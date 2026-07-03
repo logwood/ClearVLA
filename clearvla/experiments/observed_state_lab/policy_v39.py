@@ -191,6 +191,13 @@ class V39PolicyConfig(V38PolicyConfig):
     adaptive_cvae_coarse_strength: float = 0.35
     adaptive_cvae_seed_scale: float = 0.35
     adaptive_cvae_output_scale: float = 0.05
+    # V58: full-action-token detail residual unfolding.  This reuses the
+    # useful part of the old micro path: intermediate states are supervised as
+    # an unfolding sequence, but the old PD/damping/Heun controller is gone.
+    adaptive_cvae_detail_micro: int = 0
+    adaptive_cvae_detail_micro_supervision: int = 0
+    adaptive_cvae_detail_micro_scale: float = 0.25
+    adaptive_cvae_detail_micro_gate_init: float = 0.35
     adaptive_cvae_context_capsules: int = 1
     adaptive_cvae_context_capsule_count: int = 6
     adaptive_cvae_direct_condition_residual: int = 0
@@ -436,6 +443,8 @@ class V39PolicyConfig(V38PolicyConfig):
             "adaptive_cvae_route_adaptive_temperature",
             "adaptive_cvae_role_query",
             "adaptive_cvae_step_roles",
+            "adaptive_cvae_detail_micro",
+            "adaptive_cvae_detail_micro_supervision",
             "adaptive_cvae_context_capsules",
             "adaptive_cvae_direct_condition_residual",
             "adaptive_cvae_condition_strength",
@@ -453,6 +462,10 @@ class V39PolicyConfig(V38PolicyConfig):
         for name in ("adaptive_cvae_seed_scale", "adaptive_cvae_output_scale"):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f"{name} must be non-negative")
+        if float(self.adaptive_cvae_detail_micro_scale) < 0:
+            raise ValueError("adaptive_cvae_detail_micro_scale must be non-negative")
+        if not (0.0 <= float(self.adaptive_cvae_detail_micro_gate_init) <= 1.0):
+            raise ValueError("adaptive_cvae_detail_micro_gate_init must be in [0, 1]")
         if int(self.adaptive_cvae_context_capsule_count) < 1:
             raise ValueError("adaptive_cvae_context_capsule_count must be >= 1")
         if float(self.adaptive_cvae_condition_strength_min) < 0:
@@ -1354,6 +1367,91 @@ class AdaptiveRecurrentCVAERefinementBlock(nn.Module):
         return x, keep
 
 
+class AdaptiveCVAEDetailResidualBlock(nn.Module):
+    """Full-token residual detail writer for unfolded CVAE refinement.
+
+    The block reads the live action-token state and the same routed condition
+    used by the main refine block.  It does not implement step size, damping,
+    or Heun correction; those old micro-controller semantics made refinement
+    conservative instead of more detailed.
+    """
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        width = max(h, int(2 * h))
+        self.scale = float(getattr(config, "adaptive_cvae_detail_micro_scale", 0.25))
+        dropout = float(config.dropout)
+        self.context = nn.Sequential(
+            nn.LayerNorm(5 * h),
+            nn.Linear(5 * h, width),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(width, h),
+        )
+        self.cond_mod = nn.Linear(h, 2 * h)
+        self.update = nn.Sequential(
+            nn.LayerNorm(h),
+            nn.Linear(h, width),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(width, h),
+        )
+        self.gate = nn.Sequential(nn.LayerNorm(5 * h), nn.Linear(5 * h, 1))
+        self.supervision_router = nn.Sequential(
+            nn.LayerNorm(5 * h),
+            nn.Linear(5 * h, h),
+            nn.SiLU(),
+            nn.Linear(h, 4),
+        )
+        self._init(config)
+
+    def _init(self, config: V39PolicyConfig) -> None:
+        init_std = float(getattr(config, "latent_cvae_output_init_std", 1e-3))
+        for seq, std in ((self.context, 0.02), (self.update, init_std), (self.supervision_router, 0.0)):
+            last = seq[-1]
+            if isinstance(last, nn.Linear):
+                if std > 0:
+                    nn.init.normal_(last.weight, mean=0.0, std=std)
+                else:
+                    nn.init.zeros_(last.weight)
+                nn.init.zeros_(last.bias)
+        nn.init.zeros_(self.cond_mod.weight)
+        nn.init.zeros_(self.cond_mod.bias)
+        gate_last = self.gate[-1]
+        if isinstance(gate_last, nn.Linear):
+            init = min(max(float(getattr(config, "adaptive_cvae_detail_micro_gate_init", 0.35)), 1e-4), 1.0 - 1e-4)
+            nn.init.zeros_(gate_last.weight)
+            nn.init.constant_(gate_last.bias, math.log(init / (1.0 - init)))
+
+    def forward(
+        self,
+        *,
+        action: Tensor,
+        cond: Tensor,
+        routed: Tensor,
+        progress_context: Tensor,
+        context_dir: Tensor,
+        step_bias: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        features = torch.cat([action, routed, progress_context, context_dir, step_bias], dim=-1)
+        detail_context = self.context(features)
+        shift, scale = self.cond_mod(cond).chunk(2, dim=-1)
+        detail_context = detail_context * (1.0 + scale[:, None]) + shift[:, None]
+        raw_update = self.update(detail_context)
+        gate = torch.sigmoid(self.gate(features))
+        update = self.scale * gate * raw_update
+        # Four coarse coverage bases: near/mid/tail/full.  The runtime expands
+        # these into horizon weights, so the learned coverage has low freedom.
+        supervision_logits = self.supervision_router(features).mean(dim=1)
+        return update, {
+            "gate": gate,
+            "raw_update": raw_update,
+            "context": detail_context,
+            "supervision_logits": supervision_logits,
+        }
+
+
 def _progress_role_basis(steps: int, dim: int) -> Tensor:
     if steps < 1 or dim < 2:
         raise ValueError("progress role basis requires steps >= 1 and dim >= 2")
@@ -1894,6 +1992,14 @@ class LatentCVAEActionDecoder(nn.Module):
             "adaptive_condition_strength_min",
             "adaptive_condition_residual_norm",
             "adaptive_context_direction_norm",
+            "adaptive_detail_micro_block_norm",
+            "adaptive_detail_micro_update_norm",
+            "adaptive_detail_micro_gate_mean",
+            "adaptive_detail_micro_raw_norm",
+            "adaptive_detail_micro_context_norm",
+            "adaptive_micro_pred_velocity",
+            "adaptive_micro_event_logits",
+            "adaptive_micro_supervision_logits",
             "adaptive_regularizer",
             "adaptive_route_entropy_regularizer",
             "adaptive_coeff_writer_context_norm",
@@ -2024,6 +2130,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             self.output_semantic_adapter = None
             self.output_function_bank = None
         self.refine_block = AdaptiveRecurrentCVAERefinementBlock(config)
+        self.detail_micro_block = (
+            AdaptiveCVAEDetailResidualBlock(config)
+            if int(getattr(config, "adaptive_cvae_detail_micro", 0))
+            else None
+        )
         self._init_residual(self.progress_seed_adapter, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
         self._init_residual(self.context_residual_adapter, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
         self._init_residual(self.token_semantic_adapter, std=0.0)
@@ -2713,6 +2824,14 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         condition_strength_min_rows: list[Tensor] = []
         condition_residual_rows: list[Tensor] = []
         context_direction_rows: list[Tensor] = []
+        detail_block_rows: list[Tensor] = []
+        detail_update_rows: list[Tensor] = []
+        detail_gate_rows: list[Tensor] = []
+        detail_raw_rows: list[Tensor] = []
+        detail_context_rows: list[Tensor] = []
+        detail_pred_rows: list[Tensor] = []
+        detail_event_rows: list[Tensor] = []
+        detail_supervision_logit_rows: list[Tensor] = []
         base_pred_velocity: Tensor | None = None
         if int(getattr(cfg, "latent_cvae_spline_base_diagnostics", 1)):
             with torch.no_grad():
@@ -2820,6 +2939,40 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 actual_update=actual_update,
                 control_update=trajectory_update,
             )
+            detail_block_rows.append((action - before).detach().float().norm(dim=-1).mean())
+            if self.detail_micro_block is not None:
+                detail_before = action
+                detail_update, detail_terms = self.detail_micro_block(
+                    action=action,
+                    cond=cond_step,
+                    routed=routed,
+                    progress_context=progress_context,
+                    context_dir=context_dir,
+                    step_bias=step_bias,
+                )
+                action, trajectory_control, detail_actual, detail_trajectory_update = self._apply_trajectory_update(
+                    action=detail_before,
+                    controls=trajectory_control,
+                    token_update=detail_update,
+                    pos=pos_anchor,
+                )
+                track_trajectory_state(
+                    action_state=action,
+                    controls=trajectory_control,
+                    token_update=detail_update,
+                    actual_update=detail_actual,
+                    control_update=detail_trajectory_update,
+                )
+                detail_update_rows.append((action - detail_before).detach().float().norm(dim=-1).mean())
+                detail_gate_rows.append(detail_terms["gate"].detach().float().mean())
+                detail_raw_rows.append(detail_terms["raw_update"].detach().float().norm(dim=-1).mean())
+                detail_context_rows.append(detail_terms["context"].detach().float().norm(dim=-1).mean())
+                regularizer_terms.append(detail_update.float().square().mean())
+                if self.training and int(getattr(cfg, "adaptive_cvae_detail_micro_supervision", 0)):
+                    detail_out = self._emit_action(action, cond)
+                    detail_pred_rows.append(detail_out["pred_velocity"])
+                    detail_event_rows.append(detail_out["event_logits"])
+                    detail_supervision_logit_rows.append(detail_terms["supervision_logits"])
             update_rows.append((action - before).detach().float().norm(dim=-1).mean())
             entropy_rows.append(entropy.to(device=device))
             max_rows.append(max_weight.to(device=device))
@@ -2918,6 +3071,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "adaptive_condition_strength_min": torch.stack(condition_strength_min_rows).mean() if condition_strength_min_rows else z0,
             "adaptive_condition_residual_norm": torch.stack(condition_residual_rows).mean() if condition_residual_rows else z0,
             "adaptive_context_direction_norm": torch.stack(context_direction_rows).mean() if context_direction_rows else z0,
+            "adaptive_detail_micro_block_norm": torch.stack(detail_block_rows).mean() if detail_block_rows else z0,
+            "adaptive_detail_micro_update_norm": torch.stack(detail_update_rows).mean() if detail_update_rows else z0,
+            "adaptive_detail_micro_gate_mean": torch.stack(detail_gate_rows).mean() if detail_gate_rows else z0,
+            "adaptive_detail_micro_raw_norm": torch.stack(detail_raw_rows).mean() if detail_raw_rows else z0,
+            "adaptive_detail_micro_context_norm": torch.stack(detail_context_rows).mean() if detail_context_rows else z0,
             "adaptive_regularizer": torch.stack(regularizer_terms).mean() if regularizer_terms else z0,
             "adaptive_route_entropy_regularizer": torch.stack(route_floor_terms).mean() if route_floor_terms else z0,
         })
@@ -2925,6 +3083,10 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             out["adaptive_spline_base_pred_velocity"] = base_pred_velocity
         if trajectory_pred_rows:
             out["adaptive_trajectory_pred_velocity"] = torch.stack(trajectory_pred_rows, dim=1)
+        if detail_pred_rows:
+            out["adaptive_micro_pred_velocity"] = torch.stack(detail_pred_rows, dim=1)
+            out["adaptive_micro_event_logits"] = torch.stack(detail_event_rows, dim=1)
+            out["adaptive_micro_supervision_logits"] = torch.stack(detail_supervision_logit_rows, dim=1)
         return out
 
 

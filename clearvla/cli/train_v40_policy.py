@@ -230,6 +230,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-coarse-strength", type=float, default=0.35)
     parser.add_argument("--adaptive-cvae-seed-scale", type=float, default=0.35)
     parser.add_argument("--adaptive-cvae-output-scale", type=float, default=0.05)
+    parser.add_argument("--adaptive-cvae-detail-micro", type=int, default=0)
+    parser.add_argument("--adaptive-cvae-detail-micro-supervision", type=int, default=0)
+    parser.add_argument("--adaptive-cvae-detail-micro-scale", type=float, default=0.25)
+    parser.add_argument("--adaptive-cvae-detail-micro-gate-init", type=float, default=0.35)
     parser.add_argument("--adaptive-cvae-context-capsules", type=int, default=1)
     parser.add_argument("--adaptive-cvae-context-capsule-count", type=int, default=6)
     parser.add_argument("--adaptive-cvae-direct-condition-residual", type=int, default=0)
@@ -483,6 +487,10 @@ def main() -> None:
         adaptive_cvae_coarse_strength=args.adaptive_cvae_coarse_strength,
         adaptive_cvae_seed_scale=args.adaptive_cvae_seed_scale,
         adaptive_cvae_output_scale=args.adaptive_cvae_output_scale,
+        adaptive_cvae_detail_micro=args.adaptive_cvae_detail_micro,
+        adaptive_cvae_detail_micro_supervision=args.adaptive_cvae_detail_micro_supervision,
+        adaptive_cvae_detail_micro_scale=args.adaptive_cvae_detail_micro_scale,
+        adaptive_cvae_detail_micro_gate_init=args.adaptive_cvae_detail_micro_gate_init,
         adaptive_cvae_context_capsules=args.adaptive_cvae_context_capsules,
         adaptive_cvae_context_capsule_count=args.adaptive_cvae_context_capsule_count,
         adaptive_cvae_direct_condition_residual=args.adaptive_cvae_direct_condition_residual,
@@ -606,6 +614,10 @@ def main() -> None:
             "adaptive_cvae_coarse_strength": float(args.adaptive_cvae_coarse_strength),
             "adaptive_cvae_seed_scale": float(args.adaptive_cvae_seed_scale),
             "adaptive_cvae_output_scale": float(args.adaptive_cvae_output_scale),
+            "adaptive_cvae_detail_micro": int(args.adaptive_cvae_detail_micro),
+            "adaptive_cvae_detail_micro_supervision": int(args.adaptive_cvae_detail_micro_supervision),
+            "adaptive_cvae_detail_micro_scale": float(args.adaptive_cvae_detail_micro_scale),
+            "adaptive_cvae_detail_micro_gate_init": float(args.adaptive_cvae_detail_micro_gate_init),
             "adaptive_cvae_context_capsules": int(args.adaptive_cvae_context_capsules),
             "adaptive_cvae_context_capsule_count": int(args.adaptive_cvae_context_capsule_count),
             "adaptive_cvae_direct_condition_residual": int(args.adaptive_cvae_direct_condition_residual),

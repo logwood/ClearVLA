@@ -105,6 +105,20 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     latent_cvae_proposal_residual_bound_ratio: float = 1.25
     latent_cvae_proposal_residual_coeff_ridge: float = 1e-2
     latent_cvae_proposal_residual_arm_only: int = 1
+    # V58 detail residual unfolding.  These losses supervise intermediate
+    # full-token detail states; the final policy loss remains the main outlet.
+    latent_cvae_micro_supervision_weight: float = 0.05
+    latent_cvae_micro_event_weight: float = 0.01
+    latent_cvae_micro_monotonic_weight: float = 0.01
+    latent_cvae_micro_weight_kl_weight: float = 0.0005
+    latent_cvae_micro_coverage_smooth_weight: float = 0.001
+    latent_cvae_micro_coverage_floor_weight: float = 0.001
+    latent_cvae_micro_coverage_prior_logit_scale: float = 0.25
+    latent_cvae_micro_coverage_floor_ratio: float = 0.55
+    latent_cvae_micro_learned_weight_max: float = 0.35
+    latent_cvae_micro_learned_ramp_steps: int = 2000
+    latent_cvae_micro_weight_floor: float = 0.05
+    latent_cvae_micro_event_positive_weight: float = 2.0
     latent_cvae_trajectory_smoothness_weight: float = 0.0
     latent_cvae_trajectory_update_smoothness_weight: float = 0.0
     latent_cvae_trajectory_update_energy_weight: float = 0.0
@@ -650,6 +664,133 @@ def _refine_fixed_unfolded_weights(
     return _normalize_horizon_weight(fixed).to(dtype=dtype), mix.to(dtype=dtype), basis.to(dtype=dtype)
 
 
+def micro_refine_supervision_losses(
+    system: V39PolicySystem,
+    sample: dict[str, Tensor],
+    output: dict[str, Tensor],
+    trainer: V39PolicyTrainerConfig,
+    *,
+    global_step: int | None = None,
+) -> dict[str, Tensor]:
+    pred = output.get("latent_cvae_adaptive_micro_pred_velocity")
+    if not isinstance(pred, Tensor) or pred.ndim != 4:
+        ref = output["pred_physical_velocity"]
+        z = torch.zeros((), device=ref.device, dtype=ref.dtype)
+        return {
+            "latent_cvae_micro_supervision": z,
+            "latent_cvae_micro_event": z,
+            "latent_cvae_micro_monotonic": z,
+            "latent_cvae_micro_weight_kl": z,
+            "latent_cvae_micro_coverage_smooth": z,
+            "latent_cvae_micro_coverage_floor": z,
+            "latent_cvae_micro_weight_alpha": z,
+            "latent_cvae_micro_step_alpha_mean": z,
+            "latent_cvae_micro_weight_final_diff": z,
+            "latent_cvae_micro_coverage_tail_mass": z,
+            "latent_cvae_micro_weight_first": z,
+            "latent_cvae_micro_weight_last": z,
+        }
+    device = pred.device
+    dtype = pred.dtype
+    batch, steps, horizon, _ = pred.shape
+    target = output["target_physical_velocity"].to(device=device, dtype=dtype)
+    fixed, fixed_mix, basis = _refine_fixed_unfolded_weights(
+        system=system,
+        trainer=trainer,
+        steps=steps,
+        device=device,
+        dtype=dtype,
+    )
+    fixed_prob = fixed.float().clamp_min(1e-8)
+    fixed_prob = fixed_prob / fixed_prob.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    normal = basis[-1].to(device=device, dtype=dtype)
+    normal_prob = normal.float().clamp_min(1e-8)
+    normal_prob = normal_prob / normal_prob.sum().clamp_min(1e-8)
+    prior_scale = max(float(getattr(trainer, "latent_cvae_micro_coverage_prior_logit_scale", 0.25)), 0.0)
+
+    logits = output.get("latent_cvae_adaptive_micro_supervision_logits")
+    if isinstance(logits, Tensor) and logits.ndim == 3 and int(logits.shape[1]) == steps and int(logits.shape[2]) == horizon:
+        logits_f = logits.to(device=device, dtype=torch.float32)
+        prior_logits = prior_scale * fixed_prob.clamp_min(1e-8).log()[None]
+        learned_prob = torch.softmax(logits_f + prior_logits, dim=-1)
+    elif isinstance(logits, Tensor) and logits.ndim == 3 and int(logits.shape[1]) == steps and int(logits.shape[2]) == 4:
+        logits_f = logits.to(device=device, dtype=torch.float32)
+        mix_prior = prior_scale * fixed_mix.float().clamp_min(1e-8).log()[None]
+        learned_mix = torch.softmax(logits_f + mix_prior, dim=-1).to(dtype=dtype)
+        learned = torch.einsum("bsk,kt->bst", learned_mix, basis)
+        learned_prob = learned.float().clamp_min(1e-8)
+        learned_prob = learned_prob / learned_prob.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    else:
+        learned_prob = fixed_prob[None].expand(batch, -1, -1)
+    learned = (learned_prob * float(horizon)).to(dtype=dtype)
+
+    ramp_steps = max(int(getattr(trainer, "latent_cvae_micro_learned_ramp_steps", 2000)), 1)
+    max_alpha = max(float(getattr(trainer, "latent_cvae_micro_learned_weight_max", 0.35)), 0.0)
+    step_value = 0 if global_step is None else max(int(global_step), 0)
+    alpha_value = min(max_alpha, max_alpha * float(step_value) / float(ramp_steps))
+    alpha = torch.as_tensor(alpha_value, device=device, dtype=dtype)
+    step_alpha_scale = (1.0 - fixed_mix[:, 3]).clamp(0.0, 1.0).to(device=device, dtype=dtype)
+    step_alpha = alpha * step_alpha_scale[None, :, None]
+    weights = (1.0 - step_alpha) * fixed[None] + step_alpha * learned
+    floor = max(float(getattr(trainer, "latent_cvae_micro_weight_floor", 0.05)), 0.0)
+    weights = _normalize_horizon_weight(weights.clamp_min(floor))
+    final_normal = normal[None, None].expand(batch, 1, horizon)
+    weights = torch.cat([weights[:, :-1], final_normal], dim=1) if steps > 1 else final_normal
+
+    physical_error = (pred - target[:, None]).square().mean(dim=-1)
+    micro_flow = (physical_error * weights).mean()
+    mono_weight = normal.to(device=device, dtype=dtype)[None, None]
+    mono_error = (physical_error * mono_weight).mean(dim=-1)
+    monotonic = F.relu(mono_error[:, 1:] - mono_error[:, :-1]).mean() if steps > 1 else torch.zeros((), device=device, dtype=dtype)
+
+    event_logits = output.get("latent_cvae_adaptive_micro_event_logits")
+    micro_event = torch.zeros((), device=device, dtype=dtype)
+    if isinstance(event_logits, Tensor) and event_logits.ndim == 4:
+        labels = gripper_event_labels(
+            target_raw=sample["policy_action_raw"].to(device=device),
+            current_raw=sample["state_raw"].to(device=device),
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
+        )
+        labels = labels[:, None].expand(-1, steps, -1)
+        ce = F.cross_entropy(event_logits.reshape(-1, 3).float(), labels.reshape(-1), reduction="none").reshape(batch, steps, horizon)
+        pos = (labels != 0).to(dtype=ce.dtype)
+        event_weight = 1.0 + pos * max(float(getattr(trainer, "latent_cvae_micro_event_positive_weight", 2.0)) - 1.0, 0.0)
+        denom = (event_weight.to(dtype=dtype) * weights).sum().clamp_min(1.0)
+        micro_event = (ce.to(dtype=dtype) * event_weight.to(dtype=dtype) * weights).sum() / denom
+
+    fixed_prob_b = fixed_prob[None].expand(batch, -1, -1)
+    weight_kl = (
+        learned_prob.clamp_min(1e-8)
+        * (learned_prob.clamp_min(1e-8).log() - fixed_prob_b.clamp_min(1e-8).log())
+    ).sum(dim=-1).mean().to(dtype=dtype)
+    smooth = (
+        (learned_prob[:, 1:] - learned_prob[:, :-1]).square().sum(dim=-1).mean() * float(horizon)
+        if steps > 1 else torch.zeros((), device=device, dtype=dtype)
+    )
+    avg_prob = learned_prob.mean(dim=1)
+    tail_start = min(max(int(getattr(system.policy_config, "rollout_tail_start_step", 8)), 0), max(horizon - 1, 0))
+    tail_mask = torch.arange(horizon, device=device) >= tail_start
+    tail_mass = avg_prob[:, tail_mask].sum(dim=-1)
+    tail_target = normal_prob[tail_mask].sum() * max(float(getattr(trainer, "latent_cvae_micro_coverage_floor_ratio", 0.55)), 0.0)
+    coverage_floor = F.relu(tail_target.to(device=device) - tail_mass).square().mean().to(dtype=dtype)
+    final_weight_diff = (weights[:, -1] - normal[None]).abs().mean()
+    return {
+        "latent_cvae_micro_supervision": micro_flow,
+        "latent_cvae_micro_event": micro_event,
+        "latent_cvae_micro_monotonic": monotonic,
+        "latent_cvae_micro_weight_kl": weight_kl,
+        "latent_cvae_micro_coverage_smooth": smooth,
+        "latent_cvae_micro_coverage_floor": coverage_floor,
+        "latent_cvae_micro_weight_alpha": alpha,
+        "latent_cvae_micro_step_alpha_mean": step_alpha.mean().detach(),
+        "latent_cvae_micro_weight_final_diff": final_weight_diff.detach(),
+        "latent_cvae_micro_coverage_tail_mass": tail_mass.detach().mean(),
+        "latent_cvae_micro_weight_first": weights[:, 0, :4].mean().detach(),
+        "latent_cvae_micro_weight_last": weights[:, -1].mean().detach(),
+    }
+
+
 def _adaptive_trajectory_basis(system: V39PolicySystem, ref: Tensor) -> Tensor | None:
     decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
     velocity_head = getattr(decoder, "velocity_head", None)
@@ -1133,6 +1274,27 @@ def flow_losses(
         losses["loss"] = losses["loss"] + trajectory_coeff_weight * trajectory_losses["latent_cvae_trajectory_coeff_supervision"]
     if trajectory_mono_weight > 0:
         losses["loss"] = losses["loss"] + trajectory_mono_weight * trajectory_losses["latent_cvae_trajectory_monotonic"]
+    micro_losses = micro_refine_supervision_losses(system, sample, output, trainer, global_step=global_step)
+    for key, value in micro_losses.items():
+        losses[key] = value.detach().float()
+    micro_weight = float(getattr(trainer, "latent_cvae_micro_supervision_weight", 0.0))
+    micro_event_weight = float(getattr(trainer, "latent_cvae_micro_event_weight", 0.0))
+    micro_mono_weight = float(getattr(trainer, "latent_cvae_micro_monotonic_weight", 0.0))
+    micro_kl_weight = float(getattr(trainer, "latent_cvae_micro_weight_kl_weight", 0.0))
+    micro_smooth_weight = float(getattr(trainer, "latent_cvae_micro_coverage_smooth_weight", 0.0))
+    micro_floor_weight = float(getattr(trainer, "latent_cvae_micro_coverage_floor_weight", 0.0))
+    if micro_weight > 0:
+        losses["loss"] = losses["loss"] + micro_weight * micro_losses["latent_cvae_micro_supervision"]
+    if micro_event_weight > 0:
+        losses["loss"] = losses["loss"] + micro_event_weight * micro_losses["latent_cvae_micro_event"]
+    if micro_mono_weight > 0:
+        losses["loss"] = losses["loss"] + micro_mono_weight * micro_losses["latent_cvae_micro_monotonic"]
+    if micro_kl_weight > 0:
+        losses["loss"] = losses["loss"] + micro_kl_weight * micro_losses["latent_cvae_micro_weight_kl"]
+    if micro_smooth_weight > 0:
+        losses["loss"] = losses["loss"] + micro_smooth_weight * micro_losses["latent_cvae_micro_coverage_smooth"]
+    if micro_floor_weight > 0:
+        losses["loss"] = losses["loss"] + micro_floor_weight * micro_losses["latent_cvae_micro_coverage_floor"]
     proposal_residual_losses = proposal_residual_coefficient_losses(system, output, trainer)
     for key, value in proposal_residual_losses.items():
         losses[key] = value.detach().float()
@@ -2185,6 +2347,19 @@ def train_v39_policy(
                     f"csbf={row.get('latent_cvae_spline_base_flow', 0.0):.4f} "
                     f"csim={row.get('latent_cvae_spline_improvement', 0.0):+.3f} "
                     f"cscorr={row.get('latent_cvae_spline_correction_to_base', 0.0):.3f} "
+                    f"cmdblk={row.get('latent_cvae_adaptive_detail_micro_block_norm', 0.0):.3f} "
+                    f"cmdet={row.get('latent_cvae_adaptive_detail_micro_update_norm', 0.0):.3f} "
+                    f"cmdgate={row.get('latent_cvae_adaptive_detail_micro_gate_mean', 0.0):.3f} "
+                    f"cmdraw={row.get('latent_cvae_adaptive_detail_micro_raw_norm', 0.0):.3f} "
+                    f"cmsup={row.get('latent_cvae_micro_supervision', 0.0):.4f} "
+                    f"cmevt={row.get('latent_cvae_micro_event', 0.0):.4f} "
+                    f"cmmono={row.get('latent_cvae_micro_monotonic', 0.0):.4f} "
+                    f"cmwa={row.get('latent_cvae_micro_weight_alpha', 0.0):.3f} "
+                    f"cmwfd={row.get('latent_cvae_micro_weight_final_diff', 0.0):.4f} "
+                    f"cmwkl={row.get('latent_cvae_micro_weight_kl', 0.0):.4f} "
+                    f"cmcs={row.get('latent_cvae_micro_coverage_smooth', 0.0):.4f} "
+                    f"cmcf={row.get('latent_cvae_micro_coverage_floor', 0.0):.4f} "
+                    f"cmtail={row.get('latent_cvae_micro_coverage_tail_mass', 0.0):.3f} "
                     f"ctctrl={row.get('latent_cvae_adaptive_trajectory_control_norm', 0.0):.3f} "
                     f"ctok={row.get('latent_cvae_adaptive_trajectory_token_norm', 0.0):.3f} "
                     f"ctupd={row.get('latent_cvae_adaptive_trajectory_update_norm', 0.0):.3f} "

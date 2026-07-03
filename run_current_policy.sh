@@ -2,4 +2,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "${SCRIPT_DIR}/scripts/current_v57_query_spline_micro.sh" "$@"
+exec bash "${SCRIPT_DIR}/scripts/current_v58_detail_micro.sh" "$@"
