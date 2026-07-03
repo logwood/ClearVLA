@@ -1368,35 +1368,33 @@ class AdaptiveRecurrentCVAERefinementBlock(nn.Module):
 
 
 class AdaptiveCVAEDetailResidualBlock(nn.Module):
-    """Full-token residual detail writer for unfolded CVAE refinement.
+    """Transformer micro block for full-token detail refinement.
 
-    The block reads the live action-token state and the same routed condition
-    used by the main refine block.  It does not implement step size, damping,
-    or Heun correction; those old micro-controller semantics made refinement
-    conservative instead of more detailed.
+    This reuses the same token-transformer style as the recurrent refine path.
+    It reads live action tokens plus DiT-derived routed/progress/context
+    features.  CVAE latent is not a primary input here; intent has already
+    shaped the coarse direction writer.
     """
 
     def __init__(self, config: V39PolicyConfig) -> None:
         super().__init__()
         h = int(config.hidden_size)
-        width = max(h, int(2 * h))
+        heads = int(config.num_heads)
         self.scale = float(getattr(config, "adaptive_cvae_detail_micro_scale", 0.25))
         dropout = float(config.dropout)
-        self.context = nn.Sequential(
+        self.token_condition = nn.Sequential(
             nn.LayerNorm(5 * h),
-            nn.Linear(5 * h, width),
+            nn.Linear(5 * h, h),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(width, h),
+            nn.Linear(h, h),
         )
-        self.cond_mod = nn.Linear(h, 2 * h)
-        self.update = nn.Sequential(
-            nn.LayerNorm(h),
-            nn.Linear(h, width),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(width, h),
-        )
+        self.n1 = nn.LayerNorm(h, elementwise_affine=False)
+        self.self_attn = nn.MultiheadAttention(h, heads, batch_first=True, dropout=dropout)
+        self.n2 = nn.LayerNorm(h, elementwise_affine=False)
+        self.ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        self.drop = nn.Dropout(dropout)
+        self.mod = nn.Linear(h, 6 * h)
         self.gate = nn.Sequential(nn.LayerNorm(5 * h), nn.Linear(5 * h, 1))
         self.supervision_router = nn.Sequential(
             nn.LayerNorm(5 * h),
@@ -1407,8 +1405,7 @@ class AdaptiveCVAEDetailResidualBlock(nn.Module):
         self._init(config)
 
     def _init(self, config: V39PolicyConfig) -> None:
-        init_std = float(getattr(config, "latent_cvae_output_init_std", 1e-3))
-        for seq, std in ((self.context, 0.02), (self.update, init_std), (self.supervision_router, 0.0)):
+        for seq, std in ((self.token_condition, 0.02), (self.supervision_router, 0.0)):
             last = seq[-1]
             if isinstance(last, nn.Linear):
                 if std > 0:
@@ -1416,13 +1413,17 @@ class AdaptiveCVAEDetailResidualBlock(nn.Module):
                 else:
                     nn.init.zeros_(last.weight)
                 nn.init.zeros_(last.bias)
-        nn.init.zeros_(self.cond_mod.weight)
-        nn.init.zeros_(self.cond_mod.bias)
+        nn.init.zeros_(self.mod.weight)
+        nn.init.zeros_(self.mod.bias)
         gate_last = self.gate[-1]
         if isinstance(gate_last, nn.Linear):
             init = min(max(float(getattr(config, "adaptive_cvae_detail_micro_gate_init", 0.35)), 1e-4), 1.0 - 1e-4)
             nn.init.zeros_(gate_last.weight)
             nn.init.constant_(gate_last.bias, math.log(init / (1.0 - init)))
+
+    @staticmethod
+    def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        return x * (1.0 + scale[:, None]) + shift[:, None]
 
     def forward(
         self,
@@ -1435,11 +1436,19 @@ class AdaptiveCVAEDetailResidualBlock(nn.Module):
         step_bias: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         features = torch.cat([action, routed, progress_context, context_dir, step_bias], dim=-1)
-        detail_context = self.context(features)
-        shift, scale = self.cond_mod(cond).chunk(2, dim=-1)
-        detail_context = detail_context * (1.0 + scale[:, None]) + shift[:, None]
-        raw_update = self.update(detail_context)
+        token_cond = self.token_condition(features)
         gate = torch.sigmoid(self.gate(features))
+        sa_s, sa_c, sa_g, ff_s, ff_c, ff_g = self.mod(cond).chunk(6, dim=-1)
+        value = self.n1(action + token_cond)
+        qk = self._modulate(value, sa_s, sa_c)
+        n = int(action.shape[1])
+        causal_mask = torch.triu(torch.ones(n, n, device=action.device, dtype=torch.bool), diagonal=1)
+        attn_update, _ = self.self_attn(qk, qk, value, attn_mask=causal_mask, need_weights=False)
+        attn_update = torch.tanh(sa_g)[:, None] * self.drop(attn_update)
+        hidden = action + gate * attn_update
+        ffn_update = self.ffn(self._modulate(self.n2(hidden + token_cond), ff_s, ff_c))
+        ffn_update = torch.tanh(ff_g)[:, None] * self.drop(ffn_update)
+        raw_update = attn_update + ffn_update
         update = self.scale * gate * raw_update
         # Four coarse coverage bases: near/mid/tail/full.  The runtime expands
         # these into horizon weights, so the learned coverage has low freedom.
@@ -1447,7 +1456,7 @@ class AdaptiveCVAEDetailResidualBlock(nn.Module):
         return update, {
             "gate": gate,
             "raw_update": raw_update,
-            "context": detail_context,
+            "context": token_cond,
             "supervision_logits": supervision_logits,
         }
 
@@ -1696,7 +1705,13 @@ class LatentCVAEActionDecoder(nn.Module):
         kl = 0.5 * (p_logvar - q_logvar + (q_var + (q_mu - p_mu).square()) / p_var - 1.0)
         return kl.sum(dim=-1).mean()
 
-    def _emit_action(self, action: Tensor, cond: Tensor) -> dict[str, Tensor]:
+    def _emit_action(
+        self,
+        action: Tensor,
+        cond: Tensor,
+        *,
+        coeff_condition: Tensor | None = None,
+    ) -> dict[str, Tensor]:
         cfg = self.config
         gate_input = torch.cat([action, cond[:, None].expand(-1, int(cfg.action_horizon), -1)], dim=-1)
         if int(getattr(cfg, "latent_cvae_event_gripper_gate", 1)):
@@ -1705,7 +1720,12 @@ class LatentCVAEActionDecoder(nn.Module):
         else:
             gate = torch.zeros_like(action)
             transition = action
-        pred_velocity_out = self.velocity_head(action, transition, return_diagnostics=True)
+        pred_velocity_out = self.velocity_head(
+            action,
+            transition,
+            return_diagnostics=True,
+            coeff_condition=coeff_condition,
+        )
         if isinstance(pred_velocity_out, tuple):
             pred_velocity, velocity_diagnostics = pred_velocity_out
         else:
@@ -1788,7 +1808,8 @@ class LatentCVAEActionDecoder(nn.Module):
         canvas_update = self._canvas_cross_update(action, canvas_memory)
         if canvas_update is not None:
             action = action + canvas_update
-        return self._emit_action(action, cond)
+        coeff_condition = cond_time + self.z_to_token(z.to(device=device, dtype=dtype))
+        return self._emit_action(action, cond, coeff_condition=coeff_condition)
 
     def _condition(
         self,
@@ -2009,6 +2030,8 @@ class LatentCVAEActionDecoder(nn.Module):
             "adaptive_coeff_writer_magnitude_std",
             "adaptive_coeff_writer_magnitude_max",
             "adaptive_coeff_writer_output_norm",
+            "adaptive_coeff_writer_condition_norm",
+            "adaptive_coeff_writer_condition_gate",
             "adaptive_coeff_writer_controls",
             "adaptive_coeff_writer_include_gripper",
             "adaptive_spline_base_pred_velocity",
@@ -2665,6 +2688,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         device = noisy_physical.device
         time_emb = self.time(time.to(dtype=dtype))
         cond_time = cond + self.time_lift(time_emb)
+        coeff_condition = cond_time + self.z_to_token(z.to(device=device, dtype=dtype))
         z0 = torch.zeros((), device=device, dtype=torch.float32)
         noisy_branch, noisy_gate_mean, noisy_branch_norm = self._gated_noisy_branch(noisy_physical, time)
         pos = self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
@@ -2835,7 +2859,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         base_pred_velocity: Tensor | None = None
         if int(getattr(cfg, "latent_cvae_spline_base_diagnostics", 1)):
             with torch.no_grad():
-                base_pred_velocity = self._emit_action(action.detach(), cond.detach())["pred_velocity"].detach()
+                base_pred_velocity = self._emit_action(
+                    action.detach(),
+                    cond.detach(),
+                    coeff_condition=coeff_condition.detach(),
+                )["pred_velocity"].detach()
         t = time.to(device=device, dtype=dtype)[:, None, None]
         for step in range(max(self.refine_steps, 0)):
             step_bias = self._refine_step_bias(step, action)
@@ -2847,7 +2875,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             progress_context = self._context_dropout(progress_context)
             prefix = progress_context + step_bias
             if int(getattr(cfg, "adaptive_cvae_prefix_memory", 1)):
-                current = self._emit_action(action, cond)
+                current = self._emit_action(action, cond, coeff_condition=coeff_condition)
                 clean = noisy_physical - t * current["pred_velocity"]
                 if int(getattr(cfg, "adaptive_cvae_prefix_detach", 1)):
                     clean = clean.detach()
@@ -2969,7 +2997,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 detail_context_rows.append(detail_terms["context"].detach().float().norm(dim=-1).mean())
                 regularizer_terms.append(detail_update.float().square().mean())
                 if self.training and int(getattr(cfg, "adaptive_cvae_detail_micro_supervision", 0)):
-                    detail_out = self._emit_action(action, cond)
+                    detail_out = self._emit_action(action, cond, coeff_condition=coeff_condition)
                     detail_pred_rows.append(detail_out["pred_velocity"])
                     detail_event_rows.append(detail_out["event_logits"])
                     detail_supervision_logit_rows.append(detail_terms["supervision_logits"])
@@ -3019,7 +3047,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         else:
             out_extra_keep = torch.zeros(batch, device=device, dtype=torch.float32)
             time_corr = torch.zeros((), device=device, dtype=torch.float32)
-        out = self._emit_action(final_action, cond)
+        out = self._emit_action(final_action, cond, coeff_condition=coeff_condition)
         progress_norm = progress.detach().float().norm(dim=-1).mean() if progress is not None else z0
         out.update({
             "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),

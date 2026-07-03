@@ -2344,6 +2344,8 @@ def train_v39_policy(
                     f"cwdir={row.get('latent_cvae_adaptive_coeff_writer_direction_norm', 0.0):.3f} "
                     f"cwraw={row.get('latent_cvae_adaptive_coeff_writer_raw_direction_norm', 0.0):.3f} "
                     f"cwmag={row.get('latent_cvae_adaptive_coeff_writer_magnitude_mean', 0.0):.3f} "
+                    f"cwcond={row.get('latent_cvae_adaptive_coeff_writer_condition_norm', 0.0):.3f} "
+                    f"cwcgate={row.get('latent_cvae_adaptive_coeff_writer_condition_gate', 0.0):.3f} "
                     f"csbf={row.get('latent_cvae_spline_base_flow', 0.0):.4f} "
                     f"csim={row.get('latent_cvae_spline_improvement', 0.0):+.3f} "
                     f"cscorr={row.get('latent_cvae_spline_correction_to_base', 0.0):.3f} "

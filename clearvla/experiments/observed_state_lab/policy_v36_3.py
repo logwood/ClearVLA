@@ -232,6 +232,8 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.coeff_query = nn.Parameter(torch.randn(1, self.arm_coeff_points, h) * 0.02)
         self.coeff_cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
         self.coeff_context_norm = nn.LayerNorm(h)
+        self.coeff_condition = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.coeff_condition_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
         coeff_dim = 2 * ad + (2 if self.coeff_include_gripper else 0)
         self.coeff_direction = nn.Linear(h, coeff_dim)
         self.coeff_magnitude = nn.Linear(h, self.coeff_magnitude_groups)
@@ -246,6 +248,10 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.arm_delta = nn.Linear(h, ad)
         self.grip_value = nn.Linear(h, 1)
         self.grip_delta = nn.Linear(h, 1)
+        nn.init.normal_(self.coeff_condition[-1].weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.coeff_condition[-1].bias)
+        nn.init.zeros_(self.coeff_condition_gate[-1].weight)
+        nn.init.zeros_(self.coeff_condition_gate[-1].bias)
         nn.init.normal_(self.coeff_direction.weight, mean=0.0, std=0.02)
         nn.init.zeros_(self.coeff_direction.bias)
         nn.init.zeros_(self.coeff_magnitude.weight)
@@ -302,12 +308,22 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         tokens: Tensor,
         *,
         include_gripper: bool,
+        coeff_condition: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         basis, _ = self._arm_coeff_basis_analysis_for(tokens)
         controls = int(basis.shape[1])
         query = self._coeff_queries_for(tokens, controls)
         context, _ = self.coeff_cross(query, tokens, tokens, need_weights=False)
         context = self.coeff_context_norm(query + context)
+        condition_norm = torch.zeros((), device=tokens.device, dtype=torch.float32)
+        condition_gate = torch.zeros((), device=tokens.device, dtype=torch.float32)
+        if coeff_condition is not None:
+            coeff_condition = coeff_condition.to(device=tokens.device, dtype=tokens.dtype)
+            condition = self.coeff_condition(coeff_condition)
+            gate = torch.sigmoid(self.coeff_condition_gate(coeff_condition))
+            context = context + gate[:, None].to(dtype=context.dtype) * condition[:, None]
+            condition_norm = condition.detach().float().norm(dim=-1).mean()
+            condition_gate = gate.detach().float().mean()
         raw_direction = self.coeff_direction(context)
         dim = 2 * int(self.config.arm_dim) + (2 if include_gripper else 0)
         raw_direction = raw_direction[..., :dim]
@@ -329,16 +345,22 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
             "adaptive_coeff_writer_magnitude_std": mag.detach().float().std(unbiased=False),
             "adaptive_coeff_writer_magnitude_max": mag.detach().float().max(),
             "adaptive_coeff_writer_output_norm": physical.detach().float().norm(dim=-1).mean(),
+            "adaptive_coeff_writer_condition_norm": condition_norm,
+            "adaptive_coeff_writer_condition_gate": condition_gate,
             "adaptive_coeff_writer_controls": torch.as_tensor(float(controls), device=tokens.device, dtype=tokens.dtype),
             "adaptive_coeff_writer_include_gripper": torch.as_tensor(float(include_gripper), device=tokens.device, dtype=tokens.dtype),
         }
         return physical, diagnostics
 
-    def _emit_arm(self, x: Tensor) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+    def _emit_arm(self, x: Tensor, coeff_condition: Tensor | None = None) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         if not self.arm_coeff_output:
             return self.arm_abs(x), self.arm_delta(x), {}
         if self.arm_coeff_writer in {"query_direction", "query-direction", "query"}:
-            physical, diagnostics = self._emit_coeff_direction(x, include_gripper=False)
+            physical, diagnostics = self._emit_coeff_direction(
+                x,
+                include_gripper=False,
+                coeff_condition=coeff_condition,
+            )
             ad = int(self.config.arm_dim)
             return physical[..., :ad], physical[..., ad : 2 * ad], diagnostics
         basis, analysis = self._arm_coeff_basis_analysis_for(x)
@@ -361,6 +383,7 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         transition_latent: Tensor | None = None,
         *,
         return_diagnostics: bool = False,
+        coeff_condition: Tensor | None = None,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         x = self.norm(tokens)
         grip_x = x
@@ -372,9 +395,13 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
             and self.coeff_include_gripper
             and self.arm_coeff_writer in {"query_direction", "query-direction", "query"}
         ):
-            pred, diagnostics = self._emit_coeff_direction(grip_x, include_gripper=True)
+            pred, diagnostics = self._emit_coeff_direction(
+                grip_x,
+                include_gripper=True,
+                coeff_condition=coeff_condition,
+            )
         else:
-            arm_abs, arm_delta, diagnostics = self._emit_arm(x)
+            arm_abs, arm_delta, diagnostics = self._emit_arm(x, coeff_condition=coeff_condition)
             pred = torch.cat([arm_abs, arm_delta, self.grip_value(grip_x), self.grip_delta(grip_x)], dim=-1)
         if return_diagnostics:
             return pred, diagnostics
