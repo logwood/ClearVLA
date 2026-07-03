@@ -978,6 +978,26 @@ def flow_losses(
     global_step: int | None = None,
 ) -> dict[str, Tensor]:
     losses = v363_flow_losses(system, sample, output, trainer)  # type: ignore[arg-type]
+    base_velocity = output.get("latent_cvae_adaptive_spline_base_pred_velocity")
+    if isinstance(base_velocity, Tensor) and "target_physical_velocity" in output:
+        pred = output["pred_physical_velocity"]
+        target = output["target_physical_velocity"].to(device=pred.device, dtype=pred.dtype)
+        base = base_velocity.to(device=pred.device, dtype=pred.dtype)
+        if base.shape == pred.shape:
+            pos_w = position_weights(system.policy_config, trainer, pred.device).to(dtype=pred.dtype)
+            base_error = (base - target).square().mean(dim=-1)
+            final_error = (pred - target).square().mean(dim=-1)
+            base_flow = (base_error * pos_w[None]).mean()
+            final_flow = (final_error * pos_w[None]).mean()
+            correction = pred - base
+            target_norm = target.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
+            base_norm = base.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
+            losses["latent_cvae_spline_base_flow"] = base_flow.detach().float()
+            losses["latent_cvae_spline_final_over_base"] = (final_flow / base_flow.clamp_min(1e-8)).detach().float()
+            losses["latent_cvae_spline_improvement"] = ((base_flow - final_flow) / base_flow.clamp_min(1e-8)).detach().float()
+            losses["latent_cvae_spline_correction_norm"] = correction.detach().float().norm(dim=-1).mean()
+            losses["latent_cvae_spline_correction_to_base"] = (correction.detach().float().norm(dim=-1).mean() / base_norm).detach().float()
+            losses["latent_cvae_spline_correction_to_target"] = (correction.detach().float().norm(dim=-1).mean() / target_norm).detach().float()
     dyn = rollout_dynamics_loss(output)
     delta = rollout_delta_loss(output)
     con = rollout_contrast_loss(output, margin=float(trainer.rollout_contrast_margin))
@@ -2157,6 +2177,14 @@ def train_v39_policy(
                     f"ctemp={row.get('latent_cvae_adaptive_route_temperature_mean', 0.0):.2f} "
                     f"cfunc={row.get('latent_cvae_adaptive_function_delta_norm', 0.0):.3f} "
                     f"cbasehf={row.get('latent_cvae_adaptive_base_highfreq_norm', 0.0):.3f} "
+                    f"cwctl={row.get('latent_cvae_adaptive_coeff_writer_controls', 0.0):.1f} "
+                    f"cwgrip={row.get('latent_cvae_adaptive_coeff_writer_include_gripper', 0.0):.0f} "
+                    f"cwdir={row.get('latent_cvae_adaptive_coeff_writer_direction_norm', 0.0):.3f} "
+                    f"cwraw={row.get('latent_cvae_adaptive_coeff_writer_raw_direction_norm', 0.0):.3f} "
+                    f"cwmag={row.get('latent_cvae_adaptive_coeff_writer_magnitude_mean', 0.0):.3f} "
+                    f"csbf={row.get('latent_cvae_spline_base_flow', 0.0):.4f} "
+                    f"csim={row.get('latent_cvae_spline_improvement', 0.0):+.3f} "
+                    f"cscorr={row.get('latent_cvae_spline_correction_to_base', 0.0):.3f} "
                     f"ctctrl={row.get('latent_cvae_adaptive_trajectory_control_norm', 0.0):.3f} "
                     f"ctok={row.get('latent_cvae_adaptive_trajectory_token_norm', 0.0):.3f} "
                     f"ctupd={row.get('latent_cvae_adaptive_trajectory_update_norm', 0.0):.3f} "

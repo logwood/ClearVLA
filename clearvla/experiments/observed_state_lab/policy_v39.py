@@ -152,6 +152,10 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_arm_coeff_basis: str = "dct"
     latent_cvae_arm_coeff_degree: int = 2
     latent_cvae_arm_coeff_ridge: float = 1e-2
+    latent_cvae_arm_coeff_writer: str = "analysis"
+    latent_cvae_coeff_include_gripper: int = 0
+    latent_cvae_coeff_magnitude_groups: int = 2
+    latent_cvae_spline_base_diagnostics: int = 1
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -349,6 +353,14 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_arm_coeff_degree must be >= 0")
         if float(self.latent_cvae_arm_coeff_ridge) < 0:
             raise ValueError("latent_cvae_arm_coeff_ridge must be non-negative")
+        if str(self.latent_cvae_arm_coeff_writer).lower() not in {"analysis", "query_direction", "query-direction", "query"}:
+            raise ValueError("latent_cvae_arm_coeff_writer must be analysis or query_direction")
+        if int(self.latent_cvae_coeff_include_gripper) not in (0, 1):
+            raise ValueError("latent_cvae_coeff_include_gripper must be 0 or 1")
+        if int(self.latent_cvae_coeff_magnitude_groups) not in (1, 2):
+            raise ValueError("latent_cvae_coeff_magnitude_groups must be 1 or 2")
+        if int(self.latent_cvae_spline_base_diagnostics) not in (0, 1):
+            raise ValueError("latent_cvae_spline_base_diagnostics must be 0 or 1")
         if str(self.final_action_decoder) != "adaptive_recurrent_cvae_action":
             raise ValueError("final_action_decoder must be adaptive_recurrent_cvae_action")
         if int(self.latent_cvae_z_dim) < 1:
@@ -1595,10 +1607,15 @@ class LatentCVAEActionDecoder(nn.Module):
         else:
             gate = torch.zeros_like(action)
             transition = action
-        pred_velocity = self.velocity_head(action, transition)
+        pred_velocity_out = self.velocity_head(action, transition, return_diagnostics=True)
+        if isinstance(pred_velocity_out, tuple):
+            pred_velocity, velocity_diagnostics = pred_velocity_out
+        else:
+            pred_velocity = pred_velocity_out
+            velocity_diagnostics = {}
         event_logits = self.event_head(action + transition)
         motion_logits = self.motion_head(action).squeeze(-1)
-        return {
+        out = {
             "pred_velocity": pred_velocity,
             "event_logits": event_logits,
             "motion_logits": motion_logits,
@@ -1606,6 +1623,8 @@ class LatentCVAEActionDecoder(nn.Module):
             "transition_latent": transition,
             "gripper_gate_mean": gate.detach().float().mean(),
         }
+        out.update(velocity_diagnostics)
+        return out
 
     def _noisy_time_gate(self, time: Tensor) -> Tensor | None:
         """V53-A1: t-dependent gate for the direct x_t branch.
@@ -1877,6 +1896,16 @@ class LatentCVAEActionDecoder(nn.Module):
             "adaptive_context_direction_norm",
             "adaptive_regularizer",
             "adaptive_route_entropy_regularizer",
+            "adaptive_coeff_writer_context_norm",
+            "adaptive_coeff_writer_raw_direction_norm",
+            "adaptive_coeff_writer_direction_norm",
+            "adaptive_coeff_writer_magnitude_mean",
+            "adaptive_coeff_writer_magnitude_std",
+            "adaptive_coeff_writer_magnitude_max",
+            "adaptive_coeff_writer_output_norm",
+            "adaptive_coeff_writer_controls",
+            "adaptive_coeff_writer_include_gripper",
+            "adaptive_spline_base_pred_velocity",
         ):
             if key in prior_out:
                 result[f"cvae_{key}"] = prior_out[key]
@@ -2684,6 +2713,10 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         condition_strength_min_rows: list[Tensor] = []
         condition_residual_rows: list[Tensor] = []
         context_direction_rows: list[Tensor] = []
+        base_pred_velocity: Tensor | None = None
+        if int(getattr(cfg, "latent_cvae_spline_base_diagnostics", 1)):
+            with torch.no_grad():
+                base_pred_velocity = self._emit_action(action.detach(), cond.detach())["pred_velocity"].detach()
         t = time.to(device=device, dtype=dtype)[:, None, None]
         for step in range(max(self.refine_steps, 0)):
             step_bias = self._refine_step_bias(step, action)
@@ -2888,6 +2921,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "adaptive_regularizer": torch.stack(regularizer_terms).mean() if regularizer_terms else z0,
             "adaptive_route_entropy_regularizer": torch.stack(route_floor_terms).mean() if route_floor_terms else z0,
         })
+        if base_pred_velocity is not None:
+            out["adaptive_spline_base_pred_velocity"] = base_pred_velocity
         if trajectory_pred_rows:
             out["adaptive_trajectory_pred_velocity"] = torch.stack(trajectory_pred_rows, dim=1)
         return out

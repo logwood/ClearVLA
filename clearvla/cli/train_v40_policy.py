@@ -198,6 +198,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-arm-coeff-basis", type=str, default="dct")
     parser.add_argument("--latent-cvae-arm-coeff-degree", type=int, default=2)
     parser.add_argument("--latent-cvae-arm-coeff-ridge", type=float, default=1e-2)
+    parser.add_argument("--latent-cvae-arm-coeff-writer", type=str, default="analysis")
+    parser.add_argument("--latent-cvae-coeff-include-gripper", type=int, default=0)
+    parser.add_argument("--latent-cvae-coeff-magnitude-groups", type=int, default=2)
+    parser.add_argument("--latent-cvae-spline-base-diagnostics", type=int, default=1)
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -447,6 +451,10 @@ def main() -> None:
         latent_cvae_arm_coeff_basis=args.latent_cvae_arm_coeff_basis,
         latent_cvae_arm_coeff_degree=args.latent_cvae_arm_coeff_degree,
         latent_cvae_arm_coeff_ridge=args.latent_cvae_arm_coeff_ridge,
+        latent_cvae_arm_coeff_writer=args.latent_cvae_arm_coeff_writer,
+        latent_cvae_coeff_include_gripper=args.latent_cvae_coeff_include_gripper,
+        latent_cvae_coeff_magnitude_groups=args.latent_cvae_coeff_magnitude_groups,
+        latent_cvae_spline_base_diagnostics=args.latent_cvae_spline_base_diagnostics,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -565,6 +573,10 @@ def main() -> None:
             "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
             "latent_cvae_arm_coeff_degree": int(args.latent_cvae_arm_coeff_degree),
             "latent_cvae_arm_coeff_ridge": float(args.latent_cvae_arm_coeff_ridge),
+            "latent_cvae_arm_coeff_writer": str(args.latent_cvae_arm_coeff_writer),
+            "latent_cvae_coeff_include_gripper": bool(int(args.latent_cvae_coeff_include_gripper)),
+            "latent_cvae_coeff_magnitude_groups": int(args.latent_cvae_coeff_magnitude_groups),
+            "latent_cvae_spline_base_diagnostics": bool(int(args.latent_cvae_spline_base_diagnostics)),
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
@@ -634,6 +646,10 @@ def main() -> None:
             "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
             "latent_cvae_arm_coeff_degree": int(args.latent_cvae_arm_coeff_degree),
             "latent_cvae_arm_coeff_ridge": float(args.latent_cvae_arm_coeff_ridge),
+            "latent_cvae_arm_coeff_writer": str(args.latent_cvae_arm_coeff_writer),
+            "latent_cvae_coeff_include_gripper": int(args.latent_cvae_coeff_include_gripper),
+            "latent_cvae_coeff_magnitude_groups": int(args.latent_cvae_coeff_magnitude_groups),
+            "latent_cvae_spline_base_diagnostics": int(args.latent_cvae_spline_base_diagnostics),
             "latent_cvae_proposal_residual_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_coeff_weight) > 0),
             "latent_cvae_proposal_residual_mid_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_mid_coeff_weight) > 0),
             "latent_cvae_proposal_residual_arm_only": bool(int(args.latent_cvae_proposal_residual_arm_only)),
