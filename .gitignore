@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.log
+runs/
+data/
+clearvla_backup/
+clearvla_justok/
+.agents/

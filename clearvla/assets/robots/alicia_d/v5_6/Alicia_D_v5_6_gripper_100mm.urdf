@@ -1,0 +1,557 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="Alicia_D_v5_6_gripper_100mm">
+ <mujoco>
+    <compiler meshdir="../../meshes/Alicia_D_v5_6/follower_standard" discardvisual="false" />
+    <contact>
+      <exclude body1="base_link" body2="link1"/>
+      <exclude body1="link1" body2="link2"/>
+      <exclude body1="link2" body2="link3"/>
+      <exclude body1="link3" body2="link4"/>
+      <exclude body1="link4" body2="link5"/>
+      <exclude body1="link5" body2="link6"/>
+      <exclude body1="link6" body2="left_gripper"/>
+      <exclude body1="left_gripper" body2="right_gripper"/>
+    </contact>
+  </mujoco>
+
+
+
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.000826234810794059 -0.00797844272739653 0.0457675129552246"
+        rpy="0 0 0" />
+      <mass
+        value="0.733961424954529" />
+      <inertia
+        ixx="0.00138410344771801"
+        ixy="5.67201110348386E-05"
+        ixz="-5.14360166026408E-07"
+        iyy="0.00173617223702126"
+        iyz="1.48652204582846E-05"
+        izz="0.00274667683204281" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="link1">
+    <inertial>
+      <origin
+        xyz="0.000230589777408925 1.29106264207593E-05 0.00303135439825203"
+        rpy="0 0 0" />
+      <mass
+        value="0.195233495556057" />
+      <inertia
+        ixx="0.000258351163283404"
+        ixy="8.79399970494642E-07"
+        ixz="6.87503893065992E-07"
+        iyy="0.000149307749091489"
+        iyz="1.07703883392669E-06"
+        izz="0.000339791347248474" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint1"
+    type="revolute">
+    <origin
+      xyz="0 0 0.1295"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link1" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.749"
+      upper="2.749"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="link2">
+    <inertial>
+      <origin
+        xyz="-0.1505886956238 0.000866069014068702 -0.000650950596117093"
+        rpy="0 0 0" />
+      <mass
+        value="0.207033693066089" />
+      <inertia
+        ixx="0.000128135500182744"
+        ixy="-1.38510377197406E-07"
+        ixz="-4.91817924862077E-06"
+        iyy="0.000205708390606615"
+        iyz="3.50025102961721E-07"
+        izz="0.000122721347334006" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint2"
+    type="revolute">
+    <origin
+      xyz="0 0 0.04287"
+      rpy="1.5708 1.5708 0" />
+    <parent
+      link="link1" />
+    <child
+      link="link2" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2"
+      upper="2"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="link3">
+    <inertial>
+      <origin
+        xyz="0.00248143780493948 -0.055786318961577 0.000269721187496484"
+        rpy="0 0 0" />
+      <mass
+        value="0.0845575651613574" />
+      <inertia
+        ixx="7.61918348100336E-05"
+        ixy="2.26498126057066E-06"
+        ixz="-3.82299410321316E-07"
+        iyy="2.87941469642104E-05"
+        iyz="5.38445498652279E-06"
+        izz="8.04370650316099E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint3"
+    type="revolute">
+    <origin
+      xyz="-0.22367 0.022492 -5E-05"
+      rpy="0 0 2.3562" />
+    <parent
+      link="link2" />
+    <child
+      link="link3" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-0.5"
+      upper="3.14159"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="link4">
+    <inertial>
+      <origin
+        xyz="-0.000298365512111376 -0.000601368976746215 -0.0659740390150152"
+        rpy="0 0 0" />
+      <mass
+        value="0.0653695951425785" />
+      <inertia
+        ixx="7.03004188045042E-05"
+        ixy="9.68417873789794E-09"
+        ixz="-7.50131710418784E-07"
+        iyy="6.87470297837511E-05"
+        iyz="-4.45271910827907E-08"
+        izz="1.68226189340094E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link4_100mm.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link4_100mm.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint4"
+    type="revolute">
+    <origin
+      xyz="-0.00211 -0.099 0.0002"
+      rpy="-1.5708 0 0" />
+    <parent
+      link="link3" />
+    <child
+      link="link4" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.79"
+      upper="2.79"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="link5">
+    <inertial>
+      <origin
+        xyz="-0.0113684232423691 -0.0308687473010146 0.000870449928863028"
+        rpy="0 0 0" />
+      <mass
+        value="0.050763902309721" />
+      <inertia
+        ixx="1.87701017069596E-05"
+        ixy="-2.01098609554627E-06"
+        ixz="5.15226540328947E-08"
+        iyy="2.51021034553581E-05"
+        iyz="-4.22412453521615E-08"
+        izz="1.7257171014064E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link5.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint5"
+    type="revolute">
+    <origin
+      xyz="0 -0.0005 -0.12235"
+      rpy="1.5708 0 -3.1416" />
+    <parent
+      link="link4" />
+    <child
+      link="link5" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="link6">
+    <inertial>
+      <origin
+        xyz="-0.029248098562467 -0.00016882200980945 0.0345028311825817"
+        rpy="0 0 0" />
+      <mass
+        value="0.119820573151617" />
+      <inertia
+        ixx="8.13589561206242E-05"
+        ixy="1.00502626880445E-08"
+        ixz="-3.58286144151259E-06"
+        iyy="3.33372461494345E-05"
+        iyz="2.08982135984784E-08"
+        izz="8.69091055900091E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link6_100mm.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/link6_100mm.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint6"
+    type="revolute">
+    <origin
+      xyz="-0.00385 -0.0575 0.001"
+      rpy="1.5708 0 0" />
+    <parent
+      link="link5" />
+    <child
+      link="link6" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-3.14159"
+      upper="3.14159"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="left_gripper">
+    <inertial>
+      <origin
+        xyz="2.97087515699346E-08 -0.0434087591943531 -0.0106596716155943"
+        rpy="0 0 0" />
+      <mass
+        value="0.0256461121677845" />
+      <inertia
+        ixx="6.46830326573706E-06"
+        ixy="-2.39543801082248E-11"
+        ixz="4.63721305647814E-12"
+        iyy="5.13428741941763E-06"
+        iyz="-1.26432048814164E-06"
+        izz="8.03606347912521E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/left_gripper_100mm.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/left_gripper_100mm.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_finger"
+    type="prismatic">
+    <origin
+      xyz="-0.000200000000001088 -0.050497849845622 0.130979659620446"
+      rpy="1.5707963267949 0 3.14159265358979" />
+    <parent
+      link="link6" />
+    <child
+      link="left_gripper" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="0.05"
+      effort="5"
+      velocity="12" />
+  </joint>
+  <link
+    name="right_gripper">
+    <inertial>
+      <origin
+        xyz="-2.97087526801576E-08 0.0434087591943507 -0.0106596716155944"
+        rpy="0 0 0" />
+      <mass
+        value="0.0256461121677874" />
+      <inertia
+        ixx="6.46830326573819E-06"
+        ixy="-2.39543798316685E-11"
+        ixz="-4.6372128498014E-12"
+        iyy="5.13428741941821E-06"
+        iyz="1.26432048814209E-06"
+        izz="8.036063479126E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/right_gripper_100mm.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="../../meshes/Alicia_D_v5_6/follower_standard/right_gripper_100mm.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_finger"
+    type="prismatic">
+    <origin
+      xyz="-0.000199999999998035 0.050502150154378 0.130979659620446"
+      rpy="-1.5707963267949 0 3.14159265358978" />
+    <parent
+      link="link6" />
+    <child
+      link="right_gripper" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.05"
+      upper="0"
+      effort="5"
+      velocity="12" />
+  </joint>
+   <link
+    name="tool0">
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+      <material
+        name="green_virtual_sphere_material">
+        <color
+          rgba="0 1 0 1" />
+      </material>
+    </visual>
+  </link>
+
+  <joint
+    name="tool0_fixed_joint"
+    type="fixed">
+    <origin
+      xyz="0 0 0.13"
+      rpy="0 0 0" />
+    <parent
+      link="link6" />
+    <child
+      link="tool0" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>
