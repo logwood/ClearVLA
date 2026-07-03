@@ -60,38 +60,18 @@ _STAGE1_DIRTY_ADAPTER_PREFIXES = (
     "planner.motion_probe.",
 )
 
-_STAGE1_REMOVED_PREFIXES = (
-    # V54 cleanup: the learned micro controller was removed from the CVAE tail.
-    # Stage-I checkpoints from experiments that contained it should still be
-    # usable as trunk/refine initializers.
-    "planner.latent_cvae_action_decoder.micro_progress_init.",
-    "planner.latent_cvae_action_decoder.micro_gain_head.",
-    "planner.latent_cvae_action_decoder.micro_reference.",
-    "planner.latent_cvae_action_decoder.micro_feedforward.",
-    "planner.latent_cvae_action_decoder.micro_context_modulation.",
-    "planner.latent_cvae_action_decoder.micro_error_norm.",
-    "planner.latent_cvae_action_decoder.micro_function_bank.",
-    "planner.latent_cvae_action_decoder.micro_refine_block.",
-    "planner.latent_cvae_action_decoder.micro_supervision_router.",
-)
-
 
 def _filter_stage1_state_dict(
     state: dict[str, torch.Tensor],
     *,
     reset_dirty_adapters: bool,
 ) -> tuple[dict[str, torch.Tensor], list[str]]:
-    removed = [
-        key for key in state
-        if key.startswith(_STAGE1_REMOVED_PREFIXES)
-    ]
-    if not reset_dirty_adapters and not removed:
+    if not reset_dirty_adapters:
         return state, []
     skipped = [
         key for key in state
         if key.startswith(_STAGE1_DIRTY_ADAPTER_PREFIXES)
-    ] if reset_dirty_adapters else []
-    skipped = [*removed, *skipped]
+    ]
     if not skipped:
         return state, []
     skipped_set = set(skipped)
@@ -146,7 +126,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer-high-latent-weight", type=float, default=1.0, help="V40: latent gain at the deepest layer.")
     parser.add_argument("--layer-causal-event-from-effect", type=int, default=1, help="V40: read event logits from causal effect tokens in layer contracts.")
     parser.add_argument("--layer-state-counterfactual", type=int, default=0, help="Experimental non-strict state/frame shuffle diagnostic; disabled by default and excluded from the recommended training path.")
-    parser.add_argument("--action-consequence-self-condition", type=int, default=0, help="Use a no-grad deploy prior clean-action estimate as the layer consequence action instead of target/noisy action.")
     parser.add_argument("--proposal-depth", type=int, default=2)
     parser.add_argument("--proposal-dropout", type=float, default=0.25)
     parser.add_argument("--dropout", type=float, default=0.05)
@@ -170,7 +149,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--first-execution-steps", type=int, default=4)
     parser.add_argument("--mid-execution-steps", type=int, default=8)
     parser.add_argument("--physical-decode-delta-blend", type=float, default=0.25)
-    parser.add_argument("--final-action-decoder", choices=["adaptive_recurrent_cvae_action"], default="adaptive_recurrent_cvae_action")
+    parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"], default="legacy")
+    parser.add_argument("--action-flow-residual-depth", type=int, default=2)
+    parser.add_argument("--action-flow-residual-high-slots", type=int, default=4)
+    parser.add_argument("--action-flow-residual-max-scale", type=float, default=0.20)
+    parser.add_argument("--action-flow-residual-visual-memory", type=int, default=1)
+    parser.add_argument("--action-flow-residual-context-memory", type=int, default=1)
+    parser.add_argument("--action-flow-residual-transition-memory", type=int, default=1)
+    parser.add_argument("--action-flow-residual-layer-memory", type=int, default=1)
+    parser.add_argument("--action-flow-residual-layer-pair-schedule", type=str, default="0:1,1:3,3:5,5:7")
+    parser.add_argument("--action-flow-residual-layer-detach", type=int, default=1)
+    parser.add_argument("--action-flow-residual-stage-router", type=int, default=1)
+    parser.add_argument("--action-flow-residual-anchor-memory", type=int, default=1)
+    parser.add_argument("--latent-action-decoder-depth", type=int, default=8)
+    parser.add_argument("--latent-action-high-slots", type=int, default=4)
+    parser.add_argument("--latent-action-layer-schedule", type=str, default="0:1,1:2,2:3,3:4,4:5,5:6,6:7,7:7")
+    parser.add_argument("--latent-action-visual-memory", type=int, default=0)
+    parser.add_argument("--latent-action-context-memory", type=int, default=0)
+    parser.add_argument("--latent-action-transition-memory", type=int, default=1)
+    parser.add_argument("--latent-action-layer-memory", type=int, default=1)
+    parser.add_argument("--latent-action-anchor-memory", type=int, default=1)
+    parser.add_argument("--latent-action-stage-router", type=int, default=0)
+    parser.add_argument("--latent-action-layer-detach", type=int, default=0)
+    parser.add_argument("--latent-action-event-gripper-gate", type=int, default=1)
+    parser.add_argument("--latent-action-temporal-depth", type=int, default=0)
+    parser.add_argument("--latent-action-near-steps", type=int, default=4)
+    parser.add_argument("--latent-action-mid-steps", type=int, default=8)
+    parser.add_argument("--latent-action-near-depth", type=int, default=2)
+    parser.add_argument("--latent-action-mid-depth", type=int, default=4)
     parser.add_argument("--latent-cvae-z-dim", type=int, default=64)
     parser.add_argument("--latent-cvae-decoder-depth", type=int, default=3)
     parser.add_argument("--latent-cvae-ffn-expansion", type=float, default=2.0)
@@ -187,21 +193,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-mu-bound", type=float, default=1.5)
     parser.add_argument("--latent-cvae-min-std", type=float, default=0.5)
     parser.add_argument("--latent-cvae-causal-attention", type=int, default=1)
-    parser.add_argument("--latent-cvae-trajectory-denoise", type=int, default=1)
-    parser.add_argument("--latent-cvae-trajectory-control-points", type=int, default=8)
-    parser.add_argument("--latent-cvae-trajectory-context", type=int, default=1)
-    parser.add_argument("--latent-cvae-trajectory-mid-supervision", type=int, default=1)
-    parser.add_argument("--latent-cvae-trajectory-update-scale", type=float, default=1.0)
-    parser.add_argument("--latent-cvae-trajectory-context-scale", type=float, default=0.50)
-    parser.add_argument("--latent-cvae-arm-coeff-output", type=int, default=0, help="V55/V56: emit arm velocity through an output-only coefficient head; does not constrain refine states.")
-    parser.add_argument("--latent-cvae-arm-coeff-points", type=int, default=8)
-    parser.add_argument("--latent-cvae-arm-coeff-basis", type=str, default="dct")
-    parser.add_argument("--latent-cvae-arm-coeff-degree", type=int, default=2)
-    parser.add_argument("--latent-cvae-arm-coeff-ridge", type=float, default=1e-2)
-    parser.add_argument("--latent-cvae-arm-coeff-writer", type=str, default="analysis")
-    parser.add_argument("--latent-cvae-coeff-include-gripper", type=int, default=0)
-    parser.add_argument("--latent-cvae-coeff-magnitude-groups", type=int, default=2)
-    parser.add_argument("--latent-cvae-spline-base-diagnostics", type=int, default=1)
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -216,7 +207,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-output-adapter", type=int, default=0)
     parser.add_argument("--adaptive-cvae-context-dropout", type=float, default=0.05)
     parser.add_argument("--adaptive-cvae-route-entropy-floor-ratio", type=float, default=0.35)
-    parser.add_argument("--adaptive-cvae-function-adapters", type=int, default=0)
+    parser.add_argument("--adaptive-cvae-function-adapters", type=int, default=1)
     parser.add_argument("--adaptive-cvae-function-rank", type=int, default=64)
     parser.add_argument("--adaptive-cvae-progress-role-dim", type=int, default=16)
     parser.add_argument("--adaptive-cvae-route-topk", type=int, default=0)
@@ -230,10 +221,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-coarse-strength", type=float, default=0.35)
     parser.add_argument("--adaptive-cvae-seed-scale", type=float, default=0.35)
     parser.add_argument("--adaptive-cvae-output-scale", type=float, default=0.05)
-    parser.add_argument("--adaptive-cvae-detail-micro", type=int, default=0)
-    parser.add_argument("--adaptive-cvae-detail-micro-supervision", type=int, default=0)
-    parser.add_argument("--adaptive-cvae-detail-micro-scale", type=float, default=0.25)
-    parser.add_argument("--adaptive-cvae-detail-micro-gate-init", type=float, default=0.35)
     parser.add_argument("--adaptive-cvae-context-capsules", type=int, default=1)
     parser.add_argument("--adaptive-cvae-context-capsule-count", type=int, default=6)
     parser.add_argument("--adaptive-cvae-direct-condition-residual", type=int, default=0)
@@ -241,40 +228,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-condition-strength-min", type=float, default=0.03)
     parser.add_argument("--adaptive-cvae-condition-strength-max", type=float, default=1.5)
     parser.add_argument("--adaptive-cvae-condition-strength-init", type=float, default=0.35)
-    parser.add_argument("--block-action-denoise-matrix", type=int, default=0, help="Enable bounded temporal-block x native-action learnable Gaussian bridge scaling.")
-    parser.add_argument("--block-action-denoise-blocks", type=str, default="0:4,4:12,12:24")
-    parser.add_argument("--block-action-denoise-rank", type=int, default=2)
-    parser.add_argument("--block-action-denoise-interaction-scale", type=float, default=0.15)
-    parser.add_argument("--block-action-noise-scale-min", type=float, default=0.75)
-    parser.add_argument("--block-action-noise-scale-max", type=float, default=1.25)
-    parser.add_argument("--block-action-noise-scale-init", type=float, default=1.00)
-    parser.add_argument("--block-action-velocity-loss-min", type=float, default=0.75)
-    parser.add_argument("--block-action-velocity-loss-max", type=float, default=1.25)
-    parser.add_argument("--block-action-velocity-loss-init", type=float, default=1.00)
-    parser.add_argument("--block-action-x0-mix-min", type=float, default=0.00)
-    parser.add_argument("--block-action-x0-mix-max", type=float, default=0.20)
-    parser.add_argument("--block-action-x0-mix-init", type=float, default=0.00)
-
-    # V53-A: shortcut suppression + consequence diagnostics.
-    parser.add_argument("--latent-cvae-noisy-gate", type=int, default=0, help="V53-A1: t-gate the direct noisy-action branch of the CVAE decoder (gate = min + (1-min)*t^p).")
-    parser.add_argument("--latent-cvae-noisy-gate-min", type=float, default=0.05)
-    parser.add_argument("--latent-cvae-noisy-gate-power", type=float, default=1.5)
-    parser.add_argument("--layer-zero-base-diagnostic", type=int, default=0, help="V53-A3: log relative consequence-output shift when rollout tokens are zeroed (no loss).")
-    # V53-B: lateral-to-vertical condition + monotonic routing.
-    parser.add_argument("--latent-cvae-layer-scan", type=int, default=0, help="V53-B1: depth-scan (GRU over ordered layer summaries) as primary CVAE condition.")
-    parser.add_argument("--latent-cvae-layer-scan-alpha", type=float, default=0.2, help="Weight of the residual lateral concat condition path.")
-    parser.add_argument("--adaptive-cvae-monotonic-layer-route", type=int, default=0, help="V53-B2: soft monotonic step<->depth alignment bias on layer/capsule routing.")
-    parser.add_argument("--adaptive-cvae-layer-route-distance-scale", type=float, default=3.0)
-    # V53-C: trunk bandwidth + serialized writers.
-    parser.add_argument("--latent-cvae-canvas-cross-attention", type=int, default=0, help="V53-C1: action tokens cross-attend to full final-canvas trajectory+rollout tokens.")
-    parser.add_argument("--adaptive-cvae-serial-writers", type=int, default=0, help="V53-C2: chain lateral writers (traj_ctx -> semantic -> function -> refine input).")
-    # V53.1: coefficient-space unification + refine-only mid supervision.
-    parser.add_argument("--latent-cvae-trajectory-pinv", type=int, default=0, help="V53.1: one ridge pseudo-inverse analysis operator shared by model projection and both coefficient supervisions.")
-    parser.add_argument("--latent-cvae-trajectory-ridge", type=float, default=1e-2)
-    parser.add_argument("--latent-cvae-trajectory-mid-refine-only", type=int, default=0, help="V53.1: mid supervision only on refine-segment (+final) states; seed/block/canvas states excluded.")
-    parser.add_argument("--latent-cvae-noisy-ratio-max", type=float, default=0.0, help="V53.2: hinge threshold on x_t-branch share of base token norm (0 disables).")
-    parser.add_argument("--latent-cvae-trajectory-context-norm-max", type=float, default=0.0, help="V53.3: hard per-token norm cap on trajectory_context (0 disables).")
-    parser.add_argument("--latent-cvae-trajectory-pos-exempt", type=int, default=0, help="V53.5: exempt the horizon positional basis from coarse/control-point smoothing (fixes v51 position-collapse).")
+    parser.add_argument("--adaptive-cvae-micro-control", type=int, default=1)
+    parser.add_argument("--adaptive-cvae-micro-refine-block", type=int, default=1)
+    parser.add_argument("--adaptive-cvae-micro-supervision", type=int, default=1)
+    parser.add_argument("--adaptive-cvae-micro-heun", type=int, default=1)
+    parser.add_argument("--adaptive-cvae-micro-monotonic-progress", type=int, default=1)
+    parser.add_argument("--adaptive-cvae-micro-min-step", type=float, default=0.03)
+    parser.add_argument("--adaptive-cvae-micro-max-step", type=float, default=0.35)
+    parser.add_argument("--adaptive-cvae-micro-step-init", type=float, default=0.12)
+    parser.add_argument("--adaptive-cvae-micro-kp-max", type=float, default=0.6)
+    parser.add_argument("--adaptive-cvae-micro-kp-init", type=float, default=0.18)
+    parser.add_argument("--adaptive-cvae-micro-kd-max", type=float, default=0.45)
+    parser.add_argument("--adaptive-cvae-micro-kd-init", type=float, default=0.08)
+    parser.add_argument("--adaptive-cvae-micro-update-scale", type=float, default=1.0)
+    parser.add_argument("--adaptive-cvae-micro-refine-block-scale", type=float, default=0.3)
+    parser.add_argument("--adaptive-cvae-micro-progress-distance-scale", type=float, default=4.0)
 
     defaults = V39PolicyTrainerConfig()
     for field in V39PolicyTrainerConfig.__dataclass_fields__:
@@ -426,8 +394,34 @@ def main() -> None:
         layer_high_latent_weight=args.layer_high_latent_weight,
         layer_causal_event_from_effect=args.layer_causal_event_from_effect,
         layer_state_counterfactual=args.layer_state_counterfactual,
-        action_consequence_self_condition=args.action_consequence_self_condition,
         final_action_decoder=args.final_action_decoder,
+        action_flow_residual_depth=args.action_flow_residual_depth,
+        action_flow_residual_high_slots=args.action_flow_residual_high_slots,
+        action_flow_residual_max_scale=args.action_flow_residual_max_scale,
+        action_flow_residual_visual_memory=args.action_flow_residual_visual_memory,
+        action_flow_residual_context_memory=args.action_flow_residual_context_memory,
+        action_flow_residual_transition_memory=args.action_flow_residual_transition_memory,
+        action_flow_residual_layer_memory=args.action_flow_residual_layer_memory,
+        action_flow_residual_layer_pair_schedule=args.action_flow_residual_layer_pair_schedule,
+        action_flow_residual_layer_detach=args.action_flow_residual_layer_detach,
+        action_flow_residual_stage_router=args.action_flow_residual_stage_router,
+        action_flow_residual_anchor_memory=args.action_flow_residual_anchor_memory,
+        latent_action_decoder_depth=args.latent_action_decoder_depth,
+        latent_action_high_slots=args.latent_action_high_slots,
+        latent_action_layer_schedule=args.latent_action_layer_schedule,
+        latent_action_visual_memory=args.latent_action_visual_memory,
+        latent_action_context_memory=args.latent_action_context_memory,
+        latent_action_transition_memory=args.latent_action_transition_memory,
+        latent_action_layer_memory=args.latent_action_layer_memory,
+        latent_action_anchor_memory=args.latent_action_anchor_memory,
+        latent_action_stage_router=args.latent_action_stage_router,
+        latent_action_layer_detach=args.latent_action_layer_detach,
+        latent_action_event_gripper_gate=args.latent_action_event_gripper_gate,
+        latent_action_temporal_depth=args.latent_action_temporal_depth,
+        latent_action_near_steps=args.latent_action_near_steps,
+        latent_action_mid_steps=args.latent_action_mid_steps,
+        latent_action_near_depth=args.latent_action_near_depth,
+        latent_action_mid_depth=args.latent_action_mid_depth,
         latent_cvae_z_dim=args.latent_cvae_z_dim,
         latent_cvae_decoder_depth=args.latent_cvae_decoder_depth,
         latent_cvae_ffn_expansion=args.latent_cvae_ffn_expansion,
@@ -444,21 +438,6 @@ def main() -> None:
         latent_cvae_mu_bound=args.latent_cvae_mu_bound,
         latent_cvae_min_std=args.latent_cvae_min_std,
         latent_cvae_causal_attention=args.latent_cvae_causal_attention,
-        latent_cvae_trajectory_denoise=args.latent_cvae_trajectory_denoise,
-        latent_cvae_trajectory_control_points=args.latent_cvae_trajectory_control_points,
-        latent_cvae_trajectory_context=args.latent_cvae_trajectory_context,
-        latent_cvae_trajectory_mid_supervision=args.latent_cvae_trajectory_mid_supervision,
-        latent_cvae_trajectory_update_scale=args.latent_cvae_trajectory_update_scale,
-        latent_cvae_trajectory_context_scale=args.latent_cvae_trajectory_context_scale,
-        latent_cvae_arm_coeff_output=args.latent_cvae_arm_coeff_output,
-        latent_cvae_arm_coeff_points=args.latent_cvae_arm_coeff_points,
-        latent_cvae_arm_coeff_basis=args.latent_cvae_arm_coeff_basis,
-        latent_cvae_arm_coeff_degree=args.latent_cvae_arm_coeff_degree,
-        latent_cvae_arm_coeff_ridge=args.latent_cvae_arm_coeff_ridge,
-        latent_cvae_arm_coeff_writer=args.latent_cvae_arm_coeff_writer,
-        latent_cvae_coeff_include_gripper=args.latent_cvae_coeff_include_gripper,
-        latent_cvae_coeff_magnitude_groups=args.latent_cvae_coeff_magnitude_groups,
-        latent_cvae_spline_base_diagnostics=args.latent_cvae_spline_base_diagnostics,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -487,10 +466,6 @@ def main() -> None:
         adaptive_cvae_coarse_strength=args.adaptive_cvae_coarse_strength,
         adaptive_cvae_seed_scale=args.adaptive_cvae_seed_scale,
         adaptive_cvae_output_scale=args.adaptive_cvae_output_scale,
-        adaptive_cvae_detail_micro=args.adaptive_cvae_detail_micro,
-        adaptive_cvae_detail_micro_supervision=args.adaptive_cvae_detail_micro_supervision,
-        adaptive_cvae_detail_micro_scale=args.adaptive_cvae_detail_micro_scale,
-        adaptive_cvae_detail_micro_gate_init=args.adaptive_cvae_detail_micro_gate_init,
         adaptive_cvae_context_capsules=args.adaptive_cvae_context_capsules,
         adaptive_cvae_context_capsule_count=args.adaptive_cvae_context_capsule_count,
         adaptive_cvae_direct_condition_residual=args.adaptive_cvae_direct_condition_residual,
@@ -498,35 +473,21 @@ def main() -> None:
         adaptive_cvae_condition_strength_min=args.adaptive_cvae_condition_strength_min,
         adaptive_cvae_condition_strength_max=args.adaptive_cvae_condition_strength_max,
         adaptive_cvae_condition_strength_init=args.adaptive_cvae_condition_strength_init,
-        block_action_denoise_matrix=args.block_action_denoise_matrix,
-        block_action_denoise_blocks=args.block_action_denoise_blocks,
-        block_action_denoise_rank=args.block_action_denoise_rank,
-        block_action_denoise_interaction_scale=args.block_action_denoise_interaction_scale,
-        block_action_noise_scale_min=args.block_action_noise_scale_min,
-        block_action_noise_scale_max=args.block_action_noise_scale_max,
-        block_action_noise_scale_init=args.block_action_noise_scale_init,
-        block_action_velocity_loss_min=args.block_action_velocity_loss_min,
-        block_action_velocity_loss_max=args.block_action_velocity_loss_max,
-        block_action_velocity_loss_init=args.block_action_velocity_loss_init,
-        block_action_x0_mix_min=args.block_action_x0_mix_min,
-        block_action_x0_mix_max=args.block_action_x0_mix_max,
-        block_action_x0_mix_init=args.block_action_x0_mix_init,
-        latent_cvae_noisy_gate=args.latent_cvae_noisy_gate,
-        latent_cvae_noisy_gate_min=args.latent_cvae_noisy_gate_min,
-        latent_cvae_noisy_gate_power=args.latent_cvae_noisy_gate_power,
-        layer_zero_base_diagnostic=args.layer_zero_base_diagnostic,
-        latent_cvae_layer_scan=args.latent_cvae_layer_scan,
-        latent_cvae_layer_scan_alpha=args.latent_cvae_layer_scan_alpha,
-        adaptive_cvae_monotonic_layer_route=args.adaptive_cvae_monotonic_layer_route,
-        adaptive_cvae_layer_route_distance_scale=args.adaptive_cvae_layer_route_distance_scale,
-        latent_cvae_canvas_cross_attention=args.latent_cvae_canvas_cross_attention,
-        adaptive_cvae_serial_writers=args.adaptive_cvae_serial_writers,
-        latent_cvae_trajectory_pinv=args.latent_cvae_trajectory_pinv,
-        latent_cvae_trajectory_ridge=args.latent_cvae_trajectory_ridge,
-        latent_cvae_trajectory_mid_refine_only=args.latent_cvae_trajectory_mid_refine_only,
-        latent_cvae_noisy_ratio_max=args.latent_cvae_noisy_ratio_max,
-        latent_cvae_trajectory_context_norm_max=args.latent_cvae_trajectory_context_norm_max,
-        latent_cvae_trajectory_pos_exempt=args.latent_cvae_trajectory_pos_exempt,
+        adaptive_cvae_micro_control=args.adaptive_cvae_micro_control,
+        adaptive_cvae_micro_refine_block=args.adaptive_cvae_micro_refine_block,
+        adaptive_cvae_micro_supervision=args.adaptive_cvae_micro_supervision,
+        adaptive_cvae_micro_heun=args.adaptive_cvae_micro_heun,
+        adaptive_cvae_micro_monotonic_progress=args.adaptive_cvae_micro_monotonic_progress,
+        adaptive_cvae_micro_min_step=args.adaptive_cvae_micro_min_step,
+        adaptive_cvae_micro_max_step=args.adaptive_cvae_micro_max_step,
+        adaptive_cvae_micro_step_init=args.adaptive_cvae_micro_step_init,
+        adaptive_cvae_micro_kp_max=args.adaptive_cvae_micro_kp_max,
+        adaptive_cvae_micro_kp_init=args.adaptive_cvae_micro_kp_init,
+        adaptive_cvae_micro_kd_max=args.adaptive_cvae_micro_kd_max,
+        adaptive_cvae_micro_kd_init=args.adaptive_cvae_micro_kd_init,
+        adaptive_cvae_micro_update_scale=args.adaptive_cvae_micro_update_scale,
+        adaptive_cvae_micro_refine_block_scale=args.adaptive_cvae_micro_refine_block_scale,
+        adaptive_cvae_micro_progress_distance_scale=args.adaptive_cvae_micro_progress_distance_scale,
     )
     system = V39PolicySystem(policy_config)
     if args.stage1_checkpoint is not None:
@@ -539,7 +500,7 @@ def main() -> None:
         )
         if skipped_stage_keys:
             print(
-                f"[v39-init] skipped stage1 keys: "
+                f"[v39-init] skipped dirty stage1 adapter keys: "
                 f"{skipped_stage_keys[:8]} count={len(skipped_stage_keys)}",
                 flush=True,
             )
@@ -570,21 +531,17 @@ def main() -> None:
             "counterfactual_delta_contrast": True,
             "tail_action_reads_controlled_delta": True,
             "final_action_decoder": str(args.final_action_decoder),
-            "latent_cvae_action_decoder": True,
-            "latent_cvae_single_final_path": True,
-            "latent_cvae_no_legacy_velocity_base": True,
-            "latent_cvae_continuous_trajectory_denoise": bool(int(args.latent_cvae_trajectory_denoise)),
-            "latent_cvae_trajectory_control_points": int(args.latent_cvae_trajectory_control_points),
-            "latent_cvae_trajectory_mid_supervision": int(args.latent_cvae_trajectory_mid_supervision),
-            "latent_cvae_arm_coeff_output": bool(int(args.latent_cvae_arm_coeff_output)),
-            "latent_cvae_arm_coeff_points": int(args.latent_cvae_arm_coeff_points),
-            "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
-            "latent_cvae_arm_coeff_degree": int(args.latent_cvae_arm_coeff_degree),
-            "latent_cvae_arm_coeff_ridge": float(args.latent_cvae_arm_coeff_ridge),
-            "latent_cvae_arm_coeff_writer": str(args.latent_cvae_arm_coeff_writer),
-            "latent_cvae_coeff_include_gripper": bool(int(args.latent_cvae_coeff_include_gripper)),
-            "latent_cvae_coeff_magnitude_groups": int(args.latent_cvae_coeff_magnitude_groups),
-            "latent_cvae_spline_base_diagnostics": bool(int(args.latent_cvae_spline_base_diagnostics)),
+            "residual_action_flow_safe_start": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
+            "residual_action_flow_uses_v37_high_action_event_tokens": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
+            "layered_residual_action_flow_layer_pair_injection": str(args.final_action_decoder) == "layered_residual_action_flow",
+            "latent_main_action_decoder": str(args.final_action_decoder) == "latent_main_action",
+            "latent_main_action_single_final_path": str(args.final_action_decoder) == "latent_main_action",
+            "latent_main_action_every_layer_summary_injected": str(args.final_action_decoder) == "latent_main_action",
+            "latent_main_action_no_legacy_velocity_base": str(args.final_action_decoder) == "latent_main_action",
+            "latent_main_action_horizon_dependent_depth": bool(int(args.latent_action_temporal_depth)) and str(args.final_action_decoder) == "latent_main_action",
+            "latent_cvae_action_decoder": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
+            "latent_cvae_single_final_path": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
+            "latent_cvae_no_legacy_velocity_base": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
@@ -614,10 +571,6 @@ def main() -> None:
             "adaptive_cvae_coarse_strength": float(args.adaptive_cvae_coarse_strength),
             "adaptive_cvae_seed_scale": float(args.adaptive_cvae_seed_scale),
             "adaptive_cvae_output_scale": float(args.adaptive_cvae_output_scale),
-            "adaptive_cvae_detail_micro": int(args.adaptive_cvae_detail_micro),
-            "adaptive_cvae_detail_micro_supervision": int(args.adaptive_cvae_detail_micro_supervision),
-            "adaptive_cvae_detail_micro_scale": float(args.adaptive_cvae_detail_micro_scale),
-            "adaptive_cvae_detail_micro_gate_init": float(args.adaptive_cvae_detail_micro_gate_init),
             "adaptive_cvae_context_capsules": int(args.adaptive_cvae_context_capsules),
             "adaptive_cvae_context_capsule_count": int(args.adaptive_cvae_context_capsule_count),
             "adaptive_cvae_direct_condition_residual": int(args.adaptive_cvae_direct_condition_residual),
@@ -625,17 +578,21 @@ def main() -> None:
             "adaptive_cvae_condition_strength_min": float(args.adaptive_cvae_condition_strength_min),
             "adaptive_cvae_condition_strength_max": float(args.adaptive_cvae_condition_strength_max),
             "adaptive_cvae_condition_strength_init": float(args.adaptive_cvae_condition_strength_init),
-            "latent_cvae_noisy_gate": bool(int(args.latent_cvae_noisy_gate)),
-            "latent_cvae_noisy_gate_min": float(args.latent_cvae_noisy_gate_min),
-            "latent_cvae_noisy_gate_power": float(args.latent_cvae_noisy_gate_power),
-            "layer_boost_residual": bool(int(args.layer_boost_residual)),
-            "layer_zero_base_diagnostic": bool(int(args.layer_zero_base_diagnostic)),
-            "latent_cvae_layer_scan": bool(int(args.latent_cvae_layer_scan)),
-            "latent_cvae_layer_scan_alpha": float(args.latent_cvae_layer_scan_alpha),
-            "adaptive_cvae_monotonic_layer_route": bool(int(args.adaptive_cvae_monotonic_layer_route)),
-            "adaptive_cvae_layer_route_distance_scale": float(args.adaptive_cvae_layer_route_distance_scale),
-            "latent_cvae_canvas_cross_attention": bool(int(args.latent_cvae_canvas_cross_attention)),
-            "adaptive_cvae_serial_writers": bool(int(args.adaptive_cvae_serial_writers)),
+            "adaptive_cvae_micro_control": int(args.adaptive_cvae_micro_control),
+            "adaptive_cvae_micro_refine_block": int(args.adaptive_cvae_micro_refine_block),
+            "adaptive_cvae_micro_supervision": int(args.adaptive_cvae_micro_supervision),
+            "adaptive_cvae_micro_heun": int(args.adaptive_cvae_micro_heun),
+            "adaptive_cvae_micro_monotonic_progress": int(args.adaptive_cvae_micro_monotonic_progress),
+            "adaptive_cvae_micro_min_step": float(args.adaptive_cvae_micro_min_step),
+            "adaptive_cvae_micro_max_step": float(args.adaptive_cvae_micro_max_step),
+            "adaptive_cvae_micro_step_init": float(args.adaptive_cvae_micro_step_init),
+            "adaptive_cvae_micro_kp_max": float(args.adaptive_cvae_micro_kp_max),
+            "adaptive_cvae_micro_kp_init": float(args.adaptive_cvae_micro_kp_init),
+            "adaptive_cvae_micro_kd_max": float(args.adaptive_cvae_micro_kd_max),
+            "adaptive_cvae_micro_kd_init": float(args.adaptive_cvae_micro_kd_init),
+            "adaptive_cvae_micro_update_scale": float(args.adaptive_cvae_micro_update_scale),
+            "adaptive_cvae_micro_refine_block_scale": float(args.adaptive_cvae_micro_refine_block_scale),
+            "adaptive_cvae_micro_progress_distance_scale": float(args.adaptive_cvae_micro_progress_distance_scale),
             "latent_cvae_z_dim": int(args.latent_cvae_z_dim),
             "latent_cvae_decoder_depth": int(args.latent_cvae_decoder_depth),
             "latent_cvae_layer_memory": int(args.latent_cvae_layer_memory),
@@ -647,24 +604,22 @@ def main() -> None:
             "latent_cvae_mu_bound": float(args.latent_cvae_mu_bound),
             "latent_cvae_min_std": float(args.latent_cvae_min_std),
             "latent_cvae_causal_attention": int(args.latent_cvae_causal_attention),
-            "latent_cvae_trajectory_denoise": int(args.latent_cvae_trajectory_denoise),
-            "latent_cvae_trajectory_control_points": int(args.latent_cvae_trajectory_control_points),
-            "latent_cvae_trajectory_context": int(args.latent_cvae_trajectory_context),
-            "latent_cvae_trajectory_mid_supervision": int(args.latent_cvae_trajectory_mid_supervision),
-            "latent_cvae_trajectory_update_scale": float(args.latent_cvae_trajectory_update_scale),
-            "latent_cvae_trajectory_context_scale": float(args.latent_cvae_trajectory_context_scale),
-            "latent_cvae_arm_coeff_output": int(args.latent_cvae_arm_coeff_output),
-            "latent_cvae_arm_coeff_points": int(args.latent_cvae_arm_coeff_points),
-            "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
-            "latent_cvae_arm_coeff_degree": int(args.latent_cvae_arm_coeff_degree),
-            "latent_cvae_arm_coeff_ridge": float(args.latent_cvae_arm_coeff_ridge),
-            "latent_cvae_arm_coeff_writer": str(args.latent_cvae_arm_coeff_writer),
-            "latent_cvae_coeff_include_gripper": int(args.latent_cvae_coeff_include_gripper),
-            "latent_cvae_coeff_magnitude_groups": int(args.latent_cvae_coeff_magnitude_groups),
-            "latent_cvae_spline_base_diagnostics": int(args.latent_cvae_spline_base_diagnostics),
-            "latent_cvae_proposal_residual_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_coeff_weight) > 0),
-            "latent_cvae_proposal_residual_mid_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_mid_coeff_weight) > 0),
-            "latent_cvae_proposal_residual_arm_only": bool(int(args.latent_cvae_proposal_residual_arm_only)),
+            "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
+            "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
+            "latent_action_visual_memory": int(args.latent_action_visual_memory),
+            "latent_action_context_memory": int(args.latent_action_context_memory),
+            "latent_action_transition_memory": int(args.latent_action_transition_memory),
+            "latent_action_event_gripper_gate": int(args.latent_action_event_gripper_gate),
+            "latent_action_temporal_depth": int(args.latent_action_temporal_depth),
+            "latent_action_near_steps": int(args.latent_action_near_steps),
+            "latent_action_mid_steps": int(args.latent_action_mid_steps),
+            "latent_action_near_depth": int(args.latent_action_near_depth),
+            "latent_action_mid_depth": int(args.latent_action_mid_depth),
+            "action_flow_residual_depth": int(args.action_flow_residual_depth),
+            "action_flow_residual_max_scale": float(args.action_flow_residual_max_scale),
+            "action_flow_residual_layer_pair_schedule": str(args.action_flow_residual_layer_pair_schedule),
+            "action_flow_residual_layer_detach": bool(args.action_flow_residual_layer_detach),
+            "action_flow_residual_stage_router": bool(args.action_flow_residual_stage_router),
             "midcut_layer": int(args.midcut_layer),
             "layer_contract_adapters": int(args.layer_contract_adapters),
             "staged_midcut_contract": True,

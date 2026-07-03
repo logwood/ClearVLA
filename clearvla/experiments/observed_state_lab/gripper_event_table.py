@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 import csv
-import inspect
 import json
 import math
 
@@ -155,29 +154,12 @@ def collect_window_predictions_for_episode(
             )
             generator = torch.Generator(device=device)
             generator.manual_seed(36036 + batch_index)
-            # V53.5: V39.5+ systems (detected via the action_state kwarg) need
-            # (a) the codec boundary in ACTION-normalizer coordinates and
-            # (b) eval noise matching the training terminal distribution
-            # (physical space when the block bridge is off).  Older systems
-            # keep their original behavior bit-exact.
-            sample_params = inspect.signature(system.sample).parameters
-            sample_kwargs: dict[str, Any] = {}
-            noise_shape = sample["policy_action"].shape
-            if "action_state" in sample_params and "action_state" in sample:
-                sample_kwargs["action_state"] = sample["action_state"]
-                if not int(getattr(system.policy_config, "block_action_denoise_matrix", 0)):
-                    noise_shape = (
-                        sample["policy_action"].shape[0],
-                        int(system.policy_config.action_horizon),
-                        int(system.policy_config.physical_action_dim),
-                    )
-            noise = torch.randn(noise_shape, generator=generator, device=device, dtype=sample["visual"].dtype)
+            noise = torch.randn(sample["policy_action"].shape, generator=generator, device=device, dtype=sample["visual"].dtype)
             with autocast_context(device, dtype):
                 pred_pack = system.sample(
                     sample["visual"], sample["history_state"], sample["executed_action_history"],
                     sample["state"], steps=int(config.inference_steps), noise=noise, use_proposal=True,
                     return_event_logits=True,
-                    **sample_kwargs,
                 )
             assert isinstance(pred_pack, dict)
             pred_raw = decode(action_normalizer, pred_pack["action"])

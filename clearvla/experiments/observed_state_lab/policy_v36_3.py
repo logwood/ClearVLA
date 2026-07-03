@@ -12,11 +12,9 @@ shape the action latent that produces the final decoded gripper command.
 """
 
 from dataclasses import dataclass
-import math
 
 import torch
 from torch import Tensor, nn
-import torch.nn.functional as F
 
 from .policy import RejectableHistoryProposal, TimeEmbedding
 from .policy_v36_2 import (
@@ -28,102 +26,6 @@ from .policy_v36_2 import (
     V362PolicyConfig,
 )
 from .world_model import V35WorldConfig, WorldEvidenceEncoder, sinusoidal_positions
-
-
-def _dct_action_basis(horizon: int, controls: int, *, device: torch.device | None = None) -> Tensor:
-    if horizon < 1 or controls < 1:
-        raise ValueError("DCT action basis requires horizon >= 1 and controls >= 1")
-    controls = min(int(controls), int(horizon))
-    pos = torch.arange(int(horizon), device=device, dtype=torch.float32)
-    cols: list[Tensor] = []
-    for k in range(controls):
-        scale = math.sqrt(1.0 / float(horizon)) if k == 0 else math.sqrt(2.0 / float(horizon))
-        cols.append(scale * torch.cos((math.pi / float(horizon)) * (pos + 0.5) * float(k)))
-    return torch.stack(cols, dim=-1)
-
-
-def _bspline_action_basis(
-    horizon: int,
-    controls: int,
-    *,
-    degree: int = 2,
-    device: torch.device | None = None,
-) -> Tensor:
-    """Return an open-uniform clamped B-spline basis [horizon, controls]."""
-
-    if horizon < 1 or controls < 1:
-        raise ValueError("B-spline action basis requires horizon >= 1 and controls >= 1")
-    controls = min(int(controls), int(horizon))
-    degree = min(max(int(degree), 0), controls - 1)
-    t = torch.linspace(0.0, 1.0, int(horizon), device=device, dtype=torch.float32)
-    # Evaluate the final sample from the left, then set the exact clamped
-    # endpoint after recursion.  This avoids zero-length terminal knot spans.
-    t_eval = t.clamp(max=1.0 - 1e-6)
-    interior = int(controls - degree - 1)
-    pieces = [
-        torch.zeros(degree + 1, device=device, dtype=torch.float32),
-    ]
-    if interior > 0:
-        pieces.append(torch.linspace(0.0, 1.0, interior + 2, device=device, dtype=torch.float32)[1:-1])
-    pieces.append(torch.ones(degree + 1, device=device, dtype=torch.float32))
-    knots = torch.cat(pieces)
-
-    basis = []
-    for idx in range(int(knots.numel()) - 1):
-        left = knots[idx]
-        right = knots[idx + 1]
-        basis.append(((t_eval >= left) & (t_eval < right)).to(dtype=torch.float32))
-    current = torch.stack(basis, dim=-1)
-
-    for order in range(1, degree + 1):
-        cols: list[Tensor] = []
-        for idx in range(int(current.shape[1]) - 1):
-            left_den = knots[idx + order] - knots[idx]
-            right_den = knots[idx + order + 1] - knots[idx + 1]
-            val = torch.zeros_like(t_eval)
-            if float(left_den) > 0.0:
-                val = val + ((t_eval - knots[idx]) / left_den) * current[:, idx]
-            if float(right_den) > 0.0:
-                val = val + ((knots[idx + order + 1] - t_eval) / right_den) * current[:, idx + 1]
-            cols.append(val)
-        current = torch.stack(cols, dim=-1)
-
-    current = current[:, :controls].clamp_min(0.0)
-    if int(horizon) > 0:
-        current[-1].zero_()
-        current[-1, -1] = 1.0
-    return current / current.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-
-
-def _ridge_basis_analysis(basis: Tensor, ridge: float = 0.0) -> Tensor:
-    """Return a stable [controls, horizon] analysis operator for a fixed basis."""
-
-    basis_f = basis.float()
-    ridge = max(float(ridge), 0.0)
-    if ridge == 0.0:
-        return torch.linalg.pinv(basis_f).to(dtype=basis.dtype)
-    gram = basis_f.transpose(0, 1) @ basis_f
-    eye = torch.eye(int(gram.shape[0]), device=basis.device, dtype=torch.float32)
-    return torch.linalg.solve(gram + ridge * eye, basis_f.transpose(0, 1)).to(dtype=basis.dtype)
-
-
-def _action_coeff_basis_and_analysis(
-    horizon: int,
-    controls: int,
-    *,
-    name: str,
-    degree: int = 2,
-    ridge: float = 0.0,
-    device: torch.device | None = None,
-) -> tuple[Tensor, Tensor]:
-    name = str(name).lower()
-    if name == "dct":
-        basis = _dct_action_basis(horizon, controls, device=device)
-        return basis, basis.transpose(0, 1).contiguous()
-    if name in {"bspline", "b-spline", "spline"}:
-        basis = _bspline_action_basis(horizon, controls, degree=degree, device=device)
-        return basis, _ridge_basis_analysis(basis, ridge=ridge).contiguous()
-    raise ValueError("latent_cvae_arm_coeff_basis currently supports 'dct' or 'bspline'")
 
 
 @dataclass(frozen=True)
@@ -205,38 +107,7 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         h = config.hidden_size
         ad = config.arm_dim
         self.config = config
-        self.arm_coeff_output = bool(int(getattr(config, "latent_cvae_arm_coeff_output", 0)))
-        self.arm_coeff_points = max(1, min(int(getattr(config, "latent_cvae_arm_coeff_points", 8)), int(config.action_horizon)))
-        self.arm_coeff_basis_name = str(getattr(config, "latent_cvae_arm_coeff_basis", "dct")).lower()
-        self.arm_coeff_degree = max(0, int(getattr(config, "latent_cvae_arm_coeff_degree", 2)))
-        self.arm_coeff_ridge = max(0.0, float(getattr(config, "latent_cvae_arm_coeff_ridge", getattr(config, "latent_cvae_trajectory_ridge", 1e-2))))
-        self.arm_coeff_writer = str(getattr(config, "latent_cvae_arm_coeff_writer", "analysis")).lower()
-        self.coeff_include_gripper = bool(int(getattr(config, "latent_cvae_coeff_include_gripper", 0)))
-        self.coeff_magnitude_groups = max(1, min(int(getattr(config, "latent_cvae_coeff_magnitude_groups", 2)), 2))
-        if self.arm_coeff_writer not in {"analysis", "query_direction", "query-direction", "query"}:
-            raise ValueError("latent_cvae_arm_coeff_writer must be 'analysis' or 'query_direction'")
-        if self.arm_coeff_output:
-            basis, analysis = _action_coeff_basis_and_analysis(
-                int(config.action_horizon),
-                self.arm_coeff_points,
-                name=self.arm_coeff_basis_name,
-                degree=self.arm_coeff_degree,
-                ridge=self.arm_coeff_ridge,
-            )
-            self.register_buffer("arm_coeff_basis", basis, persistent=False)
-            self.register_buffer("arm_coeff_analysis", analysis, persistent=False)
-        else:
-            self.register_buffer("arm_coeff_basis", torch.empty(0), persistent=False)
-            self.register_buffer("arm_coeff_analysis", torch.empty(0), persistent=False)
         self.norm = nn.LayerNorm(h)
-        self.coeff_query = nn.Parameter(torch.randn(1, self.arm_coeff_points, h) * 0.02)
-        self.coeff_cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
-        self.coeff_context_norm = nn.LayerNorm(h)
-        self.coeff_condition = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-        self.coeff_condition_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
-        coeff_dim = 2 * ad + (2 if self.coeff_include_gripper else 0)
-        self.coeff_direction = nn.Linear(h, coeff_dim)
-        self.coeff_magnitude = nn.Linear(h, self.coeff_magnitude_groups)
         self.transition_norm = nn.LayerNorm(h)
         self.gripper_delta = nn.Linear(h, h)
         self.gripper_gate = nn.Linear(h, h)
@@ -248,164 +119,14 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.arm_delta = nn.Linear(h, ad)
         self.grip_value = nn.Linear(h, 1)
         self.grip_delta = nn.Linear(h, 1)
-        nn.init.normal_(self.coeff_condition[-1].weight, mean=0.0, std=0.02)
-        nn.init.zeros_(self.coeff_condition[-1].bias)
-        nn.init.zeros_(self.coeff_condition_gate[-1].weight)
-        nn.init.zeros_(self.coeff_condition_gate[-1].bias)
-        nn.init.normal_(self.coeff_direction.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(self.coeff_direction.bias)
-        nn.init.zeros_(self.coeff_magnitude.weight)
-        nn.init.constant_(self.coeff_magnitude.bias, -2.0)
 
-    def _arm_coeff_basis_analysis_for(self, tokens: Tensor) -> tuple[Tensor, Tensor]:
-        horizon = int(tokens.shape[1])
-        if (
-            self.arm_coeff_basis.ndim == 2
-            and int(self.arm_coeff_basis.shape[0]) == horizon
-            and int(self.arm_coeff_basis.shape[1]) == int(self.arm_coeff_points)
-            and self.arm_coeff_analysis.ndim == 2
-            and int(self.arm_coeff_analysis.shape[0]) == int(self.arm_coeff_points)
-            and int(self.arm_coeff_analysis.shape[1]) == horizon
-        ):
-            return (
-                self.arm_coeff_basis.to(device=tokens.device, dtype=tokens.dtype),
-                self.arm_coeff_analysis.to(device=tokens.device, dtype=tokens.dtype),
-            )
-        controls = min(int(self.arm_coeff_points), horizon)
-        basis, analysis = _action_coeff_basis_and_analysis(
-            horizon,
-            controls,
-            name=self.arm_coeff_basis_name,
-            degree=self.arm_coeff_degree,
-            ridge=self.arm_coeff_ridge,
-            device=tokens.device,
-        )
-        return basis.to(dtype=tokens.dtype), analysis.to(dtype=tokens.dtype)
-
-    def _coeff_queries_for(self, tokens: Tensor, controls: int) -> Tensor:
-        query = self.coeff_query.to(device=tokens.device, dtype=tokens.dtype)
-        if int(query.shape[1]) == int(controls):
-            return query.expand(int(tokens.shape[0]), -1, -1)
-        if int(query.shape[1]) > int(controls):
-            return query[:, :controls].expand(int(tokens.shape[0]), -1, -1)
-        repeat = math.ceil(float(controls) / float(query.shape[1]))
-        return query.repeat(1, repeat, 1)[:, :controls].expand(int(tokens.shape[0]), -1, -1)
-
-    @staticmethod
-    def _expand_group_magnitude(mag: Tensor, dim: int, arm_dim: int, include_gripper: bool) -> Tensor:
-        if int(mag.shape[-1]) == 1:
-            return mag.expand(*mag.shape[:-1], dim)
-        out = torch.empty(*mag.shape[:-1], dim, device=mag.device, dtype=mag.dtype)
-        out[..., :arm_dim] = mag[..., :1]
-        out[..., arm_dim : 2 * arm_dim] = mag[..., 1:2]
-        if include_gripper:
-            out[..., 2 * arm_dim : 2 * arm_dim + 1] = mag[..., :1]
-            out[..., 2 * arm_dim + 1 : 2 * arm_dim + 2] = mag[..., 1:2]
-        return out
-
-    def _emit_coeff_direction(
-        self,
-        tokens: Tensor,
-        *,
-        include_gripper: bool,
-        coeff_condition: Tensor | None = None,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        basis, _ = self._arm_coeff_basis_analysis_for(tokens)
-        controls = int(basis.shape[1])
-        query = self._coeff_queries_for(tokens, controls)
-        context, _ = self.coeff_cross(query, tokens, tokens, need_weights=False)
-        context = self.coeff_context_norm(query + context)
-        condition_norm = torch.zeros((), device=tokens.device, dtype=torch.float32)
-        condition_gate = torch.zeros((), device=tokens.device, dtype=torch.float32)
-        if coeff_condition is not None:
-            coeff_condition = coeff_condition.to(device=tokens.device, dtype=tokens.dtype)
-            condition = self.coeff_condition(coeff_condition)
-            gate = torch.sigmoid(self.coeff_condition_gate(coeff_condition))
-            context = context + gate[:, None].to(dtype=context.dtype) * condition[:, None]
-            condition_norm = condition.detach().float().norm(dim=-1).mean()
-            condition_gate = gate.detach().float().mean()
-        raw_direction = self.coeff_direction(context)
-        dim = 2 * int(self.config.arm_dim) + (2 if include_gripper else 0)
-        raw_direction = raw_direction[..., :dim]
-        direction = F.normalize(raw_direction, dim=-1, eps=1e-4)
-        mag = F.softplus(self.coeff_magnitude(context))
-        mag_full = self._expand_group_magnitude(
-            mag,
-            dim,
-            int(self.config.arm_dim),
-            include_gripper,
-        )
-        coeff = direction * mag_full
-        physical = torch.einsum("tc,bcd->btd", basis, coeff)
-        diagnostics = {
-            "adaptive_coeff_writer_context_norm": context.detach().float().norm(dim=-1).mean(),
-            "adaptive_coeff_writer_raw_direction_norm": raw_direction.detach().float().norm(dim=-1).mean(),
-            "adaptive_coeff_writer_direction_norm": direction.detach().float().norm(dim=-1).mean(),
-            "adaptive_coeff_writer_magnitude_mean": mag.detach().float().mean(),
-            "adaptive_coeff_writer_magnitude_std": mag.detach().float().std(unbiased=False),
-            "adaptive_coeff_writer_magnitude_max": mag.detach().float().max(),
-            "adaptive_coeff_writer_output_norm": physical.detach().float().norm(dim=-1).mean(),
-            "adaptive_coeff_writer_condition_norm": condition_norm,
-            "adaptive_coeff_writer_condition_gate": condition_gate,
-            "adaptive_coeff_writer_controls": torch.as_tensor(float(controls), device=tokens.device, dtype=tokens.dtype),
-            "adaptive_coeff_writer_include_gripper": torch.as_tensor(float(include_gripper), device=tokens.device, dtype=tokens.dtype),
-        }
-        return physical, diagnostics
-
-    def _emit_arm(self, x: Tensor, coeff_condition: Tensor | None = None) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-        if not self.arm_coeff_output:
-            return self.arm_abs(x), self.arm_delta(x), {}
-        if self.arm_coeff_writer in {"query_direction", "query-direction", "query"}:
-            physical, diagnostics = self._emit_coeff_direction(
-                x,
-                include_gripper=False,
-                coeff_condition=coeff_condition,
-            )
-            ad = int(self.config.arm_dim)
-            return physical[..., :ad], physical[..., ad : 2 * ad], diagnostics
-        basis, analysis = self._arm_coeff_basis_analysis_for(x)
-        coeff_tokens = torch.einsum("ct,bth->bch", analysis, x)
-        arm_abs_coeff = self.arm_abs(coeff_tokens)
-        arm_delta_coeff = self.arm_delta(coeff_tokens)
-        arm_abs = torch.einsum("tc,bca->bta", basis, arm_abs_coeff)
-        arm_delta = torch.einsum("tc,bca->bta", basis, arm_delta_coeff)
-        diagnostics = {
-            "adaptive_coeff_writer_context_norm": coeff_tokens.detach().float().norm(dim=-1).mean(),
-            "adaptive_coeff_writer_output_norm": torch.cat([arm_abs, arm_delta], dim=-1).detach().float().norm(dim=-1).mean(),
-            "adaptive_coeff_writer_controls": torch.as_tensor(float(int(basis.shape[1])), device=x.device, dtype=x.dtype),
-            "adaptive_coeff_writer_include_gripper": torch.zeros((), device=x.device, dtype=x.dtype),
-        }
-        return arm_abs, arm_delta, diagnostics
-
-    def forward(
-        self,
-        tokens: Tensor,
-        transition_latent: Tensor | None = None,
-        *,
-        return_diagnostics: bool = False,
-        coeff_condition: Tensor | None = None,
-    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+    def forward(self, tokens: Tensor, transition_latent: Tensor | None = None) -> Tensor:
         x = self.norm(tokens)
         grip_x = x
         if transition_latent is not None:
             z = self.transition_norm(transition_latent)
             grip_x = grip_x + torch.sigmoid(self.gripper_gate(z)) * self.gripper_delta(z)
-        if (
-            self.arm_coeff_output
-            and self.coeff_include_gripper
-            and self.arm_coeff_writer in {"query_direction", "query-direction", "query"}
-        ):
-            pred, diagnostics = self._emit_coeff_direction(
-                grip_x,
-                include_gripper=True,
-                coeff_condition=coeff_condition,
-            )
-        else:
-            arm_abs, arm_delta, diagnostics = self._emit_arm(x, coeff_condition=coeff_condition)
-            pred = torch.cat([arm_abs, arm_delta, self.grip_value(grip_x), self.grip_delta(grip_x)], dim=-1)
-        if return_diagnostics:
-            return pred, diagnostics
-        return pred
+        return torch.cat([self.arm_abs(x), self.arm_delta(x), self.grip_value(grip_x), self.grip_delta(grip_x)], dim=-1)
 
 
 class PolicyLatentDiTPlannerV363(nn.Module):

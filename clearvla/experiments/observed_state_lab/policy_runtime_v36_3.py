@@ -170,33 +170,8 @@ def flow_losses(
     cfg = system.policy_config
     device = output["pred_physical_velocity"].device
     weight = position_weights(cfg, trainer, device)
-    physical_error_dim = (output["pred_physical_velocity"] - output["target_physical_velocity"]).square()
-    physical_error = physical_error_dim.mean(dim=-1)
-    physical_flow_unweighted = (physical_error * weight[None]).mean()
-    block_action_x0_flow = torch.zeros((), device=device, dtype=physical_error_dim.dtype)
-    if "block_action_velocity_loss_weight" in output:
-        cell_weight = output["block_action_velocity_loss_weight"].to(device=device, dtype=physical_error_dim.dtype).detach()
-        cell_weight = cell_weight / cell_weight.mean().clamp_min(1e-6)
-        weighted_physical_error = (physical_error_dim * cell_weight).mean(dim=-1)
-        flow = (weighted_physical_error * weight[None]).mean()
-    else:
-        flow = physical_flow_unweighted
-    if "block_action_x0_mix" in output and "target_physical" in output and "clean_physical_estimate" in output:
-        x0_mix = output["block_action_x0_mix"].to(device=device, dtype=physical_error_dim.dtype).detach()
-        x0_cell_weight = output.get("block_action_velocity_loss_weight", torch.ones_like(x0_mix)).to(
-            device=device,
-            dtype=physical_error_dim.dtype,
-        ).detach()
-        x0_cell_weight = x0_cell_weight / x0_cell_weight.mean().clamp_min(1e-6)
-        x0_error_dim = (
-            output["clean_physical_estimate"]
-            - output["target_physical"].to(device=device, dtype=output["clean_physical_estimate"].dtype)
-        ).square()
-        x0_flow = (x0_error_dim * x0_mix * x0_cell_weight).mean(dim=-1)
-        block_action_x0_flow = (x0_flow * weight[None]).mean()
-        x0_loss_weight = float(getattr(trainer, "block_action_denoise_x0_loss_weight", 1.0))
-        if x0_loss_weight > 0:
-            flow = flow + x0_loss_weight * block_action_x0_flow
+    physical_error = (output["pred_physical_velocity"] - output["target_physical_velocity"]).square().mean(dim=-1)
+    flow = (physical_error * weight[None]).mean()
     proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
 
     labels = gripper_event_labels(
@@ -300,8 +275,6 @@ def flow_losses(
     return {
         "loss": total,
         "physical_flow": flow,
-        "physical_flow_unweighted": physical_flow_unweighted.detach(),
-        "block_action_x0_physical_flow": block_action_x0_flow.detach(),
         "proposal": proposal,
         "event": event,
         "motion": motion,

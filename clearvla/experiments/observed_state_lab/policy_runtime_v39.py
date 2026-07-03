@@ -78,6 +78,11 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     midcut_rollout_delta_loss_weight: float = 0.01
     midcut_rollout_contrast_loss_weight: float = 0.03
 
+    # Optional safe residual action-flow denoiser.  This module is random at
+    # first load but zero-starts behaviorally, so it gets a distinct LR group
+    # in policy stage instead of being hidden inside the large trunk group.
+    action_flow_residual_lr_scale: float = 1.5
+    latent_action_decoder_lr_scale: float = 1.5
     # V42 compact latent-CVAE head.  Small KL keeps q(z|latent,target) close
     # to the conditional prior used at inference without letting KL dominate
     # the action flow/chunk reconstruction objective.
@@ -92,45 +97,18 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     latent_cvae_legacy_anchor_min_weight: float = 0.0
     latent_cvae_adaptive_regularizer_weight: float = 0.002
     latent_cvae_adaptive_route_entropy_weight: float = 0.001
-    latent_cvae_trajectory_supervision_weight: float = 0.04
-    latent_cvae_trajectory_coeff_weight: float = 0.04
-    latent_cvae_trajectory_monotonic_weight: float = 0.01
-    # V52: close the hidden-trajectory loophole with a deploy-safe
-    # proposal-residual objective.  Coefficient terms supervise the smooth
-    # trajectory controls; the bound term is measured in physical residual
-    # coordinates so basis-null/high-frequency residuals cannot bypass it.
-    latent_cvae_proposal_residual_coeff_weight: float = 0.06
-    latent_cvae_proposal_residual_mid_coeff_weight: float = 0.03
-    latent_cvae_proposal_residual_bound_weight: float = 0.002
-    latent_cvae_proposal_residual_bound_ratio: float = 1.25
-    latent_cvae_proposal_residual_coeff_ridge: float = 1e-2
-    latent_cvae_proposal_residual_arm_only: int = 1
-    # V58 detail residual unfolding.  These losses supervise intermediate
-    # full-token detail states; the final policy loss remains the main outlet.
-    latent_cvae_micro_supervision_weight: float = 0.05
-    latent_cvae_micro_event_weight: float = 0.01
-    latent_cvae_micro_monotonic_weight: float = 0.01
-    latent_cvae_micro_weight_kl_weight: float = 0.0005
-    latent_cvae_micro_coverage_smooth_weight: float = 0.001
-    latent_cvae_micro_coverage_floor_weight: float = 0.001
+    latent_cvae_micro_supervision_weight: float = 0.08
+    latent_cvae_micro_event_weight: float = 0.02
+    latent_cvae_micro_monotonic_weight: float = 0.02
+    latent_cvae_micro_weight_kl_weight: float = 0.001
+    latent_cvae_micro_coverage_smooth_weight: float = 0.002
+    latent_cvae_micro_coverage_floor_weight: float = 0.002
     latent_cvae_micro_coverage_prior_logit_scale: float = 0.25
     latent_cvae_micro_coverage_floor_ratio: float = 0.55
-    latent_cvae_micro_learned_weight_max: float = 0.35
+    latent_cvae_micro_learned_weight_max: float = 0.40
     latent_cvae_micro_learned_ramp_steps: int = 2000
     latent_cvae_micro_weight_floor: float = 0.05
     latent_cvae_micro_event_positive_weight: float = 2.0
-    latent_cvae_trajectory_smoothness_weight: float = 0.0
-    latent_cvae_trajectory_update_smoothness_weight: float = 0.0
-    latent_cvae_trajectory_update_energy_weight: float = 0.0
-    latent_cvae_trajectory_projection_weight: float = 0.0
-    block_action_denoise_lr_scale: float = 1.0
-    block_action_denoise_regularizer_weight: float = 0.005
-    block_action_denoise_x0_loss_weight: float = 1.0
-    # Boundary seam diagnostics for temporal block denoising.  Continuity is
-    # enforced structurally by native-action endpoint encoding and sampling
-    # projection; these weights are off by default so seam losses remain probes.
-    block_action_boundary_delta_weight: float = 0.0
-    block_action_boundary_consistency_weight: float = 0.0
 
     # V39.1. contract_mode=layer_adapter keeps the full DiT active in Stage 1
     # and supervises tiny side adapters at every block instead of stopping at a
@@ -165,18 +143,6 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     layer_variance_loss_weight: float = 0.05
     layer_norm_loss_weight: float = 0.02
     layer_delta_match_loss_weight: float = 0.15
-
-    # V53-A2: boosting-style layer contract.  Each layer's rollout/milestone
-    # prediction is treated as a residual on top of the detached cumulative
-    # prediction of the layers below it, and the loss is applied to the
-    # cumulative sum.  Layer k therefore learns only what layers < k have not
-    # explained, turning the parallel per-layer supervision into a telescoping
-    # vertical series.
-    layer_boost_residual: int = 0
-
-    # V53.2: weight for the x_t-branch share hinge (model emits
-    # latent_cvae_adaptive_noisy_ratio_regularizer when the max is set).
-    latent_cvae_noisy_ratio_weight: float = 0.0
 
 
 def _validate_current_token_tensor(tokens: Tensor, *, system: V39PolicySystem) -> None:
@@ -617,7 +583,7 @@ def _normalize_horizon_weight(weight: Tensor) -> Tensor:
     return weight / weight.mean(dim=-1, keepdim=True).clamp_min(1e-6)
 
 
-def _refine_fixed_unfolded_weights(
+def _micro_fixed_unfolded_weights(
     *,
     system: V39PolicySystem,
     trainer: V39PolicyTrainerConfig,
@@ -625,11 +591,11 @@ def _refine_fixed_unfolded_weights(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Fixed coarse-to-fine supervision map for intermediate refine states.
+    """Fixed coarse-to-fine supervision map for micro refine states.
 
-    The final refine state is anchored to the normal policy horizon weighting.
+    The final micro state is anchored to the normal policy horizon weighting.
     Earlier states emphasize near-horizon trajectory quality without assigning
-    any refine step to a hard physical stage.
+    any micro step to a hard physical stage.
     """
     horizon = int(system.policy_config.action_horizon)
     pos = position_weights(system.policy_config, trainer, device).to(dtype=torch.float32)
@@ -652,7 +618,7 @@ def _refine_fixed_unfolded_weights(
         s = torch.linspace(0.0, 1.0, steps, device=device, dtype=torch.float32)
         near_c = (1.0 - s).square()
         mid_c = torch.exp(-((s - 0.42).square()) / 0.08)
-        tail_c = torch.exp(-((s - 0.72).square()) / 0.06)
+        tail_c = torch.exp(-((s - 0.72).square()) / 0.06) * (1.0 - 0.7 * s)
         full_c = s.square()
         mix = torch.stack([near_c, mid_c, tail_c, full_c], dim=-1).clamp_min(1e-4)
         mix = mix / mix.sum(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -687,14 +653,12 @@ def micro_refine_supervision_losses(
             "latent_cvae_micro_step_alpha_mean": z,
             "latent_cvae_micro_weight_final_diff": z,
             "latent_cvae_micro_coverage_tail_mass": z,
-            "latent_cvae_micro_weight_first": z,
-            "latent_cvae_micro_weight_last": z,
         }
     device = pred.device
     dtype = pred.dtype
     batch, steps, horizon, _ = pred.shape
     target = output["target_physical_velocity"].to(device=device, dtype=dtype)
-    fixed, fixed_mix, basis = _refine_fixed_unfolded_weights(
+    fixed, fixed_mix, basis = _micro_fixed_unfolded_weights(
         system=system,
         trainer=trainer,
         steps=steps,
@@ -725,7 +689,7 @@ def micro_refine_supervision_losses(
     learned = (learned_prob * float(horizon)).to(dtype=dtype)
 
     ramp_steps = max(int(getattr(trainer, "latent_cvae_micro_learned_ramp_steps", 2000)), 1)
-    max_alpha = max(float(getattr(trainer, "latent_cvae_micro_learned_weight_max", 0.35)), 0.0)
+    max_alpha = max(float(getattr(trainer, "latent_cvae_micro_learned_weight_max", 0.25)), 0.0)
     step_value = 0 if global_step is None else max(int(global_step), 0)
     alpha_value = min(max_alpha, max_alpha * float(step_value) / float(ramp_steps))
     alpha = torch.as_tensor(alpha_value, device=device, dtype=dtype)
@@ -756,8 +720,7 @@ def micro_refine_supervision_losses(
         ce = F.cross_entropy(event_logits.reshape(-1, 3).float(), labels.reshape(-1), reduction="none").reshape(batch, steps, horizon)
         pos = (labels != 0).to(dtype=ce.dtype)
         event_weight = 1.0 + pos * max(float(getattr(trainer, "latent_cvae_micro_event_positive_weight", 2.0)) - 1.0, 0.0)
-        denom = (event_weight.to(dtype=dtype) * weights).sum().clamp_min(1.0)
-        micro_event = (ce.to(dtype=dtype) * event_weight.to(dtype=dtype) * weights).sum() / denom
+        micro_event = (ce.to(dtype=dtype) * event_weight.to(dtype=dtype) * weights).sum() / (event_weight.to(dtype=dtype) * weights).sum().clamp_min(1.0)
 
     fixed_prob_b = fixed_prob[None].expand(batch, -1, -1)
     weight_kl = (
@@ -790,325 +753,6 @@ def micro_refine_supervision_losses(
         "latent_cvae_micro_weight_last": weights[:, -1].mean().detach(),
     }
 
-
-def _adaptive_trajectory_basis(system: V39PolicySystem, ref: Tensor) -> Tensor | None:
-    decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
-    velocity_head = getattr(decoder, "velocity_head", None)
-    if int(getattr(system.policy_config, "latent_cvae_arm_coeff_output", 0)):
-        arm_basis = getattr(velocity_head, "arm_coeff_basis", None)
-        if torch.is_tensor(arm_basis) and arm_basis.ndim == 2 and int(arm_basis.numel()) > 0:
-            return arm_basis.to(device=ref.device, dtype=ref.dtype)
-    basis = getattr(decoder, "trajectory_basis", None)
-    if not torch.is_tensor(basis):
-        return None
-    return basis.to(device=ref.device, dtype=ref.dtype)
-
-
-def _adaptive_trajectory_analysis(system: V39PolicySystem, ref: Tensor) -> Tensor | None:
-    """V53.1: shared [C, T] analysis operator from the decoder.
-
-    Both coefficient supervisions and the model-internal projection must live
-    in one coefficient space; this returns the decoder's buffer (ridge
-    pseudo-inverse when latent_cvae_trajectory_pinv=1, legacy normalized
-    transpose otherwise).
-    """
-    decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
-    velocity_head = getattr(decoder, "velocity_head", None)
-    if int(getattr(system.policy_config, "latent_cvae_arm_coeff_output", 0)):
-        arm_analysis = getattr(velocity_head, "arm_coeff_analysis", None)
-        if torch.is_tensor(arm_analysis) and arm_analysis.ndim == 2 and int(arm_analysis.numel()) > 0:
-            return arm_analysis.to(device=ref.device, dtype=ref.dtype)
-    analysis = getattr(decoder, "trajectory_analysis", None)
-    if not torch.is_tensor(analysis):
-        return None
-    return analysis.to(device=ref.device, dtype=ref.dtype)
-
-
-def trajectory_coefficient_supervision_losses(
-    system: V39PolicySystem,
-    output: dict[str, Tensor],
-    trainer: V39PolicyTrainerConfig,
-) -> dict[str, Tensor]:
-    pred = output.get("latent_cvae_adaptive_trajectory_pred_velocity")
-    ref = output["pred_physical_velocity"]
-    z = torch.zeros((), device=ref.device, dtype=ref.dtype)
-    if not isinstance(pred, Tensor) or pred.ndim != 4:
-        return {
-            "latent_cvae_trajectory_supervision": z,
-            "latent_cvae_trajectory_coeff_supervision": z,
-            "latent_cvae_trajectory_monotonic": z,
-            "latent_cvae_trajectory_mid_count": z,
-            "latent_cvae_trajectory_coeff_pred_norm": z,
-            "latent_cvae_trajectory_coeff_target_norm": z,
-        }
-    basis = _adaptive_trajectory_basis(system, pred)
-    if basis is None:
-        return {
-            "latent_cvae_trajectory_supervision": z,
-            "latent_cvae_trajectory_coeff_supervision": z,
-            "latent_cvae_trajectory_monotonic": z,
-            "latent_cvae_trajectory_mid_count": z,
-            "latent_cvae_trajectory_coeff_pred_norm": z,
-            "latent_cvae_trajectory_coeff_target_norm": z,
-        }
-    device = pred.device
-    dtype = pred.dtype
-    batch, steps, horizon, _ = pred.shape
-    target = output["target_physical_velocity"].to(device=device, dtype=dtype)
-    if int(target.shape[1]) != horizon:
-        target = F.interpolate(
-            target.transpose(1, 2),
-            size=horizon,
-            mode="linear",
-            align_corners=True,
-        ).transpose(1, 2)
-    fixed, _, _ = _refine_fixed_unfolded_weights(
-        system=system,
-        trainer=trainer,
-        steps=steps,
-        device=device,
-        dtype=dtype,
-    )
-    token_error = (pred - target[:, None]).square().mean(dim=-1)
-    trajectory_flow = (token_error * fixed[None]).mean()
-
-    analysis = _adaptive_trajectory_analysis(system, pred)
-    if analysis is None:
-        analysis = (basis / basis.sum(dim=0, keepdim=True).clamp_min(1e-6)).transpose(0, 1)
-    pred_coeff = torch.einsum("ch,bshp->bscp", analysis, pred)
-    target_coeff = torch.einsum("ch,bhp->bcp", analysis, target)
-    coeff_error = (pred_coeff - target_coeff[:, None]).square().mean(dim=-1)
-    coeff_weight = torch.einsum("sh,hc->sc", fixed.float(), basis.float().clamp_min(0.0))
-    coeff_weight = _normalize_horizon_weight(coeff_weight.clamp_min(1e-6)).to(device=device, dtype=dtype)
-    coeff_flow = (coeff_error * coeff_weight[None]).mean()
-
-    normal = position_weights(system.policy_config, trainer, device).to(dtype=dtype)
-    mono_error = (token_error * normal[None, None]).mean(dim=-1)
-    monotonic = F.relu(mono_error[:, 1:] - mono_error[:, :-1]).mean() if steps > 1 else z
-    return {
-        "latent_cvae_trajectory_supervision": trajectory_flow,
-        "latent_cvae_trajectory_coeff_supervision": coeff_flow,
-        "latent_cvae_trajectory_monotonic": monotonic,
-        "latent_cvae_trajectory_mid_count": torch.as_tensor(float(steps), device=device, dtype=dtype),
-        "latent_cvae_trajectory_coeff_pred_norm": pred_coeff.detach().float().norm(dim=-1).mean(),
-        "latent_cvae_trajectory_coeff_target_norm": target_coeff.detach().float().norm(dim=-1).mean(),
-    }
-
-
-def _zero_proposal_residual_losses(ref: Tensor) -> dict[str, Tensor]:
-    z = torch.zeros((), device=ref.device, dtype=ref.dtype)
-    return {
-        "latent_cvae_proposal_residual_coeff": z,
-        "latent_cvae_proposal_residual_mid_coeff": z,
-        "latent_cvae_proposal_residual_bound": z,
-        "latent_cvae_proposal_residual_coeff_pred_norm": z,
-        "latent_cvae_proposal_residual_coeff_target_norm": z,
-        "latent_cvae_proposal_residual_reconstruction": z,
-        "latent_cvae_proposal_residual_keep_mean": z,
-        "latent_cvae_proposal_residual_target_norm": z,
-    }
-
-
-def _proposal_residual_physical_slice(system: V39PolicySystem, physical_dim: int, *, device: torch.device) -> Tensor:
-    """Return the physical channels used by proposal-residual trajectory coefficients."""
-    arm_dim = int(system.policy_config.arm_dim)
-    end = min(max(2 * arm_dim, 1), int(physical_dim))
-    return torch.arange(0, end, device=device, dtype=torch.long)
-
-
-def proposal_residual_coefficient_losses(
-    system: V39PolicySystem,
-    output: dict[str, Tensor],
-    trainer: V39PolicyTrainerConfig,
-) -> dict[str, Tensor]:
-    """Supervise denoising in explicit action-space proposal-residual coefficients.
-
-    The target is target_physical - stopgrad(proposal_physical).  The prediction
-    is reconstructed from the actual denoising path, noisy_physical - t * velocity,
-    so this does not add an auxiliary answer-copying head.
-    """
-    ref = output["pred_physical_velocity"]
-    required = ("proposal_physical", "target_physical", "clean_physical_estimate", "noisy_physical_action", "time")
-    if any(key not in output for key in required):
-        return _zero_proposal_residual_losses(ref)
-    basis = _adaptive_trajectory_basis(system, ref)
-    if basis is None:
-        return _zero_proposal_residual_losses(ref)
-
-    device = ref.device
-    dtype = ref.dtype
-    target = output["target_physical"].to(device=device, dtype=dtype)
-    proposal = output["proposal_physical"].to(device=device, dtype=dtype).detach()
-    pred_clean = output["clean_physical_estimate"].to(device=device, dtype=dtype)
-    if target.shape != proposal.shape or target.shape != pred_clean.shape:
-        return _zero_proposal_residual_losses(ref)
-
-    physical_dim = int(target.shape[-1])
-    if int(getattr(trainer, "latent_cvae_proposal_residual_arm_only", 1)):
-        channel_index = _proposal_residual_physical_slice(system, physical_dim, device=device)
-        target = target.index_select(-1, channel_index)
-        proposal = proposal.index_select(-1, channel_index)
-        pred_clean = pred_clean.index_select(-1, channel_index)
-
-    target_residual = target - proposal
-    pred_residual = pred_clean - proposal
-    basis_f = basis.to(device=device, dtype=torch.float32)
-    if int(getattr(system.policy_config, "latent_cvae_trajectory_pinv", 0)):
-        # V53.1: use the decoder's shared analysis operator so proposal-residual
-        # coefficients live in the same space as the model projection and the
-        # trajectory coefficient supervision.
-        shared = _adaptive_trajectory_analysis(system, ref)
-        coeff_encoder = shared.float() if shared is not None else torch.linalg.pinv(basis_f)
-    else:
-        ridge = max(float(getattr(trainer, "latent_cvae_proposal_residual_coeff_ridge", 1e-2)), 0.0)
-        if ridge > 0:
-            gram = basis_f.transpose(0, 1) @ basis_f
-            eye = torch.eye(int(gram.shape[0]), device=device, dtype=torch.float32)
-            coeff_encoder = torch.linalg.solve(gram + ridge * eye, basis_f.transpose(0, 1))
-        else:
-            coeff_encoder = torch.linalg.pinv(basis_f)
-    target_coeff = torch.einsum("ch,bhp->bcp", coeff_encoder, target_residual.float()).to(dtype=dtype)
-    pred_coeff = torch.einsum("ch,bhp->bcp", coeff_encoder, pred_residual.float()).to(dtype=dtype)
-
-    keep = output.get("proposal_keep")
-    if isinstance(keep, Tensor):
-        keep_w = keep.to(device=device, dtype=dtype).reshape(-1).clamp(0.0, 1.0)
-    else:
-        keep_w = torch.ones(int(target.shape[0]), device=device, dtype=dtype)
-    pos = position_weights(system.policy_config, trainer, device).to(device=device, dtype=dtype)
-    if int(pos.shape[0]) != int(basis.shape[0]):
-        pos = F.interpolate(pos[None, None], size=int(basis.shape[0]), mode="linear", align_corners=True).reshape(-1)
-    coeff_weight = torch.einsum("h,hc->c", pos.float(), basis.float().clamp_min(0.0))
-    coeff_weight = (coeff_weight / coeff_weight.mean().clamp_min(1e-6)).to(device=device, dtype=dtype)
-
-    coeff_error = (pred_coeff - target_coeff).square().mean(dim=-1)
-    denom = (keep_w[:, None] * coeff_weight[None]).sum().clamp_min(1.0)
-    coeff_loss = (coeff_error * coeff_weight[None] * keep_w[:, None]).sum() / denom
-
-    ratio = max(float(getattr(trainer, "latent_cvae_proposal_residual_bound_ratio", 1.25)), 1.0)
-    physical_pos = position_weights(system.policy_config, trainer, device).to(device=device, dtype=dtype)
-    if int(physical_pos.shape[0]) != int(target_residual.shape[1]):
-        physical_pos = F.interpolate(
-            physical_pos[None, None],
-            size=int(target_residual.shape[1]),
-            mode="linear",
-            align_corners=True,
-        ).reshape(-1)
-    physical_pos = physical_pos / physical_pos.mean().clamp_min(1e-6)
-    pred_physical_norm = pred_residual.float().norm(dim=-1)
-    target_physical_norm = target_residual.detach().float().norm(dim=-1)
-    bound = F.relu(pred_physical_norm - ratio * target_physical_norm).square()
-    physical_denom = (keep_w[:, None] * physical_pos[None]).sum().clamp_min(1.0)
-    bound_loss = (bound.to(dtype=dtype) * physical_pos[None] * keep_w[:, None]).sum() / physical_denom
-
-    recon = torch.einsum("hc,bcp->bhp", basis.to(device=device, dtype=dtype), target_coeff)
-    recon_error = (recon - target_residual).square().mean(dim=-1)
-    recon_denom = (keep_w[:, None].expand_as(recon_error)).sum().clamp_min(1.0)
-    recon_loss = (recon_error * keep_w[:, None]).sum() / recon_denom
-
-    mid_pred = output.get("latent_cvae_adaptive_trajectory_pred_velocity")
-    mid_loss = torch.zeros((), device=device, dtype=dtype)
-    if isinstance(mid_pred, Tensor) and mid_pred.ndim == 4:
-        mid_pred = mid_pred.to(device=device, dtype=dtype)
-        batch, steps, horizon, _ = mid_pred.shape
-        noisy = output["noisy_physical_action"].to(device=device, dtype=dtype)
-        time = output["time"].to(device=device, dtype=dtype).reshape(batch, 1, 1, 1)
-        if int(noisy.shape[1]) != horizon:
-            noisy = F.interpolate(noisy.transpose(1, 2), size=horizon, mode="linear", align_corners=True).transpose(1, 2)
-        mid_clean = noisy[:, None] - time * mid_pred
-        mid_proposal = proposal
-        if int(mid_proposal.shape[1]) != horizon:
-            mid_proposal = F.interpolate(mid_proposal.transpose(1, 2), size=horizon, mode="linear", align_corners=True).transpose(1, 2)
-        mid_residual = mid_clean
-        if int(getattr(trainer, "latent_cvae_proposal_residual_arm_only", 1)):
-            channel_index = _proposal_residual_physical_slice(system, physical_dim, device=device)
-            mid_residual = mid_residual.index_select(-1, channel_index)
-        mid_residual = mid_residual - mid_proposal[:, None]
-        mid_coeff = torch.einsum("ch,bshp->bscp", coeff_encoder, mid_residual.float()).to(dtype=dtype)
-        mid_error = (mid_coeff - target_coeff[:, None]).square().mean(dim=-1)
-        fixed, _, _ = _refine_fixed_unfolded_weights(
-            system=system,
-            trainer=trainer,
-            steps=steps,
-            device=device,
-            dtype=dtype,
-        )
-        step_coeff_weight = torch.einsum("sh,hc->sc", fixed.float(), basis.float().clamp_min(0.0))
-        step_coeff_weight = _normalize_horizon_weight(step_coeff_weight.clamp_min(1e-6)).to(device=device, dtype=dtype)
-        mid_denom = (keep_w[:, None, None] * step_coeff_weight[None]).sum().clamp_min(1.0)
-        mid_loss = (mid_error * step_coeff_weight[None] * keep_w[:, None, None]).sum() / mid_denom
-
-    return {
-        "latent_cvae_proposal_residual_coeff": coeff_loss,
-        "latent_cvae_proposal_residual_mid_coeff": mid_loss,
-        "latent_cvae_proposal_residual_bound": bound_loss,
-        "latent_cvae_proposal_residual_coeff_pred_norm": pred_coeff.detach().float().norm(dim=-1).mean(),
-        "latent_cvae_proposal_residual_coeff_target_norm": target_coeff.detach().float().norm(dim=-1).mean(),
-        "latent_cvae_proposal_residual_reconstruction": recon_loss.detach(),
-        "latent_cvae_proposal_residual_keep_mean": keep_w.detach().float().mean(),
-        "latent_cvae_proposal_residual_target_norm": target_residual.detach().float().norm(dim=-1).mean(),
-    }
-
-
-def _block_action_boundary_indices(system: V39PolicySystem, device: torch.device) -> Tensor | None:
-    if not int(getattr(system.policy_config, "block_action_denoise_matrix", 0)):
-        return None
-    horizon = int(system.policy_config.action_horizon)
-    rows: list[tuple[int, int]] = []
-    for item in str(getattr(system.policy_config, "block_action_denoise_blocks", "")).split(","):
-        item = item.strip()
-        if not item or ":" not in item:
-            continue
-        left, right = item.split(":", 1)
-        start, end = int(left), int(right)
-        if 0 <= start < end <= horizon:
-            rows.append((start, end))
-    rows = sorted(rows)
-    boundaries = [start for start, _ in rows[1:] if 0 < start < horizon]
-    if not boundaries:
-        return None
-    return torch.as_tensor(boundaries, device=device, dtype=torch.long)
-
-
-def block_action_boundary_continuity_losses(
-    system: V39PolicySystem,
-    sample: dict[str, Tensor],
-    output: dict[str, Tensor],
-) -> dict[str, Tensor]:
-    ref = output["pred_physical_velocity"]
-    z = torch.zeros((), device=ref.device, dtype=ref.dtype)
-    boundary_idx = _block_action_boundary_indices(system, ref.device)
-    if boundary_idx is None:
-        return {
-            "block_action_boundary_delta": z,
-            "block_action_boundary_consistency": z,
-            "block_action_boundary_count": z,
-        }
-    pred_action = output.get("pred_action_estimate")
-    clean_physical = output.get("clean_physical_estimate")
-    if not isinstance(pred_action, Tensor) or not isinstance(clean_physical, Tensor):
-        return {
-            "block_action_boundary_delta": z,
-            "block_action_boundary_consistency": z,
-            "block_action_boundary_count": z,
-        }
-    pred_action = pred_action.to(device=ref.device, dtype=ref.dtype)
-    target_action = sample["policy_action"].to(device=ref.device, dtype=ref.dtype)
-    prev_idx = boundary_idx - 1
-    pred_delta = pred_action[:, boundary_idx] - pred_action[:, prev_idx]
-    target_delta = target_action[:, boundary_idx] - target_action[:, prev_idx]
-    boundary_delta = F.smooth_l1_loss(pred_delta, target_delta)
-
-    parts = system.codec.split_physical(clean_physical.to(device=ref.device, dtype=ref.dtype))
-    physical_native_delta = system.codec.join_action(parts["arm_delta"], parts["gripper_delta"])
-    boundary_consistency = F.smooth_l1_loss(pred_delta, physical_native_delta[:, boundary_idx])
-    return {
-        "block_action_boundary_delta": boundary_delta,
-        "block_action_boundary_consistency": boundary_consistency,
-        "block_action_boundary_count": torch.as_tensor(float(boundary_idx.numel()), device=ref.device, dtype=ref.dtype),
-    }
-
-
 def flow_losses(
     system: V39PolicySystem,
     sample: dict[str, Tensor],
@@ -1119,26 +763,6 @@ def flow_losses(
     global_step: int | None = None,
 ) -> dict[str, Tensor]:
     losses = v363_flow_losses(system, sample, output, trainer)  # type: ignore[arg-type]
-    base_velocity = output.get("latent_cvae_adaptive_spline_base_pred_velocity")
-    if isinstance(base_velocity, Tensor) and "target_physical_velocity" in output:
-        pred = output["pred_physical_velocity"]
-        target = output["target_physical_velocity"].to(device=pred.device, dtype=pred.dtype)
-        base = base_velocity.to(device=pred.device, dtype=pred.dtype)
-        if base.shape == pred.shape:
-            pos_w = position_weights(system.policy_config, trainer, pred.device).to(dtype=pred.dtype)
-            base_error = (base - target).square().mean(dim=-1)
-            final_error = (pred - target).square().mean(dim=-1)
-            base_flow = (base_error * pos_w[None]).mean()
-            final_flow = (final_error * pos_w[None]).mean()
-            correction = pred - base
-            target_norm = target.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
-            base_norm = base.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
-            losses["latent_cvae_spline_base_flow"] = base_flow.detach().float()
-            losses["latent_cvae_spline_final_over_base"] = (final_flow / base_flow.clamp_min(1e-8)).detach().float()
-            losses["latent_cvae_spline_improvement"] = ((base_flow - final_flow) / base_flow.clamp_min(1e-8)).detach().float()
-            losses["latent_cvae_spline_correction_norm"] = correction.detach().float().norm(dim=-1).mean()
-            losses["latent_cvae_spline_correction_to_base"] = (correction.detach().float().norm(dim=-1).mean() / base_norm).detach().float()
-            losses["latent_cvae_spline_correction_to_target"] = (correction.detach().float().norm(dim=-1).mean() / target_norm).detach().float()
     dyn = rollout_dynamics_loss(output)
     delta = rollout_delta_loss(output)
     con = rollout_contrast_loss(output, margin=float(trainer.rollout_contrast_margin))
@@ -1220,25 +844,6 @@ def flow_losses(
         losses["latent_cvae_adaptive_regularizer_weight"] = torch.as_tensor(weight, device=reg.device, dtype=reg.dtype)
         if weight > 0:
             losses["loss"] = losses["loss"] + weight * reg
-    keep_ps = output.get("latent_cvae_adaptive_continue_per_sample")
-    if torch.is_tensor(keep_ps) and keep_ps.ndim == 1 and int(keep_ps.shape[0]) > 1 and "target_physical_velocity" in output:
-        err_ps = (
-            (output["pred_physical_velocity"].detach().float() - output["target_physical_velocity"].detach().float())
-            .square().mean(dim=(1, 2))
-        )
-        kf = keep_ps.detach().float()
-        if kf.std() > 1e-8 and err_ps.std() > 1e-8:
-            kc = kf - kf.mean()
-            ec = err_ps - err_ps.mean()
-            losses["latent_cvae_continue_error_corr"] = ((kc * ec).mean() / (kc.std() * ec.std()).clamp_min(1e-8))
-        else:
-            losses["latent_cvae_continue_error_corr"] = torch.zeros((), device=kf.device)
-    if "latent_cvae_adaptive_noisy_ratio_regularizer" in output:
-        noisy_reg = output["latent_cvae_adaptive_noisy_ratio_regularizer"]
-        noisy_weight = float(getattr(trainer, "latent_cvae_noisy_ratio_weight", 0.0))
-        losses["latent_cvae_noisy_ratio_regularizer"] = noisy_reg.detach().float()
-        if noisy_weight > 0:
-            losses["loss"] = losses["loss"] + noisy_weight * noisy_reg
     if "latent_cvae_adaptive_route_entropy_regularizer" in output:
         route_reg = output["latent_cvae_adaptive_route_entropy_regularizer"]
         route_weight = float(getattr(trainer, "latent_cvae_adaptive_route_entropy_weight", 0.0))
@@ -1246,34 +851,6 @@ def flow_losses(
         losses["latent_cvae_adaptive_route_entropy_weight"] = torch.as_tensor(route_weight, device=route_reg.device, dtype=route_reg.dtype)
         if route_weight > 0:
             losses["loss"] = losses["loss"] + route_weight * route_reg
-    if "block_action_denoise_regularizer" in output:
-        ba_reg = output["block_action_denoise_regularizer"]
-        ba_weight = float(getattr(trainer, "block_action_denoise_regularizer_weight", 0.0))
-        losses["block_action_denoise_regularizer"] = ba_reg.detach().float()
-        losses["block_action_denoise_regularizer_weight"] = torch.as_tensor(ba_weight, device=ba_reg.device, dtype=ba_reg.dtype)
-        if ba_weight > 0:
-            losses["loss"] = losses["loss"] + ba_weight * ba_reg
-    boundary_losses = block_action_boundary_continuity_losses(system, sample, output)
-    for key, value in boundary_losses.items():
-        losses[key] = value.detach().float()
-    boundary_delta_weight = float(getattr(trainer, "block_action_boundary_delta_weight", 0.0))
-    boundary_consistency_weight = float(getattr(trainer, "block_action_boundary_consistency_weight", 0.0))
-    if boundary_delta_weight > 0:
-        losses["loss"] = losses["loss"] + boundary_delta_weight * boundary_losses["block_action_boundary_delta"]
-    if boundary_consistency_weight > 0:
-        losses["loss"] = losses["loss"] + boundary_consistency_weight * boundary_losses["block_action_boundary_consistency"]
-    trajectory_losses = trajectory_coefficient_supervision_losses(system, output, trainer)
-    for key, value in trajectory_losses.items():
-        losses[key] = value.detach().float()
-    trajectory_weight = float(getattr(trainer, "latent_cvae_trajectory_supervision_weight", 0.0))
-    trajectory_coeff_weight = float(getattr(trainer, "latent_cvae_trajectory_coeff_weight", 0.0))
-    trajectory_mono_weight = float(getattr(trainer, "latent_cvae_trajectory_monotonic_weight", 0.0))
-    if trajectory_weight > 0:
-        losses["loss"] = losses["loss"] + trajectory_weight * trajectory_losses["latent_cvae_trajectory_supervision"]
-    if trajectory_coeff_weight > 0:
-        losses["loss"] = losses["loss"] + trajectory_coeff_weight * trajectory_losses["latent_cvae_trajectory_coeff_supervision"]
-    if trajectory_mono_weight > 0:
-        losses["loss"] = losses["loss"] + trajectory_mono_weight * trajectory_losses["latent_cvae_trajectory_monotonic"]
     micro_losses = micro_refine_supervision_losses(system, sample, output, trainer, global_step=global_step)
     for key, value in micro_losses.items():
         losses[key] = value.detach().float()
@@ -1295,31 +872,6 @@ def flow_losses(
         losses["loss"] = losses["loss"] + micro_smooth_weight * micro_losses["latent_cvae_micro_coverage_smooth"]
     if micro_floor_weight > 0:
         losses["loss"] = losses["loss"] + micro_floor_weight * micro_losses["latent_cvae_micro_coverage_floor"]
-    proposal_residual_losses = proposal_residual_coefficient_losses(system, output, trainer)
-    for key, value in proposal_residual_losses.items():
-        losses[key] = value.detach().float()
-    proposal_residual_coeff_weight = float(getattr(trainer, "latent_cvae_proposal_residual_coeff_weight", 0.0))
-    proposal_residual_mid_weight = float(getattr(trainer, "latent_cvae_proposal_residual_mid_coeff_weight", 0.0))
-    proposal_residual_bound_weight = float(getattr(trainer, "latent_cvae_proposal_residual_bound_weight", 0.0))
-    if proposal_residual_coeff_weight > 0:
-        losses["loss"] = losses["loss"] + proposal_residual_coeff_weight * proposal_residual_losses["latent_cvae_proposal_residual_coeff"]
-    if proposal_residual_mid_weight > 0:
-        losses["loss"] = losses["loss"] + proposal_residual_mid_weight * proposal_residual_losses["latent_cvae_proposal_residual_mid_coeff"]
-    if proposal_residual_bound_weight > 0:
-        losses["loss"] = losses["loss"] + proposal_residual_bound_weight * proposal_residual_losses["latent_cvae_proposal_residual_bound"]
-    for key, attr in (
-        ("latent_cvae_adaptive_trajectory_control_smoothness", "latent_cvae_trajectory_smoothness_weight"),
-        ("latent_cvae_adaptive_trajectory_update_smoothness", "latent_cvae_trajectory_update_smoothness_weight"),
-        ("latent_cvae_adaptive_trajectory_update_energy", "latent_cvae_trajectory_update_energy_weight"),
-        ("latent_cvae_adaptive_trajectory_projection_regularizer", "latent_cvae_trajectory_projection_weight"),
-    ):
-        if key in output:
-            value = output[key]
-            weight = float(getattr(trainer, attr, 0.0))
-            losses[key] = value.detach().float()
-            losses[f"{key}_weight"] = torch.as_tensor(weight, device=value.device, dtype=value.dtype)
-            if weight > 0:
-                losses["loss"] = losses["loss"] + weight * value
     losses.update(rollout_diagnostics(output))
     if "gate_self" in output:
         losses["gate_self"] = output["gate_self"].detach()
@@ -1329,38 +881,83 @@ def flow_losses(
     for key in (
         "mod_content_norm", "mod_time_norm", "mod_content_to_time",
         "future_conditioned_action_loss",
-        "block_action_denoise_smoothness",
-        "block_action_denoise_deviation",
-        "block_action_denoise_interaction_norm",
-        "block_action_noise_arm_mean",
-        "block_action_noise_gripper_mean",
-        "block_action_noise_near_mean",
-        "block_action_noise_tail_mean",
-        "block_action_noise_min",
-        "block_action_noise_max",
-        "block_action_noise_std",
-        "block_action_noise_raw_rms",
-        "block_action_noise_rms",
-        "block_action_noise_boundary_jump",
-        "block_action_loss_arm_mean",
-        "block_action_loss_gripper_mean",
-        "block_action_x0_near_mean",
-        "block_action_x0_tail_mean",
     ):
         if key in output:
             losses[key] = output[key].detach()
     if "rollout_alpha" in output:
         losses["rollout_alpha_mean"] = output["rollout_alpha"].detach().float().mean()
-    # V53.2: generic scalar diagnostics passthrough (replaces the hand-kept
-    # key list; picks up every latent_cvae_* scalar the model exports).
-    for key, value in output.items():
-        if (
-            key.startswith("latent_cvae")
-            and torch.is_tensor(value)
-            and value.ndim == 0
-            and key not in losses
-        ):
-            losses[key] = value.detach().float()
+    for key in (
+        "action_flow_residual_norm",
+        "action_flow_raw_residual_norm",
+        "action_flow_residual_alpha_mean",
+        "action_flow_stage_router_entropy",
+        "action_flow_stage_router_max",
+        "latent_action_stage_router_entropy",
+        "latent_action_stage_router_max",
+        "latent_action_gripper_gate_mean",
+        "latent_action_layer_memory_count",
+        "latent_action_temporal_update_mean",
+        "latent_action_temporal_near_depth",
+        "latent_action_temporal_mid_depth",
+        "latent_cvae_kl",
+        "latent_cvae_kl_weight",
+        "latent_cvae_prior_std",
+        "latent_cvae_post_std",
+        "latent_cvae_z_norm",
+        "latent_cvae_prior_z_norm",
+        "latent_cvae_post_z_norm",
+        "latent_cvae_mu_gap",
+        "latent_cvae_prior_pred_norm",
+        "latent_cvae_post_pred_norm",
+        "latent_cvae_post_gripper_gate_mean",
+        "latent_cvae_condition_norm",
+        "latent_cvae_posterior_used",
+        "latent_cvae_gripper_gate_mean",
+        "latent_cvae_layer_memory_count",
+        "latent_cvae_adaptive_refine_update_mean",
+        "latent_cvae_adaptive_route_entropy",
+        "latent_cvae_adaptive_route_max",
+        "latent_cvae_adaptive_route_effective_slots",
+        "latent_cvae_adaptive_progress_entropy",
+        "latent_cvae_adaptive_progress_max",
+        "latent_cvae_adaptive_progress_effective_slots",
+        "latent_cvae_adaptive_progress_norm",
+        "latent_cvae_adaptive_continue_mean",
+        "latent_cvae_adaptive_prefix_norm",
+        "latent_cvae_adaptive_progress_seed_entropy",
+        "latent_cvae_adaptive_progress_seed_max",
+        "latent_cvae_adaptive_progress_seed_effective_slots",
+        "latent_cvae_adaptive_progress_seed_norm",
+        "latent_cvae_adaptive_route_temperature_mean",
+        "latent_cvae_adaptive_semantic_bias_norm",
+        "latent_cvae_adaptive_function_delta_norm",
+        "latent_cvae_adaptive_base_highfreq_norm",
+        "latent_cvae_adaptive_refine_step_bias_norm",
+        "latent_cvae_adaptive_capsule_layer_entropy",
+        "latent_cvae_adaptive_capsule_layer_max",
+        "latent_cvae_adaptive_capsule_layer_effective_slots",
+        "latent_cvae_adaptive_context_direction_norm",
+        "latent_cvae_adaptive_micro_step_mean",
+        "latent_cvae_adaptive_micro_step_std",
+        "latent_cvae_adaptive_micro_progress_mean",
+        "latent_cvae_adaptive_micro_kp_mean",
+        "latent_cvae_adaptive_micro_kd_mean",
+        "latent_cvae_adaptive_micro_feedforward_norm",
+        "latent_cvae_adaptive_micro_feedback_norm",
+        "latent_cvae_adaptive_micro_damping_norm",
+        "latent_cvae_adaptive_micro_function_norm",
+        "latent_cvae_adaptive_micro_control_norm",
+        "latent_cvae_adaptive_micro_update_norm",
+        "latent_cvae_adaptive_micro_heun_error",
+        "latent_cvae_adaptive_micro_refine_block_norm",
+        "latent_cvae_adaptive_micro_controller_norm",
+        "latent_cvae_adaptive_regularizer",
+        "latent_cvae_adaptive_regularizer_weight",
+        "latent_cvae_adaptive_route_entropy_regularizer",
+        "latent_cvae_adaptive_route_entropy_weight",
+    ):
+        if key in output:
+            losses[key] = output[key].detach().float()
     return losses
 
 
@@ -1538,41 +1135,6 @@ def layer_contract_losses(
         z = torch.zeros((), device=output["pred_physical_velocity"].device, dtype=output["pred_physical_velocity"].dtype)
         return {"loss": z, "layer_contract": z, "layer_contract_weight_sum": z}
 
-    boost_rows: dict[str, list[Tensor]] = {"effect": [], "delta": []}
-    if int(getattr(trainer, "layer_boost_residual", 0)):
-        # V53-A2: telescoping residual supervision.  cum_k = detach(cum_{k-1})
-        # + pred_k for the primary latent predictions and every counterfactual
-        # variant, so contrast/dynamics losses stay internally consistent.
-        boost_keys = ("rollout_effect_pred", "rollout_delta_pred", "milestone_step_delta_pred")
-        suffixes = ("", "_hold_action", "_shuffle_action", "_shuffle_state")
-        cum: dict[str, Tensor] = {}
-        boosted: list[dict[str, Tensor]] = []
-        for entry in layers:
-            new_entry = dict(entry)
-            for base_key in boost_keys:
-                for suffix in suffixes:
-                    key = f"{base_key}{suffix}"
-                    value = entry.get(key)
-                    if not torch.is_tensor(value):
-                        continue
-                    prev = cum.get(key)
-                    if prev is not None and prev.shape == value.shape:
-                        cum_value = prev.detach() + value
-                    else:
-                        cum_value = value
-                    cum[key] = cum_value
-                    new_entry[key] = cum_value
-            residual_norm = entry["rollout_effect_pred"].detach().float().norm(dim=-1).mean() if torch.is_tensor(entry.get("rollout_effect_pred")) else None
-            if residual_norm is not None:
-                new_entry["boost_effect_residual_norm"] = residual_norm
-                boost_rows["effect"].append(residual_norm)
-            delta_norm = entry["rollout_delta_pred"].detach().float().norm(dim=-1).mean() if torch.is_tensor(entry.get("rollout_delta_pred")) else None
-            if delta_norm is not None:
-                new_entry["boost_delta_residual_norm"] = delta_norm
-                boost_rows["delta"].append(delta_norm)
-            boosted.append(new_entry)
-        layers = boosted
-
     total: Tensor | None = None
     weight_sum = 0.0
     metric_acc: dict[str, Tensor] = {}
@@ -1656,12 +1218,6 @@ def layer_contract_losses(
         ):
             if key in merged:
                 log_rows[f"layer{i}_{key}"] = merged[key].detach()
-        if "boost_effect_residual_norm" in entry:
-            log_rows[f"layer{i}_boost_effect_residual_norm"] = entry["boost_effect_residual_norm"]
-        if "boost_delta_residual_norm" in entry:
-            log_rows[f"layer{i}_boost_delta_residual_norm"] = entry["boost_delta_residual_norm"]
-        if "consequence_zero_base_shift" in entry:
-            log_rows[f"layer{i}_czbase"] = entry["consequence_zero_base_shift"].detach()
     assert total is not None
     denom = max(weight_sum, 1e-6)
     contract = total / denom
@@ -1676,17 +1232,6 @@ def layer_contract_losses(
         "layer_norm_weight": torch.as_tensor(w_norm, device=contract.device, dtype=contract.dtype),
         "layer_delta_match_weight": torch.as_tensor(w_delta_match, device=contract.device, dtype=contract.dtype),
     }
-    if boost_rows["effect"]:
-        out["layer_boost_effect_residual_norm"] = torch.stack(boost_rows["effect"]).mean()
-    if boost_rows["delta"]:
-        out["layer_boost_delta_residual_norm"] = torch.stack(boost_rows["delta"]).mean()
-    zero_base = [
-        entry["consequence_zero_base_shift"]
-        for entry in layers
-        if torch.is_tensor(entry.get("consequence_zero_base_shift"))
-    ]
-    if zero_base:
-        out["consequence_zero_base_shift"] = torch.stack(zero_base).mean()
     for key, value in metric_acc.items():
         out[key] = value / denom
     out.update(log_rows)
@@ -1733,21 +1278,10 @@ def evaluate_v39_policy(
             memory_reporter.snapshot(tag="eval_after_prepare", phase="eval", epoch=epoch, batch=batch_index, global_step=global_step)
         generator = torch.Generator(device=device)
         generator.manual_seed(37237 + batch_index)
-        # V53.5 (#4 fix): the eval starting noise must match the training
-        # terminal distribution.  With the block bridge ON training draws
-        # native-space noise (sample() scales+encodes it); with it OFF
-        # training draws unit Gaussians directly in PHYSICAL space, so eval
-        # must too.  Feeding encode(native noise) while training on physical
-        # noise puts the sampler off-distribution from the first step.
-        noise_dim = (
-            system.policy_config.action_dim
-            if int(getattr(system.policy_config, "block_action_denoise_matrix", 0))
-            else system.policy_config.physical_action_dim
-        )
         noise = torch.randn(
             sample["policy_action"].shape[0],
             system.policy_config.action_horizon,
-            noise_dim,
+            system.policy_config.physical_action_dim,
             generator=generator,
             device=device,
             dtype=sample["visual"].dtype,
@@ -1760,14 +1294,12 @@ def evaluate_v39_policy(
             stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer)
             pred_pack = system.sample(
                 sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
-                action_state=sample["action_state"],
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=True, return_event_logits=True,
                 stop_at_midcut=stop_midcut_eval,
             )
             assert isinstance(pred_pack, dict)
             no_proposal = system.sample(
                 sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
-                action_state=sample["action_state"],
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
                 stop_at_midcut=stop_midcut_eval,
             )
@@ -2000,10 +1532,12 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         planner.event_probe,
         planner.motion_probe,
     ]
+    if getattr(planner, "residual_action_flow_denoiser", None) is not None:
+        losses["grad_residual_action_flow"] = _module_grad_norm(planner.residual_action_flow_denoiser, reference=reference)
+    if getattr(planner, "latent_main_action_decoder", None) is not None:
+        losses["grad_latent_main_action"] = _module_grad_norm(planner.latent_main_action_decoder, reference=reference)
     if getattr(planner, "latent_cvae_action_decoder", None) is not None:
         losses["grad_latent_cvae_action"] = _module_grad_norm(planner.latent_cvae_action_decoder, reference=reference)
-    if getattr(planner, "block_action_denoise", None) is not None:
-        losses["grad_block_action_denoise"] = _module_grad_norm(planner.block_action_denoise, reference=reference)
     final = torch.nn.ModuleList(final_modules)
     losses["grad_final_policy_heads"] = _module_grad_norm(final, reference=reference)
 
@@ -2054,16 +1588,14 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             final_modules = [planner.final_norm, planner.direct_physical_head, planner.rollout_residual_head, planner.controlled_dynamics, planner.motion_probe]
             if not event_probe_in_contract:
                 final_modules.append(planner.event_probe)
+            if getattr(planner, "residual_action_flow_denoiser", None) is not None:
+                final_modules.append(planner.residual_action_flow_denoiser)
+            if getattr(planner, "latent_main_action_decoder", None) is not None:
+                final_modules.append(planner.latent_main_action_decoder)
             if getattr(planner, "latent_cvae_action_decoder", None) is not None:
                 final_modules.append(planner.latent_cvae_action_decoder)
             if float(getattr(trainer, "layer_contract_final_action_loss_weight", 0.0)) > 0:
                 groups.append({"params": _unique_params(final_modules), "lr": trainer.lr * float(getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)), "name": "weak_final_policy_probe"})
-            if getattr(planner, "block_action_denoise", None) is not None:
-                groups.append({
-                    "params": list(planner.block_action_denoise.parameters()),
-                    "lr": trainer.lr * float(getattr(trainer, "block_action_denoise_lr_scale", 1.0)),
-                    "name": "block_action_denoise_matrix",
-                })
             groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
         else:
             upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
@@ -2090,17 +1622,23 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             groups.append({"params": _unique_params(adapter_modules), "lr": adapter_lr, "name": adapter_name})
             final_modules = [planner.final_norm, planner.direct_physical_head, planner.rollout_residual_head, planner.controlled_dynamics, planner.event_probe, planner.motion_probe]
             groups.append({"params": _unique_params(final_modules), "lr": trainer.lr, "name": "final_policy_heads"})
+            if getattr(planner, "residual_action_flow_denoiser", None) is not None:
+                groups.append({
+                    "params": list(planner.residual_action_flow_denoiser.parameters()),
+                    "lr": trainer.lr * float(getattr(trainer, "action_flow_residual_lr_scale", 1.5)),
+                    "name": "residual_action_flow_denoiser",
+                })
+            if getattr(planner, "latent_main_action_decoder", None) is not None:
+                groups.append({
+                    "params": list(planner.latent_main_action_decoder.parameters()),
+                    "lr": trainer.lr * float(getattr(trainer, "latent_action_decoder_lr_scale", 1.5)),
+                    "name": "latent_main_action_decoder",
+                })
             if getattr(planner, "latent_cvae_action_decoder", None) is not None:
                 groups.append({
                     "params": list(planner.latent_cvae_action_decoder.parameters()),
                     "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                     "name": "latent_cvae_action_decoder",
-                })
-            if getattr(planner, "block_action_denoise", None) is not None:
-                groups.append({
-                    "params": list(planner.block_action_denoise.parameters()),
-                    "lr": trainer.lr * float(getattr(trainer, "block_action_denoise_lr_scale", 1.0)),
-                    "name": "block_action_denoise_matrix",
                 })
             groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
         return [group for group in groups if len(group["params"]) > 0]
@@ -2127,29 +1665,29 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
     if stage in {"contract", "stage1"}:
         groups.append({"params": _unique_params(pre_modules), "lr": trainer.lr, "name": "pre_midcut_trunk"})
         groups.append({"params": _unique_params(mid_modules), "lr": trainer.lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)), "name": "midcut_contract_heads"})
-        if getattr(planner, "block_action_denoise", None) is not None:
-            groups.append({
-                "params": list(planner.block_action_denoise.parameters()),
-                "lr": trainer.lr * float(getattr(trainer, "block_action_denoise_lr_scale", 1.0)),
-                "name": "block_action_denoise_matrix",
-            })
         groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
     else:
         upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
         groups.append({"params": _unique_params(pre_modules), "lr": upper_lr, "name": "pre_midcut_trunk_low_lr"})
         groups.append({"params": _unique_params(mid_modules), "lr": upper_lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)), "name": "midcut_contract_heads_low_lr"})
         groups.append({"params": _unique_params(post_modules), "lr": trainer.lr, "name": "post_midcut_policy"})
+        if getattr(planner, "residual_action_flow_denoiser", None) is not None:
+            groups.append({
+                "params": list(planner.residual_action_flow_denoiser.parameters()),
+                "lr": trainer.lr * float(getattr(trainer, "action_flow_residual_lr_scale", 1.5)),
+                "name": "residual_action_flow_denoiser",
+            })
+        if getattr(planner, "latent_main_action_decoder", None) is not None:
+            groups.append({
+                "params": list(planner.latent_main_action_decoder.parameters()),
+                "lr": trainer.lr * float(getattr(trainer, "latent_action_decoder_lr_scale", 1.5)),
+                "name": "latent_main_action_decoder",
+            })
         if getattr(planner, "latent_cvae_action_decoder", None) is not None:
             groups.append({
                 "params": list(planner.latent_cvae_action_decoder.parameters()),
                 "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                 "name": "latent_cvae_action_decoder",
-            })
-        if getattr(planner, "block_action_denoise", None) is not None:
-            groups.append({
-                "params": list(planner.block_action_denoise.parameters()),
-                "lr": trainer.lr * float(getattr(trainer, "block_action_denoise_lr_scale", 1.0)),
-                "name": "block_action_denoise_matrix",
             })
         groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
     return [group for group in groups if len(group["params"]) > 0]
@@ -2304,8 +1842,7 @@ def train_v39_policy(
                 row = _sync_loss_row(losses, grad=grad)
                 print(
                     f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
-                    f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_unweighted', row['physical_flow']):.6f} "
-                    f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
+                    f"pflow={row['physical_flow']:.6f} decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
                     f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
                     f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
                     f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
@@ -2328,31 +1865,28 @@ def train_v39_policy(
                     f"cpeff={row.get('latent_cvae_adaptive_progress_effective_slots', 0.0):.2f} "
                     f"cprog={row.get('latent_cvae_adaptive_progress_norm', 0.0):.2f} "
                     f"ccont={row.get('latent_cvae_adaptive_continue_mean', 0.0):.3f} "
-                    f"ccstd={row.get('latent_cvae_adaptive_continue_std', 0.0):.3f} "
-                    f"ccf={row.get('latent_cvae_adaptive_continue_first', 0.0):.3f} "
-                    f"ccl={row.get('latent_cvae_adaptive_continue_last', 0.0):.3f} "
-                    f"cctc={row.get('latent_cvae_adaptive_continue_time_corr', 0.0):+.3f} "
-                    f"ccec={row.get('latent_cvae_continue_error_corr', 0.0):+.3f} "
                     f"cprefix={row.get('latent_cvae_adaptive_prefix_norm', 0.0):.2f} "
                     f"czseed={row.get('latent_cvae_adaptive_progress_seed_norm', 0.0):.3f} "
                     f"czseff={row.get('latent_cvae_adaptive_progress_seed_effective_slots', 0.0):.2f} "
                     f"ctemp={row.get('latent_cvae_adaptive_route_temperature_mean', 0.0):.2f} "
                     f"cfunc={row.get('latent_cvae_adaptive_function_delta_norm', 0.0):.3f} "
                     f"cbasehf={row.get('latent_cvae_adaptive_base_highfreq_norm', 0.0):.3f} "
-                    f"cwctl={row.get('latent_cvae_adaptive_coeff_writer_controls', 0.0):.1f} "
-                    f"cwgrip={row.get('latent_cvae_adaptive_coeff_writer_include_gripper', 0.0):.0f} "
-                    f"cwdir={row.get('latent_cvae_adaptive_coeff_writer_direction_norm', 0.0):.3f} "
-                    f"cwraw={row.get('latent_cvae_adaptive_coeff_writer_raw_direction_norm', 0.0):.3f} "
-                    f"cwmag={row.get('latent_cvae_adaptive_coeff_writer_magnitude_mean', 0.0):.3f} "
-                    f"cwcond={row.get('latent_cvae_adaptive_coeff_writer_condition_norm', 0.0):.3f} "
-                    f"cwcgate={row.get('latent_cvae_adaptive_coeff_writer_condition_gate', 0.0):.3f} "
-                    f"csbf={row.get('latent_cvae_spline_base_flow', 0.0):.4f} "
-                    f"csim={row.get('latent_cvae_spline_improvement', 0.0):+.3f} "
-                    f"cscorr={row.get('latent_cvae_spline_correction_to_base', 0.0):.3f} "
-                    f"cmdblk={row.get('latent_cvae_adaptive_detail_micro_block_norm', 0.0):.3f} "
-                    f"cmdet={row.get('latent_cvae_adaptive_detail_micro_update_norm', 0.0):.3f} "
-                    f"cmdgate={row.get('latent_cvae_adaptive_detail_micro_gate_mean', 0.0):.3f} "
-                    f"cmdraw={row.get('latent_cvae_adaptive_detail_micro_raw_norm', 0.0):.3f} "
+                    f"cstep={row.get('latent_cvae_adaptive_refine_step_bias_norm', 0.0):.3f} "
+                    f"ccmax={row.get('latent_cvae_adaptive_capsule_layer_max', 0.0):.3f} "
+                    f"ccleff={row.get('latent_cvae_adaptive_capsule_layer_effective_slots', 0.0):.2f} "
+                    f"cmds={row.get('latent_cvae_adaptive_micro_step_mean', 0.0):.3f} "
+                    f"cmprog={row.get('latent_cvae_adaptive_micro_progress_mean', 0.0):.3f} "
+                    f"cmkp={row.get('latent_cvae_adaptive_micro_kp_mean', 0.0):.3f} "
+                    f"cmkd={row.get('latent_cvae_adaptive_micro_kd_mean', 0.0):.3f} "
+                    f"cmff={row.get('latent_cvae_adaptive_micro_feedforward_norm', 0.0):.3f} "
+                    f"cmfb={row.get('latent_cvae_adaptive_micro_feedback_norm', 0.0):.3f} "
+                    f"cmdamp={row.get('latent_cvae_adaptive_micro_damping_norm', 0.0):.3f} "
+                    f"cmfunc={row.get('latent_cvae_adaptive_micro_function_norm', 0.0):.3f} "
+                    f"cmctrl={row.get('latent_cvae_adaptive_micro_control_norm', 0.0):.3f} "
+                    f"cmupd={row.get('latent_cvae_adaptive_micro_update_norm', 0.0):.3f} "
+                    f"cmheun={row.get('latent_cvae_adaptive_micro_heun_error', 0.0):.3f} "
+                    f"cmblk={row.get('latent_cvae_adaptive_micro_refine_block_norm', 0.0):.3f} "
+                    f"cmstate={row.get('latent_cvae_adaptive_micro_controller_norm', 0.0):.3f} "
                     f"cmsup={row.get('latent_cvae_micro_supervision', 0.0):.4f} "
                     f"cmevt={row.get('latent_cvae_micro_event', 0.0):.4f} "
                     f"cmmono={row.get('latent_cvae_micro_monotonic', 0.0):.4f} "
@@ -2362,40 +1896,10 @@ def train_v39_policy(
                     f"cmcs={row.get('latent_cvae_micro_coverage_smooth', 0.0):.4f} "
                     f"cmcf={row.get('latent_cvae_micro_coverage_floor', 0.0):.4f} "
                     f"cmtail={row.get('latent_cvae_micro_coverage_tail_mass', 0.0):.3f} "
-                    f"ctctrl={row.get('latent_cvae_adaptive_trajectory_control_norm', 0.0):.3f} "
-                    f"ctok={row.get('latent_cvae_adaptive_trajectory_token_norm', 0.0):.3f} "
-                    f"ctupd={row.get('latent_cvae_adaptive_trajectory_update_norm', 0.0):.3f} "
-                    f"ctctx={row.get('latent_cvae_adaptive_trajectory_context_norm', 0.0):.3f} "
-                    f"cterr={row.get('latent_cvae_adaptive_trajectory_projection_error', 0.0):.3f} "
-                    f"ctsup={row.get('latent_cvae_trajectory_supervision', 0.0):.4f} "
-                    f"ctcoef={row.get('latent_cvae_trajectory_coeff_supervision', 0.0):.4f} "
-                    f"ctmono={row.get('latent_cvae_trajectory_monotonic', 0.0):.4f} "
-                    f"prcoef={row.get('latent_cvae_proposal_residual_coeff', 0.0):.4f} "
-                    f"prmid={row.get('latent_cvae_proposal_residual_mid_coeff', 0.0):.4f} "
-                    f"prbd={row.get('latent_cvae_proposal_residual_bound', 0.0):.4f} "
-                    f"prn={row.get('latent_cvae_proposal_residual_coeff_pred_norm', 0.0):.3f}/"
-                    f"{row.get('latent_cvae_proposal_residual_coeff_target_norm', 0.0):.3f} "
-                    f"prkeep={row.get('latent_cvae_proposal_residual_keep_mean', 0.0):.2f} "
-                    f"ctsm={row.get('latent_cvae_adaptive_trajectory_control_smoothness', 0.0):.4f} "
-                    f"ctusm={row.get('latent_cvae_adaptive_trajectory_update_smoothness', 0.0):.4f} "
-                    f"ctue={row.get('latent_cvae_adaptive_trajectory_update_energy', 0.0):.4f} "
-                    f"ctpr={row.get('latent_cvae_adaptive_trajectory_projection_regularizer', 0.0):.4f} "
-                    f"cstep={row.get('latent_cvae_adaptive_refine_step_bias_norm', 0.0):.3f} "
-                    f"ccmax={row.get('latent_cvae_adaptive_capsule_layer_max', 0.0):.3f} "
-                    f"ccleff={row.get('latent_cvae_adaptive_capsule_layer_effective_slots', 0.0):.2f} "
                     f"careg={row.get('latent_cvae_adaptive_regularizer', 0.0):.4f} "
                     f"carent={row.get('latent_cvae_adaptive_route_entropy_regularizer', 0.0):.4f} "
-                    f"cxgate={row.get('latent_cvae_adaptive_noisy_gate_mean', 0.0):.3f} "
-                    f"xnorm={row.get('latent_cvae_adaptive_noisy_branch_norm', 0.0):.3f} "
-                    f"xratio={row.get('latent_cvae_adaptive_noisy_branch_ratio', 0.0):.3f} "
-                    f"cscan={row.get('latent_cvae_condition_scan_norm', 0.0):.2f} "
-                    f"clat={row.get('latent_cvae_condition_lateral_norm', 0.0):.2f} "
-                    f"ccanv={row.get('latent_cvae_adaptive_canvas_cross_norm', 0.0):.3f} "
-                    f"cvgate={row.get('latent_cvae_adaptive_canvas_gate', 0.0):.3f} "
-                    f"czbase={row.get('consequence_zero_base_shift', 0.0):.3f} "
-                    f"lboost={row.get('layer_boost_effect_residual_norm', 0.0):.3f} "
-                    f"ldres={row.get('layer_boost_delta_residual_norm', 0.0):.3f} "
                     f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
+                    f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
                     f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",
                     flush=True,
                 )

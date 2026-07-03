@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# =============================================================================
+# V48 JUST-OK BASELINE
+#
+# Imported from clearvla_history/clearvla_justok and the corresponding
+# v48_dirty_adapter_reset_cvae_b8.log.  This is not a final healthy model; it is
+# the last known action-space path that learned with usable validation behavior.
+#
+# Keep the main action output in physical 24x7 action space.  Do not enable the
+# later trajectory manifold, coefficient writer, query-direction writer, or
+# detail-micro branches from v55-v59 on this baseline.
+# =============================================================================
+set -euo pipefail
+
+DATA_ROOT=${DATA_ROOT:-/data/liang.zhang/dataset/grab_pen_single/grab_pen_single}
+CACHE_DIR=${CACHE_DIR:-/home/sen.wang/workspace/robotics/clear/data/cache_336}
+DINO_CACHE_DIR=${DINO_CACHE_DIR:-/home/sen.wang/workspace/robotics/clear/data/dinov2_cache_336}
+STAGE1_CHECKPOINT=${STAGE1_CHECKPOINT:-/home/sen.wang/workspace/robotics/clear/clearvla_v40_2_goodcheck/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt}
+OUT_DIR=${OUT_DIR:-runs/v48_justok_b8}
+
+exec python -u -m clearvla.cli.train_v40_policy \
+  --data-root "${DATA_ROOT}" \
+  --glob '*.hdf5' \
+  --decoded-image-cache-dir "${CACHE_DIR}" \
+  --cameras top wrist \
+  --action-key action \
+  --state-key qpos \
+  --top-key observations/images/cam_high \
+  --wrist-key observations/images/cam_right_wrist \
+  --cache-resize 336 336 \
+  --episode-split-mode ordered-counts \
+  --train-episode-count 63 \
+  --val-episode-count 5 \
+  --test-episode-count 5 \
+  --seed 0 \
+  --batch-size 8 \
+  --num-workers 4 \
+  --normalizer zscore \
+  --out-dir "${OUT_DIR}" \
+  --stage1-checkpoint "${STAGE1_CHECKPOINT}" \
+  --stage1-reset-dirty-adapters 1 \
+  --condition-mode dinov2-cache \
+  --dinov2-model facebook/dinov2-base \
+  --dinov2-token-cache-dir "${DINO_CACHE_DIR}" \
+  --prefetch-dinov2-tokens \
+  --dtype bf16 \
+  --world-horizon 48 \
+  --policy-horizon 24 \
+  --segment-length 4 \
+  --history-offsets=-8,-4,0 \
+  --executed-action-offsets=-8,-4,-1 \
+  --target-history-offsets=-8,-4,0 \
+  --stride 1 \
+  --hidden-size 512 \
+  --heads 8 \
+  --depth 8 \
+  --midcut-layer 3 \
+  --midcut-future-gain-init 0.1 \
+  --layer-contract-adapters 1 \
+  --layer-contract-adapter-dim 128 \
+  --layer-contract-grad-scale 1.0 \
+  --layer-contract-residual-scale 0.5 \
+  --layer-shared-fm-probe 0 \
+  --layer-fm-probe-hidden 256 \
+  --layer-recurrent-consequence 1 \
+  --layer-consequence-steps 6 \
+  --layer-consequence-hidden 256 \
+  --layer-consequence-delta-scale 1.0 \
+  --layer-consequence-initial-gain 0.1 \
+  --layer-causal-feedback-depth 0 \
+  --layer-causal-memory-tokens 4 \
+  --layer-low-causal-weight 1.0 \
+  --layer-high-causal-weight 1.0 \
+  --layer-low-latent-weight 1.0 \
+  --layer-high-latent-weight 1.0 \
+  --layer-causal-event-from-effect 1 \
+  --layer-state-counterfactual 1 \
+  --proposal-depth 2 \
+  --proposal-dropout 0.25 \
+  --dropout 0.05 \
+  --event-tokens 3 \
+  --canvas-registers 12 \
+  --future-anchors 6 \
+  --future-grid-size 4 \
+  --action-basis-tokens 4 \
+  --rollout-tail-start-step 8 \
+  --rollout-tail-full-step 13 \
+  --controlled-delta-rank 8 \
+  --base-effect-hidden 128 \
+  --latent-action-tokens 8 \
+  --neutral-action-tokens 4 \
+  --controlled-delta-dropout 0.0 \
+  --role-dropout 0.1 \
+  --visual-memory-dropout 0.0 \
+  --canvas-dropout 0.0 \
+  --inference-steps 5 \
+  --gripper-dim-index -1 \
+  --first-execution-steps 4 \
+  --mid-execution-steps 8 \
+  --physical-decode-delta-blend 0.25 \
+  --final-action-decoder adaptive_recurrent_cvae_action \
+  --action-flow-residual-depth 2 \
+  --action-flow-residual-high-slots 4 \
+  --action-flow-residual-max-scale 0.2 \
+  --action-flow-residual-visual-memory 1 \
+  --action-flow-residual-context-memory 1 \
+  --action-flow-residual-transition-memory 1 \
+  --action-flow-residual-layer-memory 1 \
+  --action-flow-residual-layer-pair-schedule '0:1,1:3,3:5,5:7' \
+  --action-flow-residual-layer-detach 1 \
+  --action-flow-residual-stage-router 1 \
+  --action-flow-residual-anchor-memory 1 \
+  --latent-cvae-z-dim 64 \
+  --latent-cvae-decoder-depth 3 \
+  --latent-cvae-ffn-expansion 2.0 \
+  --latent-cvae-layer-memory 1 \
+  --latent-cvae-transition-memory 1 \
+  --latent-cvae-context-memory 0 \
+  --latent-cvae-visual-memory 0 \
+  --latent-cvae-transition-detach 1 \
+  --latent-cvae-layer-detach 1 \
+  --latent-cvae-layer-grad-scale 0.15 \
+  --latent-cvae-event-gripper-gate 1 \
+  --latent-cvae-inference-sample 0 \
+  --latent-cvae-output-init-std 1e-3 \
+  --latent-cvae-mu-bound 1.25 \
+  --latent-cvae-min-std 0.6 \
+  --latent-cvae-causal-attention 1 \
+  --adaptive-cvae-refine-steps 6 \
+  --adaptive-cvae-progress-memory 1 \
+  --adaptive-cvae-progress-steps 6 \
+  --adaptive-cvae-prefix-memory 0 \
+  --adaptive-cvae-layer-routing 1 \
+  --adaptive-cvae-route-cosine 1 \
+  --adaptive-cvae-route-temperature 1.0 \
+  --adaptive-cvae-prefix-detach 1 \
+  --adaptive-cvae-progress-z-injection 1 \
+  --adaptive-cvae-route-query-bias 1 \
+  --adaptive-cvae-token-semantic-adapter 1 \
+  --adaptive-cvae-context-dropout 0.05 \
+  --adaptive-cvae-route-entropy-floor-ratio 0.15 \
+  --adaptive-cvae-function-adapters 1 \
+  --adaptive-cvae-function-rank 32 \
+  --adaptive-cvae-progress-role-dim 16 \
+  --adaptive-cvae-route-topk 0 \
+  --adaptive-cvae-route-sparsemax 1 \
+  --adaptive-cvae-route-adaptive-temperature 1 \
+  --adaptive-cvae-route-min-temperature 0.35 \
+  --adaptive-cvae-route-max-temperature 1.25 \
+  --adaptive-cvae-role-query 1 \
+  --adaptive-cvae-step-roles 1 \
+  --adaptive-cvae-coarse-stride 4 \
+  --adaptive-cvae-coarse-strength 0.35 \
+  --adaptive-cvae-seed-scale 0.35 \
+  --adaptive-cvae-output-scale 0.05 \
+  --adaptive-cvae-output-adapter 0 \
+  --adaptive-cvae-context-capsules 1 \
+  --adaptive-cvae-context-capsule-count 6 \
+  --adaptive-cvae-micro-control 1 \
+  --adaptive-cvae-micro-supervision 1 \
+  --adaptive-cvae-micro-step-init 0.14 \
+  --adaptive-cvae-micro-kp-init 0.22 \
+  --adaptive-cvae-micro-kd-init 0.04 \
+  --adaptive-cvae-micro-kp-max 0.6 \
+  --adaptive-cvae-micro-kd-max 0.3 \
+  --adaptive-cvae-micro-min-step 0.03 \
+  --adaptive-cvae-micro-max-step 0.35 \
+  --adaptive-cvae-micro-update-scale 1.0 \
+  --adaptive-cvae-micro-heun 1 \
+  --adaptive-cvae-micro-monotonic-progress 1 \
+  --adaptive-cvae-micro-progress-distance-scale 4.0 \
+  --adaptive-cvae-micro-refine-block 1 \
+  --adaptive-cvae-micro-refine-block-scale 0.0 \
+  --adaptive-cvae-direct-condition-residual 0 \
+  --adaptive-cvae-condition-strength 0 \
+  --adaptive-cvae-condition-strength-init 0.35 \
+  --adaptive-cvae-condition-strength-min 0.03 \
+  --adaptive-cvae-condition-strength-max 1.5 \
+  --epochs 8 \
+  --lr 8e-5 \
+  --proposal-lr 5e-5 \
+  --latent-cvae-action-decoder-lr-scale 0.7 \
+  --action-flow-residual-lr-scale 1.5 \
+  --latent-cvae-kl-weight 5e-4 \
+  --latent-cvae-legacy-anchor-weight 0.03 \
+  --latent-cvae-legacy-anchor-decay-steps 2500 \
+  --latent-cvae-legacy-anchor-min-weight 0.0 \
+  --latent-cvae-posterior-recon-weight 0.05 \
+  --latent-cvae-adaptive-regularizer-weight 0.002 \
+  --latent-cvae-adaptive-route-entropy-weight 0.0003 \
+  --latent-cvae-micro-supervision-weight 0.08 \
+  --latent-cvae-micro-event-weight 0.02 \
+  --latent-cvae-micro-event-positive-weight 2.0 \
+  --latent-cvae-micro-monotonic-weight 0.02 \
+  --latent-cvae-micro-coverage-smooth-weight 0.002 \
+  --latent-cvae-micro-coverage-floor-weight 0.002 \
+  --latent-cvae-micro-coverage-floor-ratio 0.55 \
+  --latent-cvae-micro-coverage-prior-logit-scale 0.25 \
+  --latent-cvae-micro-weight-kl-weight 0.001 \
+  --latent-cvae-micro-weight-floor 0.05 \
+  --latent-cvae-micro-learned-weight-max 0.4 \
+  --latent-cvae-micro-learned-ramp-steps 2000 \
+  --weight-decay 0.01 \
+  --beta1 0.9 \
+  --beta2 0.999 \
+  --eps 1e-8 \
+  --grad-clip 1.0 \
+  --warmup-steps 500 \
+  --min-lr-ratio 0.1 \
+  --proposal-loss-weight 0.05 \
+  --first-weight 1.5 \
+  --first4-weight 1.3 \
+  --first8-weight 1.15 \
+  --tail-weight 1.1 \
+  --event-loss-weight 0.08 \
+  --event-positive-weight 4.0 \
+  --event-focal-gamma 1.0 \
+  --gripper-transition-l1-weight 0.06 \
+  --smooth-delta-weight 0.02 \
+  --decoded-action-loss-weight 0.08 \
+  --physical-delta-consistency-weight 0.03 \
+  --transition-gripper-flow-weight 0.06 \
+  --event-delta-consistency-weight 0.03 \
+  --event-magnitude-weight 0.03 \
+  --event-off-delta-weight 0.03 \
+  --arm-motion-loss-weight 0.03 \
+  --arm-motion-threshold 0.02 \
+  --gripper-event-threshold 0.1 \
+  --deploy-min-recall 0.4 \
+  --deploy-min-event-ratio 0.7 \
+  --deploy-max-event-ratio 1.8 \
+  --deploy-max-tail-first-ratio 2.6 \
+  --eval-inference-steps 5 \
+  --log-every 20 \
+  --max-train-batches 0 \
+  --max-val-batches 0 \
+  --rollout-dynamics-loss-weight 0.03 \
+  --rollout-delta-loss-weight 0.01 \
+  --rollout-contrast-loss-weight 0.06 \
+  --rollout-contrast-margin 0.02 \
+  --future-latent-loss-weight 0.0 \
+  --action-effect-loss-weight 0.0 \
+  --future-latent-loss-start-epoch 1 \
+  --future-latent-max-batches 0 \
+  --memory-report-every 0 \
+  --memory-report-detail 0 \
+  --memory-report-sync 0 \
+  --training-stage policy \
+  --upper-lr-scale 0.20 \
+  --midcut-head-lr-scale 1.0 \
+  --midcut-aux-loss-weight 0.03 \
+  --midcut-aux-final-ratio 0.15 \
+  --midcut-aux-decay-epochs 4 \
+  --midcut-rollout-dynamics-loss-weight 0.03 \
+  --midcut-rollout-delta-loss-weight 0.01 \
+  --midcut-rollout-contrast-loss-weight 0.03 \
+  --contract-mode layer_adapter \
+  --layer-contract-loss-weight 1.0 \
+  --layer-contract-final-action-loss-weight 0.0 \
+  --layer-contract-final-action-lr-scale 0.3 \
+  --layerwise-lr-min-scale 0.3 \
+  --layer-contract-adapter-policy-lr-scale 1.0 \
+  --layer-latent-loss-weight 1.0 \
+  --layer-fm-probe-loss-weight 0.0 \
+  --layer-event-loss-weight 0.05 \
+  --layer-motion-loss-weight 0.03 \
+  --layer-decoded-action-loss-weight 0.0 \
+  --layer-contrast-loss-weight 0.03 \
+  --layer-variance-loss-weight 0.05 \
+  --layer-norm-loss-weight 0.02 \
+  --layer-delta-match-loss-weight 0.15 \
+  "$@"
