@@ -12,6 +12,7 @@ shape the action latent that produces the final decoded gripper command.
 """
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import Tensor, nn
@@ -26,6 +27,18 @@ from .policy_v36_2 import (
     V362PolicyConfig,
 )
 from .world_model import V35WorldConfig, WorldEvidenceEncoder, sinusoidal_positions
+
+
+def _dct_action_basis(horizon: int, controls: int, *, device: torch.device | None = None) -> Tensor:
+    if horizon < 1 or controls < 1:
+        raise ValueError("DCT action basis requires horizon >= 1 and controls >= 1")
+    controls = min(int(controls), int(horizon))
+    pos = torch.arange(int(horizon), device=device, dtype=torch.float32)
+    cols: list[Tensor] = []
+    for k in range(controls):
+        scale = math.sqrt(1.0 / float(horizon)) if k == 0 else math.sqrt(2.0 / float(horizon))
+        cols.append(scale * torch.cos((math.pi / float(horizon)) * (pos + 0.5) * float(k)))
+    return torch.stack(cols, dim=-1)
 
 
 @dataclass(frozen=True)
@@ -107,6 +120,18 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         h = config.hidden_size
         ad = config.arm_dim
         self.config = config
+        self.arm_coeff_output = bool(int(getattr(config, "latent_cvae_arm_coeff_output", 0)))
+        self.arm_coeff_points = max(1, min(int(getattr(config, "latent_cvae_arm_coeff_points", 8)), int(config.action_horizon)))
+        self.arm_coeff_basis_name = str(getattr(config, "latent_cvae_arm_coeff_basis", "dct")).lower()
+        if self.arm_coeff_output and self.arm_coeff_basis_name != "dct":
+            raise ValueError("latent_cvae_arm_coeff_basis currently supports only 'dct'")
+        if self.arm_coeff_output:
+            basis = _dct_action_basis(int(config.action_horizon), self.arm_coeff_points)
+            self.register_buffer("arm_coeff_basis", basis, persistent=False)
+            self.register_buffer("arm_coeff_analysis", basis.transpose(0, 1).contiguous(), persistent=False)
+        else:
+            self.register_buffer("arm_coeff_basis", torch.empty(0), persistent=False)
+            self.register_buffer("arm_coeff_analysis", torch.empty(0), persistent=False)
         self.norm = nn.LayerNorm(h)
         self.transition_norm = nn.LayerNorm(h)
         self.gripper_delta = nn.Linear(h, h)
@@ -120,13 +145,36 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.grip_value = nn.Linear(h, 1)
         self.grip_delta = nn.Linear(h, 1)
 
+    def _arm_coeff_basis_for(self, tokens: Tensor) -> Tensor:
+        horizon = int(tokens.shape[1])
+        if (
+            self.arm_coeff_basis.ndim == 2
+            and int(self.arm_coeff_basis.shape[0]) == horizon
+            and int(self.arm_coeff_basis.shape[1]) == int(self.arm_coeff_points)
+        ):
+            return self.arm_coeff_basis.to(device=tokens.device, dtype=tokens.dtype)
+        controls = min(int(self.arm_coeff_points), horizon)
+        return _dct_action_basis(horizon, controls, device=tokens.device).to(dtype=tokens.dtype)
+
+    def _emit_arm(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        if not self.arm_coeff_output:
+            return self.arm_abs(x), self.arm_delta(x)
+        basis = self._arm_coeff_basis_for(x)
+        coeff_tokens = torch.einsum("tc,bth->bch", basis, x)
+        arm_abs_coeff = self.arm_abs(coeff_tokens)
+        arm_delta_coeff = self.arm_delta(coeff_tokens)
+        arm_abs = torch.einsum("tc,bca->bta", basis, arm_abs_coeff)
+        arm_delta = torch.einsum("tc,bca->bta", basis, arm_delta_coeff)
+        return arm_abs, arm_delta
+
     def forward(self, tokens: Tensor, transition_latent: Tensor | None = None) -> Tensor:
         x = self.norm(tokens)
         grip_x = x
         if transition_latent is not None:
             z = self.transition_norm(transition_latent)
             grip_x = grip_x + torch.sigmoid(self.gripper_gate(z)) * self.gripper_delta(z)
-        return torch.cat([self.arm_abs(x), self.arm_delta(x), self.grip_value(grip_x), self.grip_delta(grip_x)], dim=-1)
+        arm_abs, arm_delta = self._emit_arm(x)
+        return torch.cat([arm_abs, arm_delta, self.grip_value(grip_x), self.grip_delta(grip_x)], dim=-1)
 
 
 class PolicyLatentDiTPlannerV363(nn.Module):

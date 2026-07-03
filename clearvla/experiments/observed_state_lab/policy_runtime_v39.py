@@ -652,6 +652,11 @@ def _refine_fixed_unfolded_weights(
 
 def _adaptive_trajectory_basis(system: V39PolicySystem, ref: Tensor) -> Tensor | None:
     decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
+    velocity_head = getattr(decoder, "velocity_head", None)
+    if int(getattr(system.policy_config, "latent_cvae_arm_coeff_output", 0)):
+        arm_basis = getattr(velocity_head, "arm_coeff_basis", None)
+        if torch.is_tensor(arm_basis) and arm_basis.ndim == 2 and int(arm_basis.numel()) > 0:
+            return arm_basis.to(device=ref.device, dtype=ref.dtype)
     basis = getattr(decoder, "trajectory_basis", None)
     if not torch.is_tensor(basis):
         return None
@@ -667,6 +672,11 @@ def _adaptive_trajectory_analysis(system: V39PolicySystem, ref: Tensor) -> Tenso
     transpose otherwise).
     """
     decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
+    velocity_head = getattr(decoder, "velocity_head", None)
+    if int(getattr(system.policy_config, "latent_cvae_arm_coeff_output", 0)):
+        arm_analysis = getattr(velocity_head, "arm_coeff_analysis", None)
+        if torch.is_tensor(arm_analysis) and arm_analysis.ndim == 2 and int(arm_analysis.numel()) > 0:
+            return arm_analysis.to(device=ref.device, dtype=ref.dtype)
     analysis = getattr(decoder, "trajectory_analysis", None)
     if not torch.is_tensor(analysis):
         return None

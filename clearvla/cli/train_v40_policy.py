@@ -193,6 +193,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-trajectory-mid-supervision", type=int, default=1)
     parser.add_argument("--latent-cvae-trajectory-update-scale", type=float, default=1.0)
     parser.add_argument("--latent-cvae-trajectory-context-scale", type=float, default=0.50)
+    parser.add_argument("--latent-cvae-arm-coeff-output", type=int, default=0, help="V55: emit arm velocity through an orthonormal coefficient head; does not constrain refine states.")
+    parser.add_argument("--latent-cvae-arm-coeff-points", type=int, default=8)
+    parser.add_argument("--latent-cvae-arm-coeff-basis", type=str, default="dct")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -437,6 +440,9 @@ def main() -> None:
         latent_cvae_trajectory_mid_supervision=args.latent_cvae_trajectory_mid_supervision,
         latent_cvae_trajectory_update_scale=args.latent_cvae_trajectory_update_scale,
         latent_cvae_trajectory_context_scale=args.latent_cvae_trajectory_context_scale,
+        latent_cvae_arm_coeff_output=args.latent_cvae_arm_coeff_output,
+        latent_cvae_arm_coeff_points=args.latent_cvae_arm_coeff_points,
+        latent_cvae_arm_coeff_basis=args.latent_cvae_arm_coeff_basis,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -550,6 +556,9 @@ def main() -> None:
             "latent_cvae_continuous_trajectory_denoise": bool(int(args.latent_cvae_trajectory_denoise)),
             "latent_cvae_trajectory_control_points": int(args.latent_cvae_trajectory_control_points),
             "latent_cvae_trajectory_mid_supervision": int(args.latent_cvae_trajectory_mid_supervision),
+            "latent_cvae_arm_coeff_output": bool(int(args.latent_cvae_arm_coeff_output)),
+            "latent_cvae_arm_coeff_points": int(args.latent_cvae_arm_coeff_points),
+            "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
@@ -614,6 +623,9 @@ def main() -> None:
             "latent_cvae_trajectory_mid_supervision": int(args.latent_cvae_trajectory_mid_supervision),
             "latent_cvae_trajectory_update_scale": float(args.latent_cvae_trajectory_update_scale),
             "latent_cvae_trajectory_context_scale": float(args.latent_cvae_trajectory_context_scale),
+            "latent_cvae_arm_coeff_output": int(args.latent_cvae_arm_coeff_output),
+            "latent_cvae_arm_coeff_points": int(args.latent_cvae_arm_coeff_points),
+            "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
             "latent_cvae_proposal_residual_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_coeff_weight) > 0),
             "latent_cvae_proposal_residual_mid_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_mid_coeff_weight) > 0),
             "latent_cvae_proposal_residual_arm_only": bool(int(args.latent_cvae_proposal_residual_arm_only)),
