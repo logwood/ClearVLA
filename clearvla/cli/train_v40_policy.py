@@ -193,9 +193,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-trajectory-mid-supervision", type=int, default=1)
     parser.add_argument("--latent-cvae-trajectory-update-scale", type=float, default=1.0)
     parser.add_argument("--latent-cvae-trajectory-context-scale", type=float, default=0.50)
-    parser.add_argument("--latent-cvae-arm-coeff-output", type=int, default=0, help="V55: emit arm velocity through an orthonormal coefficient head; does not constrain refine states.")
+    parser.add_argument("--latent-cvae-arm-coeff-output", type=int, default=0, help="V55/V56: emit arm velocity through an output-only coefficient head; does not constrain refine states.")
     parser.add_argument("--latent-cvae-arm-coeff-points", type=int, default=8)
     parser.add_argument("--latent-cvae-arm-coeff-basis", type=str, default="dct")
+    parser.add_argument("--latent-cvae-arm-coeff-degree", type=int, default=2)
+    parser.add_argument("--latent-cvae-arm-coeff-ridge", type=float, default=1e-2)
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -443,6 +445,8 @@ def main() -> None:
         latent_cvae_arm_coeff_output=args.latent_cvae_arm_coeff_output,
         latent_cvae_arm_coeff_points=args.latent_cvae_arm_coeff_points,
         latent_cvae_arm_coeff_basis=args.latent_cvae_arm_coeff_basis,
+        latent_cvae_arm_coeff_degree=args.latent_cvae_arm_coeff_degree,
+        latent_cvae_arm_coeff_ridge=args.latent_cvae_arm_coeff_ridge,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -559,6 +563,8 @@ def main() -> None:
             "latent_cvae_arm_coeff_output": bool(int(args.latent_cvae_arm_coeff_output)),
             "latent_cvae_arm_coeff_points": int(args.latent_cvae_arm_coeff_points),
             "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
+            "latent_cvae_arm_coeff_degree": int(args.latent_cvae_arm_coeff_degree),
+            "latent_cvae_arm_coeff_ridge": float(args.latent_cvae_arm_coeff_ridge),
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
@@ -626,6 +632,8 @@ def main() -> None:
             "latent_cvae_arm_coeff_output": int(args.latent_cvae_arm_coeff_output),
             "latent_cvae_arm_coeff_points": int(args.latent_cvae_arm_coeff_points),
             "latent_cvae_arm_coeff_basis": str(args.latent_cvae_arm_coeff_basis),
+            "latent_cvae_arm_coeff_degree": int(args.latent_cvae_arm_coeff_degree),
+            "latent_cvae_arm_coeff_ridge": float(args.latent_cvae_arm_coeff_ridge),
             "latent_cvae_proposal_residual_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_coeff_weight) > 0),
             "latent_cvae_proposal_residual_mid_coeff_supervision": bool(float(args.latent_cvae_proposal_residual_mid_coeff_weight) > 0),
             "latent_cvae_proposal_residual_arm_only": bool(int(args.latent_cvae_proposal_residual_arm_only)),

@@ -142,13 +142,16 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_trajectory_mid_supervision: int = 1
     latent_cvae_trajectory_update_scale: float = 1.0
     latent_cvae_trajectory_context_scale: float = 0.50
-    # V55: output-only arm coefficient head.  This keeps the recurrent denoise
-    # state in full action-token space and only writes the arm velocity through
-    # an orthonormal DCT basis at the final head.  It is not a smoothing loss
-    # and it does not project intermediate refine states.
+    # V55/V56: output-only arm coefficient head.  This keeps the recurrent
+    # denoise state in full action-token space and only writes the arm velocity
+    # through a final coefficient basis.  DCT is orthonormal; B-spline uses a
+    # ridge pseudo-inverse analysis operator.  It is not a smoothing loss and
+    # it does not project intermediate refine states.
     latent_cvae_arm_coeff_output: int = 0
     latent_cvae_arm_coeff_points: int = 8
     latent_cvae_arm_coeff_basis: str = "dct"
+    latent_cvae_arm_coeff_degree: int = 2
+    latent_cvae_arm_coeff_ridge: float = 1e-2
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -340,8 +343,12 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_arm_coeff_output must be 0 or 1")
         if int(self.latent_cvae_arm_coeff_points) < 1:
             raise ValueError("latent_cvae_arm_coeff_points must be >= 1")
-        if str(self.latent_cvae_arm_coeff_basis).lower() != "dct":
-            raise ValueError("latent_cvae_arm_coeff_basis currently supports only dct")
+        if str(self.latent_cvae_arm_coeff_basis).lower() not in {"dct", "bspline", "b-spline", "spline"}:
+            raise ValueError("latent_cvae_arm_coeff_basis currently supports dct or bspline")
+        if int(self.latent_cvae_arm_coeff_degree) < 0:
+            raise ValueError("latent_cvae_arm_coeff_degree must be >= 0")
+        if float(self.latent_cvae_arm_coeff_ridge) < 0:
+            raise ValueError("latent_cvae_arm_coeff_ridge must be non-negative")
         if str(self.final_action_decoder) != "adaptive_recurrent_cvae_action":
             raise ValueError("final_action_decoder must be adaptive_recurrent_cvae_action")
         if int(self.latent_cvae_z_dim) < 1:

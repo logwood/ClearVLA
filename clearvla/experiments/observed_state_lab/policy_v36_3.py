@@ -41,6 +41,90 @@ def _dct_action_basis(horizon: int, controls: int, *, device: torch.device | Non
     return torch.stack(cols, dim=-1)
 
 
+def _bspline_action_basis(
+    horizon: int,
+    controls: int,
+    *,
+    degree: int = 2,
+    device: torch.device | None = None,
+) -> Tensor:
+    """Return an open-uniform clamped B-spline basis [horizon, controls]."""
+
+    if horizon < 1 or controls < 1:
+        raise ValueError("B-spline action basis requires horizon >= 1 and controls >= 1")
+    controls = min(int(controls), int(horizon))
+    degree = min(max(int(degree), 0), controls - 1)
+    t = torch.linspace(0.0, 1.0, int(horizon), device=device, dtype=torch.float32)
+    # Evaluate the final sample from the left, then set the exact clamped
+    # endpoint after recursion.  This avoids zero-length terminal knot spans.
+    t_eval = t.clamp(max=1.0 - 1e-6)
+    interior = int(controls - degree - 1)
+    pieces = [
+        torch.zeros(degree + 1, device=device, dtype=torch.float32),
+    ]
+    if interior > 0:
+        pieces.append(torch.linspace(0.0, 1.0, interior + 2, device=device, dtype=torch.float32)[1:-1])
+    pieces.append(torch.ones(degree + 1, device=device, dtype=torch.float32))
+    knots = torch.cat(pieces)
+
+    basis = []
+    for idx in range(int(knots.numel()) - 1):
+        left = knots[idx]
+        right = knots[idx + 1]
+        basis.append(((t_eval >= left) & (t_eval < right)).to(dtype=torch.float32))
+    current = torch.stack(basis, dim=-1)
+
+    for order in range(1, degree + 1):
+        cols: list[Tensor] = []
+        for idx in range(int(current.shape[1]) - 1):
+            left_den = knots[idx + order] - knots[idx]
+            right_den = knots[idx + order + 1] - knots[idx + 1]
+            val = torch.zeros_like(t_eval)
+            if float(left_den) > 0.0:
+                val = val + ((t_eval - knots[idx]) / left_den) * current[:, idx]
+            if float(right_den) > 0.0:
+                val = val + ((knots[idx + order + 1] - t_eval) / right_den) * current[:, idx + 1]
+            cols.append(val)
+        current = torch.stack(cols, dim=-1)
+
+    current = current[:, :controls].clamp_min(0.0)
+    if int(horizon) > 0:
+        current[-1].zero_()
+        current[-1, -1] = 1.0
+    return current / current.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+
+def _ridge_basis_analysis(basis: Tensor, ridge: float = 0.0) -> Tensor:
+    """Return a stable [controls, horizon] analysis operator for a fixed basis."""
+
+    basis_f = basis.float()
+    ridge = max(float(ridge), 0.0)
+    if ridge == 0.0:
+        return torch.linalg.pinv(basis_f).to(dtype=basis.dtype)
+    gram = basis_f.transpose(0, 1) @ basis_f
+    eye = torch.eye(int(gram.shape[0]), device=basis.device, dtype=torch.float32)
+    return torch.linalg.solve(gram + ridge * eye, basis_f.transpose(0, 1)).to(dtype=basis.dtype)
+
+
+def _action_coeff_basis_and_analysis(
+    horizon: int,
+    controls: int,
+    *,
+    name: str,
+    degree: int = 2,
+    ridge: float = 0.0,
+    device: torch.device | None = None,
+) -> tuple[Tensor, Tensor]:
+    name = str(name).lower()
+    if name == "dct":
+        basis = _dct_action_basis(horizon, controls, device=device)
+        return basis, basis.transpose(0, 1).contiguous()
+    if name in {"bspline", "b-spline", "spline"}:
+        basis = _bspline_action_basis(horizon, controls, degree=degree, device=device)
+        return basis, _ridge_basis_analysis(basis, ridge=ridge).contiguous()
+    raise ValueError("latent_cvae_arm_coeff_basis currently supports 'dct' or 'bspline'")
+
+
 @dataclass(frozen=True)
 class V363PolicyConfig(V362PolicyConfig):
     """V36.3 policy config.
@@ -123,12 +207,18 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.arm_coeff_output = bool(int(getattr(config, "latent_cvae_arm_coeff_output", 0)))
         self.arm_coeff_points = max(1, min(int(getattr(config, "latent_cvae_arm_coeff_points", 8)), int(config.action_horizon)))
         self.arm_coeff_basis_name = str(getattr(config, "latent_cvae_arm_coeff_basis", "dct")).lower()
-        if self.arm_coeff_output and self.arm_coeff_basis_name != "dct":
-            raise ValueError("latent_cvae_arm_coeff_basis currently supports only 'dct'")
+        self.arm_coeff_degree = max(0, int(getattr(config, "latent_cvae_arm_coeff_degree", 2)))
+        self.arm_coeff_ridge = max(0.0, float(getattr(config, "latent_cvae_arm_coeff_ridge", getattr(config, "latent_cvae_trajectory_ridge", 1e-2))))
         if self.arm_coeff_output:
-            basis = _dct_action_basis(int(config.action_horizon), self.arm_coeff_points)
+            basis, analysis = _action_coeff_basis_and_analysis(
+                int(config.action_horizon),
+                self.arm_coeff_points,
+                name=self.arm_coeff_basis_name,
+                degree=self.arm_coeff_degree,
+                ridge=self.arm_coeff_ridge,
+            )
             self.register_buffer("arm_coeff_basis", basis, persistent=False)
-            self.register_buffer("arm_coeff_analysis", basis.transpose(0, 1).contiguous(), persistent=False)
+            self.register_buffer("arm_coeff_analysis", analysis, persistent=False)
         else:
             self.register_buffer("arm_coeff_basis", torch.empty(0), persistent=False)
             self.register_buffer("arm_coeff_analysis", torch.empty(0), persistent=False)
@@ -145,22 +235,36 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.grip_value = nn.Linear(h, 1)
         self.grip_delta = nn.Linear(h, 1)
 
-    def _arm_coeff_basis_for(self, tokens: Tensor) -> Tensor:
+    def _arm_coeff_basis_analysis_for(self, tokens: Tensor) -> tuple[Tensor, Tensor]:
         horizon = int(tokens.shape[1])
         if (
             self.arm_coeff_basis.ndim == 2
             and int(self.arm_coeff_basis.shape[0]) == horizon
             and int(self.arm_coeff_basis.shape[1]) == int(self.arm_coeff_points)
+            and self.arm_coeff_analysis.ndim == 2
+            and int(self.arm_coeff_analysis.shape[0]) == int(self.arm_coeff_points)
+            and int(self.arm_coeff_analysis.shape[1]) == horizon
         ):
-            return self.arm_coeff_basis.to(device=tokens.device, dtype=tokens.dtype)
+            return (
+                self.arm_coeff_basis.to(device=tokens.device, dtype=tokens.dtype),
+                self.arm_coeff_analysis.to(device=tokens.device, dtype=tokens.dtype),
+            )
         controls = min(int(self.arm_coeff_points), horizon)
-        return _dct_action_basis(horizon, controls, device=tokens.device).to(dtype=tokens.dtype)
+        basis, analysis = _action_coeff_basis_and_analysis(
+            horizon,
+            controls,
+            name=self.arm_coeff_basis_name,
+            degree=self.arm_coeff_degree,
+            ridge=self.arm_coeff_ridge,
+            device=tokens.device,
+        )
+        return basis.to(dtype=tokens.dtype), analysis.to(dtype=tokens.dtype)
 
     def _emit_arm(self, x: Tensor) -> tuple[Tensor, Tensor]:
         if not self.arm_coeff_output:
             return self.arm_abs(x), self.arm_delta(x)
-        basis = self._arm_coeff_basis_for(x)
-        coeff_tokens = torch.einsum("tc,bth->bch", basis, x)
+        basis, analysis = self._arm_coeff_basis_analysis_for(x)
+        coeff_tokens = torch.einsum("ct,bth->bch", analysis, x)
         arm_abs_coeff = self.arm_abs(coeff_tokens)
         arm_delta_coeff = self.arm_delta(coeff_tokens)
         arm_abs = torch.einsum("tc,bca->bta", basis, arm_abs_coeff)
