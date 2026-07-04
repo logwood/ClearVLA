@@ -1872,7 +1872,10 @@ def train_v39_policy(
                 row = _sync_loss_row(losses, grad=grad)
                 print(
                     f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
-                    f"pflow={row['physical_flow']:.6f} decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
+                    f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
+                    f"gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
+                    f"gfme={row.get('gripper_fm_event', 0.0):.5f} gfmh={row.get('gripper_fm_hold', 0.0):.5f} "
+                    f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
                     f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
                     f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
                     f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "

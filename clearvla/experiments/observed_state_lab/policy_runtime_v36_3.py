@@ -43,6 +43,9 @@ class V363PolicyTrainerConfig:
     event_loss_weight: float = 0.08
     event_positive_weight: float = 6.0
     event_focal_gamma: float = 1.0
+    gripper_fm_event_boost: float = 3.0
+    gripper_fm_value_weight: float = 1.0
+    gripper_fm_delta_weight: float = 1.5
     gripper_transition_l1_weight: float = 0.04
     smooth_delta_weight: float = 0.02
     decoded_action_loss_weight: float = 0.04
@@ -170,16 +173,41 @@ def flow_losses(
     cfg = system.policy_config
     device = output["pred_physical_velocity"].device
     weight = position_weights(cfg, trainer, device)
-    physical_error = (output["pred_physical_velocity"] - output["target_physical_velocity"]).square().mean(dim=-1)
-    flow = (physical_error * weight[None]).mean()
-    proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
-
     labels = gripper_event_labels(
         target_raw=sample["policy_action_raw"].to(device=device),
         current_raw=sample["state_raw"].to(device=device),
         gripper_index=cfg.gripper_index,
         threshold=trainer.gripper_event_threshold,
     )
+    velocity_error = (output["pred_physical_velocity"] - output["target_physical_velocity"]).square()
+    uniform_physical_error = velocity_error.mean(dim=-1)
+
+    # Flow matching stays on the existing velocity branch, but the metric is a
+    # two-field metric: ordinary typed velocity everywhere, plus an event-aware
+    # gripper field on the existing gripper value/delta coordinates.  This keeps
+    # gripper supervision inside the main FM path instead of adding another head.
+    ad = int(cfg.arm_dim)
+    grip_value_index = 2 * ad
+    grip_delta_index = 2 * ad + 1
+    dim_weight = torch.ones((int(velocity_error.shape[-1]),), device=device, dtype=velocity_error.dtype)
+    dim_weight[grip_value_index] = max(float(trainer.gripper_fm_value_weight), 0.0)
+    dim_weight[grip_delta_index] = max(float(trainer.gripper_fm_delta_weight), 0.0)
+    physical_error = (velocity_error * dim_weight[None, None]).sum(dim=-1) / dim_weight.sum().clamp_min(1e-6)
+    transition_mask = (labels != 0).to(dtype=physical_error.dtype, device=device)
+    event_boost = max(float(trainer.gripper_fm_event_boost), 0.0)
+    flow_weight = weight.to(dtype=physical_error.dtype)[None] * (1.0 + event_boost * transition_mask)
+    flow = (physical_error * flow_weight).sum() / flow_weight.sum().clamp_min(1.0)
+    uniform_flow = (uniform_physical_error * weight.to(dtype=uniform_physical_error.dtype)[None]).mean()
+    grip_value_flow = (velocity_error[..., grip_value_index] * flow_weight).sum() / flow_weight.sum().clamp_min(1.0)
+    grip_delta_flow = (velocity_error[..., grip_delta_index] * flow_weight).sum() / flow_weight.sum().clamp_min(1.0)
+    event_denom = (transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
+    hold_mask_for_flow = (1.0 - transition_mask).to(dtype=physical_error.dtype)
+    hold_denom = (hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
+    gripper_pair_error = 0.5 * (velocity_error[..., grip_value_index] + velocity_error[..., grip_delta_index])
+    gripper_event_flow = (gripper_pair_error * transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum() / event_denom
+    gripper_hold_flow = (gripper_pair_error * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum() / hold_denom
+    proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
+
     flat_labels = labels.reshape(-1)
     flat_logits = output["event_logits"].reshape(-1, 3)
     event_weights = torch.ones_like(flat_labels, dtype=flat_logits.dtype)
@@ -194,7 +222,7 @@ def flow_losses(
     )
     motion = F.binary_cross_entropy_with_logits(output["motion_logits"].float(), motion_target.float())
 
-    transition_mask = (labels != 0).to(output["pred_action_estimate"].dtype)
+    transition_mask = transition_mask.to(output["pred_action_estimate"].dtype)
     grip_idx = cfg.gripper_index
     pred_g = output["pred_action_estimate"][..., grip_idx]
     target_g = sample["policy_action"].to(device=device)[..., grip_idx]
@@ -213,7 +241,6 @@ def flow_losses(
     # V36.3 latent-coupling losses.  These losses supervise the existing final
     # decoded action and the existing typed velocity tensor; they do not create
     # a separate gripper command path.
-    ad = cfg.arm_dim
     grip_phys = slice(2 * ad, 2 * ad + 2)
     grip_velocity_error = (
         output["pred_physical_velocity"][..., grip_phys] - output["target_physical_velocity"][..., grip_phys]
@@ -275,6 +302,13 @@ def flow_losses(
     return {
         "loss": total,
         "physical_flow": flow,
+        "physical_flow_uniform": uniform_flow,
+        "gripper_fm_value": grip_value_flow,
+        "gripper_fm_delta": grip_delta_flow,
+        "gripper_fm_event": gripper_event_flow,
+        "gripper_fm_hold": gripper_hold_flow,
+        "gripper_fm_event_rate": transition_mask.float().mean(),
+        "gripper_fm_weight_mean": flow_weight.detach().float().mean(),
         "proposal": proposal,
         "event": event,
         "motion": motion,
