@@ -126,6 +126,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer-high-latent-weight", type=float, default=1.0, help="V40: latent gain at the deepest layer.")
     parser.add_argument("--layer-causal-event-from-effect", type=int, default=1, help="V40: read event logits from causal effect tokens in layer contracts.")
     parser.add_argument("--layer-state-counterfactual", type=int, default=0, help="Experimental non-strict state/frame shuffle diagnostic; disabled by default and excluded from the recommended training path.")
+    parser.add_argument("--action-consequence-self-condition", type=int, default=0, help="Use a no-grad deployable clean-action preview as the layer consequence action input.")
+    parser.add_argument("--layer-zero-base-diagnostic", type=int, default=0, help="Log consequence-output shift when layer rollout tokens are zeroed; diagnostic only, no loss.")
     parser.add_argument("--proposal-depth", type=int, default=2)
     parser.add_argument("--proposal-dropout", type=float, default=0.25)
     parser.add_argument("--dropout", type=float, default=0.05)
@@ -193,6 +195,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-mu-bound", type=float, default=1.5)
     parser.add_argument("--latent-cvae-min-std", type=float, default=0.5)
     parser.add_argument("--latent-cvae-causal-attention", type=int, default=1)
+    parser.add_argument("--latent-cvae-noisy-gate", type=int, default=0, help="t-gate the direct noisy-action branch of the CVAE decoder.")
+    parser.add_argument("--latent-cvae-noisy-gate-min", type=float, default=0.05)
+    parser.add_argument("--latent-cvae-noisy-gate-power", type=float, default=1.5)
+    parser.add_argument("--latent-cvae-layer-scan", type=int, default=0, help="Use a recurrent scan over ordered layer summaries as the CVAE condition.")
+    parser.add_argument("--latent-cvae-layer-scan-alpha", type=float, default=0.2, help="Residual weight for the flat lateral layer condition when layer scan is enabled.")
+    parser.add_argument("--latent-cvae-mmdit-decoder", type=int, default=0, help="Use the MMDiT-lite CVAE action-condition token decoder.")
+    parser.add_argument("--latent-cvae-mmdit-depth", type=int, default=3)
+    parser.add_argument("--latent-cvae-mmdit-cond-update", type=int, default=0, help="Allow condition tokens to update inside the MMDiT-lite decoder.")
+    parser.add_argument("--latent-cvae-mmdit-noisy-causal", type=int, default=1, help="Mask future noisy-action condition tokens for action queries.")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -394,6 +405,8 @@ def main() -> None:
         layer_high_latent_weight=args.layer_high_latent_weight,
         layer_causal_event_from_effect=args.layer_causal_event_from_effect,
         layer_state_counterfactual=args.layer_state_counterfactual,
+        action_consequence_self_condition=args.action_consequence_self_condition,
+        layer_zero_base_diagnostic=args.layer_zero_base_diagnostic,
         final_action_decoder=args.final_action_decoder,
         action_flow_residual_depth=args.action_flow_residual_depth,
         action_flow_residual_high_slots=args.action_flow_residual_high_slots,
@@ -438,6 +451,15 @@ def main() -> None:
         latent_cvae_mu_bound=args.latent_cvae_mu_bound,
         latent_cvae_min_std=args.latent_cvae_min_std,
         latent_cvae_causal_attention=args.latent_cvae_causal_attention,
+        latent_cvae_noisy_gate=args.latent_cvae_noisy_gate,
+        latent_cvae_noisy_gate_min=args.latent_cvae_noisy_gate_min,
+        latent_cvae_noisy_gate_power=args.latent_cvae_noisy_gate_power,
+        latent_cvae_layer_scan=args.latent_cvae_layer_scan,
+        latent_cvae_layer_scan_alpha=args.latent_cvae_layer_scan_alpha,
+        latent_cvae_mmdit_decoder=args.latent_cvae_mmdit_decoder,
+        latent_cvae_mmdit_depth=args.latent_cvae_mmdit_depth,
+        latent_cvae_mmdit_cond_update=args.latent_cvae_mmdit_cond_update,
+        latent_cvae_mmdit_noisy_causal=args.latent_cvae_mmdit_noisy_causal,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -543,6 +565,10 @@ def main() -> None:
             "latent_cvae_single_final_path": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
             "latent_cvae_no_legacy_velocity_base": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
+            "latent_cvae_mmdit_decoder": bool(int(args.latent_cvae_mmdit_decoder)),
+            "latent_cvae_mmdit_no_direct_noisy_residual": bool(int(args.latent_cvae_mmdit_decoder)),
+            "latent_cvae_mmdit_condition_update": bool(int(args.latent_cvae_mmdit_cond_update)),
+            "latent_cvae_mmdit_noisy_causal": bool(int(args.latent_cvae_mmdit_noisy_causal)),
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
             "adaptive_cvae_progress_steps": int(args.adaptive_cvae_progress_steps),
@@ -604,6 +630,15 @@ def main() -> None:
             "latent_cvae_mu_bound": float(args.latent_cvae_mu_bound),
             "latent_cvae_min_std": float(args.latent_cvae_min_std),
             "latent_cvae_causal_attention": int(args.latent_cvae_causal_attention),
+            "latent_cvae_noisy_gate": int(args.latent_cvae_noisy_gate),
+            "latent_cvae_noisy_gate_min": float(args.latent_cvae_noisy_gate_min),
+            "latent_cvae_noisy_gate_power": float(args.latent_cvae_noisy_gate_power),
+            "latent_cvae_layer_scan": int(args.latent_cvae_layer_scan),
+            "latent_cvae_layer_scan_alpha": float(args.latent_cvae_layer_scan_alpha),
+            "latent_cvae_mmdit_decoder": int(args.latent_cvae_mmdit_decoder),
+            "latent_cvae_mmdit_depth": int(args.latent_cvae_mmdit_depth),
+            "latent_cvae_mmdit_cond_update": int(args.latent_cvae_mmdit_cond_update),
+            "latent_cvae_mmdit_noisy_causal": int(args.latent_cvae_mmdit_noisy_causal),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
             "latent_action_visual_memory": int(args.latent_action_visual_memory),
@@ -631,6 +666,8 @@ def main() -> None:
             "v40_context_fusion_at_zero_feedback_depth": True,
             "v40_milestone_anchor_alignment": "required_equal",
             "v40_state_counterfactual_enabled": bool(args.layer_state_counterfactual),
+            "action_consequence_self_condition": bool(args.action_consequence_self_condition),
+            "layer_zero_base_diagnostic": bool(args.layer_zero_base_diagnostic),
             "v40_hard_action_negative": "within_batch_farthest_action",
             "v39_3_consequence_steps": int(args.layer_consequence_steps),
             "v40_causal_feedback_depth": int(args.layer_causal_feedback_depth),

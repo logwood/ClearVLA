@@ -911,10 +911,15 @@ def flow_losses(
         "latent_cvae_post_pred_norm",
         "latent_cvae_post_gripper_gate_mean",
         "latent_cvae_condition_norm",
+        "latent_cvae_condition_scan_norm",
+        "latent_cvae_condition_lateral_norm",
         "latent_cvae_posterior_used",
         "latent_cvae_gripper_gate_mean",
         "latent_cvae_layer_memory_count",
         "latent_cvae_adaptive_refine_update_mean",
+        "latent_cvae_adaptive_noisy_gate_mean",
+        "latent_cvae_adaptive_noisy_branch_norm",
+        "latent_cvae_adaptive_noisy_branch_ratio",
         "latent_cvae_adaptive_route_entropy",
         "latent_cvae_adaptive_route_max",
         "latent_cvae_adaptive_route_effective_slots",
@@ -936,6 +941,11 @@ def flow_losses(
         "latent_cvae_adaptive_capsule_layer_entropy",
         "latent_cvae_adaptive_capsule_layer_max",
         "latent_cvae_adaptive_capsule_layer_effective_slots",
+        "latent_cvae_adaptive_condition_strength_mean",
+        "latent_cvae_adaptive_condition_strength_std",
+        "latent_cvae_adaptive_condition_strength_max",
+        "latent_cvae_adaptive_condition_strength_min",
+        "latent_cvae_adaptive_condition_residual_norm",
         "latent_cvae_adaptive_context_direction_norm",
         "latent_cvae_adaptive_micro_step_mean",
         "latent_cvae_adaptive_micro_step_std",
@@ -955,6 +965,17 @@ def flow_losses(
         "latent_cvae_adaptive_regularizer_weight",
         "latent_cvae_adaptive_route_entropy_regularizer",
         "latent_cvae_adaptive_route_entropy_weight",
+        "latent_cvae_mmdit_action_update_norm",
+        "latent_cvae_mmdit_cond_update_norm",
+        "latent_cvae_mmdit_action_cond_attention",
+        "latent_cvae_mmdit_action_noisy_attention",
+        "latent_cvae_mmdit_action_token_norm",
+        "latent_cvae_mmdit_condition_token_norm",
+        "latent_cvae_mmdit_noisy_token_norm",
+        "consequence_self_condition",
+        "consequence_self_condition_target_mse",
+        "consequence_self_condition_noisy_mse",
+        "consequence_preview_flow",
     ):
         if key in output:
             losses[key] = output[key].detach().float()
@@ -1218,6 +1239,8 @@ def layer_contract_losses(
         ):
             if key in merged:
                 log_rows[f"layer{i}_{key}"] = merged[key].detach()
+        if "consequence_zero_base_shift" in entry:
+            log_rows[f"layer{i}_czbase"] = entry["consequence_zero_base_shift"].detach()
     assert total is not None
     denom = max(weight_sum, 1e-6)
     contract = total / denom
@@ -1232,6 +1255,13 @@ def layer_contract_losses(
         "layer_norm_weight": torch.as_tensor(w_norm, device=contract.device, dtype=contract.dtype),
         "layer_delta_match_weight": torch.as_tensor(w_delta_match, device=contract.device, dtype=contract.dtype),
     }
+    zero_base = [
+        entry["consequence_zero_base_shift"]
+        for entry in layers
+        if torch.is_tensor(entry.get("consequence_zero_base_shift"))
+    ]
+    if zero_base:
+        out["consequence_zero_base_shift"] = torch.stack(zero_base).mean()
     for key, value in metric_acc.items():
         out[key] = value / denom
     out.update(log_rows)
@@ -1856,7 +1886,12 @@ def train_v39_policy(
                     f"cstd={row.get('latent_cvae_prior_std', 0.0):.3f} "
                     f"cgate={row.get('latent_cvae_gripper_gate_mean', 0.0):.3f} "
                     f"clmem={row.get('latent_cvae_layer_memory_count', 0.0):.1f} "
+                    f"cscan={row.get('latent_cvae_condition_scan_norm', 0.0):.2f} "
+                    f"clat={row.get('latent_cvae_condition_lateral_norm', 0.0):.2f} "
                     f"cadu={row.get('latent_cvae_adaptive_refine_update_mean', 0.0):.3f} "
+                    f"cxgate={row.get('latent_cvae_adaptive_noisy_gate_mean', 0.0):.3f} "
+                    f"xnorm={row.get('latent_cvae_adaptive_noisy_branch_norm', 0.0):.3f} "
+                    f"xratio={row.get('latent_cvae_adaptive_noisy_branch_ratio', 0.0):.3f} "
                     f"crmax={row.get('latent_cvae_adaptive_route_max', 0.0):.3f} "
                     f"crent={row.get('latent_cvae_adaptive_route_entropy', 0.0):.3f} "
                     f"creff={row.get('latent_cvae_adaptive_route_effective_slots', 0.0):.2f} "
@@ -1874,6 +1909,15 @@ def train_v39_policy(
                     f"cstep={row.get('latent_cvae_adaptive_refine_step_bias_norm', 0.0):.3f} "
                     f"ccmax={row.get('latent_cvae_adaptive_capsule_layer_max', 0.0):.3f} "
                     f"ccleff={row.get('latent_cvae_adaptive_capsule_layer_effective_slots', 0.0):.2f} "
+                    f"cstr={row.get('latent_cvae_adaptive_condition_strength_mean', 0.0):.3f} "
+                    f"ccond={row.get('latent_cvae_adaptive_condition_residual_norm', 0.0):.3f} "
+                    f"mdu={row.get('latent_cvae_mmdit_action_update_norm', 0.0):.3f} "
+                    f"mdcu={row.get('latent_cvae_mmdit_cond_update_norm', 0.0):.3f} "
+                    f"mdca={row.get('latent_cvae_mmdit_action_cond_attention', 0.0):.3f} "
+                    f"mdna={row.get('latent_cvae_mmdit_action_noisy_attention', 0.0):.3f} "
+                    f"mdat={row.get('latent_cvae_mmdit_action_token_norm', 0.0):.2f} "
+                    f"mdct={row.get('latent_cvae_mmdit_condition_token_norm', 0.0):.2f} "
+                    f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
                     f"cmds={row.get('latent_cvae_adaptive_micro_step_mean', 0.0):.3f} "
                     f"cmprog={row.get('latent_cvae_adaptive_micro_progress_mean', 0.0):.3f} "
                     f"cmkp={row.get('latent_cvae_adaptive_micro_kp_mean', 0.0):.3f} "
@@ -1898,6 +1942,11 @@ def train_v39_policy(
                     f"cmtail={row.get('latent_cvae_micro_coverage_tail_mass', 0.0):.3f} "
                     f"careg={row.get('latent_cvae_adaptive_regularizer', 0.0):.4f} "
                     f"carent={row.get('latent_cvae_adaptive_route_entropy_regularizer', 0.0):.4f} "
+                    f"czbase={row.get('consequence_zero_base_shift', 0.0):.3f} "
+                    f"csc={row.get('consequence_self_condition', 0.0):.0f} "
+                    f"cscmse={row.get('consequence_self_condition_target_mse', 0.0):.4f} "
+                    f"cscnmse={row.get('consequence_self_condition_noisy_mse', 0.0):.4f} "
+                    f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
                     f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
                     f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
                     f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",

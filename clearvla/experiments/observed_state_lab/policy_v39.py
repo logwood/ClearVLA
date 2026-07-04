@@ -97,6 +97,13 @@ class V39PolicyConfig(V38PolicyConfig):
     # canvas tokens that may already contain action information, so it is not a
     # strict same-action/different-state intervention.
     layer_state_counterfactual: int = 0
+    # Optional consequence-cell input cleanup.  When enabled, a no-grad preview
+    # denoising pass supplies a deployable clean-action estimate to the
+    # consequence cell instead of the label-derived noisy bridge state.
+    action_consequence_self_condition: int = 0
+    # Loss-free shortcut diagnostic: rerun each consequence cell with rollout
+    # tokens zeroed and log how much its output shifts.
+    layer_zero_base_diagnostic: int = 0
 
     # Optional final decoder used only in policy-stage experiments.  The safe
     # variants keep the warm-started V40.1 legacy velocity head as the base
@@ -169,6 +176,25 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_mu_bound: float = 1.5
     latent_cvae_min_std: float = 0.5
     latent_cvae_causal_attention: int = 1
+    # V53-A1: suppress the direct x_t/noisy-action branch near low flow time,
+    # where x_t is close to the answer and can become a cheap denoising shortcut.
+    latent_cvae_noisy_gate: int = 0
+    latent_cvae_noisy_gate_min: float = 0.05
+    latent_cvae_noisy_gate_power: float = 1.5
+    # V53-B1: recurrent scan over ordered per-layer summaries.  This keeps
+    # layer-depth information as a sequence instead of flattening all layer
+    # summaries into one hypercolumn condition.
+    latent_cvae_layer_scan: int = 0
+    latent_cvae_layer_scan_alpha: float = 0.2
+    # V60: MMDiT-lite bottom decoder.  The CVAE prior/posterior contract stays
+    # intact, but the final action tokens read layer/trajectory/noisy/progress
+    # tokens through a compact joint-attention mixer.  Noisy action is kept out
+    # of the action residual stream by default, so the velocity head cannot use
+    # a pure x_t -> output linear shortcut.
+    latent_cvae_mmdit_decoder: int = 0
+    latent_cvae_mmdit_depth: int = 3
+    latent_cvae_mmdit_cond_update: int = 0
+    latent_cvae_mmdit_noisy_causal: int = 1
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -269,6 +295,10 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("layer_causal_event_from_effect must be 0 or 1")
         if int(self.layer_state_counterfactual) not in (0, 1):
             raise ValueError("layer_state_counterfactual must be 0 or 1")
+        if int(self.action_consequence_self_condition) not in (0, 1):
+            raise ValueError("action_consequence_self_condition must be 0 or 1")
+        if int(self.layer_zero_base_diagnostic) not in (0, 1):
+            raise ValueError("layer_zero_base_diagnostic must be 0 or 1")
         if str(self.final_action_decoder) not in {"legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"}:
             raise ValueError("final_action_decoder must be legacy, residual_action_flow, layered_residual_action_flow, latent_main_action, latent_cvae_action, or adaptive_recurrent_cvae_action")
         if int(self.action_flow_residual_depth) < 1:
@@ -325,10 +355,13 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_layer_memory", "latent_cvae_transition_memory",
             "latent_cvae_transition_detach", "latent_cvae_context_memory", "latent_cvae_visual_memory",
             "latent_cvae_layer_detach", "latent_cvae_event_gripper_gate",
-            "latent_cvae_inference_sample",
+            "latent_cvae_inference_sample", "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
+            "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
         ):
             if int(getattr(self, name)) not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
+        if int(self.latent_cvae_mmdit_depth) < 1:
+            raise ValueError("latent_cvae_mmdit_depth must be >= 1")
         if str(self.final_action_decoder) == "latent_cvae_action":
             if int(self.latent_cvae_layer_memory) and not int(self.layer_contract_adapters):
                 raise ValueError("latent_cvae_action with latent_cvae_layer_memory=1 requires layer_contract_adapters=1")
@@ -364,6 +397,12 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_min_std must be non-negative")
         if int(self.latent_cvae_causal_attention) not in (0, 1):
             raise ValueError("latent_cvae_causal_attention must be 0 or 1")
+        if not (0.0 <= float(self.latent_cvae_noisy_gate_min) <= 1.0):
+            raise ValueError("latent_cvae_noisy_gate_min must be in [0, 1]")
+        if float(self.latent_cvae_noisy_gate_power) <= 0:
+            raise ValueError("latent_cvae_noisy_gate_power must be positive")
+        if float(self.latent_cvae_layer_scan_alpha) < 0:
+            raise ValueError("latent_cvae_layer_scan_alpha must be non-negative")
         if not (0.0 <= float(self.latent_cvae_layer_grad_scale) <= 1.0):
             raise ValueError("latent_cvae_layer_grad_scale must be in [0, 1]")
         if int(self.adaptive_cvae_route_cosine) not in (0, 1):
@@ -1378,7 +1417,7 @@ class LayeredV37StyleResidualActionFlowDenoiser(nn.Module):
         transition_memory: Tensor | None,
         visual_memory: Tensor | None,
         layer_memories: list[Tensor],
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         cfg = self.config
         parts: list[Tensor] = []
         if stage_index == 0 and int(getattr(cfg, "action_flow_residual_context_memory", 1)):
@@ -1691,7 +1730,7 @@ class HierarchicalLatentMainActionDecoder(nn.Module):
         visual_memory: Tensor | None,
         layer_memories: list[Tensor],
         all_layer_summary: Tensor | None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         cfg = self.config
         parts: list[Tensor] = []
         ref: Tensor | None = None
@@ -1893,6 +1932,137 @@ class LatentCVAEActionBlock(nn.Module):
         x = x + torch.tanh(sa_g)[:, None] * self.drop(update)
         update = self.ffn(self._modulate(self.n2(x), ff_s, ff_c))
         return x + torch.tanh(ff_g)[:, None] * self.drop(update)
+
+
+class LatentCVAEMMDiTBlock(nn.Module):
+    """Compact MMDiT-style mixer for CVAE action tokens.
+
+    Action tokens and condition tokens use separate QKV/O and MLP parameters,
+    then action queries attend over the concatenated action+condition keys.
+    The condition stream is read-only by default to avoid action information
+    being written into condition tokens and returning as a shortcut.
+    """
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        self.config = config
+        h = int(config.hidden_size)
+        heads = int(config.num_heads)
+        if h % heads != 0:
+            raise ValueError("hidden_size must be divisible by num_heads for LatentCVAEMMDiTBlock")
+        self.hidden_size = h
+        self.heads = heads
+        self.head_dim = h // heads
+        self.action_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.cond_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.action_qkv = nn.Linear(h, 3 * h)
+        self.cond_qkv = nn.Linear(h, 3 * h)
+        self.action_out = nn.Linear(h, h)
+        self.cond_out = nn.Linear(h, h)
+        self.action_ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.cond_ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.action_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        self.cond_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        self.action_mod = nn.Linear(h, 6 * h)
+        self.cond_mod = nn.Linear(h, 6 * h)
+        self.drop = nn.Dropout(float(config.dropout))
+        nn.init.zeros_(self.action_mod.weight)
+        nn.init.zeros_(self.action_mod.bias)
+        nn.init.zeros_(self.cond_mod.weight)
+        nn.init.zeros_(self.cond_mod.bias)
+
+    @staticmethod
+    def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        return x * (1.0 + scale[:, None]) + shift[:, None]
+
+    def _split_heads(self, x: Tensor) -> Tensor:
+        b, n, h = x.shape
+        return x.reshape(b, n, self.heads, h // self.heads).transpose(1, 2)
+
+    def _merge_heads(self, x: Tensor) -> Tensor:
+        b, heads, n, d = x.shape
+        return x.transpose(1, 2).reshape(b, n, heads * d)
+
+    @staticmethod
+    def _attention(q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = None) -> tuple[Tensor, Tensor]:
+        scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (float(q.shape[-1]) ** -0.5)
+        if mask is not None:
+            scores = scores.masked_fill(mask[None, None], torch.finfo(scores.dtype).min)
+        weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
+        return torch.matmul(weights, v), weights
+
+    def _action_mask(self, action_len: int, cond_len: int, noisy_start: int, noisy_len: int, device: torch.device) -> Tensor | None:
+        if not int(getattr(self.config, "latent_cvae_causal_attention", 1)):
+            return None
+        total = action_len + cond_len
+        mask = torch.zeros(action_len, total, device=device, dtype=torch.bool)
+        future_action = torch.triu(torch.ones(action_len, action_len, device=device, dtype=torch.bool), diagonal=1)
+        mask[:, :action_len] = future_action
+        if int(getattr(self.config, "latent_cvae_mmdit_noisy_causal", 1)) and noisy_len > 0:
+            horizon = torch.arange(action_len, device=device)[:, None]
+            noisy_pos = torch.arange(noisy_len, device=device)[None]
+            future_noisy = noisy_pos > horizon
+            start = action_len + int(noisy_start)
+            stop = min(start + noisy_len, total)
+            if start < stop:
+                mask[:, start:stop] = future_noisy[:, : stop - start]
+        return mask
+
+    def forward(
+        self,
+        action: Tensor,
+        cond_tokens: Tensor,
+        global_cond: Tensor,
+        *,
+        noisy_start: int,
+        noisy_len: int,
+        update_condition: bool,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        action_before = action
+        cond_before = cond_tokens
+        a_sa_s, a_sa_c, a_sa_g, a_ff_s, a_ff_c, a_ff_g = self.action_mod(global_cond).chunk(6, dim=-1)
+        c_sa_s, c_sa_c, c_sa_g, c_ff_s, c_ff_c, c_ff_g = self.cond_mod(global_cond).chunk(6, dim=-1)
+
+        a_value = self.action_norm(action)
+        c_value = self.cond_norm(cond_tokens)
+        a_qkv = self.action_qkv(self._modulate(a_value, a_sa_s, a_sa_c)).chunk(3, dim=-1)
+        c_qkv = self.cond_qkv(self._modulate(c_value, c_sa_s, c_sa_c)).chunk(3, dim=-1)
+        aq, ak, av = (self._split_heads(part) for part in a_qkv)
+        cq, ck, cv = (self._split_heads(part) for part in c_qkv)
+        k_all = torch.cat([ak, ck], dim=2)
+        v_all = torch.cat([av, cv], dim=2)
+        mask = self._action_mask(int(action.shape[1]), int(cond_tokens.shape[1]), int(noisy_start), int(noisy_len), action.device)
+        action_attn, weights = self._attention(aq, k_all, v_all, mask)
+        action = action + torch.tanh(a_sa_g)[:, None] * self.drop(self.action_out(self._merge_heads(action_attn)))
+        action = action + torch.tanh(a_ff_g)[:, None] * self.drop(
+            self.action_ffn(self._modulate(self.action_ffn_norm(action), a_ff_s, a_ff_c))
+        )
+
+        cond_update_norm = torch.zeros((), device=action.device, dtype=torch.float32)
+        if update_condition:
+            cond_attn, _ = self._attention(cq, ck, cv, None)
+            cond_tokens = cond_tokens + torch.tanh(c_sa_g)[:, None] * self.drop(self.cond_out(self._merge_heads(cond_attn)))
+            cond_tokens = cond_tokens + torch.tanh(c_ff_g)[:, None] * self.drop(
+                self.cond_ffn(self._modulate(self.cond_ffn_norm(cond_tokens), c_ff_s, c_ff_c))
+            )
+            cond_update_norm = (cond_tokens - cond_before).detach().float().norm(dim=-1).mean()
+
+        action_len = int(action_before.shape[1])
+        cond_start = action_len
+        noisy_abs_start = cond_start + int(noisy_start)
+        noisy_abs_stop = min(noisy_abs_start + int(noisy_len), int(weights.shape[-1]))
+        cond_mass = weights[..., cond_start:].detach().float().sum(dim=-1).mean()
+        if noisy_abs_start < noisy_abs_stop:
+            noisy_mass = weights[..., noisy_abs_start:noisy_abs_stop].detach().float().sum(dim=-1).mean()
+        else:
+            noisy_mass = torch.zeros((), device=action.device, dtype=torch.float32)
+        metrics = {
+            "action_update_norm": (action - action_before).detach().float().norm(dim=-1).mean(),
+            "cond_update_norm": cond_update_norm,
+            "action_cond_attn": cond_mass,
+            "action_noisy_attn": noisy_mass,
+        }
+        return action, cond_tokens, metrics
 
 
 class AdaptiveRecurrentCVAERefinementBlock(nn.Module):
@@ -2227,6 +2397,14 @@ class LatentCVAEActionDecoder(nn.Module):
         self.traj_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
         cond_in = int(config.depth) * h + 4 * h
         self.condition_fusion = nn.Sequential(nn.LayerNorm(cond_in), nn.Linear(cond_in, h), nn.SiLU(), nn.Linear(h, h))
+        if int(getattr(config, "latent_cvae_layer_scan", 0)):
+            self.layer_scan = nn.GRUCell(h, h)
+            self.layer_scan_init = nn.Parameter(torch.zeros(1, h))
+            self.layer_scan_fusion = nn.Sequential(nn.LayerNorm(5 * h), nn.Linear(5 * h, h), nn.SiLU(), nn.Linear(h, h))
+        else:
+            self.layer_scan = None
+            self.layer_scan_init = None
+            self.layer_scan_fusion = None
         self.prior = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, 2 * self.z_dim))
         self.posterior_action = nn.Sequential(
             nn.LayerNorm(int(config.physical_action_dim)),
@@ -2237,6 +2415,25 @@ class LatentCVAEActionDecoder(nn.Module):
         self.posterior = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, 2 * self.z_dim))
         self.z_to_token = nn.Sequential(nn.LayerNorm(self.z_dim), nn.Linear(self.z_dim, h))
         self.blocks = nn.ModuleList([LatentCVAEActionBlock(config) for _ in range(self.depth)])
+        if int(getattr(config, "latent_cvae_mmdit_decoder", 0)):
+            mmdit_depth = int(getattr(config, "latent_cvae_mmdit_depth", self.depth))
+            self.mmdit_blocks = nn.ModuleList([LatentCVAEMMDiTBlock(config) for _ in range(mmdit_depth)])
+            self.mmdit_traj_cond_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            self.mmdit_cond_global_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            self.mmdit_z_global_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            self.mmdit_progress_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            self.mmdit_step_cond_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            self.mmdit_type_embed = nn.Parameter(torch.randn(1, 6, h) * 0.02)
+            self.mmdit_action_norm = nn.LayerNorm(h)
+        else:
+            self.mmdit_blocks = nn.ModuleList()
+            self.mmdit_traj_cond_proj = None
+            self.mmdit_cond_global_proj = None
+            self.mmdit_z_global_proj = None
+            self.mmdit_progress_proj = None
+            self.mmdit_step_cond_proj = None
+            self.mmdit_type_embed = None
+            self.mmdit_action_norm = None
         self.event_gate = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.Sigmoid())
         self.event_transition = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
         self.velocity_head = TransitionAwarePhysicalVelocityHead(config)
@@ -2350,6 +2547,145 @@ class LatentCVAEActionDecoder(nn.Module):
             "gripper_gate_mean": gate.detach().float().mean(),
         }
 
+    def _noisy_time_gate(self, time: Tensor) -> Tensor | None:
+        if not int(getattr(self.config, "latent_cvae_noisy_gate", 0)):
+            return None
+        min_gate = float(getattr(self.config, "latent_cvae_noisy_gate_min", 0.05))
+        power = float(getattr(self.config, "latent_cvae_noisy_gate_power", 1.5))
+        t = time.float().clamp(0.0, 1.0)
+        return (min_gate + (1.0 - min_gate) * t.pow(power))[:, None, None]
+
+    def _gated_noisy_branch(self, noisy_physical: Tensor, time: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        branch = self.noisy_action_lift(noisy_physical)
+        gate = self._noisy_time_gate(time)
+        if gate is None:
+            gate_mean = torch.ones((), device=branch.device, dtype=torch.float32)
+        else:
+            branch = branch * gate.to(device=branch.device, dtype=branch.dtype)
+            gate_mean = gate.detach().float().mean()
+        return branch, gate_mean, branch.detach().float().norm(dim=-1).mean()
+
+    def _mmdit_progress_tokens(self, *, batch: int, cond_time: Tensor, z: Tensor) -> Tensor | None:
+        progress_fn = getattr(self, "_latent_progress", None)
+        if not callable(progress_fn):
+            return None
+        if not int(getattr(self.config, "adaptive_cvae_progress_memory", 0)):
+            return None
+        return progress_fn(batch=batch, cond_time=cond_time, z=z)
+
+    def _mmdit_condition_tokens(
+        self,
+        *,
+        noisy_tokens: Tensor,
+        trajectory_tokens: Tensor,
+        cond_time: Tensor,
+        z_token: Tensor,
+        layer_stack: Tensor | None,
+        progress_tokens: Tensor | None,
+    ) -> tuple[Tensor, int, int, Tensor]:
+        if (
+            self.mmdit_traj_cond_proj is None
+            or self.mmdit_cond_global_proj is None
+            or self.mmdit_z_global_proj is None
+            or self.mmdit_type_embed is None
+        ):
+            raise RuntimeError("MMDiT condition modules are not initialized")
+        dtype = noisy_tokens.dtype
+        device = noisy_tokens.device
+        type_embed = self.mmdit_type_embed.to(device=device, dtype=dtype)
+        groups: list[Tensor] = []
+        if layer_stack is not None:
+            groups.append(layer_stack.to(device=device, dtype=dtype) + type_embed[:, 0:1])
+        traj_tokens = self.mmdit_traj_cond_proj(trajectory_tokens.to(device=device, dtype=dtype)) + type_embed[:, 1:2]
+        groups.append(traj_tokens)
+        noisy_start = sum(int(group.shape[1]) for group in groups)
+        groups.append(noisy_tokens + type_embed[:, 2:3])
+        global_tokens = torch.stack([
+            self.mmdit_cond_global_proj(cond_time.to(device=device, dtype=dtype)),
+            self.mmdit_z_global_proj(z_token.to(device=device, dtype=dtype)),
+        ], dim=1) + type_embed[:, 3:4]
+        groups.append(global_tokens)
+        if progress_tokens is not None and self.mmdit_progress_proj is not None:
+            groups.append(self.mmdit_progress_proj(progress_tokens.to(device=device, dtype=dtype)) + type_embed[:, 4:5])
+        cond_tokens = torch.cat(groups, dim=1)
+        cond_norm = cond_tokens.detach().float().norm(dim=-1).mean()
+        return cond_tokens, noisy_start, int(noisy_tokens.shape[1]), cond_norm
+
+    def _decode_with_z_mmdit(
+        self,
+        *,
+        noisy_physical: Tensor,
+        time: Tensor,
+        trajectory_tokens: Tensor,
+        cond: Tensor,
+        z: Tensor,
+        layer_stack: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        if self.mmdit_action_norm is None:
+            raise RuntimeError("MMDiT action modules are not initialized")
+        batch = int(noisy_physical.shape[0])
+        dtype = noisy_physical.dtype
+        device = noisy_physical.device
+        time_emb = self.time(time.to(dtype=dtype))
+        cond_time = cond + self.time_lift(time_emb)
+        noisy_tokens, noisy_gate_mean, noisy_token_norm = self._gated_noisy_branch(noisy_physical, time)
+        z_token = self.z_to_token(z.to(device=device, dtype=dtype))
+        action = (
+            self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
+            + self.trajectory_lift(trajectory_tokens)
+            + z_token[:, None]
+            + cond_time[:, None]
+        )
+        progress_tokens = self._mmdit_progress_tokens(batch=batch, cond_time=cond_time, z=z)
+        cond_tokens, noisy_start, noisy_len, cond_token_norm = self._mmdit_condition_tokens(
+            noisy_tokens=noisy_tokens,
+            trajectory_tokens=trajectory_tokens,
+            cond_time=cond_time,
+            z_token=z_token,
+            layer_stack=layer_stack,
+            progress_tokens=progress_tokens,
+        )
+        action_updates: list[Tensor] = []
+        cond_updates: list[Tensor] = []
+        cond_attn_rows: list[Tensor] = []
+        noisy_attn_rows: list[Tensor] = []
+        update_condition = bool(int(getattr(self.config, "latent_cvae_mmdit_cond_update", 0)))
+        for block in self.mmdit_blocks:
+            action, cond_tokens, metrics = block(
+                action,
+                cond_tokens,
+                cond_time,
+                noisy_start=noisy_start,
+                noisy_len=noisy_len,
+                update_condition=update_condition,
+            )
+            action_updates.append(metrics["action_update_norm"].to(device=device))
+            cond_updates.append(metrics["cond_update_norm"].to(device=device))
+            cond_attn_rows.append(metrics["action_cond_attn"].to(device=device))
+            noisy_attn_rows.append(metrics["action_noisy_attn"].to(device=device))
+        action = self.mmdit_action_norm(action)
+        out = self._emit_action(action, cond)
+        z0 = torch.zeros((), device=device, dtype=torch.float32)
+        action_update = torch.stack(action_updates).mean() if action_updates else z0
+        cond_update = torch.stack(cond_updates).mean() if cond_updates else z0
+        cond_attn = torch.stack(cond_attn_rows).mean() if cond_attn_rows else z0
+        noisy_attn = torch.stack(noisy_attn_rows).mean() if noisy_attn_rows else z0
+        action_norm = action.detach().float().norm(dim=-1).mean()
+        noisy_ratio = noisy_token_norm / action_norm.clamp_min(1e-6)
+        out.update({
+            "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
+            "adaptive_noisy_branch_norm": noisy_token_norm.to(device=device),
+            "adaptive_noisy_branch_ratio": noisy_ratio.to(device=device),
+            "mmdit_action_update_norm": action_update,
+            "mmdit_cond_update_norm": cond_update,
+            "mmdit_action_cond_attention": cond_attn,
+            "mmdit_action_noisy_attention": noisy_attn,
+            "mmdit_action_token_norm": action_norm,
+            "mmdit_condition_token_norm": cond_token_norm.to(device=device),
+            "mmdit_noisy_token_norm": noisy_token_norm.to(device=device),
+        })
+        return out
+
     def _decode_with_z(
         self,
         *,
@@ -2360,22 +2696,39 @@ class LatentCVAEActionDecoder(nn.Module):
         z: Tensor,
         layer_stack: Tensor | None = None,
     ) -> dict[str, Tensor]:
+        if int(getattr(self.config, "latent_cvae_mmdit_decoder", 0)):
+            return self._decode_with_z_mmdit(
+                noisy_physical=noisy_physical,
+                time=time,
+                trajectory_tokens=trajectory_tokens,
+                cond=cond,
+                z=z,
+                layer_stack=layer_stack,
+            )
         del layer_stack
         batch = int(noisy_physical.shape[0])
         dtype = noisy_physical.dtype
         device = noisy_physical.device
         time_emb = self.time(time.to(dtype=dtype))
         cond_time = cond + self.time_lift(time_emb)
+        noisy_branch, noisy_gate_mean, noisy_branch_norm = self._gated_noisy_branch(noisy_physical, time)
         action = (
             self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
-            + self.noisy_action_lift(noisy_physical)
+            + noisy_branch
             + self.trajectory_lift(trajectory_tokens)
             + self.z_to_token(z.to(dtype=dtype))[:, None]
             + cond_time[:, None]
         )
+        noisy_branch_ratio = noisy_branch_norm / action.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
         for block in self.blocks:
             action = block(action, cond_time)
-        return self._emit_action(action, cond)
+        out = self._emit_action(action, cond)
+        out.update({
+            "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
+            "adaptive_noisy_branch_norm": noisy_branch_norm.to(device=device),
+            "adaptive_noisy_branch_ratio": noisy_branch_ratio.to(device=device),
+        })
+        return out
 
     def _condition(
         self,
@@ -2385,7 +2738,7 @@ class LatentCVAEActionDecoder(nn.Module):
         transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         visual_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         layer_contracts: list[dict[str, Tensor]],
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         cfg = self.config
         dtype = trajectory_tokens.dtype
         device = trajectory_tokens.device
@@ -2417,9 +2770,30 @@ class LatentCVAEActionDecoder(nn.Module):
         trans = self._memory_summary(transition_source, traj, self.transition_proj) if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else torch.zeros_like(traj)
         ctx = self._memory_summary(context_memory, traj, self.context_proj) if int(getattr(cfg, "latent_cvae_context_memory", 0)) else torch.zeros_like(traj)
         vis = self._memory_summary(visual_memory, traj, self.visual_proj) if int(getattr(cfg, "latent_cvae_visual_memory", 0)) else torch.zeros_like(traj)
-        cond = self.condition_fusion(torch.cat([layer_flat, trans, ctx, vis, traj], dim=-1))
+        lateral_cond = self.condition_fusion(torch.cat([layer_flat, trans, ctx, vis, traj], dim=-1))
+        zero_stat = torch.zeros((), device=device, dtype=torch.float32)
+        cond_stats = {
+            "cvae_condition_scan_norm": zero_stat,
+            "cvae_condition_lateral_norm": lateral_cond.detach().float().norm(dim=-1).mean(),
+        }
+        if (
+            int(getattr(cfg, "latent_cvae_layer_scan", 0))
+            and use_layer_memory
+            and self.layer_scan is not None
+            and self.layer_scan_init is not None
+            and self.layer_scan_fusion is not None
+        ):
+            state = self.layer_scan_init.to(device=device, dtype=layer_stack.dtype).expand(batch, -1)
+            for i in range(int(layer_stack.shape[1])):
+                state = self.layer_scan(layer_stack[:, i], state)
+            scan_cond = self.layer_scan_fusion(torch.cat([state.to(dtype=dtype), trans, ctx, vis, traj], dim=-1))
+            alpha = float(getattr(cfg, "latent_cvae_layer_scan_alpha", 0.2))
+            cond = scan_cond + alpha * lateral_cond
+            cond_stats["cvae_condition_scan_norm"] = scan_cond.detach().float().norm(dim=-1).mean()
+        else:
+            cond = lateral_cond
         layer_count = torch.tensor(float(len(summaries)), device=device, dtype=dtype)
-        return cond, layer_count, layer_stack
+        return cond, layer_count, layer_stack, cond_stats
 
     def forward(
         self,
@@ -2436,7 +2810,7 @@ class LatentCVAEActionDecoder(nn.Module):
         cfg = self.config
         dtype = noisy_physical.dtype
         device = noisy_physical.device
-        cond, layer_count, layer_stack = self._condition(
+        cond, layer_count, layer_stack, cond_stats = self._condition(
             trajectory_tokens=trajectory_tokens,
             context_memory=context_memory,
             transition_memory=transition_memory,
@@ -2502,6 +2876,8 @@ class LatentCVAEActionDecoder(nn.Module):
             "cvae_post_z_norm": post_z_norm,
             "cvae_mu_gap": mu_gap,
             "cvae_condition_norm": cond.detach().float().norm(dim=-1).mean(),
+            "cvae_condition_scan_norm": cond_stats["cvae_condition_scan_norm"],
+            "cvae_condition_lateral_norm": cond_stats["cvae_condition_lateral_norm"],
             "cvae_posterior_used": torch.tensor(float(posterior_used), device=device, dtype=dtype),
             "gripper_gate_mean": prior_out["gripper_gate_mean"],
             "layer_memory_count": layer_count,
@@ -2509,6 +2885,9 @@ class LatentCVAEActionDecoder(nn.Module):
         }
         for key in (
             "adaptive_refine_update_mean",
+            "adaptive_noisy_gate_mean",
+            "adaptive_noisy_branch_norm",
+            "adaptive_noisy_branch_ratio",
             "adaptive_route_entropy",
             "adaptive_route_max",
             "adaptive_route_effective_slots",
@@ -2556,6 +2935,13 @@ class LatentCVAEActionDecoder(nn.Module):
             "adaptive_micro_supervision_logits",
             "adaptive_regularizer",
             "adaptive_route_entropy_regularizer",
+            "mmdit_action_update_norm",
+            "mmdit_cond_update_norm",
+            "mmdit_action_cond_attention",
+            "mmdit_action_noisy_attention",
+            "mmdit_action_token_norm",
+            "mmdit_condition_token_norm",
+            "mmdit_noisy_token_norm",
         ):
             if key in prior_out:
                 result[f"cvae_{key}"] = prior_out[key]
@@ -3226,12 +3612,16 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         time_emb = self.time(time.to(dtype=dtype))
         cond_time = cond + self.time_lift(time_emb)
         z0 = torch.zeros((), device=device, dtype=torch.float32)
+        mmdit_refine = bool(int(getattr(cfg, "latent_cvae_mmdit_decoder", 0)) and len(self.mmdit_blocks) > 0)
+        noisy_branch, noisy_gate_mean, noisy_branch_norm = self._gated_noisy_branch(noisy_physical, time)
         base_raw = (
             self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
-            + self.noisy_action_lift(noisy_physical)
             + self.trajectory_lift(trajectory_tokens)
             + cond_time[:, None]
         )
+        if not mmdit_refine:
+            base_raw = base_raw + noisy_branch
+        noisy_branch_ratio = noisy_branch_norm / base_raw.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
         base_action = self._coarse_temporal_base(base_raw)
         base_highfreq = (base_raw - base_action).detach().float().norm(dim=-1).mean()
         progress = self._latent_progress(batch=batch, cond_time=cond_time, z=z)
@@ -3264,11 +3654,31 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         )
         if context_capsules is not None and layer_stack is not None:
             route_floor_terms.append(self._route_entropy_floor(capsule_layer_entropy, int(layer_stack.shape[1])))
-        micro_enabled = bool(int(getattr(cfg, "adaptive_cvae_micro_control", 1)) and progress is not None)
+        mmdit_cond_tokens: Tensor | None = None
+        mmdit_noisy_start = 0
+        mmdit_noisy_len = 0
+        mmdit_cond_token_norm = z0
+        if mmdit_refine:
+            if self.mmdit_step_cond_proj is None or self.mmdit_type_embed is None or self.mmdit_action_norm is None:
+                raise RuntimeError("MMDiT refine modules are not initialized")
+            z_token = self.z_to_token(z.to(device=device, dtype=dtype))
+            mmdit_cond_tokens, mmdit_noisy_start, mmdit_noisy_len, mmdit_cond_token_norm = self._mmdit_condition_tokens(
+                noisy_tokens=noisy_branch,
+                trajectory_tokens=trajectory_tokens,
+                cond_time=cond_time,
+                z_token=z_token,
+                layer_stack=layer_stack,
+                progress_tokens=progress,
+            )
+        micro_enabled = bool((not mmdit_refine) and int(getattr(cfg, "adaptive_cvae_micro_control", 1)) and progress is not None)
         progress_center = self._micro_initial_progress(action) if micro_enabled else None
         prev_velocity = torch.zeros_like(action)
 
         update_rows: list[Tensor] = []
+        mmdit_action_update_rows: list[Tensor] = []
+        mmdit_cond_update_rows: list[Tensor] = []
+        mmdit_cond_attn_rows: list[Tensor] = []
+        mmdit_noisy_attn_rows: list[Tensor] = []
         entropy_rows: list[Tensor] = []
         max_rows: list[Tensor] = []
         progress_entropy_rows: list[Tensor] = []
@@ -3327,23 +3737,23 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             if context_capsules is not None:
                 context, entropy, max_weight, _ = self._route_context_capsules(route_action, context_capsules)
                 route_floor_terms.append(self._route_entropy_floor(entropy, int(context_capsules.shape[1])))
-                context_dir = self.context_direction_norm(context)
+                direct_routed, strength, context_dir = self._semantic_context_residual(
+                    action=route_action,
+                    cond_time=cond_time,
+                    context=context,
+                    progress_context=progress_context,
+                    step_bias=step_bias,
+                )
                 if micro_enabled:
-                    routed = self.micro_context_modulation(context_dir)
+                    routed = self.micro_context_modulation(context_dir) + direct_routed
                 else:
-                    routed, strength, context_dir = self._semantic_context_residual(
-                        action=route_action,
-                        cond_time=cond_time,
-                        context=context,
-                        progress_context=progress_context,
-                        step_bias=step_bias,
-                    )
-                    strength_f = strength.detach().float()
-                    condition_strength_mean_rows.append(strength_f.mean())
-                    condition_strength_std_rows.append(strength_f.std(unbiased=False))
-                    condition_strength_max_rows.append(strength_f.max())
-                    condition_strength_min_rows.append(strength_f.min())
-                    condition_residual_rows.append(routed.detach().float().norm(dim=-1).mean())
+                    routed = direct_routed
+                strength_f = strength.detach().float()
+                condition_strength_mean_rows.append(strength_f.mean())
+                condition_strength_std_rows.append(strength_f.std(unbiased=False))
+                condition_strength_max_rows.append(strength_f.max())
+                condition_strength_min_rows.append(strength_f.min())
+                condition_residual_rows.append(direct_routed.detach().float().norm(dim=-1).mean())
                 context_direction_rows.append(context_dir.detach().float().norm(dim=-1).mean())
                 regularizer_terms.append(routed.float().square().mean())
             else:
@@ -3373,7 +3783,31 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             function_rows.append(function_bias.detach().float().norm(dim=-1).mean())
             prefix = prefix + semantic_bias + function_bias
             before = action
-            if micro_enabled:
+            if mmdit_refine:
+                assert mmdit_cond_tokens is not None
+                assert self.mmdit_step_cond_proj is not None
+                assert self.mmdit_type_embed is not None
+                dynamic_step = self.mmdit_step_cond_proj(prefix + routed + progress_context + semantic_bias)
+                type_embed = self.mmdit_type_embed.to(device=device, dtype=dtype)
+                step_cond_tokens = torch.cat([mmdit_cond_tokens, dynamic_step + type_embed[:, 5:6]], dim=1)
+                mmdit_block = self.mmdit_blocks[min(step, len(self.mmdit_blocks) - 1)]
+                action, updated_cond_tokens, mmdit_metrics = mmdit_block(
+                    action,
+                    step_cond_tokens,
+                    cond_time,
+                    noisy_start=mmdit_noisy_start,
+                    noisy_len=mmdit_noisy_len,
+                    update_condition=bool(int(getattr(cfg, "latent_cvae_mmdit_cond_update", 0))),
+                )
+                if int(getattr(cfg, "latent_cvae_mmdit_cond_update", 0)):
+                    mmdit_cond_tokens = updated_cond_tokens[:, : int(mmdit_cond_tokens.shape[1])]
+                prev_velocity = action - before
+                keep = torch.ones((), device=device, dtype=torch.float32)
+                mmdit_action_update_rows.append(mmdit_metrics["action_update_norm"].to(device=device))
+                mmdit_cond_update_rows.append(mmdit_metrics["cond_update_norm"].to(device=device))
+                mmdit_cond_attn_rows.append(mmdit_metrics["action_cond_attn"].to(device=device))
+                mmdit_noisy_attn_rows.append(mmdit_metrics["action_noisy_attn"].to(device=device))
+            elif micro_enabled:
                 if int(getattr(cfg, "adaptive_cvae_micro_refine_block", 1)):
                     micro_update, ds, kp, kd, micro_terms = self.micro_refine_block(
                         action=action,
@@ -3444,6 +3878,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             semantic_rows.append(semantic_bias.detach().float().norm(dim=-1).mean())
             step_bias_rows.append(step_bias.detach().float().norm(dim=-1).mean())
 
+        if mmdit_refine and self.mmdit_action_norm is not None:
+            action = self.mmdit_action_norm(action)
         output_delta, output_function = self._output_semantic_delta(action=action, cond_time=cond_time, progress=progress)
         output_scale = float(getattr(cfg, "adaptive_cvae_output_scale", 1.0))
         output_delta = output_delta * output_scale
@@ -3453,6 +3889,9 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         out = self._emit_action(action + output_delta, cond)
         progress_norm = progress.detach().float().norm(dim=-1).mean() if progress is not None else z0
         out.update({
+            "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
+            "adaptive_noisy_branch_norm": noisy_branch_norm.to(device=device),
+            "adaptive_noisy_branch_ratio": noisy_branch_ratio.to(device=device),
             "adaptive_refine_update_mean": torch.stack(update_rows).mean() if update_rows else z0,
             "adaptive_route_entropy": torch.stack(entropy_rows).mean() if entropy_rows else z0,
             "adaptive_route_max": torch.stack(max_rows).mean() if max_rows else z0,
@@ -3482,6 +3921,13 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "adaptive_condition_strength_min": torch.stack(condition_strength_min_rows).mean() if condition_strength_min_rows else z0,
             "adaptive_condition_residual_norm": torch.stack(condition_residual_rows).mean() if condition_residual_rows else z0,
             "adaptive_context_direction_norm": torch.stack(context_direction_rows).mean() if context_direction_rows else z0,
+            "mmdit_action_update_norm": torch.stack(mmdit_action_update_rows).mean() if mmdit_action_update_rows else z0,
+            "mmdit_cond_update_norm": torch.stack(mmdit_cond_update_rows).mean() if mmdit_cond_update_rows else z0,
+            "mmdit_action_cond_attention": torch.stack(mmdit_cond_attn_rows).mean() if mmdit_cond_attn_rows else z0,
+            "mmdit_action_noisy_attention": torch.stack(mmdit_noisy_attn_rows).mean() if mmdit_noisy_attn_rows else z0,
+            "mmdit_action_token_norm": action.detach().float().norm(dim=-1).mean() if mmdit_refine else z0,
+            "mmdit_condition_token_norm": mmdit_cond_token_norm.to(device=device) if mmdit_refine else z0,
+            "mmdit_noisy_token_norm": noisy_branch_norm.to(device=device) if mmdit_refine else z0,
             "adaptive_micro_step_mean": torch.stack(micro_step_rows).mean() if micro_step_rows else z0,
             "adaptive_micro_step_std": torch.stack(micro_step_std_rows).mean() if micro_step_std_rows else z0,
             "adaptive_micro_progress_mean": torch.stack(micro_progress_rows).mean() if micro_progress_rows else z0,
@@ -3720,7 +4166,30 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     layer_entry["neutral_latent_pred"] = cons["milestone_neutral_latent_pred"]
                     layer_entry["layer_causal_gain"] = causal_gain.detach().float()
                     layer_entry["layer_latent_gain"] = latent_gain.detach().float()
-                    if int(getattr(cfg, "layer_state_counterfactual", 0)) and int(layer_entry["rollout_tokens"].shape[0]) > 1:
+                    if bool(enable_layer_contracts) and int(getattr(cfg, "layer_zero_base_diagnostic", 0)):
+                        # Loss-free shortcut probe.  If zeroing the rollout
+                        # tokens barely moves the consequence output, the cell
+                        # is probably relying on action features instead of the
+                        # state/rollout context.
+                        with torch.no_grad():
+                            cons_zero = self.layer_consequence_cell(
+                                rollout_tokens=torch.zeros_like(layer_entry["rollout_tokens"]),
+                                action_physical=consequence_physical,
+                                state_tokens=layer_entry.get("state_tokens"),
+                                state_history_tokens=layer_entry.get("state_history_tokens"),
+                                executed_tokens=layer_entry.get("executed_tokens"),
+                                trajectory_tokens=layer_entry.get("trajectory_tokens"),
+                                proposal_tokens=layer_entry.get("proposal_tokens"),
+                                layer_index=index - 1,
+                            )
+                            base_eff = cons["milestone_rollout_effect_pred"].detach().float()
+                            zero_eff = cons_zero["milestone_rollout_effect_pred"].float()
+                            zero_shift = (
+                                (base_eff - zero_eff).norm(dim=-1).mean()
+                                / base_eff.norm(dim=-1).mean().clamp_min(1e-6)
+                            )
+                        layer_entry["consequence_zero_base_shift"] = zero_shift
+                    if bool(enable_layer_contracts) and int(getattr(cfg, "layer_state_counterfactual", 0)) and int(layer_entry["rollout_tokens"].shape[0]) > 1:
                         flat_state = layer_entry["rollout_tokens"].detach().float().flatten(1)
                         dist_state = torch.cdist(flat_state, flat_state, p=2)
                         eye_state = torch.eye(dist_state.shape[0], device=dist_state.device, dtype=torch.bool)
@@ -3974,6 +4443,14 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 _zeros_like_scalar(pred_physical_velocity)
                 if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_norm", _zeros_like_scalar(pred_physical_velocity))
             ),
+            "latent_cvae_condition_scan_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_scan_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_condition_lateral_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_lateral_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
             "latent_cvae_posterior_used": (
                 _zeros_like_scalar(pred_physical_velocity)
                 if latent_cvae_action is None else latent_cvae_action.get("cvae_posterior_used", _zeros_like_scalar(pred_physical_velocity))
@@ -4013,6 +4490,18 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             "latent_cvae_adaptive_refine_update_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
                 if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_refine_update_mean", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_adaptive_noisy_gate_mean": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_noisy_gate_mean", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_adaptive_noisy_branch_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_noisy_branch_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_adaptive_noisy_branch_ratio": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_noisy_branch_ratio", _zeros_like_scalar(pred_physical_velocity))
             ),
             "latent_cvae_adaptive_route_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
@@ -4186,6 +4675,34 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 _zeros_like_scalar(pred_physical_velocity)
                 if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_route_entropy_regularizer", _zeros_like_scalar(pred_physical_velocity))
             ),
+            "latent_cvae_mmdit_action_update_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_update_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_mmdit_cond_update_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_cond_update_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_mmdit_action_cond_attention": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_cond_attention", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_mmdit_action_noisy_attention": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_noisy_attention", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_mmdit_action_token_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_token_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_mmdit_condition_token_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_condition_token_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_mmdit_noisy_token_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_noisy_token_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
             "rollout_effect_pred": rollout_effect_pred,
             "rollout_base_effect_pred": dynamics["rollout_base_effect_pred"],
             "rollout_delta_pred": controlled_delta,
@@ -4303,6 +4820,33 @@ class V39PolicySystem(nn.Module):
         drop = self.policy_config.proposal_dropout if proposal_dropout is None else float(proposal_dropout)
         keep = (torch.rand(target_physical.shape[0], device=target_physical.device) >= drop).to(target_physical.dtype)
 
+        consequence_input = noisy_physical
+        preview_velocity: Tensor | None = None
+        use_self_condition = (
+            int(getattr(self.policy_config, "action_consequence_self_condition", 0))
+            and int(getattr(self.policy_config, "layer_recurrent_consequence", 0))
+            and int(getattr(self.policy_config, "layer_contract_adapters", 0))
+        )
+        if use_self_condition:
+            with torch.no_grad():
+                preview = self._policy_forward(
+                    noisy_physical.detach(),
+                    t.detach(),
+                    visual,
+                    state_history,
+                    state,
+                    executed_history,
+                    proposal["tokens"].detach(),
+                    keep,
+                    stop_at_midcut=stop_at_midcut,
+                    consequence_physical=noisy_physical.detach(),
+                    cvae_target_physical=None,
+                    enable_layer_contracts=False,
+                )
+                preview_velocity = preview["pred_physical_velocity"].detach()
+                consequence_input = (noisy_physical - t[:, None, None] * preview_velocity).detach()
+                del preview
+
         action_policy = self._policy_forward(
             noisy_physical,
             t,
@@ -4313,7 +4857,7 @@ class V39PolicySystem(nn.Module):
             proposal["tokens"].detach(),
             keep,
             stop_at_midcut=stop_at_midcut,
-            consequence_physical=noisy_physical,
+            consequence_physical=consequence_input,
             cvae_target_physical=target_physical,
         )
         clean_physical_estimate = noisy_physical - t[:, None, None] * action_policy["pred_physical_velocity"]
@@ -4334,6 +4878,17 @@ class V39PolicySystem(nn.Module):
             "pred_action_estimate": decoded_action,
             "future_conditioned_action_loss": torch.zeros((), device=target_physical.device, dtype=target_physical.dtype),
         }
+        if preview_velocity is not None:
+            out["consequence_self_condition"] = torch.ones((), device=target_physical.device, dtype=target_physical.dtype)
+            out["consequence_self_condition_target_mse"] = (
+                consequence_input.float() - target_physical.detach().float()
+            ).square().mean()
+            out["consequence_self_condition_noisy_mse"] = (
+                consequence_input.float() - noisy_physical.detach().float()
+            ).square().mean()
+            out["consequence_preview_flow"] = (
+                preview_velocity.float() - target_physical_velocity.detach().float()
+            ).square().mean()
         if "midcut_pred_physical_velocity" in action_policy:
             mid_clean = noisy_physical - t[:, None, None] * action_policy["midcut_pred_physical_velocity"]
             out["midcut_clean_physical_estimate"] = mid_clean
@@ -4396,17 +4951,36 @@ class V39PolicySystem(nn.Module):
                 if target_physical.shape[0] > 1:
                     # V40: within-batch hard action negative.  V39 used a
                     # reverse-batch permutation, which can become an adjacent
-                    # near-duplicate on ordered validation batches.  Here each
-                    # sample borrows the batch action with the largest chunkwise
-                    # physical-action distance, preserving the same observation
-                    # and target future while making the intervention materially
-                    # different whenever the batch contains alternatives.
-                    flat = target_physical.detach().float().flatten(1)
-                    dist = torch.cdist(flat, flat, p=2)
-                    eye = torch.eye(dist.shape[0], device=dist.device, dtype=torch.bool)
+                    # near-duplicate on ordered validation batches.  The hard
+                    # negative must be encoded in the current sample's action
+                    # state; directly permuting target_physical would mix
+                    # state-relative coordinate frames and inflate shuffle
+                    # diagnostics.
+                    batch = int(target_action.shape[0])
+                    cand_action = (
+                        target_action.detach()[None]
+                        .expand(batch, -1, -1, -1)
+                        .reshape(batch * batch, int(target_action.shape[1]), int(target_action.shape[2]))
+                    )
+                    cand_state = (
+                        codec_state.detach()[:, None]
+                        .expand(-1, batch, -1)
+                        .reshape(batch * batch, int(codec_state.shape[-1]))
+                    )
+                    cand_physical = self.codec.encode(cand_action, cand_state).reshape(
+                        batch,
+                        batch,
+                        int(target_physical.shape[1]),
+                        int(target_physical.shape[2]),
+                    )
+                    dist = (
+                        cand_physical.detach().float()
+                        - target_physical.detach().float()[:, None]
+                    ).flatten(2).norm(dim=-1)
+                    eye = torch.eye(batch, device=dist.device, dtype=torch.bool)
                     dist = dist.masked_fill(eye, -1.0)
                     perm = dist.argmax(dim=1)
-                    shuffle_physical = target_physical[perm]
+                    shuffle_physical = cand_physical[torch.arange(batch, device=target_physical.device), perm]
                 else:
                     shuffle_physical = target_physical
                 shuffle_noisy = (1 - t[:, None, None]) * shuffle_physical + t[:, None, None] * noise
@@ -4474,11 +5048,34 @@ class V39PolicySystem(nn.Module):
             else:
                 x = x.to(device=visual.device, dtype=visual.dtype)
         keep = torch.full((visual.shape[0],), 1.0 if use_proposal else 0.0, device=visual.device, dtype=visual.dtype)
+        use_self_condition = (
+            int(getattr(self.policy_config, "action_consequence_self_condition", 0))
+            and int(getattr(self.policy_config, "layer_recurrent_consequence", 0))
+            and int(getattr(self.policy_config, "layer_contract_adapters", 0))
+        )
         for index in range(steps, 0, -1):
             t = torch.full((visual.shape[0],), float(index) / float(steps), device=visual.device, dtype=visual.dtype)
+            consequence_input = x
+            if use_self_condition:
+                preview = self._policy_forward(
+                    x,
+                    t,
+                    visual,
+                    state_history,
+                    state,
+                    executed_history,
+                    proposal["tokens"],
+                    keep,
+                    stop_at_midcut=stop_at_midcut,
+                    consequence_physical=x,
+                    enable_layer_contracts=False,
+                )
+                consequence_input = (x - t[:, None, None] * preview["pred_physical_velocity"]).detach()
+                del preview
             out = self._policy_forward(
                 x, t, visual, state_history, state, executed_history, proposal["tokens"], keep,
                 stop_at_midcut=stop_at_midcut,
+                consequence_physical=consequence_input,
                 enable_layer_contracts=False,
             )
             x = x - out["pred_physical_velocity"] / float(steps)
