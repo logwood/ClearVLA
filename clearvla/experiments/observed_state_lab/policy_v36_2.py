@@ -45,6 +45,7 @@ class V362PolicyConfig:
     first_execution_steps: int = 4
     mid_execution_steps: int = 8
     physical_decode_delta_blend: float = 0.25
+    gripper_field_dim: int = 12
 
     def validate(self) -> None:
         if min(
@@ -73,6 +74,8 @@ class V362PolicyConfig:
             raise ValueError("dropout must be in [0,1)")
         if not 0 <= self.physical_decode_delta_blend <= 1:
             raise ValueError("physical_decode_delta_blend must be in [0,1]")
+        if int(self.gripper_field_dim) < 2:
+            raise ValueError("gripper_field_dim must be >= 2")
         if self.first_execution_steps > self.action_horizon:
             raise ValueError("first_execution_steps cannot exceed action_horizon")
         if self.mid_execution_steps > self.action_horizon:
@@ -88,8 +91,10 @@ class V362PolicyConfig:
 
     @property
     def physical_action_dim(self) -> int:
-        # arm_abs + arm_delta + gripper_value + gripper_delta
-        return 2 * self.arm_dim + 2
+        # arm_abs + arm_delta + expanded gripper field.  The first two gripper
+        # coordinates are value/delta and are the only ones decoded to native
+        # actions; the rest are auxiliary flow coordinates for gripper timing.
+        return 2 * self.arm_dim + int(self.gripper_field_dim)
 
 
 class PhysicalActionCodec(nn.Module):
@@ -116,6 +121,10 @@ class PhysicalActionCodec(nn.Module):
     def gripper_index(self) -> int:
         return self.config.gripper_index
 
+    @property
+    def gripper_field_dim(self) -> int:
+        return int(self.config.gripper_field_dim)
+
     def split_action(self, action: Tensor) -> tuple[Tensor, Tensor]:
         gi = self.gripper_index
         grip = action[..., gi : gi + 1]
@@ -135,16 +144,64 @@ class PhysicalActionCodec(nn.Module):
         arm, grip = self.split_action(action)
         prev_arm, prev_grip = self.split_action(boundary)
         arm_delta = arm - prev_arm
-        grip_delta = grip - prev_grip
-        return torch.cat([arm, arm_delta, grip, grip_delta], dim=-1)
+        grip_field = self._encode_gripper_field(grip, prev_grip, action_state)
+        return torch.cat([arm, arm_delta, grip_field], dim=-1)
+
+    def _encode_gripper_field(self, grip: Tensor, prev_grip: Tensor, action_state: Tensor) -> Tensor:
+        state_grip = self.split_action(action_state.to(device=grip.device, dtype=grip.dtype))[1]
+        delta = grip - prev_grip
+        features = [
+            grip,
+            delta,
+            grip - state_grip[:, None],
+            prev_grip,
+            delta.abs(),
+            torch.relu(delta),
+            torch.relu(-delta),
+            delta - torch.cat([torch.zeros_like(delta[:, :1]), delta[:, :-1]], dim=1),
+            self._lag_delta(grip, state_grip, lag=2),
+            self._lag_delta(grip, state_grip, lag=4),
+            self._future_delta(grip, step=1),
+            self._future_delta(grip, step=4),
+        ]
+        field = torch.cat(features, dim=-1)
+        dim = self.gripper_field_dim
+        if int(field.shape[-1]) >= dim:
+            return field[..., :dim]
+        pad = torch.zeros(*field.shape[:-1], dim - int(field.shape[-1]), device=field.device, dtype=field.dtype)
+        return torch.cat([field, pad], dim=-1)
+
+    @staticmethod
+    def _lag_delta(grip: Tensor, state_grip: Tensor, *, lag: int) -> Tensor:
+        lag = max(int(lag), 1)
+        prefix = state_grip[:, None].expand(-1, min(lag, int(grip.shape[1])), -1)
+        if int(grip.shape[1]) > lag:
+            past = torch.cat([prefix, grip[:, :-lag]], dim=1)
+        else:
+            past = prefix
+        return grip - past[:, : int(grip.shape[1])]
+
+    @staticmethod
+    def _future_delta(grip: Tensor, *, step: int) -> Tensor:
+        step = max(int(step), 1)
+        horizon = int(grip.shape[1])
+        if horizon > step:
+            future = torch.cat([grip[:, step:], grip[:, -1:].expand(-1, step, -1)], dim=1)
+        else:
+            future = grip[:, -1:].expand(-1, horizon, -1)
+        return future[:, :horizon] - grip
 
     def split_physical(self, physical: Tensor) -> dict[str, Tensor]:
         ad = self.arm_dim
+        gf = self.gripper_field_dim
+        gripper_field = physical[..., 2 * ad : 2 * ad + gf]
         return {
             "arm_abs": physical[..., :ad],
             "arm_delta": physical[..., ad : 2 * ad],
-            "gripper_value": physical[..., 2 * ad : 2 * ad + 1],
-            "gripper_delta": physical[..., 2 * ad + 1 : 2 * ad + 2],
+            "gripper_field": gripper_field,
+            "gripper_value": gripper_field[..., :1],
+            "gripper_delta": gripper_field[..., 1:2],
+            "gripper_extra": gripper_field[..., 2:],
         }
 
     def decode(self, physical: Tensor, action_state: Tensor) -> Tensor:
@@ -192,21 +249,28 @@ class PhysicalActionTokenLift(nn.Module):
         self.arm_delta = nn.Linear(ad, h)
         self.grip_value = nn.Linear(1, h)
         self.grip_delta = nn.Linear(1, h)
-        self.component_type = nn.Parameter(torch.randn(1, 4, h) * 0.02)
+        self.grip_extra = nn.Linear(max(int(config.gripper_field_dim) - 2, 1), h)
+        self.component_type = nn.Parameter(torch.randn(1, 5, h) * 0.02)
         self.mix = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h * 2), nn.SiLU(), nn.Linear(h * 2, h))
 
     def forward(self, physical: Tensor) -> Tensor:
         ad = self.config.arm_dim
+        gf = int(self.config.gripper_field_dim)
         arm_abs = physical[..., :ad]
         arm_delta = physical[..., ad : 2 * ad]
-        grip_value = physical[..., 2 * ad : 2 * ad + 1]
-        grip_delta = physical[..., 2 * ad + 1 : 2 * ad + 2]
+        grip_field = physical[..., 2 * ad : 2 * ad + gf]
+        grip_value = grip_field[..., :1]
+        grip_delta = grip_field[..., 1:2]
+        grip_extra = grip_field[..., 2:]
+        if int(grip_extra.shape[-1]) == 0:
+            grip_extra = torch.zeros(*grip_field.shape[:-1], 1, device=physical.device, dtype=physical.dtype)
         comp = self.component_type.to(device=physical.device, dtype=physical.dtype)
         x = (
             self.arm_abs(arm_abs) + comp[:, 0, None]
             + self.arm_delta(arm_delta) + comp[:, 1, None]
             + self.grip_value(grip_value) + comp[:, 2, None]
             + self.grip_delta(grip_delta) + comp[:, 3, None]
+            + self.grip_extra(grip_extra) + comp[:, 4, None]
         )
         return self.mix(x)
 
@@ -224,10 +288,14 @@ class PhysicalVelocityHead(nn.Module):
         self.arm_delta = nn.Linear(h, ad)
         self.grip_value = nn.Linear(h, 1)
         self.grip_delta = nn.Linear(h, 1)
+        self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
 
     def forward(self, tokens: Tensor) -> Tensor:
         x = self.norm(tokens)
-        return torch.cat([self.arm_abs(x), self.arm_delta(x), self.grip_value(x), self.grip_delta(x)], dim=-1)
+        parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(x), self.grip_delta(x)]
+        if int(self.grip_extra.out_features) > 0:
+            parts.append(self.grip_extra(x))
+        return torch.cat(parts, dim=-1)
 
 
 class HorizonRoleEmbedding(nn.Module):

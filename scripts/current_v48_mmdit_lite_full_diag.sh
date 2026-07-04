@@ -21,6 +21,7 @@ exec bash "${SCRIPT_DIR}/current_v48_justok.sh" \
   --latent-cvae-noisy-gate-power "${LATENT_CVAE_NOISY_GATE_POWER:-1.0}" \
   --latent-cvae-layer-scan "${LATENT_CVAE_LAYER_SCAN:-1}" \
   --latent-cvae-layer-scan-alpha "${LATENT_CVAE_LAYER_SCAN_ALPHA:-0.2}" \
+  --gripper-field-dim "${GRIPPER_FIELD_DIM:-12}" \
   --adaptive-cvae-function-adapters 0 \
   --adaptive-cvae-micro-control 0 \
   --adaptive-cvae-direct-condition-residual 0 \

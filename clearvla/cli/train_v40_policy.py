@@ -78,6 +78,20 @@ def _filter_stage1_state_dict(
     return {key: value for key, value in state.items() if key not in skipped_set}, skipped
 
 
+def _filter_shape_mismatched_state_dict(
+    state: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], list[str]]:
+    skipped = [
+        key for key, value in state.items()
+        if key in target and tuple(value.shape) != tuple(target[key].shape)
+    ]
+    if not skipped:
+        return state, []
+    skipped_set = set(skipped)
+    return {key: value for key, value in state.items() if key not in skipped_set}, skipped
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train V40 layer-role causal/latent temporal policy.")
     add_data_args(parser, default_resize=(336, 336))
@@ -151,6 +165,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--first-execution-steps", type=int, default=4)
     parser.add_argument("--mid-execution-steps", type=int, default=8)
     parser.add_argument("--physical-decode-delta-blend", type=float, default=0.25)
+    parser.add_argument("--gripper-field-dim", type=int, default=12)
     parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"], default="legacy")
     parser.add_argument("--action-flow-residual-depth", type=int, default=2)
     parser.add_argument("--action-flow-residual-high-slots", type=int, default=4)
@@ -365,6 +380,7 @@ def main() -> None:
         first_execution_steps=args.first_execution_steps,
         mid_execution_steps=args.mid_execution_steps,
         physical_decode_delta_blend=args.physical_decode_delta_blend,
+        gripper_field_dim=args.gripper_field_dim,
         visual_token_dim=int(latent_dim),
         visual_history_length=len(dataset_config.history_offsets),
         num_cameras=len(cameras),
@@ -524,6 +540,13 @@ def main() -> None:
             print(
                 f"[v39-init] skipped dirty stage1 adapter keys: "
                 f"{skipped_stage_keys[:8]} count={len(skipped_stage_keys)}",
+                flush=True,
+            )
+        stage_state, skipped_shape_keys = _filter_shape_mismatched_state_dict(stage_state, system.state_dict())
+        if skipped_shape_keys:
+            print(
+                f"[v39-init] skipped shape-mismatched stage1 keys: "
+                f"{skipped_shape_keys[:8]} count={len(skipped_shape_keys)}",
                 flush=True,
             )
         missing, unexpected = system.load_state_dict(stage_state, strict=False)

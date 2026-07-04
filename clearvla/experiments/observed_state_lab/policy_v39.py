@@ -1144,6 +1144,7 @@ class V37StyleResidualActionFlowDenoiser(nn.Module):
             self.velocity_head.arm_delta,
             self.velocity_head.grip_value,
             self.velocity_head.grip_delta,
+            self.velocity_head.grip_extra,
         ):
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
@@ -1362,6 +1363,7 @@ class LayeredV37StyleResidualActionFlowDenoiser(nn.Module):
             self.velocity_head.arm_delta,
             self.velocity_head.grip_value,
             self.velocity_head.grip_delta,
+            self.velocity_head.grip_extra,
         ):
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
@@ -1672,6 +1674,7 @@ class HierarchicalLatentMainActionDecoder(nn.Module):
             self.velocity_head.arm_delta,
             self.velocity_head.grip_value,
             self.velocity_head.grip_delta,
+            self.velocity_head.grip_extra,
         ):
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
@@ -2448,6 +2451,7 @@ class LatentCVAEActionDecoder(nn.Module):
             self.velocity_head.arm_delta,
             self.velocity_head.grip_value,
             self.velocity_head.grip_delta,
+            self.velocity_head.grip_extra,
         ):
             if std > 0:
                 nn.init.normal_(module.weight, mean=0.0, std=std)

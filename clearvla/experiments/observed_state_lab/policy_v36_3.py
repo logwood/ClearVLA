@@ -99,7 +99,7 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
     The arm channels are emitted exactly from the normalized action tokens.  The
     gripper channels are emitted from the same tokens after a zero-initialized
     transition-latent residual.  This is not a separate gripper command head:
-    the unique action output is still the 14-D physical velocity tensor.
+    the unique action output is still the typed physical velocity tensor.
     """
 
     def __init__(self, config: V363PolicyConfig) -> None:
@@ -119,6 +119,7 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         self.arm_delta = nn.Linear(h, ad)
         self.grip_value = nn.Linear(h, 1)
         self.grip_delta = nn.Linear(h, 1)
+        self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
 
     def forward(self, tokens: Tensor, transition_latent: Tensor | None = None) -> Tensor:
         x = self.norm(tokens)
@@ -126,7 +127,10 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         if transition_latent is not None:
             z = self.transition_norm(transition_latent)
             grip_x = grip_x + torch.sigmoid(self.gripper_gate(z)) * self.gripper_delta(z)
-        return torch.cat([self.arm_abs(x), self.arm_delta(x), self.grip_value(grip_x), self.grip_delta(grip_x)], dim=-1)
+        parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(grip_x), self.grip_delta(grip_x)]
+        if int(self.grip_extra.out_features) > 0:
+            parts.append(self.grip_extra(grip_x))
+        return torch.cat(parts, dim=-1)
 
 
 class PolicyLatentDiTPlannerV363(nn.Module):

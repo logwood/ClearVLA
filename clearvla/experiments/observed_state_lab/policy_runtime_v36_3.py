@@ -43,9 +43,9 @@ class V363PolicyTrainerConfig:
     event_loss_weight: float = 0.08
     event_positive_weight: float = 6.0
     event_focal_gamma: float = 1.0
-    gripper_fm_event_boost: float = 3.0
+    gripper_fm_event_boost: float = 0.0
     gripper_fm_value_weight: float = 1.0
-    gripper_fm_delta_weight: float = 1.5
+    gripper_fm_delta_weight: float = 1.0
     gripper_transition_l1_weight: float = 0.04
     smooth_delta_weight: float = 0.02
     decoded_action_loss_weight: float = 0.04
@@ -182,30 +182,38 @@ def flow_losses(
     velocity_error = (output["pred_physical_velocity"] - output["target_physical_velocity"]).square()
     uniform_physical_error = velocity_error.mean(dim=-1)
 
-    # Flow matching stays on the existing velocity branch, but the metric is a
-    # two-field metric: ordinary typed velocity everywhere, plus an event-aware
-    # gripper field on the existing gripper value/delta coordinates.  This keeps
-    # gripper supervision inside the main FM path instead of adding another head.
+    # Flow matching stays on the existing velocity branch.  Arm remains six
+    # native dimensions with abs/delta channels.  Gripper is expanded to a
+    # larger typed field, then compressed back to one native-dimension error so
+    # it has bandwidth without dominating the 7-D action loss.
     ad = int(cfg.arm_dim)
+    gf = int(cfg.gripper_field_dim)
     grip_value_index = 2 * ad
     grip_delta_index = 2 * ad + 1
-    dim_weight = torch.ones((int(velocity_error.shape[-1]),), device=device, dtype=velocity_error.dtype)
-    dim_weight[grip_value_index] = max(float(trainer.gripper_fm_value_weight), 0.0)
-    dim_weight[grip_delta_index] = max(float(trainer.gripper_fm_delta_weight), 0.0)
-    physical_error = (velocity_error * dim_weight[None, None]).sum(dim=-1) / dim_weight.sum().clamp_min(1e-6)
-    transition_mask = (labels != 0).to(dtype=physical_error.dtype, device=device)
+    grip_field = velocity_error[..., 2 * ad : 2 * ad + gf]
+    arm_abs_error = velocity_error[..., :ad]
+    arm_delta_error = velocity_error[..., ad : 2 * ad]
+    arm_native_error = 0.5 * (arm_abs_error + arm_delta_error)
+    grip_channel_weight = torch.ones((gf,), device=device, dtype=velocity_error.dtype)
+    grip_channel_weight[0] = max(float(trainer.gripper_fm_value_weight), 0.0)
+    grip_channel_weight[1] = max(float(trainer.gripper_fm_delta_weight), 0.0)
+    gripper_native_error = (
+        grip_field * grip_channel_weight[None, None]
+    ).sum(dim=-1) / grip_channel_weight.sum().clamp_min(1e-6)
+    transition_mask = (labels != 0).to(dtype=velocity_error.dtype, device=device)
     event_boost = max(float(trainer.gripper_fm_event_boost), 0.0)
-    flow_weight = weight.to(dtype=physical_error.dtype)[None] * (1.0 + event_boost * transition_mask)
-    flow = (physical_error * flow_weight).sum() / flow_weight.sum().clamp_min(1.0)
+    gripper_native_error = gripper_native_error * (1.0 + event_boost * transition_mask)
+    physical_error = (arm_native_error.sum(dim=-1) + gripper_native_error) / float(ad + 1)
+    flow_weight = weight.to(dtype=physical_error.dtype)[None]
+    flow = (physical_error * flow_weight).mean()
     uniform_flow = (uniform_physical_error * weight.to(dtype=uniform_physical_error.dtype)[None]).mean()
-    grip_value_flow = (velocity_error[..., grip_value_index] * flow_weight).sum() / flow_weight.sum().clamp_min(1.0)
-    grip_delta_flow = (velocity_error[..., grip_delta_index] * flow_weight).sum() / flow_weight.sum().clamp_min(1.0)
+    grip_value_flow = (velocity_error[..., grip_value_index] * flow_weight).mean()
+    grip_delta_flow = (velocity_error[..., grip_delta_index] * flow_weight).mean()
     event_denom = (transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
     hold_mask_for_flow = (1.0 - transition_mask).to(dtype=physical_error.dtype)
     hold_denom = (hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
-    gripper_pair_error = 0.5 * (velocity_error[..., grip_value_index] + velocity_error[..., grip_delta_index])
-    gripper_event_flow = (gripper_pair_error * transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum() / event_denom
-    gripper_hold_flow = (gripper_pair_error * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum() / hold_denom
+    gripper_event_flow = (gripper_native_error * transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum() / event_denom
+    gripper_hold_flow = (gripper_native_error * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum() / hold_denom
     proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
 
     flat_labels = labels.reshape(-1)
@@ -241,7 +249,7 @@ def flow_losses(
     # V36.3 latent-coupling losses.  These losses supervise the existing final
     # decoded action and the existing typed velocity tensor; they do not create
     # a separate gripper command path.
-    grip_phys = slice(2 * ad, 2 * ad + 2)
+    grip_phys = slice(2 * ad, 2 * ad + gf)
     grip_velocity_error = (
         output["pred_physical_velocity"][..., grip_phys] - output["target_physical_velocity"][..., grip_phys]
     ).square().mean(dim=-1)
@@ -303,6 +311,7 @@ def flow_losses(
         "loss": total,
         "physical_flow": flow,
         "physical_flow_uniform": uniform_flow,
+        "gripper_fm_field": (gripper_native_error * flow_weight).mean(),
         "gripper_fm_value": grip_value_flow,
         "gripper_fm_delta": grip_delta_flow,
         "gripper_fm_event": gripper_event_flow,
