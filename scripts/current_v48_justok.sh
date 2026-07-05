@@ -75,6 +75,7 @@ exec python -u -m clearvla.cli.train_v40_policy \
   --layer-high-latent-weight 1.0 \
   --layer-causal-event-from-effect 1 \
   --layer-state-counterfactual 1 \
+  --layer-zero-base-diagnostic 0 \
   --proposal-depth 2 \
   --proposal-dropout 0.25 \
   --dropout 0.05 \
@@ -95,6 +96,7 @@ exec python -u -m clearvla.cli.train_v40_policy \
   --canvas-dropout 0.0 \
   --inference-steps 5 \
   --gripper-dim-index -1 \
+  --gripper-field-mode legacy_handcrafted \
   --first-execution-steps 4 \
   --mid-execution-steps 8 \
   --physical-decode-delta-blend 0.25 \
@@ -120,6 +122,8 @@ exec python -u -m clearvla.cli.train_v40_policy \
   --latent-cvae-transition-detach 1 \
   --latent-cvae-layer-detach 1 \
   --latent-cvae-layer-grad-scale 0.15 \
+  --latent-cvae-condition-source-norm 0 \
+  --latent-cvae-bounded-consequence-fusion 0 \
   --latent-cvae-event-gripper-gate 1 \
   --latent-cvae-inference-sample 0 \
   --latent-cvae-output-init-std 1e-3 \

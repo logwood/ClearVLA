@@ -741,7 +741,7 @@ class V38PolicySystem(nn.Module):
         proposal = self.proposal(executed_history)
         codec_state = state if action_state is None else action_state
         target_physical = self.codec.encode(target_action, codec_state)
-        noise = torch.randn_like(target_physical)
+        noise = self.codec.sample_noise(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
         target_physical_velocity = noise - target_physical
@@ -834,13 +834,7 @@ class V38PolicySystem(nn.Module):
         proposal = self.proposal(executed_history)
         steps = int(steps or self.policy_config.inference_steps)
         if noise is None:
-            x = torch.randn(
-                visual.shape[0],
-                self.policy_config.action_horizon,
-                self.policy_config.physical_action_dim,
-                device=visual.device,
-                dtype=visual.dtype,
-            )
+            x = self.codec.sample_noise(visual.shape[0], device=visual.device, dtype=visual.dtype)
         else:
             x = noise.clone()
             if x.shape[-1] == self.policy_config.action_dim:

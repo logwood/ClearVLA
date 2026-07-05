@@ -46,6 +46,7 @@ class V362PolicyConfig:
     mid_execution_steps: int = 8
     physical_decode_delta_blend: float = 0.25
     gripper_field_dim: int = 12
+    gripper_field_mode: str = "legacy_handcrafted"
 
     def validate(self) -> None:
         if min(
@@ -76,6 +77,8 @@ class V362PolicyConfig:
             raise ValueError("physical_decode_delta_blend must be in [0,1]")
         if int(self.gripper_field_dim) < 2:
             raise ValueError("gripper_field_dim must be >= 2")
+        if str(self.gripper_field_mode) not in {"legacy_handcrafted", "parseval_temporal"}:
+            raise ValueError("gripper_field_mode must be legacy_handcrafted or parseval_temporal")
         if self.first_execution_steps > self.action_horizon:
             raise ValueError("first_execution_steps cannot exceed action_horizon")
         if self.mid_execution_steps > self.action_horizon:
@@ -91,10 +94,68 @@ class V362PolicyConfig:
 
     @property
     def physical_action_dim(self) -> int:
-        # arm_abs + arm_delta + expanded gripper field.  The first two gripper
-        # coordinates are value/delta and are the only ones decoded to native
-        # actions; the rest are auxiliary flow coordinates for gripper timing.
+        # arm_abs + arm_delta + expanded gripper field. Legacy mode reserves
+        # value/delta channels; Parseval mode reconstructs the native gripper
+        # trajectory jointly from every field channel.
         return 2 * self.arm_dim + int(self.gripper_field_dim)
+
+
+class ParsevalGripperTemporalFrame(nn.Module):
+    """Causal local redundant gripper coordinates with exact reconstruction.
+
+    Half of the channels are direct views and the rest are short delayed views
+    of the same native trajectory. Every source timestep distributes unit
+    energy over only valid causal observation slots; the adjoint gathers all
+    views back. Consequently Phi.T @ Phi = I exactly, no future value enters an
+    earlier field token, and no smoothing/filtering prior is imposed.
+    """
+
+    def __init__(self, horizon: int, channels: int) -> None:
+        super().__init__()
+        horizon = int(horizon)
+        channels = int(channels)
+        if horizon < 1 or channels < 1:
+            raise ValueError("Parseval gripper frame requires positive horizon/channels")
+        direct_channels = (channels + 1) // 2
+        delayed_channels = channels - direct_channels
+        delays = torch.cat([
+            torch.zeros(direct_channels, dtype=torch.long),
+            torch.arange(1, delayed_channels + 1, dtype=torch.long),
+        ]).clamp_max(horizon - 1)
+        source = torch.arange(horizon, dtype=torch.long)[:, None]
+        valid = source + delays[None] < horizon
+        weights = valid.to(torch.float64)
+        weights = weights / weights.square().sum(dim=-1, keepdim=True).clamp_min(1.0).sqrt()
+        analysis_matrix = torch.zeros(horizon, channels, horizon, dtype=torch.float64)
+        for source_step in range(horizon):
+            for channel, delay in enumerate(delays.tolist()):
+                output_step = source_step + int(delay)
+                if output_step < horizon:
+                    analysis_matrix[output_step, channel, source_step] = weights[source_step, channel]
+        self.horizon = horizon
+        self.channels = channels
+        self.register_buffer("delays", delays, persistent=False)
+        self.register_buffer("source_weights", weights.to(torch.float32), persistent=False)
+        self.register_buffer("analysis_matrix", analysis_matrix.to(torch.float32), persistent=False)
+
+    def analysis(self, gripper: Tensor) -> Tensor:
+        if gripper.ndim != 3 or int(gripper.shape[1]) != self.horizon or int(gripper.shape[2]) != 1:
+            raise ValueError(f"gripper must be [B,{self.horizon},1], got {tuple(gripper.shape)}")
+        output_dtype = gripper.dtype
+        source = gripper[..., 0].float()
+        matrix = self.analysis_matrix.to(device=gripper.device, dtype=torch.float32)
+        return torch.einsum("tcs,bs->btc", matrix, source).to(dtype=output_dtype)
+
+    def synthesis(self, field: Tensor) -> Tensor:
+        if field.ndim != 3 or int(field.shape[1]) != self.horizon or int(field.shape[2]) != self.channels:
+            raise ValueError(f"gripper field must be [B,{self.horizon},{self.channels}], got {tuple(field.shape)}")
+        output_dtype = field.dtype
+        matrix = self.analysis_matrix.to(device=field.device, dtype=torch.float32)
+        native = torch.einsum("tcs,btc->bs", matrix, field.float())
+        return native[..., None].to(dtype=output_dtype)
+
+    def project(self, field: Tensor) -> Tensor:
+        return self.analysis(self.synthesis(field))
 
 
 class PhysicalActionCodec(nn.Module):
@@ -108,6 +169,11 @@ class PhysicalActionCodec(nn.Module):
         super().__init__()
         config.validate()
         self.config = config
+        self.gripper_frame = (
+            ParsevalGripperTemporalFrame(config.action_horizon, config.gripper_field_dim)
+            if str(config.gripper_field_mode) == "parseval_temporal"
+            else None
+        )
 
     @property
     def arm_dim(self) -> int:
@@ -124,6 +190,10 @@ class PhysicalActionCodec(nn.Module):
     @property
     def gripper_field_dim(self) -> int:
         return int(self.config.gripper_field_dim)
+
+    @property
+    def uses_parseval_gripper_field(self) -> bool:
+        return self.gripper_frame is not None
 
     def split_action(self, action: Tensor) -> tuple[Tensor, Tensor]:
         gi = self.gripper_index
@@ -144,8 +214,47 @@ class PhysicalActionCodec(nn.Module):
         arm, grip = self.split_action(action)
         prev_arm, prev_grip = self.split_action(boundary)
         arm_delta = arm - prev_arm
-        grip_field = self._encode_gripper_field(grip, prev_grip, action_state)
+        grip_field = self.encode_gripper_field(grip, prev_grip=prev_grip, action_state=action_state)
         return torch.cat([arm, arm_delta, grip_field], dim=-1)
+
+    def encode_gripper_field(
+        self,
+        grip: Tensor,
+        *,
+        prev_grip: Tensor | None = None,
+        action_state: Tensor | None = None,
+    ) -> Tensor:
+        if self.gripper_frame is not None:
+            return self.gripper_frame.analysis(grip)
+        if prev_grip is None or action_state is None:
+            raise ValueError("legacy gripper field encoding requires prev_grip and action_state")
+        return self._encode_gripper_field(grip, prev_grip, action_state)
+
+    def decode_gripper_field(self, field: Tensor) -> Tensor:
+        if self.gripper_frame is not None:
+            return self.gripper_frame.synthesis(field)
+        return field[..., :1]
+
+    def project_gripper_field(self, field: Tensor) -> Tensor:
+        if self.gripper_frame is not None:
+            return self.gripper_frame.project(field)
+        return field
+
+    def sample_noise(
+        self,
+        batch: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
+        shape = (int(batch), int(self.config.action_horizon))
+        if self.gripper_frame is None:
+            return torch.randn(*shape, self.physical_dim, device=device, dtype=dtype, generator=generator)
+        arm_noise = torch.randn(*shape, 2 * self.arm_dim, device=device, dtype=dtype, generator=generator)
+        native_grip_noise = torch.randn(*shape, 1, device=device, dtype=dtype, generator=generator)
+        grip_noise = self.gripper_frame.analysis(native_grip_noise)
+        return torch.cat([arm_noise, grip_noise], dim=-1)
 
     def _encode_gripper_field(self, grip: Tensor, prev_grip: Tensor, action_state: Tensor) -> Tensor:
         state_grip = self.split_action(action_state.to(device=grip.device, dtype=grip.dtype))[1]
@@ -195,13 +304,17 @@ class PhysicalActionCodec(nn.Module):
         ad = self.arm_dim
         gf = self.gripper_field_dim
         gripper_field = physical[..., 2 * ad : 2 * ad + gf]
+        gripper_value = self.decode_gripper_field(gripper_field)
+        gripper_delta = gripper_value - torch.cat(
+            [gripper_value[:, :1], gripper_value[:, :-1]], dim=1
+        )
         return {
             "arm_abs": physical[..., :ad],
             "arm_delta": physical[..., ad : 2 * ad],
             "gripper_field": gripper_field,
-            "gripper_value": gripper_field[..., :1],
-            "gripper_delta": gripper_field[..., 1:2],
-            "gripper_extra": gripper_field[..., 2:],
+            "gripper_value": gripper_value,
+            "gripper_delta": gripper_delta if self.uses_parseval_gripper_field else gripper_field[..., 1:2],
+            "gripper_extra": gripper_field if self.uses_parseval_gripper_field else gripper_field[..., 2:],
         }
 
     def decode(self, physical: Tensor, action_state: Tensor) -> Tensor:
@@ -218,9 +331,12 @@ class PhysicalActionCodec(nn.Module):
         if blend > 0:
             state_arm, state_grip = self.split_action(action_state.to(device=physical.device, dtype=physical.dtype))
             arm_from_delta = state_arm[:, None] + torch.cumsum(parts["arm_delta"], dim=1)
-            grip_from_delta = state_grip[:, None] + torch.cumsum(parts["gripper_delta"], dim=1)
             arm = (1.0 - blend) * arm_abs + blend * arm_from_delta
-            grip = (1.0 - blend) * grip_abs + blend * grip_from_delta
+            if self.uses_parseval_gripper_field:
+                grip = grip_abs
+            else:
+                grip_from_delta = state_grip[:, None] + torch.cumsum(parts["gripper_delta"], dim=1)
+                grip = (1.0 - blend) * grip_abs + blend * grip_from_delta
         else:
             arm = arm_abs
             grip = grip_abs
@@ -233,6 +349,8 @@ class PhysicalActionCodec(nn.Module):
         prev_arm, prev_grip = self.split_action(boundary)
         actual_delta = torch.cat([arm - prev_arm, grip - prev_grip], dim=-1)
         parts = self.split_physical(physical)
+        if self.uses_parseval_gripper_field:
+            return torch.nn.functional.smooth_l1_loss(actual_delta[..., : self.arm_dim], parts["arm_delta"])
         physical_delta = torch.cat([parts["arm_delta"], parts["gripper_delta"]], dim=-1)
         return torch.nn.functional.smooth_l1_loss(actual_delta, physical_delta)
 
@@ -245,12 +363,26 @@ class PhysicalActionTokenLift(nn.Module):
         h = config.hidden_size
         ad = config.arm_dim
         self.config = config
+        self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
         self.arm_abs = nn.Linear(ad, h)
         self.arm_delta = nn.Linear(ad, h)
-        self.grip_value = nn.Linear(1, h)
-        self.grip_delta = nn.Linear(1, h)
-        self.grip_extra = nn.Linear(max(int(config.gripper_field_dim) - 2, 1), h)
-        self.component_type = nn.Parameter(torch.randn(1, 5, h) * 0.02)
+        if self.parseval_gripper:
+            # One projection gives the whole field one semantic bandwidth unit.
+            # Avoid field-only LayerNorm: it would erase the native magnitude
+            # that the flow state must retain.
+            self.grip_field = nn.Linear(int(config.gripper_field_dim), h)
+            self.grip_field_input_scale = float(config.gripper_field_dim) ** 0.5
+            self.grip_value = None
+            self.grip_delta = None
+            self.grip_extra = None
+            component_count = 3
+        else:
+            self.grip_field = None
+            self.grip_value = nn.Linear(1, h)
+            self.grip_delta = nn.Linear(1, h)
+            self.grip_extra = nn.Linear(max(int(config.gripper_field_dim) - 2, 1), h)
+            component_count = 5
+        self.component_type = nn.Parameter(torch.randn(1, component_count, h) * 0.02)
         self.mix = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h * 2), nn.SiLU(), nn.Linear(h * 2, h))
 
     def forward(self, physical: Tensor) -> Tensor:
@@ -259,19 +391,24 @@ class PhysicalActionTokenLift(nn.Module):
         arm_abs = physical[..., :ad]
         arm_delta = physical[..., ad : 2 * ad]
         grip_field = physical[..., 2 * ad : 2 * ad + gf]
-        grip_value = grip_field[..., :1]
-        grip_delta = grip_field[..., 1:2]
-        grip_extra = grip_field[..., 2:]
-        if int(grip_extra.shape[-1]) == 0:
-            grip_extra = torch.zeros(*grip_field.shape[:-1], 1, device=physical.device, dtype=physical.dtype)
         comp = self.component_type.to(device=physical.device, dtype=physical.dtype)
-        x = (
-            self.arm_abs(arm_abs) + comp[:, 0, None]
-            + self.arm_delta(arm_delta) + comp[:, 1, None]
-            + self.grip_value(grip_value) + comp[:, 2, None]
-            + self.grip_delta(grip_delta) + comp[:, 3, None]
-            + self.grip_extra(grip_extra) + comp[:, 4, None]
-        )
+        x = self.arm_abs(arm_abs) + comp[:, 0, None] + self.arm_delta(arm_delta) + comp[:, 1, None]
+        if self.parseval_gripper:
+            assert self.grip_field is not None
+            x = x + self.grip_field(grip_field * self.grip_field_input_scale) + comp[:, 2, None]
+        else:
+            grip_value = grip_field[..., :1]
+            grip_delta = grip_field[..., 1:2]
+            grip_extra = grip_field[..., 2:]
+            if int(grip_extra.shape[-1]) == 0:
+                grip_extra = torch.zeros(*grip_field.shape[:-1], 1, device=physical.device, dtype=physical.dtype)
+            assert self.grip_value is not None and self.grip_delta is not None and self.grip_extra is not None
+            x = (
+                x
+                + self.grip_value(grip_value) + comp[:, 2, None]
+                + self.grip_delta(grip_delta) + comp[:, 3, None]
+                + self.grip_extra(grip_extra) + comp[:, 4, None]
+            )
         return self.mix(x)
 
 
@@ -284,14 +421,26 @@ class PhysicalVelocityHead(nn.Module):
         ad = config.arm_dim
         self.config = config
         self.norm = nn.LayerNorm(h)
-        self.arm_abs = nn.Linear(h, ad)
-        self.arm_delta = nn.Linear(h, ad)
-        self.grip_value = nn.Linear(h, 1)
-        self.grip_delta = nn.Linear(h, 1)
-        self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
+        self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        if self.parseval_gripper:
+            self.arm_field = nn.Linear(h, 2 * ad)
+            self.grip_field = nn.Linear(h, int(config.gripper_field_dim))
+        else:
+            self.arm_abs = nn.Linear(h, ad)
+            self.arm_delta = nn.Linear(h, ad)
+            self.grip_value = nn.Linear(h, 1)
+            self.grip_delta = nn.Linear(h, 1)
+            self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
+
+    def output_layers(self) -> tuple[nn.Linear, ...]:
+        if self.parseval_gripper:
+            return self.arm_field, self.grip_field
+        return self.arm_abs, self.arm_delta, self.grip_value, self.grip_delta, self.grip_extra
 
     def forward(self, tokens: Tensor) -> Tensor:
         x = self.norm(tokens)
+        if self.parseval_gripper:
+            return torch.cat([self.arm_field(x), self.grip_field(x)], dim=-1)
         parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(x), self.grip_delta(x)]
         if int(self.grip_extra.out_features) > 0:
             parts.append(self.grip_extra(x))
@@ -588,7 +737,7 @@ class V362PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         target_physical = self.codec.encode(target_action, state)
-        noise = torch.randn_like(target_physical)
+        noise = self.codec.sample_noise(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
         target_physical_velocity = noise - target_physical
@@ -628,13 +777,7 @@ class V362PolicySystem(nn.Module):
         proposal = self.proposal(executed_history)
         steps = int(steps or self.policy_config.inference_steps)
         if noise is None:
-            x = torch.randn(
-                visual.shape[0],
-                self.policy_config.action_horizon,
-                self.policy_config.physical_action_dim,
-                device=visual.device,
-                dtype=visual.dtype,
-            )
+            x = self.codec.sample_noise(visual.shape[0], device=visual.device, dtype=visual.dtype)
         else:
             x = noise.clone()
             if x.shape[-1] == self.policy_config.action_dim:
@@ -668,6 +811,7 @@ class V362PolicySystem(nn.Module):
 
 
 __all__ = [
+    "ParsevalGripperTemporalFrame",
     "V362PolicyConfig",
     "PhysicalActionCodec",
     "PhysicalActionTokenLift",

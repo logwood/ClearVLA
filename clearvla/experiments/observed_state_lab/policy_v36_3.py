@@ -115,11 +115,21 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         nn.init.zeros_(self.gripper_delta.bias)
         nn.init.zeros_(self.gripper_gate.weight)
         nn.init.zeros_(self.gripper_gate.bias)
-        self.arm_abs = nn.Linear(h, ad)
-        self.arm_delta = nn.Linear(h, ad)
-        self.grip_value = nn.Linear(h, 1)
-        self.grip_delta = nn.Linear(h, 1)
-        self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
+        self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        if self.parseval_gripper:
+            self.arm_field = nn.Linear(h, 2 * ad)
+            self.grip_field = nn.Linear(h, int(config.gripper_field_dim))
+        else:
+            self.arm_abs = nn.Linear(h, ad)
+            self.arm_delta = nn.Linear(h, ad)
+            self.grip_value = nn.Linear(h, 1)
+            self.grip_delta = nn.Linear(h, 1)
+            self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
+
+    def output_layers(self) -> tuple[nn.Linear, ...]:
+        if self.parseval_gripper:
+            return self.arm_field, self.grip_field
+        return self.arm_abs, self.arm_delta, self.grip_value, self.grip_delta, self.grip_extra
 
     def forward(self, tokens: Tensor, transition_latent: Tensor | None = None) -> Tensor:
         x = self.norm(tokens)
@@ -127,6 +137,8 @@ class TransitionAwarePhysicalVelocityHead(nn.Module):
         if transition_latent is not None:
             z = self.transition_norm(transition_latent)
             grip_x = grip_x + torch.sigmoid(self.gripper_gate(z)) * self.gripper_delta(z)
+        if self.parseval_gripper:
+            return torch.cat([self.arm_field(x), self.grip_field(grip_x)], dim=-1)
         parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(grip_x), self.grip_delta(grip_x)]
         if int(self.grip_extra.out_features) > 0:
             parts.append(self.grip_extra(grip_x))
@@ -384,7 +396,7 @@ class V363PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         target_physical = self.codec.encode(target_action, state)
-        noise = torch.randn_like(target_physical)
+        noise = self.codec.sample_noise(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
         target_physical_velocity = noise - target_physical
@@ -428,13 +440,7 @@ class V363PolicySystem(nn.Module):
         proposal = self.proposal(executed_history)
         steps = int(steps or self.policy_config.inference_steps)
         if noise is None:
-            x = torch.randn(
-                visual.shape[0],
-                self.policy_config.action_horizon,
-                self.policy_config.physical_action_dim,
-                device=visual.device,
-                dtype=visual.dtype,
-            )
+            x = self.codec.sample_noise(visual.shape[0], device=visual.device, dtype=visual.dtype)
         else:
             x = noise.clone()
             if x.shape[-1] == self.policy_config.action_dim:

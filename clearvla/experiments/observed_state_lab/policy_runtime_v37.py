@@ -124,10 +124,8 @@ def evaluate_v37_policy(
         sample = prepare_v37_policy_sample(batch, conditioner=conditioner, system=system, camera_names=camera_names, device=device, dtype=dtype)
         generator = torch.Generator(device=device)
         generator.manual_seed(37237 + batch_index)
-        noise = torch.randn(
+        noise = system.codec.sample_noise(
             sample["policy_action"].shape[0],
-            system.policy_config.action_horizon,
-            system.policy_config.physical_action_dim,
             generator=generator,
             device=device,
             dtype=sample["visual"].dtype,

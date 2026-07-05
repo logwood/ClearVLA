@@ -60,6 +60,15 @@ _STAGE1_DIRTY_ADAPTER_PREFIXES = (
     "planner.motion_probe.",
 )
 
+_PARSEVAL_REPLACED_STAGE1_PREFIXES = (
+    "planner.seed.noisy_physical_lift.grip_value.",
+    "planner.seed.noisy_physical_lift.grip_delta.",
+    "planner.seed.noisy_physical_lift.grip_extra.",
+    "planner.latent_cvae_action_decoder.noisy_action_lift.",
+    "planner.latent_cvae_action_decoder.posterior_action.",
+    "planner.latent_cvae_action_decoder.velocity_head.",
+)
+
 
 def _filter_stage1_state_dict(
     state: dict[str, torch.Tensor],
@@ -86,6 +95,20 @@ def _filter_shape_mismatched_state_dict(
         key for key, value in state.items()
         if key in target and tuple(value.shape) != tuple(target[key].shape)
     ]
+    if not skipped:
+        return state, []
+    skipped_set = set(skipped)
+    return {key: value for key, value in state.items() if key not in skipped_set}, skipped
+
+
+def _filter_parseval_replaced_state_dict(
+    state: dict[str, torch.Tensor],
+    *,
+    enabled: bool,
+) -> tuple[dict[str, torch.Tensor], list[str]]:
+    if not enabled:
+        return state, []
+    skipped = [key for key in state if key.startswith(_PARSEVAL_REPLACED_STAGE1_PREFIXES)]
     if not skipped:
         return state, []
     skipped_set = set(skipped)
@@ -141,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer-causal-event-from-effect", type=int, default=1, help="V40: read event logits from causal effect tokens in layer contracts.")
     parser.add_argument("--layer-state-counterfactual", type=int, default=0, help="Experimental non-strict state/frame shuffle diagnostic; disabled by default and excluded from the recommended training path.")
     parser.add_argument("--action-consequence-self-condition", type=int, default=0, help="Use a no-grad deployable clean-action preview as the layer consequence action input.")
-    parser.add_argument("--layer-zero-base-diagnostic", type=int, default=0, help="Log consequence-output shift when layer rollout tokens are zeroed; diagnostic only, no loss.")
+    parser.add_argument("--layer-zero-base-diagnostic", type=int, default=1, help="Log consequence-output shift when layer rollout tokens are zeroed; diagnostic only, no loss.")
     parser.add_argument("--proposal-depth", type=int, default=2)
     parser.add_argument("--proposal-dropout", type=float, default=0.25)
     parser.add_argument("--dropout", type=float, default=0.05)
@@ -166,6 +189,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mid-execution-steps", type=int, default=8)
     parser.add_argument("--physical-decode-delta-blend", type=float, default=0.25)
     parser.add_argument("--gripper-field-dim", type=int, default=12)
+    parser.add_argument("--gripper-field-mode", choices=("legacy_handcrafted", "parseval_temporal"), default="legacy_handcrafted")
     parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"], default="legacy")
     parser.add_argument("--action-flow-residual-depth", type=int, default=2)
     parser.add_argument("--action-flow-residual-high-slots", type=int, default=4)
@@ -202,8 +226,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-transition-detach", type=int, default=1)
     parser.add_argument("--latent-cvae-context-memory", type=int, default=0)
     parser.add_argument("--latent-cvae-visual-memory", type=int, default=0)
-    parser.add_argument("--latent-cvae-layer-detach", type=int, default=0)
+    parser.add_argument("--latent-cvae-layer-detach", type=int, default=1)
     parser.add_argument("--latent-cvae-layer-grad-scale", type=float, default=0.0)
+    parser.add_argument("--latent-cvae-condition-source-norm", type=int, default=1, help="Normalize each CVAE condition source before fusion.")
+    parser.add_argument("--latent-cvae-bounded-consequence-fusion", type=int, default=1, help="Fuse world and action-conditioned summaries separately so routing cannot bypass consequence scaling.")
+    parser.add_argument("--latent-cvae-consequence-scale-init", type=float, default=0.10, help="Initial strength of action-conditioned layer-contract summaries.")
+    parser.add_argument("--latent-cvae-consequence-scale-max", type=float, default=0.50, help="Upper bound for action-conditioned layer-contract summary strength.")
     parser.add_argument("--latent-cvae-event-gripper-gate", type=int, default=1)
     parser.add_argument("--latent-cvae-inference-sample", type=int, default=0)
     parser.add_argument("--latent-cvae-output-init-std", type=float, default=1e-3)
@@ -381,6 +409,7 @@ def main() -> None:
         mid_execution_steps=args.mid_execution_steps,
         physical_decode_delta_blend=args.physical_decode_delta_blend,
         gripper_field_dim=args.gripper_field_dim,
+        gripper_field_mode=args.gripper_field_mode,
         visual_token_dim=int(latent_dim),
         visual_history_length=len(dataset_config.history_offsets),
         num_cameras=len(cameras),
@@ -461,6 +490,10 @@ def main() -> None:
         latent_cvae_visual_memory=args.latent_cvae_visual_memory,
         latent_cvae_layer_detach=args.latent_cvae_layer_detach,
         latent_cvae_layer_grad_scale=args.latent_cvae_layer_grad_scale,
+        latent_cvae_condition_source_norm=args.latent_cvae_condition_source_norm,
+        latent_cvae_bounded_consequence_fusion=args.latent_cvae_bounded_consequence_fusion,
+        latent_cvae_consequence_scale_init=args.latent_cvae_consequence_scale_init,
+        latent_cvae_consequence_scale_max=args.latent_cvae_consequence_scale_max,
         latent_cvae_event_gripper_gate=args.latent_cvae_event_gripper_gate,
         latent_cvae_inference_sample=args.latent_cvae_inference_sample,
         latent_cvae_output_init_std=args.latent_cvae_output_init_std,
@@ -542,6 +575,16 @@ def main() -> None:
                 f"{skipped_stage_keys[:8]} count={len(skipped_stage_keys)}",
                 flush=True,
             )
+        stage_state, skipped_parseval_keys = _filter_parseval_replaced_state_dict(
+            stage_state,
+            enabled=str(args.gripper_field_mode) == "parseval_temporal",
+        )
+        if skipped_parseval_keys:
+            print(
+                f"[v39-init] skipped replaced Parseval-interface keys: "
+                f"{skipped_parseval_keys[:8]} count={len(skipped_parseval_keys)}",
+                flush=True,
+            )
         stage_state, skipped_shape_keys = _filter_shape_mismatched_state_dict(stage_state, system.state_dict())
         if skipped_shape_keys:
             print(
@@ -576,6 +619,10 @@ def main() -> None:
             "counterfactual_delta_contrast": True,
             "tail_action_reads_controlled_delta": True,
             "final_action_decoder": str(args.final_action_decoder),
+            "gripper_field_mode": str(args.gripper_field_mode),
+            "gripper_field_dim": int(args.gripper_field_dim),
+            "gripper_parseval_shared_native_noise": str(args.gripper_field_mode) == "parseval_temporal",
+            "gripper_parseval_all_channels_decode": str(args.gripper_field_mode) == "parseval_temporal",
             "residual_action_flow_safe_start": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
             "residual_action_flow_uses_v37_high_action_event_tokens": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
             "layered_residual_action_flow_layer_pair_injection": str(args.final_action_decoder) == "layered_residual_action_flow",

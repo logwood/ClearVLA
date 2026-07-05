@@ -23,7 +23,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from .policy import RejectableHistoryProposal
-from .policy_v36_2 import PhysicalActionCodec
+from .policy_v36_2 import ParsevalGripperTemporalFrame, PhysicalActionCodec, PhysicalActionTokenLift
 from .policy_v36_3 import TransitionAwarePhysicalVelocityHead
 from .world_model import BiasFreeFFN
 from .policy_v38 import (
@@ -103,7 +103,7 @@ class V39PolicyConfig(V38PolicyConfig):
     action_consequence_self_condition: int = 0
     # Loss-free shortcut diagnostic: rerun each consequence cell with rollout
     # tokens zeroed and log how much its output shifts.
-    layer_zero_base_diagnostic: int = 0
+    layer_zero_base_diagnostic: int = 1
 
     # Optional final decoder used only in policy-stage experiments.  The safe
     # variants keep the warm-started V40.1 legacy velocity head as the base
@@ -168,8 +168,15 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_transition_detach: int = 1
     latent_cvae_context_memory: int = 0
     latent_cvae_visual_memory: int = 0
-    latent_cvae_layer_detach: int = 0
+    latent_cvae_layer_detach: int = 1
     latent_cvae_layer_grad_scale: float = 0.0
+    # Keep rollout/consequence features visible to the final decoder without
+    # letting their unconstrained scale or gradients turn them into an
+    # auxiliary action-prediction path.
+    latent_cvae_condition_source_norm: int = 1
+    latent_cvae_bounded_consequence_fusion: int = 1
+    latent_cvae_consequence_scale_init: float = 0.10
+    latent_cvae_consequence_scale_max: float = 0.50
     latent_cvae_event_gripper_gate: int = 1
     latent_cvae_inference_sample: int = 0
     latent_cvae_output_init_std: float = 1e-3
@@ -354,7 +361,9 @@ class V39PolicyConfig(V38PolicyConfig):
         for name in (
             "latent_cvae_layer_memory", "latent_cvae_transition_memory",
             "latent_cvae_transition_detach", "latent_cvae_context_memory", "latent_cvae_visual_memory",
-            "latent_cvae_layer_detach", "latent_cvae_event_gripper_gate",
+            "latent_cvae_layer_detach", "latent_cvae_condition_source_norm",
+            "latent_cvae_bounded_consequence_fusion",
+            "latent_cvae_event_gripper_gate",
             "latent_cvae_inference_sample", "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
             "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
         ):
@@ -405,6 +414,14 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_layer_scan_alpha must be non-negative")
         if not (0.0 <= float(self.latent_cvae_layer_grad_scale) <= 1.0):
             raise ValueError("latent_cvae_layer_grad_scale must be in [0, 1]")
+        if float(self.latent_cvae_consequence_scale_max) <= 0:
+            raise ValueError("latent_cvae_consequence_scale_max must be positive")
+        if not (
+            0.0
+            <= float(self.latent_cvae_consequence_scale_init)
+            <= float(self.latent_cvae_consequence_scale_max)
+        ):
+            raise ValueError("latent_cvae_consequence_scale_init must be in [0, max]")
         if int(self.adaptive_cvae_route_cosine) not in (0, 1):
             raise ValueError("adaptive_cvae_route_cosine must be 0 or 1")
         if float(self.adaptive_cvae_route_temperature) <= 0:
@@ -779,7 +796,13 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
         h = int(config.hidden_size)
         ph = int(config.physical_action_dim)
         mid = int(config.layer_consequence_hidden)
-        self.action_summary_dim = ph * 5 + 4
+        self.gripper_frame = (
+            ParsevalGripperTemporalFrame(config.action_horizon, config.gripper_field_dim)
+            if str(getattr(config, "gripper_field_mode", "legacy_handcrafted")) == "parseval_temporal"
+            else None
+        )
+        semantic_ph = 2 * int(config.arm_dim) + 1 if self.gripper_frame is not None else ph
+        self.action_summary_dim = semantic_ph * 5 + 4
         self.action_encoder = nn.Sequential(
             nn.LayerNorm(self.action_summary_dim),
             nn.Linear(self.action_summary_dim, mid),
@@ -812,6 +835,13 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
     def _segment_action(self, action_physical: Tensor) -> Tensor:
         cfg = self.config
         k = int(cfg.layer_consequence_steps)
+        if self.gripper_frame is not None:
+            ad = int(cfg.arm_dim)
+            gripper_field = action_physical[..., 2 * ad :]
+            action_physical = torch.cat(
+                [action_physical[..., : 2 * ad], self.gripper_frame.synthesis(gripper_field)],
+                dim=-1,
+            )
         b, horizon, ph = action_physical.shape
         if horizon <= 0:
             raise ValueError("action_physical horizon must be positive")
@@ -1139,13 +1169,7 @@ class V37StyleResidualActionFlowDenoiser(nn.Module):
         return mask
 
     def _zero_initialize_outputs(self) -> None:
-        for module in (
-            self.velocity_head.arm_abs,
-            self.velocity_head.arm_delta,
-            self.velocity_head.grip_value,
-            self.velocity_head.grip_delta,
-            self.velocity_head.grip_extra,
-        ):
+        for module in self.velocity_head.output_layers():
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
         for seq in (self.event_delta_head, self.motion_delta_head):
@@ -1358,13 +1382,7 @@ class LayeredV37StyleResidualActionFlowDenoiser(nn.Module):
         return mask
 
     def _zero_initialize_outputs(self) -> None:
-        for module in (
-            self.velocity_head.arm_abs,
-            self.velocity_head.arm_delta,
-            self.velocity_head.grip_value,
-            self.velocity_head.grip_delta,
-            self.velocity_head.grip_extra,
-        ):
+        for module in self.velocity_head.output_layers():
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
         for seq in (self.event_delta_head, self.motion_delta_head):
@@ -1669,13 +1687,7 @@ class HierarchicalLatentMainActionDecoder(nn.Module):
         return mask
 
     def _zero_initialize_outputs(self) -> None:
-        for module in (
-            self.velocity_head.arm_abs,
-            self.velocity_head.arm_delta,
-            self.velocity_head.grip_value,
-            self.velocity_head.grip_delta,
-            self.velocity_head.grip_extra,
-        ):
+        for module in self.velocity_head.output_layers():
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
         for seq in (self.event_head, self.motion_head):
@@ -2363,6 +2375,7 @@ class LatentCVAEActionDecoder(nn.Module):
     """
 
     _LAYER_KEYS = LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+    _CONSEQUENCE_LAYER_KEYS = _LAYER_KEYS[2:]
 
     def __init__(self, config: V39PolicyConfig) -> None:
         super().__init__()
@@ -2373,7 +2386,12 @@ class LatentCVAEActionDecoder(nn.Module):
         self.depth = int(getattr(config, "latent_cvae_decoder_depth", 3))
         self.time = TimeEmbedding(h)
         self.horizon_query = nn.Parameter(torch.randn(1, int(config.action_horizon), h) * 0.02)
-        self.noisy_action_lift = nn.Sequential(nn.LayerNorm(int(config.physical_action_dim)), nn.Linear(int(config.physical_action_dim), h))
+        parseval_gripper = str(getattr(config, "gripper_field_mode", "legacy_handcrafted")) == "parseval_temporal"
+        self.noisy_action_lift = (
+            PhysicalActionTokenLift(config)
+            if parseval_gripper
+            else nn.Sequential(nn.LayerNorm(int(config.physical_action_dim)), nn.Linear(int(config.physical_action_dim), h))
+        )
         self.trajectory_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.time_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         # One projection per V40 layer.  This makes every layer latent explicitly
@@ -2393,6 +2411,16 @@ class LatentCVAEActionDecoder(nn.Module):
         self.layer_key_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
         nn.init.zeros_(self.layer_key_gate[-1].weight)
         nn.init.zeros_(self.layer_key_gate[-1].bias)
+        consequence_scale_max = float(getattr(config, "latent_cvae_consequence_scale_max", 0.50))
+        consequence_scale_init = float(getattr(config, "latent_cvae_consequence_scale_init", 0.10))
+        consequence_scale_ratio = min(max(consequence_scale_init / consequence_scale_max, 1e-4), 1.0 - 1e-4)
+        consequence_scale_logit = math.log(consequence_scale_ratio / (1.0 - consequence_scale_ratio))
+        self.layer_consequence_scale_logits = nn.Parameter(
+            torch.full((len(self._CONSEQUENCE_LAYER_KEYS),), consequence_scale_logit)
+        )
+        self._consequence_scale_index = {
+            key: index for index, key in enumerate(self._CONSEQUENCE_LAYER_KEYS)
+        }
         self.layer_embed = nn.Parameter(torch.randn(1, int(config.depth), h) * 0.02)
         self.transition_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
         self.context_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
@@ -2409,12 +2437,21 @@ class LatentCVAEActionDecoder(nn.Module):
             self.layer_scan_init = None
             self.layer_scan_fusion = None
         self.prior = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, 2 * self.z_dim))
-        self.posterior_action = nn.Sequential(
-            nn.LayerNorm(int(config.physical_action_dim)),
-            nn.Linear(int(config.physical_action_dim), h),
-            nn.SiLU(),
-            nn.Linear(h, h),
-        )
+        if parseval_gripper:
+            self.posterior_action = nn.Sequential(
+                PhysicalActionTokenLift(config),
+                nn.LayerNorm(h),
+                nn.Linear(h, h),
+                nn.SiLU(),
+                nn.Linear(h, h),
+            )
+        else:
+            self.posterior_action = nn.Sequential(
+                nn.LayerNorm(int(config.physical_action_dim)),
+                nn.Linear(int(config.physical_action_dim), h),
+                nn.SiLU(),
+                nn.Linear(h, h),
+            )
         self.posterior = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, 2 * self.z_dim))
         self.z_to_token = nn.Sequential(nn.LayerNorm(self.z_dim), nn.Linear(self.z_dim, h))
         self.blocks = nn.ModuleList([LatentCVAEActionBlock(config) for _ in range(self.depth)])
@@ -2446,13 +2483,7 @@ class LatentCVAEActionDecoder(nn.Module):
 
     def _initialize_outputs(self) -> None:
         std = float(getattr(self.config, "latent_cvae_output_init_std", 1e-3))
-        for module in (
-            self.velocity_head.arm_abs,
-            self.velocity_head.arm_delta,
-            self.velocity_head.grip_value,
-            self.velocity_head.grip_delta,
-            self.velocity_head.grip_extra,
-        ):
+        for module in self.velocity_head.output_layers():
             if std > 0:
                 nn.init.normal_(module.weight, mean=0.0, std=std)
             else:
@@ -2468,23 +2499,98 @@ class LatentCVAEActionDecoder(nn.Module):
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
 
-    def _layer_entry_summary(self, entry: dict[str, Tensor], *, detach: bool) -> Tensor | None:
+    def _normalize_condition_source(self, value: Tensor) -> Tensor:
+        if int(getattr(self.config, "latent_cvae_condition_source_norm", 1)):
+            return F.layer_norm(value, (self.hidden_size,))
+        return value
+
+    def _consequence_scales(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        scale_max = float(getattr(self.config, "latent_cvae_consequence_scale_max", 0.50))
+        return scale_max * torch.sigmoid(self.layer_consequence_scale_logits).to(device=device, dtype=dtype)
+
+    def _layer_entry_summary(
+        self,
+        entry: dict[str, Tensor],
+        *,
+        detach: bool,
+    ) -> tuple[Tensor | None, dict[str, Tensor]]:
         groups: list[Tensor] = []
+        consequence_group: list[bool] = []
+        active_scales: list[Tensor] = []
         grad_scale = float(getattr(self.config, "latent_cvae_layer_grad_scale", 0.0))
+        bounded_fusion = bool(int(getattr(self.config, "latent_cvae_bounded_consequence_fusion", 1)))
         for key_index, key in enumerate(self._LAYER_KEYS):
             value = entry.get(key)
             if not isinstance(value, Tensor) or value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
                 continue
             source = _scaled_contract_view(value, grad_scale) if detach else value
             pooled = source.mean(dim=1)
-            typed = self.layer_key_proj[key_index](pooled)
+            typed = self._normalize_condition_source(self.layer_key_proj[key_index](pooled))
+            scale_index = self._consequence_scale_index.get(key)
+            is_consequence = scale_index is not None
+            if scale_index is not None and bounded_fusion:
+                scale = self._consequence_scales(device=typed.device, dtype=typed.dtype)[scale_index]
+                typed = typed * scale
+                active_scales.append(scale)
+            elif scale_index is not None:
+                active_scales.append(typed.new_ones(()))
             typed = typed + self.layer_key_embed[:, key_index].to(device=typed.device, dtype=typed.dtype)
             groups.append(typed)
+            consequence_group.append(is_consequence)
         if not groups:
-            return None
+            zero = self.layer_consequence_scale_logits.detach().new_zeros(())
+            return None, {
+                "consequence_scale_mean": zero,
+                "consequence_gate_preference": zero,
+                "consequence_mix_ratio": zero,
+            }
         stack = torch.stack(groups, dim=1)
-        weights = torch.softmax(self.layer_key_gate(stack).float(), dim=1).to(dtype=stack.dtype)
-        return (stack * weights).sum(dim=1)
+        logits = self.layer_key_gate(stack).float()
+        consequence_mask = torch.tensor(consequence_group, device=stack.device, dtype=torch.bool)
+        world_mask = ~consequence_mask
+        global_weights = torch.softmax(logits, dim=1).to(dtype=stack.dtype)
+        if any(consequence_group) and not all(consequence_group):
+            consequence_count = sum(consequence_group)
+            world_count = len(consequence_group) - consequence_count
+            consequence_score = torch.logsumexp(logits[:, consequence_mask], dim=1) - math.log(consequence_count)
+            world_score = torch.logsumexp(logits[:, world_mask], dim=1) - math.log(world_count)
+            gate_preference = torch.sigmoid(consequence_score - world_score).mean()
+        elif any(consequence_group):
+            gate_preference = logits.new_ones(())
+        else:
+            gate_preference = logits.new_zeros(())
+        if bounded_fusion:
+            # Select semantics within each family, then mix the families
+            # explicitly. A single global softmax could otherwise undo the
+            # consequence scale by assigning all mass to one conditioned key.
+            if any(consequence_group):
+                consequence_weights = torch.softmax(logits[:, consequence_mask], dim=1).to(dtype=stack.dtype)
+                consequence_summary = (stack[:, consequence_mask] * consequence_weights).sum(dim=1)
+            else:
+                consequence_summary = stack.new_zeros(stack.shape[0], stack.shape[-1])
+            if not all(consequence_group):
+                world_weights = torch.softmax(logits[:, world_mask], dim=1).to(dtype=stack.dtype)
+                world_summary = (stack[:, world_mask] * world_weights).sum(dim=1)
+            else:
+                world_summary = stack.new_zeros(stack.shape[0], stack.shape[-1])
+        else:
+            consequence_summary = (
+                (stack[:, consequence_mask] * global_weights[:, consequence_mask]).sum(dim=1)
+                if any(consequence_group) else stack.new_zeros(stack.shape[0], stack.shape[-1])
+            )
+            world_summary = (
+                (stack[:, world_mask] * global_weights[:, world_mask]).sum(dim=1)
+                if not all(consequence_group) else stack.new_zeros(stack.shape[0], stack.shape[-1])
+            )
+        consequence_norm = consequence_summary.detach().float().norm(dim=-1).mean()
+        world_norm = world_summary.detach().float().norm(dim=-1).mean()
+        mix_ratio = consequence_norm / (world_norm + consequence_norm).clamp_min(1e-6)
+        scale_mean = torch.stack(active_scales).mean() if active_scales else stack.new_zeros(())
+        return world_summary + consequence_summary, {
+            "consequence_scale_mean": scale_mean.detach().float(),
+            "consequence_gate_preference": gate_preference.detach().float(),
+            "consequence_mix_ratio": mix_ratio,
+        }
 
     @staticmethod
     def _memory_summary(memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None, ref: Tensor, proj: nn.Module) -> Tensor:
@@ -2747,26 +2853,28 @@ class LatentCVAEActionDecoder(nn.Module):
         dtype = trajectory_tokens.dtype
         device = trajectory_tokens.device
         batch = int(trajectory_tokens.shape[0])
-        detach_layers = bool(int(getattr(cfg, "latent_cvae_layer_detach", 0)))
+        detach_layers = bool(int(getattr(cfg, "latent_cvae_layer_detach", 1)))
         use_layer_memory = bool(int(getattr(cfg, "latent_cvae_layer_memory", 1)))
         summaries: list[Tensor] = []
+        summary_stats: list[dict[str, Tensor]] = []
         if use_layer_memory:
             for entry in layer_contracts:
-                summary = self._layer_entry_summary(entry, detach=detach_layers)
+                summary, entry_stats = self._layer_entry_summary(entry, detach=detach_layers)
                 if summary is not None:
                     summaries.append(summary.to(device=device, dtype=dtype))
+                    summary_stats.append(entry_stats)
         if use_layer_memory and len(summaries) < int(cfg.depth):
             raise RuntimeError(f"{str(getattr(cfg, 'final_action_decoder', 'latent_cvae_action'))} expected summaries for {int(cfg.depth)} layers, got {len(summaries)}")
         if use_layer_memory and summaries:
             projected = []
             for i in range(int(cfg.depth)):
                 src = summaries[min(i, len(summaries) - 1)]
-                projected.append(self.layer_proj[i](src))
+                projected.append(self._normalize_condition_source(self.layer_proj[i](src)))
             layer_stack = torch.stack(projected, dim=1) + self.layer_embed.to(device=device, dtype=dtype)
         else:
             layer_stack = torch.zeros(batch, int(cfg.depth), self.hidden_size, device=device, dtype=dtype)
         layer_flat = layer_stack.reshape(batch, int(cfg.depth) * self.hidden_size)
-        traj = self.traj_summary_proj(trajectory_tokens.mean(dim=1))
+        traj = self._normalize_condition_source(self.traj_summary_proj(trajectory_tokens.mean(dim=1)))
         transition_source = self._maybe_detach_memory(
             transition_memory,
             detach=bool(int(getattr(cfg, "latent_cvae_transition_detach", 1))),
@@ -2774,11 +2882,27 @@ class LatentCVAEActionDecoder(nn.Module):
         trans = self._memory_summary(transition_source, traj, self.transition_proj) if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else torch.zeros_like(traj)
         ctx = self._memory_summary(context_memory, traj, self.context_proj) if int(getattr(cfg, "latent_cvae_context_memory", 0)) else torch.zeros_like(traj)
         vis = self._memory_summary(visual_memory, traj, self.visual_proj) if int(getattr(cfg, "latent_cvae_visual_memory", 0)) else torch.zeros_like(traj)
+        transition_raw_norm = trans.detach().float().norm(dim=-1).mean()
+        trans = self._normalize_condition_source(trans)
+        ctx = self._normalize_condition_source(ctx)
+        vis = self._normalize_condition_source(vis)
         lateral_cond = self.condition_fusion(torch.cat([layer_flat, trans, ctx, vis, traj], dim=-1))
         zero_stat = torch.zeros((), device=device, dtype=torch.float32)
+        scale_stats = [item["consequence_scale_mean"].to(device=device) for item in summary_stats]
+        preference_stats = [item["consequence_gate_preference"].to(device=device) for item in summary_stats]
+        mix_stats = [item["consequence_mix_ratio"].to(device=device) for item in summary_stats]
         cond_stats = {
             "cvae_condition_scan_norm": zero_stat,
             "cvae_condition_lateral_norm": lateral_cond.detach().float().norm(dim=-1).mean(),
+            "cvae_layer_summary_norm": (
+                torch.stack([value.detach().float().norm(dim=-1).mean() for value in summaries]).mean()
+                if summaries else zero_stat
+            ),
+            "cvae_transition_source_raw_norm": transition_raw_norm,
+            "cvae_transition_condition_norm": trans.detach().float().norm(dim=-1).mean(),
+            "cvae_consequence_scale_mean": torch.stack(scale_stats).mean() if scale_stats else zero_stat,
+            "cvae_consequence_gate_preference": torch.stack(preference_stats).mean() if preference_stats else zero_stat,
+            "cvae_consequence_mix_ratio": torch.stack(mix_stats).mean() if mix_stats else zero_stat,
         }
         if (
             int(getattr(cfg, "latent_cvae_layer_scan", 0))
@@ -2882,6 +3006,12 @@ class LatentCVAEActionDecoder(nn.Module):
             "cvae_condition_norm": cond.detach().float().norm(dim=-1).mean(),
             "cvae_condition_scan_norm": cond_stats["cvae_condition_scan_norm"],
             "cvae_condition_lateral_norm": cond_stats["cvae_condition_lateral_norm"],
+            "cvae_layer_summary_norm": cond_stats["cvae_layer_summary_norm"],
+            "cvae_transition_source_raw_norm": cond_stats["cvae_transition_source_raw_norm"],
+            "cvae_transition_condition_norm": cond_stats["cvae_transition_condition_norm"],
+            "cvae_consequence_scale_mean": cond_stats["cvae_consequence_scale_mean"],
+            "cvae_consequence_gate_preference": cond_stats["cvae_consequence_gate_preference"],
+            "cvae_consequence_mix_ratio": cond_stats["cvae_consequence_mix_ratio"],
             "cvae_posterior_used": torch.tensor(float(posterior_used), device=device, dtype=dtype),
             "gripper_gate_mean": prior_out["gripper_gate_mean"],
             "layer_memory_count": layer_count,
@@ -4455,6 +4585,30 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 _zeros_like_scalar(pred_physical_velocity)
                 if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_lateral_norm", _zeros_like_scalar(pred_physical_velocity))
             ),
+            "latent_cvae_layer_summary_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_layer_summary_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_transition_condition_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_transition_condition_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_transition_source_raw_norm": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_transition_source_raw_norm", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_consequence_scale_mean": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_consequence_scale_mean", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_consequence_gate_preference": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_consequence_gate_preference", _zeros_like_scalar(pred_physical_velocity))
+            ),
+            "latent_cvae_consequence_mix_ratio": (
+                _zeros_like_scalar(pred_physical_velocity)
+                if latent_cvae_action is None else latent_cvae_action.get("cvae_consequence_mix_ratio", _zeros_like_scalar(pred_physical_velocity))
+            ),
             "latent_cvae_posterior_used": (
                 _zeros_like_scalar(pred_physical_velocity)
                 if latent_cvae_action is None else latent_cvae_action.get("cvae_posterior_used", _zeros_like_scalar(pred_physical_velocity))
@@ -4817,7 +4971,11 @@ class V39PolicySystem(nn.Module):
         proposal = self.proposal(executed_history)
         codec_state = state if action_state is None else action_state
         target_physical = self.codec.encode(target_action, codec_state)
-        noise = torch.randn_like(target_physical)
+        noise = self.codec.sample_noise(
+            target_physical.shape[0],
+            device=target_physical.device,
+            dtype=target_physical.dtype,
+        )
         t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
         target_physical_velocity = noise - target_physical
@@ -5036,10 +5194,8 @@ class V39PolicySystem(nn.Module):
         if steps <= 0:
             raise ValueError("steps must be positive")
         if noise is None:
-            x = torch.randn(
+            x = self.codec.sample_noise(
                 visual.shape[0],
-                self.policy_config.action_horizon,
-                self.policy_config.physical_action_dim,
                 device=visual.device,
                 dtype=visual.dtype,
             )

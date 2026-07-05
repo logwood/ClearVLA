@@ -28,6 +28,7 @@ from .policy_runtime_v36_3 import (
     flow_losses as v363_flow_losses,
     gripper_event_labels,
     position_weights,
+    semantic_physical_velocity_error,
     is_deploy_eligible,
     mean_rows,
 )
@@ -701,7 +702,7 @@ def micro_refine_supervision_losses(
     final_normal = normal[None, None].expand(batch, 1, horizon)
     weights = torch.cat([weights[:, :-1], final_normal], dim=1) if steps > 1 else final_normal
 
-    physical_error = (pred - target[:, None]).square().mean(dim=-1)
+    physical_error = semantic_physical_velocity_error(system, pred - target[:, None])
     micro_flow = (physical_error * weights).mean()
     mono_weight = normal.to(device=device, dtype=dtype)[None, None]
     mono_error = (physical_error * mono_weight).mean(dim=-1)
@@ -794,7 +795,7 @@ def flow_losses(
     if "latent_cvae_kl" in output and "legacy_physical_velocity" in output:
         pred = output["pred_physical_velocity"]
         legacy = output["legacy_physical_velocity"].detach().to(device=pred.device, dtype=pred.dtype)
-        anchor_error = (pred - legacy).square().mean(dim=-1)
+        anchor_error = semantic_physical_velocity_error(system, pred - legacy)
         pos_w = position_weights(system.policy_config, trainer, pred.device).to(dtype=pred.dtype)
         anchor = (anchor_error * pos_w[None]).mean()
         base_weight = max(float(getattr(trainer, "latent_cvae_legacy_anchor_weight", 0.0)), 0.0)
@@ -823,7 +824,10 @@ def flow_losses(
     # target-conditioned z from becoming the only path that learns action.
     if "post_pred_velocity" in output:
         post_pred = output["post_pred_velocity"]
-        post_error = (post_pred - output["target_physical_velocity"]).square().mean(dim=-1)
+        post_error = semantic_physical_velocity_error(
+            system,
+            post_pred - output["target_physical_velocity"],
+        )
         pos_w = position_weights(system.policy_config, trainer, post_pred.device).to(dtype=post_pred.dtype)
         post_flow = (post_error * pos_w[None]).mean()
         losses["latent_cvae_post_flow"] = post_flow.detach().float()
@@ -913,6 +917,12 @@ def flow_losses(
         "latent_cvae_condition_norm",
         "latent_cvae_condition_scan_norm",
         "latent_cvae_condition_lateral_norm",
+        "latent_cvae_layer_summary_norm",
+        "latent_cvae_transition_source_raw_norm",
+        "latent_cvae_transition_condition_norm",
+        "latent_cvae_consequence_scale_mean",
+        "latent_cvae_consequence_gate_preference",
+        "latent_cvae_consequence_mix_ratio",
         "latent_cvae_posterior_used",
         "latent_cvae_gripper_gate_mean",
         "latent_cvae_layer_memory_count",
@@ -1289,6 +1299,11 @@ def evaluate_v39_policy(
     no_proposal_rows = []
     event_logits_rows: list[np.ndarray] = []
     event_target_rows: list[np.ndarray] = []
+    eval_field_null_sse = 0.0
+    eval_field_energy = 0.0
+    eval_field_null_count = 0
+    eval_noise_projection_sse = 0.0
+    eval_noise_projection_count = 0
     contract_eval = _is_contract_stage(trainer) and _uses_layer_adapter_contract(trainer)
     contract_metric_sums: dict[str, float] = {}
     contract_metric_count = 0
@@ -1308,10 +1323,8 @@ def evaluate_v39_policy(
             memory_reporter.snapshot(tag="eval_after_prepare", phase="eval", epoch=epoch, batch=batch_index, global_step=global_step)
         generator = torch.Generator(device=device)
         generator.manual_seed(37237 + batch_index)
-        noise = torch.randn(
+        noise = system.codec.sample_noise(
             sample["policy_action"].shape[0],
-            system.policy_config.action_horizon,
-            system.policy_config.physical_action_dim,
             generator=generator,
             device=device,
             dtype=sample["visual"].dtype,
@@ -1333,6 +1346,18 @@ def evaluate_v39_policy(
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
                 stop_at_midcut=stop_midcut_eval,
             )
+            if system.codec.uses_parseval_gripper_field:
+                ad = int(system.policy_config.arm_dim)
+                gf = int(system.policy_config.gripper_field_dim)
+                noise_field = noise[..., 2 * ad : 2 * ad + gf]
+                noise_null = noise_field - system.codec.project_gripper_field(noise_field)
+                eval_noise_projection_sse += float(noise_null.float().square().sum().cpu())
+                eval_noise_projection_count += int(noise_null.numel())
+                pred_field = pred_pack["physical_action"][..., 2 * ad : 2 * ad + gf]
+                pred_null = pred_field - system.codec.project_gripper_field(pred_field)
+                eval_field_null_sse += float(pred_null.float().square().sum().cpu())
+                eval_field_energy += float(pred_field.float().square().sum().cpu())
+                eval_field_null_count += int(pred_null.numel())
             if contract_eval:
                 contract_output = system.flow_training_forward(
                     sample["visual"], sample["history_state"], sample["executed_action_history"],
@@ -1394,6 +1419,10 @@ def evaluate_v39_policy(
     metrics["eval_stop_at_midcut"] = float(_is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer))
     metrics["eval_layer_adapter_contract"] = float(_uses_layer_adapter_contract(trainer))
     metrics["contract_eval_teacher_forced_action"] = float(contract_eval)
+    if system.codec.uses_parseval_gripper_field:
+        metrics["eval_gripper_field_projection_mse"] = eval_field_null_sse / max(eval_field_null_count, 1)
+        metrics["eval_gripper_field_null_ratio"] = eval_field_null_sse / max(eval_field_energy, 1e-12)
+        metrics["eval_gripper_noise_projection_mse"] = eval_noise_projection_sse / max(eval_noise_projection_count, 1)
     if contract_metric_count:
         for key, value in contract_metric_sums.items():
             metrics[f"contract_{key}"] = value / float(contract_metric_count)
@@ -1873,8 +1902,12 @@ def train_v39_policy(
                 print(
                     f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
                     f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
-                    f"gfmf={row.get('gripper_fm_field', 0.0):.5f} gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
+                    f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} gfmf={row.get('gripper_fm_field', 0.0):.5f} "
+                    f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
                     f"gfme={row.get('gripper_fm_event', 0.0):.5f} gfmh={row.get('gripper_fm_hold', 0.0):.5f} "
+                    f"gfmn={row.get('gripper_fm_native', 0.0):.5f} gfmnull={row.get('gripper_fm_null', 0.0):.5f} "
+                    f"gfmnr={row.get('gripper_fm_null_ratio', 0.0):.3f} gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
+                    f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
                     f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
                     f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
                     f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
@@ -1891,6 +1924,12 @@ def train_v39_policy(
                     f"clmem={row.get('latent_cvae_layer_memory_count', 0.0):.1f} "
                     f"cscan={row.get('latent_cvae_condition_scan_norm', 0.0):.2f} "
                     f"clat={row.get('latent_cvae_condition_lateral_norm', 0.0):.2f} "
+                    f"clsum={row.get('latent_cvae_layer_summary_norm', 0.0):.2f} "
+                    f"ctraw={row.get('latent_cvae_transition_source_raw_norm', 0.0):.2f} "
+                    f"ctmem={row.get('latent_cvae_transition_condition_norm', 0.0):.2f} "
+                    f"ccscale={row.get('latent_cvae_consequence_scale_mean', 0.0):.3f} "
+                    f"ccpref={row.get('latent_cvae_consequence_gate_preference', 0.0):.3f} "
+                    f"ccmix={row.get('latent_cvae_consequence_mix_ratio', 0.0):.3f} "
                     f"cadu={row.get('latent_cvae_adaptive_refine_update_mean', 0.0):.3f} "
                     f"cxgate={row.get('latent_cvae_adaptive_noisy_gate_mean', 0.0):.3f} "
                     f"xnorm={row.get('latent_cvae_adaptive_noisy_branch_norm', 0.0):.3f} "
