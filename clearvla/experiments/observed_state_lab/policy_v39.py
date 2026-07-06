@@ -1965,6 +1965,14 @@ class LatentCVAEActionBlock(nn.Module):
         return x + torch.tanh(ff_g)[:, None] * self.drop(update)
 
 
+@dataclass
+class PreparedEvidenceMemory:
+    key_bias: Tensor
+    ranges: dict[str, tuple[int, int]]
+    block_kv: tuple[tuple[Tensor, Tensor], ...]
+    batch_size: int
+
+
 class SemanticEvidenceWorkspaceBlock(nn.Module):
     """AdaLN-conditioned workspace block with one evidence write path."""
 
@@ -2008,12 +2016,20 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         b, heads, n, d = x.shape
         return x.transpose(1, 2).reshape(b, n, heads * d)
 
+    def project_memory(self, memory: Tensor) -> tuple[Tensor, Tensor]:
+        memory_value = self.memory_norm(memory)
+        return (
+            self._split_heads(self.cross_k(memory_value)),
+            self._split_heads(self.cross_v(memory_value)),
+        )
+
     def forward(
         self,
         workspace: Tensor,
-        memory: Tensor,
         primary_cond: Tensor,
         *,
+        memory_k: Tensor,
+        memory_v: Tensor,
         key_bias: Tensor,
         query_context: Tensor,
     ) -> tuple[Tensor, Tensor]:
@@ -2041,13 +2057,10 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         # creating an action -> workspace -> action echo shortcut.
         cross_query = self.cross_norm(workspace + query_context)
         q = self._split_heads(self.cross_q(self._modulate(cross_query, cross_s, cross_c)))
-        memory_value = self.memory_norm(memory)
-        k = self._split_heads(self.cross_k(memory_value))
-        v = self._split_heads(self.cross_v(memory_value))
-        scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (float(self.head_dim) ** -0.5)
+        scores = torch.matmul(q.float(), memory_k.float().transpose(-2, -1)) * (float(self.head_dim) ** -0.5)
         scores = scores + key_bias.to(device=scores.device, dtype=scores.dtype)[None, None, None]
         weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
-        cross_update = torch.matmul(weights, v)
+        cross_update = torch.matmul(weights, memory_v)
         cross_update = self.cross_out(self._merge_heads(cross_update))
         workspace = workspace + torch.tanh(cross_g)[:, None] * self.drop(cross_update)
 
@@ -2103,16 +2116,15 @@ class SemanticEvidenceWorkspace(nn.Module):
             align_corners=True,
         ).transpose(1, 2).to(dtype=action.dtype)
 
-    def forward(
+    def _prepare_sources(
         self,
         sources: dict[str, Tensor],
         *,
-        action: Tensor,
-        primary_cond: Tensor,
-        step_context: Tensor,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        device = action.device
-        dtype = action.dtype
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        allow_empty: bool,
+    ) -> tuple[Tensor | None, Tensor, dict[str, tuple[int, int]]]:
         unknown_sources = set(sources).difference(self.SOURCE_NAMES)
         if unknown_sources:
             raise ValueError(f"unknown evidence workspace sources: {sorted(unknown_sources)}")
@@ -2126,10 +2138,10 @@ class SemanticEvidenceWorkspace(nn.Module):
                 continue
             if value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
                 raise ValueError(f"workspace source {name!r} must be [B,N,H], got {tuple(value.shape)}")
-            if int(value.shape[0]) != int(action.shape[0]):
+            if int(value.shape[0]) != batch_size:
                 raise ValueError(
                     f"workspace source {name!r} batch={int(value.shape[0])} "
-                    f"does not match action batch={int(action.shape[0])}"
+                    f"does not match action batch={batch_size}"
                 )
             value = value.to(device=device, dtype=dtype)
             if int(value.shape[1]) == 0:
@@ -2138,25 +2150,96 @@ class SemanticEvidenceWorkspace(nn.Module):
             parts.append(typed)
             count = int(typed.shape[1])
             ranges[name] = (offset, offset + count)
-            # Equal source-group prior mass prevents a 192-token rollout grid
-            # from winning solely through token multiplicity.
             key_bias_parts.append(torch.full((count,), -math.log(float(count)), device=device, dtype=torch.float32))
             offset += count
         if not parts:
+            if allow_empty:
+                return None, torch.zeros(0, device=device, dtype=torch.float32), ranges
             raise RuntimeError("evidence workspace requires at least one semantic source")
-        memory = torch.cat(parts, dim=1)
-        key_bias = torch.cat(key_bias_parts, dim=0)
+        return torch.cat(parts, dim=1), torch.cat(key_bias_parts, dim=0), ranges
+
+    def prepare_static_memory(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> PreparedEvidenceMemory:
+        memory, key_bias, ranges = self._prepare_sources(
+            sources,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+            allow_empty=False,
+        )
+        assert memory is not None
+        return PreparedEvidenceMemory(
+            key_bias=key_bias,
+            ranges=ranges,
+            block_kv=tuple(block.project_memory(memory) for block in self.blocks),
+            batch_size=batch_size,
+        )
+
+    def forward(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        action: Tensor,
+        primary_cond: Tensor,
+        step_context: Tensor,
+        static_memory: PreparedEvidenceMemory | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        device = action.device
+        dtype = action.dtype
+        batch_size = int(action.shape[0])
+        if static_memory is not None and static_memory.batch_size != batch_size:
+            raise ValueError(
+                f"cached workspace batch={static_memory.batch_size} does not match action batch={batch_size}"
+            )
+        dynamic_memory, dynamic_bias, dynamic_ranges = self._prepare_sources(
+            sources,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+            allow_empty=static_memory is not None,
+        )
+        if static_memory is None:
+            assert dynamic_memory is not None
+            ranges = dynamic_ranges
+            key_bias = dynamic_bias
+            static_token_count = 0
+        else:
+            overlap = set(static_memory.ranges).intersection(dynamic_ranges)
+            if overlap:
+                raise ValueError(f"workspace sources appear in both static and dynamic memory: {sorted(overlap)}")
+            static_token_count = int(static_memory.key_bias.numel())
+            ranges = dict(static_memory.ranges)
+            ranges.update({name: (start + static_token_count, stop + static_token_count) for name, (start, stop) in dynamic_ranges.items()})
+            key_bias = torch.cat([static_memory.key_bias.to(device=device), dynamic_bias], dim=0)
         action_query = self.action_query_proj(self._resize_action(action))
         step_query = self.step_query_proj(step_context.to(device=device, dtype=dtype))[:, None]
         workspace = self.query.to(device=device, dtype=dtype).expand(int(action.shape[0]), -1, -1)
         workspace = workspace + step_query
         workspace_seed = workspace
         weight_rows: list[Tensor] = []
-        for block in self.blocks:
+        for block_index, block in enumerate(self.blocks):
+            if dynamic_memory is None:
+                dynamic_k = dynamic_v = None
+            else:
+                dynamic_k, dynamic_v = block.project_memory(dynamic_memory)
+            if static_memory is None:
+                assert dynamic_k is not None and dynamic_v is not None
+                memory_k, memory_v = dynamic_k, dynamic_v
+            else:
+                static_k, static_v = static_memory.block_kv[block_index]
+                memory_k = static_k if dynamic_k is None else torch.cat([static_k, dynamic_k], dim=2)
+                memory_v = static_v if dynamic_v is None else torch.cat([static_v, dynamic_v], dim=2)
             workspace, weights = block(
                 workspace,
-                memory,
                 primary_cond,
+                memory_k=memory_k,
+                memory_v=memory_v,
                 key_bias=key_bias,
                 query_context=action_query,
             )
@@ -2169,6 +2252,11 @@ class SemanticEvidenceWorkspace(nn.Module):
             "workspace_token_norm": workspace.detach().float().norm(dim=-1).mean(),
             "workspace_update_norm": (workspace_seed.detach() - workspace_pre_norm.detach()).float().norm(dim=-1).mean(),
             "workspace_source_count": torch.tensor(float(len(ranges)), device=device, dtype=torch.float32),
+            "workspace_cached_token_fraction": torch.tensor(
+                float(static_token_count) / float(max(int(key_bias.numel()), 1)),
+                device=device,
+                dtype=torch.float32,
+            ),
             "workspace_attention_entropy": -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=-1).mean(),
             "workspace_attention_max": weights.max(dim=-1).values.mean(),
         }
@@ -3558,6 +3646,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_token_norm",
             "workspace_update_norm",
             "workspace_source_count",
+            "workspace_cached_token_fraction",
             "workspace_attention_entropy",
             "workspace_attention_max",
             "workspace_group_attention_entropy",
@@ -4331,11 +4420,27 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         mmdit_rollout_start = 0
         mmdit_rollout_len = 0
         mmdit_cond_token_norm = z0
+        workspace_static_memory: PreparedEvidenceMemory | None = None
         if mmdit_refine:
             if self.mmdit_step_cond_proj is None or self.mmdit_type_embed is None or self.mmdit_action_norm is None:
                 raise RuntimeError("MMDiT refine modules are not initialized")
             if self.evidence_workspace is None:
                 raise RuntimeError("MMDiT evidence workspace is not initialized")
+            static_sources = dict(evidence_sources or {})
+            # Full layer memory is consumed by the step-dependent router. All
+            # remaining sources are invariant across refine steps within this
+            # prior/posterior decode and can safely reuse block-specific K/V.
+            static_sources.pop("layer", None)
+            if rollout_tokens is not None:
+                static_sources["rollout"] = rollout_tokens
+            if context_capsules is not None:
+                static_sources["capsule"] = context_capsules
+            workspace_static_memory = self.evidence_workspace.prepare_static_memory(
+                static_sources,
+                batch_size=batch,
+                device=device,
+                dtype=dtype,
+            )
         micro_enabled = bool((not mmdit_refine) and int(getattr(cfg, "adaptive_cvae_micro_control", 1)) and progress is not None)
         progress_center = self._micro_initial_progress(action) if micro_enabled else None
         prev_velocity = torch.zeros_like(action)
@@ -4394,19 +4499,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 routed_layer, layer_entropy, layer_max = self._route_layers(route_action, layer_stack)
                 if layer_stack is not None and int(getattr(cfg, "adaptive_cvae_layer_routing", 1)):
                     route_floor_terms.append(self._route_entropy_floor(layer_entropy, int(layer_stack.shape[1])))
-                workspace_sources = dict(evidence_sources or {})
-                # The ordered scan/lateral summaries remain available, while
-                # the full layer bank is consumed through the step-specific
-                # router rather than becoming a second direct fan-in.
-                workspace_sources.pop("layer", None)
+                workspace_sources: dict[str, Tensor] = {}
                 if progress is not None:
                     workspace_sources["progress"] = progress_context
                 if int(getattr(cfg, "latent_cvae_layer_memory", 1)):
                     workspace_sources["routed_layer"] = routed_layer
-                if rollout_tokens is not None:
-                    workspace_sources["rollout"] = rollout_tokens
-                if context_capsules is not None:
-                    workspace_sources["capsule"] = context_capsules
                 step_context = step_bias.mean(dim=1)
                 assert self.evidence_workspace is not None
                 workspace_tokens, workspace_metrics = self.evidence_workspace(
@@ -4414,6 +4511,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     action=action,
                     primary_cond=primary_cond,
                     step_context=step_context,
+                    static_memory=workspace_static_memory,
                 )
                 z_token = self.z_to_token(z.to(device=device, dtype=dtype))
                 (

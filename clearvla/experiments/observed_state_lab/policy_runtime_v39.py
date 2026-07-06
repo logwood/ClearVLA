@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -1022,6 +1023,7 @@ def flow_losses(
         "latent_cvae_workspace_token_norm",
         "latent_cvae_workspace_update_norm",
         "latent_cvae_workspace_source_count",
+        "latent_cvae_workspace_cached_token_fraction",
         "latent_cvae_workspace_attention_entropy",
         "latent_cvae_workspace_attention_max",
         "latent_cvae_workspace_group_attention_entropy",
@@ -1919,6 +1921,8 @@ def train_v39_policy(
 
     for epoch in range(start_epoch, trainer.epochs + 1):
         system.train(); metric_sums: dict[str, Tensor] = {}; metric_count = 0
+        throughput_start = time.perf_counter()
+        throughput_batch = 0
         include_future = (
             (float(trainer.rollout_dynamics_loss_weight) > 0 or float(trainer.rollout_contrast_loss_weight) > 0
              or float(trainer.future_latent_loss_weight) > 0 or float(trainer.action_effect_loss_weight) > 0
@@ -2032,6 +2036,11 @@ def train_v39_policy(
             metric_count += 1
             if trainer.log_every and batch_index % trainer.log_every == 0:
                 row = _sync_loss_row(losses, grad=grad)
+                throughput_now = time.perf_counter()
+                throughput_count = max(batch_index - throughput_batch, 1)
+                seconds_per_batch = (throughput_now - throughput_start) / float(throughput_count)
+                throughput_start = throughput_now
+                throughput_batch = batch_index
                 print(
                     f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
                     f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
@@ -2110,6 +2119,7 @@ def train_v39_policy(
                     f"wtok={row.get('latent_cvae_workspace_token_norm', 0.0):.2f} "
                     f"wdelta={row.get('latent_cvae_workspace_update_norm', 0.0):.2f} "
                     f"wsrc={row.get('latent_cvae_workspace_source_count', 0.0):.0f} "
+                    f"wcache={row.get('latent_cvae_workspace_cached_token_fraction', 0.0):.3f} "
                     f"went={row.get('latent_cvae_workspace_attention_entropy', 0.0):.3f} "
                     f"wmax={row.get('latent_cvae_workspace_attention_max', 0.0):.3f} "
                     f"wgent={row.get('latent_cvae_workspace_group_attention_entropy', 0.0):.3f} "
@@ -2160,7 +2170,8 @@ def train_v39_policy(
                     f"rcgrad={row.get('grad_latent_cvae_rollout_condition', 0.0):.3e} "
                     f"wgrad={row.get('grad_latent_cvae_workspace', 0.0):.3e} "
                     f"zpgrad={row.get('grad_latent_cvae_primary_modulation', 0.0):.3e} "
-                    f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",
+                    f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e} "
+                    f"spb={seconds_per_batch:.3f}",
                     flush=True,
                 )
         train_metrics = _finalize_metric_tensors(metric_sums, metric_count)
