@@ -202,6 +202,10 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_mmdit_depth: int = 3
     latent_cvae_mmdit_cond_update: int = 0
     latent_cvae_mmdit_noisy_causal: int = 1
+    # V65: z is the primary denoising condition. All other semantic sources
+    # first negotiate through a horizon-aligned evidence workspace; this count
+    # controls its information bandwidth without tying it to action_horizon.
+    latent_cvae_horizon_tokens: int = 24
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -371,11 +375,22 @@ class V39PolicyConfig(V38PolicyConfig):
                 raise ValueError(f"{name} must be 0 or 1")
         if int(self.latent_cvae_mmdit_depth) < 1:
             raise ValueError("latent_cvae_mmdit_depth must be >= 1")
-        if str(self.final_action_decoder) == "latent_cvae_action":
+        if int(self.latent_cvae_horizon_tokens) < 1:
+            raise ValueError("latent_cvae_horizon_tokens must be >= 1")
+        if str(self.final_action_decoder) in ("latent_cvae_action", "adaptive_recurrent_cvae_action"):
             if int(self.latent_cvae_layer_memory) and not int(self.layer_contract_adapters):
-                raise ValueError("latent_cvae_action with latent_cvae_layer_memory=1 requires layer_contract_adapters=1")
+                raise ValueError(
+                    f"{self.final_action_decoder} with latent_cvae_layer_memory=1 "
+                    "requires layer_contract_adapters=1"
+                )
         if int(self.adaptive_cvae_refine_steps) < 0:
             raise ValueError("adaptive_cvae_refine_steps must be >= 0")
+        if (
+            int(self.latent_cvae_mmdit_decoder)
+            and str(self.final_action_decoder) == "adaptive_recurrent_cvae_action"
+            and int(self.adaptive_cvae_refine_steps) < 1
+        ):
+            raise ValueError("adaptive MMDiT decoder requires adaptive_cvae_refine_steps >= 1")
         if int(self.adaptive_cvae_progress_steps) < 1:
             raise ValueError("adaptive_cvae_progress_steps must be >= 1")
         for name in (
@@ -1437,7 +1452,7 @@ class LayeredV37StyleResidualActionFlowDenoiser(nn.Module):
         transition_memory: Tensor | None,
         visual_memory: Tensor | None,
         layer_memories: list[Tensor],
-    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor], dict[str, Tensor]]:
         cfg = self.config
         parts: list[Tensor] = []
         if stage_index == 0 and int(getattr(cfg, "action_flow_residual_context_memory", 1)):
@@ -1927,6 +1942,7 @@ class LatentCVAEActionBlock(nn.Module):
         self.n2 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
         self.drop = nn.Dropout(float(config.dropout))
+        self.cond_mod_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.mod = nn.Linear(h, 6 * h)
         nn.init.zeros_(self.mod.weight)
         nn.init.zeros_(self.mod.bias)
@@ -1936,7 +1952,7 @@ class LatentCVAEActionBlock(nn.Module):
         return x * (1.0 + scale[:, None]) + shift[:, None]
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
-        sa_s, sa_c, sa_g, ff_s, ff_c, ff_g = self.mod(cond).chunk(6, dim=-1)
+        sa_s, sa_c, sa_g, ff_s, ff_c, ff_g = self.mod(self.cond_mod_norm(cond)).chunk(6, dim=-1)
         value = self.n1(x)
         qk = self._modulate(value, sa_s, sa_c)
         attn_mask = None
@@ -1947,6 +1963,239 @@ class LatentCVAEActionBlock(nn.Module):
         x = x + torch.tanh(sa_g)[:, None] * self.drop(update)
         update = self.ffn(self._modulate(self.n2(x), ff_s, ff_c))
         return x + torch.tanh(ff_g)[:, None] * self.drop(update)
+
+
+class SemanticEvidenceWorkspaceBlock(nn.Module):
+    """AdaLN-conditioned workspace block with one evidence write path."""
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        heads = int(config.num_heads)
+        if h % heads != 0:
+            raise ValueError("hidden_size must be divisible by num_heads for evidence workspace")
+        self.config = config
+        self.heads = heads
+        self.head_dim = h // heads
+        self.self_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.self_attn = nn.MultiheadAttention(h, heads, batch_first=True, dropout=float(config.dropout))
+        self.cross_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.memory_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.cross_q = nn.Linear(h, h, bias=False)
+        self.cross_k = nn.Linear(h, h, bias=False)
+        self.cross_v = nn.Linear(h, h, bias=False)
+        self.cross_out = nn.Linear(h, h)
+        self.ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        self.mod = nn.Linear(h, 9 * h)
+        self.drop = nn.Dropout(float(config.dropout))
+        nn.init.zeros_(self.mod.weight)
+        nn.init.zeros_(self.mod.bias)
+        # Evidence is visible from the first update, while z/time learns how to
+        # specialize the read through AdaLN without an initially dead path.
+        nn.init.constant_(self.mod.bias[5 * h: 6 * h], math.atanh(0.10))
+
+    @staticmethod
+    def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        return x * (1.0 + scale[:, None]) + shift[:, None]
+
+    def _split_heads(self, x: Tensor) -> Tensor:
+        b, n, h = x.shape
+        return x.reshape(b, n, self.heads, h // self.heads).transpose(1, 2)
+
+    @staticmethod
+    def _merge_heads(x: Tensor) -> Tensor:
+        b, heads, n, d = x.shape
+        return x.transpose(1, 2).reshape(b, n, heads * d)
+
+    def forward(
+        self,
+        workspace: Tensor,
+        memory: Tensor,
+        primary_cond: Tensor,
+        *,
+        key_bias: Tensor,
+        query_context: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        (
+            self_s, self_c, self_g,
+            cross_s, cross_c, cross_g,
+            ffn_s, ffn_c, ffn_g,
+        ) = self.mod(primary_cond).chunk(9, dim=-1)
+        causal_mask = None
+        if int(getattr(self.config, "latent_cvae_causal_attention", 1)):
+            n = int(workspace.shape[1])
+            causal_mask = torch.triu(torch.ones(n, n, device=workspace.device, dtype=torch.bool), diagonal=1)
+        self_value = self._modulate(self.self_norm(workspace), self_s, self_c)
+        self_update, _ = self.self_attn(
+            self_value,
+            self_value,
+            self_value,
+            attn_mask=causal_mask,
+            need_weights=False,
+        )
+        workspace = workspace + torch.tanh(self_g)[:, None] * self.drop(self_update)
+
+        # Current action state selects evidence but never enters the workspace
+        # value/residual stream. This preserves state-dependent retrieval without
+        # creating an action -> workspace -> action echo shortcut.
+        cross_query = self.cross_norm(workspace + query_context)
+        q = self._split_heads(self.cross_q(self._modulate(cross_query, cross_s, cross_c)))
+        memory_value = self.memory_norm(memory)
+        k = self._split_heads(self.cross_k(memory_value))
+        v = self._split_heads(self.cross_v(memory_value))
+        scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (float(self.head_dim) ** -0.5)
+        scores = scores + key_bias.to(device=scores.device, dtype=scores.dtype)[None, None, None]
+        weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
+        cross_update = torch.matmul(weights, v)
+        cross_update = self.cross_out(self._merge_heads(cross_update))
+        workspace = workspace + torch.tanh(cross_g)[:, None] * self.drop(cross_update)
+
+        ffn_update = self.ffn(self._modulate(self.ffn_norm(workspace), ffn_s, ffn_c))
+        workspace = workspace + torch.tanh(ffn_g)[:, None] * self.drop(ffn_update)
+        return workspace, weights
+
+
+class SemanticEvidenceWorkspace(nn.Module):
+    """Fuse typed semantic sources into a configurable horizon token field."""
+
+    SOURCE_NAMES = (
+        "layer",
+        "scan",
+        "lateral",
+        "transition",
+        "transition_delta",
+        "transition_effect",
+        "transition_event",
+        "context",
+        "visual",
+        "trajectory",
+        "rollout",
+        "capsule",
+        "progress",
+        "routed_layer",
+    )
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        self.hidden_size = h
+        self.token_count = int(getattr(config, "latent_cvae_horizon_tokens", config.action_horizon))
+        self.query = nn.Parameter(torch.randn(1, self.token_count, h) * 0.02)
+        self.type_embed = nn.Parameter(torch.randn(1, len(self.SOURCE_NAMES), h) * 0.02)
+        self.source_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.action_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.step_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.blocks = nn.ModuleList([SemanticEvidenceWorkspaceBlock(config) for _ in range(2)])
+        self.final_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+    def _resize_action(self, action: Tensor) -> Tensor:
+        if int(action.shape[1]) == self.token_count:
+            return action
+        if self.token_count == 1:
+            return action.mean(dim=1, keepdim=True)
+        if int(action.shape[1]) == 1:
+            return action.expand(-1, self.token_count, -1)
+        return F.interpolate(
+            action.transpose(1, 2).float(),
+            size=self.token_count,
+            mode="linear",
+            align_corners=True,
+        ).transpose(1, 2).to(dtype=action.dtype)
+
+    def forward(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        action: Tensor,
+        primary_cond: Tensor,
+        step_context: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        device = action.device
+        dtype = action.dtype
+        unknown_sources = set(sources).difference(self.SOURCE_NAMES)
+        if unknown_sources:
+            raise ValueError(f"unknown evidence workspace sources: {sorted(unknown_sources)}")
+        parts: list[Tensor] = []
+        ranges: dict[str, tuple[int, int]] = {}
+        key_bias_parts: list[Tensor] = []
+        offset = 0
+        for index, name in enumerate(self.SOURCE_NAMES):
+            value = sources.get(name)
+            if value is None:
+                continue
+            if value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
+                raise ValueError(f"workspace source {name!r} must be [B,N,H], got {tuple(value.shape)}")
+            if int(value.shape[0]) != int(action.shape[0]):
+                raise ValueError(
+                    f"workspace source {name!r} batch={int(value.shape[0])} "
+                    f"does not match action batch={int(action.shape[0])}"
+                )
+            value = value.to(device=device, dtype=dtype)
+            if int(value.shape[1]) == 0:
+                continue
+            typed = self.source_norm(value) + self.type_embed[:, index:index + 1].to(device=device, dtype=dtype)
+            parts.append(typed)
+            count = int(typed.shape[1])
+            ranges[name] = (offset, offset + count)
+            # Equal source-group prior mass prevents a 192-token rollout grid
+            # from winning solely through token multiplicity.
+            key_bias_parts.append(torch.full((count,), -math.log(float(count)), device=device, dtype=torch.float32))
+            offset += count
+        if not parts:
+            raise RuntimeError("evidence workspace requires at least one semantic source")
+        memory = torch.cat(parts, dim=1)
+        key_bias = torch.cat(key_bias_parts, dim=0)
+        action_query = self.action_query_proj(self._resize_action(action))
+        step_query = self.step_query_proj(step_context.to(device=device, dtype=dtype))[:, None]
+        workspace = self.query.to(device=device, dtype=dtype).expand(int(action.shape[0]), -1, -1)
+        workspace = workspace + step_query
+        workspace_seed = workspace
+        weight_rows: list[Tensor] = []
+        for block in self.blocks:
+            workspace, weights = block(
+                workspace,
+                memory,
+                primary_cond,
+                key_bias=key_bias,
+                query_context=action_query,
+            )
+            weight_rows.append(weights.detach().float())
+        workspace_pre_norm = workspace
+        workspace = self.final_norm(workspace)
+        weights = torch.stack(weight_rows).mean(dim=0)
+        metrics: dict[str, Tensor] = {
+            "workspace_token_count": torch.tensor(float(workspace.shape[1]), device=device, dtype=torch.float32),
+            "workspace_token_norm": workspace.detach().float().norm(dim=-1).mean(),
+            "workspace_update_norm": (workspace_seed.detach() - workspace_pre_norm.detach()).float().norm(dim=-1).mean(),
+            "workspace_source_count": torch.tensor(float(len(ranges)), device=device, dtype=torch.float32),
+            "workspace_attention_entropy": -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=-1).mean(),
+            "workspace_attention_max": weights.max(dim=-1).values.mean(),
+        }
+        group_weights = torch.stack([
+            weights[..., start:stop].sum(dim=-1)
+            for start, stop in ranges.values()
+        ], dim=-1)
+        metrics["workspace_group_attention_entropy"] = -(
+            group_weights.clamp_min(1e-8) * group_weights.clamp_min(1e-8).log()
+        ).sum(dim=-1).mean()
+        metrics["workspace_group_effective_sources"] = torch.exp(metrics["workspace_group_attention_entropy"])
+        metrics["workspace_attention_mass_error"] = (group_weights.sum(dim=-1) - 1.0).abs().mean()
+        for name, (start, stop) in ranges.items():
+            metrics[f"workspace_{name}_attention"] = weights[..., start:stop].sum(dim=-1).mean()
+        transition_mass = [
+            metrics[key]
+            for key in (
+                "workspace_transition_attention",
+                "workspace_transition_delta_attention",
+                "workspace_transition_effect_attention",
+                "workspace_transition_event_attention",
+            )
+            if key in metrics
+        ]
+        if transition_mass:
+            metrics["workspace_transition_total_attention"] = torch.stack(transition_mass).sum()
+        return workspace, metrics
 
 
 class LatentCVAEMMDiTBlock(nn.Module):
@@ -1978,6 +2227,7 @@ class LatentCVAEMMDiTBlock(nn.Module):
         self.cond_ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
         self.cond_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        self.global_cond_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_mod = nn.Linear(h, 6 * h)
         self.cond_mod = nn.Linear(h, 6 * h)
         self.drop = nn.Dropout(float(config.dropout))
@@ -2051,7 +2301,7 @@ class LatentCVAEMMDiTBlock(nn.Module):
         # prior mass merely because it has more tokens. Under equal logits the
         # complete rollout grid starts with roughly one horizon group's budget.
         reference = max(int(action_len), 1)
-        group_ratio = max(float(stop - start) / float(reference), 1.0)
+        group_ratio = max(float(stop - start) / float(reference), 1e-6)
         bias = torch.zeros(total, device=device, dtype=torch.float32)
         bias[start:stop] = -math.log(group_ratio)
         return bias
@@ -2070,8 +2320,9 @@ class LatentCVAEMMDiTBlock(nn.Module):
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         action_before = action
         cond_before = cond_tokens
-        a_sa_s, a_sa_c, a_sa_g, a_ff_s, a_ff_c, a_ff_g = self.action_mod(global_cond).chunk(6, dim=-1)
-        c_sa_s, c_sa_c, c_sa_g, c_ff_s, c_ff_c, c_ff_g = self.cond_mod(global_cond).chunk(6, dim=-1)
+        stable_global = self.global_cond_norm(global_cond)
+        a_sa_s, a_sa_c, a_sa_g, a_ff_s, a_ff_c, a_ff_g = self.action_mod(stable_global).chunk(6, dim=-1)
+        c_sa_s, c_sa_c, c_sa_g, c_ff_s, c_ff_c, c_ff_g = self.cond_mod(stable_global).chunk(6, dim=-1)
 
         a_value = self.action_norm(action)
         c_value = self.cond_norm(cond_tokens)
@@ -2493,6 +2744,7 @@ class LatentCVAEActionDecoder(nn.Module):
         self.context_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
         self.visual_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
         self.traj_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
+        self.condition_contract_norm = nn.LayerNorm(h, elementwise_affine=False)
         cond_in = int(config.depth) * h + 4 * h
         self.condition_fusion = nn.Sequential(nn.LayerNorm(cond_in), nn.Linear(cond_in, h), nn.SiLU(), nn.Linear(h, h))
         if int(getattr(config, "latent_cvae_layer_scan", 0)):
@@ -2536,6 +2788,8 @@ class LatentCVAEActionDecoder(nn.Module):
             self.mmdit_step_cond_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
             self.mmdit_type_embed = nn.Parameter(torch.randn(1, 6, h) * 0.02)
             self.mmdit_action_norm = nn.LayerNorm(h)
+            self.mmdit_primary_condition_norm = nn.LayerNorm(h, elementwise_affine=False)
+            self.evidence_workspace = SemanticEvidenceWorkspace(config)
         else:
             self.mmdit_blocks = nn.ModuleList()
             self.mmdit_traj_cond_proj = None
@@ -2547,6 +2801,8 @@ class LatentCVAEActionDecoder(nn.Module):
             self.mmdit_step_cond_proj = None
             self.mmdit_type_embed = None
             self.mmdit_action_norm = None
+            self.mmdit_primary_condition_norm = None
+            self.evidence_workspace = None
         self.event_gate = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.Sigmoid())
         self.event_transition = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
         self.velocity_head = TransitionAwarePhysicalVelocityHead(config)
@@ -2680,6 +2936,24 @@ class LatentCVAEActionDecoder(nn.Module):
         return proj(torch.stack(pooled, dim=1)).mean(dim=1)
 
     @staticmethod
+    def _memory_tokens(
+        memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
+        ref: Tensor,
+        proj: nn.Module,
+    ) -> Tensor:
+        if memory is None:
+            return ref.new_zeros(int(ref.shape[0]), 0, int(ref.shape[-1]))
+        groups = [memory] if isinstance(memory, Tensor) else list(memory)
+        pooled: list[Tensor] = []
+        for value in groups:
+            if not isinstance(value, Tensor) or value.ndim != 3 or int(value.shape[-1]) != int(ref.shape[-1]):
+                raise ValueError(f"CVAE memory groups must be [B,N,H], got {type(value).__name__}")
+            pooled.append(value.to(device=ref.device, dtype=ref.dtype).mean(dim=1))
+        if not pooled:
+            return ref.new_zeros(int(ref.shape[0]), 0, int(ref.shape[-1]))
+        return proj(torch.stack(pooled, dim=1))
+
+    @staticmethod
     def _maybe_detach_memory(
         memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         *,
@@ -2756,6 +3030,18 @@ class LatentCVAEActionDecoder(nn.Module):
             return None
         return progress_fn(batch=batch, cond_time=cond_time, z=z)
 
+    def _mmdit_primary_condition(self, *, z: Tensor, time_emb: Tensor) -> Tensor:
+        if self.mmdit_primary_condition_norm is None:
+            raise RuntimeError("MMDiT primary-condition modules are not initialized")
+        dtype = time_emb.dtype
+        primary = self.z_to_token(z.to(device=time_emb.device, dtype=dtype)) + self.time_lift(time_emb)
+        return self.mmdit_primary_condition_norm(primary)
+
+    def _mmdit_primary_z_effect(self, *, z: Tensor, time_emb: Tensor, primary_cond: Tensor) -> Tensor:
+        with torch.no_grad():
+            zero_primary = self._mmdit_primary_condition(z=torch.zeros_like(z), time_emb=time_emb)
+            return (primary_cond.detach().float() - zero_primary.detach().float()).norm(dim=-1).mean()
+
     def _mmdit_condition_tokens(
         self,
         *,
@@ -2766,6 +3052,7 @@ class LatentCVAEActionDecoder(nn.Module):
         z_token: Tensor,
         layer_stack: Tensor | None,
         progress_tokens: Tensor | None,
+        workspace_tokens: Tensor | None = None,
     ) -> tuple[Tensor, int, int, int, int, Tensor]:
         if (
             self.mmdit_traj_cond_proj is None
@@ -2777,6 +3064,15 @@ class LatentCVAEActionDecoder(nn.Module):
         dtype = noisy_tokens.dtype
         device = noisy_tokens.device
         type_embed = self.mmdit_type_embed.to(device=device, dtype=dtype)
+        if workspace_tokens is not None:
+            workspace_group = workspace_tokens.to(device=device, dtype=dtype) + type_embed[:, 0:1]
+            noisy_start = int(workspace_group.shape[1])
+            cond_tokens = torch.cat([workspace_group, noisy_tokens + type_embed[:, 2:3]], dim=1)
+            cond_norm = cond_tokens.detach().float().norm(dim=-1).mean()
+            # The generic balanced group range in LatentCVAEMMDiTBlock is used
+            # for the workspace here. Source-level rollout mass is measured by
+            # SemanticEvidenceWorkspace itself.
+            return cond_tokens, noisy_start, int(noisy_tokens.shape[1]), 0, noisy_start, cond_norm
         groups: list[Tensor] = []
         if layer_stack is not None:
             groups.append(layer_stack.to(device=device, dtype=dtype) + type_embed[:, 0:1])
@@ -2815,6 +3111,7 @@ class LatentCVAEActionDecoder(nn.Module):
         cond: Tensor,
         z: Tensor,
         layer_stack: Tensor | None = None,
+        evidence_sources: dict[str, Tensor] | None = None,
     ) -> dict[str, Tensor]:
         if self.mmdit_action_norm is None:
             raise RuntimeError("MMDiT action modules are not initialized")
@@ -2822,24 +3119,34 @@ class LatentCVAEActionDecoder(nn.Module):
         dtype = noisy_physical.dtype
         device = noisy_physical.device
         time_emb = self.time(time.to(dtype=dtype))
-        cond_time = cond + self.time_lift(time_emb)
+        primary_cond = self._mmdit_primary_condition(z=z, time_emb=time_emb)
+        primary_z_effect = self._mmdit_primary_z_effect(z=z, time_emb=time_emb, primary_cond=primary_cond)
         noisy_tokens, noisy_gate_mean, noisy_token_norm = self._gated_noisy_branch(noisy_physical, time)
         z_token = self.z_to_token(z.to(device=device, dtype=dtype))
-        action = (
-            self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
-            + self.trajectory_lift(trajectory_tokens)
-            + z_token[:, None]
-            + cond_time[:, None]
+        action = self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
+        progress_tokens = self._mmdit_progress_tokens(batch=batch, cond_time=primary_cond, z=z)
+        if self.evidence_workspace is None:
+            raise RuntimeError("MMDiT evidence workspace is not initialized")
+        workspace_sources = dict(evidence_sources or {})
+        if rollout_tokens is not None:
+            workspace_sources["rollout"] = rollout_tokens
+        if progress_tokens is not None:
+            workspace_sources["progress"] = progress_tokens
+        workspace_tokens, workspace_metrics = self.evidence_workspace(
+            workspace_sources,
+            action=action,
+            primary_cond=primary_cond,
+            step_context=torch.zeros(batch, self.hidden_size, device=device, dtype=dtype),
         )
-        progress_tokens = self._mmdit_progress_tokens(batch=batch, cond_time=cond_time, z=z)
         cond_tokens, noisy_start, noisy_len, rollout_start, rollout_len, cond_token_norm = self._mmdit_condition_tokens(
             noisy_tokens=noisy_tokens,
             trajectory_tokens=trajectory_tokens,
             rollout_tokens=rollout_tokens,
-            cond_time=cond_time,
+            cond_time=primary_cond,
             z_token=z_token,
             layer_stack=layer_stack,
             progress_tokens=progress_tokens,
+            workspace_tokens=workspace_tokens,
         )
         action_updates: list[Tensor] = []
         cond_updates: list[Tensor] = []
@@ -2852,7 +3159,7 @@ class LatentCVAEActionDecoder(nn.Module):
             action, cond_tokens, metrics = block(
                 action,
                 cond_tokens,
-                cond_time,
+                primary_cond,
                 noisy_start=noisy_start,
                 noisy_len=noisy_len,
                 rollout_start=rollout_start,
@@ -2866,7 +3173,7 @@ class LatentCVAEActionDecoder(nn.Module):
             rollout_attn_rows.append(metrics["action_rollout_attn"].to(device=device))
             rollout_enrichment_rows.append(metrics["action_rollout_enrichment"].to(device=device))
         action = self.mmdit_action_norm(action)
-        out = self._emit_action(action, cond)
+        out = self._emit_action(action, primary_cond)
         z0 = torch.zeros((), device=device, dtype=torch.float32)
         action_update = torch.stack(action_updates).mean() if action_updates else z0
         cond_update = torch.stack(cond_updates).mean() if cond_updates else z0
@@ -2876,6 +3183,8 @@ class LatentCVAEActionDecoder(nn.Module):
         rollout_enrichment = torch.stack(rollout_enrichment_rows).mean() if rollout_enrichment_rows else z0
         action_norm = action.detach().float().norm(dim=-1).mean()
         noisy_ratio = noisy_token_norm / action_norm.clamp_min(1e-6)
+        workspace_rollout = workspace_metrics.get("workspace_rollout_attention", z0)
+        workspace_enrichment = workspace_rollout * workspace_metrics["workspace_source_count"].clamp_min(1.0)
         out.update({
             "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
             "adaptive_noisy_branch_norm": noisy_token_norm.to(device=device),
@@ -2884,11 +3193,16 @@ class LatentCVAEActionDecoder(nn.Module):
             "mmdit_cond_update_norm": cond_update,
             "mmdit_action_cond_attention": cond_attn,
             "mmdit_action_noisy_attention": noisy_attn,
-            "mmdit_action_rollout_attention": rollout_attn,
-            "mmdit_action_rollout_enrichment": rollout_enrichment,
+            "mmdit_action_workspace_attention": rollout_attn,
+            "mmdit_action_workspace_enrichment": rollout_enrichment,
+            "mmdit_action_rollout_attention": workspace_rollout,
+            "mmdit_action_rollout_enrichment": workspace_enrichment,
             "mmdit_action_token_norm": action_norm,
             "mmdit_condition_token_norm": cond_token_norm.to(device=device),
             "mmdit_noisy_token_norm": noisy_token_norm.to(device=device),
+            "primary_condition_norm": primary_cond.detach().float().norm(dim=-1).mean(),
+            "primary_z_effect_norm": primary_z_effect,
+            **workspace_metrics,
         })
         return out
 
@@ -2902,6 +3216,7 @@ class LatentCVAEActionDecoder(nn.Module):
         cond: Tensor,
         z: Tensor,
         layer_stack: Tensor | None = None,
+        evidence_sources: dict[str, Tensor] | None = None,
     ) -> dict[str, Tensor]:
         if int(getattr(self.config, "latent_cvae_mmdit_decoder", 0)):
             return self._decode_with_z_mmdit(
@@ -2912,8 +3227,9 @@ class LatentCVAEActionDecoder(nn.Module):
                 cond=cond,
                 z=z,
                 layer_stack=layer_stack,
+                evidence_sources=evidence_sources,
             )
-        del layer_stack, rollout_tokens
+        del layer_stack, rollout_tokens, evidence_sources
         batch = int(noisy_physical.shape[0])
         dtype = noisy_physical.dtype
         device = noisy_physical.device
@@ -2942,6 +3258,7 @@ class LatentCVAEActionDecoder(nn.Module):
         self,
         *,
         trajectory_tokens: Tensor,
+        trajectory_workspace_tokens: Tensor | None,
         context_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         visual_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
@@ -2977,9 +3294,12 @@ class LatentCVAEActionDecoder(nn.Module):
             transition_memory,
             detach=bool(int(getattr(cfg, "latent_cvae_transition_detach", 1))),
         )
-        trans = self._memory_summary(transition_source, traj, self.transition_proj) if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else torch.zeros_like(traj)
-        ctx = self._memory_summary(context_memory, traj, self.context_proj) if int(getattr(cfg, "latent_cvae_context_memory", 0)) else torch.zeros_like(traj)
-        vis = self._memory_summary(visual_memory, traj, self.visual_proj) if int(getattr(cfg, "latent_cvae_visual_memory", 0)) else torch.zeros_like(traj)
+        transition_tokens = self._memory_tokens(transition_source, traj, self.transition_proj) if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else traj.new_zeros(batch, 0, self.hidden_size)
+        context_tokens = self._memory_tokens(context_memory, traj, self.context_proj) if int(getattr(cfg, "latent_cvae_context_memory", 0)) else traj.new_zeros(batch, 0, self.hidden_size)
+        visual_tokens = self._memory_tokens(visual_memory, traj, self.visual_proj) if int(getattr(cfg, "latent_cvae_visual_memory", 0)) else traj.new_zeros(batch, 0, self.hidden_size)
+        trans = transition_tokens.mean(dim=1) if int(transition_tokens.shape[1]) > 0 else torch.zeros_like(traj)
+        ctx = context_tokens.mean(dim=1) if int(context_tokens.shape[1]) > 0 else torch.zeros_like(traj)
+        vis = visual_tokens.mean(dim=1) if int(visual_tokens.shape[1]) > 0 else torch.zeros_like(traj)
         transition_raw_norm = trans.detach().float().norm(dim=-1).mean()
         trans = self._normalize_condition_source(trans)
         ctx = self._normalize_condition_source(ctx)
@@ -3014,12 +3334,41 @@ class LatentCVAEActionDecoder(nn.Module):
                 state = self.layer_scan(layer_stack[:, i], state)
             scan_cond = self.layer_scan_fusion(torch.cat([state.to(dtype=dtype), trans, ctx, vis, traj], dim=-1))
             alpha = float(getattr(cfg, "latent_cvae_layer_scan_alpha", 0.2))
-            cond = scan_cond + alpha * lateral_cond
+            raw_cond = scan_cond + alpha * lateral_cond
+            cond = self.condition_contract_norm(scan_cond) + alpha * self.condition_contract_norm(lateral_cond)
             cond_stats["cvae_condition_scan_norm"] = scan_cond.detach().float().norm(dim=-1).mean()
         else:
-            cond = lateral_cond
+            scan_cond = None
+            raw_cond = lateral_cond
+            cond = self.condition_contract_norm(lateral_cond)
+        cond_stats["cvae_condition_raw_norm"] = raw_cond.detach().float().norm(dim=-1).mean()
+        cond = self.condition_contract_norm(cond)
+        evidence_sources: dict[str, Tensor] = {
+            "lateral": lateral_cond[:, None],
+            "trajectory": (
+                trajectory_tokens
+                if trajectory_workspace_tokens is None
+                else trajectory_workspace_tokens.to(device=device, dtype=dtype)
+            ),
+        }
+        if use_layer_memory and summaries:
+            evidence_sources["layer"] = layer_stack
+        if int(transition_tokens.shape[1]) >= 3:
+            evidence_sources["transition_delta"] = transition_tokens[:, 0:1]
+            evidence_sources["transition_effect"] = transition_tokens[:, 1:2]
+            evidence_sources["transition_event"] = transition_tokens[:, 2:3]
+            if int(transition_tokens.shape[1]) > 3:
+                evidence_sources["transition"] = transition_tokens[:, 3:]
+        elif int(transition_tokens.shape[1]) > 0:
+            evidence_sources["transition"] = transition_tokens
+        if scan_cond is not None:
+            evidence_sources["scan"] = scan_cond[:, None]
+        if int(getattr(cfg, "latent_cvae_context_memory", 0)):
+            evidence_sources["context"] = context_tokens
+        if int(getattr(cfg, "latent_cvae_visual_memory", 0)):
+            evidence_sources["visual"] = visual_tokens
         layer_count = torch.tensor(float(len(summaries)), device=device, dtype=dtype)
-        return cond, layer_count, layer_stack, cond_stats
+        return cond, layer_count, layer_stack, evidence_sources, cond_stats
 
     def forward(
         self,
@@ -3032,13 +3381,15 @@ class LatentCVAEActionDecoder(nn.Module):
         transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         visual_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         layer_contracts: list[dict[str, Tensor]],
+        trajectory_workspace_tokens: Tensor | None = None,
         target_physical: Tensor | None = None,
     ) -> dict[str, Tensor]:
         cfg = self.config
         dtype = noisy_physical.dtype
         device = noisy_physical.device
-        cond, layer_count, layer_stack, cond_stats = self._condition(
+        cond, layer_count, layer_stack, evidence_sources, cond_stats = self._condition(
             trajectory_tokens=trajectory_tokens,
+            trajectory_workspace_tokens=trajectory_workspace_tokens,
             context_memory=context_memory,
             transition_memory=transition_memory,
             visual_memory=visual_memory,
@@ -3068,6 +3419,7 @@ class LatentCVAEActionDecoder(nn.Module):
             cond=cond,
             z=prior_z,
             layer_stack=layer_stack,
+            evidence_sources=evidence_sources,
         )
 
         posterior_used = target_physical is not None
@@ -3090,6 +3442,7 @@ class LatentCVAEActionDecoder(nn.Module):
                 cond=cond,
                 z=post_z,
                 layer_stack=layer_stack,
+                evidence_sources=evidence_sources,
             )
             kl = self._kl_diag_gaussians(q_mu.float(), q_logvar.float(), p_mu.float(), p_logvar.float()).to(dtype=dtype)
             post_std = torch.exp(0.5 * q_logvar).detach().float().mean()
@@ -3111,6 +3464,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "cvae_post_z_norm": post_z_norm,
             "cvae_mu_gap": mu_gap,
             "cvae_condition_norm": cond.detach().float().norm(dim=-1).mean(),
+            "cvae_condition_raw_norm": cond_stats["cvae_condition_raw_norm"],
             "cvae_condition_scan_norm": cond_stats["cvae_condition_scan_norm"],
             "cvae_condition_lateral_norm": cond_stats["cvae_condition_lateral_norm"],
             "cvae_layer_summary_norm": cond_stats["cvae_layer_summary_norm"],
@@ -3190,11 +3544,41 @@ class LatentCVAEActionDecoder(nn.Module):
             "mmdit_cond_update_norm",
             "mmdit_action_cond_attention",
             "mmdit_action_noisy_attention",
+            "mmdit_action_workspace_attention",
+            "mmdit_action_workspace_enrichment",
             "mmdit_action_rollout_attention",
             "mmdit_action_rollout_enrichment",
             "mmdit_action_token_norm",
             "mmdit_condition_token_norm",
             "mmdit_noisy_token_norm",
+            "primary_condition_norm",
+            "primary_z_effect_norm",
+            "workspace_progress_update_norm",
+            "workspace_token_count",
+            "workspace_token_norm",
+            "workspace_update_norm",
+            "workspace_source_count",
+            "workspace_attention_entropy",
+            "workspace_attention_max",
+            "workspace_group_attention_entropy",
+            "workspace_group_effective_sources",
+            "workspace_attention_mass_error",
+            "workspace_action_update_ratio",
+            "workspace_layer_attention",
+            "workspace_scan_attention",
+            "workspace_lateral_attention",
+            "workspace_transition_attention",
+            "workspace_transition_delta_attention",
+            "workspace_transition_effect_attention",
+            "workspace_transition_event_attention",
+            "workspace_transition_total_attention",
+            "workspace_context_attention",
+            "workspace_visual_attention",
+            "workspace_trajectory_attention",
+            "workspace_rollout_attention",
+            "workspace_capsule_attention",
+            "workspace_progress_attention",
+            "workspace_routed_layer_attention",
         ):
             if key in prior_out:
                 result[f"cvae_{key}"] = prior_out[key]
@@ -3212,13 +3596,13 @@ class LatentCVAEActionDecoder(nn.Module):
 
 
 class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
-    """V43 adaptive recurrent CVAE action head.
+    """CVAE action head with z-primary refinement and typed evidence workspace.
 
-    This keeps V42's compact CVAE prior/posterior contract, then refines action
-    tokens with a shared causal block.  The refinement path is deliberately
-    small: action tokens read a compact bank of latent progress slots plus a
-    soft route over per-layer summaries.  Progress slots are internal ordered
-    latent states, not physical horizon steps.
+    In the MMDiT path, z and flow time own AdaLN modulation. Layer, transition,
+    rollout, trajectory, capsule, and progress evidence first compete inside a
+    configurable workspace; each refine step then performs one action update
+    from that workspace plus the noisy action field. The legacy recurrent path
+    remains available only when the MMDiT decoder is disabled.
     """
 
     def __init__(self, config: V39PolicyConfig) -> None:
@@ -3244,6 +3628,13 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         self.context_capsule_role_lift = nn.Sequential(nn.LayerNorm(self.progress_role_dim), nn.Linear(self.progress_role_dim, h))
         self.progress_z_lift = nn.Sequential(nn.LayerNorm(self.z_dim), nn.Linear(self.z_dim, h))
         self.progress_block = LatentCVAEActionBlock(config)
+        self.progress_contract_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.workspace_progress_update = nn.Sequential(
+            nn.LayerNorm(4 * h),
+            nn.Linear(4 * h, h),
+            nn.SiLU(),
+            nn.Linear(h, h),
+        )
         self.context_capsule_block = LatentCVAEActionBlock(config)
         self.progress_action_query = nn.Linear(h, h, bias=False)
         self.progress_key = nn.Linear(h, h, bias=False)
@@ -3291,6 +3682,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         self.output_function_bank = AdaptiveCVAEFunctionBank(config)
         self.refine_block = AdaptiveRecurrentCVAERefinementBlock(config)
         self._init_residual(self.progress_seed_adapter, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
+        self._init_residual(self.workspace_progress_update, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
         self._init_residual(self.context_residual_adapter, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
         self._init_residual(self.micro_reference, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
         self._init_residual(self.micro_feedforward, std=float(getattr(config, "latent_cvae_output_init_std", 1e-3)))
@@ -3623,9 +4015,10 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             self.progress_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
             + self.progress_role_lift(role)[None]
             + cond_time[:, None]
-            + self.progress_z_lift(z.to(device=device, dtype=dtype))[:, None]
         )
-        return self.progress_block(progress, cond_time)
+        if not int(getattr(cfg, "latent_cvae_mmdit_decoder", 0)):
+            progress = progress + self.progress_z_lift(z.to(device=device, dtype=dtype))[:, None]
+        return self.progress_contract_norm(self.progress_block(progress, cond_time))
 
     def _route_progress_full(self, action: Tensor, progress: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
         if progress is None:
@@ -3820,6 +4213,29 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             return torch.zeros_like(action)
         return self.progress_seed_adapter(torch.cat([action, progress_context], dim=-1))
 
+    def _workspace_update_progress(
+        self,
+        progress: Tensor | None,
+        *,
+        action: Tensor,
+        workspace: Tensor,
+        step_context: Tensor,
+    ) -> tuple[Tensor | None, Tensor]:
+        if progress is None:
+            return None, torch.zeros((), device=action.device, dtype=torch.float32)
+        slots = int(progress.shape[1])
+        action_summary = action.mean(dim=1, keepdim=True).expand(-1, slots, -1)
+        workspace_summary = workspace.mean(dim=1, keepdim=True).expand(-1, slots, -1)
+        step_summary = step_context[:, None].expand(-1, slots, -1)
+        delta = self.workspace_progress_update(torch.cat([
+            progress,
+            action_summary,
+            workspace_summary,
+            step_summary,
+        ], dim=-1))
+        progress = self.progress_contract_norm(progress + delta)
+        return progress, delta.detach().float().norm(dim=-1).mean()
+
     def _function_delta(self, bank: AdaptiveCVAEFunctionBank, x: Tensor, weights: Tensor | None) -> Tensor:
         if not int(getattr(self.config, "adaptive_cvae_function_adapters", 1)):
             return torch.zeros_like(x)
@@ -3858,23 +4274,22 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         cond: Tensor,
         z: Tensor,
         layer_stack: Tensor | None = None,
+        evidence_sources: dict[str, Tensor] | None = None,
     ) -> dict[str, Tensor]:
         cfg = self.config
         batch = int(noisy_physical.shape[0])
         dtype = noisy_physical.dtype
         device = noisy_physical.device
         time_emb = self.time(time.to(dtype=dtype))
-        cond_time = cond + self.time_lift(time_emb)
         z0 = torch.zeros((), device=device, dtype=torch.float32)
         mmdit_refine = bool(int(getattr(cfg, "latent_cvae_mmdit_decoder", 0)) and len(self.mmdit_blocks) > 0)
+        primary_cond = self._mmdit_primary_condition(z=z, time_emb=time_emb) if mmdit_refine else cond + self.time_lift(time_emb)
+        primary_z_effect = self._mmdit_primary_z_effect(z=z, time_emb=time_emb, primary_cond=primary_cond) if mmdit_refine else z0
+        cond_time = primary_cond
         noisy_branch, noisy_gate_mean, noisy_branch_norm = self._gated_noisy_branch(noisy_physical, time)
-        base_raw = (
-            self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
-            + self.trajectory_lift(trajectory_tokens)
-            + cond_time[:, None]
-        )
+        base_raw = self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
         if not mmdit_refine:
-            base_raw = base_raw + noisy_branch
+            base_raw = base_raw + noisy_branch + self.trajectory_lift(trajectory_tokens) + cond_time[:, None]
         noisy_branch_ratio = noisy_branch_norm / base_raw.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
         base_action = self._coarse_temporal_base(base_raw)
         base_highfreq = (base_raw - base_action).detach().float().norm(dim=-1).mean()
@@ -3885,7 +4300,10 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         route_floor_terms: list[Tensor] = []
         regularizer_terms: list[Tensor] = []
         function_rows: list[Tensor] = []
-        if progress is not None and int(getattr(cfg, "adaptive_cvae_progress_z_injection", 1)):
+        if mmdit_refine:
+            seed_delta = torch.zeros_like(base_action)
+            action = base_action
+        elif progress is not None and int(getattr(cfg, "adaptive_cvae_progress_z_injection", 1)):
             seed_temperature = self._adaptive_route_temperature(base_action).detach().float().mean()
             seed_context, seed_entropy, seed_max, seed_weights = self._route_progress_full(base_action, progress)
             route_floor_terms.append(self._route_entropy_floor(seed_entropy, int(progress.shape[1])))
@@ -3908,7 +4326,6 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         )
         if context_capsules is not None and layer_stack is not None:
             route_floor_terms.append(self._route_entropy_floor(capsule_layer_entropy, int(layer_stack.shape[1])))
-        mmdit_cond_tokens: Tensor | None = None
         mmdit_noisy_start = 0
         mmdit_noisy_len = 0
         mmdit_rollout_start = 0
@@ -3917,23 +4334,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         if mmdit_refine:
             if self.mmdit_step_cond_proj is None or self.mmdit_type_embed is None or self.mmdit_action_norm is None:
                 raise RuntimeError("MMDiT refine modules are not initialized")
-            z_token = self.z_to_token(z.to(device=device, dtype=dtype))
-            (
-                mmdit_cond_tokens,
-                mmdit_noisy_start,
-                mmdit_noisy_len,
-                mmdit_rollout_start,
-                mmdit_rollout_len,
-                mmdit_cond_token_norm,
-            ) = self._mmdit_condition_tokens(
-                noisy_tokens=noisy_branch,
-                trajectory_tokens=trajectory_tokens,
-                rollout_tokens=rollout_tokens,
-                cond_time=cond_time,
-                z_token=z_token,
-                layer_stack=layer_stack,
-                progress_tokens=progress,
-            )
+            if self.evidence_workspace is None:
+                raise RuntimeError("MMDiT evidence workspace is not initialized")
         micro_enabled = bool((not mmdit_refine) and int(getattr(cfg, "adaptive_cvae_micro_control", 1)) and progress is not None)
         progress_center = self._micro_initial_progress(action) if micro_enabled else None
         prev_velocity = torch.zeros_like(action)
@@ -3945,6 +4347,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         mmdit_noisy_attn_rows: list[Tensor] = []
         mmdit_rollout_attn_rows: list[Tensor] = []
         mmdit_rollout_enrichment_rows: list[Tensor] = []
+        workspace_progress_update_rows: list[Tensor] = []
+        workspace_metric_rows: dict[str, list[Tensor]] = {}
         entropy_rows: list[Tensor] = []
         max_rows: list[Tensor] = []
         progress_entropy_rows: list[Tensor] = []
@@ -3982,6 +4386,102 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             step_bias = self._refine_step_bias(step, action)
             route_action = action + step_bias
             temperature_rows.append(self._adaptive_route_temperature(route_action).detach().float().mean())
+            if mmdit_refine:
+                progress_context, progress_entropy, progress_max, _ = self._route_progress_full(route_action, progress)
+                if progress is not None:
+                    route_floor_terms.append(self._route_entropy_floor(progress_entropy, int(progress.shape[1])))
+                progress_context = self._context_dropout(progress_context)
+                routed_layer, layer_entropy, layer_max = self._route_layers(route_action, layer_stack)
+                if layer_stack is not None and int(getattr(cfg, "adaptive_cvae_layer_routing", 1)):
+                    route_floor_terms.append(self._route_entropy_floor(layer_entropy, int(layer_stack.shape[1])))
+                workspace_sources = dict(evidence_sources or {})
+                # The ordered scan/lateral summaries remain available, while
+                # the full layer bank is consumed through the step-specific
+                # router rather than becoming a second direct fan-in.
+                workspace_sources.pop("layer", None)
+                if progress is not None:
+                    workspace_sources["progress"] = progress_context
+                if int(getattr(cfg, "latent_cvae_layer_memory", 1)):
+                    workspace_sources["routed_layer"] = routed_layer
+                if rollout_tokens is not None:
+                    workspace_sources["rollout"] = rollout_tokens
+                if context_capsules is not None:
+                    workspace_sources["capsule"] = context_capsules
+                step_context = step_bias.mean(dim=1)
+                assert self.evidence_workspace is not None
+                workspace_tokens, workspace_metrics = self.evidence_workspace(
+                    workspace_sources,
+                    action=action,
+                    primary_cond=primary_cond,
+                    step_context=step_context,
+                )
+                z_token = self.z_to_token(z.to(device=device, dtype=dtype))
+                (
+                    step_cond_tokens,
+                    mmdit_noisy_start,
+                    mmdit_noisy_len,
+                    mmdit_rollout_start,
+                    mmdit_rollout_len,
+                    mmdit_cond_token_norm,
+                ) = self._mmdit_condition_tokens(
+                    noisy_tokens=noisy_branch,
+                    trajectory_tokens=trajectory_tokens,
+                    rollout_tokens=rollout_tokens,
+                    cond_time=primary_cond,
+                    z_token=z_token,
+                    layer_stack=layer_stack,
+                    progress_tokens=progress,
+                    workspace_tokens=workspace_tokens,
+                )
+                before = action
+                mmdit_block = self.mmdit_blocks[min(step, len(self.mmdit_blocks) - 1)]
+                action, _, mmdit_metrics = mmdit_block(
+                    action,
+                    step_cond_tokens,
+                    primary_cond,
+                    noisy_start=mmdit_noisy_start,
+                    noisy_len=mmdit_noisy_len,
+                    rollout_start=mmdit_rollout_start,
+                    rollout_len=mmdit_rollout_len,
+                    update_condition=False,
+                )
+                update = action - before
+                update_energy = update.float().square().mean()
+                action_energy = before.detach().float().square().mean().clamp_min(1e-6)
+                update_ratio_sq = update_energy / action_energy
+                # The trainable regularizer stays in squared-energy coordinates.
+                # sqrt at update=0 has an infinite derivative and poisoned the
+                # zero-gated MMDiT initialization on its first backward pass.
+                update_ratio = update_ratio_sq.detach().clamp_min(0.0).sqrt()
+                # Architectural normalization is primary; this is only a soft
+                # trust-region fuse that activates on genuinely runaway updates.
+                regularizer_terms.append(F.relu(update_ratio_sq - 0.25).square())
+                progress, progress_update_norm = self._workspace_update_progress(
+                    progress,
+                    action=action,
+                    workspace=workspace_tokens,
+                    step_context=step_context,
+                )
+                workspace_progress_update_rows.append(progress_update_norm)
+                workspace_metrics["workspace_action_update_ratio"] = update_ratio.detach()
+                for key, value in workspace_metrics.items():
+                    workspace_metric_rows.setdefault(key, []).append(value.to(device=device))
+                prev_velocity = update
+                keep = torch.ones((), device=device, dtype=torch.float32)
+                mmdit_action_update_rows.append(mmdit_metrics["action_update_norm"].to(device=device))
+                mmdit_cond_update_rows.append(mmdit_metrics["cond_update_norm"].to(device=device))
+                mmdit_cond_attn_rows.append(mmdit_metrics["action_cond_attn"].to(device=device))
+                mmdit_noisy_attn_rows.append(mmdit_metrics["action_noisy_attn"].to(device=device))
+                mmdit_rollout_attn_rows.append(mmdit_metrics["action_rollout_attn"].to(device=device))
+                mmdit_rollout_enrichment_rows.append(mmdit_metrics["action_rollout_enrichment"].to(device=device))
+                update_rows.append(update.detach().float().norm(dim=-1).mean())
+                entropy_rows.append(layer_entropy.to(device=device))
+                max_rows.append(layer_max.to(device=device))
+                progress_entropy_rows.append(progress_entropy.to(device=device))
+                progress_max_rows.append(progress_max.to(device=device))
+                continue_rows.append(keep)
+                step_bias_rows.append(step_bias.detach().float().norm(dim=-1).mean())
+                continue
             if micro_enabled:
                 progress_context, progress_entropy, progress_max, progress_weights = self._route_progress_monotonic(
                     route_action,
@@ -4049,35 +4549,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             function_rows.append(function_bias.detach().float().norm(dim=-1).mean())
             prefix = prefix + semantic_bias + function_bias
             before = action
-            if mmdit_refine:
-                assert mmdit_cond_tokens is not None
-                assert self.mmdit_step_cond_proj is not None
-                assert self.mmdit_type_embed is not None
-                dynamic_step = self.mmdit_step_cond_proj(prefix + routed + progress_context + semantic_bias)
-                type_embed = self.mmdit_type_embed.to(device=device, dtype=dtype)
-                step_cond_tokens = torch.cat([mmdit_cond_tokens, dynamic_step + type_embed[:, 5:6]], dim=1)
-                mmdit_block = self.mmdit_blocks[min(step, len(self.mmdit_blocks) - 1)]
-                action, updated_cond_tokens, mmdit_metrics = mmdit_block(
-                    action,
-                    step_cond_tokens,
-                    cond_time,
-                    noisy_start=mmdit_noisy_start,
-                    noisy_len=mmdit_noisy_len,
-                    rollout_start=mmdit_rollout_start,
-                    rollout_len=mmdit_rollout_len,
-                    update_condition=bool(int(getattr(cfg, "latent_cvae_mmdit_cond_update", 0))),
-                )
-                if int(getattr(cfg, "latent_cvae_mmdit_cond_update", 0)):
-                    mmdit_cond_tokens = updated_cond_tokens[:, : int(mmdit_cond_tokens.shape[1])]
-                prev_velocity = action - before
-                keep = torch.ones((), device=device, dtype=torch.float32)
-                mmdit_action_update_rows.append(mmdit_metrics["action_update_norm"].to(device=device))
-                mmdit_cond_update_rows.append(mmdit_metrics["cond_update_norm"].to(device=device))
-                mmdit_cond_attn_rows.append(mmdit_metrics["action_cond_attn"].to(device=device))
-                mmdit_noisy_attn_rows.append(mmdit_metrics["action_noisy_attn"].to(device=device))
-                mmdit_rollout_attn_rows.append(mmdit_metrics["action_rollout_attn"].to(device=device))
-                mmdit_rollout_enrichment_rows.append(mmdit_metrics["action_rollout_enrichment"].to(device=device))
-            elif micro_enabled:
+            if micro_enabled:
                 if int(getattr(cfg, "adaptive_cvae_micro_refine_block", 1)):
                     micro_update, ds, kp, kd, micro_terms = self.micro_refine_block(
                         action=action,
@@ -4150,14 +4622,27 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
 
         if mmdit_refine and self.mmdit_action_norm is not None:
             action = self.mmdit_action_norm(action)
-        output_delta, output_function = self._output_semantic_delta(action=action, cond_time=cond_time, progress=progress)
-        output_scale = float(getattr(cfg, "adaptive_cvae_output_scale", 1.0))
-        output_delta = output_delta * output_scale
-        output_function = output_function * output_scale
+        if mmdit_refine:
+            output_delta = torch.zeros_like(action)
+            output_function = torch.zeros_like(action)
+        else:
+            output_delta, output_function = self._output_semantic_delta(action=action, cond_time=cond_time, progress=progress)
+            output_scale = float(getattr(cfg, "adaptive_cvae_output_scale", 1.0))
+            output_delta = output_delta * output_scale
+            output_function = output_function * output_scale
         regularizer_terms.append(output_delta.float().square().mean())
         function_rows.append(output_function.detach().float().norm(dim=-1).mean())
-        out = self._emit_action(action + output_delta, cond)
+        emit_condition = primary_cond if mmdit_refine else cond
+        out = self._emit_action(action + output_delta, emit_condition)
         progress_norm = progress.detach().float().norm(dim=-1).mean() if progress is not None else z0
+        workspace_summary = {
+            key: torch.stack(values).mean()
+            for key, values in workspace_metric_rows.items()
+            if values
+        }
+        workspace_rollout = workspace_summary.get("workspace_rollout_attention", z0)
+        workspace_source_count = workspace_summary.get("workspace_source_count", z0)
+        workspace_rollout_enrichment = workspace_rollout * workspace_source_count.clamp_min(1.0)
         out.update({
             "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
             "adaptive_noisy_branch_norm": noisy_branch_norm.to(device=device),
@@ -4195,11 +4680,16 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "mmdit_cond_update_norm": torch.stack(mmdit_cond_update_rows).mean() if mmdit_cond_update_rows else z0,
             "mmdit_action_cond_attention": torch.stack(mmdit_cond_attn_rows).mean() if mmdit_cond_attn_rows else z0,
             "mmdit_action_noisy_attention": torch.stack(mmdit_noisy_attn_rows).mean() if mmdit_noisy_attn_rows else z0,
-            "mmdit_action_rollout_attention": torch.stack(mmdit_rollout_attn_rows).mean() if mmdit_rollout_attn_rows else z0,
-            "mmdit_action_rollout_enrichment": torch.stack(mmdit_rollout_enrichment_rows).mean() if mmdit_rollout_enrichment_rows else z0,
+            "mmdit_action_workspace_attention": torch.stack(mmdit_rollout_attn_rows).mean() if mmdit_rollout_attn_rows else z0,
+            "mmdit_action_workspace_enrichment": torch.stack(mmdit_rollout_enrichment_rows).mean() if mmdit_rollout_enrichment_rows else z0,
+            "mmdit_action_rollout_attention": workspace_rollout,
+            "mmdit_action_rollout_enrichment": workspace_rollout_enrichment,
             "mmdit_action_token_norm": action.detach().float().norm(dim=-1).mean() if mmdit_refine else z0,
             "mmdit_condition_token_norm": mmdit_cond_token_norm.to(device=device) if mmdit_refine else z0,
             "mmdit_noisy_token_norm": noisy_branch_norm.to(device=device) if mmdit_refine else z0,
+            "primary_condition_norm": primary_cond.detach().float().norm(dim=-1).mean() if mmdit_refine else z0,
+            "primary_z_effect_norm": primary_z_effect,
+            "workspace_progress_update_norm": torch.stack(workspace_progress_update_rows).mean() if workspace_progress_update_rows else z0,
             "adaptive_micro_step_mean": torch.stack(micro_step_rows).mean() if micro_step_rows else z0,
             "adaptive_micro_step_std": torch.stack(micro_step_std_rows).mean() if micro_step_std_rows else z0,
             "adaptive_micro_progress_mean": torch.stack(micro_progress_rows).mean() if micro_progress_rows else z0,
@@ -4216,6 +4706,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "adaptive_micro_controller_norm": torch.stack(micro_controller_rows).mean() if micro_controller_rows else z0,
             "adaptive_regularizer": torch.stack(regularizer_terms).mean() if regularizer_terms else z0,
             "adaptive_route_entropy_regularizer": torch.stack(route_floor_terms).mean() if route_floor_terms else z0,
+            **workspace_summary,
         })
         if micro_pred_rows:
             out["adaptive_micro_pred_velocity"] = torch.stack(micro_pred_rows, dim=1)
@@ -4353,6 +4844,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         consequence_physical: Tensor | None = None,
         cvae_target_physical: Tensor | None = None,
         enable_layer_contracts: bool = True,
+        enable_final_action_decoder: bool = True,
     ) -> dict[str, Tensor]:
         cfg = self.config
         if proposal_keep is None:
@@ -4558,18 +5050,33 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         residual_action_flow: dict[str, Tensor] | None = None
         latent_main_action: dict[str, Tensor] | None = None
         latent_cvae_action: dict[str, Tensor] | None = None
-        if self.latent_cvae_action_decoder is not None:
+        if not enable_final_action_decoder:
+            # Counterfactual rollout branches consume only dynamics and layer
+            # contracts. Running the final CVAE/MMDiT tower here duplicated a
+            # full prior decode whose action output was immediately discarded.
+            pred_physical_velocity = torch.zeros_like(noisy_physical)
+            legacy_event_logits = event_context.new_zeros(
+                int(event_context.shape[0]), int(event_context.shape[1]), 3
+            )
+            legacy_motion_logits = event_context.new_zeros(
+                int(event_context.shape[0]), int(event_context.shape[1])
+            )
+        elif self.latent_cvae_action_decoder is not None:
             context_memory = [
                 canvas[:, slices["state"]],
                 canvas[:, slices["state_history"]],
                 canvas[:, slices["executed"]],
                 canvas[:, slices["proposal"]],
             ] if int(getattr(cfg, "latent_cvae_context_memory", 0)) else None
-            transition_memory = [rollout, controlled_delta, rollout_effect_pred, event_context] if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else None
+            # Rollout has its own full-resolution workspace source. Transition
+            # memory therefore carries only explicit consequence semantics and
+            # does not duplicate the same rollout grid through a pooled path.
+            transition_memory = [controlled_delta, rollout_effect_pred, event_context] if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else None
             latent_cvae_action = self.latent_cvae_action_decoder(
                 noisy_physical=noisy_physical,
                 time=time,
                 trajectory_tokens=trajectory_pooled,
+                trajectory_workspace_tokens=trajectory,
                 rollout_tokens=rollout,
                 context_memory=context_memory,
                 transition_memory=transition_memory,
@@ -5070,6 +5577,10 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 "legacy_physical_velocity": legacy_velocity,
                 "rollout_alpha": rollout_alpha,
             })
+        if latent_cvae_action is not None:
+            for key, value in latent_cvae_action.items():
+                if key.startswith("cvae_") and isinstance(value, Tensor):
+                    out.setdefault(f"latent_{key}", value)
         if latent_cvae_action is not None and "post_pred_velocity" in latent_cvae_action:
             out.update({
                 "post_pred_velocity": latent_cvae_action["post_pred_velocity"],
@@ -5115,6 +5626,7 @@ class V39PolicySystem(nn.Module):
         consequence_physical: Tensor | None = None,
         cvae_target_physical: Tensor | None = None,
         enable_layer_contracts: bool = True,
+        enable_final_action_decoder: bool = True,
     ) -> dict[str, Tensor]:
         return self.planner(
             noisy_physical,
@@ -5129,6 +5641,7 @@ class V39PolicySystem(nn.Module):
             consequence_physical=consequence_physical,
             cvae_target_physical=cvae_target_physical,
             enable_layer_contracts=enable_layer_contracts,
+            enable_final_action_decoder=enable_final_action_decoder,
         )
 
     @torch.no_grad()
@@ -5286,6 +5799,7 @@ class V39PolicySystem(nn.Module):
                     keep,
                     stop_at_midcut=stop_at_midcut,
                     consequence_physical=hold_physical,
+                    enable_final_action_decoder=False,
                 )
                 out["rollout_effect_pred_hold_action"] = hold_policy["rollout_effect_pred"]
                 out["rollout_delta_pred_hold_action"] = hold_policy["rollout_delta_pred"]
@@ -5342,6 +5856,7 @@ class V39PolicySystem(nn.Module):
                     keep,
                     stop_at_midcut=stop_at_midcut,
                     consequence_physical=shuffle_physical,
+                    enable_final_action_decoder=False,
                 )
                 out["rollout_effect_pred_shuffle_action"] = shuffle_policy["rollout_effect_pred"]
                 out["rollout_delta_pred_shuffle_action"] = shuffle_policy["rollout_delta_pred"]
@@ -5398,6 +5913,8 @@ class V39PolicySystem(nn.Module):
             and int(getattr(self.policy_config, "layer_recurrent_consequence", 0))
             and int(getattr(self.policy_config, "layer_contract_adapters", 0))
         )
+        sample_diagnostic_sums: dict[str, Tensor] = {}
+        sample_diagnostic_count = 0
         for index in range(steps, 0, -1):
             t = torch.full((visual.shape[0],), float(index) / float(steps), device=visual.device, dtype=visual.dtype)
             consequence_input = x
@@ -5423,6 +5940,19 @@ class V39PolicySystem(nn.Module):
                 consequence_physical=consequence_input,
                 enable_layer_contracts=False,
             )
+            for key, value in out.items():
+                keep_diagnostic = (
+                    key.startswith("latent_cvae_workspace_")
+                    or key.startswith("latent_cvae_mmdit_")
+                    or key in (
+                        "latent_cvae_primary_condition_norm",
+                        "latent_cvae_primary_z_effect_norm",
+                    )
+                )
+                if keep_diagnostic and torch.is_tensor(value) and value.numel() == 1:
+                    scalar = value.detach().float()
+                    sample_diagnostic_sums[key] = sample_diagnostic_sums.get(key, torch.zeros_like(scalar)) + scalar
+            sample_diagnostic_count += 1
             x = x - out["pred_physical_velocity"] / float(steps)
         action = self.codec.decode(x, state)
         if return_event_logits:
@@ -5432,7 +5962,15 @@ class V39PolicySystem(nn.Module):
                 stop_at_midcut=stop_at_midcut,
                 enable_layer_contracts=False,
             )
-            return {"action": action, "physical_action": x, "event_logits": event["event_logits"], "motion_logits": event["motion_logits"]}
+            result = {
+                "action": action,
+                "physical_action": x,
+                "event_logits": event["event_logits"],
+                "motion_logits": event["motion_logits"],
+            }
+            for key, value in sample_diagnostic_sums.items():
+                result[f"sample_{key}"] = value / float(max(sample_diagnostic_count, 1))
+            return result
         return action
 
     def parameter_report(self) -> dict[str, int]:

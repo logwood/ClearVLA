@@ -56,6 +56,10 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     rollout_variance_loss_weight: float = 0.05
     rollout_norm_loss_weight: float = 0.02
     rollout_milestone_delta_match_weight: float = 0.15
+    # Local fuse for the complete CVAE/MMDiT decoder. Architectural pre-norm is
+    # the primary protection; this prevents a decoder-only spike from consuming
+    # the global clipping budget and starving the world/rollout trunk.
+    latent_cvae_grad_clip: float = 0.0
     # Kept for CLI/checkpoint compatibility; defaults disabled to avoid the
     # future self-denoise shortcut.
     future_latent_loss_weight: float = 0.0
@@ -937,6 +941,7 @@ def flow_losses(
         "latent_cvae_post_pred_norm",
         "latent_cvae_post_gripper_gate_mean",
         "latent_cvae_condition_norm",
+        "latent_cvae_condition_raw_norm",
         "latent_cvae_condition_scan_norm",
         "latent_cvae_condition_lateral_norm",
         "latent_cvae_layer_summary_norm",
@@ -1003,11 +1008,41 @@ def flow_losses(
         "latent_cvae_mmdit_cond_update_norm",
         "latent_cvae_mmdit_action_cond_attention",
         "latent_cvae_mmdit_action_noisy_attention",
+        "latent_cvae_mmdit_action_workspace_attention",
+        "latent_cvae_mmdit_action_workspace_enrichment",
         "latent_cvae_mmdit_action_rollout_attention",
         "latent_cvae_mmdit_action_rollout_enrichment",
         "latent_cvae_mmdit_action_token_norm",
         "latent_cvae_mmdit_condition_token_norm",
         "latent_cvae_mmdit_noisy_token_norm",
+        "latent_cvae_primary_condition_norm",
+        "latent_cvae_primary_z_effect_norm",
+        "latent_cvae_workspace_progress_update_norm",
+        "latent_cvae_workspace_token_count",
+        "latent_cvae_workspace_token_norm",
+        "latent_cvae_workspace_update_norm",
+        "latent_cvae_workspace_source_count",
+        "latent_cvae_workspace_attention_entropy",
+        "latent_cvae_workspace_attention_max",
+        "latent_cvae_workspace_group_attention_entropy",
+        "latent_cvae_workspace_group_effective_sources",
+        "latent_cvae_workspace_attention_mass_error",
+        "latent_cvae_workspace_action_update_ratio",
+        "latent_cvae_workspace_layer_attention",
+        "latent_cvae_workspace_scan_attention",
+        "latent_cvae_workspace_lateral_attention",
+        "latent_cvae_workspace_transition_attention",
+        "latent_cvae_workspace_transition_delta_attention",
+        "latent_cvae_workspace_transition_effect_attention",
+        "latent_cvae_workspace_transition_event_attention",
+        "latent_cvae_workspace_transition_total_attention",
+        "latent_cvae_workspace_context_attention",
+        "latent_cvae_workspace_visual_attention",
+        "latent_cvae_workspace_trajectory_attention",
+        "latent_cvae_workspace_rollout_attention",
+        "latent_cvae_workspace_capsule_attention",
+        "latent_cvae_workspace_progress_attention",
+        "latent_cvae_workspace_routed_layer_attention",
         "consequence_self_condition",
         "consequence_self_condition_target_mse",
         "consequence_self_condition_noisy_mse",
@@ -1333,6 +1368,8 @@ def evaluate_v39_policy(
     contract_eval = _is_contract_stage(trainer) and _uses_layer_adapter_contract(trainer)
     contract_metric_sums: dict[str, float] = {}
     contract_metric_count = 0
+    sampling_diagnostic_sums: dict[str, float] = {}
+    sampling_diagnostic_counts: dict[str, int] = {}
     for batch_index, batch in enumerate(loader, start=1):
         if max_batches and batch_index > max_batches:
             break
@@ -1367,6 +1404,14 @@ def evaluate_v39_policy(
                 stop_at_midcut=stop_midcut_eval,
             )
             assert isinstance(pred_pack, dict)
+            diagnostic_weight = int(pred_pack["action"].shape[0])
+            for key, value in pred_pack.items():
+                if key.startswith("sample_latent_cvae_") and torch.is_tensor(value) and value.numel() == 1:
+                    sampling_diagnostic_sums[key] = (
+                        sampling_diagnostic_sums.get(key, 0.0)
+                        + float(value.float().cpu()) * diagnostic_weight
+                    )
+                    sampling_diagnostic_counts[key] = sampling_diagnostic_counts.get(key, 0) + diagnostic_weight
             no_proposal = system.sample(
                 sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
@@ -1452,6 +1497,9 @@ def evaluate_v39_policy(
     if contract_metric_count:
         for key, value in contract_metric_sums.items():
             metrics[f"contract_{key}"] = value / float(contract_metric_count)
+    for key, value in sampling_diagnostic_sums.items():
+        metrics[key] = value / float(max(sampling_diagnostic_counts.get(key, 0), 1))
+    metrics["eval_sampling_diagnostic_count"] = float(len(sampling_diagnostic_sums))
     return metrics
 
 
@@ -1624,9 +1672,31 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_latent_main_action"] = _module_grad_norm(planner.latent_main_action_decoder, reference=reference)
     if getattr(planner, "latent_cvae_action_decoder", None) is not None:
         losses["grad_latent_cvae_action"] = _module_grad_norm(planner.latent_cvae_action_decoder, reference=reference)
-        rollout_projection = getattr(planner.latent_cvae_action_decoder, "mmdit_rollout_cond_proj", None)
-        if rollout_projection is not None:
-            losses["grad_latent_cvae_rollout_condition"] = _module_grad_norm(rollout_projection, reference=reference)
+        workspace = getattr(planner.latent_cvae_action_decoder, "evidence_workspace", None)
+        if workspace is not None:
+            losses["grad_latent_cvae_workspace"] = _module_grad_norm(workspace, reference=reference)
+            primary_modules: list[torch.nn.Module] = []
+            primary_modules.extend(
+                block.mod for block in getattr(planner.latent_cvae_action_decoder, "blocks", [])
+                if hasattr(block, "mod")
+            )
+            primary_modules.extend(
+                block.action_mod for block in getattr(planner.latent_cvae_action_decoder, "mmdit_blocks", [])
+                if hasattr(block, "action_mod")
+            )
+            primary_modules.extend(
+                block.mod for block in getattr(workspace, "blocks", [])
+                if hasattr(block, "mod")
+            )
+            if primary_modules:
+                losses["grad_latent_cvae_primary_modulation"] = _module_grad_norm(
+                    torch.nn.ModuleList(primary_modules),
+                    reference=reference,
+                )
+        else:
+            rollout_projection = getattr(planner.latent_cvae_action_decoder, "mmdit_rollout_cond_proj", None)
+            if rollout_projection is not None:
+                losses["grad_latent_cvae_rollout_condition"] = _module_grad_norm(rollout_projection, reference=reference)
     final = torch.nn.ModuleList(final_modules)
     losses["grad_final_policy_heads"] = _module_grad_norm(final, reference=reference)
 
@@ -1834,6 +1904,14 @@ def train_v39_policy(
         payload = torch.load(resume, map_location="cpu", weights_only=False)
         if payload.get("schema") not in POLICY_CHECKPOINT_SCHEMAS:
             raise ValueError("resume checkpoint is not V39/V40 policy")
+        saved_policy = payload.get("policy_config", {})
+        saved_workspace_tokens = int(saved_policy.get("latent_cvae_horizon_tokens", 24))
+        current_workspace_tokens = int(getattr(system.policy_config, "latent_cvae_horizon_tokens", 24))
+        if saved_workspace_tokens != current_workspace_tokens:
+            raise ValueError(
+                "resume workspace-token mismatch: "
+                f"checkpoint={saved_workspace_tokens}, current={current_workspace_tokens}"
+            )
         system.load_state_dict(payload["model"], strict=True)
         optimizer.load_state_dict(payload["optimizer"]); schedule.load_state_dict(payload["scheduler"])
         start_epoch = int(payload["epoch"]) + 1; global_step = int(payload["global_step"])
@@ -1920,11 +1998,31 @@ def train_v39_policy(
                     losses["midcut_aux_scale"] = torch.as_tensor(aux_scale, device=losses["loss"].device, dtype=losses["loss"].dtype)
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_forward_loss", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
+            if not torch.isfinite(losses["loss"].detach()).all():
+                raise FloatingPointError(
+                    f"non-finite training loss before backward at epoch={epoch} batch={batch_index}"
+                )
             losses["loss"].float().backward()
             _attach_grad_diagnostics(losses, system)
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_backward", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
-            grad = torch.nn.utils.clip_grad_norm_(system.parameters(), trainer.grad_clip)
+            latent_decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
+            latent_clip = float(getattr(trainer, "latent_cvae_grad_clip", 0.0))
+            if latent_decoder is not None and latent_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    latent_decoder.parameters(),
+                    latent_clip,
+                    error_if_nonfinite=True,
+                )
+                losses["grad_latent_cvae_action_post_clip"] = _module_grad_norm(
+                    latent_decoder,
+                    reference=losses["loss"],
+                )
+            grad = torch.nn.utils.clip_grad_norm_(
+                system.parameters(),
+                trainer.grad_clip,
+                error_if_nonfinite=True,
+            )
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_clip", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
             optimizer.step(); schedule.step(); global_step += 1
@@ -1963,6 +2061,9 @@ def train_v39_policy(
                     f"clmem={row.get('latent_cvae_layer_memory_count', 0.0):.1f} "
                     f"cscan={row.get('latent_cvae_condition_scan_norm', 0.0):.2f} "
                     f"clat={row.get('latent_cvae_condition_lateral_norm', 0.0):.2f} "
+                    f"craw={row.get('latent_cvae_condition_raw_norm', 0.0):.2f} "
+                    f"zcond={row.get('latent_cvae_primary_condition_norm', 0.0):.2f} "
+                    f"zfx={row.get('latent_cvae_primary_z_effect_norm', 0.0):.2f} "
                     f"clsum={row.get('latent_cvae_layer_summary_norm', 0.0):.2f} "
                     f"ctraw={row.get('latent_cvae_transition_source_raw_norm', 0.0):.2f} "
                     f"ctmem={row.get('latent_cvae_transition_condition_norm', 0.0):.2f} "
@@ -1999,10 +2100,30 @@ def train_v39_policy(
                     f"mdat={row.get('latent_cvae_mmdit_action_token_norm', 0.0):.2f} "
                     f"mdct={row.get('latent_cvae_mmdit_condition_token_norm', 0.0):.2f} "
                     f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
+                    f"mdwa={row.get('latent_cvae_mmdit_action_workspace_attention', 0.0):.3f} "
+                    f"mdwe={row.get('latent_cvae_mmdit_action_workspace_enrichment', 0.0):.3f} "
                     f"mdra={row.get('latent_cvae_mmdit_action_rollout_attention', 0.0):.3f} "
                     f"mdre={row.get('latent_cvae_mmdit_action_rollout_enrichment', 0.0):.3f} "
                     f"mdrn={row.get('latent_cvae_rollout_token_norm', 0.0):.2f} "
                     f"mdrc={row.get('latent_cvae_rollout_token_count', 0.0):.0f} "
+                    f"wk={row.get('latent_cvae_workspace_token_count', 0.0):.0f} "
+                    f"wtok={row.get('latent_cvae_workspace_token_norm', 0.0):.2f} "
+                    f"wdelta={row.get('latent_cvae_workspace_update_norm', 0.0):.2f} "
+                    f"wsrc={row.get('latent_cvae_workspace_source_count', 0.0):.0f} "
+                    f"went={row.get('latent_cvae_workspace_attention_entropy', 0.0):.3f} "
+                    f"wmax={row.get('latent_cvae_workspace_attention_max', 0.0):.3f} "
+                    f"wgent={row.get('latent_cvae_workspace_group_attention_entropy', 0.0):.3f} "
+                    f"wgeff={row.get('latent_cvae_workspace_group_effective_sources', 0.0):.2f} "
+                    f"wmass={row.get('latent_cvae_workspace_attention_mass_error', 0.0):.1e} "
+                    f"wupd={row.get('latent_cvae_workspace_action_update_ratio', 0.0):.3f} "
+                    f"wprog={row.get('latent_cvae_workspace_progress_update_norm', 0.0):.3f} "
+                    f"wscan={row.get('latent_cvae_workspace_scan_attention', 0.0):.3f} "
+                    f"wlat={row.get('latent_cvae_workspace_lateral_attention', 0.0):.3f} "
+                    f"wtrans={row.get('latent_cvae_workspace_transition_total_attention', row.get('latent_cvae_workspace_transition_attention', 0.0)):.3f} "
+                    f"wtraj={row.get('latent_cvae_workspace_trajectory_attention', 0.0):.3f} "
+                    f"wroll={row.get('latent_cvae_workspace_rollout_attention', 0.0):.3f} "
+                    f"wcaps={row.get('latent_cvae_workspace_capsule_attention', 0.0):.3f} "
+                    f"wroute={row.get('latent_cvae_workspace_routed_layer_attention', 0.0):.3f} "
                     f"cmds={row.get('latent_cvae_adaptive_micro_step_mean', 0.0):.3f} "
                     f"cmprog={row.get('latent_cvae_adaptive_micro_progress_mean', 0.0):.3f} "
                     f"cmkp={row.get('latent_cvae_adaptive_micro_kp_mean', 0.0):.3f} "
@@ -2033,9 +2154,12 @@ def train_v39_policy(
                     f"cscnmse={row.get('consequence_self_condition_noisy_mse', 0.0):.4f} "
                     f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
                     f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
+                    f"cgclip={row.get('grad_latent_cvae_action_post_clip', 0.0):.3e} "
                     f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
                     f"rdgrad={row.get('grad_controlled_dynamics', 0.0):.3e} "
                     f"rcgrad={row.get('grad_latent_cvae_rollout_condition', 0.0):.3e} "
+                    f"wgrad={row.get('grad_latent_cvae_workspace', 0.0):.3e} "
+                    f"zpgrad={row.get('grad_latent_cvae_primary_modulation', 0.0):.3e} "
                     f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",
                     flush=True,
                 )
