@@ -49,6 +49,13 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     rollout_delta_loss_weight: float = 0.01
     rollout_contrast_loss_weight: float = 0.06
     rollout_contrast_margin: float = 0.02
+    # Main controlled rollout must match not only the future direction but also
+    # its energy and inter-milestone change. These mirror the proven layer
+    # consequence contracts and prevent a low-amplitude conditional mean from
+    # satisfying the world objective.
+    rollout_variance_loss_weight: float = 0.05
+    rollout_norm_loss_weight: float = 0.02
+    rollout_milestone_delta_match_weight: float = 0.15
     # Kept for CLI/checkpoint compatibility; defaults disabled to avoid the
     # future self-denoise shortcut.
     future_latent_loss_weight: float = 0.0
@@ -559,6 +566,8 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
         "rollout_delta_norm",
         "rollout_base_norm",
         "rollout_delta_gain",
+        "rollout_deep_update_norm",
+        "rollout_deep_token_norm",
         "milestone_gate_mean",
         "milestone_step_delta_norm",
         "milestone_effect_norm",
@@ -767,9 +776,16 @@ def flow_losses(
     dyn = rollout_dynamics_loss(output)
     delta = rollout_delta_loss(output)
     con = rollout_contrast_loss(output, margin=float(trainer.rollout_contrast_margin))
+    grid = _future_grid_count(system, output)
+    rollout_var = latent_variance_loss(output, grid=grid)
+    rollout_norm = latent_norm_loss(output)
+    rollout_milestone = milestone_delta_match_loss(output, grid=grid)
     losses["rollout_dynamics"] = dyn
     losses["rollout_delta"] = delta
     losses["rollout_contrast"] = con
+    losses["rollout_variance"] = rollout_var
+    losses["rollout_norm"] = rollout_norm
+    losses["rollout_milestone_delta_match"] = rollout_milestone
     # Compatibility log names: these no longer correspond to self-denoise.
     losses["future_latent"] = dyn.detach()
     losses["action_effect"] = delta.detach()
@@ -779,6 +795,12 @@ def flow_losses(
         losses["loss"] = losses["loss"] + float(trainer.rollout_delta_loss_weight) * delta
     if enable_future_loss and float(trainer.rollout_contrast_loss_weight) > 0:
         losses["loss"] = losses["loss"] + float(trainer.rollout_contrast_loss_weight) * con
+    if enable_future_loss and float(trainer.rollout_variance_loss_weight) > 0:
+        losses["loss"] = losses["loss"] + float(trainer.rollout_variance_loss_weight) * rollout_var
+    if enable_future_loss and float(trainer.rollout_norm_loss_weight) > 0:
+        losses["loss"] = losses["loss"] + float(trainer.rollout_norm_loss_weight) * rollout_norm
+    if enable_future_loss and float(trainer.rollout_milestone_delta_match_weight) > 0:
+        losses["loss"] = losses["loss"] + float(trainer.rollout_milestone_delta_match_weight) * rollout_milestone
     # Disabled by default. Kept only as compatibility knobs; they map to the
     # same dynamics-bound target rather than future-noisy denoise.
     if enable_future_loss and float(trainer.future_latent_loss_weight) > 0:
@@ -920,6 +942,8 @@ def flow_losses(
         "latent_cvae_layer_summary_norm",
         "latent_cvae_transition_source_raw_norm",
         "latent_cvae_transition_condition_norm",
+        "latent_cvae_rollout_token_norm",
+        "latent_cvae_rollout_token_count",
         "latent_cvae_consequence_scale_mean",
         "latent_cvae_consequence_gate_preference",
         "latent_cvae_consequence_mix_ratio",
@@ -979,6 +1003,8 @@ def flow_losses(
         "latent_cvae_mmdit_cond_update_norm",
         "latent_cvae_mmdit_action_cond_attention",
         "latent_cvae_mmdit_action_noisy_attention",
+        "latent_cvae_mmdit_action_rollout_attention",
+        "latent_cvae_mmdit_action_rollout_enrichment",
         "latent_cvae_mmdit_action_token_norm",
         "latent_cvae_mmdit_condition_token_norm",
         "latent_cvae_mmdit_noisy_token_norm",
@@ -1583,6 +1609,7 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     if getattr(planner, "layer_consequence_cell", None) is not None:
         losses["grad_layer_consequence_cell"] = _module_grad_norm(planner.layer_consequence_cell, reference=reference)
     losses["grad_midcut_heads"] = _module_grad_norm(planner.midcut_heads, reference=reference)
+    losses["grad_controlled_dynamics"] = _module_grad_norm(planner.controlled_dynamics, reference=reference)
     final_modules = [
         planner.final_norm,
         planner.direct_physical_head,
@@ -1597,6 +1624,9 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_latent_main_action"] = _module_grad_norm(planner.latent_main_action_decoder, reference=reference)
     if getattr(planner, "latent_cvae_action_decoder", None) is not None:
         losses["grad_latent_cvae_action"] = _module_grad_norm(planner.latent_cvae_action_decoder, reference=reference)
+        rollout_projection = getattr(planner.latent_cvae_action_decoder, "mmdit_rollout_cond_proj", None)
+        if rollout_projection is not None:
+            losses["grad_latent_cvae_rollout_condition"] = _module_grad_norm(rollout_projection, reference=reference)
     final = torch.nn.ModuleList(final_modules)
     losses["grad_final_policy_heads"] = _module_grad_norm(final, reference=reference)
 
@@ -1620,6 +1650,12 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
     cut = int(system.policy_config.midcut_layer)
     planner = system.planner
     groups: list[dict[str, Any]] = []
+    complete_latent_decoder = (
+        getattr(planner, "latent_cvae_action_decoder", None) is not None
+        or getattr(planner, "latent_main_action_decoder", None) is not None
+    )
+    legacy_action_readers = [] if complete_latent_decoder else [planner.direct_physical_head, planner.rollout_residual_head]
+    legacy_motion_readers = [] if complete_latent_decoder else [planner.motion_probe]
 
     if _uses_layer_adapter_contract(trainer) and len(getattr(planner, "layer_contract_heads", [])) > 0:
         shared_modules = [planner.visual_memory, planner.rollout_codec, planner.seed, planner.time, planner.content_mod]
@@ -1644,7 +1680,7 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             if event_probe_in_contract:
                 contract_modules.append(planner.event_probe)
             groups.append({"params": _unique_params(contract_modules), "lr": trainer.lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)), "name": "contract_adapters_heads"})
-            final_modules = [planner.final_norm, planner.direct_physical_head, planner.rollout_residual_head, planner.controlled_dynamics, planner.motion_probe]
+            final_modules = [planner.final_norm, *legacy_action_readers, planner.controlled_dynamics, *legacy_motion_readers]
             if not event_probe_in_contract:
                 final_modules.append(planner.event_probe)
             if getattr(planner, "residual_action_flow_denoiser", None) is not None:
@@ -1679,7 +1715,7 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             adapter_lr = trainer.lr * adapter_lr_scale if adapter_lr_scale > 0 else inherited_contract_lr
             adapter_name = "layer_contract_adapters_reset_lr" if adapter_lr_scale > 0 else "layer_contract_adapters_low_lr"
             groups.append({"params": _unique_params(adapter_modules), "lr": adapter_lr, "name": adapter_name})
-            final_modules = [planner.final_norm, planner.direct_physical_head, planner.rollout_residual_head, planner.controlled_dynamics, planner.event_probe, planner.motion_probe]
+            final_modules = [planner.final_norm, *legacy_action_readers, planner.controlled_dynamics, planner.event_probe, *legacy_motion_readers]
             groups.append({"params": _unique_params(final_modules), "lr": trainer.lr, "name": "final_policy_heads"})
             if getattr(planner, "residual_action_flow_denoiser", None) is not None:
                 groups.append({
@@ -1715,11 +1751,10 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
     post_modules = [
         *list(planner.blocks[cut:]),
         planner.final_norm,
-        planner.direct_physical_head,
-        planner.rollout_residual_head,
+        *legacy_action_readers,
         planner.controlled_dynamics,
         planner.event_probe,
-        planner.motion_probe,
+        *legacy_motion_readers,
     ]
     if stage in {"contract", "stage1"}:
         groups.append({"params": _unique_params(pre_modules), "lr": trainer.lr, "name": "pre_midcut_trunk"})
@@ -1909,10 +1944,14 @@ def train_v39_policy(
                     f"gfmnr={row.get('gripper_fm_null_ratio', 0.0):.3f} gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
                     f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
                     f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
+                    f"rvar={row.get('rollout_variance', 0.0):.4f} rnorm={row.get('rollout_norm', 0.0):.4f} "
+                    f"rstep={row.get('rollout_milestone_delta_match', 0.0):.4f} "
                     f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
                     f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
                     f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
                     f"stdr={row.get('rollout_pred_std_ratio', 0.0):.4f} dnratio={row.get('rollout_milestone_delta_norm_ratio', 0.0):.4f} "
+                    f"rdeep={row.get('rollout_deep_update_norm', 0.0):.2f} "
+                    f"rdnorm={row.get('rollout_deep_token_norm', 0.0):.2f} "
                     f"event={row['event']:.6f} "
                     f"cz={row.get('latent_cvae_prior_z_norm', row.get('latent_cvae_z_norm', 0.0)):.2f} "
                     f"cpz={row.get('latent_cvae_post_z_norm', 0.0):.2f} "
@@ -1960,6 +1999,10 @@ def train_v39_policy(
                     f"mdat={row.get('latent_cvae_mmdit_action_token_norm', 0.0):.2f} "
                     f"mdct={row.get('latent_cvae_mmdit_condition_token_norm', 0.0):.2f} "
                     f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
+                    f"mdra={row.get('latent_cvae_mmdit_action_rollout_attention', 0.0):.3f} "
+                    f"mdre={row.get('latent_cvae_mmdit_action_rollout_enrichment', 0.0):.3f} "
+                    f"mdrn={row.get('latent_cvae_rollout_token_norm', 0.0):.2f} "
+                    f"mdrc={row.get('latent_cvae_rollout_token_count', 0.0):.0f} "
                     f"cmds={row.get('latent_cvae_adaptive_micro_step_mean', 0.0):.3f} "
                     f"cmprog={row.get('latent_cvae_adaptive_micro_progress_mean', 0.0):.3f} "
                     f"cmkp={row.get('latent_cvae_adaptive_micro_kp_mean', 0.0):.3f} "
@@ -1991,6 +2034,8 @@ def train_v39_policy(
                     f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
                     f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
                     f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
+                    f"rdgrad={row.get('grad_controlled_dynamics', 0.0):.3e} "
+                    f"rcgrad={row.get('grad_latent_cvae_rollout_condition', 0.0):.3e} "
                     f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",
                     flush=True,
                 )
