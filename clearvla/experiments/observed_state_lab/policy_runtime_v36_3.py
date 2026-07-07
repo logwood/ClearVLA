@@ -187,6 +187,34 @@ def semantic_physical_velocity_error(system: V363PolicySystem, residual: Tensor)
     return error.reshape(*residual.shape[:-2], horizon)
 
 
+def _normalized_event_emphasis(
+    transition_mask: Tensor,
+    position_weight: Tensor,
+    boost: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Reallocate gripper loss mass toward events without changing its total budget."""
+
+    if transition_mask.ndim != 2:
+        raise ValueError(f"transition_mask must be [B,T], got {tuple(transition_mask.shape)}")
+    if position_weight.ndim != 1 or int(position_weight.shape[0]) != int(transition_mask.shape[1]):
+        raise ValueError(
+            f"position_weight must be [T={transition_mask.shape[1]}], got {tuple(position_weight.shape)}"
+        )
+    mask = transition_mask.to(dtype=torch.float32)
+    horizon_weight = position_weight.to(device=mask.device, dtype=torch.float32)[None]
+    raw = 1.0 + max(float(boost), 0.0) * mask
+    # Normalize in the same horizon metric used by flow matching. Every sample
+    # keeps exactly one native gripper dimension of aggregate loss mass.
+    normalizer = (raw * horizon_weight).sum(dim=1, keepdim=True) / horizon_weight.sum().clamp_min(1e-8)
+    emphasis = raw / normalizer.detach().clamp_min(1e-8)
+    weighted = emphasis * horizon_weight
+    event_mass = (weighted * mask).sum() / weighted.sum().clamp_min(1e-8)
+    event_mean = (emphasis * mask).sum() / mask.sum().clamp_min(1.0)
+    hold = 1.0 - mask
+    hold_mean = (emphasis * hold).sum() / hold.sum().clamp_min(1.0)
+    return emphasis, event_mass, event_mean, hold_mean
+
+
 def flow_losses(
     system: V363PolicySystem,
     sample: dict[str, Tensor],
@@ -244,9 +272,15 @@ def flow_losses(
         gripper_null_component = torch.zeros_like(gripper_native_component)
         target_projection_error = zero.float()
         target_energy_ratio = zero.float()
+    gripper_native_error_raw = gripper_native_error
     transition_mask = (labels != 0).to(dtype=velocity_error.dtype, device=device)
     event_boost = max(float(trainer.gripper_fm_event_boost), 0.0)
-    gripper_native_error = gripper_native_error * (1.0 + event_boost * transition_mask)
+    event_emphasis, event_loss_mass, event_weight_mean, hold_weight_mean = _normalized_event_emphasis(
+        transition_mask,
+        weight,
+        event_boost,
+    )
+    gripper_native_error = gripper_native_error_raw * event_emphasis
     physical_error = (arm_native_error.sum(dim=-1) + gripper_native_error) / float(ad + 1)
     uniform_physical_error = (
         physical_error if system.codec.uses_parseval_gripper_field else velocity_error.mean(dim=-1)
@@ -266,8 +300,10 @@ def flow_losses(
     event_denom = (transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
     hold_mask_for_flow = (1.0 - transition_mask).to(dtype=physical_error.dtype)
     hold_denom = (hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
-    gripper_event_flow = (gripper_native_error * transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum() / event_denom
-    gripper_hold_flow = (gripper_native_error * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum() / hold_denom
+    # Keep event/hold diagnostics in the native unweighted metric so runs with
+    # different emphasis settings remain directly comparable.
+    gripper_event_flow = (gripper_native_error_raw * transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum() / event_denom
+    gripper_hold_flow = (gripper_native_error_raw * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum() / hold_denom
     proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
 
     flat_labels = labels.reshape(-1)
@@ -304,7 +340,7 @@ def flow_losses(
     # decoded action and the existing typed velocity tensor; they do not create
     # a separate gripper command path.
     transition_gripper_flow = (
-        gripper_native_error * transition_mask
+        gripper_native_error_raw * transition_mask
     ).sum() / transition_mask.sum().clamp(min=1.0)
 
     pred_delta_g = pred_delta[..., grip_idx]
@@ -377,6 +413,9 @@ def flow_losses(
         "gripper_fm_hold": gripper_hold_flow,
         "gripper_fm_event_rate": transition_mask.float().mean(),
         "gripper_fm_weight_mean": flow_weight.detach().float().mean(),
+        "gripper_fm_event_loss_mass": event_loss_mass.detach().float(),
+        "gripper_fm_event_emphasis_mean": event_weight_mean.detach().float(),
+        "gripper_fm_hold_emphasis_mean": hold_weight_mean.detach().float(),
         "proposal": proposal,
         "event": event,
         "motion": motion,

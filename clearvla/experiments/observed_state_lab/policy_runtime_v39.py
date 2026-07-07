@@ -1030,6 +1030,7 @@ def flow_losses(
         "latent_cvae_workspace_group_effective_sources",
         "latent_cvae_workspace_attention_mass_error",
         "latent_cvae_workspace_action_update_ratio",
+        "latent_cvae_workspace_noisy_query_scale",
         "latent_cvae_workspace_layer_attention",
         "latent_cvae_workspace_scan_attention",
         "latent_cvae_workspace_lateral_attention",
@@ -1469,6 +1470,8 @@ def evaluate_v39_policy(
     target = np.concatenate(target_rows)
     current = np.concatenate(current_rows)
     squared = (pred - target) ** 2
+    arm_squared = squared[..., :-1]
+    gripper_squared = squared[..., -1]
     metrics = {
         "full_mse": float(squared.mean()),
         "full_rmse": float(np.sqrt(squared.mean())),
@@ -1476,8 +1479,16 @@ def evaluate_v39_policy(
         "first4_rmse": float(np.sqrt(squared[:, :4].mean())),
         "first8_rmse": float(np.sqrt(squared[:, :8].mean())),
         "tail_rmse": float(np.sqrt(squared[:, 8:].mean())) if squared.shape[1] > 8 else float("nan"),
-        "arm_full_rmse": float(np.sqrt(squared[..., :-1].mean())),
-        "gripper_full_rmse": float(np.sqrt(squared[..., -1].mean())),
+        "arm_full_rmse": float(np.sqrt(arm_squared.mean())),
+        "arm_first_rmse": float(np.sqrt(arm_squared[:, 0].mean())),
+        "arm_first4_rmse": float(np.sqrt(arm_squared[:, :4].mean())),
+        "arm_first8_rmse": float(np.sqrt(arm_squared[:, :8].mean())),
+        "arm_tail_rmse": float(np.sqrt(arm_squared[:, 8:].mean())) if arm_squared.shape[1] > 8 else float("nan"),
+        "gripper_full_rmse": float(np.sqrt(gripper_squared.mean())),
+        "gripper_first_rmse": float(np.sqrt(gripper_squared[:, 0].mean())),
+        "gripper_first4_rmse": float(np.sqrt(gripper_squared[:, :4].mean())),
+        "gripper_first8_rmse": float(np.sqrt(gripper_squared[:, :8].mean())),
+        "gripper_tail_rmse": float(np.sqrt(gripper_squared[:, 8:].mean())) if gripper_squared.shape[1] > 8 else float("nan"),
         "proposal_utility_mse_gain": float(((no_proposal - target) ** 2).mean() - squared.mean()),
     }
     metrics.update(gripper_transition_metrics(
@@ -2047,6 +2058,9 @@ def train_v39_policy(
                     f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} gfmf={row.get('gripper_fm_field', 0.0):.5f} "
                     f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
                     f"gfme={row.get('gripper_fm_event', 0.0):.5f} gfmh={row.get('gripper_fm_hold', 0.0):.5f} "
+                    f"gfmem={row.get('gripper_fm_event_loss_mass', 0.0):.3f} "
+                    f"gfmew={row.get('gripper_fm_event_emphasis_mean', 0.0):.2f}/"
+                    f"{row.get('gripper_fm_hold_emphasis_mean', 0.0):.2f} "
                     f"gfmn={row.get('gripper_fm_native', 0.0):.5f} gfmnull={row.get('gripper_fm_null', 0.0):.5f} "
                     f"gfmnr={row.get('gripper_fm_null_ratio', 0.0):.3f} gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
                     f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
@@ -2120,6 +2134,7 @@ def train_v39_policy(
                     f"wdelta={row.get('latent_cvae_workspace_update_norm', 0.0):.2f} "
                     f"wsrc={row.get('latent_cvae_workspace_source_count', 0.0):.0f} "
                     f"wcache={row.get('latent_cvae_workspace_cached_token_fraction', 0.0):.3f} "
+                    f"wqscale={row.get('latent_cvae_workspace_noisy_query_scale', 0.0):.3f} "
                     f"went={row.get('latent_cvae_workspace_attention_entropy', 0.0):.3f} "
                     f"wmax={row.get('latent_cvae_workspace_attention_max', 0.0):.3f} "
                     f"wgent={row.get('latent_cvae_workspace_group_attention_entropy', 0.0):.3f} "

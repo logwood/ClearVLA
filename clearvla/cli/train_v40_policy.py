@@ -248,6 +248,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-mmdit-cond-update", type=int, default=0, help="Allow condition tokens to update inside the MMDiT-lite decoder.")
     parser.add_argument("--latent-cvae-mmdit-noisy-causal", type=int, default=1, help="Mask future noisy-action condition tokens for action queries.")
     parser.add_argument("--latent-cvae-horizon-tokens", type=int, default=24, help="Number of z-conditioned evidence workspace tokens supplied to MMDiT.")
+    parser.add_argument("--latent-cvae-workspace-noisy-query", type=int, default=0, help="Condition workspace evidence queries on the current noisy flow state.")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -511,6 +512,7 @@ def main() -> None:
         latent_cvae_mmdit_cond_update=args.latent_cvae_mmdit_cond_update,
         latent_cvae_mmdit_noisy_causal=args.latent_cvae_mmdit_noisy_causal,
         latent_cvae_horizon_tokens=args.latent_cvae_horizon_tokens,
+        latent_cvae_workspace_noisy_query=args.latent_cvae_workspace_noisy_query,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -642,6 +644,7 @@ def main() -> None:
             "latent_cvae_mmdit_condition_update": bool(int(args.latent_cvae_mmdit_cond_update)),
             "latent_cvae_mmdit_noisy_causal": bool(int(args.latent_cvae_mmdit_noisy_causal)),
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
+            "latent_cvae_workspace_noisy_query": bool(int(args.latent_cvae_workspace_noisy_query)),
             "latent_cvae_z_primary_denoising": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_typed_evidence_workspace": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)),
@@ -716,6 +719,7 @@ def main() -> None:
             "latent_cvae_mmdit_cond_update": int(args.latent_cvae_mmdit_cond_update),
             "latent_cvae_mmdit_noisy_causal": int(args.latent_cvae_mmdit_noisy_causal),
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
+            "latent_cvae_workspace_noisy_query": int(args.latent_cvae_workspace_noisy_query),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
             "latent_action_visual_memory": int(args.latent_action_visual_memory),

@@ -206,6 +206,9 @@ class V39PolicyConfig(V38PolicyConfig):
     # first negotiate through a horizon-aligned evidence workspace; this count
     # controls its information bandwidth without tying it to action_horizon.
     latent_cvae_horizon_tokens: int = 24
+    # V66: let workspace queries inspect the deploy-safe noisy flow state. This
+    # changes evidence selection only; noisy actions never enter workspace V.
+    latent_cvae_workspace_noisy_query: int = 0
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -370,6 +373,7 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_event_gripper_gate",
             "latent_cvae_inference_sample", "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
             "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
+            "latent_cvae_workspace_noisy_query",
         ):
             if int(getattr(self, name)) not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
@@ -3130,6 +3134,20 @@ class LatentCVAEActionDecoder(nn.Module):
             zero_primary = self._mmdit_primary_condition(z=torch.zeros_like(z), time_emb=time_emb)
             return (primary_cond.detach().float() - zero_primary.detach().float()).norm(dim=-1).mean()
 
+    def _workspace_query_action(self, action: Tensor, noisy: Tensor) -> tuple[Tensor, Tensor]:
+        if not int(getattr(self.config, "latent_cvae_workspace_noisy_query", 0)):
+            return action, torch.zeros((), device=action.device, dtype=torch.float32)
+        if action.shape != noisy.shape:
+            raise ValueError(f"workspace action/noisy query mismatch: {tuple(action.shape)} vs {tuple(noisy.shape)}")
+        action_norm = action.detach().float().norm(dim=-1, keepdim=True).clamp_min(1e-4)
+        noisy_norm = noisy.detach().float().norm(dim=-1, keepdim=True).clamp_min(1e-4)
+        scale = (action_norm / noisy_norm).clamp(max=8.0)
+        # Query-only conditioning: detach x_t and match its token norm to the
+        # current action query. Evidence values remain condition-only, so this
+        # cannot become a second noisy-action residual stream.
+        noisy_query = noisy.detach() * scale.to(device=action.device, dtype=action.dtype)
+        return action + noisy_query, scale.mean()
+
     def _mmdit_condition_tokens(
         self,
         *,
@@ -3220,12 +3238,14 @@ class LatentCVAEActionDecoder(nn.Module):
             workspace_sources["rollout"] = rollout_tokens
         if progress_tokens is not None:
             workspace_sources["progress"] = progress_tokens
+        workspace_query, workspace_query_scale = self._workspace_query_action(action, noisy_tokens)
         workspace_tokens, workspace_metrics = self.evidence_workspace(
             workspace_sources,
-            action=action,
+            action=workspace_query,
             primary_cond=primary_cond,
             step_context=torch.zeros(batch, self.hidden_size, device=device, dtype=dtype),
         )
+        workspace_metrics["workspace_noisy_query_scale"] = workspace_query_scale
         cond_tokens, noisy_start, noisy_len, rollout_start, rollout_len, cond_token_norm = self._mmdit_condition_tokens(
             noisy_tokens=noisy_tokens,
             trajectory_tokens=trajectory_tokens,
@@ -3653,6 +3673,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_group_effective_sources",
             "workspace_attention_mass_error",
             "workspace_action_update_ratio",
+            "workspace_noisy_query_scale",
             "workspace_layer_attention",
             "workspace_scan_attention",
             "workspace_lateral_attention",
@@ -4506,13 +4527,15 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     workspace_sources["routed_layer"] = routed_layer
                 step_context = step_bias.mean(dim=1)
                 assert self.evidence_workspace is not None
+                workspace_query, workspace_query_scale = self._workspace_query_action(action, noisy_branch)
                 workspace_tokens, workspace_metrics = self.evidence_workspace(
                     workspace_sources,
-                    action=action,
+                    action=workspace_query,
                     primary_cond=primary_cond,
                     step_context=step_context,
                     static_memory=workspace_static_memory,
                 )
+                workspace_metrics["workspace_noisy_query_scale"] = workspace_query_scale
                 z_token = self.z_to_token(z.to(device=device, dtype=dtype))
                 (
                     step_cond_tokens,
