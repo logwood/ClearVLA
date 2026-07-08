@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 import csv
+import inspect
 import json
 import math
 
@@ -140,6 +141,7 @@ def collect_window_predictions_for_episode(
     else:
         resolved_gidx = gidx
 
+    sample_supports_action_state = "action_state" in inspect.signature(system.sample).parameters
     with torch.no_grad():
         for batch_index, batch in enumerate(loader, start=1):
             if max_batches and batch_index > max_batches:
@@ -154,12 +156,28 @@ def collect_window_predictions_for_episode(
             )
             generator = torch.Generator(device=device)
             generator.manual_seed(36036 + batch_index)
-            noise = torch.randn(sample["policy_action"].shape, generator=generator, device=device, dtype=sample["visual"].dtype)
+            if bool(getattr(getattr(system, "codec", None), "uses_arm_manifold", False)):
+                noise = system.codec.sample_noise(
+                    sample["policy_action"].shape[0], generator=generator, device=device,
+                    dtype=sample["visual"].dtype, action_state=sample["action_state"],
+                )
+            else:
+                noise = torch.randn(
+                    sample["policy_action"].shape, generator=generator,
+                    device=device, dtype=sample["visual"].dtype,
+                )
             with autocast_context(device, dtype):
+                sample_kwargs = {
+                    "steps": int(config.inference_steps),
+                    "noise": noise,
+                    "use_proposal": True,
+                    "return_event_logits": True,
+                }
+                if sample_supports_action_state:
+                    sample_kwargs["action_state"] = sample["action_state"]
                 pred_pack = system.sample(
                     sample["visual"], sample["history_state"], sample["executed_action_history"],
-                    sample["state"], steps=int(config.inference_steps), noise=noise, use_proposal=True,
-                    return_event_logits=True,
+                    sample["state"], **sample_kwargs,
                 )
             assert isinstance(pred_pack, dict)
             pred_raw = decode(action_normalizer, pred_pack["action"])

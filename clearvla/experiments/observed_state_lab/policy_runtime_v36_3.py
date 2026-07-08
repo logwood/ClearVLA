@@ -46,6 +46,7 @@ class V363PolicyTrainerConfig:
     gripper_fm_event_boost: float = 0.0
     gripper_fm_value_weight: float = 1.0
     gripper_fm_delta_weight: float = 1.0
+    arm_manifold_null_weight: float = 1.0
     gripper_transition_l1_weight: float = 0.04
     smooth_delta_weight: float = 0.02
     decoded_action_loss_weight: float = 0.04
@@ -164,7 +165,12 @@ def arm_motion_labels(system: V363PolicySystem, target_action: Tensor, action_st
     return (norm >= float(threshold)).to(target_action.dtype)
 
 
-def semantic_physical_velocity_error(system: V363PolicySystem, residual: Tensor) -> Tensor:
+def semantic_physical_velocity_error(
+    system: V363PolicySystem,
+    residual: Tensor,
+    *,
+    arm_null_weight: float = 1.0,
+) -> Tensor:
     """Return per-horizon error with gripper counted as one native dimension."""
     cfg = system.policy_config
     ad = int(cfg.arm_dim)
@@ -173,9 +179,18 @@ def semantic_physical_velocity_error(system: V363PolicySystem, residual: Tensor)
         raise ValueError(f"physical residual must end in [T,{cfg.physical_action_dim}], got {tuple(residual.shape)}")
     horizon = int(residual.shape[-2])
     flat = residual.reshape(-1, horizon, int(cfg.physical_action_dim))
-    arm_error = 0.5 * (
-        flat[..., :ad].square() + flat[..., ad : 2 * ad].square()
-    ).sum(dim=-1)
+    if system.codec.uses_arm_manifold:
+        arm_native, _, arm_null = system.codec.project_arm_tangent(flat[..., : 2 * ad])
+        arm_null_per_dim = 0.5 * (
+            arm_null[..., :ad].square() + arm_null[..., ad : 2 * ad].square()
+        )
+        arm_error = (
+            arm_native.square() + max(float(arm_null_weight), 0.0) * arm_null_per_dim
+        ).sum(dim=-1)
+    else:
+        arm_error = 0.5 * (
+            flat[..., :ad].square() + flat[..., ad : 2 * ad].square()
+        ).sum(dim=-1)
     gripper_field = flat[..., 2 * ad : 2 * ad + gf]
     if system.codec.uses_parseval_gripper_field:
         native = system.codec.decode_gripper_field(gripper_field)
@@ -242,8 +257,55 @@ def flow_losses(
     grip_field = velocity_error[..., 2 * ad : 2 * ad + gf]
     arm_abs_error = velocity_error[..., :ad]
     arm_delta_error = velocity_error[..., ad : 2 * ad]
-    arm_native_error = 0.5 * (arm_abs_error + arm_delta_error)
     zero = torch.zeros((), device=device, dtype=velocity_error.dtype)
+    if system.codec.uses_arm_manifold:
+        arm_native_residual, _, arm_null_residual = system.codec.project_arm_tangent(
+            velocity_residual[..., : 2 * ad]
+        )
+        arm_native_component = arm_native_residual.square()
+        arm_null_component = 0.5 * (
+            arm_null_residual[..., :ad].square()
+            + arm_null_residual[..., ad : 2 * ad].square()
+        )
+        arm_null_weight = max(float(trainer.arm_manifold_null_weight), 0.0)
+        arm_native_error = arm_native_component + arm_null_weight * arm_null_component
+
+        target_arm = output["target_physical_velocity"][..., : 2 * ad]
+        _, _, target_arm_null = system.codec.project_arm_tangent(target_arm)
+        arm_target_projection_error = target_arm_null.float().square().mean()
+        source_noise = output.get("source_physical_noise")
+        if source_noise is not None:
+            source_arm = source_noise[..., : 2 * ad]
+            projected_source_arm = system.codec.project_arm_field(
+                source_arm, sample["action_state"].to(device=device)
+            )
+            arm_noise_projection_error = (
+                source_arm.float() - projected_source_arm.float()
+            ).square().mean()
+            arm_noise_abs_std = source_arm[..., :ad].float().std(unbiased=False)
+            arm_noise_delta_std = source_arm[..., ad : 2 * ad].float().std(unbiased=False)
+        else:
+            arm_noise_projection_error = zero.float()
+            arm_noise_abs_std = zero.float()
+            arm_noise_delta_std = zero.float()
+        target_physical = output.get("target_physical")
+        if target_physical is not None:
+            target_arm_physical = target_physical[..., : 2 * ad]
+            arm_target_abs_std = target_arm_physical[..., :ad].float().std(unbiased=False)
+            arm_target_delta_std = target_arm_physical[..., ad : 2 * ad].float().std(unbiased=False)
+        else:
+            arm_target_abs_std = zero.float()
+            arm_target_delta_std = zero.float()
+    else:
+        arm_native_component = 0.5 * (arm_abs_error + arm_delta_error)
+        arm_null_component = torch.zeros_like(arm_native_component)
+        arm_native_error = arm_native_component
+        arm_target_projection_error = zero.float()
+        arm_noise_projection_error = zero.float()
+        arm_noise_abs_std = zero.float()
+        arm_noise_delta_std = zero.float()
+        arm_target_abs_std = zero.float()
+        arm_target_delta_std = zero.float()
     if system.codec.uses_parseval_gripper_field:
         field_residual = velocity_residual[..., 2 * ad : 2 * ad + gf]
         native_residual = system.codec.decode_gripper_field(field_residual)
@@ -288,7 +350,28 @@ def flow_losses(
     flow_weight = weight.to(dtype=physical_error.dtype)[None]
     flow = (physical_error * flow_weight).mean()
     uniform_flow = (uniform_physical_error * weight.to(dtype=uniform_physical_error.dtype)[None]).mean()
+    # Cross-version anchor metric. Always derive it from the same orthogonal arm
+    # tangent projection and native gripper synthesis, including legacy runs
+    # whose optimization objective still lives in independent physical fields.
+    # It excludes null components and event emphasis. Comparisons also require
+    # an identical action_normalizer_fingerprint.
+    anchor_arm_native, _, _ = system.codec.project_arm_tangent(
+        velocity_residual[..., : 2 * ad]
+    )
+    anchor_gripper_native = system.codec.decode_gripper_field(
+        velocity_residual[..., 2 * ad : 2 * ad + gf]
+    )[..., 0]
+    physical_native_error = (
+        anchor_arm_native.square().sum(dim=-1) + anchor_gripper_native.square()
+    ) / float(ad + 1)
+    physical_flow_native = (physical_native_error * flow_weight).mean()
+    physical_flow_native_uniform = physical_native_error.mean()
     arm_flow_per_dim = (arm_native_error.mean(dim=-1) * flow_weight).mean()
+    arm_native_flow = (arm_native_component.mean(dim=-1) * flow_weight).mean()
+    arm_null_flow = (arm_null_component.mean(dim=-1) * flow_weight).mean()
+    arm_null_ratio = arm_null_flow / (
+        arm_native_flow + arm_null_flow
+    ).detach().clamp_min(1e-6)
     gripper_field_flow = (gripper_native_error * flow_weight).mean()
     gripper_arm_flow_ratio = gripper_field_flow / arm_flow_per_dim.detach().clamp_min(1e-6)
     grip_value_flow = (gripper_native_component * flow_weight).mean()
@@ -399,7 +482,18 @@ def flow_losses(
         "loss": total,
         "physical_flow": flow,
         "physical_flow_uniform": uniform_flow,
+        "physical_flow_native": physical_flow_native.detach(),
+        "physical_flow_native_uniform": physical_flow_native_uniform.detach(),
         "arm_fm_per_dim": arm_flow_per_dim,
+        "arm_fm_native": arm_native_flow,
+        "arm_fm_null": arm_null_flow,
+        "arm_fm_null_ratio": arm_null_ratio,
+        "arm_fm_target_projection_error": arm_target_projection_error,
+        "arm_fm_noise_projection_error": arm_noise_projection_error,
+        "arm_noise_abs_std": arm_noise_abs_std,
+        "arm_noise_delta_std": arm_noise_delta_std,
+        "arm_target_abs_std": arm_target_abs_std,
+        "arm_target_delta_std": arm_target_delta_std,
         "gripper_fm_field": gripper_field_flow,
         "gripper_arm_fm_ratio": gripper_arm_flow_ratio,
         "gripper_fm_value": grip_value_flow,

@@ -446,6 +446,9 @@ class ControlledResidualLatentDynamics(nn.Module):
     def __init__(self, config: V38PolicyConfig) -> None:
         super().__init__()
         self.config = config
+        self.base_mode = str(getattr(config, "controlled_base_mode", "learned"))
+        if self.base_mode not in {"learned", "fixed_zero"}:
+            raise ValueError(f"unsupported controlled_base_mode={self.base_mode!r}")
         h = int(config.hidden_size)
         r = int(config.controlled_delta_rank)
         base_hidden = int(config.base_effect_hidden)
@@ -505,6 +508,12 @@ class ControlledResidualLatentDynamics(nn.Module):
         nn.init.zeros_(self.coeff_head[-1].bias)
         nn.init.normal_(self.direct_action_mlp[-1].weight, mean=0.0, std=5e-2)
         nn.init.zeros_(self.direct_action_mlp[-1].bias)
+        if self.base_mode == "fixed_zero":
+            # A learned base has no identifiable target: base + delta can stay
+            # correct while both terms grow in opposite directions.  The
+            # no-change origin is the only target-free baseline with a unique
+            # residual decomposition, so new V39 runs freeze this legacy head.
+            self.base_head.requires_grad_(False)
 
     def _coeff(
         self,
@@ -545,19 +554,45 @@ class ControlledResidualLatentDynamics(nn.Module):
         coeff = torch.tanh(self.coeff_head(torch.cat([rq, action_context + direct], dim=-1)))
         return coeff, latent_action, direct
 
-    def forward(self, rollout_base: Tensor, context_kv: Tensor, action_tokens: Tensor | None = None) -> dict[str, Tensor]:
+    def forward(
+        self,
+        rollout_base: Tensor,
+        context_kv: Tensor,
+        action_tokens: Tensor | None = None,
+        *,
+        transition_tokens: Tensor | None = None,
+    ) -> dict[str, Tensor]:
         cfg = self.config
         b, n, h = rollout_base.shape
         if n != cfg.future_token_count or h != cfg.hidden_size:
             raise ValueError(f"rollout_base must be [B,{cfg.future_token_count},{cfg.hidden_size}], got {tuple(rollout_base.shape)}")
-        base_effect = self.base_head(rollout_base)
-        basis = self.basis_head(rollout_base).reshape(b, n, cfg.controlled_delta_rank, h)
-        coeff_action, latent_action, _ = self._coeff(rollout_base, context_kv, action_tokens=action_tokens, neutral=False)
-        coeff_neutral, latent_neutral, _ = self._coeff(rollout_base, context_kv, action_tokens=None, neutral=True)
+        transition = rollout_base if transition_tokens is None else transition_tokens
+        if transition.shape != rollout_base.shape:
+            raise ValueError(
+                f"transition_tokens must match rollout_base {tuple(rollout_base.shape)}, got {tuple(transition.shape)}"
+            )
+        if self.base_mode == "fixed_zero":
+            base_effect = torch.zeros_like(rollout_base)
+        else:
+            base_effect = self.base_head(rollout_base)
+        # The baseline and transition representation are deliberately separate.
+        # V39 can keep a fixed, identifiable origin while still using the full
+        # deep rollout canvas to construct action-conditioned directions.
+        basis = self.basis_head(transition).reshape(b, n, cfg.controlled_delta_rank, h)
+        coeff_action, latent_action, _ = self._coeff(transition, context_kv, action_tokens=action_tokens, neutral=False)
+        coeff_neutral, latent_neutral, _ = self._coeff(transition, context_kv, action_tokens=None, neutral=True)
         coeff_delta = coeff_action - coeff_neutral
         controlled_delta = torch.einsum("bnr,bnrh->bnh", coeff_delta, basis) / float(cfg.controlled_delta_rank) ** 0.5
         controlled_delta = self.delta_drop(controlled_delta * self.delta_gain.to(device=controlled_delta.device, dtype=controlled_delta.dtype))
         pred_effect = base_effect + controlled_delta
+        base_norm = base_effect.detach().float().norm(dim=-1).mean()
+        delta_norm = controlled_delta.detach().float().norm(dim=-1).mean()
+        effect_norm = pred_effect.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
+        expansion_ratio = (
+            effect_norm.new_ones(())
+            if self.base_mode == "fixed_zero"
+            else (base_norm + delta_norm) / effect_norm
+        )
         return {
             "rollout_base_effect_pred": base_effect,
             "rollout_delta_pred": controlled_delta,
@@ -572,8 +607,10 @@ class ControlledResidualLatentDynamics(nn.Module):
             "rollout_neutral_coeff_abs_mean": coeff_neutral.detach().float().abs().mean(),
             "rollout_centered_coeff_abs_mean": coeff_delta.detach().float().abs().mean(),
             "rollout_basis_norm": basis.detach().float().norm(dim=-1).mean(),
-            "rollout_delta_norm": controlled_delta.detach().float().norm(dim=-1).mean(),
-            "rollout_base_norm": base_effect.detach().float().norm(dim=-1).mean(),
+            "rollout_delta_norm": delta_norm,
+            "rollout_base_norm": base_norm,
+            "rollout_decomposition_expansion_ratio": expansion_ratio,
+            "rollout_base_is_fixed_zero": base_norm.new_tensor(float(self.base_mode == "fixed_zero")),
             "rollout_delta_gain": self.delta_gain.detach().float().abs(),
         }
 

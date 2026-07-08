@@ -50,6 +50,11 @@ class V39PolicyConfig(V38PolicyConfig):
     # Lightweight contract heads.  Kept small on purpose: these heads should
     # read structure from Z_mid, not manufacture it after the fact.
     midcut_future_gain_init: float = 0.10
+    # Old checkpoints omitted this field and therefore retain the learned
+    # decomposition. New training CLI runs explicitly select fixed_zero, which
+    # makes rollout_effect == controlled_delta and removes base/delta gauge
+    # freedom without discarding the deep rollout representation.
+    controlled_base_mode: str = "learned"
 
     # V39.1: optional multi-layer contract adapters.  When enabled, every DiT
     # block exposes a tiny side adapter and weak readout heads.  The adapters
@@ -209,6 +214,10 @@ class V39PolicyConfig(V38PolicyConfig):
     # V66: let workspace queries inspect the deploy-safe noisy flow state. This
     # changes evidence selection only; noisy actions never enter workspace V.
     latent_cvae_workspace_noisy_query: int = 0
+    # Diagnostic ablation for the full-resolution trajectory canvas in workspace
+    # values. The MMDiT action stream still receives noisy/action tokens; setting
+    # this to zero tests whether trajectory is useful evidence or an x_t echo.
+    latent_cvae_workspace_trajectory_source: int = 1
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -269,6 +278,8 @@ class V39PolicyConfig(V38PolicyConfig):
 
     def validate(self) -> None:
         super().validate()
+        if str(self.controlled_base_mode) not in {"learned", "fixed_zero"}:
+            raise ValueError("controlled_base_mode must be learned or fixed_zero")
         if int(self.midcut_layer) < 1 or int(self.midcut_layer) > int(self.depth):
             raise ValueError("midcut_layer must be in [1, depth]")
         if float(self.midcut_future_gain_init) <= 0:
@@ -373,7 +384,7 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_event_gripper_gate",
             "latent_cvae_inference_sample", "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
             "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
-            "latent_cvae_workspace_noisy_query",
+            "latent_cvae_workspace_noisy_query", "latent_cvae_workspace_trajectory_source",
         ):
             if int(getattr(self, name)) not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
@@ -3451,17 +3462,25 @@ class LatentCVAEActionDecoder(nn.Module):
             cond = self.condition_contract_norm(lateral_cond)
         cond_stats["cvae_condition_raw_norm"] = raw_cond.detach().float().norm(dim=-1).mean()
         cond = self.condition_contract_norm(cond)
-        evidence_sources: dict[str, Tensor] = {
-            "lateral": lateral_cond[:, None],
-            "trajectory": (
+        evidence_sources: dict[str, Tensor] = {"lateral": lateral_cond[:, None]}
+        if int(getattr(cfg, "latent_cvae_workspace_trajectory_source", 1)):
+            evidence_sources["trajectory"] = (
                 trajectory_tokens
                 if trajectory_workspace_tokens is None
                 else trajectory_workspace_tokens.to(device=device, dtype=dtype)
-            ),
-        }
+            )
         if use_layer_memory and summaries:
             evidence_sources["layer"] = layer_stack
-        if int(transition_tokens.shape[1]) >= 3:
+        fixed_zero_base = str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero"
+        if fixed_zero_base and int(transition_tokens.shape[1]) >= 2:
+            # The identifiable rollout has no separate effect token because
+            # effect == delta. Keep the remaining two sources semantically
+            # explicit instead of treating their mean as an anonymous memory.
+            evidence_sources["transition_delta"] = transition_tokens[:, 0:1]
+            evidence_sources["transition_event"] = transition_tokens[:, 1:2]
+            if int(transition_tokens.shape[1]) > 2:
+                evidence_sources["transition"] = transition_tokens[:, 2:]
+        elif int(transition_tokens.shape[1]) >= 3:
             evidence_sources["transition_delta"] = transition_tokens[:, 0:1]
             evidence_sources["transition_effect"] = transition_tokens[:, 1:2]
             evidence_sources["transition_event"] = transition_tokens[:, 2:3]
@@ -5152,11 +5171,20 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             canvas[:, slices["executed"]],
             canvas[:, slices["proposal"]],
         ], dim=1)
-        dynamics = self.controlled_dynamics(
-            rollout,
-            context_kv,
-            action_tokens=trajectory,
-        )
+        if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
+            dynamics = self.controlled_dynamics(
+                rollout_init.to(device=rollout.device, dtype=rollout.dtype),
+                context_kv,
+                action_tokens=trajectory,
+                transition_tokens=rollout,
+            )
+        else:
+            # Preserve the exact learned-base path for historical checkpoints.
+            dynamics = self.controlled_dynamics(
+                rollout,
+                context_kv,
+                action_tokens=trajectory,
+            )
         controlled_delta = dynamics["rollout_delta_pred"]
         rollout_effect_pred = dynamics["rollout_effect_pred"]
         event_context = _rollout_tokens_to_action_horizon(controlled_delta, cfg)
@@ -5192,7 +5220,15 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             # Rollout has its own full-resolution workspace source. Transition
             # memory therefore carries only explicit consequence semantics and
             # does not duplicate the same rollout grid through a pooled path.
-            transition_memory = [controlled_delta, rollout_effect_pred, event_context] if int(getattr(cfg, "latent_cvae_transition_memory", 1)) else None
+            if int(getattr(cfg, "latent_cvae_transition_memory", 1)):
+                if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
+                    # effect == delta under a fixed-zero base. Feeding both would
+                    # duplicate one condition under two semantic names.
+                    transition_memory = [controlled_delta, event_context]
+                else:
+                    transition_memory = [controlled_delta, rollout_effect_pred, event_context]
+            else:
+                transition_memory = None
             latent_cvae_action = self.latent_cvae_action_decoder(
                 noisy_physical=noisy_physical,
                 time=time,
@@ -5210,7 +5246,10 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             legacy_motion_logits = latent_cvae_action["motion_logits"]
         elif self.latent_main_action_decoder is not None:
             context_memory = context_kv if int(getattr(cfg, "latent_action_context_memory", 0)) else None
-            transition_memory = torch.cat([rollout, controlled_delta, rollout_effect_pred, event_context], dim=1) if int(getattr(cfg, "latent_action_transition_memory", 1)) else None
+            transition_parts = [rollout, controlled_delta, event_context]
+            if str(getattr(cfg, "controlled_base_mode", "learned")) != "fixed_zero":
+                transition_parts.insert(2, rollout_effect_pred)
+            transition_memory = torch.cat(transition_parts, dim=1) if int(getattr(cfg, "latent_action_transition_memory", 1)) else None
             latent_main_action = self.latent_main_action_decoder(
                 noisy_physical=noisy_physical,
                 time=time,
@@ -5238,7 +5277,10 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             assert legacy_velocity is not None
             if decoder_mode == "layered_residual_action_flow":
                 context_memory = torch.cat([context_kv, registers], dim=1) if int(getattr(cfg, "action_flow_residual_context_memory", 1)) else context_kv
-                transition_memory = torch.cat([rollout, controlled_delta, rollout_effect_pred, event_context], dim=1) if int(getattr(cfg, "action_flow_residual_transition_memory", 1)) else None
+                transition_parts = [rollout, controlled_delta, event_context]
+                if str(getattr(cfg, "controlled_base_mode", "learned")) != "fixed_zero":
+                    transition_parts.insert(2, rollout_effect_pred)
+                transition_memory = torch.cat(transition_parts, dim=1) if int(getattr(cfg, "action_flow_residual_transition_memory", 1)) else None
                 residual_action_flow = self.residual_action_flow_denoiser(
                     noisy_physical=noisy_physical,
                     time=time,
@@ -5673,6 +5715,8 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             "rollout_basis_norm": dynamics["rollout_basis_norm"],
             "rollout_delta_norm": dynamics["rollout_delta_norm"],
             "rollout_base_norm": dynamics["rollout_base_norm"],
+            "rollout_decomposition_expansion_ratio": dynamics["rollout_decomposition_expansion_ratio"],
+            "rollout_base_is_fixed_zero": dynamics["rollout_base_is_fixed_zero"],
             "rollout_delta_gain": dynamics["rollout_delta_gain"],
             "future_latent_pred": rollout_effect_pred,
             "action_effect_pred": rollout_effect_pred,
@@ -5788,12 +5832,17 @@ class V39PolicySystem(nn.Module):
     ) -> dict[str, Tensor]:
         del future_training_pack
         proposal = self.proposal(executed_history)
+        if self.codec.uses_arm_manifold and action_state is None:
+            raise ValueError(
+                "manifold_native training requires action_state in action-normalizer coordinates"
+            )
         codec_state = state if action_state is None else action_state
         target_physical = self.codec.encode(target_action, codec_state)
         noise = self.codec.sample_noise(
             target_physical.shape[0],
             device=target_physical.device,
             dtype=target_physical.dtype,
+            action_state=codec_state,
         )
         t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
@@ -5856,6 +5905,7 @@ class V39PolicySystem(nn.Module):
             "proposal_action": proposal["action"],
             "time": t,
             "noisy_physical_action": noisy_physical,
+            "source_physical_noise": noise,
             "pred_action_estimate": decoded_action,
             "future_conditioned_action_loss": torch.zeros((), device=target_physical.device, dtype=target_physical.dtype),
         }
@@ -5997,6 +6047,7 @@ class V39PolicySystem(nn.Module):
         executed_history: Tensor,
         state: Tensor,
         *,
+        action_state: Tensor | None = None,
         steps: int | None = None,
         noise: Tensor | None = None,
         use_proposal: bool = True,
@@ -6014,20 +6065,27 @@ class V39PolicySystem(nn.Module):
         steps = int(steps or self.policy_config.inference_steps)
         if steps <= 0:
             raise ValueError("steps must be positive")
+        if self.codec.uses_arm_manifold and action_state is None:
+            raise ValueError("manifold_native sampling requires action_state in action-normalizer coordinates")
+        codec_state = (state if action_state is None else action_state).to(
+            device=visual.device, dtype=visual.dtype,
+        )
         if noise is None:
             x = self.codec.sample_noise(
                 visual.shape[0],
                 device=visual.device,
                 dtype=visual.dtype,
+                action_state=codec_state,
             )
         else:
             x = noise.clone()
             if x.shape[-1] == self.policy_config.action_dim:
-                x = self.codec.encode(x.to(device=visual.device, dtype=visual.dtype), state.to(device=visual.device, dtype=visual.dtype))
+                x = self.codec.encode(x.to(device=visual.device, dtype=visual.dtype), codec_state)
             elif x.shape[-1] != self.policy_config.physical_action_dim:
                 raise ValueError("noise must have last dim action_dim or physical_action_dim")
             else:
                 x = x.to(device=visual.device, dtype=visual.dtype)
+            x = self.codec.project_physical(x, codec_state)
         keep = torch.full((visual.shape[0],), 1.0 if use_proposal else 0.0, device=visual.device, dtype=visual.dtype)
         use_self_condition = (
             int(getattr(self.policy_config, "action_consequence_self_condition", 0))
@@ -6074,8 +6132,24 @@ class V39PolicySystem(nn.Module):
                     scalar = value.detach().float()
                     sample_diagnostic_sums[key] = sample_diagnostic_sums.get(key, torch.zeros_like(scalar)) + scalar
             sample_diagnostic_count += 1
-            x = x - out["pred_physical_velocity"] / float(steps)
-        action = self.codec.decode(x, state)
+            raw_next = x - out["pred_physical_velocity"] / float(steps)
+            projected_next = self.codec.project_physical(raw_next, codec_state)
+            # Pre-projection null drift: raw per-step magnitude plus the
+            # step-size-normalized rate (x steps == / h) so runs with different
+            # inference step counts stay comparable.
+            null_drift = (raw_next - projected_next).detach().float()
+            arm_span = 2 * int(self.codec.arm_dim)
+            arm_null_norm = null_drift[..., :arm_span].norm(dim=-1).mean()
+            grip_null_norm = null_drift[..., arm_span:].norm(dim=-1).mean()
+            for null_key, null_value in (
+                ("arm_null_preproject", arm_null_norm),
+                ("arm_null_preproject_rate", arm_null_norm * float(steps)),
+                ("grip_null_preproject", grip_null_norm),
+                ("grip_null_preproject_rate", grip_null_norm * float(steps)),
+            ):
+                sample_diagnostic_sums[null_key] = sample_diagnostic_sums.get(null_key, torch.zeros_like(null_value)) + null_value
+            x = projected_next
+        action = self.codec.decode(x, codec_state)
         if return_event_logits:
             zero_t = torch.zeros((visual.shape[0],), device=visual.device, dtype=visual.dtype)
             event = self._policy_forward(

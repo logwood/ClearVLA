@@ -553,10 +553,37 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
         rows["rollout_distance_shuffle"] = shuf.detach()
         rows["rollout_delta_hold"] = (hold - real).detach()
         rows["rollout_delta_shuffle"] = (shuf - real).detach()
-        rows["rollout_effect_change_hold"] = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_hold_action"].float()).square().mean().detach()
-        rows["rollout_effect_change_shuffle"] = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_shuffle_action"].float()).square().mean().detach()
-        rows["rollout_full_effect_change_hold"] = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_hold_action"].float()).square().mean().detach()
-        rows["rollout_full_effect_change_shuffle"] = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_shuffle_action"].float()).square().mean().detach()
+        delta_change_hold = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_hold_action"].float()).square().mean()
+        delta_change_shuffle = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_shuffle_action"].float()).square().mean()
+        full_change_hold = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_hold_action"].float()).square().mean()
+        full_change_shuffle = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_shuffle_action"].float()).square().mean()
+        rows["rollout_effect_change_hold"] = delta_change_hold.detach()
+        rows["rollout_effect_change_shuffle"] = delta_change_shuffle.detach()
+        rows["rollout_full_effect_change_hold"] = full_change_hold.detach()
+        rows["rollout_full_effect_change_shuffle"] = full_change_shuffle.detach()
+        rows["rollout_hold_cancellation_fraction"] = torch.where(
+            delta_change_hold > 1e-8,
+            1.0 - full_change_hold / delta_change_hold.clamp_min(1e-8),
+            torch.zeros_like(delta_change_hold),
+        ).detach()
+        rows["rollout_shuffle_cancellation_fraction"] = torch.where(
+            delta_change_shuffle > 1e-8,
+            1.0 - full_change_shuffle / delta_change_shuffle.clamp_min(1e-8),
+            torch.zeros_like(delta_change_shuffle),
+        ).detach()
+        if "rollout_base_effect_pred" in output:
+            base = output["rollout_base_effect_pred"].float()
+            rows["rollout_effect_delta_gap"] = (
+                output["rollout_effect_pred"].float() - output["rollout_delta_pred"].float()
+            ).square().mean().detach()
+            if "rollout_base_effect_pred_hold_action" in output:
+                rows["rollout_base_change_hold"] = (
+                    base - output["rollout_base_effect_pred_hold_action"].float()
+                ).square().mean().detach()
+            if "rollout_base_effect_pred_shuffle_action" in output:
+                rows["rollout_base_change_shuffle"] = (
+                    base - output["rollout_base_effect_pred_shuffle_action"].float()
+                ).square().mean().detach()
         if "rollout_delta_pred_shuffle_state" in output:
             state = _effect_distance(output["rollout_delta_pred_shuffle_state"], target_delta).mean()
             rows["rollout_delta_state_shuffle"] = (state - real).detach()
@@ -570,6 +597,8 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
         "rollout_basis_norm",
         "rollout_delta_norm",
         "rollout_base_norm",
+        "rollout_decomposition_expansion_ratio",
+        "rollout_base_is_fixed_zero",
         "rollout_delta_gain",
         "rollout_deep_update_norm",
         "rollout_deep_token_norm",
@@ -716,7 +745,11 @@ def micro_refine_supervision_losses(
     final_normal = normal[None, None].expand(batch, 1, horizon)
     weights = torch.cat([weights[:, :-1], final_normal], dim=1) if steps > 1 else final_normal
 
-    physical_error = semantic_physical_velocity_error(system, pred - target[:, None])
+    physical_error = semantic_physical_velocity_error(
+        system,
+        pred - target[:, None],
+        arm_null_weight=trainer.arm_manifold_null_weight,
+    )
     micro_flow = (physical_error * weights).mean()
     mono_weight = normal.to(device=device, dtype=dtype)[None, None]
     mono_error = (physical_error * mono_weight).mean(dim=-1)
@@ -822,7 +855,11 @@ def flow_losses(
     if "latent_cvae_kl" in output and "legacy_physical_velocity" in output:
         pred = output["pred_physical_velocity"]
         legacy = output["legacy_physical_velocity"].detach().to(device=pred.device, dtype=pred.dtype)
-        anchor_error = semantic_physical_velocity_error(system, pred - legacy)
+        anchor_error = semantic_physical_velocity_error(
+            system,
+            pred - legacy,
+            arm_null_weight=trainer.arm_manifold_null_weight,
+        )
         pos_w = position_weights(system.policy_config, trainer, pred.device).to(dtype=pred.dtype)
         anchor = (anchor_error * pos_w[None]).mean()
         base_weight = max(float(getattr(trainer, "latent_cvae_legacy_anchor_weight", 0.0)), 0.0)
@@ -854,6 +891,7 @@ def flow_losses(
         post_error = semantic_physical_velocity_error(
             system,
             post_pred - output["target_physical_velocity"],
+            arm_null_weight=trainer.arm_manifold_null_weight,
         )
         pos_w = position_weights(system.policy_config, trainer, post_pred.device).to(dtype=post_pred.dtype)
         post_flow = (post_error * pos_w[None]).mean()
@@ -1166,6 +1204,10 @@ def _layer_contract_as_primary(
     entry: dict[str, Tensor],
 ) -> dict[str, Tensor]:
     fake = dict(output)
+    # These describe the top-level controlled-dynamics decomposition. A layer
+    # consequence entry has a different contract and must not inherit them.
+    fake.pop("rollout_decomposition_expansion_ratio", None)
+    fake.pop("rollout_base_is_fixed_zero", None)
     replacements = {
         "pred_physical_velocity": "pred_physical_velocity",
         "direct_physical_velocity": "direct_physical_velocity",
@@ -1368,6 +1410,11 @@ def evaluate_v39_policy(
     eval_field_null_count = 0
     eval_noise_projection_sse = 0.0
     eval_noise_projection_count = 0
+    eval_arm_field_null_sse = 0.0
+    eval_arm_field_energy = 0.0
+    eval_arm_field_null_count = 0
+    eval_arm_noise_projection_sse = 0.0
+    eval_arm_noise_projection_count = 0
     contract_eval = _is_contract_stage(trainer) and _uses_layer_adapter_contract(trainer)
     contract_metric_sums: dict[str, float] = {}
     contract_metric_count = 0
@@ -1394,6 +1441,7 @@ def evaluate_v39_policy(
             generator=generator,
             device=device,
             dtype=sample["visual"].dtype,
+            action_state=sample["action_state"],
         )
         contract_losses: dict[str, Tensor] | None = None
         with autocast_context(device, dtype):
@@ -1403,13 +1451,19 @@ def evaluate_v39_policy(
             stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer)
             pred_pack = system.sample(
                 sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
+                action_state=sample["action_state"],
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=True, return_event_logits=True,
                 stop_at_midcut=stop_midcut_eval,
             )
             assert isinstance(pred_pack, dict)
             diagnostic_weight = int(pred_pack["action"].shape[0])
             for key, value in pred_pack.items():
-                if key.startswith("sample_latent_cvae_") and torch.is_tensor(value) and value.numel() == 1:
+                keep_sampling_diagnostic = (
+                    key.startswith("sample_latent_cvae_")
+                    or key.startswith("sample_arm_null_")
+                    or key.startswith("sample_grip_null_")
+                )
+                if keep_sampling_diagnostic and torch.is_tensor(value) and value.numel() == 1:
                     sampling_diagnostic_sums[key] = (
                         sampling_diagnostic_sums.get(key, 0.0)
                         + float(value.float().cpu()) * diagnostic_weight
@@ -1417,6 +1471,7 @@ def evaluate_v39_policy(
                     sampling_diagnostic_counts[key] = sampling_diagnostic_counts.get(key, 0) + diagnostic_weight
             no_proposal = system.sample(
                 sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
+                action_state=sample["action_state"],
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
                 stop_at_midcut=stop_midcut_eval,
             )
@@ -1432,6 +1487,20 @@ def evaluate_v39_policy(
                 eval_field_null_sse += float(pred_null.float().square().sum().cpu())
                 eval_field_energy += float(pred_field.float().square().sum().cpu())
                 eval_field_null_count += int(pred_null.numel())
+            if system.codec.uses_arm_manifold:
+                ad = int(system.policy_config.arm_dim)
+                action_state = sample["action_state"]
+                noise_arm = noise[..., : 2 * ad]
+                projected_noise_arm = system.codec.project_arm_field(noise_arm, action_state)
+                noise_arm_null = noise_arm - projected_noise_arm
+                eval_arm_noise_projection_sse += float(noise_arm_null.float().square().sum().cpu())
+                eval_arm_noise_projection_count += int(noise_arm_null.numel())
+                pred_arm = pred_pack["physical_action"][..., : 2 * ad]
+                projected_pred_arm = system.codec.project_arm_field(pred_arm, action_state)
+                pred_arm_null = pred_arm - projected_pred_arm
+                eval_arm_field_null_sse += float(pred_arm_null.float().square().sum().cpu())
+                eval_arm_field_energy += float(pred_arm.float().square().sum().cpu())
+                eval_arm_field_null_count += int(pred_arm_null.numel())
             if contract_eval:
                 contract_output = system.flow_training_forward(
                     sample["visual"], sample["history_state"], sample["executed_action_history"],
@@ -1507,6 +1576,12 @@ def evaluate_v39_policy(
         metrics["eval_gripper_field_projection_mse"] = eval_field_null_sse / max(eval_field_null_count, 1)
         metrics["eval_gripper_field_null_ratio"] = eval_field_null_sse / max(eval_field_energy, 1e-12)
         metrics["eval_gripper_noise_projection_mse"] = eval_noise_projection_sse / max(eval_noise_projection_count, 1)
+    if system.codec.uses_arm_manifold:
+        metrics["eval_arm_field_projection_mse"] = eval_arm_field_null_sse / max(eval_arm_field_null_count, 1)
+        metrics["eval_arm_field_null_ratio"] = eval_arm_field_null_sse / max(eval_arm_field_energy, 1e-12)
+        metrics["eval_arm_noise_projection_mse"] = eval_arm_noise_projection_sse / max(
+            eval_arm_noise_projection_count, 1
+        )
     if contract_metric_count:
         for key, value in contract_metric_sums.items():
             metrics[f"contract_{key}"] = value / float(contract_metric_count)
@@ -1720,7 +1795,7 @@ def _unique_params(modules: Sequence[torch.nn.Module]) -> list[torch.nn.Paramete
     for module in modules:
         for param in module.parameters():
             ident = id(param)
-            if ident not in seen:
+            if param.requires_grad and ident not in seen:
                 seen.add(ident)
                 params.append(param)
     return params
@@ -2055,7 +2130,13 @@ def train_v39_policy(
                 print(
                     f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
                     f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
+                    f"pfn={row.get('physical_flow_native', 0.0):.6f} pfnu={row.get('physical_flow_native_uniform', 0.0):.6f} "
                     f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} gfmf={row.get('gripper_fm_field', 0.0):.5f} "
+                    f"afmn={row.get('arm_fm_native', 0.0):.5f} afmnull={row.get('arm_fm_null', 0.0):.5f} "
+                    f"afmnr={row.get('arm_fm_null_ratio', 0.0):.3f} afmproj={row.get('arm_fm_target_projection_error', 0.0):.2e} "
+                    f"afmnoise={row.get('arm_fm_noise_projection_error', 0.0):.2e} "
+                    f"anstd={row.get('arm_noise_abs_std', 0.0):.3f}/{row.get('arm_noise_delta_std', 0.0):.3f} "
+                    f"atstd={row.get('arm_target_abs_std', 0.0):.3f}/{row.get('arm_target_delta_std', 0.0):.3f} "
                     f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
                     f"gfme={row.get('gripper_fm_event', 0.0):.5f} gfmh={row.get('gripper_fm_hold', 0.0):.5f} "
                     f"gfmem={row.get('gripper_fm_event_loss_mass', 0.0):.3f} "
@@ -2070,6 +2151,10 @@ def train_v39_policy(
                     f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
                     f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
                     f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
+                    f"rbase={row.get('rollout_base_norm', 0.0):.3f} "
+                    f"rexp={row.get('rollout_decomposition_expansion_ratio', 0.0):.3f} "
+                    f"rcancel={row.get('rollout_shuffle_cancellation_fraction', 0.0):.3f} "
+                    f"rbleak={row.get('rollout_base_change_shuffle', 0.0):.2e} "
                     f"stdr={row.get('rollout_pred_std_ratio', 0.0):.4f} dnratio={row.get('rollout_milestone_delta_norm_ratio', 0.0):.4f} "
                     f"rdeep={row.get('rollout_deep_update_norm', 0.0):.2f} "
                     f"rdnorm={row.get('rollout_deep_token_norm', 0.0):.2f} "

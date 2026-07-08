@@ -47,6 +47,11 @@ class V362PolicyConfig:
     physical_decode_delta_blend: float = 0.25
     gripper_field_dim: int = 12
     gripper_field_mode: str = "legacy_handcrafted"
+    # Historical runs sampled arm_abs/arm_delta independently. New runs can
+    # instead sample one native arm trajectory and map it into the redundant
+    # [absolute, delta] coordinates used by the policy.
+    arm_flow_mode: str = "legacy_independent"
+    arm_noise_temporal_rho: float = 0.0
 
     def validate(self) -> None:
         if min(
@@ -79,6 +84,10 @@ class V362PolicyConfig:
             raise ValueError("gripper_field_dim must be >= 2")
         if str(self.gripper_field_mode) not in {"legacy_handcrafted", "parseval_temporal"}:
             raise ValueError("gripper_field_mode must be legacy_handcrafted or parseval_temporal")
+        if str(self.arm_flow_mode) not in {"legacy_independent", "manifold_native"}:
+            raise ValueError("arm_flow_mode must be legacy_independent or manifold_native")
+        if not 0.0 <= float(self.arm_noise_temporal_rho) < 1.0:
+            raise ValueError("arm_noise_temporal_rho must be in [0,1)")
         if self.first_execution_steps > self.action_horizon:
             raise ValueError("first_execution_steps cannot exceed action_horizon")
         if self.mid_execution_steps > self.action_horizon:
@@ -174,6 +183,36 @@ class PhysicalActionCodec(nn.Module):
             if str(config.gripper_field_mode) == "parseval_temporal"
             else None
         )
+        horizon = int(config.action_horizon)
+        difference = torch.eye(horizon, dtype=torch.float64)
+        if horizon > 1:
+            difference[1:, :-1] -= torch.eye(horizon - 1, dtype=torch.float64)
+        gram = torch.eye(horizon, dtype=torch.float64) + difference.T @ difference
+        self.register_buffer("arm_difference_matrix", difference.to(torch.float32), persistent=False)
+        self.register_buffer("arm_projection_inverse", torch.linalg.inv(gram).to(torch.float32), persistent=False)
+
+        rho = float(config.arm_noise_temporal_rho)
+        rows = torch.arange(horizon, dtype=torch.float64)[:, None]
+        cols = torch.arange(horizon, dtype=torch.float64)[None]
+        lag = rows - cols
+        innovation = (1.0 - rho * rho) ** 0.5 * torch.where(
+            lag >= 0,
+            torch.as_tensor(rho, dtype=torch.float64) ** lag.clamp_min(0),
+            torch.zeros_like(lag),
+        )
+        state_gain = torch.as_tensor(rho, dtype=torch.float64) ** (
+            torch.arange(1, horizon + 1, dtype=torch.float64)
+        )
+        self.register_buffer(
+            "arm_noise_innovation_matrix",
+            innovation.to(torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "arm_noise_state_gain",
+            state_gain.to(torch.float32),
+            persistent=False,
+        )
 
     @property
     def arm_dim(self) -> int:
@@ -194,6 +233,10 @@ class PhysicalActionCodec(nn.Module):
     @property
     def uses_parseval_gripper_field(self) -> bool:
         return self.gripper_frame is not None
+
+    @property
+    def uses_arm_manifold(self) -> bool:
+        return str(self.config.arm_flow_mode) == "manifold_native"
 
     def split_action(self, action: Tensor) -> tuple[Tensor, Tensor]:
         gi = self.gripper_index
@@ -240,6 +283,85 @@ class PhysicalActionCodec(nn.Module):
             return self.gripper_frame.project(field)
         return field
 
+    def _arm_difference(self, arm: Tensor) -> Tensor:
+        matrix = self.arm_difference_matrix.to(device=arm.device, dtype=torch.float32)
+        return torch.einsum("ts,bsd->btd", matrix, arm.float()).to(dtype=arm.dtype)
+
+    def _sample_native_arm_noise(
+        self,
+        batch: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        generator: torch.Generator | None,
+        action_state: Tensor,
+    ) -> Tensor:
+        white = torch.randn(
+            int(batch), int(self.config.action_horizon), self.arm_dim,
+            device=device, dtype=dtype, generator=generator,
+        )
+        state_arm, _ = self.split_action(action_state.to(device=device, dtype=dtype))
+        innovation = self.arm_noise_innovation_matrix.to(device=device, dtype=torch.float32)
+        state_gain = self.arm_noise_state_gain.to(device=device, dtype=torch.float32)
+        correlated = torch.einsum("ts,bsd->btd", innovation, white.float())
+        correlated = correlated + state_gain[None, :, None] * state_arm.float()[:, None]
+        return correlated.to(dtype=dtype)
+
+    def encode_arm_coordinates(self, arm: Tensor, action_state: Tensor) -> tuple[Tensor, Tensor]:
+        state_arm, _ = self.split_action(action_state.to(device=arm.device, dtype=arm.dtype))
+        delta = self._arm_difference(arm)
+        delta[:, 0] = delta[:, 0] - state_arm
+        return arm, delta
+
+    def project_arm_tangent(self, arm_field: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Orthogonally split [absolute, delta] residuals into tangent and null parts."""
+        if arm_field.ndim != 3 or int(arm_field.shape[-1]) != 2 * self.arm_dim:
+            raise ValueError(
+                f"arm_field must be [B,T,{2 * self.arm_dim}], got {tuple(arm_field.shape)}"
+            )
+        arm_abs = arm_field[..., : self.arm_dim].float()
+        arm_delta = arm_field[..., self.arm_dim :].float()
+        difference = self.arm_difference_matrix.to(device=arm_field.device, dtype=torch.float32)
+        inverse = self.arm_projection_inverse.to(device=arm_field.device, dtype=torch.float32)
+        rhs = arm_abs + torch.einsum("ts,btd->bsd", difference, arm_delta)
+        native = torch.einsum("ts,bsd->btd", inverse, rhs)
+        projected_delta = torch.einsum("ts,bsd->btd", difference, native)
+        projected = torch.cat([native, projected_delta], dim=-1)
+        null = arm_field.float() - projected
+        return (
+            native.to(dtype=arm_field.dtype),
+            projected.to(dtype=arm_field.dtype),
+            null.to(dtype=arm_field.dtype),
+        )
+
+    def project_arm_field(self, arm_field: Tensor, action_state: Tensor) -> Tensor:
+        """Project arm coordinates onto delta == finite_difference(abs, state)."""
+        if arm_field.ndim != 3 or int(arm_field.shape[-1]) != 2 * self.arm_dim:
+            raise ValueError(
+                f"arm_field must be [B,T,{2 * self.arm_dim}], got {tuple(arm_field.shape)}"
+            )
+        state_arm, _ = self.split_action(action_state.to(device=arm_field.device, dtype=arm_field.dtype))
+        arm_abs = arm_field[..., : self.arm_dim].float()
+        arm_delta = arm_field[..., self.arm_dim :].float()
+        difference = self.arm_difference_matrix.to(device=arm_field.device, dtype=torch.float32)
+        inverse = self.arm_projection_inverse.to(device=arm_field.device, dtype=torch.float32)
+        adjusted_delta = arm_delta.clone()
+        adjusted_delta[:, 0] = adjusted_delta[:, 0] + state_arm.float()
+        rhs = arm_abs + torch.einsum("ts,btd->bsd", difference, adjusted_delta)
+        projected_abs = torch.einsum("ts,bsd->btd", inverse, rhs)
+        projected_delta = torch.einsum("ts,bsd->btd", difference, projected_abs)
+        projected_delta[:, 0] = projected_delta[:, 0] - state_arm.float()
+        return torch.cat([projected_abs, projected_delta], dim=-1).to(dtype=arm_field.dtype)
+
+    def project_physical(self, physical: Tensor, action_state: Tensor) -> Tensor:
+        if physical.ndim != 3 or int(physical.shape[-1]) != self.physical_dim:
+            raise ValueError(f"physical must be [B,T,{self.physical_dim}], got {tuple(physical.shape)}")
+        arm_field = physical[..., : 2 * self.arm_dim]
+        if self.uses_arm_manifold:
+            arm_field = self.project_arm_field(arm_field, action_state)
+        gripper_field = self.project_gripper_field(physical[..., 2 * self.arm_dim :])
+        return torch.cat([arm_field, gripper_field], dim=-1)
+
     def sample_noise(
         self,
         batch: int,
@@ -247,11 +369,34 @@ class PhysicalActionCodec(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
         generator: torch.Generator | None = None,
+        action_state: Tensor | None = None,
     ) -> Tensor:
         shape = (int(batch), int(self.config.action_horizon))
+        if not self.uses_arm_manifold and self.gripper_frame is None:
+            # Preserve the exact historical RNG path for legacy checkpoints.
+            return torch.randn(
+                *shape, self.physical_dim, device=device, dtype=dtype, generator=generator,
+            )
+        if self.uses_arm_manifold:
+            if action_state is None:
+                raise ValueError("manifold_native arm noise requires action_state")
+            if int(action_state.shape[0]) != int(batch):
+                raise ValueError("action_state batch does not match requested noise batch")
+            native_arm_noise = self._sample_native_arm_noise(
+                batch, device=device, dtype=dtype, generator=generator,
+                action_state=action_state,
+            )
+            arm_abs, arm_delta = self.encode_arm_coordinates(native_arm_noise, action_state)
+            arm_noise = torch.cat([arm_abs, arm_delta], dim=-1)
+        else:
+            arm_noise = torch.randn(
+                *shape, 2 * self.arm_dim, device=device, dtype=dtype, generator=generator,
+            )
         if self.gripper_frame is None:
-            return torch.randn(*shape, self.physical_dim, device=device, dtype=dtype, generator=generator)
-        arm_noise = torch.randn(*shape, 2 * self.arm_dim, device=device, dtype=dtype, generator=generator)
+            grip_noise = torch.randn(
+                *shape, self.gripper_field_dim, device=device, dtype=dtype, generator=generator,
+            )
+            return torch.cat([arm_noise, grip_noise], dim=-1)
         native_grip_noise = torch.randn(*shape, 1, device=device, dtype=dtype, generator=generator)
         grip_noise = self.gripper_frame.analysis(native_grip_noise)
         return torch.cat([arm_noise, grip_noise], dim=-1)

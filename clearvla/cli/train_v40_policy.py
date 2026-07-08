@@ -41,6 +41,28 @@ def _parse_offsets(text: str) -> tuple[int, ...]:
     return values
 
 
+def _normalizer_fingerprint(normalizer: ArrayNormalizer) -> str:
+    """Short stable hash of the normalizer statistics.
+
+    physical_flow_native_uniform is a cross-version anchor metric ONLY between
+    runs that share this fingerprint: the native metric is priced in
+    normalizer coordinates, so refitting the normalizer silently re-scales it.
+    """
+    import hashlib
+
+    def _round(value: Any) -> Any:
+        array = np.asarray(value)
+        if array.dtype.kind in "fc":
+            return np.round(array.astype(np.float64), 6).tolist()
+        return array.tolist() if array.ndim else value
+    payload = json.dumps(
+        {key: _round(value) for key, value in sorted(normalizer.to_dict().items())},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def _legacy_payload(path: Path | None) -> dict[str, Any] | None:
     if path is None:
         return None
@@ -177,6 +199,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rollout-tail-full-step", type=int, default=13)
     parser.add_argument("--controlled-delta-rank", type=int, default=8)
     parser.add_argument("--base-effect-hidden", type=int, default=128)
+    parser.add_argument(
+        "--controlled-base-mode",
+        choices=("learned", "fixed_zero"),
+        default="fixed_zero",
+        help="Use an identifiable no-change rollout base; learned is retained only for historical checkpoint evaluation.",
+    )
     parser.add_argument("--latent-action-tokens", type=int, default=8)
     parser.add_argument("--neutral-action-tokens", type=int, default=4)
     parser.add_argument("--controlled-delta-dropout", type=float, default=0.0)
@@ -188,6 +216,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--first-execution-steps", type=int, default=4)
     parser.add_argument("--mid-execution-steps", type=int, default=8)
     parser.add_argument("--physical-decode-delta-blend", type=float, default=0.25)
+    parser.add_argument(
+        "--arm-flow-mode",
+        choices=("legacy_independent", "manifold_native"),
+        default="legacy_independent",
+    )
+    parser.add_argument("--arm-noise-temporal-rho", type=float, default=0.0)
     parser.add_argument("--gripper-field-dim", type=int, default=12)
     parser.add_argument("--gripper-field-mode", choices=("legacy_handcrafted", "parseval_temporal"), default="legacy_handcrafted")
     parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"], default="legacy")
@@ -249,6 +283,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-mmdit-noisy-causal", type=int, default=1, help="Mask future noisy-action condition tokens for action queries.")
     parser.add_argument("--latent-cvae-horizon-tokens", type=int, default=24, help="Number of z-conditioned evidence workspace tokens supplied to MMDiT.")
     parser.add_argument("--latent-cvae-workspace-noisy-query", type=int, default=0, help="Condition workspace evidence queries on the current noisy flow state.")
+    parser.add_argument("--latent-cvae-workspace-trajectory-source", type=int, default=1, help="Expose full-resolution trajectory canvas tokens as workspace values; set 0 for the x_t-echo ablation.")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -410,6 +445,8 @@ def main() -> None:
         first_execution_steps=args.first_execution_steps,
         mid_execution_steps=args.mid_execution_steps,
         physical_decode_delta_blend=args.physical_decode_delta_blend,
+        arm_flow_mode=args.arm_flow_mode,
+        arm_noise_temporal_rho=args.arm_noise_temporal_rho,
         gripper_field_dim=args.gripper_field_dim,
         gripper_field_mode=args.gripper_field_mode,
         visual_token_dim=int(latent_dim),
@@ -428,6 +465,7 @@ def main() -> None:
         rollout_tail_full_step=args.rollout_tail_full_step,
         controlled_delta_rank=args.controlled_delta_rank,
         base_effect_hidden=args.base_effect_hidden,
+        controlled_base_mode=args.controlled_base_mode,
         latent_action_tokens=args.latent_action_tokens,
         neutral_action_tokens=args.neutral_action_tokens,
         controlled_delta_dropout=args.controlled_delta_dropout,
@@ -513,6 +551,7 @@ def main() -> None:
         latent_cvae_mmdit_noisy_causal=args.latent_cvae_mmdit_noisy_causal,
         latent_cvae_horizon_tokens=args.latent_cvae_horizon_tokens,
         latent_cvae_workspace_noisy_query=args.latent_cvae_workspace_noisy_query,
+        latent_cvae_workspace_trajectory_source=args.latent_cvae_workspace_trajectory_source,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -627,6 +666,11 @@ def main() -> None:
             "gripper_field_dim": int(args.gripper_field_dim),
             "gripper_parseval_shared_native_noise": str(args.gripper_field_mode) == "parseval_temporal",
             "gripper_parseval_all_channels_decode": str(args.gripper_field_mode) == "parseval_temporal",
+            "arm_flow_mode": str(args.arm_flow_mode),
+            "arm_noise_temporal_rho": float(args.arm_noise_temporal_rho),
+            "action_normalizer_fingerprint": _normalizer_fingerprint(action_norm),
+            "arm_manifold_native_noise": str(args.arm_flow_mode) == "manifold_native",
+            "arm_manifold_projected_sampling": str(args.arm_flow_mode) == "manifold_native",
             "residual_action_flow_safe_start": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
             "residual_action_flow_uses_v37_high_action_event_tokens": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
             "layered_residual_action_flow_layer_pair_injection": str(args.final_action_decoder) == "layered_residual_action_flow",
@@ -645,6 +689,7 @@ def main() -> None:
             "latent_cvae_mmdit_noisy_causal": bool(int(args.latent_cvae_mmdit_noisy_causal)),
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
             "latent_cvae_workspace_noisy_query": bool(int(args.latent_cvae_workspace_noisy_query)),
+            "latent_cvae_workspace_trajectory_source": bool(int(args.latent_cvae_workspace_trajectory_source)),
             "latent_cvae_z_primary_denoising": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_typed_evidence_workspace": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)),
@@ -720,6 +765,7 @@ def main() -> None:
             "latent_cvae_mmdit_noisy_causal": int(args.latent_cvae_mmdit_noisy_causal),
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
             "latent_cvae_workspace_noisy_query": int(args.latent_cvae_workspace_noisy_query),
+            "latent_cvae_workspace_trajectory_source": int(args.latent_cvae_workspace_trajectory_source),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
             "latent_action_visual_memory": int(args.latent_action_visual_memory),
