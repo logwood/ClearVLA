@@ -2021,6 +2021,155 @@ class PreparedEvidenceMemory:
     batch_size: int
 
 
+class EvidenceMemoryBank(nn.Module):
+    """Owns typed evidence storage and static K/V preparation for workspace reads."""
+
+    SOURCE_NAMES = (
+        "layer",
+        "scan",
+        "lateral",
+        "transition",
+        "transition_delta",
+        "transition_effect",
+        "transition_event",
+        "context",
+        "visual",
+        "trajectory",
+        "rollout",
+        "capsule",
+        "progress",
+        "routed_layer",
+    )
+    SOURCE_ROLES = {
+        "layer": "layer",
+        "routed_layer": "layer",
+        "trajectory": "geom",
+        "rollout": "geom",
+        "transition": "event",
+        "transition_delta": "event",
+        "transition_effect": "event",
+        "transition_event": "event",
+        "progress": "state",
+        "capsule": "state",
+        "context": "state",
+        "visual": "state",
+        "scan": "global",
+        "lateral": "global",
+    }
+    ROLE_NAMES = ("geom", "event", "state", "layer", "global")
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        self.hidden_size = h
+        self.type_embed = nn.Parameter(torch.randn(1, len(self.SOURCE_NAMES), h) * 0.02)
+        self.source_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+    def _source_role(self, name: str) -> str:
+        return self.SOURCE_ROLES.get(name, "global")
+
+    def prepare_sources(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        allow_empty: bool,
+    ) -> tuple[Tensor | None, Tensor, dict[str, tuple[int, int]]]:
+        unknown_sources = set(sources).difference(self.SOURCE_NAMES)
+        if unknown_sources:
+            raise ValueError(f"unknown evidence workspace sources: {sorted(unknown_sources)}")
+        parts: list[Tensor] = []
+        ranges: dict[str, tuple[int, int]] = {}
+        key_bias_parts: list[Tensor] = []
+        offset = 0
+        for index, name in enumerate(self.SOURCE_NAMES):
+            value = sources.get(name)
+            if value is None:
+                continue
+            if value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
+                raise ValueError(f"workspace source {name!r} must be [B,N,H], got {tuple(value.shape)}")
+            if int(value.shape[0]) != batch_size:
+                raise ValueError(
+                    f"workspace source {name!r} batch={int(value.shape[0])} "
+                    f"does not match action batch={batch_size}"
+                )
+            value = value.to(device=device, dtype=dtype)
+            if int(value.shape[1]) == 0:
+                continue
+            typed = self.source_norm(value) + self.type_embed[:, index:index + 1].to(device=device, dtype=dtype)
+            parts.append(typed)
+            count = int(typed.shape[1])
+            ranges[name] = (offset, offset + count)
+            key_bias_parts.append(torch.full((count,), -math.log(float(count)), device=device, dtype=torch.float32))
+            offset += count
+        if not parts:
+            if allow_empty:
+                return None, torch.zeros(0, device=device, dtype=torch.float32), ranges
+            raise RuntimeError("evidence memory bank requires at least one semantic source")
+        return torch.cat(parts, dim=1), torch.cat(key_bias_parts, dim=0), ranges
+
+    def prepare_static_memory(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        blocks: nn.ModuleList,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> PreparedEvidenceMemory:
+        memory, key_bias, ranges = self.prepare_sources(
+            sources,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+            allow_empty=False,
+        )
+        assert memory is not None
+        return PreparedEvidenceMemory(
+            key_bias=key_bias,
+            ranges=ranges,
+            block_kv=tuple(block.project_memory(memory) for block in blocks),
+            batch_size=batch_size,
+        )
+
+    def role_token_counts(self, ranges: dict[str, tuple[int, int]]) -> dict[str, int]:
+        counts = {role: 0 for role in self.ROLE_NAMES}
+        for name, (start, stop) in ranges.items():
+            role = self._source_role(name)
+            counts[role] = counts.get(role, 0) + max(int(stop) - int(start), 0)
+        return counts
+
+    def role_attention_metrics(
+        self,
+        weights: Tensor,
+        ranges: dict[str, tuple[int, int]],
+    ) -> dict[str, Tensor]:
+        metrics: dict[str, Tensor] = {}
+        device = weights.device
+        dtype = weights.dtype
+        for role in self.ROLE_NAMES:
+            role_ranges = [
+                (start, stop)
+                for name, (start, stop) in ranges.items()
+                if self._source_role(name) == role
+            ]
+            if role_ranges:
+                parts = [weights[..., start:stop].sum(dim=-1).mean() for start, stop in role_ranges]
+                metrics[f"workspace_role_{role}_attention"] = torch.stack(parts).sum()
+                token_count = sum(max(int(stop) - int(start), 0) for start, stop in role_ranges)
+            else:
+                metrics[f"workspace_role_{role}_attention"] = torch.zeros((), device=device, dtype=dtype)
+                token_count = 0
+            metrics[f"workspace_role_{role}_token_count"] = torch.tensor(
+                float(token_count),
+                device=device,
+                dtype=torch.float32,
+            )
+        return metrics
+
+
 class SemanticEvidenceWorkspaceBlock(nn.Module):
     """AdaLN-conditioned workspace block with one evidence write path."""
 
@@ -2120,22 +2269,7 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
 class SemanticEvidenceWorkspace(nn.Module):
     """Fuse typed semantic sources into a configurable horizon token field."""
 
-    SOURCE_NAMES = (
-        "layer",
-        "scan",
-        "lateral",
-        "transition",
-        "transition_delta",
-        "transition_effect",
-        "transition_event",
-        "context",
-        "visual",
-        "trajectory",
-        "rollout",
-        "capsule",
-        "progress",
-        "routed_layer",
-    )
+    SOURCE_NAMES = EvidenceMemoryBank.SOURCE_NAMES
 
     def __init__(self, config: V39PolicyConfig) -> None:
         super().__init__()
@@ -2143,14 +2277,40 @@ class SemanticEvidenceWorkspace(nn.Module):
         h = int(config.hidden_size)
         self.hidden_size = h
         self.token_count = int(getattr(config, "latent_cvae_horizon_tokens", config.action_horizon))
+        self.memory_bank = EvidenceMemoryBank(config)
         self.query = nn.Parameter(torch.randn(1, self.token_count, h) * 0.02)
-        self.type_embed = nn.Parameter(torch.randn(1, len(self.SOURCE_NAMES), h) * 0.02)
-        self.source_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.step_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.global_state_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.blocks = nn.ModuleList([SemanticEvidenceWorkspaceBlock(config) for _ in range(2)])
         self.final_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict[str, Tensor],
+        prefix: str,
+        local_metadata: dict,
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        # V74A moved the source type embedding into EvidenceMemoryBank.  Keep
+        # old v73 checkpoints loadable under both stage1 non-strict and resume
+        # strict paths without exposing duplicate parameters.
+        old_type_key = prefix + "type_embed"
+        new_type_key = prefix + "memory_bank.type_embed"
+        if old_type_key in state_dict and new_type_key not in state_dict:
+            state_dict[new_type_key] = state_dict.pop(old_type_key)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _resize_action(self, action: Tensor) -> Tensor:
         if int(action.shape[1]) == self.token_count:
@@ -2175,38 +2335,13 @@ class SemanticEvidenceWorkspace(nn.Module):
         dtype: torch.dtype,
         allow_empty: bool,
     ) -> tuple[Tensor | None, Tensor, dict[str, tuple[int, int]]]:
-        unknown_sources = set(sources).difference(self.SOURCE_NAMES)
-        if unknown_sources:
-            raise ValueError(f"unknown evidence workspace sources: {sorted(unknown_sources)}")
-        parts: list[Tensor] = []
-        ranges: dict[str, tuple[int, int]] = {}
-        key_bias_parts: list[Tensor] = []
-        offset = 0
-        for index, name in enumerate(self.SOURCE_NAMES):
-            value = sources.get(name)
-            if value is None:
-                continue
-            if value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
-                raise ValueError(f"workspace source {name!r} must be [B,N,H], got {tuple(value.shape)}")
-            if int(value.shape[0]) != batch_size:
-                raise ValueError(
-                    f"workspace source {name!r} batch={int(value.shape[0])} "
-                    f"does not match action batch={batch_size}"
-                )
-            value = value.to(device=device, dtype=dtype)
-            if int(value.shape[1]) == 0:
-                continue
-            typed = self.source_norm(value) + self.type_embed[:, index:index + 1].to(device=device, dtype=dtype)
-            parts.append(typed)
-            count = int(typed.shape[1])
-            ranges[name] = (offset, offset + count)
-            key_bias_parts.append(torch.full((count,), -math.log(float(count)), device=device, dtype=torch.float32))
-            offset += count
-        if not parts:
-            if allow_empty:
-                return None, torch.zeros(0, device=device, dtype=torch.float32), ranges
-            raise RuntimeError("evidence workspace requires at least one semantic source")
-        return torch.cat(parts, dim=1), torch.cat(key_bias_parts, dim=0), ranges
+        return self.memory_bank.prepare_sources(
+            sources,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+            allow_empty=allow_empty,
+        )
 
     def prepare_static_memory(
         self,
@@ -2216,19 +2351,12 @@ class SemanticEvidenceWorkspace(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> PreparedEvidenceMemory:
-        memory, key_bias, ranges = self._prepare_sources(
+        return self.memory_bank.prepare_static_memory(
             sources,
+            blocks=self.blocks,
             batch_size=batch_size,
             device=device,
             dtype=dtype,
-            allow_empty=False,
-        )
-        assert memory is not None
-        return PreparedEvidenceMemory(
-            key_bias=key_bias,
-            ranges=ranges,
-            block_kv=tuple(block.project_memory(memory) for block in self.blocks),
-            batch_size=batch_size,
         )
 
     def forward(
@@ -2326,6 +2454,7 @@ class SemanticEvidenceWorkspace(nn.Module):
         metrics["workspace_attention_mass_error"] = (group_weights.sum(dim=-1) - 1.0).abs().mean()
         for name, (start, stop) in ranges.items():
             metrics[f"workspace_{name}_attention"] = weights[..., start:stop].sum(dim=-1).mean()
+        metrics.update(self.memory_bank.role_attention_metrics(weights, ranges))
         transition_mass = [
             metrics[key]
             for key in (
@@ -3847,6 +3976,16 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_action_update_ratio",
             "workspace_noisy_query_scale",
             "workspace_progress_query_norm",
+            "workspace_role_geom_attention",
+            "workspace_role_event_attention",
+            "workspace_role_state_attention",
+            "workspace_role_layer_attention",
+            "workspace_role_global_attention",
+            "workspace_role_geom_token_count",
+            "workspace_role_event_token_count",
+            "workspace_role_state_token_count",
+            "workspace_role_layer_token_count",
+            "workspace_role_global_token_count",
             "workspace_layer_attention",
             "workspace_scan_attention",
             "workspace_lateral_attention",

@@ -1094,6 +1094,7 @@ def flow_losses(
         "latent_cvae_workspace_token_count",
         "latent_cvae_workspace_token_norm",
         "latent_cvae_workspace_update_norm",
+        "latent_cvae_workspace_global_state_norm",
         "latent_cvae_workspace_source_count",
         "latent_cvae_workspace_cached_token_fraction",
         "latent_cvae_workspace_attention_entropy",
@@ -1103,6 +1104,17 @@ def flow_losses(
         "latent_cvae_workspace_attention_mass_error",
         "latent_cvae_workspace_action_update_ratio",
         "latent_cvae_workspace_noisy_query_scale",
+        "latent_cvae_workspace_progress_query_norm",
+        "latent_cvae_workspace_role_geom_attention",
+        "latent_cvae_workspace_role_event_attention",
+        "latent_cvae_workspace_role_state_attention",
+        "latent_cvae_workspace_role_layer_attention",
+        "latent_cvae_workspace_role_global_attention",
+        "latent_cvae_workspace_role_geom_token_count",
+        "latent_cvae_workspace_role_event_token_count",
+        "latent_cvae_workspace_role_state_token_count",
+        "latent_cvae_workspace_role_layer_token_count",
+        "latent_cvae_workspace_role_global_token_count",
         "latent_cvae_workspace_layer_attention",
         "latent_cvae_workspace_scan_attention",
         "latent_cvae_workspace_lateral_attention",
@@ -2290,6 +2302,11 @@ def train_v39_policy(
                     f"wroll={row.get('latent_cvae_workspace_rollout_attention', 0.0):.3f} "
                     f"wcaps={row.get('latent_cvae_workspace_capsule_attention', 0.0):.3f} "
                     f"wroute={row.get('latent_cvae_workspace_routed_layer_attention', 0.0):.3f} "
+                    f"wgeom={row.get('latent_cvae_workspace_role_geom_attention', 0.0):.3f} "
+                    f"wevt={row.get('latent_cvae_workspace_role_event_attention', 0.0):.3f} "
+                    f"wstate={row.get('latent_cvae_workspace_role_state_attention', 0.0):.3f} "
+                    f"wrlay={row.get('latent_cvae_workspace_role_layer_attention', 0.0):.3f} "
+                    f"wglob={row.get('latent_cvae_workspace_role_global_attention', 0.0):.3f} "
                     # V72 (S5 cleanup): dead cm* micro-controller console keys
                     # removed -- micro is config-off AND structurally excluded
                     # under mmdit_refine; the loss-dict keys remain intact for
