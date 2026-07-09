@@ -153,14 +153,20 @@ class ParsevalGripperTemporalFrame(nn.Module):
         output_dtype = gripper.dtype
         source = gripper[..., 0].float()
         matrix = self.analysis_matrix.to(device=gripper.device, dtype=torch.float32)
-        return torch.einsum("tcs,bs->btc", matrix, source).to(dtype=output_dtype)
+        # V70: einsum is on the autocast list, so .float() alone does not keep
+        # this in fp32 under bf16 autocast; the resulting ulp-level rounding
+        # (~4e-3) used to set the floor of every frame-hygiene diagnostic.
+        with torch.autocast(device_type=gripper.device.type, enabled=False):
+            field = torch.einsum("tcs,bs->btc", matrix, source)
+        return field.to(dtype=output_dtype)
 
     def synthesis(self, field: Tensor) -> Tensor:
         if field.ndim != 3 or int(field.shape[1]) != self.horizon or int(field.shape[2]) != self.channels:
             raise ValueError(f"gripper field must be [B,{self.horizon},{self.channels}], got {tuple(field.shape)}")
         output_dtype = field.dtype
         matrix = self.analysis_matrix.to(device=field.device, dtype=torch.float32)
-        native = torch.einsum("tcs,btc->bs", matrix, field.float())
+        with torch.autocast(device_type=field.device.type, enabled=False):
+            native = torch.einsum("tcs,btc->bs", matrix, field.float())
         return native[..., None].to(dtype=output_dtype)
 
     def project(self, field: Tensor) -> Tensor:
@@ -285,7 +291,11 @@ class PhysicalActionCodec(nn.Module):
 
     def _arm_difference(self, arm: Tensor) -> Tensor:
         matrix = self.arm_difference_matrix.to(device=arm.device, dtype=torch.float32)
-        return torch.einsum("ts,bsd->btd", matrix, arm.float()).to(dtype=arm.dtype)
+        # V70: keep the consistency-defining arithmetic out of bf16 autocast
+        # (einsum autocasts even with .float() inputs).
+        with torch.autocast(device_type=arm.device.type, enabled=False):
+            delta = torch.einsum("ts,bsd->btd", matrix, arm.float())
+        return delta.to(dtype=arm.dtype)
 
     def _sample_native_arm_noise(
         self,
@@ -303,8 +313,9 @@ class PhysicalActionCodec(nn.Module):
         state_arm, _ = self.split_action(action_state.to(device=device, dtype=dtype))
         innovation = self.arm_noise_innovation_matrix.to(device=device, dtype=torch.float32)
         state_gain = self.arm_noise_state_gain.to(device=device, dtype=torch.float32)
-        correlated = torch.einsum("ts,bsd->btd", innovation, white.float())
-        correlated = correlated + state_gain[None, :, None] * state_arm.float()[:, None]
+        with torch.autocast(device_type=device.type, enabled=False):
+            correlated = torch.einsum("ts,bsd->btd", innovation, white.float())
+            correlated = correlated + state_gain[None, :, None] * state_arm.float()[:, None]
         return correlated.to(dtype=dtype)
 
     def encode_arm_coordinates(self, arm: Tensor, action_state: Tensor) -> tuple[Tensor, Tensor]:
@@ -323,9 +334,10 @@ class PhysicalActionCodec(nn.Module):
         arm_delta = arm_field[..., self.arm_dim :].float()
         difference = self.arm_difference_matrix.to(device=arm_field.device, dtype=torch.float32)
         inverse = self.arm_projection_inverse.to(device=arm_field.device, dtype=torch.float32)
-        rhs = arm_abs + torch.einsum("ts,btd->bsd", difference, arm_delta)
-        native = torch.einsum("ts,bsd->btd", inverse, rhs)
-        projected_delta = torch.einsum("ts,bsd->btd", difference, native)
+        with torch.autocast(device_type=arm_field.device.type, enabled=False):
+            rhs = arm_abs + torch.einsum("ts,btd->bsd", difference, arm_delta)
+            native = torch.einsum("ts,bsd->btd", inverse, rhs)
+            projected_delta = torch.einsum("ts,bsd->btd", difference, native)
         projected = torch.cat([native, projected_delta], dim=-1)
         null = arm_field.float() - projected
         return (
@@ -347,9 +359,10 @@ class PhysicalActionCodec(nn.Module):
         inverse = self.arm_projection_inverse.to(device=arm_field.device, dtype=torch.float32)
         adjusted_delta = arm_delta.clone()
         adjusted_delta[:, 0] = adjusted_delta[:, 0] + state_arm.float()
-        rhs = arm_abs + torch.einsum("ts,btd->bsd", difference, adjusted_delta)
-        projected_abs = torch.einsum("ts,bsd->btd", inverse, rhs)
-        projected_delta = torch.einsum("ts,bsd->btd", difference, projected_abs)
+        with torch.autocast(device_type=arm_field.device.type, enabled=False):
+            rhs = arm_abs + torch.einsum("ts,btd->bsd", difference, adjusted_delta)
+            projected_abs = torch.einsum("ts,bsd->btd", inverse, rhs)
+            projected_delta = torch.einsum("ts,bsd->btd", difference, projected_abs)
         projected_delta[:, 0] = projected_delta[:, 0] - state_arm.float()
         return torch.cat([projected_abs, projected_delta], dim=-1).to(dtype=arm_field.dtype)
 

@@ -369,17 +369,64 @@ def flow_losses(
     arm_flow_per_dim = (arm_native_error.mean(dim=-1) * flow_weight).mean()
     arm_native_flow = (arm_native_component.mean(dim=-1) * flow_weight).mean()
     arm_null_flow = (arm_null_component.mean(dim=-1) * flow_weight).mean()
+    # V70 metric overhaul.  The old *_null_ratio keys divide by the RESIDUAL
+    # error, a quantity that collapses as training succeeds -- the ratio then
+    # rises toward 1 at fixed null and misreports success as pathology.  They
+    # are kept for continuity but renamed in spirit: treat them as
+    # "null vs remaining error", never as health gauges.  The stable gauges
+    # are the RMS (native units, comparable to data delta std and to the
+    # fp32 hygiene floor) and the output-energy fraction (scale-free).
     arm_null_ratio = arm_null_flow / (
         arm_native_flow + arm_null_flow
     ).detach().clamp_min(1e-6)
+    arm_null_rms = arm_null_component.detach().float().mean().clamp_min(0.0).sqrt()
+    pred_arm = output["pred_physical_velocity"][..., : 2 * ad].detach().float()
+    pred_arm_energy = 0.5 * (
+        pred_arm[..., :ad].square() + pred_arm[..., ad:].square()
+    ).mean()
+    arm_null_output_fraction = arm_null_component.detach().float().mean() / pred_arm_energy.clamp_min(1e-8)
     gripper_field_flow = (gripper_native_error * flow_weight).mean()
-    gripper_arm_flow_ratio = gripper_field_flow / arm_flow_per_dim.detach().clamp_min(1e-6)
+    # V70: relative-difficulty ratio.  Both channels are first normalized by
+    # their own target energy so a fast-collapsing arm residual no longer
+    # inflates the gripper's apparent lag.
+    target_v = output["target_physical_velocity"].detach().float()
+    target_arm_energy = 0.5 * (
+        target_v[..., :ad].square() + target_v[..., ad : 2 * ad].square()
+    ).mean().clamp_min(1e-8)
+    if system.codec.uses_parseval_gripper_field:
+        target_grip_energy = system.codec.decode_gripper_field(
+            target_v[..., 2 * ad : 2 * ad + gf]
+        )[..., 0].square().mean().clamp_min(1e-8)
+    else:
+        target_grip_energy = target_v[..., 2 * ad].square().mean().clamp_min(1e-8)
+    gripper_arm_flow_ratio = (
+        (gripper_field_flow / target_grip_energy)
+        / (arm_flow_per_dim / target_arm_energy).detach().clamp_min(1e-6)
+    )
     grip_value_flow = (gripper_native_component * flow_weight).mean()
     grip_delta_flow = (gripper_delta_component * flow_weight).mean()
     gripper_null_flow = (gripper_null_component * flow_weight).mean()
     gripper_null_ratio = gripper_null_flow / (
         grip_value_flow + gripper_null_flow
     ).detach().clamp_min(1e-6)
+    grip_null_rms = gripper_null_component.detach().float().mean().clamp_min(0.0).sqrt()
+    pred_grip_field = output["pred_physical_velocity"][..., 2 * ad : 2 * ad + gf].detach().float()
+    pred_grip_energy = pred_grip_field.square().sum(dim=-1).mean()
+    grip_null_output_fraction = gripper_null_component.detach().float().mean() / pred_grip_energy.clamp_min(1e-8)
+    # V70 (H4 test): decompose gripper null energy by event vs hold steps.
+    # If null concentrates at event steps it is a timing-uncertainty signature
+    # (informative), not waste -- read it, don't suppress it.
+    event_step_mask = transition_mask.to(dtype=torch.float32)
+    hold_step_mask = 1.0 - event_step_mask
+    grip_null_event_rms = (
+        (gripper_null_component.detach().float() * event_step_mask).sum()
+        / event_step_mask.sum().clamp_min(1.0)
+    ).clamp_min(0.0).sqrt()
+    grip_null_hold_rms = (
+        (gripper_null_component.detach().float() * hold_step_mask).sum()
+        / hold_step_mask.sum().clamp_min(1.0)
+    ).clamp_min(0.0).sqrt()
+    grip_null_event_hold_ratio = grip_null_event_rms / grip_null_hold_rms.clamp_min(1e-8)
     event_denom = (transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
     hold_mask_for_flow = (1.0 - transition_mask).to(dtype=physical_error.dtype)
     hold_denom = (hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
@@ -488,6 +535,8 @@ def flow_losses(
         "arm_fm_native": arm_native_flow,
         "arm_fm_null": arm_null_flow,
         "arm_fm_null_ratio": arm_null_ratio,
+        "arm_fm_null_rms": arm_null_rms,
+        "arm_fm_null_output_fraction": arm_null_output_fraction,
         "arm_fm_target_projection_error": arm_target_projection_error,
         "arm_fm_noise_projection_error": arm_noise_projection_error,
         "arm_noise_abs_std": arm_noise_abs_std,
@@ -501,6 +550,11 @@ def flow_losses(
         "gripper_fm_native": grip_value_flow,
         "gripper_fm_null": gripper_null_flow,
         "gripper_fm_null_ratio": gripper_null_ratio,
+        "gripper_fm_null_rms": grip_null_rms,
+        "gripper_fm_null_output_fraction": grip_null_output_fraction,
+        "gripper_fm_null_event_rms": grip_null_event_rms,
+        "gripper_fm_null_hold_rms": grip_null_hold_rms,
+        "gripper_fm_null_event_hold_ratio": grip_null_event_hold_ratio,
         "gripper_fm_target_projection_error": target_projection_error,
         "gripper_fm_target_energy_ratio": target_energy_ratio,
         "gripper_fm_event": gripper_event_flow,

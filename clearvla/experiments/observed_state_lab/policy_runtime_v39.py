@@ -920,6 +920,25 @@ def flow_losses(
         losses["latent_cvae_adaptive_route_entropy_weight"] = torch.as_tensor(route_weight, device=route_reg.device, dtype=route_reg.dtype)
         if route_weight > 0:
             losses["loss"] = losses["loss"] + route_weight * route_reg
+    # V70: stable-denominator replacements for the retired xratio gauge.
+    # volume parity = noisy token norm vs workspace token norm (1.0 = parity;
+    # after the noisy LayerNorm lands this pins to 1 by construction).
+    # influence ratio = (attention share x value volume) of noisy vs workspace
+    # evidence -- the honest "how much is the action listening to x_t" gauge.
+    noisy_vol = output.get("latent_cvae_mmdit_noisy_token_norm")
+    ws_vol = output.get("latent_cvae_workspace_token_norm")
+    if torch.is_tensor(noisy_vol) and torch.is_tensor(ws_vol):
+        losses["mmdit_noisy_volume_parity"] = (
+            noisy_vol.detach().float() / ws_vol.detach().float().clamp_min(1e-6)
+        )
+        noisy_attn = output.get("latent_cvae_mmdit_action_noisy_attention")
+        ws_attn = output.get("latent_cvae_mmdit_action_workspace_attention")
+        if torch.is_tensor(noisy_attn) and torch.is_tensor(ws_attn):
+            losses["mmdit_noisy_influence_ratio"] = (
+                noisy_attn.detach().float() * noisy_vol.detach().float()
+            ) / (
+                ws_attn.detach().float() * ws_vol.detach().float()
+            ).clamp_min(1e-8)
     micro_losses = micro_refine_supervision_losses(system, sample, output, trainer, global_step=global_step)
     for key, value in micro_losses.items():
         losses[key] = value.detach().float()
@@ -1054,9 +1073,24 @@ def flow_losses(
         "latent_cvae_mmdit_action_token_norm",
         "latent_cvae_mmdit_condition_token_norm",
         "latent_cvae_mmdit_noisy_token_norm",
+        # V72: time-stratified x_t/workspace attention (sum+count pairs; the
+        # epoch mean of sums divided by the epoch mean of counts recovers the
+        # exact stratified mean, robust to empty buckets in small batches).
+        "latent_cvae_mmdit_noisy_attn_t0_sum",
+        "latent_cvae_mmdit_noisy_attn_t1_sum",
+        "latent_cvae_mmdit_noisy_attn_t2_sum",
+        "latent_cvae_mmdit_workspace_attn_t0_sum",
+        "latent_cvae_mmdit_workspace_attn_t1_sum",
+        "latent_cvae_mmdit_workspace_attn_t2_sum",
+        "latent_cvae_mmdit_attn_t0_count",
+        "latent_cvae_mmdit_attn_t1_count",
+        "latent_cvae_mmdit_attn_t2_count",
         "latent_cvae_primary_condition_norm",
         "latent_cvae_primary_z_effect_norm",
         "latent_cvae_workspace_progress_update_norm",
+        # V72: echo probe -- fraction of the progress update attributable to
+        # the raw action summary input (0 by construction under isolation).
+        "latent_cvae_workspace_progress_action_dependence",
         "latent_cvae_workspace_token_count",
         "latent_cvae_workspace_token_norm",
         "latent_cvae_workspace_update_norm",
@@ -1246,9 +1280,17 @@ def _layer_contract_as_primary(
             fake[dst] = entry[src]
     if "clean_physical_estimate" not in fake and "time" in output and "noisy_physical_action" in output:
         t = output["time"].to(device=fake["pred_physical_velocity"].device, dtype=fake["pred_physical_velocity"].dtype)
-        clean = output["noisy_physical_action"] - t[:, None, None] * fake["pred_physical_velocity"]
+        boundary = sample["action_state"].to(
+            device=fake["pred_physical_velocity"].device, dtype=fake["pred_physical_velocity"].dtype
+        )
+        # V70 (H3 fix): project before decode, matching the training forward
+        # and deployment geometry.
+        clean = system.codec.project_physical(
+            output["noisy_physical_action"] - t[:, None, None] * fake["pred_physical_velocity"],
+            boundary,
+        )
         fake["clean_physical_estimate"] = clean
-        fake["pred_action_estimate"] = system.codec.decode(clean, sample["action_state"].to(device=clean.device, dtype=clean.dtype))
+        fake["pred_action_estimate"] = system.codec.decode(clean, boundary)
     return fake
 
 
@@ -2133,7 +2175,8 @@ def train_v39_policy(
                     f"pfn={row.get('physical_flow_native', 0.0):.6f} pfnu={row.get('physical_flow_native_uniform', 0.0):.6f} "
                     f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} gfmf={row.get('gripper_fm_field', 0.0):.5f} "
                     f"afmn={row.get('arm_fm_native', 0.0):.5f} afmnull={row.get('arm_fm_null', 0.0):.5f} "
-                    f"afmnr={row.get('arm_fm_null_ratio', 0.0):.3f} afmproj={row.get('arm_fm_target_projection_error', 0.0):.2e} "
+                    f"afmnrms={row.get('arm_fm_null_rms', 0.0):.4f} afmnf={row.get('arm_fm_null_output_fraction', 0.0):.4f} "
+                    f"afmproj={row.get('arm_fm_target_projection_error', 0.0):.2e} "
                     f"afmnoise={row.get('arm_fm_noise_projection_error', 0.0):.2e} "
                     f"anstd={row.get('arm_noise_abs_std', 0.0):.3f}/{row.get('arm_noise_delta_std', 0.0):.3f} "
                     f"atstd={row.get('arm_target_abs_std', 0.0):.3f}/{row.get('arm_target_delta_std', 0.0):.3f} "
@@ -2143,7 +2186,9 @@ def train_v39_policy(
                     f"gfmew={row.get('gripper_fm_event_emphasis_mean', 0.0):.2f}/"
                     f"{row.get('gripper_fm_hold_emphasis_mean', 0.0):.2f} "
                     f"gfmn={row.get('gripper_fm_native', 0.0):.5f} gfmnull={row.get('gripper_fm_null', 0.0):.5f} "
-                    f"gfmnr={row.get('gripper_fm_null_ratio', 0.0):.3f} gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
+                    f"gfmnrms={row.get('gripper_fm_null_rms', 0.0):.4f} gfmnf={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
+                    f"gfnehr={row.get('gripper_fm_null_event_hold_ratio', 0.0):.2f} "
+                    f"gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
                     f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
                     f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
                     f"rvar={row.get('rollout_variance', 0.0):.4f} rnorm={row.get('rollout_norm', 0.0):.4f} "
@@ -2181,7 +2226,8 @@ def train_v39_policy(
                     f"cadu={row.get('latent_cvae_adaptive_refine_update_mean', 0.0):.3f} "
                     f"cxgate={row.get('latent_cvae_adaptive_noisy_gate_mean', 0.0):.3f} "
                     f"xnorm={row.get('latent_cvae_adaptive_noisy_branch_norm', 0.0):.3f} "
-                    f"xratio={row.get('latent_cvae_adaptive_noisy_branch_ratio', 0.0):.3f} "
+                    f"volpar={row.get('mmdit_noisy_volume_parity', 0.0):.3f} "
+                    f"xinfl={row.get('mmdit_noisy_influence_ratio', 0.0):.2f} "
                     f"crmax={row.get('latent_cvae_adaptive_route_max', 0.0):.3f} "
                     f"crent={row.get('latent_cvae_adaptive_route_entropy', 0.0):.3f} "
                     f"creff={row.get('latent_cvae_adaptive_route_effective_slots', 0.0):.2f} "
@@ -2210,6 +2256,12 @@ def train_v39_policy(
                     f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
                     f"mdwa={row.get('latent_cvae_mmdit_action_workspace_attention', 0.0):.3f} "
                     f"mdwe={row.get('latent_cvae_mmdit_action_workspace_enrichment', 0.0):.3f} "
+                    f"mdnaT={row.get('latent_cvae_mmdit_noisy_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_noisy_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_noisy_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                    f"mdwaT={row.get('latent_cvae_mmdit_workspace_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_workspace_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_workspace_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
                     f"mdra={row.get('latent_cvae_mmdit_action_rollout_attention', 0.0):.3f} "
                     f"mdre={row.get('latent_cvae_mmdit_action_rollout_enrichment', 0.0):.3f} "
                     f"mdrn={row.get('latent_cvae_rollout_token_norm', 0.0):.2f} "
@@ -2226,7 +2278,9 @@ def train_v39_policy(
                     f"wgeff={row.get('latent_cvae_workspace_group_effective_sources', 0.0):.2f} "
                     f"wmass={row.get('latent_cvae_workspace_attention_mass_error', 0.0):.1e} "
                     f"wupd={row.get('latent_cvae_workspace_action_update_ratio', 0.0):.3f} "
-                    f"wprog={row.get('latent_cvae_workspace_progress_update_norm', 0.0):.3f} "
+                    f"wprog={row.get('latent_cvae_workspace_progress_attention', 0.0):.3f} "
+                    f"wpupd={row.get('latent_cvae_workspace_progress_update_norm', 0.0):.3f} "
+                    f"wpact={row.get('latent_cvae_workspace_progress_action_dependence', 0.0):.3f} "
                     f"wscan={row.get('latent_cvae_workspace_scan_attention', 0.0):.3f} "
                     f"wlat={row.get('latent_cvae_workspace_lateral_attention', 0.0):.3f} "
                     f"wtrans={row.get('latent_cvae_workspace_transition_total_attention', row.get('latent_cvae_workspace_transition_attention', 0.0)):.3f} "
@@ -2234,28 +2288,10 @@ def train_v39_policy(
                     f"wroll={row.get('latent_cvae_workspace_rollout_attention', 0.0):.3f} "
                     f"wcaps={row.get('latent_cvae_workspace_capsule_attention', 0.0):.3f} "
                     f"wroute={row.get('latent_cvae_workspace_routed_layer_attention', 0.0):.3f} "
-                    f"cmds={row.get('latent_cvae_adaptive_micro_step_mean', 0.0):.3f} "
-                    f"cmprog={row.get('latent_cvae_adaptive_micro_progress_mean', 0.0):.3f} "
-                    f"cmkp={row.get('latent_cvae_adaptive_micro_kp_mean', 0.0):.3f} "
-                    f"cmkd={row.get('latent_cvae_adaptive_micro_kd_mean', 0.0):.3f} "
-                    f"cmff={row.get('latent_cvae_adaptive_micro_feedforward_norm', 0.0):.3f} "
-                    f"cmfb={row.get('latent_cvae_adaptive_micro_feedback_norm', 0.0):.3f} "
-                    f"cmdamp={row.get('latent_cvae_adaptive_micro_damping_norm', 0.0):.3f} "
-                    f"cmfunc={row.get('latent_cvae_adaptive_micro_function_norm', 0.0):.3f} "
-                    f"cmctrl={row.get('latent_cvae_adaptive_micro_control_norm', 0.0):.3f} "
-                    f"cmupd={row.get('latent_cvae_adaptive_micro_update_norm', 0.0):.3f} "
-                    f"cmheun={row.get('latent_cvae_adaptive_micro_heun_error', 0.0):.3f} "
-                    f"cmblk={row.get('latent_cvae_adaptive_micro_refine_block_norm', 0.0):.3f} "
-                    f"cmstate={row.get('latent_cvae_adaptive_micro_controller_norm', 0.0):.3f} "
-                    f"cmsup={row.get('latent_cvae_micro_supervision', 0.0):.4f} "
-                    f"cmevt={row.get('latent_cvae_micro_event', 0.0):.4f} "
-                    f"cmmono={row.get('latent_cvae_micro_monotonic', 0.0):.4f} "
-                    f"cmwa={row.get('latent_cvae_micro_weight_alpha', 0.0):.3f} "
-                    f"cmwfd={row.get('latent_cvae_micro_weight_final_diff', 0.0):.4f} "
-                    f"cmwkl={row.get('latent_cvae_micro_weight_kl', 0.0):.4f} "
-                    f"cmcs={row.get('latent_cvae_micro_coverage_smooth', 0.0):.4f} "
-                    f"cmcf={row.get('latent_cvae_micro_coverage_floor', 0.0):.4f} "
-                    f"cmtail={row.get('latent_cvae_micro_coverage_tail_mass', 0.0):.3f} "
+                    # V72 (S5 cleanup): dead cm* micro-controller console keys
+                    # removed -- micro is config-off AND structurally excluded
+                    # under mmdit_refine; the loss-dict keys remain intact for
+                    # legacy non-MMDiT configs.
                     f"careg={row.get('latent_cvae_adaptive_regularizer', 0.0):.4f} "
                     f"carent={row.get('latent_cvae_adaptive_route_entropy_regularizer', 0.0):.4f} "
                     f"czbase={row.get('consequence_zero_base_shift', 0.0):.3f} "

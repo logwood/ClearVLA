@@ -207,6 +207,22 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_mmdit_depth: int = 3
     latent_cvae_mmdit_cond_update: int = 0
     latent_cvae_mmdit_noisy_causal: int = 1
+    # V70: close the volume degree of freedom on the x_t evidence.  Noisy
+    # condition tokens pass through LayerNorm (same volume scale as every
+    # other market participant) and the t-gate moves from value scaling to an
+    # additive log g(t) bias on the noisy attention logits -- same gating
+    # semantics, but no longer defeatable by lift amplification, and the
+    # attention-share gauges become honest influence readings.
+    latent_cvae_mmdit_noisy_logit_gate: int = 0
+    # V72: shelf discipline -- the evidence workspace is for world evidence;
+    # content the action wrote must not return as evidence. When enabled, the
+    # per-step progress update no longer receives the raw action summary
+    # (zeros are fed in its place so parameter shapes and checkpoints stay
+    # compatible across both arms of the A/B). Progress then evolves from
+    # workspace evidence + step context only. The action->progress->workspace
+    # echo was measured growing monotonically through v69 (update norm 5.96 at
+    # epoch 1 -> 10-13.8 at epoch 8) while val was saturated.
+    latent_cvae_progress_action_isolation: int = 0
     # V65: z is the primary denoising condition. All other semantic sources
     # first negotiate through a horizon-aligned evidence workspace; this count
     # controls its information bandwidth without tying it to action_horizon.
@@ -384,6 +400,8 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_event_gripper_gate",
             "latent_cvae_inference_sample", "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
             "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
+            "latent_cvae_mmdit_noisy_logit_gate",
+            "latent_cvae_progress_action_isolation",
             "latent_cvae_workspace_noisy_query", "latent_cvae_workspace_trajectory_source",
         ):
             if int(getattr(self, name)) not in (0, 1):
@@ -2358,10 +2376,15 @@ class LatentCVAEMMDiTBlock(nn.Module):
         v: Tensor,
         mask: Tensor | None = None,
         key_bias: Tensor | None = None,
+        batch_key_bias: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (float(q.shape[-1]) ** -0.5)
         if key_bias is not None:
             scores = scores + key_bias.to(device=scores.device, dtype=scores.dtype)[None, None, None]
+        if batch_key_bias is not None:
+            # V70: per-sample additive logit bias (e.g. the t-gate on noisy
+            # keys), shape [B, K] broadcast over heads and queries.
+            scores = scores + batch_key_bias.to(device=scores.device, dtype=scores.dtype)[:, None, None, :]
         if mask is not None:
             scores = scores.masked_fill(mask[None, None], torch.finfo(scores.dtype).min)
         weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
@@ -2420,6 +2443,7 @@ class LatentCVAEMMDiTBlock(nn.Module):
         rollout_start: int,
         rollout_len: int,
         update_condition: bool,
+        noisy_logit_bias: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         action_before = action
         cond_before = cond_tokens
@@ -2443,7 +2467,17 @@ class LatentCVAEMMDiTBlock(nn.Module):
             rollout_len=int(rollout_len),
             device=action.device,
         )
-        action_attn, weights = self._attention(aq, k_all, v_all, mask, key_bias)
+        batch_key_bias = None
+        if noisy_logit_bias is not None and int(noisy_len) > 0:
+            total = int(action.shape[1]) + int(cond_tokens.shape[1])
+            start = int(action.shape[1]) + int(noisy_start)
+            stop = min(start + int(noisy_len), total)
+            if start < stop:
+                batch_key_bias = torch.zeros(
+                    int(action.shape[0]), total, device=action.device, dtype=torch.float32
+                )
+                batch_key_bias[:, start:stop] = noisy_logit_bias.float()[:, None]
+        action_attn, weights = self._attention(aq, k_all, v_all, mask, key_bias, batch_key_bias)
         action = action + torch.tanh(a_sa_g)[:, None] * self.drop(self.action_out(self._merge_heads(action_attn)))
         action = action + torch.tanh(a_ff_g)[:, None] * self.drop(
             self.action_ffn(self._modulate(self.action_ffn_norm(action), a_ff_s, a_ff_c))
@@ -2464,13 +2498,23 @@ class LatentCVAEMMDiTBlock(nn.Module):
         noisy_abs_stop = min(noisy_abs_start + int(noisy_len), int(weights.shape[-1]))
         rollout_abs_start = cond_start + int(rollout_start)
         rollout_abs_stop = min(rollout_abs_start + int(rollout_len), int(weights.shape[-1]))
+        batch = int(weights.shape[0])
         cond_mass = weights[..., cond_start:].detach().float().sum(dim=-1).mean()
         if noisy_abs_start < noisy_abs_stop:
-            noisy_mass = weights[..., noisy_abs_start:noisy_abs_stop].detach().float().sum(dim=-1).mean()
+            # Per-sample rows [B] (mean over heads and queries) feed the V72
+            # time-stratified gauges; the scalar keeps the legacy console keys.
+            noisy_mass_rows = (
+                weights[..., noisy_abs_start:noisy_abs_stop].detach().float().sum(dim=-1).mean(dim=(1, 2))
+            )
+            noisy_mass = noisy_mass_rows.mean()
         else:
+            noisy_mass_rows = torch.zeros(batch, device=action.device, dtype=torch.float32)
             noisy_mass = torch.zeros((), device=action.device, dtype=torch.float32)
         if rollout_abs_start < rollout_abs_stop:
-            rollout_mass = weights[..., rollout_abs_start:rollout_abs_stop].detach().float().sum(dim=-1).mean()
+            rollout_mass_rows = (
+                weights[..., rollout_abs_start:rollout_abs_stop].detach().float().sum(dim=-1).mean(dim=(1, 2))
+            )
+            rollout_mass = rollout_mass_rows.mean()
             # Measure enrichment against the exact token-count prior seen by
             # each causal action query. This accounts for both the rollout
             # group bias and the partially masked noisy-action condition.
@@ -2488,6 +2532,7 @@ class LatentCVAEMMDiTBlock(nn.Module):
             ).mean()
             rollout_enrichment = (rollout_mass / cond_mass.clamp_min(1e-6)) / expected_share.clamp_min(1e-6)
         else:
+            rollout_mass_rows = torch.zeros(batch, device=action.device, dtype=torch.float32)
             rollout_mass = torch.zeros((), device=action.device, dtype=torch.float32)
             rollout_enrichment = torch.zeros((), device=action.device, dtype=torch.float32)
         metrics = {
@@ -2497,6 +2542,10 @@ class LatentCVAEMMDiTBlock(nn.Module):
             "action_noisy_attn": noisy_mass,
             "action_rollout_attn": rollout_mass,
             "action_rollout_enrichment": rollout_enrichment,
+            # [B] rows; in workspace mode the "rollout" range tracks the
+            # workspace group (see _mmdit_condition_tokens).
+            "action_noisy_attn_rows": noisy_mass_rows,
+            "action_rollout_attn_rows": rollout_mass_rows,
         }
         return action, cond_tokens, metrics
 
@@ -2892,6 +2941,11 @@ class LatentCVAEActionDecoder(nn.Module):
             self.mmdit_type_embed = nn.Parameter(torch.randn(1, 6, h) * 0.02)
             self.mmdit_action_norm = nn.LayerNorm(h)
             self.mmdit_primary_condition_norm = nn.LayerNorm(h, elementwise_affine=False)
+            self.mmdit_noisy_norm = (
+                nn.LayerNorm(h)
+                if int(getattr(config, "latent_cvae_mmdit_noisy_logit_gate", 0))
+                else None
+            )
             self.evidence_workspace = SemanticEvidenceWorkspace(config)
         else:
             self.mmdit_blocks = nn.ModuleList()
@@ -2905,6 +2959,7 @@ class LatentCVAEActionDecoder(nn.Module):
             self.mmdit_type_embed = None
             self.mmdit_action_norm = None
             self.mmdit_primary_condition_norm = None
+            self.mmdit_noisy_norm = None
             self.evidence_workspace = None
         self.event_gate = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.Sigmoid())
         self.event_transition = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
@@ -3159,6 +3214,35 @@ class LatentCVAEActionDecoder(nn.Module):
         noisy_query = noisy.detach() * scale.to(device=action.device, dtype=action.dtype)
         return action + noisy_query, scale.mean()
 
+    @staticmethod
+    def _time_stratified_attention(
+        time: Tensor,
+        noisy_rows: Tensor,
+        workspace_rows: Tensor,
+    ) -> dict[str, Tensor]:
+        """V72 S3 gauge: x_t vs workspace attention share, stratified by flow time.
+
+        Emits per-bucket SUM and COUNT rather than a per-batch ratio so the
+        epoch-level averaging pipeline stays statistically exact:
+        mean_over_batches(sum) / mean_over_batches(count) equals the true
+        stratified mean, whereas averaging per-batch ratios would weight
+        empty/sparse buckets incorrectly. Buckets: t in [0,1/3), [1/3,2/3),
+        [2/3,1]. t=0 is data, t=1 is noise; the shortcut-vs-legitimate-need
+        question lives at LOW t, where deploy-time x_t is nearly the model's
+        own output and train-time x_t is nearly the oracle.
+        """
+        t = time.detach().float().reshape(-1)
+        noisy_rows = noisy_rows.detach().float().reshape(-1)
+        workspace_rows = workspace_rows.detach().float().reshape(-1)
+        out: dict[str, Tensor] = {}
+        edges = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0 + 1e-6)
+        for i in range(3):
+            mask = ((t >= edges[i]) & (t < edges[i + 1])).float()
+            out[f"mmdit_noisy_attn_t{i}_sum"] = (noisy_rows * mask).sum()
+            out[f"mmdit_workspace_attn_t{i}_sum"] = (workspace_rows * mask).sum()
+            out[f"mmdit_attn_t{i}_count"] = mask.sum()
+        return out
+
     def _mmdit_condition_tokens(
         self,
         *,
@@ -3238,7 +3322,22 @@ class LatentCVAEActionDecoder(nn.Module):
         time_emb = self.time(time.to(dtype=dtype))
         primary_cond = self._mmdit_primary_condition(z=z, time_emb=time_emb)
         primary_z_effect = self._mmdit_primary_z_effect(z=z, time_emb=time_emb, primary_cond=primary_cond)
-        noisy_tokens, noisy_gate_mean, noisy_token_norm = self._gated_noisy_branch(noisy_physical, time)
+        if self.mmdit_noisy_norm is not None:
+            # V70: volume-normalized x_t evidence + logit-domain t-gate.  The
+            # lift output is LayerNormed to market-standard volume; the gate
+            # becomes an additive log g(t) bias on the noisy attention logits.
+            noisy_tokens = self.mmdit_noisy_norm(self.noisy_action_lift(noisy_physical))
+            gate = self._noisy_time_gate(time)
+            if gate is None:
+                noisy_logit_bias = None
+                noisy_gate_mean = torch.ones((), device=device, dtype=torch.float32)
+            else:
+                noisy_logit_bias = gate.reshape(int(gate.shape[0])).float().clamp_min(1e-6).log()
+                noisy_gate_mean = gate.detach().float().mean()
+            noisy_token_norm = noisy_tokens.detach().float().norm(dim=-1).mean()
+        else:
+            noisy_tokens, noisy_gate_mean, noisy_token_norm = self._gated_noisy_branch(noisy_physical, time)
+            noisy_logit_bias = None
         z_token = self.z_to_token(z.to(device=device, dtype=dtype))
         action = self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
         progress_tokens = self._mmdit_progress_tokens(batch=batch, cond_time=primary_cond, z=z)
@@ -3273,6 +3372,8 @@ class LatentCVAEActionDecoder(nn.Module):
         noisy_attn_rows: list[Tensor] = []
         rollout_attn_rows: list[Tensor] = []
         rollout_enrichment_rows: list[Tensor] = []
+        noisy_attn_sample_rows: list[Tensor] = []
+        workspace_attn_sample_rows: list[Tensor] = []
         update_condition = bool(int(getattr(self.config, "latent_cvae_mmdit_cond_update", 0)))
         for block in self.mmdit_blocks:
             action, cond_tokens, metrics = block(
@@ -3284,6 +3385,7 @@ class LatentCVAEActionDecoder(nn.Module):
                 rollout_start=rollout_start,
                 rollout_len=rollout_len,
                 update_condition=update_condition,
+                noisy_logit_bias=noisy_logit_bias,
             )
             action_updates.append(metrics["action_update_norm"].to(device=device))
             cond_updates.append(metrics["cond_update_norm"].to(device=device))
@@ -3291,6 +3393,8 @@ class LatentCVAEActionDecoder(nn.Module):
             noisy_attn_rows.append(metrics["action_noisy_attn"].to(device=device))
             rollout_attn_rows.append(metrics["action_rollout_attn"].to(device=device))
             rollout_enrichment_rows.append(metrics["action_rollout_enrichment"].to(device=device))
+            noisy_attn_sample_rows.append(metrics["action_noisy_attn_rows"].to(device=device))
+            workspace_attn_sample_rows.append(metrics["action_rollout_attn_rows"].to(device=device))
         action = self.mmdit_action_norm(action)
         out = self._emit_action(action, primary_cond)
         z0 = torch.zeros((), device=device, dtype=torch.float32)
@@ -3321,6 +3425,11 @@ class LatentCVAEActionDecoder(nn.Module):
             "mmdit_noisy_token_norm": noisy_token_norm.to(device=device),
             "primary_condition_norm": primary_cond.detach().float().norm(dim=-1).mean(),
             "primary_z_effect_norm": primary_z_effect,
+            **self._time_stratified_attention(
+                time,
+                torch.stack(noisy_attn_sample_rows).mean(dim=0) if noisy_attn_sample_rows else torch.zeros(batch, device=device, dtype=torch.float32),
+                torch.stack(workspace_attn_sample_rows).mean(dim=0) if workspace_attn_sample_rows else torch.zeros(batch, device=device, dtype=torch.float32),
+            ),
             **workspace_metrics,
         })
         return out
@@ -3678,9 +3787,19 @@ class LatentCVAEActionDecoder(nn.Module):
             "mmdit_action_token_norm",
             "mmdit_condition_token_norm",
             "mmdit_noisy_token_norm",
+            "mmdit_noisy_attn_t0_sum",
+            "mmdit_noisy_attn_t1_sum",
+            "mmdit_noisy_attn_t2_sum",
+            "mmdit_workspace_attn_t0_sum",
+            "mmdit_workspace_attn_t1_sum",
+            "mmdit_workspace_attn_t2_sum",
+            "mmdit_attn_t0_count",
+            "mmdit_attn_t1_count",
+            "mmdit_attn_t2_count",
             "primary_condition_norm",
             "primary_z_effect_norm",
             "workspace_progress_update_norm",
+            "workspace_progress_action_dependence",
             "workspace_token_count",
             "workspace_token_norm",
             "workspace_update_norm",
@@ -4349,21 +4468,57 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         action: Tensor,
         workspace: Tensor,
         step_context: Tensor,
-    ) -> tuple[Tensor | None, Tensor]:
+    ) -> tuple[Tensor | None, Tensor, Tensor]:
+        """Per-step progress update.
+
+        Returns (progress, update_norm, action_dependence).
+
+        V72 shelf discipline: progress is a workspace evidence source, so raw
+        action content flowing into its values creates an
+        action -> progress -> workspace -> action echo one refine step later,
+        invisible to the attention-share gauges. With
+        latent_cvae_progress_action_isolation=1 the action summary input is
+        zeroed (parameter shapes unchanged; checkpoints stay compatible).
+
+        action_dependence is an unconditional detached probe (probe-not-touch):
+        the update MLP is re-evaluated with the action input zeroed and the
+        relative delta is reported. The MLP is deterministic (LN/Linear/SiLU,
+        no dropout), so the extra forward consumes no RNG and paired-seed
+        comparability across runs is preserved. Under isolation=1 it reads 0
+        by construction, confirming the cut.
+        """
+        zero_scalar = torch.zeros((), device=action.device, dtype=torch.float32)
         if progress is None:
-            return None, torch.zeros((), device=action.device, dtype=torch.float32)
+            return None, zero_scalar, zero_scalar
         slots = int(progress.shape[1])
         action_summary = action.mean(dim=1, keepdim=True).expand(-1, slots, -1)
         workspace_summary = workspace.mean(dim=1, keepdim=True).expand(-1, slots, -1)
         step_summary = step_context[:, None].expand(-1, slots, -1)
+        isolate = bool(int(getattr(self.config, "latent_cvae_progress_action_isolation", 0)))
+        action_input = torch.zeros_like(action_summary) if isolate else action_summary
         delta = self.workspace_progress_update(torch.cat([
             progress,
-            action_summary,
+            action_input,
             workspace_summary,
             step_summary,
         ], dim=-1))
+        with torch.no_grad():
+            if isolate:
+                action_dependence = zero_scalar
+            else:
+                delta_no_action = self.workspace_progress_update(torch.cat([
+                    progress.detach(),
+                    torch.zeros_like(action_summary),
+                    workspace_summary.detach(),
+                    step_summary.detach(),
+                ], dim=-1))
+                reference = delta.detach().float()
+                action_dependence = (
+                    (reference - delta_no_action.float()).norm(dim=-1).mean()
+                    / reference.norm(dim=-1).mean().clamp_min(1e-8)
+                )
         progress = self.progress_contract_norm(progress + delta)
-        return progress, delta.detach().float().norm(dim=-1).mean()
+        return progress, delta.detach().float().norm(dim=-1).mean(), action_dependence
 
     def _function_delta(self, bank: AdaptiveCVAEFunctionBank, x: Tensor, weights: Tensor | None) -> Tensor:
         if not int(getattr(self.config, "adaptive_cvae_function_adapters", 1)):
@@ -4415,7 +4570,22 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         primary_cond = self._mmdit_primary_condition(z=z, time_emb=time_emb) if mmdit_refine else cond + self.time_lift(time_emb)
         primary_z_effect = self._mmdit_primary_z_effect(z=z, time_emb=time_emb, primary_cond=primary_cond) if mmdit_refine else z0
         cond_time = primary_cond
-        noisy_branch, noisy_gate_mean, noisy_branch_norm = self._gated_noisy_branch(noisy_physical, time)
+        if mmdit_refine and self.mmdit_noisy_norm is not None:
+            # V70: volume-normalized x_t evidence + logit-domain t-gate (same
+            # pattern as _decode_with_z_mmdit; this refine path is the live
+            # decoder for the adaptive subclass, so the fix must land here).
+            noisy_branch = self.mmdit_noisy_norm(self.noisy_action_lift(noisy_physical))
+            gate = self._noisy_time_gate(time)
+            if gate is None:
+                noisy_logit_bias = None
+                noisy_gate_mean = torch.ones((), device=device, dtype=torch.float32)
+            else:
+                noisy_logit_bias = gate.reshape(int(gate.shape[0])).float().clamp_min(1e-6).log()
+                noisy_gate_mean = gate.detach().float().mean()
+            noisy_branch_norm = noisy_branch.detach().float().norm(dim=-1).mean()
+        else:
+            noisy_branch, noisy_gate_mean, noisy_branch_norm = self._gated_noisy_branch(noisy_physical, time)
+            noisy_logit_bias = None
         base_raw = self.horizon_query.to(device=device, dtype=dtype).expand(batch, -1, -1)
         if not mmdit_refine:
             base_raw = base_raw + noisy_branch + self.trajectory_lift(trajectory_tokens) + cond_time[:, None]
@@ -4492,7 +4662,10 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         mmdit_noisy_attn_rows: list[Tensor] = []
         mmdit_rollout_attn_rows: list[Tensor] = []
         mmdit_rollout_enrichment_rows: list[Tensor] = []
+        mmdit_noisy_attn_sample_rows: list[Tensor] = []
+        mmdit_workspace_attn_sample_rows: list[Tensor] = []
         workspace_progress_update_rows: list[Tensor] = []
+        workspace_progress_dependence_rows: list[Tensor] = []
         workspace_metric_rows: dict[str, list[Tensor]] = {}
         entropy_rows: list[Tensor] = []
         max_rows: list[Tensor] = []
@@ -4584,6 +4757,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     rollout_start=mmdit_rollout_start,
                     rollout_len=mmdit_rollout_len,
                     update_condition=False,
+                    noisy_logit_bias=noisy_logit_bias,
                 )
                 update = action - before
                 update_energy = update.float().square().mean()
@@ -4596,13 +4770,14 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 # Architectural normalization is primary; this is only a soft
                 # trust-region fuse that activates on genuinely runaway updates.
                 regularizer_terms.append(F.relu(update_ratio_sq - 0.25).square())
-                progress, progress_update_norm = self._workspace_update_progress(
+                progress, progress_update_norm, progress_action_dependence = self._workspace_update_progress(
                     progress,
                     action=action,
                     workspace=workspace_tokens,
                     step_context=step_context,
                 )
                 workspace_progress_update_rows.append(progress_update_norm)
+                workspace_progress_dependence_rows.append(progress_action_dependence)
                 workspace_metrics["workspace_action_update_ratio"] = update_ratio.detach()
                 for key, value in workspace_metrics.items():
                     workspace_metric_rows.setdefault(key, []).append(value.to(device=device))
@@ -4614,6 +4789,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 mmdit_noisy_attn_rows.append(mmdit_metrics["action_noisy_attn"].to(device=device))
                 mmdit_rollout_attn_rows.append(mmdit_metrics["action_rollout_attn"].to(device=device))
                 mmdit_rollout_enrichment_rows.append(mmdit_metrics["action_rollout_enrichment"].to(device=device))
+                mmdit_noisy_attn_sample_rows.append(mmdit_metrics["action_noisy_attn_rows"].to(device=device))
+                mmdit_workspace_attn_sample_rows.append(mmdit_metrics["action_rollout_attn_rows"].to(device=device))
                 update_rows.append(update.detach().float().norm(dim=-1).mean())
                 entropy_rows.append(layer_entropy.to(device=device))
                 max_rows.append(layer_max.to(device=device))
@@ -4830,6 +5007,12 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "primary_condition_norm": primary_cond.detach().float().norm(dim=-1).mean() if mmdit_refine else z0,
             "primary_z_effect_norm": primary_z_effect,
             "workspace_progress_update_norm": torch.stack(workspace_progress_update_rows).mean() if workspace_progress_update_rows else z0,
+            "workspace_progress_action_dependence": torch.stack(workspace_progress_dependence_rows).mean() if workspace_progress_dependence_rows else z0,
+            **self._time_stratified_attention(
+                time,
+                torch.stack(mmdit_noisy_attn_sample_rows).mean(dim=0) if mmdit_noisy_attn_sample_rows else torch.zeros(batch, device=device, dtype=torch.float32),
+                torch.stack(mmdit_workspace_attn_sample_rows).mean(dim=0) if mmdit_workspace_attn_sample_rows else torch.zeros(batch, device=device, dtype=torch.float32),
+            ),
             "adaptive_micro_step_mean": torch.stack(micro_step_rows).mean() if micro_step_rows else z0,
             "adaptive_micro_step_std": torch.stack(micro_step_std_rows).mean() if micro_step_std_rows else z0,
             "adaptive_micro_progress_mean": torch.stack(micro_progress_rows).mean() if micro_progress_rows else z0,
@@ -5890,10 +6073,22 @@ class V39PolicySystem(nn.Module):
             consequence_physical=consequence_input,
             cvae_target_physical=target_physical,
         )
-        clean_physical_estimate = noisy_physical - t[:, None, None] * action_policy["pred_physical_velocity"]
+        # V70 (H3 fix): every training-time clean estimate is projected onto the
+        # physical manifold BEFORE any decode/loss use, matching deployment
+        # where each integration step is projected.  This closes the null
+        # arbitrage channel (arm decode blend was null-sensitive) and aligns
+        # the train/deploy decode geometry.  Null components remain fully
+        # visible to the velocity-space flow/null losses.
+        clean_physical_estimate = self.codec.project_physical(
+            noisy_physical - t[:, None, None] * action_policy["pred_physical_velocity"],
+            codec_state,
+        )
         decoded_action = self.codec.decode(clean_physical_estimate, codec_state)
         if "post_pred_velocity" in action_policy:
-            post_clean = noisy_physical - t[:, None, None] * action_policy["post_pred_velocity"]
+            post_clean = self.codec.project_physical(
+                noisy_physical - t[:, None, None] * action_policy["post_pred_velocity"],
+                codec_state,
+            )
             action_policy["post_clean_physical_estimate"] = post_clean
             action_policy["post_pred_action_estimate"] = self.codec.decode(post_clean, codec_state)
         out = {
@@ -5921,12 +6116,18 @@ class V39PolicySystem(nn.Module):
                 preview_velocity.float() - target_physical_velocity.detach().float()
             ).square().mean()
         if "midcut_pred_physical_velocity" in action_policy:
-            mid_clean = noisy_physical - t[:, None, None] * action_policy["midcut_pred_physical_velocity"]
+            mid_clean = self.codec.project_physical(
+                noisy_physical - t[:, None, None] * action_policy["midcut_pred_physical_velocity"],
+                codec_state,
+            )
             out["midcut_clean_physical_estimate"] = mid_clean
             out["midcut_pred_action_estimate"] = self.codec.decode(mid_clean, codec_state)
         if "layer_contracts" in action_policy:
             for entry in action_policy["layer_contracts"]:
-                clean = noisy_physical - t[:, None, None] * entry["pred_physical_velocity"]
+                clean = self.codec.project_physical(
+                    noisy_physical - t[:, None, None] * entry["pred_physical_velocity"],
+                    codec_state,
+                )
                 entry["clean_physical_estimate"] = clean
                 entry["pred_action_estimate"] = self.codec.decode(clean, codec_state)
 

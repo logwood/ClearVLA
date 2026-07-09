@@ -281,6 +281,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-mmdit-depth", type=int, default=3)
     parser.add_argument("--latent-cvae-mmdit-cond-update", type=int, default=0, help="Allow condition tokens to update inside the MMDiT-lite decoder.")
     parser.add_argument("--latent-cvae-mmdit-noisy-causal", type=int, default=1, help="Mask future noisy-action condition tokens for action queries.")
+    parser.add_argument("--latent-cvae-mmdit-noisy-logit-gate", type=int, default=0, help="V70: LayerNorm noisy condition tokens and move the t-gate to an additive log g(t) attention-logit bias (closes the value-volume degree of freedom).")
+    parser.add_argument("--latent-cvae-progress-action-isolation", type=int, default=0, help="V72: cut the action->progress->workspace echo; the per-step progress update no longer receives the raw action summary (zeros fed, parameter shapes unchanged).")
     parser.add_argument("--latent-cvae-horizon-tokens", type=int, default=24, help="Number of z-conditioned evidence workspace tokens supplied to MMDiT.")
     parser.add_argument("--latent-cvae-workspace-noisy-query", type=int, default=0, help="Condition workspace evidence queries on the current noisy flow state.")
     parser.add_argument("--latent-cvae-workspace-trajectory-source", type=int, default=1, help="Expose full-resolution trajectory canvas tokens as workspace values; set 0 for the x_t-echo ablation.")
@@ -549,6 +551,8 @@ def main() -> None:
         latent_cvae_mmdit_depth=args.latent_cvae_mmdit_depth,
         latent_cvae_mmdit_cond_update=args.latent_cvae_mmdit_cond_update,
         latent_cvae_mmdit_noisy_causal=args.latent_cvae_mmdit_noisy_causal,
+        latent_cvae_mmdit_noisy_logit_gate=args.latent_cvae_mmdit_noisy_logit_gate,
+        latent_cvae_progress_action_isolation=args.latent_cvae_progress_action_isolation,
         latent_cvae_horizon_tokens=args.latent_cvae_horizon_tokens,
         latent_cvae_workspace_noisy_query=args.latent_cvae_workspace_noisy_query,
         latent_cvae_workspace_trajectory_source=args.latent_cvae_workspace_trajectory_source,
