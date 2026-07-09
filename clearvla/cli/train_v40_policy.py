@@ -286,6 +286,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-horizon-tokens", type=int, default=24, help="Number of z-conditioned evidence workspace tokens supplied to MMDiT.")
     parser.add_argument("--latent-cvae-workspace-noisy-query", type=int, default=0, help="Condition workspace evidence queries on the current noisy flow state.")
     parser.add_argument("--latent-cvae-workspace-trajectory-source", type=int, default=1, help="Expose full-resolution trajectory canvas tokens as workspace values; set 0 for the x_t-echo ablation.")
+    parser.add_argument("--latent-cvae-workspace-global-sources", type=int, default=1, help="Expose scan/lateral global condition summaries as workspace values; set 0 to keep them only in cond/z.")
+    parser.add_argument("--latent-cvae-workspace-layer-source", type=int, default=1, help="Expose full layer_stack as a static workspace value; set 0 to force layer information through routed_layer/capsules.")
+    parser.add_argument("--latent-cvae-workspace-progress-value", type=int, default=1, help="Expose progress as a workspace value; set 0 to use progress only as workspace step/query state.")
+    parser.add_argument("--latent-cvae-workspace-time-state", type=int, default=0, help="Inject the existing z+time primary condition into workspace slots as explicit state.")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -556,6 +560,10 @@ def main() -> None:
         latent_cvae_horizon_tokens=args.latent_cvae_horizon_tokens,
         latent_cvae_workspace_noisy_query=args.latent_cvae_workspace_noisy_query,
         latent_cvae_workspace_trajectory_source=args.latent_cvae_workspace_trajectory_source,
+        latent_cvae_workspace_global_sources=args.latent_cvae_workspace_global_sources,
+        latent_cvae_workspace_layer_source=args.latent_cvae_workspace_layer_source,
+        latent_cvae_workspace_progress_value=args.latent_cvae_workspace_progress_value,
+        latent_cvae_workspace_time_state=args.latent_cvae_workspace_time_state,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -694,6 +702,10 @@ def main() -> None:
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
             "latent_cvae_workspace_noisy_query": bool(int(args.latent_cvae_workspace_noisy_query)),
             "latent_cvae_workspace_trajectory_source": bool(int(args.latent_cvae_workspace_trajectory_source)),
+            "latent_cvae_workspace_global_sources": bool(int(args.latent_cvae_workspace_global_sources)),
+            "latent_cvae_workspace_layer_source": bool(int(args.latent_cvae_workspace_layer_source)),
+            "latent_cvae_workspace_progress_value": bool(int(args.latent_cvae_workspace_progress_value)),
+            "latent_cvae_workspace_time_state": bool(int(args.latent_cvae_workspace_time_state)),
             "latent_cvae_z_primary_denoising": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_typed_evidence_workspace": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)),
@@ -770,6 +782,10 @@ def main() -> None:
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
             "latent_cvae_workspace_noisy_query": int(args.latent_cvae_workspace_noisy_query),
             "latent_cvae_workspace_trajectory_source": int(args.latent_cvae_workspace_trajectory_source),
+            "latent_cvae_workspace_global_sources": int(args.latent_cvae_workspace_global_sources),
+            "latent_cvae_workspace_layer_source": int(args.latent_cvae_workspace_layer_source),
+            "latent_cvae_workspace_progress_value": int(args.latent_cvae_workspace_progress_value),
+            "latent_cvae_workspace_time_state": int(args.latent_cvae_workspace_time_state),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
             "latent_action_visual_memory": int(args.latent_action_visual_memory),

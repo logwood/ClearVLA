@@ -234,6 +234,19 @@ class V39PolicyConfig(V38PolicyConfig):
     # values. The MMDiT action stream still receives noisy/action tokens; setting
     # this to zero tests whether trajectory is useful evidence or an x_t echo.
     latent_cvae_workspace_trajectory_source: int = 1
+    # V73/V74: structured workspace discipline.  ``global_sources`` controls
+    # whether scan/lateral summaries are also exposed as workspace values after
+    # already shaping the global CVAE condition.  ``layer_source`` controls the
+    # static full-layer menu; the adaptive MMDiT path can still read layers via
+    # per-step routed_layer/capsules.  ``progress_value`` controls whether
+    # progress is a workspace value or only contributes to the step query/state.
+    # ``time_state`` injects the existing primary_cond (z + time_lift(time))
+    # into workspace slots; it deliberately reuses the live MMDiT time
+    # definition instead of creating a second time embedding.
+    latent_cvae_workspace_global_sources: int = 1
+    latent_cvae_workspace_layer_source: int = 1
+    latent_cvae_workspace_progress_value: int = 1
+    latent_cvae_workspace_time_state: int = 0
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -403,6 +416,8 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_mmdit_noisy_logit_gate",
             "latent_cvae_progress_action_isolation",
             "latent_cvae_workspace_noisy_query", "latent_cvae_workspace_trajectory_source",
+            "latent_cvae_workspace_global_sources", "latent_cvae_workspace_layer_source",
+            "latent_cvae_workspace_progress_value", "latent_cvae_workspace_time_state",
         ):
             if int(getattr(self, name)) not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
@@ -2124,6 +2139,7 @@ class SemanticEvidenceWorkspace(nn.Module):
 
     def __init__(self, config: V39PolicyConfig) -> None:
         super().__init__()
+        self.config = config
         h = int(config.hidden_size)
         self.hidden_size = h
         self.token_count = int(getattr(config, "latent_cvae_horizon_tokens", config.action_horizon))
@@ -2132,6 +2148,7 @@ class SemanticEvidenceWorkspace(nn.Module):
         self.source_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.step_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.global_state_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.blocks = nn.ModuleList([SemanticEvidenceWorkspaceBlock(config) for _ in range(2)])
         self.final_norm = nn.LayerNorm(h, elementwise_affine=False)
 
@@ -2252,8 +2269,12 @@ class SemanticEvidenceWorkspace(nn.Module):
             key_bias = torch.cat([static_memory.key_bias.to(device=device), dynamic_bias], dim=0)
         action_query = self.action_query_proj(self._resize_action(action))
         step_query = self.step_query_proj(step_context.to(device=device, dtype=dtype))[:, None]
+        if int(getattr(self.config, "latent_cvae_workspace_time_state", 0)):
+            global_state = self.global_state_proj(primary_cond.to(device=device, dtype=dtype))
+        else:
+            global_state = torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype)
         workspace = self.query.to(device=device, dtype=dtype).expand(int(action.shape[0]), -1, -1)
-        workspace = workspace + step_query
+        workspace = workspace + step_query + global_state[:, None]
         workspace_seed = workspace
         weight_rows: list[Tensor] = []
         for block_index, block in enumerate(self.blocks):
@@ -2284,6 +2305,7 @@ class SemanticEvidenceWorkspace(nn.Module):
             "workspace_token_count": torch.tensor(float(workspace.shape[1]), device=device, dtype=torch.float32),
             "workspace_token_norm": workspace.detach().float().norm(dim=-1).mean(),
             "workspace_update_norm": (workspace_seed.detach() - workspace_pre_norm.detach()).float().norm(dim=-1).mean(),
+            "workspace_global_state_norm": global_state.detach().float().norm(dim=-1).mean(),
             "workspace_source_count": torch.tensor(float(len(ranges)), device=device, dtype=torch.float32),
             "workspace_cached_token_fraction": torch.tensor(
                 float(static_token_count) / float(max(int(key_bias.numel()), 1)),
@@ -3346,16 +3368,21 @@ class LatentCVAEActionDecoder(nn.Module):
         workspace_sources = dict(evidence_sources or {})
         if rollout_tokens is not None:
             workspace_sources["rollout"] = rollout_tokens
-        if progress_tokens is not None:
+        progress_query_context = torch.zeros(batch, self.hidden_size, device=device, dtype=dtype)
+        progress_as_value = bool(int(getattr(cfg, "latent_cvae_workspace_progress_value", 1)))
+        if progress_tokens is not None and progress_as_value:
             workspace_sources["progress"] = progress_tokens
+        elif progress_tokens is not None:
+            progress_query_context = progress_tokens.to(device=device, dtype=dtype).mean(dim=1)
         workspace_query, workspace_query_scale = self._workspace_query_action(action, noisy_tokens)
         workspace_tokens, workspace_metrics = self.evidence_workspace(
             workspace_sources,
             action=workspace_query,
             primary_cond=primary_cond,
-            step_context=torch.zeros(batch, self.hidden_size, device=device, dtype=dtype),
+            step_context=progress_query_context,
         )
         workspace_metrics["workspace_noisy_query_scale"] = workspace_query_scale
+        workspace_metrics["workspace_progress_query_norm"] = progress_query_context.detach().float().norm(dim=-1).mean()
         cond_tokens, noisy_start, noisy_len, rollout_start, rollout_len, cond_token_norm = self._mmdit_condition_tokens(
             noisy_tokens=noisy_tokens,
             trajectory_tokens=trajectory_tokens,
@@ -3571,14 +3598,20 @@ class LatentCVAEActionDecoder(nn.Module):
             cond = self.condition_contract_norm(lateral_cond)
         cond_stats["cvae_condition_raw_norm"] = raw_cond.detach().float().norm(dim=-1).mean()
         cond = self.condition_contract_norm(cond)
-        evidence_sources: dict[str, Tensor] = {"lateral": lateral_cond[:, None]}
+        evidence_sources: dict[str, Tensor] = {}
+        if int(getattr(cfg, "latent_cvae_workspace_global_sources", 1)):
+            evidence_sources["lateral"] = lateral_cond[:, None]
         if int(getattr(cfg, "latent_cvae_workspace_trajectory_source", 1)):
             evidence_sources["trajectory"] = (
                 trajectory_tokens
                 if trajectory_workspace_tokens is None
                 else trajectory_workspace_tokens.to(device=device, dtype=dtype)
             )
-        if use_layer_memory and summaries:
+        if (
+            use_layer_memory
+            and summaries
+            and int(getattr(cfg, "latent_cvae_workspace_layer_source", 1))
+        ):
             evidence_sources["layer"] = layer_stack
         fixed_zero_base = str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero"
         if fixed_zero_base and int(transition_tokens.shape[1]) >= 2:
@@ -3597,7 +3630,7 @@ class LatentCVAEActionDecoder(nn.Module):
                 evidence_sources["transition"] = transition_tokens[:, 3:]
         elif int(transition_tokens.shape[1]) > 0:
             evidence_sources["transition"] = transition_tokens
-        if scan_cond is not None:
+        if scan_cond is not None and int(getattr(cfg, "latent_cvae_workspace_global_sources", 1)):
             evidence_sources["scan"] = scan_cond[:, None]
         if int(getattr(cfg, "latent_cvae_context_memory", 0)):
             evidence_sources["context"] = context_tokens
@@ -3803,6 +3836,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_token_count",
             "workspace_token_norm",
             "workspace_update_norm",
+            "workspace_global_state_norm",
             "workspace_source_count",
             "workspace_cached_token_fraction",
             "workspace_attention_entropy",
@@ -3812,6 +3846,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_attention_mass_error",
             "workspace_action_update_ratio",
             "workspace_noisy_query_scale",
+            "workspace_progress_query_norm",
             "workspace_layer_attention",
             "workspace_scan_attention",
             "workspace_lateral_attention",
@@ -4713,11 +4748,15 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 if layer_stack is not None and int(getattr(cfg, "adaptive_cvae_layer_routing", 1)):
                     route_floor_terms.append(self._route_entropy_floor(layer_entropy, int(layer_stack.shape[1])))
                 workspace_sources: dict[str, Tensor] = {}
-                if progress is not None:
+                progress_query_context = torch.zeros(batch, self.hidden_size, device=device, dtype=dtype)
+                progress_as_value = bool(int(getattr(cfg, "latent_cvae_workspace_progress_value", 1)))
+                if progress is not None and progress_as_value:
                     workspace_sources["progress"] = progress_context
+                elif progress is not None:
+                    progress_query_context = progress_context.mean(dim=1)
                 if int(getattr(cfg, "latent_cvae_layer_memory", 1)):
                     workspace_sources["routed_layer"] = routed_layer
-                step_context = step_bias.mean(dim=1)
+                step_context = step_bias.mean(dim=1) + progress_query_context
                 assert self.evidence_workspace is not None
                 workspace_query, workspace_query_scale = self._workspace_query_action(action, noisy_branch)
                 workspace_tokens, workspace_metrics = self.evidence_workspace(
@@ -4728,6 +4767,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     static_memory=workspace_static_memory,
                 )
                 workspace_metrics["workspace_noisy_query_scale"] = workspace_query_scale
+                workspace_metrics["workspace_progress_query_norm"] = progress_query_context.detach().float().norm(dim=-1).mean()
                 z_token = self.z_to_token(z.to(device=device, dtype=dtype))
                 (
                     step_cond_tokens,
