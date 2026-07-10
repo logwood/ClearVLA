@@ -242,11 +242,19 @@ class V39PolicyConfig(V38PolicyConfig):
     # progress is a workspace value or only contributes to the step query/state.
     # ``time_state`` injects the existing primary_cond (z + time_lift(time))
     # into workspace slots; it deliberately reuses the live MMDiT time
-    # definition instead of creating a second time embedding.
+    # definition instead of creating a second time embedding.  ``slot_time``
+    # keeps that signal slot-aware so it does not become a uniform 24-token
+    # bias that washes out local/event retrieval.
     latent_cvae_workspace_global_sources: int = 1
     latent_cvae_workspace_layer_source: int = 1
     latent_cvae_workspace_progress_value: int = 1
     latent_cvae_workspace_time_state: int = 0
+    latent_cvae_workspace_slot_time_state: int = 1
+    latent_cvae_workspace_slot_time_scale: float = 0.10
+    # V74B: central controller for workspace retrieval strengths, role bias,
+    # query modulation, and delayed capacity without changing the 24-token
+    # MMDiT interface.
+    latent_cvae_workspace_controller: int = 0
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -264,6 +272,7 @@ class V39PolicyConfig(V38PolicyConfig):
     adaptive_cvae_prefix_detach: int = 1
     adaptive_cvae_progress_z_injection: int = 1
     adaptive_cvae_route_query_bias: int = 1
+    adaptive_cvae_route_time_query: int = 0
     adaptive_cvae_token_semantic_adapter: int = 1
     adaptive_cvae_output_adapter: int = 0
     adaptive_cvae_context_dropout: float = 0.05
@@ -418,9 +427,12 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_workspace_noisy_query", "latent_cvae_workspace_trajectory_source",
             "latent_cvae_workspace_global_sources", "latent_cvae_workspace_layer_source",
             "latent_cvae_workspace_progress_value", "latent_cvae_workspace_time_state",
+            "latent_cvae_workspace_slot_time_state", "latent_cvae_workspace_controller",
         ):
             if int(getattr(self, name)) not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
+        if float(self.latent_cvae_workspace_slot_time_scale) < 0.0:
+            raise ValueError("latent_cvae_workspace_slot_time_scale must be >= 0")
         if int(self.latent_cvae_mmdit_depth) < 1:
             raise ValueError("latent_cvae_mmdit_depth must be >= 1")
         if int(self.latent_cvae_horizon_tokens) < 1:
@@ -448,6 +460,7 @@ class V39PolicyConfig(V38PolicyConfig):
             "adaptive_cvae_prefix_detach",
             "adaptive_cvae_progress_z_injection",
             "adaptive_cvae_route_query_bias",
+            "adaptive_cvae_route_time_query",
             "adaptive_cvae_token_semantic_adapter",
             "adaptive_cvae_output_adapter",
             "adaptive_cvae_function_adapters",
@@ -2045,10 +2058,10 @@ class EvidenceMemoryBank(nn.Module):
         "routed_layer": "layer",
         "trajectory": "geom",
         "rollout": "geom",
-        "transition": "event",
-        "transition_delta": "event",
-        "transition_effect": "event",
-        "transition_event": "event",
+        "transition": "transition",
+        "transition_delta": "transition",
+        "transition_effect": "transition",
+        "transition_event": "transition",
         "progress": "state",
         "capsule": "state",
         "context": "state",
@@ -2056,7 +2069,7 @@ class EvidenceMemoryBank(nn.Module):
         "scan": "global",
         "lateral": "global",
     }
-    ROLE_NAMES = ("geom", "event", "state", "layer", "global")
+    ROLE_NAMES = ("geom", "transition", "event", "state", "layer", "global")
 
     def __init__(self, config: V39PolicyConfig) -> None:
         super().__init__()
@@ -2169,6 +2182,100 @@ class EvidenceMemoryBank(nn.Module):
             )
         return metrics
 
+    def role_key_bias(
+        self,
+        role_logits: Tensor,
+        ranges: dict[str, tuple[int, int]],
+    ) -> Tensor:
+        batch = int(role_logits.shape[0])
+        total_tokens = max((stop for _, stop in ranges.values()), default=0)
+        if total_tokens <= 0:
+            return role_logits.new_zeros(batch, 0)
+        role_to_index = {role: i for i, role in enumerate(self.ROLE_NAMES)}
+        bias = role_logits.new_zeros(batch, total_tokens)
+        for name, (start, stop) in ranges.items():
+            role = self._source_role(name)
+            index = role_to_index.get(role)
+            if index is None:
+                continue
+            bias[:, start:stop] = role_logits[:, index:index + 1]
+        return bias
+
+
+class WorkspaceController(nn.Module):
+    """Central capacity and role controller for workspace memory retrieval."""
+
+    def __init__(self, config: V39PolicyConfig, role_names: tuple[str, ...]) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        self.role_names = tuple(role_names)
+        self.state_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.action_state = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.step_state = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.workspace_mod = nn.Linear(h, 2 * h)
+        self.query_mod = nn.Linear(h, 2 * h)
+        self.role_head = nn.Linear(h, len(self.role_names))
+        self.capacity_head = nn.Linear(h, 1)
+        self.delay_head = nn.Linear(h, 1)
+        self.temperature_head = nn.Linear(h, 1)
+        for module in (self.workspace_mod, self.query_mod, self.role_head, self.capacity_head, self.delay_head, self.temperature_head):
+            nn.init.zeros_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    @staticmethod
+    def _bounded_modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        # Keep the controller a gentle manager rather than a second action head.
+        return x * (1.0 + 0.10 * torch.tanh(scale)[:, None]) + 0.10 * torch.tanh(shift)[:, None]
+
+    def forward(
+        self,
+        *,
+        workspace: Tensor,
+        action_query: Tensor,
+        primary_cond: Tensor,
+        step_context: Tensor,
+        memory_bank: EvidenceMemoryBank,
+        ranges: dict[str, tuple[int, int]],
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        action_summary = action_query.mean(dim=1)
+        step_state = self.step_state(step_context.to(device=primary_cond.device, dtype=primary_cond.dtype))
+        value_state = self.state_norm(primary_cond + step_state)
+        select_state = self.state_norm(primary_cond + step_state + self.action_state(action_summary))
+        ws_shift, ws_scale = self.workspace_mod(value_state).chunk(2, dim=-1)
+        q_shift, q_scale = self.query_mod(select_state).chunk(2, dim=-1)
+        workspace = self._bounded_modulate(workspace, ws_shift, ws_scale)
+        action_query = self._bounded_modulate(action_query, q_shift, q_scale)
+
+        capacity_scale = 1.0 + 0.25 * torch.tanh(self.capacity_head(select_state)).squeeze(-1)
+        delay_gate = torch.sigmoid(self.delay_head(select_state)).squeeze(-1)
+        temperature = 0.5 + 1.5 * torch.sigmoid(self.temperature_head(select_state)).squeeze(-1)
+        role_logits = self.role_head(select_state)
+        gated_role_logits = role_logits * delay_gate[:, None] / temperature[:, None].clamp_min(1e-4)
+        role_key_bias = memory_bank.role_key_bias(gated_role_logits, ranges)
+
+        role_counts = memory_bank.role_token_counts(ranges)
+        active_role_mask = torch.tensor(
+            [role_counts.get(role, 0) > 0 for role in self.role_names],
+            device=gated_role_logits.device,
+            dtype=torch.bool,
+        )
+        masked_role_logits = gated_role_logits.float().masked_fill(~active_role_mask[None], -1e4)
+        role_probs = torch.softmax(masked_role_logits, dim=-1)
+        role_entropy = -(role_probs.clamp_min(1e-8) * role_probs.clamp_min(1e-8).log()).sum(dim=-1).mean()
+        metrics: dict[str, Tensor] = {
+            "workspace_controller_capacity": capacity_scale.detach().float().mean(),
+            "workspace_controller_delay": delay_gate.detach().float().mean(),
+            "workspace_controller_temperature": temperature.detach().float().mean(),
+            "workspace_controller_role_entropy": role_entropy.detach().float(),
+            "workspace_controller_role_max": role_probs.detach().float().max(dim=-1).values.mean(),
+            "workspace_controller_query_delta_norm": (0.10 * torch.tanh(q_shift)).detach().float().norm(dim=-1).mean(),
+            "workspace_controller_workspace_delta_norm": (0.10 * torch.tanh(ws_shift)).detach().float().norm(dim=-1).mean(),
+        }
+        for index, role in enumerate(self.role_names):
+            metrics[f"workspace_controller_role_{role}_prob"] = role_probs[:, index].detach().float().mean()
+            metrics[f"workspace_controller_role_{role}_logit"] = gated_role_logits[:, index].detach().float().mean()
+        return workspace, action_query, role_key_bias, capacity_scale, metrics
+
 
 class SemanticEvidenceWorkspaceBlock(nn.Module):
     """AdaLN-conditioned workspace block with one evidence write path."""
@@ -2229,6 +2336,7 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         memory_v: Tensor,
         key_bias: Tensor,
         query_context: Tensor,
+        read_scale: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         (
             self_s, self_c, self_g,
@@ -2255,11 +2363,20 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         cross_query = self.cross_norm(workspace + query_context)
         q = self._split_heads(self.cross_q(self._modulate(cross_query, cross_s, cross_c)))
         scores = torch.matmul(q.float(), memory_k.float().transpose(-2, -1)) * (float(self.head_dim) ** -0.5)
-        scores = scores + key_bias.to(device=scores.device, dtype=scores.dtype)[None, None, None]
+        key_bias = key_bias.to(device=scores.device, dtype=scores.dtype)
+        if key_bias.ndim == 1:
+            scores = scores + key_bias[None, None, None]
+        elif key_bias.ndim == 2:
+            scores = scores + key_bias[:, None, None]
+        else:
+            raise ValueError(f"key_bias must be [M] or [B,M], got {tuple(key_bias.shape)}")
         weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
         cross_update = torch.matmul(weights, memory_v)
         cross_update = self.cross_out(self._merge_heads(cross_update))
-        workspace = workspace + torch.tanh(cross_g)[:, None] * self.drop(cross_update)
+        cross_gain = torch.tanh(cross_g)[:, None]
+        if read_scale is not None:
+            cross_gain = cross_gain * read_scale.to(device=workspace.device, dtype=workspace.dtype)[:, None, None]
+        workspace = workspace + cross_gain * self.drop(cross_update)
 
         ffn_update = self.ffn(self._modulate(self.ffn_norm(workspace), ffn_s, ffn_c))
         workspace = workspace + torch.tanh(ffn_g)[:, None] * self.drop(ffn_update)
@@ -2282,6 +2399,18 @@ class SemanticEvidenceWorkspace(nn.Module):
         self.action_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.step_query_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.global_state_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        global_state = self.global_state_proj[-1]
+        if isinstance(global_state, nn.Linear):
+            # Time-state is a residual retrieval bias.  Start from the previous
+            # workspace behavior and let training open this path deliberately;
+            # random z/time injection can dominate the first batches.
+            nn.init.zeros_(global_state.weight)
+            nn.init.zeros_(global_state.bias)
+        self.controller = (
+            WorkspaceController(config, EvidenceMemoryBank.ROLE_NAMES)
+            if int(getattr(config, "latent_cvae_workspace_controller", 0))
+            else None
+        )
         self.blocks = nn.ModuleList([SemanticEvidenceWorkspaceBlock(config) for _ in range(2)])
         self.final_norm = nn.LayerNorm(h, elementwise_affine=False)
 
@@ -2325,6 +2454,30 @@ class SemanticEvidenceWorkspace(nn.Module):
             mode="linear",
             align_corners=True,
         ).transpose(1, 2).to(dtype=action.dtype)
+
+    def _slot_aware_global_state(self, global_state: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Keep z/time workspace state global in meaning but slot-aware in form."""
+        slot_state = global_state[:, None]
+        zero = torch.zeros((), device=global_state.device, dtype=torch.float32)
+        if (
+            not int(getattr(self.config, "latent_cvae_workspace_slot_time_state", 1))
+            or float(getattr(self.config, "latent_cvae_workspace_slot_time_scale", 0.10)) <= 0.0
+            or self.token_count <= 1
+        ):
+            return slot_state, zero, zero
+        scale = float(getattr(self.config, "latent_cvae_workspace_slot_time_scale", 0.10))
+        # Use the learned workspace slot identity as a bounded selector.  This
+        # preserves the global z/time signal while avoiding an identical vector
+        # being added to every retrieval slot.
+        slot_identity = F.layer_norm(
+            self.query.to(device=global_state.device, dtype=global_state.dtype),
+            (self.hidden_size,),
+        )
+        slot_delta = scale * global_state[:, None] * torch.tanh(slot_identity)
+        slot_state = slot_state + slot_delta
+        slot_delta_norm = slot_delta.detach().float().norm(dim=-1).mean()
+        slot_diversity = (slot_state - slot_state.mean(dim=1, keepdim=True)).detach().float().norm(dim=-1).mean()
+        return slot_state, slot_delta_norm, slot_diversity
 
     def _prepare_sources(
         self,
@@ -2401,9 +2554,22 @@ class SemanticEvidenceWorkspace(nn.Module):
             global_state = self.global_state_proj(primary_cond.to(device=device, dtype=dtype))
         else:
             global_state = torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype)
+        global_slot_state, global_slot_delta_norm, global_slot_diversity = self._slot_aware_global_state(global_state)
         workspace = self.query.to(device=device, dtype=dtype).expand(int(action.shape[0]), -1, -1)
-        workspace = workspace + step_query + global_state[:, None]
+        workspace = workspace + step_query + global_slot_state
         workspace_seed = workspace
+        read_scale: Tensor | None = None
+        controller_metrics: dict[str, Tensor] = {}
+        if self.controller is not None:
+            workspace, action_query, role_bias, read_scale, controller_metrics = self.controller(
+                workspace=workspace,
+                action_query=action_query,
+                primary_cond=primary_cond,
+                step_context=step_context,
+                memory_bank=self.memory_bank,
+                ranges=ranges,
+            )
+            key_bias = key_bias.to(device=device) + role_bias.to(device=device, dtype=key_bias.dtype)
         weight_rows: list[Tensor] = []
         for block_index, block in enumerate(self.blocks):
             if dynamic_memory is None:
@@ -2424,6 +2590,7 @@ class SemanticEvidenceWorkspace(nn.Module):
                 memory_v=memory_v,
                 key_bias=key_bias,
                 query_context=action_query,
+                read_scale=read_scale,
             )
             weight_rows.append(weights.detach().float())
         workspace_pre_norm = workspace
@@ -2434,6 +2601,8 @@ class SemanticEvidenceWorkspace(nn.Module):
             "workspace_token_norm": workspace.detach().float().norm(dim=-1).mean(),
             "workspace_update_norm": (workspace_seed.detach() - workspace_pre_norm.detach()).float().norm(dim=-1).mean(),
             "workspace_global_state_norm": global_state.detach().float().norm(dim=-1).mean(),
+            "workspace_global_slot_delta_norm": global_slot_delta_norm,
+            "workspace_global_slot_diversity": global_slot_diversity,
             "workspace_source_count": torch.tensor(float(len(ranges)), device=device, dtype=torch.float32),
             "workspace_cached_token_fraction": torch.tensor(
                 float(static_token_count) / float(max(int(key_bias.numel()), 1)),
@@ -2443,6 +2612,7 @@ class SemanticEvidenceWorkspace(nn.Module):
             "workspace_attention_entropy": -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=-1).mean(),
             "workspace_attention_max": weights.max(dim=-1).values.mean(),
         }
+        metrics.update(controller_metrics)
         group_weights = torch.stack([
             weights[..., start:stop].sum(dim=-1)
             for start, stop in ranges.values()
@@ -3905,6 +4075,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "adaptive_progress_seed_effective_slots",
             "adaptive_progress_seed_norm",
             "adaptive_route_temperature_mean",
+            "adaptive_route_time_query_norm",
             "adaptive_semantic_bias_norm",
             "adaptive_output_adapter_norm",
             "adaptive_function_delta_norm",
@@ -3966,6 +4137,8 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_token_norm",
             "workspace_update_norm",
             "workspace_global_state_norm",
+            "workspace_global_slot_delta_norm",
+            "workspace_global_slot_diversity",
             "workspace_source_count",
             "workspace_cached_token_fraction",
             "workspace_attention_entropy",
@@ -3977,15 +4150,36 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_noisy_query_scale",
             "workspace_progress_query_norm",
             "workspace_role_geom_attention",
+            "workspace_role_transition_attention",
             "workspace_role_event_attention",
             "workspace_role_state_attention",
             "workspace_role_layer_attention",
             "workspace_role_global_attention",
             "workspace_role_geom_token_count",
+            "workspace_role_transition_token_count",
             "workspace_role_event_token_count",
             "workspace_role_state_token_count",
             "workspace_role_layer_token_count",
             "workspace_role_global_token_count",
+            "workspace_controller_capacity",
+            "workspace_controller_delay",
+            "workspace_controller_temperature",
+            "workspace_controller_role_entropy",
+            "workspace_controller_role_max",
+            "workspace_controller_query_delta_norm",
+            "workspace_controller_workspace_delta_norm",
+            "workspace_controller_role_geom_prob",
+            "workspace_controller_role_transition_prob",
+            "workspace_controller_role_event_prob",
+            "workspace_controller_role_state_prob",
+            "workspace_controller_role_layer_prob",
+            "workspace_controller_role_global_prob",
+            "workspace_controller_role_geom_logit",
+            "workspace_controller_role_transition_logit",
+            "workspace_controller_role_event_logit",
+            "workspace_controller_role_state_logit",
+            "workspace_controller_role_layer_logit",
+            "workspace_controller_role_global_logit",
             "workspace_layer_attention",
             "workspace_scan_attention",
             "workspace_lateral_attention",
@@ -4075,6 +4269,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         self.route_query = nn.Linear(h, h, bias=False)
         self.route_key = nn.Linear(h, h, bias=False)
         self.route_value = nn.Linear(h, h, bias=False)
+        self.route_time_query = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.context_layer_query = nn.Linear(h, h, bias=False)
         self.context_layer_key = nn.Linear(h, h, bias=False)
         self.context_layer_value = nn.Linear(h, h, bias=False)
@@ -4124,6 +4319,10 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         if isinstance(temp_head, nn.Linear):
             nn.init.zeros_(temp_head.weight)
             nn.init.zeros_(temp_head.bias)
+        route_time = self.route_time_query[-1]
+        if isinstance(route_time, nn.Linear):
+            nn.init.zeros_(route_time.weight)
+            nn.init.zeros_(route_time.bias)
         strength_head = self.condition_strength_head[-1]
         if isinstance(strength_head, nn.Linear):
             lo = float(getattr(config, "adaptive_cvae_condition_strength_min", 0.03))
@@ -4186,6 +4385,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             return bias[:, :horizon]
         repeat = math.ceil(horizon / int(bias.shape[1]))
         return bias.repeat(1, repeat, 1)[:, :horizon]
+
+    def _route_time_bias(self, route_cond: Tensor | None, action: Tensor) -> Tensor | None:
+        if route_cond is None or not int(getattr(self.config, "adaptive_cvae_route_time_query", 0)):
+            return None
+        return self.route_time_query(route_cond.to(device=action.device, dtype=action.dtype))[:, None]
 
     def _coarse_temporal_base(self, action: Tensor) -> Tensor:
         stride = max(int(getattr(self.config, "adaptive_cvae_coarse_stride", 1)), 1)
@@ -4282,7 +4486,12 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         ], dim=1)
         return torch.cat([prefix_last, prefix_mean], dim=-1)
 
-    def _route_layers(self, action: Tensor, layer_stack: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
+    def _route_layers(
+        self,
+        action: Tensor,
+        layer_stack: Tensor | None,
+        route_cond: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
         cfg = self.config
         if (
             layer_stack is None
@@ -4295,6 +4504,9 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         q = self.route_query(action)
         if int(getattr(cfg, "adaptive_cvae_route_query_bias", 1)):
             q = q + self._horizon_bias(self.layer_route_query_bias, action)
+        time_bias = self._route_time_bias(route_cond, action)
+        if time_bias is not None:
+            q = q + time_bias
         layer_role = self.layer_role_basis.to(device=action.device, dtype=action.dtype)
         k = self.route_key(layer_stack) + self.layer_role_key(layer_role)[None]
         v = self.route_value(layer_stack)
@@ -4373,7 +4585,12 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         max_weight = wf.detach().max(dim=-1).values.mean()
         return capsules, entropy, max_weight
 
-    def _route_context_capsules(self, action: Tensor, capsules: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
+    def _route_context_capsules(
+        self,
+        action: Tensor,
+        capsules: Tensor | None,
+        route_cond: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
         if capsules is None:
             z = torch.zeros((), device=action.device, dtype=torch.float32)
             return torch.zeros_like(action), z, z, None
@@ -4383,6 +4600,9 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         q = self.context_route_query(action)
         if int(getattr(cfg, "adaptive_cvae_route_query_bias", 1)):
             q = q + self._horizon_bias(self.context_route_query_bias, action)
+        time_bias = self._route_time_bias(route_cond, action)
+        if time_bias is not None:
+            q = q + time_bias
         k = self.context_route_key(capsules) + self.context_route_role_key(role)[None]
         v = self.context_route_value(capsules) + self.context_route_role_value(role)[None]
         if int(getattr(cfg, "adaptive_cvae_route_cosine", 1)):
@@ -4442,7 +4662,12 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             progress = progress + self.progress_z_lift(z.to(device=device, dtype=dtype))[:, None]
         return self.progress_contract_norm(self.progress_block(progress, cond_time))
 
-    def _route_progress_full(self, action: Tensor, progress: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
+    def _route_progress_full(
+        self,
+        action: Tensor,
+        progress: Tensor | None,
+        route_cond: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
         if progress is None:
             z = torch.zeros((), device=action.device, dtype=torch.float32)
             return torch.zeros_like(action), z, z, None
@@ -4451,6 +4676,9 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         q = self.progress_action_query(action)
         if int(getattr(cfg, "adaptive_cvae_route_query_bias", 1)):
             q = q + self._horizon_bias(self.progress_route_query_bias, action)
+        time_bias = self._route_time_bias(route_cond, action)
+        if time_bias is not None:
+            q = q + time_bias
         role = self.progress_role_basis.to(device=action.device, dtype=action.dtype)
         k = self.progress_key(progress) + self.progress_role_key(role)[None]
         v = self.progress_value(progress) + self.progress_role_value(role)[None]
@@ -4474,18 +4702,22 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         action: Tensor,
         progress: Tensor | None,
         progress_center: Tensor | None,
+        route_cond: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
         if (
             progress is None
             or progress_center is None
             or not int(getattr(self.config, "adaptive_cvae_micro_monotonic_progress", 1))
         ):
-            return self._route_progress_full(action, progress)
+            return self._route_progress_full(action, progress, route_cond=route_cond)
         cfg = self.config
         progress = progress.to(device=action.device, dtype=action.dtype)
         q = self.progress_action_query(action)
         if int(getattr(cfg, "adaptive_cvae_route_query_bias", 1)):
             q = q + self._horizon_bias(self.progress_route_query_bias, action)
+        time_bias = self._route_time_bias(route_cond, action)
+        if time_bias is not None:
+            q = q + time_bias
         role = self.progress_role_basis.to(device=action.device, dtype=action.dtype)
         k = self.progress_key(progress) + self.progress_role_key(role)[None]
         v = self.progress_value(progress) + self.progress_role_value(role)[None]
@@ -4626,8 +4858,13 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         update = float(getattr(self.config, "adaptive_cvae_micro_update_scale", 1.0)) * ds * control
         return update, ds, kp, kd, terms
 
-    def _route_progress(self, action: Tensor, progress: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
-        routed, entropy, max_weight, _ = self._route_progress_full(action, progress)
+    def _route_progress(
+        self,
+        action: Tensor,
+        progress: Tensor | None,
+        route_cond: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        routed, entropy, max_weight, _ = self._route_progress_full(action, progress, route_cond=route_cond)
         return routed, entropy, max_weight
 
     def _progress_seed_delta(self, action: Tensor, progress_context: Tensor) -> Tensor:
@@ -4715,7 +4952,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
     def _output_semantic_delta(self, *, action: Tensor, cond_time: Tensor, progress: Tensor | None) -> tuple[Tensor, Tensor]:
         if not int(getattr(self.config, "adaptive_cvae_output_adapter", 0)):
             return torch.zeros_like(action), torch.zeros_like(action)
-        progress_context, _, _, progress_weights = self._route_progress_full(action, progress)
+        progress_context, _, _, progress_weights = self._route_progress_full(action, progress, route_cond=cond_time)
         progress_context = self._context_dropout(progress_context)
         cond_tokens = cond_time[:, None].expand(-1, int(action.shape[1]), -1)
         semantic_delta = self.output_semantic_adapter(torch.cat([action, cond_tokens, progress_context], dim=-1))
@@ -4778,7 +5015,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             action = base_action
         elif progress is not None and int(getattr(cfg, "adaptive_cvae_progress_z_injection", 1)):
             seed_temperature = self._adaptive_route_temperature(base_action).detach().float().mean()
-            seed_context, seed_entropy, seed_max, seed_weights = self._route_progress_full(base_action, progress)
+            seed_context, seed_entropy, seed_max, seed_weights = self._route_progress_full(
+                base_action,
+                progress,
+                route_cond=primary_cond,
+            )
             route_floor_terms.append(self._route_entropy_floor(seed_entropy, int(progress.shape[1])))
             seed_context = self._context_dropout(seed_context)
             seed_function = self._function_delta(self.seed_function_bank, base_action + seed_context, seed_weights)
@@ -4879,11 +5120,19 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             route_action = action + step_bias
             temperature_rows.append(self._adaptive_route_temperature(route_action).detach().float().mean())
             if mmdit_refine:
-                progress_context, progress_entropy, progress_max, _ = self._route_progress_full(route_action, progress)
+                progress_context, progress_entropy, progress_max, _ = self._route_progress_full(
+                    route_action,
+                    progress,
+                    route_cond=primary_cond,
+                )
                 if progress is not None:
                     route_floor_terms.append(self._route_entropy_floor(progress_entropy, int(progress.shape[1])))
                 progress_context = self._context_dropout(progress_context)
-                routed_layer, layer_entropy, layer_max = self._route_layers(route_action, layer_stack)
+                routed_layer, layer_entropy, layer_max = self._route_layers(
+                    route_action,
+                    layer_stack,
+                    route_cond=primary_cond,
+                )
                 if layer_stack is not None and int(getattr(cfg, "adaptive_cvae_layer_routing", 1)):
                     route_floor_terms.append(self._route_entropy_floor(layer_entropy, int(layer_stack.shape[1])))
                 workspace_sources: dict[str, Tensor] = {}
@@ -4983,9 +5232,14 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     route_action,
                     progress,
                     progress_center,
+                    route_cond=primary_cond,
                 )
             else:
-                progress_context, progress_entropy, progress_max, progress_weights = self._route_progress_full(route_action, progress)
+                progress_context, progress_entropy, progress_max, progress_weights = self._route_progress_full(
+                    route_action,
+                    progress,
+                    route_cond=primary_cond,
+                )
             if progress is not None:
                 route_floor_terms.append(self._route_entropy_floor(progress_entropy, int(progress.shape[1])))
             progress_context = self._context_dropout(progress_context)
@@ -4997,7 +5251,11 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     clean = clean.detach()
                 prefix = prefix + self.prefix_lift(self._prefix_features(clean))
             if context_capsules is not None:
-                context, entropy, max_weight, _ = self._route_context_capsules(route_action, context_capsules)
+                context, entropy, max_weight, _ = self._route_context_capsules(
+                    route_action,
+                    context_capsules,
+                    route_cond=primary_cond,
+                )
                 route_floor_terms.append(self._route_entropy_floor(entropy, int(context_capsules.shape[1])))
                 direct_routed, strength, context_dir = self._semantic_context_residual(
                     action=route_action,
@@ -5019,7 +5277,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 context_direction_rows.append(context_dir.detach().float().norm(dim=-1).mean())
                 regularizer_terms.append(routed.float().square().mean())
             else:
-                routed, entropy, max_weight = self._route_layers(route_action, layer_stack)
+                routed, entropy, max_weight = self._route_layers(route_action, layer_stack, route_cond=primary_cond)
                 if (
                     layer_stack is not None
                     and int(getattr(cfg, "adaptive_cvae_layer_routing", 1))
@@ -5139,6 +5397,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         workspace_rollout = workspace_summary.get("workspace_rollout_attention", z0)
         workspace_source_count = workspace_summary.get("workspace_source_count", z0)
         workspace_rollout_enrichment = workspace_rollout * workspace_source_count.clamp_min(1.0)
+        route_time_bias = self._route_time_bias(primary_cond, action)
+        route_time_norm = route_time_bias.detach().float().norm(dim=-1).mean() if route_time_bias is not None else z0
         out.update({
             "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
             "adaptive_noisy_branch_norm": noisy_branch_norm.to(device=device),
@@ -5158,6 +5418,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "adaptive_progress_seed_effective_slots": torch.exp(seed_entropy.to(device=device)) if progress is not None else z0,
             "adaptive_progress_seed_norm": seed_delta.detach().float().norm(dim=-1).mean(),
             "adaptive_route_temperature_mean": torch.stack([seed_temperature.to(device=device), *temperature_rows]).mean() if temperature_rows else seed_temperature.to(device=device),
+            "adaptive_route_time_query_norm": route_time_norm,
             "adaptive_semantic_bias_norm": torch.stack(semantic_rows).mean() if semantic_rows else z0,
             "adaptive_output_adapter_norm": output_delta.detach().float().norm(dim=-1).mean(),
             "adaptive_function_delta_norm": torch.stack(function_rows).mean() if function_rows else z0,

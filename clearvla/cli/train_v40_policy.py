@@ -91,6 +91,12 @@ _PARSEVAL_REPLACED_STAGE1_PREFIXES = (
     "planner.latent_cvae_action_decoder.velocity_head.",
 )
 
+_V74_TIME_CONTROLLER_STAGE1_PREFIXES = (
+    "planner.latent_cvae_action_decoder.evidence_workspace.global_state_proj.",
+    "planner.latent_cvae_action_decoder.evidence_workspace.controller.",
+    "planner.latent_cvae_action_decoder.route_time_query.",
+)
+
 
 def _filter_stage1_state_dict(
     state: dict[str, torch.Tensor],
@@ -131,6 +137,20 @@ def _filter_parseval_replaced_state_dict(
     if not enabled:
         return state, []
     skipped = [key for key in state if key.startswith(_PARSEVAL_REPLACED_STAGE1_PREFIXES)]
+    if not skipped:
+        return state, []
+    skipped_set = set(skipped)
+    return {key: value for key, value in state.items() if key not in skipped_set}, skipped
+
+
+def _filter_v74_time_controller_state_dict(
+    state: dict[str, torch.Tensor],
+    *,
+    enabled: bool,
+) -> tuple[dict[str, torch.Tensor], list[str]]:
+    if not enabled:
+        return state, []
+    skipped = [key for key in state if key.startswith(_V74_TIME_CONTROLLER_STAGE1_PREFIXES)]
     if not skipped:
         return state, []
     skipped_set = set(skipped)
@@ -290,6 +310,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-workspace-layer-source", type=int, default=1, help="Expose full layer_stack as a static workspace value; set 0 to force layer information through routed_layer/capsules.")
     parser.add_argument("--latent-cvae-workspace-progress-value", type=int, default=1, help="Expose progress as a workspace value; set 0 to use progress only as workspace step/query state.")
     parser.add_argument("--latent-cvae-workspace-time-state", type=int, default=0, help="Inject the existing z+time primary condition into workspace slots as explicit state.")
+    parser.add_argument("--latent-cvae-workspace-slot-time-state", type=int, default=1, help="Make workspace time-state slot-aware instead of broadcasting one identical z+time vector to every workspace token.")
+    parser.add_argument("--latent-cvae-workspace-slot-time-scale", type=float, default=0.10, help="Scale of the slot-specific component used by --latent-cvae-workspace-slot-time-state.")
+    parser.add_argument("--latent-cvae-workspace-controller", type=int, default=0, help="V74B: use the central workspace controller for role bias, capacity, and query modulation.")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -300,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-prefix-detach", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-z-injection", type=int, default=1)
     parser.add_argument("--adaptive-cvae-route-query-bias", type=int, default=1)
+    parser.add_argument("--adaptive-cvae-route-time-query", type=int, default=0, help="V74B: add the existing z+time primary condition to route queries only.")
     parser.add_argument("--adaptive-cvae-token-semantic-adapter", type=int, default=1)
     parser.add_argument("--adaptive-cvae-output-adapter", type=int, default=0)
     parser.add_argument("--adaptive-cvae-context-dropout", type=float, default=0.05)
@@ -564,6 +588,9 @@ def main() -> None:
         latent_cvae_workspace_layer_source=args.latent_cvae_workspace_layer_source,
         latent_cvae_workspace_progress_value=args.latent_cvae_workspace_progress_value,
         latent_cvae_workspace_time_state=args.latent_cvae_workspace_time_state,
+        latent_cvae_workspace_slot_time_state=args.latent_cvae_workspace_slot_time_state,
+        latent_cvae_workspace_slot_time_scale=args.latent_cvae_workspace_slot_time_scale,
+        latent_cvae_workspace_controller=args.latent_cvae_workspace_controller,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -574,6 +601,7 @@ def main() -> None:
         adaptive_cvae_prefix_detach=args.adaptive_cvae_prefix_detach,
         adaptive_cvae_progress_z_injection=args.adaptive_cvae_progress_z_injection,
         adaptive_cvae_route_query_bias=args.adaptive_cvae_route_query_bias,
+        adaptive_cvae_route_time_query=args.adaptive_cvae_route_time_query,
         adaptive_cvae_token_semantic_adapter=args.adaptive_cvae_token_semantic_adapter,
         adaptive_cvae_output_adapter=args.adaptive_cvae_output_adapter,
         adaptive_cvae_context_dropout=args.adaptive_cvae_context_dropout,
@@ -638,6 +666,20 @@ def main() -> None:
             print(
                 f"[v39-init] skipped replaced Parseval-interface keys: "
                 f"{skipped_parseval_keys[:8]} count={len(skipped_parseval_keys)}",
+                flush=True,
+            )
+        stage_state, skipped_v74_time_keys = _filter_v74_time_controller_state_dict(
+            stage_state,
+            enabled=bool(
+                int(args.latent_cvae_workspace_time_state)
+                or int(args.latent_cvae_workspace_controller)
+                or int(args.adaptive_cvae_route_time_query)
+            ),
+        )
+        if skipped_v74_time_keys:
+            print(
+                f"[v39-init] skipped V74 time/controller stage1 keys: "
+                f"{skipped_v74_time_keys[:8]} count={len(skipped_v74_time_keys)}",
                 flush=True,
             )
         stage_state, skipped_shape_keys = _filter_shape_mismatched_state_dict(stage_state, system.state_dict())
@@ -706,6 +748,9 @@ def main() -> None:
             "latent_cvae_workspace_layer_source": bool(int(args.latent_cvae_workspace_layer_source)),
             "latent_cvae_workspace_progress_value": bool(int(args.latent_cvae_workspace_progress_value)),
             "latent_cvae_workspace_time_state": bool(int(args.latent_cvae_workspace_time_state)),
+            "latent_cvae_workspace_slot_time_state": bool(int(args.latent_cvae_workspace_slot_time_state)),
+            "latent_cvae_workspace_slot_time_scale": float(args.latent_cvae_workspace_slot_time_scale),
+            "latent_cvae_workspace_controller": bool(int(args.latent_cvae_workspace_controller)),
             "latent_cvae_z_primary_denoising": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_typed_evidence_workspace": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)),
@@ -719,6 +764,7 @@ def main() -> None:
             "adaptive_cvae_prefix_detach": int(args.adaptive_cvae_prefix_detach),
             "adaptive_cvae_progress_z_injection": int(args.adaptive_cvae_progress_z_injection),
             "adaptive_cvae_route_query_bias": int(args.adaptive_cvae_route_query_bias),
+            "adaptive_cvae_route_time_query": int(args.adaptive_cvae_route_time_query),
             "adaptive_cvae_token_semantic_adapter": int(args.adaptive_cvae_token_semantic_adapter),
             "adaptive_cvae_output_adapter": int(args.adaptive_cvae_output_adapter),
             "adaptive_cvae_context_dropout": float(args.adaptive_cvae_context_dropout),
@@ -786,6 +832,10 @@ def main() -> None:
             "latent_cvae_workspace_layer_source": int(args.latent_cvae_workspace_layer_source),
             "latent_cvae_workspace_progress_value": int(args.latent_cvae_workspace_progress_value),
             "latent_cvae_workspace_time_state": int(args.latent_cvae_workspace_time_state),
+            "latent_cvae_workspace_slot_time_state": int(args.latent_cvae_workspace_slot_time_state),
+            "latent_cvae_workspace_slot_time_scale": float(args.latent_cvae_workspace_slot_time_scale),
+            "latent_cvae_workspace_controller": int(args.latent_cvae_workspace_controller),
+            "adaptive_cvae_route_time_query": int(args.adaptive_cvae_route_time_query),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
             "latent_action_visual_memory": int(args.latent_action_visual_memory),

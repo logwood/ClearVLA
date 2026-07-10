@@ -1031,6 +1031,7 @@ def flow_losses(
         "latent_cvae_adaptive_progress_seed_effective_slots",
         "latent_cvae_adaptive_progress_seed_norm",
         "latent_cvae_adaptive_route_temperature_mean",
+        "latent_cvae_adaptive_route_time_query_norm",
         "latent_cvae_adaptive_semantic_bias_norm",
         "latent_cvae_adaptive_function_delta_norm",
         "latent_cvae_adaptive_base_highfreq_norm",
@@ -1095,6 +1096,8 @@ def flow_losses(
         "latent_cvae_workspace_token_norm",
         "latent_cvae_workspace_update_norm",
         "latent_cvae_workspace_global_state_norm",
+        "latent_cvae_workspace_global_slot_delta_norm",
+        "latent_cvae_workspace_global_slot_diversity",
         "latent_cvae_workspace_source_count",
         "latent_cvae_workspace_cached_token_fraction",
         "latent_cvae_workspace_attention_entropy",
@@ -1106,15 +1109,36 @@ def flow_losses(
         "latent_cvae_workspace_noisy_query_scale",
         "latent_cvae_workspace_progress_query_norm",
         "latent_cvae_workspace_role_geom_attention",
+        "latent_cvae_workspace_role_transition_attention",
         "latent_cvae_workspace_role_event_attention",
         "latent_cvae_workspace_role_state_attention",
         "latent_cvae_workspace_role_layer_attention",
         "latent_cvae_workspace_role_global_attention",
         "latent_cvae_workspace_role_geom_token_count",
+        "latent_cvae_workspace_role_transition_token_count",
         "latent_cvae_workspace_role_event_token_count",
         "latent_cvae_workspace_role_state_token_count",
         "latent_cvae_workspace_role_layer_token_count",
         "latent_cvae_workspace_role_global_token_count",
+        "latent_cvae_workspace_controller_capacity",
+        "latent_cvae_workspace_controller_delay",
+        "latent_cvae_workspace_controller_temperature",
+        "latent_cvae_workspace_controller_role_entropy",
+        "latent_cvae_workspace_controller_role_max",
+        "latent_cvae_workspace_controller_query_delta_norm",
+        "latent_cvae_workspace_controller_workspace_delta_norm",
+        "latent_cvae_workspace_controller_role_geom_prob",
+        "latent_cvae_workspace_controller_role_transition_prob",
+        "latent_cvae_workspace_controller_role_event_prob",
+        "latent_cvae_workspace_controller_role_state_prob",
+        "latent_cvae_workspace_controller_role_layer_prob",
+        "latent_cvae_workspace_controller_role_global_prob",
+        "latent_cvae_workspace_controller_role_geom_logit",
+        "latent_cvae_workspace_controller_role_transition_logit",
+        "latent_cvae_workspace_controller_role_event_logit",
+        "latent_cvae_workspace_controller_role_state_logit",
+        "latent_cvae_workspace_controller_role_layer_logit",
+        "latent_cvae_workspace_controller_role_global_logit",
         "latent_cvae_workspace_layer_attention",
         "latent_cvae_workspace_scan_attention",
         "latent_cvae_workspace_lateral_attention",
@@ -2252,6 +2276,7 @@ def train_v39_policy(
                     f"czseed={row.get('latent_cvae_adaptive_progress_seed_norm', 0.0):.3f} "
                     f"czseff={row.get('latent_cvae_adaptive_progress_seed_effective_slots', 0.0):.2f} "
                     f"ctemp={row.get('latent_cvae_adaptive_route_temperature_mean', 0.0):.2f} "
+                    f"rtime={row.get('latent_cvae_adaptive_route_time_query_norm', 0.0):.3f} "
                     f"cfunc={row.get('latent_cvae_adaptive_function_delta_norm', 0.0):.3f} "
                     f"cbasehf={row.get('latent_cvae_adaptive_base_highfreq_norm', 0.0):.3f} "
                     f"cstep={row.get('latent_cvae_adaptive_refine_step_bias_norm', 0.0):.3f} "
@@ -2282,6 +2307,8 @@ def train_v39_policy(
                     f"wtok={row.get('latent_cvae_workspace_token_norm', 0.0):.2f} "
                     f"wdelta={row.get('latent_cvae_workspace_update_norm', 0.0):.2f} "
                     f"wgstate={row.get('latent_cvae_workspace_global_state_norm', 0.0):.2f} "
+                    f"wgslot={row.get('latent_cvae_workspace_global_slot_delta_norm', 0.0):.3f} "
+                    f"wsdiv={row.get('latent_cvae_workspace_global_slot_diversity', 0.0):.3f} "
                     f"wsrc={row.get('latent_cvae_workspace_source_count', 0.0):.0f} "
                     f"wcache={row.get('latent_cvae_workspace_cached_token_fraction', 0.0):.3f} "
                     f"wqscale={row.get('latent_cvae_workspace_noisy_query_scale', 0.0):.3f} "
@@ -2303,10 +2330,15 @@ def train_v39_policy(
                     f"wcaps={row.get('latent_cvae_workspace_capsule_attention', 0.0):.3f} "
                     f"wroute={row.get('latent_cvae_workspace_routed_layer_attention', 0.0):.3f} "
                     f"wgeom={row.get('latent_cvae_workspace_role_geom_attention', 0.0):.3f} "
+                    f"wtrn={row.get('latent_cvae_workspace_role_transition_attention', 0.0):.3f} "
                     f"wevt={row.get('latent_cvae_workspace_role_event_attention', 0.0):.3f} "
                     f"wstate={row.get('latent_cvae_workspace_role_state_attention', 0.0):.3f} "
                     f"wrlay={row.get('latent_cvae_workspace_role_layer_attention', 0.0):.3f} "
                     f"wglob={row.get('latent_cvae_workspace_role_global_attention', 0.0):.3f} "
+                    f"ctrlcap={row.get('latent_cvae_workspace_controller_capacity', 0.0):.3f} "
+                    f"ctrldly={row.get('latent_cvae_workspace_controller_delay', 0.0):.3f} "
+                    f"ctrlent={row.get('latent_cvae_workspace_controller_role_entropy', 0.0):.3f} "
+                    f"ctrlq={row.get('latent_cvae_workspace_controller_query_delta_norm', 0.0):.3f} "
                     # V72 (S5 cleanup): dead cm* micro-controller console keys
                     # removed -- micro is config-off AND structurally excluded
                     # under mmdit_refine; the loss-dict keys remain intact for
