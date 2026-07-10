@@ -255,6 +255,13 @@ class V39PolicyConfig(V38PolicyConfig):
     # query modulation, and delayed capacity without changing the 24-token
     # MMDiT interface.
     latent_cvae_workspace_controller: int = 0
+    # V75: hierarchical evidence workspace. Low slots are temporary evidence
+    # reads, stage slots are persistent across refine steps, and action tokens
+    # consume both only through MMDiT. Stage state may alter low retrieval
+    # queries/selectors, but never enters the low value/residual stream.
+    latent_cvae_hierarchical_workspace: int = 0
+    latent_cvae_stage_slots: int = 6
+    latent_cvae_stage_promote_scale_init: float = 0.05
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -428,6 +435,7 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_workspace_global_sources", "latent_cvae_workspace_layer_source",
             "latent_cvae_workspace_progress_value", "latent_cvae_workspace_time_state",
             "latent_cvae_workspace_slot_time_state", "latent_cvae_workspace_controller",
+            "latent_cvae_hierarchical_workspace",
         ):
             if int(getattr(self, name)) not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
@@ -437,6 +445,31 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_mmdit_depth must be >= 1")
         if int(self.latent_cvae_horizon_tokens) < 1:
             raise ValueError("latent_cvae_horizon_tokens must be >= 1")
+        if int(self.latent_cvae_stage_slots) < 1:
+            raise ValueError("latent_cvae_stage_slots must be >= 1")
+        if not (0.0 <= float(self.latent_cvae_stage_promote_scale_init) <= 1.0):
+            raise ValueError("latent_cvae_stage_promote_scale_init must be in [0, 1]")
+        if int(self.latent_cvae_hierarchical_workspace):
+            if str(self.final_action_decoder) != "adaptive_recurrent_cvae_action":
+                raise ValueError("hierarchical workspace requires adaptive_recurrent_cvae_action")
+            if not int(self.latent_cvae_mmdit_decoder):
+                raise ValueError("hierarchical workspace requires latent_cvae_mmdit_decoder=1")
+            incompatible = (
+                "latent_cvae_workspace_noisy_query",
+                "latent_cvae_workspace_time_state",
+                "latent_cvae_workspace_controller",
+                "latent_cvae_workspace_progress_value",
+                "adaptive_cvae_route_time_query",
+                "adaptive_cvae_progress_memory",
+                "adaptive_cvae_layer_routing",
+                "adaptive_cvae_context_capsules",
+            )
+            enabled = [name for name in incompatible if int(getattr(self, name))]
+            if enabled:
+                raise ValueError(
+                    "hierarchical workspace owns selection/state routing; disable incompatible paths: "
+                    + ", ".join(enabled)
+                )
         if str(self.final_action_decoder) in ("latent_cvae_action", "adaptive_recurrent_cvae_action"):
             if int(self.latent_cvae_layer_memory) and not int(self.layer_contract_adapters):
                 raise ValueError(
@@ -2034,6 +2067,20 @@ class PreparedEvidenceMemory:
     batch_size: int
 
 
+@dataclass(frozen=True)
+class MMDiTConditionLayout:
+    """Explicit condition-group slices in the condition-token coordinate."""
+
+    noisy_start: int
+    noisy_len: int
+    rollout_start: int = 0
+    rollout_len: int = 0
+    low_start: int = 0
+    low_len: int = 0
+    stage_start: int = 0
+    stage_len: int = 0
+
+
 class EvidenceMemoryBank(nn.Module):
     """Owns typed evidence storage and static K/V preparation for workspace reads."""
 
@@ -2044,7 +2091,7 @@ class EvidenceMemoryBank(nn.Module):
         "transition",
         "transition_delta",
         "transition_effect",
-        "transition_event",
+        "transition_timeline",
         "context",
         "visual",
         "trajectory",
@@ -2061,7 +2108,7 @@ class EvidenceMemoryBank(nn.Module):
         "transition": "transition",
         "transition_delta": "transition",
         "transition_effect": "transition",
-        "transition_event": "transition",
+        "transition_timeline": "transition",
         "progress": "state",
         "capsule": "state",
         "context": "state",
@@ -2631,13 +2678,470 @@ class SemanticEvidenceWorkspace(nn.Module):
                 "workspace_transition_attention",
                 "workspace_transition_delta_attention",
                 "workspace_transition_effect_attention",
-                "workspace_transition_event_attention",
+                "workspace_transition_timeline_attention",
             )
             if key in metrics
         ]
         if transition_mass:
             metrics["workspace_transition_total_attention"] = torch.stack(transition_mass).sum()
         return workspace, metrics
+
+
+class HierarchicalWorkspaceManager(nn.Module):
+    """Condition/stage-driven retrieval manager with no action input.
+
+    Stage content is allowed to shape selector state, role logits, promotion,
+    and stage output strength. The low-output scale is intentionally computed
+    from condition+step only, so stage cannot modulate the low value stream.
+    """
+
+    def __init__(self, config: V39PolicyConfig, role_names: tuple[str, ...]) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        self.hidden_size = h
+        self.role_names = tuple(role_names)
+        self.base_fusion = nn.Sequential(
+            nn.LayerNorm(2 * h),
+            nn.Linear(2 * h, h),
+            nn.SiLU(),
+            nn.Linear(h, h),
+        )
+        self.stage_role_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_content_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_query = nn.Linear(h, h, bias=False)
+        self.stage_role_key = nn.Linear(h, h, bias=False)
+        self.stage_content_key = nn.Linear(h, h, bias=False)
+        self.stage_content_value = nn.Linear(h, h, bias=False)
+        self.stage_summary_out = nn.Linear(h, h)
+        self.select_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.query_shift = nn.Linear(h, h)
+        self.role_head = nn.Linear(h, len(self.role_names))
+        self.promote_head = nn.Linear(h, 1)
+        self.low_output_head = nn.Linear(h, 1)
+        self.stage_output_head = nn.Linear(h, 1)
+        for module in (
+            self.query_shift,
+            self.role_head,
+            self.promote_head,
+            self.low_output_head,
+            self.stage_output_head,
+        ):
+            nn.init.zeros_(module.weight)
+            nn.init.zeros_(module.bias)
+        # Begin as a conservative promotion controller. This gate remains
+        # effective because it is applied after normalization in the stage cell.
+        nn.init.constant_(self.promote_head.bias, math.log(0.10 / 0.90))
+        # Stage is a new condition group on top of a pretrained MMDiT. Let it
+        # enter with 0.1 prior strength and earn more attention during training.
+        stage_fraction = 0.10 / 1.50
+        nn.init.constant_(self.stage_output_head.bias, math.log(stage_fraction / (1.0 - stage_fraction)))
+
+    def forward(
+        self,
+        *,
+        primary_cond: Tensor,
+        step_embedding: Tensor,
+        stage_role: Tensor,
+        stage_content: Tensor,
+        memory_bank: EvidenceMemoryBank,
+        ranges: dict[str, tuple[int, int]],
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        base_state = self.base_fusion(torch.cat([primary_cond, step_embedding], dim=-1))
+        q = self.stage_query(base_state)[:, None]
+        normalized_role = self.stage_role_norm(stage_role)
+        normalized_content = self.stage_content_norm(stage_content)
+        k = self.stage_role_key(normalized_role) + self.stage_content_key(normalized_content)
+        v = self.stage_content_value(normalized_content)
+        logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (float(self.hidden_size) ** -0.5)
+        stage_weights = torch.softmax(logits, dim=-1).to(dtype=stage_content.dtype)
+        stage_summary = self.stage_summary_out(torch.matmul(stage_weights, v).squeeze(1))
+        select_state = self.select_norm(base_state + stage_summary)
+
+        query_shift = self.query_shift(select_state)
+        role_logits = self.role_head(select_state)
+        role_key_bias = memory_bank.role_key_bias(role_logits, ranges)
+        promote_gate = torch.sigmoid(self.promote_head(select_state)).squeeze(-1)
+        # This head never sees stage_summary/select_state. That is the explicit
+        # stage -> low-value firewall; stage affects only query/role selection.
+        low_output_strength = torch.exp(0.5 * torch.tanh(self.low_output_head(base_state))).squeeze(-1)
+        stage_output_strength = 1.5 * torch.sigmoid(self.stage_output_head(select_state)).squeeze(-1)
+
+        role_counts = memory_bank.role_token_counts(ranges)
+        active_mask = torch.tensor(
+            [role_counts.get(role, 0) > 0 for role in self.role_names],
+            device=role_logits.device,
+            dtype=torch.bool,
+        )
+        masked_role_logits = role_logits.float().masked_fill(~active_mask[None], -1e4)
+        role_probs = torch.softmax(masked_role_logits, dim=-1)
+        role_entropy = -(role_probs.clamp_min(1e-8) * role_probs.clamp_min(1e-8).log()).sum(dim=-1).mean()
+        stage_prob = stage_weights.detach().float().clamp_min(1e-8)
+        metrics: dict[str, Tensor] = {
+            "hierarchical_manager_stage_attention_entropy": -(stage_prob * stage_prob.log()).sum(dim=-1).mean(),
+            "hierarchical_manager_stage_attention_max": stage_prob.max(dim=-1).values.mean(),
+            "hierarchical_manager_role_entropy": role_entropy.detach(),
+            "hierarchical_manager_role_max": role_probs.detach().max(dim=-1).values.mean(),
+            "hierarchical_manager_query_shift_norm": query_shift.detach().float().norm(dim=-1).mean(),
+            "hierarchical_manager_promote_gate": promote_gate.detach().float().mean(),
+            "hierarchical_manager_low_output_strength": low_output_strength.detach().float().mean(),
+            "hierarchical_manager_stage_output_strength": stage_output_strength.detach().float().mean(),
+        }
+        for index, role in enumerate(self.role_names):
+            metrics[f"hierarchical_manager_role_{role}_prob"] = role_probs[:, index].detach().float().mean()
+        return (
+            query_shift,
+            role_key_bias,
+            promote_gate,
+            low_output_strength,
+            stage_output_strength,
+            metrics,
+        )
+
+
+class HierarchicalEvidenceWorkspace(nn.Module):
+    """Temporary low reads plus persistent, role-separated stage memory."""
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        self.config = config
+        h = int(config.hidden_size)
+        heads = int(config.num_heads)
+        if h % heads != 0:
+            raise ValueError("hidden_size must be divisible by num_heads for hierarchical workspace")
+        self.hidden_size = h
+        self.heads = heads
+        self.head_dim = h // heads
+        self.low_count = int(getattr(config, "latent_cvae_horizon_tokens", config.action_horizon))
+        self.stage_count = int(getattr(config, "latent_cvae_stage_slots", 6))
+        self.refine_steps = max(int(getattr(config, "adaptive_cvae_refine_steps", 1)), 1)
+        self.memory_bank = EvidenceMemoryBank(config)
+
+        # Value and selector identities are separate parameters. Per-sample
+        # stage state is never added to low_value_seed.
+        self.low_value_seed = nn.Parameter(torch.randn(1, self.low_count, h) * 0.02)
+        self.low_selector_seed = nn.Parameter(torch.randn(1, self.low_count, h) * 0.02)
+        self.step_embedding = nn.Parameter(torch.randn(1, self.refine_steps, h) * 0.02)
+        self.condition_query = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.manager = HierarchicalWorkspaceManager(config, EvidenceMemoryBank.ROLE_NAMES)
+
+        self.low_stage_query = nn.Linear(h, h, bias=False)
+        self.stage_role_selector_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_content_selector_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.low_stage_role_key = nn.Linear(h, h, bias=False)
+        self.low_stage_content_key = nn.Linear(h, h, bias=False)
+        self.low_stage_role_value = nn.Linear(h, h, bias=False)
+        self.low_stage_content_value = nn.Linear(h, h, bias=False)
+        self.low_stage_out = nn.Linear(h, h)
+        self.low_blocks = nn.ModuleList([SemanticEvidenceWorkspaceBlock(config) for _ in range(2)])
+        self.low_final_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+        # Role is a persistent learned identity. Content is the only recurrent
+        # state and is initialized without adding the role tensor. One shared
+        # seed avoids both zero-LayerNorm gain and a second hidden slot-role.
+        self.stage_role = nn.Parameter(torch.randn(1, self.stage_count, h) * 0.02)
+        self.stage_content_seed = nn.Parameter(torch.randn(1, 1, h) * 0.02)
+        self.stage_init = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        nn.init.zeros_(self.stage_init[-1].weight)
+        nn.init.zeros_(self.stage_init[-1].bias)
+        self.stage_role_query = nn.Linear(h, h, bias=False)
+        self.stage_content_query = nn.Linear(h, h, bias=False)
+        self.stage_condition_query = nn.Linear(h, h, bias=False)
+        self.stage_low_key = nn.Linear(h, h, bias=False)
+        self.stage_low_value = nn.Linear(h, h, bias=False)
+        self.stage_promote_out = nn.Linear(h, h)
+        self.stage_input_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_gru = nn.GRUCell(h, h)
+        with torch.no_grad():
+            self.stage_gru.bias_ih.zero_()
+            self.stage_gru.bias_hh.zero_()
+            # PyTorch GRU gate order is reset, update(retain), candidate.
+            self.stage_gru.bias_ih[h:2 * h].fill_(0.5)
+            self.stage_gru.bias_hh[h:2 * h].fill_(0.5)
+        promote_init = min(max(float(getattr(config, "latent_cvae_stage_promote_scale_init", 0.05)), 1e-4), 1.0 - 1e-4)
+        self.stage_promote_scale_logit = nn.Parameter(torch.tensor(math.log(promote_init / (1.0 - promote_init))))
+        self.stage_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_content_out = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.stage_role_out = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        nn.init.eye_(self.stage_content_out[-1].weight)
+        nn.init.zeros_(self.stage_content_out[-1].bias)
+        nn.init.eye_(self.stage_role_out[-1].weight)
+        nn.init.zeros_(self.stage_role_out[-1].bias)
+
+    def _split_heads(self, x: Tensor) -> Tensor:
+        b, n, h = x.shape
+        return x.reshape(b, n, self.heads, h // self.heads).transpose(1, 2)
+
+    @staticmethod
+    def _merge_heads(x: Tensor) -> Tensor:
+        b, heads, n, d = x.shape
+        return x.transpose(1, 2).reshape(b, n, heads * d)
+
+    def _attention(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
+        qh = self._split_heads(q)
+        kh = self._split_heads(k)
+        vh = self._split_heads(v)
+        logits = torch.matmul(qh.float(), kh.float().transpose(-2, -1)) * (float(self.head_dim) ** -0.5)
+        weights = torch.softmax(logits, dim=-1).to(dtype=q.dtype)
+        return self._merge_heads(torch.matmul(weights, vh)), weights
+
+    def _step_state(self, step_index: int, *, batch: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+        index = min(max(int(step_index), 0), self.refine_steps - 1)
+        return self.step_embedding[:, index].to(device=device, dtype=dtype).expand(batch, -1)
+
+    def prepare_evidence(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> PreparedEvidenceMemory:
+        return self.memory_bank.prepare_static_memory(
+            sources,
+            blocks=self.low_blocks,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
+
+    def init_stage(self, primary_cond: Tensor) -> Tensor:
+        batch = int(primary_cond.shape[0])
+        content = self.stage_content_seed.to(device=primary_cond.device, dtype=primary_cond.dtype).expand(
+            batch, self.stage_count, -1
+        )
+        content = content + self.stage_init(primary_cond)[:, None]
+        return self.stage_norm(content)
+
+    def _low_selector_context(
+        self,
+        *,
+        primary_cond: Tensor,
+        step_state: Tensor,
+        manager_shift: Tensor,
+        stage_role: Tensor,
+        stage_content: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        batch = int(primary_cond.shape[0])
+        selector_seed = self.low_selector_seed.to(device=primary_cond.device, dtype=primary_cond.dtype).expand(batch, -1, -1)
+        selector_seed = selector_seed + self.condition_query(primary_cond)[:, None] + step_state[:, None] + manager_shift[:, None]
+        q = self.low_stage_query(selector_seed)
+        normalized_role = self.stage_role_selector_norm(stage_role)
+        normalized_content = self.stage_content_selector_norm(stage_content)
+        k = self.low_stage_role_key(normalized_role) + self.low_stage_content_key(normalized_content)
+        role_v = self.low_stage_role_value(normalized_role)
+        content_v = self.low_stage_content_value(normalized_content)
+        role_context, weights = self._attention(q, k, role_v)
+        content_context = self._merge_heads(torch.matmul(weights, self._split_heads(content_v)))
+        stage_selector = self.low_stage_out(role_context + content_context)
+        # stage_selector is returned only as query_context to the evidence
+        # cross-attention. It is never added to low_value_seed or low residuals.
+        return selector_seed + stage_selector, weights, role_context, content_context
+
+    def _stage_retain_gate(self, x: Tensor, hidden: Tensor) -> Tensor:
+        gi = F.linear(x, self.stage_gru.weight_ih, self.stage_gru.bias_ih)
+        gh = F.linear(hidden, self.stage_gru.weight_hh, self.stage_gru.bias_hh)
+        _, input_update, _ = gi.chunk(3, dim=-1)
+        _, hidden_update, _ = gh.chunk(3, dim=-1)
+        return torch.sigmoid(input_update + hidden_update)
+
+    def _promote_stage(
+        self,
+        *,
+        low_tokens: Tensor,
+        stage_role: Tensor,
+        stage_content: Tensor,
+        primary_cond: Tensor,
+        step_state: Tensor,
+        promote_gate: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        normalized_role = self.stage_role_selector_norm(stage_role)
+        normalized_content = self.stage_content_selector_norm(stage_content)
+        q = (
+            self.stage_role_query(normalized_role)
+            + self.stage_content_query(normalized_content)
+            + self.stage_condition_query(primary_cond + step_state)[:, None]
+        )
+        k = self.stage_low_key(low_tokens)
+        v = self.stage_low_value(low_tokens)
+        promoted, weights = self._attention(q, k, v)
+        promoted = self.stage_promote_out(promoted)
+        gated_promoted = promoted * promote_gate[:, None, None].to(dtype=promoted.dtype)
+        # Normalize first. Reversing this order would cancel the scalar gate
+        # and silently turn promotion strength into a fake control surface.
+        gru_input = self.stage_input_norm(promoted) * promote_gate[:, None, None].to(dtype=promoted.dtype)
+        flat_input = gru_input.reshape(-1, self.hidden_size)
+        flat_hidden = stage_content.reshape(-1, self.hidden_size)
+        retain = self._stage_retain_gate(flat_input, flat_hidden)
+        recurrent = self.stage_gru(flat_input, flat_hidden).reshape_as(stage_content)
+        promote_scale = torch.sigmoid(self.stage_promote_scale_logit).to(device=stage_content.device, dtype=stage_content.dtype)
+        next_content = self.stage_norm(recurrent + promote_scale * gated_promoted)
+        return next_content, weights, promoted, retain, promote_scale
+
+    @staticmethod
+    def _slot_diversity(x: Tensor) -> Tensor:
+        return (x - x.mean(dim=1, keepdim=True)).detach().float().norm(dim=-1).mean()
+
+    def step(
+        self,
+        *,
+        prepared_evidence: PreparedEvidenceMemory,
+        stage_content: Tensor,
+        primary_cond: Tensor,
+        step_index: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        batch = int(primary_cond.shape[0])
+        device = primary_cond.device
+        dtype = primary_cond.dtype
+        if prepared_evidence.batch_size != batch:
+            raise ValueError(
+                f"cached hierarchical workspace batch={prepared_evidence.batch_size} does not match decode batch={batch}"
+            )
+        if tuple(stage_content.shape) != (batch, self.stage_count, self.hidden_size):
+            raise ValueError(
+                f"stage content must be {(batch, self.stage_count, self.hidden_size)}, got {tuple(stage_content.shape)}"
+            )
+        stage_role = self.stage_role.to(device=device, dtype=dtype).expand(batch, -1, -1)
+        step_state = self._step_state(step_index, batch=batch, device=device, dtype=dtype)
+        (
+            manager_shift,
+            role_bias,
+            promote_gate,
+            low_output_strength,
+            stage_output_strength,
+            manager_metrics,
+        ) = self.manager(
+            primary_cond=primary_cond,
+            step_embedding=step_state,
+            stage_role=stage_role,
+            stage_content=stage_content,
+            memory_bank=self.memory_bank,
+            ranges=prepared_evidence.ranges,
+        )
+        query_context, selector_weights, selector_role, selector_content = self._low_selector_context(
+            primary_cond=primary_cond,
+            step_state=step_state,
+            manager_shift=manager_shift,
+            stage_role=stage_role,
+            stage_content=stage_content,
+        )
+
+        # The low value stream starts from a stage-independent seed. All stage
+        # influence is confined to query_context and role_bias above.
+        low = self.low_value_seed.to(device=device, dtype=dtype).expand(batch, -1, -1)
+        low_seed = low
+        key_bias = prepared_evidence.key_bias.to(device=device) + role_bias.to(device=device, dtype=torch.float32)
+        evidence_weight_rows: list[Tensor] = []
+        for block_index, block in enumerate(self.low_blocks):
+            memory_k, memory_v = prepared_evidence.block_kv[block_index]
+            low, weights = block(
+                low,
+                primary_cond,
+                memory_k=memory_k,
+                memory_v=memory_v,
+                key_bias=key_bias,
+                query_context=query_context,
+                read_scale=None,
+            )
+            evidence_weight_rows.append(weights.detach().float())
+        low_pre_norm = low
+        low = self.low_final_norm(low)
+        low_for_action = low
+
+        next_stage_content, promote_weights, promoted, retain, promote_scale = self._promote_stage(
+            low_tokens=low,
+            stage_role=stage_role,
+            stage_content=stage_content,
+            primary_cond=primary_cond,
+            step_state=step_state,
+            promote_gate=promote_gate,
+        )
+        role_component = self.stage_role_out(stage_role)
+        content_component = self.stage_content_out(next_stage_content)
+        stage_for_action = role_component + content_component
+        low_logit_bias = low_output_strength.clamp_min(1e-4).log()
+        stage_logit_bias = stage_output_strength.clamp_min(1e-4).log()
+
+        weights = torch.stack(evidence_weight_rows).mean(dim=0)
+        group_weights = torch.stack([
+            weights[..., start:stop].sum(dim=-1)
+            for start, stop in prepared_evidence.ranges.values()
+        ], dim=-1)
+        selector_prob = selector_weights.detach().float().clamp_min(1e-8)
+        promote_prob = promote_weights.detach().float().clamp_min(1e-8)
+        zero = torch.zeros((), device=device, dtype=torch.float32)
+        role_norm = role_component.detach().float().norm(dim=-1).mean()
+        content_norm = content_component.detach().float().norm(dim=-1).mean()
+        metrics: dict[str, Tensor] = {
+            "workspace_token_count": torch.tensor(float(self.low_count), device=device, dtype=torch.float32),
+            "workspace_token_norm": low_for_action.detach().float().norm(dim=-1).mean(),
+            "workspace_update_norm": (low_pre_norm.detach() - low_seed.detach()).float().norm(dim=-1).mean(),
+            "workspace_global_state_norm": zero,
+            "workspace_global_slot_delta_norm": zero,
+            "workspace_global_slot_diversity": zero,
+            "workspace_source_count": torch.tensor(float(len(prepared_evidence.ranges)), device=device, dtype=torch.float32),
+            "workspace_cached_token_fraction": torch.ones((), device=device, dtype=torch.float32),
+            "workspace_noisy_query_scale": zero,
+            "workspace_progress_query_norm": zero,
+            "workspace_attention_entropy": -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=-1).mean(),
+            "workspace_attention_max": weights.max(dim=-1).values.mean(),
+            "workspace_group_attention_entropy": -(
+                group_weights.clamp_min(1e-8) * group_weights.clamp_min(1e-8).log()
+            ).sum(dim=-1).mean(),
+            "workspace_attention_mass_error": (group_weights.sum(dim=-1) - 1.0).abs().mean(),
+            "hierarchical_low_token_count": torch.tensor(float(self.low_count), device=device, dtype=torch.float32),
+            "hierarchical_low_token_norm": low_for_action.detach().float().norm(dim=-1).mean(),
+            "hierarchical_low_selector_stage_entropy": -(selector_prob * selector_prob.log()).sum(dim=-1).mean(),
+            "hierarchical_low_selector_stage_max": selector_prob.max(dim=-1).values.mean(),
+            "hierarchical_low_selector_stage_effective_slots": torch.exp(
+                -(selector_prob * selector_prob.log()).sum(dim=-1).mean()
+            ),
+            "hierarchical_low_selector_role_norm": selector_role.detach().float().norm(dim=-1).mean(),
+            "hierarchical_low_selector_content_norm": selector_content.detach().float().norm(dim=-1).mean(),
+            "hierarchical_stage_token_count": torch.tensor(float(self.stage_count), device=device, dtype=torch.float32),
+            "hierarchical_stage_role_norm": stage_role.detach().float().norm(dim=-1).mean(),
+            "hierarchical_stage_role_diversity": self._slot_diversity(stage_role),
+            "hierarchical_stage_content_norm": next_stage_content.detach().float().norm(dim=-1).mean(),
+            "hierarchical_stage_content_diversity": self._slot_diversity(next_stage_content),
+            "hierarchical_stage_role_content_cosine": F.cosine_similarity(
+                stage_role.detach().float(), next_stage_content.detach().float(), dim=-1
+            ).mean(),
+            "hierarchical_stage_role_output_norm": role_norm,
+            "hierarchical_stage_content_output_norm": content_norm,
+            "hierarchical_stage_role_output_fraction": role_norm / (role_norm + content_norm).clamp_min(1e-8),
+            "hierarchical_stage_update_norm": (
+                next_stage_content.detach().float() - stage_content.detach().float()
+            ).norm(dim=-1).mean(),
+            "hierarchical_stage_retain_mean": retain.detach().float().mean(),
+            "hierarchical_stage_promote_attention_entropy": -(promote_prob * promote_prob.log()).sum(dim=-1).mean(),
+            "hierarchical_stage_promote_attention_max": promote_prob.max(dim=-1).values.mean(),
+            "hierarchical_stage_promoted_norm": promoted.detach().float().norm(dim=-1).mean(),
+            "hierarchical_stage_promote_scale": promote_scale.detach().float(),
+        }
+        metrics["workspace_group_effective_sources"] = torch.exp(metrics["workspace_group_attention_entropy"])
+        metrics.update(manager_metrics)
+        metrics.update(self.memory_bank.role_attention_metrics(weights, prepared_evidence.ranges))
+        for name, (start, stop) in prepared_evidence.ranges.items():
+            metrics[f"workspace_{name}_attention"] = weights[..., start:stop].sum(dim=-1).mean()
+        transition_mass = [
+            metrics[key]
+            for key in (
+                "workspace_transition_attention",
+                "workspace_transition_delta_attention",
+                "workspace_transition_effect_attention",
+                "workspace_transition_timeline_attention",
+            )
+            if key in metrics
+        ]
+        if transition_mass:
+            metrics["workspace_transition_total_attention"] = torch.stack(transition_mass).sum()
+        return (
+            low_for_action,
+            next_stage_content,
+            stage_for_action,
+            low_logit_bias,
+            stage_logit_bias,
+            metrics,
+        )
 
 
 class LatentCVAEMMDiTBlock(nn.Module):
@@ -2753,6 +3257,37 @@ class LatentCVAEMMDiTBlock(nn.Module):
         bias[start:stop] = -math.log(group_ratio)
         return bias
 
+    @staticmethod
+    def _hierarchical_key_bias(
+        *,
+        action_len: int,
+        cond_len: int,
+        low_start: int,
+        low_len: int,
+        stage_start: int,
+        stage_len: int,
+        noisy_start: int,
+        noisy_len: int,
+        device: torch.device,
+    ) -> Tensor:
+        """Give each condition group one action-horizon unit of prior mass."""
+
+        total = int(action_len) + int(cond_len)
+        reference = max(int(action_len), 1)
+        bias = torch.zeros(total, device=device, dtype=torch.float32)
+        for start, length in (
+            (low_start, low_len),
+            (stage_start, stage_len),
+            (noisy_start, noisy_len),
+        ):
+            absolute_start = int(action_len) + int(start)
+            absolute_stop = min(absolute_start + int(length), total)
+            if int(length) <= 0 or absolute_start >= absolute_stop:
+                continue
+            group_ratio = max(float(absolute_stop - absolute_start) / float(reference), 1e-6)
+            bias[absolute_start:absolute_stop] = -math.log(group_ratio)
+        return bias
+
     def forward(
         self,
         action: Tensor,
@@ -2763,8 +3298,14 @@ class LatentCVAEMMDiTBlock(nn.Module):
         noisy_len: int,
         rollout_start: int,
         rollout_len: int,
+        low_start: int,
+        low_len: int,
+        stage_start: int,
+        stage_len: int,
         update_condition: bool,
         noisy_logit_bias: Tensor | None = None,
+        low_logit_bias: Tensor | None = None,
+        stage_logit_bias: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         action_before = action
         cond_before = cond_tokens
@@ -2781,23 +3322,44 @@ class LatentCVAEMMDiTBlock(nn.Module):
         k_all = torch.cat([ak, ck], dim=2)
         v_all = torch.cat([av, cv], dim=2)
         mask = self._action_mask(int(action.shape[1]), int(cond_tokens.shape[1]), int(noisy_start), int(noisy_len), action.device)
-        key_bias = self._action_key_bias(
-            action_len=int(action.shape[1]),
-            cond_len=int(cond_tokens.shape[1]),
-            rollout_start=int(rollout_start),
-            rollout_len=int(rollout_len),
-            device=action.device,
-        )
+        hierarchical_groups = int(low_len) > 0 or int(stage_len) > 0
+        if hierarchical_groups:
+            key_bias = self._hierarchical_key_bias(
+                action_len=int(action.shape[1]),
+                cond_len=int(cond_tokens.shape[1]),
+                low_start=int(low_start),
+                low_len=int(low_len),
+                stage_start=int(stage_start),
+                stage_len=int(stage_len),
+                noisy_start=int(noisy_start),
+                noisy_len=int(noisy_len),
+                device=action.device,
+            )
+        else:
+            key_bias = self._action_key_bias(
+                action_len=int(action.shape[1]),
+                cond_len=int(cond_tokens.shape[1]),
+                rollout_start=int(rollout_start),
+                rollout_len=int(rollout_len),
+                device=action.device,
+            )
         batch_key_bias = None
-        if noisy_logit_bias is not None and int(noisy_len) > 0:
+        if any(value is not None for value in (noisy_logit_bias, low_logit_bias, stage_logit_bias)):
             total = int(action.shape[1]) + int(cond_tokens.shape[1])
-            start = int(action.shape[1]) + int(noisy_start)
-            stop = min(start + int(noisy_len), total)
-            if start < stop:
-                batch_key_bias = torch.zeros(
-                    int(action.shape[0]), total, device=action.device, dtype=torch.float32
-                )
-                batch_key_bias[:, start:stop] = noisy_logit_bias.float()[:, None]
+            batch_key_bias = torch.zeros(
+                int(action.shape[0]), total, device=action.device, dtype=torch.float32
+            )
+            for local_start, length, value in (
+                (noisy_start, noisy_len, noisy_logit_bias),
+                (low_start, low_len, low_logit_bias),
+                (stage_start, stage_len, stage_logit_bias),
+            ):
+                if value is None or int(length) <= 0:
+                    continue
+                start = int(action.shape[1]) + int(local_start)
+                stop = min(start + int(length), total)
+                if start < stop:
+                    batch_key_bias[:, start:stop] = value.float().reshape(-1, 1)
         action_attn, weights = self._attention(aq, k_all, v_all, mask, key_bias, batch_key_bias)
         action = action + torch.tanh(a_sa_g)[:, None] * self.drop(self.action_out(self._merge_heads(action_attn)))
         action = action + torch.tanh(a_ff_g)[:, None] * self.drop(
@@ -2815,57 +3377,73 @@ class LatentCVAEMMDiTBlock(nn.Module):
 
         action_len = int(action_before.shape[1])
         cond_start = action_len
-        noisy_abs_start = cond_start + int(noisy_start)
-        noisy_abs_stop = min(noisy_abs_start + int(noisy_len), int(weights.shape[-1]))
-        rollout_abs_start = cond_start + int(rollout_start)
-        rollout_abs_stop = min(rollout_abs_start + int(rollout_len), int(weights.shape[-1]))
         batch = int(weights.shape[0])
-        cond_mass = weights[..., cond_start:].detach().float().sum(dim=-1).mean()
-        if noisy_abs_start < noisy_abs_stop:
-            # Per-sample rows [B] (mean over heads and queries) feed the V72
-            # time-stratified gauges; the scalar keeps the legacy console keys.
-            noisy_mass_rows = (
-                weights[..., noisy_abs_start:noisy_abs_stop].detach().float().sum(dim=-1).mean(dim=(1, 2))
-            )
-            noisy_mass = noisy_mass_rows.mean()
-        else:
-            noisy_mass_rows = torch.zeros(batch, device=action.device, dtype=torch.float32)
-            noisy_mass = torch.zeros((), device=action.device, dtype=torch.float32)
-        if rollout_abs_start < rollout_abs_stop:
-            rollout_mass_rows = (
-                weights[..., rollout_abs_start:rollout_abs_stop].detach().float().sum(dim=-1).mean(dim=(1, 2))
-            )
-            rollout_mass = rollout_mass_rows.mean()
-            # Measure enrichment against the exact token-count prior seen by
-            # each causal action query. This accounts for both the rollout
-            # group bias and the partially masked noisy-action condition.
-            cond_prior = torch.ones(int(cond_tokens.shape[1]), device=action.device, dtype=torch.float32)
-            if key_bias is not None:
-                cond_prior = key_bias[cond_start:].float().exp()
-            cond_prior = cond_prior[None].expand(action_len, -1)
-            if mask is not None:
-                cond_prior = cond_prior.masked_fill(mask[:, cond_start:], 0.0)
-            rollout_local_start = max(rollout_abs_start - cond_start, 0)
-            rollout_local_stop = min(rollout_abs_stop - cond_start, int(cond_tokens.shape[1]))
-            expected_share = (
-                cond_prior[:, rollout_local_start:rollout_local_stop].sum(dim=-1)
-                / cond_prior.sum(dim=-1).clamp_min(1e-6)
+        cond_len = int(cond_tokens.shape[1])
+        detached_weights = weights.detach().float()
+        cond_mass_rows = detached_weights[..., cond_start:].sum(dim=-1).mean(dim=(1, 2))
+        cond_mass = cond_mass_rows.mean()
+
+        prior_logits = torch.zeros(batch, action_len, cond_len, device=action.device, dtype=torch.float32)
+        if key_bias is not None:
+            prior_logits = prior_logits + key_bias[cond_start:].float()[None, None]
+        if batch_key_bias is not None:
+            prior_logits = prior_logits + batch_key_bias[:, None, cond_start:].float()
+        cond_prior = prior_logits.exp()
+        if mask is not None:
+            cond_prior = cond_prior.masked_fill(mask[None, :, cond_start:], 0.0)
+        cond_prior_total = cond_prior.sum(dim=-1).clamp_min(1e-6)
+
+        def group_stats(local_start: int, length: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+            start = max(int(local_start), 0)
+            stop = min(start + max(int(length), 0), cond_len)
+            if start >= stop:
+                zeros = torch.zeros(batch, device=action.device, dtype=torch.float32)
+                scalar = torch.zeros((), device=action.device, dtype=torch.float32)
+                return zeros, scalar, zeros, scalar
+            absolute_start = cond_start + start
+            absolute_stop = cond_start + stop
+            mass_rows = detached_weights[..., absolute_start:absolute_stop].sum(dim=-1).mean(dim=(1, 2))
+            expected_rows = (
+                cond_prior[..., start:stop].sum(dim=-1) / cond_prior_total
+            ).mean(dim=1)
+            enrichment = (
+                (mass_rows / cond_mass_rows.clamp_min(1e-6)) / expected_rows.clamp_min(1e-6)
             ).mean()
-            rollout_enrichment = (rollout_mass / cond_mass.clamp_min(1e-6)) / expected_share.clamp_min(1e-6)
+            return mass_rows, mass_rows.mean(), expected_rows, enrichment
+
+        noisy_mass_rows, noisy_mass, _, _ = group_stats(noisy_start, noisy_len)
+        rollout_mass_rows, rollout_mass, _, rollout_enrichment = group_stats(
+            rollout_start, rollout_len
+        )
+        low_mass_rows, low_mass, low_expected_rows, low_enrichment = group_stats(low_start, low_len)
+        stage_mass_rows, stage_mass, stage_expected_rows, stage_enrichment = group_stats(stage_start, stage_len)
+        if hierarchical_groups:
+            workspace_mass_rows = low_mass_rows + stage_mass_rows
+            workspace_expected_rows = low_expected_rows + stage_expected_rows
+            workspace_enrichment = (
+                (workspace_mass_rows / cond_mass_rows.clamp_min(1e-6))
+                / workspace_expected_rows.clamp_min(1e-6)
+            ).mean()
         else:
-            rollout_mass_rows = torch.zeros(batch, device=action.device, dtype=torch.float32)
-            rollout_mass = torch.zeros((), device=action.device, dtype=torch.float32)
-            rollout_enrichment = torch.zeros((), device=action.device, dtype=torch.float32)
+            workspace_mass_rows = rollout_mass_rows
+            workspace_enrichment = rollout_enrichment
         metrics = {
             "action_update_norm": (action - action_before).detach().float().norm(dim=-1).mean(),
             "cond_update_norm": cond_update_norm,
             "action_cond_attn": cond_mass,
             "action_noisy_attn": noisy_mass,
+            "action_low_attn": low_mass,
+            "action_stage_attn": stage_mass,
+            "action_low_enrichment": low_enrichment,
+            "action_stage_enrichment": stage_enrichment,
+            "action_workspace_attn": workspace_mass_rows.mean(),
+            "action_workspace_enrichment": workspace_enrichment,
             "action_rollout_attn": rollout_mass,
             "action_rollout_enrichment": rollout_enrichment,
-            # [B] rows; in workspace mode the "rollout" range tracks the
-            # workspace group (see _mmdit_condition_tokens).
             "action_noisy_attn_rows": noisy_mass_rows,
+            "action_low_attn_rows": low_mass_rows,
+            "action_stage_attn_rows": stage_mass_rows,
+            "action_workspace_attn_rows": workspace_mass_rows,
             "action_rollout_attn_rows": rollout_mass_rows,
         }
         return action, cond_tokens, metrics
@@ -3268,6 +3846,18 @@ class LatentCVAEActionDecoder(nn.Module):
                 else None
             )
             self.evidence_workspace = SemanticEvidenceWorkspace(config)
+            self.hierarchical_workspace = (
+                HierarchicalEvidenceWorkspace(config)
+                if int(getattr(config, "latent_cvae_hierarchical_workspace", 0))
+                else None
+            )
+            if self.hierarchical_workspace is not None:
+                # Keep legacy parameters loadable for checkpoint compatibility,
+                # but exclude unused legacy workspace/action paths from
+                # gradients. Otherwise the old z-conditioned action blocks can
+                # solve the sample before low/stage MMDiT refinement is used.
+                self.evidence_workspace.requires_grad_(False)
+                self.blocks.requires_grad_(False)
         else:
             self.mmdit_blocks = nn.ModuleList()
             self.mmdit_traj_cond_proj = None
@@ -3282,6 +3872,7 @@ class LatentCVAEActionDecoder(nn.Module):
             self.mmdit_primary_condition_norm = None
             self.mmdit_noisy_norm = None
             self.evidence_workspace = None
+            self.hierarchical_workspace = None
         self.event_gate = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.Sigmoid())
         self.event_transition = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
         self.velocity_head = TransitionAwarePhysicalVelocityHead(config)
@@ -3540,6 +4131,8 @@ class LatentCVAEActionDecoder(nn.Module):
         time: Tensor,
         noisy_rows: Tensor,
         workspace_rows: Tensor,
+        low_rows: Tensor | None = None,
+        stage_rows: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """V72 S3 gauge: x_t vs workspace attention share, stratified by flow time.
 
@@ -3555,12 +4148,16 @@ class LatentCVAEActionDecoder(nn.Module):
         t = time.detach().float().reshape(-1)
         noisy_rows = noisy_rows.detach().float().reshape(-1)
         workspace_rows = workspace_rows.detach().float().reshape(-1)
+        low_rows = torch.zeros_like(workspace_rows) if low_rows is None else low_rows.detach().float().reshape(-1)
+        stage_rows = torch.zeros_like(workspace_rows) if stage_rows is None else stage_rows.detach().float().reshape(-1)
         out: dict[str, Tensor] = {}
         edges = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0 + 1e-6)
         for i in range(3):
             mask = ((t >= edges[i]) & (t < edges[i + 1])).float()
             out[f"mmdit_noisy_attn_t{i}_sum"] = (noisy_rows * mask).sum()
             out[f"mmdit_workspace_attn_t{i}_sum"] = (workspace_rows * mask).sum()
+            out[f"mmdit_low_attn_t{i}_sum"] = (low_rows * mask).sum()
+            out[f"mmdit_stage_attn_t{i}_sum"] = (stage_rows * mask).sum()
             out[f"mmdit_attn_t{i}_count"] = mask.sum()
         return out
 
@@ -3575,7 +4172,9 @@ class LatentCVAEActionDecoder(nn.Module):
         layer_stack: Tensor | None,
         progress_tokens: Tensor | None,
         workspace_tokens: Tensor | None = None,
-    ) -> tuple[Tensor, int, int, int, int, Tensor]:
+        low_workspace_tokens: Tensor | None = None,
+        stage_workspace_tokens: Tensor | None = None,
+    ) -> tuple[Tensor, MMDiTConditionLayout, Tensor]:
         if (
             self.mmdit_traj_cond_proj is None
             or self.mmdit_cond_global_proj is None
@@ -3586,6 +4185,26 @@ class LatentCVAEActionDecoder(nn.Module):
         dtype = noisy_tokens.dtype
         device = noisy_tokens.device
         type_embed = self.mmdit_type_embed.to(device=device, dtype=dtype)
+        hierarchical = low_workspace_tokens is not None or stage_workspace_tokens is not None
+        if hierarchical:
+            if low_workspace_tokens is None or stage_workspace_tokens is None:
+                raise ValueError("hierarchical MMDiT conditions require both low and stage token groups")
+            low_group = low_workspace_tokens.to(device=device, dtype=dtype) + type_embed[:, 0:1]
+            stage_group = stage_workspace_tokens.to(device=device, dtype=dtype) + type_embed[:, 4:5]
+            noisy_group = noisy_tokens + type_embed[:, 2:3]
+            low_start = 0
+            stage_start = int(low_group.shape[1])
+            noisy_start = stage_start + int(stage_group.shape[1])
+            cond_tokens = torch.cat([low_group, stage_group, noisy_group], dim=1)
+            layout = MMDiTConditionLayout(
+                noisy_start=noisy_start,
+                noisy_len=int(noisy_group.shape[1]),
+                low_start=low_start,
+                low_len=int(low_group.shape[1]),
+                stage_start=stage_start,
+                stage_len=int(stage_group.shape[1]),
+            )
+            return cond_tokens, layout, cond_tokens.detach().float().norm(dim=-1).mean()
         if workspace_tokens is not None:
             workspace_group = workspace_tokens.to(device=device, dtype=dtype) + type_embed[:, 0:1]
             noisy_start = int(workspace_group.shape[1])
@@ -3594,7 +4213,13 @@ class LatentCVAEActionDecoder(nn.Module):
             # The generic balanced group range in LatentCVAEMMDiTBlock is used
             # for the workspace here. Source-level rollout mass is measured by
             # SemanticEvidenceWorkspace itself.
-            return cond_tokens, noisy_start, int(noisy_tokens.shape[1]), 0, noisy_start, cond_norm
+            layout = MMDiTConditionLayout(
+                noisy_start=noisy_start,
+                noisy_len=int(noisy_tokens.shape[1]),
+                rollout_start=0,
+                rollout_len=noisy_start,
+            )
+            return cond_tokens, layout, cond_norm
         groups: list[Tensor] = []
         if layer_stack is not None:
             groups.append(layer_stack.to(device=device, dtype=dtype) + type_embed[:, 0:1])
@@ -3621,7 +4246,13 @@ class LatentCVAEActionDecoder(nn.Module):
             groups.append(self.mmdit_progress_proj(progress_tokens.to(device=device, dtype=dtype)) + type_embed[:, 4:5])
         cond_tokens = torch.cat(groups, dim=1)
         cond_norm = cond_tokens.detach().float().norm(dim=-1).mean()
-        return cond_tokens, noisy_start, int(noisy_tokens.shape[1]), rollout_start, rollout_len, cond_norm
+        layout = MMDiTConditionLayout(
+            noisy_start=noisy_start,
+            noisy_len=int(noisy_tokens.shape[1]),
+            rollout_start=rollout_start,
+            rollout_len=rollout_len,
+        )
+        return cond_tokens, layout, cond_norm
 
     def _decode_with_z_mmdit(
         self,
@@ -3668,7 +4299,7 @@ class LatentCVAEActionDecoder(nn.Module):
         if rollout_tokens is not None:
             workspace_sources["rollout"] = rollout_tokens
         progress_query_context = torch.zeros(batch, self.hidden_size, device=device, dtype=dtype)
-        progress_as_value = bool(int(getattr(cfg, "latent_cvae_workspace_progress_value", 1)))
+        progress_as_value = bool(int(getattr(self.config, "latent_cvae_workspace_progress_value", 1)))
         if progress_tokens is not None and progress_as_value:
             workspace_sources["progress"] = progress_tokens
         elif progress_tokens is not None:
@@ -3682,7 +4313,7 @@ class LatentCVAEActionDecoder(nn.Module):
         )
         workspace_metrics["workspace_noisy_query_scale"] = workspace_query_scale
         workspace_metrics["workspace_progress_query_norm"] = progress_query_context.detach().float().norm(dim=-1).mean()
-        cond_tokens, noisy_start, noisy_len, rollout_start, rollout_len, cond_token_norm = self._mmdit_condition_tokens(
+        cond_tokens, layout, cond_token_norm = self._mmdit_condition_tokens(
             noisy_tokens=noisy_tokens,
             trajectory_tokens=trajectory_tokens,
             rollout_tokens=rollout_tokens,
@@ -3706,10 +4337,14 @@ class LatentCVAEActionDecoder(nn.Module):
                 action,
                 cond_tokens,
                 primary_cond,
-                noisy_start=noisy_start,
-                noisy_len=noisy_len,
-                rollout_start=rollout_start,
-                rollout_len=rollout_len,
+                noisy_start=layout.noisy_start,
+                noisy_len=layout.noisy_len,
+                rollout_start=layout.rollout_start,
+                rollout_len=layout.rollout_len,
+                low_start=layout.low_start,
+                low_len=layout.low_len,
+                stage_start=layout.stage_start,
+                stage_len=layout.stage_len,
                 update_condition=update_condition,
                 noisy_logit_bias=noisy_logit_bias,
             )
@@ -3717,10 +4352,10 @@ class LatentCVAEActionDecoder(nn.Module):
             cond_updates.append(metrics["cond_update_norm"].to(device=device))
             cond_attn_rows.append(metrics["action_cond_attn"].to(device=device))
             noisy_attn_rows.append(metrics["action_noisy_attn"].to(device=device))
-            rollout_attn_rows.append(metrics["action_rollout_attn"].to(device=device))
-            rollout_enrichment_rows.append(metrics["action_rollout_enrichment"].to(device=device))
+            rollout_attn_rows.append(metrics["action_workspace_attn"].to(device=device))
+            rollout_enrichment_rows.append(metrics["action_workspace_enrichment"].to(device=device))
             noisy_attn_sample_rows.append(metrics["action_noisy_attn_rows"].to(device=device))
-            workspace_attn_sample_rows.append(metrics["action_rollout_attn_rows"].to(device=device))
+            workspace_attn_sample_rows.append(metrics["action_workspace_attn_rows"].to(device=device))
         action = self.mmdit_action_norm(action)
         out = self._emit_action(action, primary_cond)
         z0 = torch.zeros((), device=device, dtype=torch.float32)
@@ -3798,8 +4433,9 @@ class LatentCVAEActionDecoder(nn.Module):
             + cond_time[:, None]
         )
         noisy_branch_ratio = noisy_branch_norm / action.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
-        for block in self.blocks:
-            action = block(action, cond_time)
+        if not hierarchical_refine:
+            for block in self.blocks:
+                action = block(action, cond_time)
         out = self._emit_action(action, cond)
         out.update({
             "adaptive_noisy_gate_mean": noisy_gate_mean.to(device=device),
@@ -3918,13 +4554,13 @@ class LatentCVAEActionDecoder(nn.Module):
             # effect == delta. Keep the remaining two sources semantically
             # explicit instead of treating their mean as an anonymous memory.
             evidence_sources["transition_delta"] = transition_tokens[:, 0:1]
-            evidence_sources["transition_event"] = transition_tokens[:, 1:2]
+            evidence_sources["transition_timeline"] = transition_tokens[:, 1:2]
             if int(transition_tokens.shape[1]) > 2:
                 evidence_sources["transition"] = transition_tokens[:, 2:]
         elif int(transition_tokens.shape[1]) >= 3:
             evidence_sources["transition_delta"] = transition_tokens[:, 0:1]
             evidence_sources["transition_effect"] = transition_tokens[:, 1:2]
-            evidence_sources["transition_event"] = transition_tokens[:, 2:3]
+            evidence_sources["transition_timeline"] = transition_tokens[:, 2:3]
             if int(transition_tokens.shape[1]) > 3:
                 evidence_sources["transition"] = transition_tokens[:, 3:]
         elif int(transition_tokens.shape[1]) > 0:
@@ -4115,6 +4751,10 @@ class LatentCVAEActionDecoder(nn.Module):
             "mmdit_action_noisy_attention",
             "mmdit_action_workspace_attention",
             "mmdit_action_workspace_enrichment",
+            "mmdit_action_low_attention",
+            "mmdit_action_stage_attention",
+            "mmdit_action_low_enrichment",
+            "mmdit_action_stage_enrichment",
             "mmdit_action_rollout_attention",
             "mmdit_action_rollout_enrichment",
             "mmdit_action_token_norm",
@@ -4126,6 +4766,12 @@ class LatentCVAEActionDecoder(nn.Module):
             "mmdit_workspace_attn_t0_sum",
             "mmdit_workspace_attn_t1_sum",
             "mmdit_workspace_attn_t2_sum",
+            "mmdit_low_attn_t0_sum",
+            "mmdit_low_attn_t1_sum",
+            "mmdit_low_attn_t2_sum",
+            "mmdit_stage_attn_t0_sum",
+            "mmdit_stage_attn_t1_sum",
+            "mmdit_stage_attn_t2_sum",
             "mmdit_attn_t0_count",
             "mmdit_attn_t1_count",
             "mmdit_attn_t2_count",
@@ -4180,13 +4826,49 @@ class LatentCVAEActionDecoder(nn.Module):
             "workspace_controller_role_state_logit",
             "workspace_controller_role_layer_logit",
             "workspace_controller_role_global_logit",
+            "hierarchical_low_token_count",
+            "hierarchical_low_token_norm",
+            "hierarchical_low_selector_stage_entropy",
+            "hierarchical_low_selector_stage_max",
+            "hierarchical_low_selector_stage_effective_slots",
+            "hierarchical_low_selector_role_norm",
+            "hierarchical_low_selector_content_norm",
+            "hierarchical_stage_token_count",
+            "hierarchical_stage_role_norm",
+            "hierarchical_stage_role_diversity",
+            "hierarchical_stage_content_norm",
+            "hierarchical_stage_content_diversity",
+            "hierarchical_stage_role_content_cosine",
+            "hierarchical_stage_role_output_norm",
+            "hierarchical_stage_content_output_norm",
+            "hierarchical_stage_role_output_fraction",
+            "hierarchical_stage_update_norm",
+            "hierarchical_stage_retain_mean",
+            "hierarchical_stage_promote_attention_entropy",
+            "hierarchical_stage_promote_attention_max",
+            "hierarchical_stage_promoted_norm",
+            "hierarchical_stage_promote_scale",
+            "hierarchical_manager_stage_attention_entropy",
+            "hierarchical_manager_stage_attention_max",
+            "hierarchical_manager_role_entropy",
+            "hierarchical_manager_role_max",
+            "hierarchical_manager_query_shift_norm",
+            "hierarchical_manager_promote_gate",
+            "hierarchical_manager_low_output_strength",
+            "hierarchical_manager_stage_output_strength",
+            "hierarchical_manager_role_geom_prob",
+            "hierarchical_manager_role_transition_prob",
+            "hierarchical_manager_role_event_prob",
+            "hierarchical_manager_role_state_prob",
+            "hierarchical_manager_role_layer_prob",
+            "hierarchical_manager_role_global_prob",
             "workspace_layer_attention",
             "workspace_scan_attention",
             "workspace_lateral_attention",
             "workspace_transition_attention",
             "workspace_transition_delta_attention",
             "workspace_transition_effect_attention",
-            "workspace_transition_event_attention",
+            "workspace_transition_timeline_attention",
             "workspace_transition_total_attention",
             "workspace_context_attention",
             "workspace_visual_attention",
@@ -4978,6 +5660,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         time_emb = self.time(time.to(dtype=dtype))
         z0 = torch.zeros((), device=device, dtype=torch.float32)
         mmdit_refine = bool(int(getattr(cfg, "latent_cvae_mmdit_decoder", 0)) and len(self.mmdit_blocks) > 0)
+        hierarchical_refine = bool(mmdit_refine and int(getattr(cfg, "latent_cvae_hierarchical_workspace", 0)))
         primary_cond = self._mmdit_primary_condition(z=z, time_emb=time_emb) if mmdit_refine else cond + self.time_lift(time_emb)
         primary_z_effect = self._mmdit_primary_z_effect(z=z, time_emb=time_emb, primary_cond=primary_cond) if mmdit_refine else z0
         cond_time = primary_cond
@@ -5003,7 +5686,9 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         noisy_branch_ratio = noisy_branch_norm / base_raw.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
         base_action = self._coarse_temporal_base(base_raw)
         base_highfreq = (base_raw - base_action).detach().float().norm(dim=-1).mean()
-        progress = self._latent_progress(batch=batch, cond_time=cond_time, z=z)
+        # Hierarchical stage memory replaces the external progress/capsule
+        # system on the MMDiT mainline. Legacy modules remain intact for A/Bs.
+        progress = None if hierarchical_refine else self._latent_progress(batch=batch, cond_time=cond_time, z=z)
         seed_entropy = z0
         seed_max = z0
         seed_temperature = z0
@@ -5033,39 +5718,54 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             action = base_action + self.z_to_token(z.to(device=device, dtype=dtype))[:, None]
         for block in self.blocks:
             action = block(action, cond_time)
-        context_capsules, capsule_layer_entropy, capsule_layer_max = self._context_capsules(
-            cond_time=cond_time,
-            layer_stack=layer_stack,
-            progress=progress,
-        )
+        if hierarchical_refine:
+            context_capsules = None
+            capsule_layer_entropy = z0
+            capsule_layer_max = z0
+        else:
+            context_capsules, capsule_layer_entropy, capsule_layer_max = self._context_capsules(
+                cond_time=cond_time,
+                layer_stack=layer_stack,
+                progress=progress,
+            )
         if context_capsules is not None and layer_stack is not None:
             route_floor_terms.append(self._route_entropy_floor(capsule_layer_entropy, int(layer_stack.shape[1])))
-        mmdit_noisy_start = 0
-        mmdit_noisy_len = 0
-        mmdit_rollout_start = 0
-        mmdit_rollout_len = 0
         mmdit_cond_token_norm = z0
         workspace_static_memory: PreparedEvidenceMemory | None = None
+        hierarchical_evidence: PreparedEvidenceMemory | None = None
+        hierarchical_stage_content: Tensor | None = None
         if mmdit_refine:
             if self.mmdit_step_cond_proj is None or self.mmdit_type_embed is None or self.mmdit_action_norm is None:
                 raise RuntimeError("MMDiT refine modules are not initialized")
-            if self.evidence_workspace is None:
-                raise RuntimeError("MMDiT evidence workspace is not initialized")
             static_sources = dict(evidence_sources or {})
-            # Full layer memory is consumed by the step-dependent router. All
-            # remaining sources are invariant across refine steps within this
-            # prior/posterior decode and can safely reuse block-specific K/V.
-            static_sources.pop("layer", None)
             if rollout_tokens is not None:
                 static_sources["rollout"] = rollout_tokens
-            if context_capsules is not None:
-                static_sources["capsule"] = context_capsules
-            workspace_static_memory = self.evidence_workspace.prepare_static_memory(
-                static_sources,
-                batch_size=batch,
-                device=device,
-                dtype=dtype,
-            )
+            if hierarchical_refine:
+                if self.hierarchical_workspace is None:
+                    raise RuntimeError("hierarchical evidence workspace is not initialized")
+                # Full layer_stack and all deploy-safe evidence remain raw,
+                # static values. No action-routed layer/progress value is added.
+                hierarchical_evidence = self.hierarchical_workspace.prepare_evidence(
+                    static_sources,
+                    batch_size=batch,
+                    device=device,
+                    dtype=dtype,
+                )
+                hierarchical_stage_content = self.hierarchical_workspace.init_stage(primary_cond)
+            else:
+                if self.evidence_workspace is None:
+                    raise RuntimeError("MMDiT evidence workspace is not initialized")
+                # Full layer memory is consumed by the legacy step-dependent
+                # router; other invariant sources reuse block-specific K/V.
+                static_sources.pop("layer", None)
+                if context_capsules is not None:
+                    static_sources["capsule"] = context_capsules
+                workspace_static_memory = self.evidence_workspace.prepare_static_memory(
+                    static_sources,
+                    batch_size=batch,
+                    device=device,
+                    dtype=dtype,
+                )
         micro_enabled = bool((not mmdit_refine) and int(getattr(cfg, "adaptive_cvae_micro_control", 1)) and progress is not None)
         progress_center = self._micro_initial_progress(action) if micro_enabled else None
         prev_velocity = torch.zeros_like(action)
@@ -5075,10 +5775,16 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         mmdit_cond_update_rows: list[Tensor] = []
         mmdit_cond_attn_rows: list[Tensor] = []
         mmdit_noisy_attn_rows: list[Tensor] = []
-        mmdit_rollout_attn_rows: list[Tensor] = []
-        mmdit_rollout_enrichment_rows: list[Tensor] = []
+        mmdit_workspace_attn_rows: list[Tensor] = []
+        mmdit_workspace_enrichment_rows: list[Tensor] = []
+        mmdit_low_attn_rows: list[Tensor] = []
+        mmdit_stage_attn_rows: list[Tensor] = []
+        mmdit_low_enrichment_rows: list[Tensor] = []
+        mmdit_stage_enrichment_rows: list[Tensor] = []
         mmdit_noisy_attn_sample_rows: list[Tensor] = []
         mmdit_workspace_attn_sample_rows: list[Tensor] = []
+        mmdit_low_attn_sample_rows: list[Tensor] = []
+        mmdit_stage_attn_sample_rows: list[Tensor] = []
         workspace_progress_update_rows: list[Tensor] = []
         workspace_progress_dependence_rows: list[Tensor] = []
         workspace_metric_rows: dict[str, list[Tensor]] = {}
@@ -5116,6 +5822,86 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         micro_supervision_logit_rows: list[Tensor] = []
         t = time.to(device=device, dtype=dtype)[:, None, None]
         for step in range(max(self.refine_steps, 0)):
+            if hierarchical_refine:
+                if (
+                    self.hierarchical_workspace is None
+                    or hierarchical_evidence is None
+                    or hierarchical_stage_content is None
+                ):
+                    raise RuntimeError("hierarchical workspace state was not prepared")
+                (
+                    low_workspace_tokens,
+                    hierarchical_stage_content,
+                    stage_workspace_tokens,
+                    low_logit_bias,
+                    stage_logit_bias,
+                    workspace_metrics,
+                ) = self.hierarchical_workspace.step(
+                    prepared_evidence=hierarchical_evidence,
+                    stage_content=hierarchical_stage_content,
+                    primary_cond=primary_cond,
+                    step_index=step,
+                )
+                z_token = self.z_to_token(z.to(device=device, dtype=dtype))
+                step_cond_tokens, layout, mmdit_cond_token_norm = self._mmdit_condition_tokens(
+                    noisy_tokens=noisy_branch,
+                    trajectory_tokens=trajectory_tokens,
+                    rollout_tokens=rollout_tokens,
+                    cond_time=primary_cond,
+                    z_token=z_token,
+                    layer_stack=layer_stack,
+                    progress_tokens=None,
+                    low_workspace_tokens=low_workspace_tokens,
+                    stage_workspace_tokens=stage_workspace_tokens,
+                )
+                before = action
+                mmdit_block = self.mmdit_blocks[min(step, len(self.mmdit_blocks) - 1)]
+                action, _, mmdit_metrics = mmdit_block(
+                    action,
+                    step_cond_tokens,
+                    primary_cond,
+                    noisy_start=layout.noisy_start,
+                    noisy_len=layout.noisy_len,
+                    rollout_start=layout.rollout_start,
+                    rollout_len=layout.rollout_len,
+                    low_start=layout.low_start,
+                    low_len=layout.low_len,
+                    stage_start=layout.stage_start,
+                    stage_len=layout.stage_len,
+                    update_condition=False,
+                    noisy_logit_bias=noisy_logit_bias,
+                    low_logit_bias=low_logit_bias,
+                    stage_logit_bias=stage_logit_bias,
+                )
+                update = action - before
+                update_energy = update.float().square().mean()
+                action_energy = before.detach().float().square().mean().clamp_min(1e-6)
+                update_ratio_sq = update_energy / action_energy
+                update_ratio = update_ratio_sq.detach().clamp_min(0.0).sqrt()
+                regularizer_terms.append(F.relu(update_ratio_sq - 0.25).square())
+                workspace_metrics["workspace_action_update_ratio"] = update_ratio
+                for key, value in workspace_metrics.items():
+                    workspace_metric_rows.setdefault(key, []).append(value.to(device=device))
+                prev_velocity = update
+                keep = torch.ones((), device=device, dtype=torch.float32)
+                mmdit_action_update_rows.append(mmdit_metrics["action_update_norm"].to(device=device))
+                mmdit_cond_update_rows.append(mmdit_metrics["cond_update_norm"].to(device=device))
+                mmdit_cond_attn_rows.append(mmdit_metrics["action_cond_attn"].to(device=device))
+                mmdit_noisy_attn_rows.append(mmdit_metrics["action_noisy_attn"].to(device=device))
+                mmdit_workspace_attn_rows.append(mmdit_metrics["action_workspace_attn"].to(device=device))
+                mmdit_workspace_enrichment_rows.append(mmdit_metrics["action_workspace_enrichment"].to(device=device))
+                mmdit_low_attn_rows.append(mmdit_metrics["action_low_attn"].to(device=device))
+                mmdit_stage_attn_rows.append(mmdit_metrics["action_stage_attn"].to(device=device))
+                mmdit_low_enrichment_rows.append(mmdit_metrics["action_low_enrichment"].to(device=device))
+                mmdit_stage_enrichment_rows.append(mmdit_metrics["action_stage_enrichment"].to(device=device))
+                mmdit_noisy_attn_sample_rows.append(mmdit_metrics["action_noisy_attn_rows"].to(device=device))
+                mmdit_workspace_attn_sample_rows.append(mmdit_metrics["action_workspace_attn_rows"].to(device=device))
+                mmdit_low_attn_sample_rows.append(mmdit_metrics["action_low_attn_rows"].to(device=device))
+                mmdit_stage_attn_sample_rows.append(mmdit_metrics["action_stage_attn_rows"].to(device=device))
+                update_rows.append(update.detach().float().norm(dim=-1).mean())
+                continue_rows.append(keep)
+                continue
+
             step_bias = self._refine_step_bias(step, action)
             route_action = action + step_bias
             temperature_rows.append(self._adaptive_route_temperature(route_action).detach().float().mean())
@@ -5157,14 +5943,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 workspace_metrics["workspace_noisy_query_scale"] = workspace_query_scale
                 workspace_metrics["workspace_progress_query_norm"] = progress_query_context.detach().float().norm(dim=-1).mean()
                 z_token = self.z_to_token(z.to(device=device, dtype=dtype))
-                (
-                    step_cond_tokens,
-                    mmdit_noisy_start,
-                    mmdit_noisy_len,
-                    mmdit_rollout_start,
-                    mmdit_rollout_len,
-                    mmdit_cond_token_norm,
-                ) = self._mmdit_condition_tokens(
+                step_cond_tokens, layout, mmdit_cond_token_norm = self._mmdit_condition_tokens(
                     noisy_tokens=noisy_branch,
                     trajectory_tokens=trajectory_tokens,
                     rollout_tokens=rollout_tokens,
@@ -5180,10 +5959,14 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                     action,
                     step_cond_tokens,
                     primary_cond,
-                    noisy_start=mmdit_noisy_start,
-                    noisy_len=mmdit_noisy_len,
-                    rollout_start=mmdit_rollout_start,
-                    rollout_len=mmdit_rollout_len,
+                    noisy_start=layout.noisy_start,
+                    noisy_len=layout.noisy_len,
+                    rollout_start=layout.rollout_start,
+                    rollout_len=layout.rollout_len,
+                    low_start=layout.low_start,
+                    low_len=layout.low_len,
+                    stage_start=layout.stage_start,
+                    stage_len=layout.stage_len,
                     update_condition=False,
                     noisy_logit_bias=noisy_logit_bias,
                 )
@@ -5215,10 +5998,16 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 mmdit_cond_update_rows.append(mmdit_metrics["cond_update_norm"].to(device=device))
                 mmdit_cond_attn_rows.append(mmdit_metrics["action_cond_attn"].to(device=device))
                 mmdit_noisy_attn_rows.append(mmdit_metrics["action_noisy_attn"].to(device=device))
-                mmdit_rollout_attn_rows.append(mmdit_metrics["action_rollout_attn"].to(device=device))
-                mmdit_rollout_enrichment_rows.append(mmdit_metrics["action_rollout_enrichment"].to(device=device))
+                mmdit_workspace_attn_rows.append(mmdit_metrics["action_workspace_attn"].to(device=device))
+                mmdit_workspace_enrichment_rows.append(mmdit_metrics["action_workspace_enrichment"].to(device=device))
+                mmdit_low_attn_rows.append(mmdit_metrics["action_low_attn"].to(device=device))
+                mmdit_stage_attn_rows.append(mmdit_metrics["action_stage_attn"].to(device=device))
+                mmdit_low_enrichment_rows.append(mmdit_metrics["action_low_enrichment"].to(device=device))
+                mmdit_stage_enrichment_rows.append(mmdit_metrics["action_stage_enrichment"].to(device=device))
                 mmdit_noisy_attn_sample_rows.append(mmdit_metrics["action_noisy_attn_rows"].to(device=device))
-                mmdit_workspace_attn_sample_rows.append(mmdit_metrics["action_rollout_attn_rows"].to(device=device))
+                mmdit_workspace_attn_sample_rows.append(mmdit_metrics["action_workspace_attn_rows"].to(device=device))
+                mmdit_low_attn_sample_rows.append(mmdit_metrics["action_low_attn_rows"].to(device=device))
+                mmdit_stage_attn_sample_rows.append(mmdit_metrics["action_stage_attn_rows"].to(device=device))
                 update_rows.append(update.detach().float().norm(dim=-1).mean())
                 entropy_rows.append(layer_entropy.to(device=device))
                 max_rows.append(layer_max.to(device=device))
@@ -5437,8 +6226,12 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "mmdit_cond_update_norm": torch.stack(mmdit_cond_update_rows).mean() if mmdit_cond_update_rows else z0,
             "mmdit_action_cond_attention": torch.stack(mmdit_cond_attn_rows).mean() if mmdit_cond_attn_rows else z0,
             "mmdit_action_noisy_attention": torch.stack(mmdit_noisy_attn_rows).mean() if mmdit_noisy_attn_rows else z0,
-            "mmdit_action_workspace_attention": torch.stack(mmdit_rollout_attn_rows).mean() if mmdit_rollout_attn_rows else z0,
-            "mmdit_action_workspace_enrichment": torch.stack(mmdit_rollout_enrichment_rows).mean() if mmdit_rollout_enrichment_rows else z0,
+            "mmdit_action_workspace_attention": torch.stack(mmdit_workspace_attn_rows).mean() if mmdit_workspace_attn_rows else z0,
+            "mmdit_action_workspace_enrichment": torch.stack(mmdit_workspace_enrichment_rows).mean() if mmdit_workspace_enrichment_rows else z0,
+            "mmdit_action_low_attention": torch.stack(mmdit_low_attn_rows).mean() if mmdit_low_attn_rows else z0,
+            "mmdit_action_stage_attention": torch.stack(mmdit_stage_attn_rows).mean() if mmdit_stage_attn_rows else z0,
+            "mmdit_action_low_enrichment": torch.stack(mmdit_low_enrichment_rows).mean() if mmdit_low_enrichment_rows else z0,
+            "mmdit_action_stage_enrichment": torch.stack(mmdit_stage_enrichment_rows).mean() if mmdit_stage_enrichment_rows else z0,
             "mmdit_action_rollout_attention": workspace_rollout,
             "mmdit_action_rollout_enrichment": workspace_rollout_enrichment,
             "mmdit_action_token_norm": action.detach().float().norm(dim=-1).mean() if mmdit_refine else z0,
@@ -5452,6 +6245,8 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
                 time,
                 torch.stack(mmdit_noisy_attn_sample_rows).mean(dim=0) if mmdit_noisy_attn_sample_rows else torch.zeros(batch, device=device, dtype=torch.float32),
                 torch.stack(mmdit_workspace_attn_sample_rows).mean(dim=0) if mmdit_workspace_attn_sample_rows else torch.zeros(batch, device=device, dtype=torch.float32),
+                torch.stack(mmdit_low_attn_sample_rows).mean(dim=0) if mmdit_low_attn_sample_rows else None,
+                torch.stack(mmdit_stage_attn_sample_rows).mean(dim=0) if mmdit_stage_attn_sample_rows else None,
             ),
             "adaptive_micro_step_mean": torch.stack(micro_step_rows).mean() if micro_step_rows else z0,
             "adaptive_micro_step_std": torch.stack(micro_step_std_rows).mean() if micro_step_std_rows else z0,
@@ -6764,6 +7559,7 @@ class V39PolicySystem(nn.Module):
                 keep_diagnostic = (
                     key.startswith("latent_cvae_workspace_")
                     or key.startswith("latent_cvae_mmdit_")
+                    or key.startswith("latent_cvae_hierarchical_")
                     or key in (
                         "latent_cvae_primary_condition_norm",
                         "latent_cvae_primary_z_effect_norm",

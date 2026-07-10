@@ -16,7 +16,7 @@
 #
 # Important diagnostic semantics:
 #   - wtrn = transition/consequence memory consumption.  This includes the
-#            current transition_event slot, which is still derived from
+#            current transition_timeline slot, which is still derived from
 #            controlled_delta and is not trusted as true event evidence yet.
 #   - wevt = true event role. It should stay zero until a real event evidence
 #            source is added.

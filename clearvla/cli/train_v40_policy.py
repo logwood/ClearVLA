@@ -313,6 +313,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-workspace-slot-time-state", type=int, default=1, help="Make workspace time-state slot-aware instead of broadcasting one identical z+time vector to every workspace token.")
     parser.add_argument("--latent-cvae-workspace-slot-time-scale", type=float, default=0.10, help="Scale of the slot-specific component used by --latent-cvae-workspace-slot-time-state.")
     parser.add_argument("--latent-cvae-workspace-controller", type=int, default=0, help="V74B: use the central workspace controller for role bias, capacity, and query modulation.")
+    parser.add_argument("--latent-cvae-hierarchical-workspace", type=int, default=0, help="V75: use temporary low evidence reads plus persistent role-separated stage memory.")
+    parser.add_argument("--latent-cvae-stage-slots", type=int, default=6, help="Number of persistent stage-memory slots in the hierarchical workspace.")
+    parser.add_argument("--latent-cvae-stage-promote-scale-init", type=float, default=0.05, help="Initial bounded residual scale for low-to-stage promotion.")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -591,6 +594,9 @@ def main() -> None:
         latent_cvae_workspace_slot_time_state=args.latent_cvae_workspace_slot_time_state,
         latent_cvae_workspace_slot_time_scale=args.latent_cvae_workspace_slot_time_scale,
         latent_cvae_workspace_controller=args.latent_cvae_workspace_controller,
+        latent_cvae_hierarchical_workspace=args.latent_cvae_hierarchical_workspace,
+        latent_cvae_stage_slots=args.latent_cvae_stage_slots,
+        latent_cvae_stage_promote_scale_init=args.latent_cvae_stage_promote_scale_init,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -751,9 +757,15 @@ def main() -> None:
             "latent_cvae_workspace_slot_time_state": bool(int(args.latent_cvae_workspace_slot_time_state)),
             "latent_cvae_workspace_slot_time_scale": float(args.latent_cvae_workspace_slot_time_scale),
             "latent_cvae_workspace_controller": bool(int(args.latent_cvae_workspace_controller)),
+            "latent_cvae_hierarchical_workspace": bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_stage_slots": int(args.latent_cvae_stage_slots),
+            "latent_cvae_stage_promote_scale_init": float(args.latent_cvae_stage_promote_scale_init),
             "latent_cvae_z_primary_denoising": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_typed_evidence_workspace": bool(int(args.latent_cvae_mmdit_decoder)),
-            "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)),
+            "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)) and not bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_workspace_no_action_feedback": bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_stage_to_low_selector_only": bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_stage_role_content_separated": bool(int(args.latent_cvae_hierarchical_workspace)),
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
             "adaptive_cvae_progress_steps": int(args.adaptive_cvae_progress_steps),
@@ -835,6 +847,9 @@ def main() -> None:
             "latent_cvae_workspace_slot_time_state": int(args.latent_cvae_workspace_slot_time_state),
             "latent_cvae_workspace_slot_time_scale": float(args.latent_cvae_workspace_slot_time_scale),
             "latent_cvae_workspace_controller": int(args.latent_cvae_workspace_controller),
+            "latent_cvae_hierarchical_workspace": int(args.latent_cvae_hierarchical_workspace),
+            "latent_cvae_stage_slots": int(args.latent_cvae_stage_slots),
+            "latent_cvae_stage_promote_scale_init": float(args.latent_cvae_stage_promote_scale_init),
             "adaptive_cvae_route_time_query": int(args.adaptive_cvae_route_time_query),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),

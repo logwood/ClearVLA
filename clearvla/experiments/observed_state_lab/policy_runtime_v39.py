@@ -1069,6 +1069,10 @@ def flow_losses(
         "latent_cvae_mmdit_action_noisy_attention",
         "latent_cvae_mmdit_action_workspace_attention",
         "latent_cvae_mmdit_action_workspace_enrichment",
+        "latent_cvae_mmdit_action_low_attention",
+        "latent_cvae_mmdit_action_stage_attention",
+        "latent_cvae_mmdit_action_low_enrichment",
+        "latent_cvae_mmdit_action_stage_enrichment",
         "latent_cvae_mmdit_action_rollout_attention",
         "latent_cvae_mmdit_action_rollout_enrichment",
         "latent_cvae_mmdit_action_token_norm",
@@ -1083,6 +1087,12 @@ def flow_losses(
         "latent_cvae_mmdit_workspace_attn_t0_sum",
         "latent_cvae_mmdit_workspace_attn_t1_sum",
         "latent_cvae_mmdit_workspace_attn_t2_sum",
+        "latent_cvae_mmdit_low_attn_t0_sum",
+        "latent_cvae_mmdit_low_attn_t1_sum",
+        "latent_cvae_mmdit_low_attn_t2_sum",
+        "latent_cvae_mmdit_stage_attn_t0_sum",
+        "latent_cvae_mmdit_stage_attn_t1_sum",
+        "latent_cvae_mmdit_stage_attn_t2_sum",
         "latent_cvae_mmdit_attn_t0_count",
         "latent_cvae_mmdit_attn_t1_count",
         "latent_cvae_mmdit_attn_t2_count",
@@ -1139,13 +1149,49 @@ def flow_losses(
         "latent_cvae_workspace_controller_role_state_logit",
         "latent_cvae_workspace_controller_role_layer_logit",
         "latent_cvae_workspace_controller_role_global_logit",
+        "latent_cvae_hierarchical_low_token_count",
+        "latent_cvae_hierarchical_low_token_norm",
+        "latent_cvae_hierarchical_low_selector_stage_entropy",
+        "latent_cvae_hierarchical_low_selector_stage_max",
+        "latent_cvae_hierarchical_low_selector_stage_effective_slots",
+        "latent_cvae_hierarchical_low_selector_role_norm",
+        "latent_cvae_hierarchical_low_selector_content_norm",
+        "latent_cvae_hierarchical_stage_token_count",
+        "latent_cvae_hierarchical_stage_role_norm",
+        "latent_cvae_hierarchical_stage_role_diversity",
+        "latent_cvae_hierarchical_stage_content_norm",
+        "latent_cvae_hierarchical_stage_content_diversity",
+        "latent_cvae_hierarchical_stage_role_content_cosine",
+        "latent_cvae_hierarchical_stage_role_output_norm",
+        "latent_cvae_hierarchical_stage_content_output_norm",
+        "latent_cvae_hierarchical_stage_role_output_fraction",
+        "latent_cvae_hierarchical_stage_update_norm",
+        "latent_cvae_hierarchical_stage_retain_mean",
+        "latent_cvae_hierarchical_stage_promote_attention_entropy",
+        "latent_cvae_hierarchical_stage_promote_attention_max",
+        "latent_cvae_hierarchical_stage_promoted_norm",
+        "latent_cvae_hierarchical_stage_promote_scale",
+        "latent_cvae_hierarchical_manager_stage_attention_entropy",
+        "latent_cvae_hierarchical_manager_stage_attention_max",
+        "latent_cvae_hierarchical_manager_role_entropy",
+        "latent_cvae_hierarchical_manager_role_max",
+        "latent_cvae_hierarchical_manager_query_shift_norm",
+        "latent_cvae_hierarchical_manager_promote_gate",
+        "latent_cvae_hierarchical_manager_low_output_strength",
+        "latent_cvae_hierarchical_manager_stage_output_strength",
+        "latent_cvae_hierarchical_manager_role_geom_prob",
+        "latent_cvae_hierarchical_manager_role_transition_prob",
+        "latent_cvae_hierarchical_manager_role_event_prob",
+        "latent_cvae_hierarchical_manager_role_state_prob",
+        "latent_cvae_hierarchical_manager_role_layer_prob",
+        "latent_cvae_hierarchical_manager_role_global_prob",
         "latent_cvae_workspace_layer_attention",
         "latent_cvae_workspace_scan_attention",
         "latent_cvae_workspace_lateral_attention",
         "latent_cvae_workspace_transition_attention",
         "latent_cvae_workspace_transition_delta_attention",
         "latent_cvae_workspace_transition_effect_attention",
-        "latent_cvae_workspace_transition_event_attention",
+        "latent_cvae_workspace_transition_timeline_attention",
         "latent_cvae_workspace_transition_total_attention",
         "latent_cvae_workspace_context_attention",
         "latent_cvae_workspace_visual_attention",
@@ -1837,21 +1883,64 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     if getattr(planner, "latent_main_action_decoder", None) is not None:
         losses["grad_latent_main_action"] = _module_grad_norm(planner.latent_main_action_decoder, reference=reference)
     if getattr(planner, "latent_cvae_action_decoder", None) is not None:
-        losses["grad_latent_cvae_action"] = _module_grad_norm(planner.latent_cvae_action_decoder, reference=reference)
-        workspace = getattr(planner.latent_cvae_action_decoder, "evidence_workspace", None)
+        decoder = planner.latent_cvae_action_decoder
+        losses["grad_latent_cvae_action"] = _module_grad_norm(decoder, reference=reference)
+        hierarchical_workspace = getattr(decoder, "hierarchical_workspace", None)
+        legacy_workspace = getattr(decoder, "evidence_workspace", None)
+        workspace = hierarchical_workspace if hierarchical_workspace is not None else legacy_workspace
         if workspace is not None:
             losses["grad_latent_cvae_workspace"] = _module_grad_norm(workspace, reference=reference)
+            if hierarchical_workspace is not None:
+                losses["grad_latent_cvae_hierarchical_workspace"] = _module_grad_norm(
+                    hierarchical_workspace, reference=reference,
+                )
+                losses["grad_latent_cvae_hierarchical_manager"] = _module_grad_norm(
+                    hierarchical_workspace.manager, reference=reference,
+                )
+                low_modules = torch.nn.ModuleList([
+                    hierarchical_workspace.condition_query,
+                    hierarchical_workspace.low_stage_query,
+                    hierarchical_workspace.low_stage_role_key,
+                    hierarchical_workspace.low_stage_content_key,
+                    hierarchical_workspace.low_stage_role_value,
+                    hierarchical_workspace.low_stage_content_value,
+                    hierarchical_workspace.low_stage_out,
+                    hierarchical_workspace.low_blocks,
+                    hierarchical_workspace.low_final_norm,
+                ])
+                losses["grad_latent_cvae_hierarchical_low"] = _module_grad_norm(
+                    low_modules, reference=reference,
+                )
+                stage_modules = torch.nn.ModuleList([
+                    hierarchical_workspace.stage_init,
+                    hierarchical_workspace.stage_role_query,
+                    hierarchical_workspace.stage_content_query,
+                    hierarchical_workspace.stage_condition_query,
+                    hierarchical_workspace.stage_low_key,
+                    hierarchical_workspace.stage_low_value,
+                    hierarchical_workspace.stage_promote_out,
+                    hierarchical_workspace.stage_gru,
+                    hierarchical_workspace.stage_content_out,
+                    hierarchical_workspace.stage_role_out,
+                ])
+                losses["grad_latent_cvae_hierarchical_stage"] = _module_grad_norm(
+                    stage_modules, reference=reference,
+                )
             primary_modules: list[torch.nn.Module] = []
             primary_modules.extend(
-                block.mod for block in getattr(planner.latent_cvae_action_decoder, "blocks", [])
+                block.mod for block in getattr(decoder, "blocks", [])
                 if hasattr(block, "mod")
             )
             primary_modules.extend(
-                block.action_mod for block in getattr(planner.latent_cvae_action_decoder, "mmdit_blocks", [])
+                block.action_mod for block in getattr(decoder, "mmdit_blocks", [])
                 if hasattr(block, "action_mod")
             )
             primary_modules.extend(
-                block.mod for block in getattr(workspace, "blocks", [])
+                block.mod for block in (
+                    getattr(workspace, "low_blocks", [])
+                    if hierarchical_workspace is not None
+                    else getattr(workspace, "blocks", [])
+                )
                 if hasattr(block, "mod")
             )
             if primary_modules:
@@ -1860,7 +1949,7 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                     reference=reference,
                 )
         else:
-            rollout_projection = getattr(planner.latent_cvae_action_decoder, "mmdit_rollout_cond_proj", None)
+            rollout_projection = getattr(decoder, "mmdit_rollout_cond_proj", None)
             if rollout_projection is not None:
                 losses["grad_latent_cvae_rollout_condition"] = _module_grad_norm(rollout_projection, reference=reference)
     final = torch.nn.ModuleList(final_modules)
@@ -2078,6 +2167,21 @@ def train_v39_policy(
                 "resume workspace-token mismatch: "
                 f"checkpoint={saved_workspace_tokens}, current={current_workspace_tokens}"
             )
+        saved_hierarchical = int(saved_policy.get("latent_cvae_hierarchical_workspace", 0))
+        current_hierarchical = int(getattr(system.policy_config, "latent_cvae_hierarchical_workspace", 0))
+        if saved_hierarchical != current_hierarchical:
+            raise ValueError(
+                "resume hierarchical-workspace mismatch: "
+                f"checkpoint={saved_hierarchical}, current={current_hierarchical}"
+            )
+        if current_hierarchical:
+            saved_stage_slots = int(saved_policy.get("latent_cvae_stage_slots", 6))
+            current_stage_slots = int(getattr(system.policy_config, "latent_cvae_stage_slots", 6))
+            if saved_stage_slots != current_stage_slots:
+                raise ValueError(
+                    "resume stage-slot mismatch: "
+                    f"checkpoint={saved_stage_slots}, current={current_stage_slots}"
+                )
         system.load_state_dict(payload["model"], strict=True)
         optimizer.load_state_dict(payload["optimizer"]); schedule.load_state_dict(payload["scheduler"])
         start_epoch = int(payload["epoch"]) + 1; global_step = int(payload["global_step"])
@@ -2293,12 +2397,22 @@ def train_v39_policy(
                     f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
                     f"mdwa={row.get('latent_cvae_mmdit_action_workspace_attention', 0.0):.3f} "
                     f"mdwe={row.get('latent_cvae_mmdit_action_workspace_enrichment', 0.0):.3f} "
+                    f"mdla={row.get('latent_cvae_mmdit_action_low_attention', 0.0):.3f} "
+                    f"mdsa={row.get('latent_cvae_mmdit_action_stage_attention', 0.0):.3f} "
+                    f"mdle={row.get('latent_cvae_mmdit_action_low_enrichment', 0.0):.3f} "
+                    f"mdse={row.get('latent_cvae_mmdit_action_stage_enrichment', 0.0):.3f} "
                     f"mdnaT={row.get('latent_cvae_mmdit_noisy_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
                     f"/{row.get('latent_cvae_mmdit_noisy_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
                     f"/{row.get('latent_cvae_mmdit_noisy_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
                     f"mdwaT={row.get('latent_cvae_mmdit_workspace_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
                     f"/{row.get('latent_cvae_mmdit_workspace_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
                     f"/{row.get('latent_cvae_mmdit_workspace_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                    f"mdlaT={row.get('latent_cvae_mmdit_low_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_low_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_low_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                    f"mdsaT={row.get('latent_cvae_mmdit_stage_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_stage_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                    f"/{row.get('latent_cvae_mmdit_stage_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
                     f"mdra={row.get('latent_cvae_mmdit_action_rollout_attention', 0.0):.3f} "
                     f"mdre={row.get('latent_cvae_mmdit_action_rollout_enrichment', 0.0):.3f} "
                     f"mdrn={row.get('latent_cvae_rollout_token_norm', 0.0):.2f} "
@@ -2339,6 +2453,21 @@ def train_v39_policy(
                     f"ctrldly={row.get('latent_cvae_workspace_controller_delay', 0.0):.3f} "
                     f"ctrlent={row.get('latent_cvae_workspace_controller_role_entropy', 0.0):.3f} "
                     f"ctrlq={row.get('latent_cvae_workspace_controller_query_delta_norm', 0.0):.3f} "
+                    f"hlow={row.get('latent_cvae_hierarchical_low_token_count', 0.0):.0f}/{row.get('latent_cvae_hierarchical_low_token_norm', 0.0):.2f} "
+                    f"hlsel={row.get('latent_cvae_hierarchical_low_selector_stage_effective_slots', 0.0):.2f} "
+                    f"hsrole={row.get('latent_cvae_hierarchical_stage_token_count', 0.0):.0f}/{row.get('latent_cvae_hierarchical_stage_role_norm', 0.0):.2f} "
+                    f"hscont={row.get('latent_cvae_hierarchical_stage_content_norm', 0.0):.2f} "
+                    f"hsrdiv={row.get('latent_cvae_hierarchical_stage_role_diversity', 0.0):.2f} "
+                    f"hscdiv={row.get('latent_cvae_hierarchical_stage_content_diversity', 0.0):.2f} "
+                    f"hsrcos={row.get('latent_cvae_hierarchical_stage_role_content_cosine', 0.0):.3f} "
+                    f"hsrfrac={row.get('latent_cvae_hierarchical_stage_role_output_fraction', 0.0):.3f} "
+                    f"hsupd={row.get('latent_cvae_hierarchical_stage_update_norm', 0.0):.3f} "
+                    f"hsret={row.get('latent_cvae_hierarchical_stage_retain_mean', 0.0):.3f} "
+                    f"hsprom={row.get('latent_cvae_hierarchical_stage_promote_scale', 0.0):.3f} "
+                    f"hmrole={row.get('latent_cvae_hierarchical_manager_role_entropy', 0.0):.3f} "
+                    f"hmprom={row.get('latent_cvae_hierarchical_manager_promote_gate', 0.0):.3f} "
+                    f"hmlow={row.get('latent_cvae_hierarchical_manager_low_output_strength', 0.0):.3f} "
+                    f"hmstage={row.get('latent_cvae_hierarchical_manager_stage_output_strength', 0.0):.3f} "
                     # V72 (S5 cleanup): dead cm* micro-controller console keys
                     # removed -- micro is config-off AND structurally excluded
                     # under mmdit_refine; the loss-dict keys remain intact for
@@ -2351,6 +2480,10 @@ def train_v39_policy(
                     f"cscnmse={row.get('consequence_self_condition_noisy_mse', 0.0):.4f} "
                     f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
                     f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
+                    f"hwgrad={row.get('grad_latent_cvae_hierarchical_workspace', 0.0):.3e} "
+                    f"hlgrad={row.get('grad_latent_cvae_hierarchical_low', 0.0):.3e} "
+                    f"hsgrad={row.get('grad_latent_cvae_hierarchical_stage', 0.0):.3e} "
+                    f"hmgrad={row.get('grad_latent_cvae_hierarchical_manager', 0.0):.3e} "
                     f"cgclip={row.get('grad_latent_cvae_action_post_clip', 0.0):.3e} "
                     f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
                     f"rdgrad={row.get('grad_controlled_dynamics', 0.0):.3e} "
