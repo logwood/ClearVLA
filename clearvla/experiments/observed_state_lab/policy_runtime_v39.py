@@ -3,6 +3,7 @@ from __future__ import annotations
 """Training/evaluation runtime for V39 staged mid-cut latent contract policy."""
 
 import json
+import math
 import random
 import time
 from dataclasses import asdict, dataclass
@@ -939,7 +940,12 @@ def flow_losses(
             ) / (
                 ws_attn.detach().float() * ws_vol.detach().float()
             ).clamp_min(1e-8)
-    micro_losses = micro_refine_supervision_losses(system, sample, output, trainer, global_step=global_step)
+    deterministic_intent_decoder = "intent_contract_deterministic" in output
+    micro_losses = (
+        {}
+        if deterministic_intent_decoder
+        else micro_refine_supervision_losses(system, sample, output, trainer, global_step=global_step)
+    )
     for key, value in micro_losses.items():
         losses[key] = value.detach().float()
     micro_weight = float(getattr(trainer, "latent_cvae_micro_supervision_weight", 0.0))
@@ -948,17 +954,17 @@ def flow_losses(
     micro_kl_weight = float(getattr(trainer, "latent_cvae_micro_weight_kl_weight", 0.0))
     micro_smooth_weight = float(getattr(trainer, "latent_cvae_micro_coverage_smooth_weight", 0.0))
     micro_floor_weight = float(getattr(trainer, "latent_cvae_micro_coverage_floor_weight", 0.0))
-    if micro_weight > 0:
+    if micro_weight > 0 and "latent_cvae_micro_supervision" in micro_losses:
         losses["loss"] = losses["loss"] + micro_weight * micro_losses["latent_cvae_micro_supervision"]
-    if micro_event_weight > 0:
+    if micro_event_weight > 0 and "latent_cvae_micro_event" in micro_losses:
         losses["loss"] = losses["loss"] + micro_event_weight * micro_losses["latent_cvae_micro_event"]
-    if micro_mono_weight > 0:
+    if micro_mono_weight > 0 and "latent_cvae_micro_monotonic" in micro_losses:
         losses["loss"] = losses["loss"] + micro_mono_weight * micro_losses["latent_cvae_micro_monotonic"]
-    if micro_kl_weight > 0:
+    if micro_kl_weight > 0 and "latent_cvae_micro_weight_kl" in micro_losses:
         losses["loss"] = losses["loss"] + micro_kl_weight * micro_losses["latent_cvae_micro_weight_kl"]
-    if micro_smooth_weight > 0:
+    if micro_smooth_weight > 0 and "latent_cvae_micro_coverage_smooth" in micro_losses:
         losses["loss"] = losses["loss"] + micro_smooth_weight * micro_losses["latent_cvae_micro_coverage_smooth"]
-    if micro_floor_weight > 0:
+    if micro_floor_weight > 0 and "latent_cvae_micro_coverage_floor" in micro_losses:
         losses["loss"] = losses["loss"] + micro_floor_weight * micro_losses["latent_cvae_micro_coverage_floor"]
     losses.update(rollout_diagnostics(output))
     if "gate_self" in output:
@@ -1102,6 +1108,10 @@ def flow_losses(
         # V72: echo probe -- fraction of the progress update attributable to
         # the raw action summary input (0 by construction under isolation).
         "latent_cvae_workspace_progress_action_dependence",
+        # CR0 probes (do_before_v76): legacy stem activity + z interventions.
+        "latent_cvae_legacy_stem_effect_ratio",
+        "latent_cvae_z_zero_delta",
+        "latent_cvae_z_shuffle_delta",
         "latent_cvae_workspace_token_count",
         "latent_cvae_workspace_token_norm",
         "latent_cvae_workspace_update_norm",
@@ -1170,6 +1180,10 @@ def flow_losses(
         "latent_cvae_hierarchical_stage_promote_attention_entropy",
         "latent_cvae_hierarchical_stage_promote_attention_max",
         "latent_cvae_hierarchical_stage_promoted_norm",
+        "latent_cvae_hierarchical_stage_promoted_projected_rms",
+        "latent_cvae_hierarchical_stage_promoted_normalized_rms",
+        "latent_cvae_hierarchical_stage_promoted_realized_scale",
+        "latent_cvae_hierarchical_stage_promote_gate_scale_error",
         "latent_cvae_hierarchical_stage_promote_scale",
         "latent_cvae_hierarchical_manager_stage_attention_entropy",
         "latent_cvae_hierarchical_manager_stage_attention_max",
@@ -1207,6 +1221,28 @@ def flow_losses(
     ):
         if key in output:
             losses[key] = output[key].detach().float()
+    # The deterministic decoder intentionally does not alias its diagnostics
+    # into latent_cvae_* names.  Prefix pass-through keeps the new contract
+    # auditable without reviving retired CVAE losses or zero-filled log fields.
+    for key, value in output.items():
+        if key.startswith(("intent_", "owned_", "hierarchical_mmdit_")) and torch.is_tensor(value):
+            losses[key] = value.detach().float()
+    clean_noisy_vol = output.get("hierarchical_mmdit_noisy_token_norm")
+    clean_cond_vol = output.get("hierarchical_mmdit_condition_token_norm")
+    if torch.is_tensor(clean_noisy_vol) and torch.is_tensor(clean_cond_vol):
+        losses["hierarchical_mmdit_noisy_volume_parity"] = (
+            clean_noisy_vol.detach().float() / clean_cond_vol.detach().float().clamp_min(1e-6)
+        )
+    clean_noisy_fraction = output.get("hierarchical_mmdit_action_noisy_update_fraction")
+    clean_stage_fraction = output.get("hierarchical_mmdit_action_stage_update_fraction")
+    clean_low_fraction = output.get("hierarchical_mmdit_action_low_update_fraction")
+    if all(torch.is_tensor(value) for value in (
+        clean_noisy_fraction, clean_stage_fraction, clean_low_fraction,
+    )):
+        workspace_fraction = clean_stage_fraction.detach().float() + clean_low_fraction.detach().float()
+        losses["hierarchical_mmdit_noisy_to_workspace_update_ratio"] = (
+            clean_noisy_fraction.detach().float() / workspace_fraction.clamp_min(1e-8)
+        )
     return losses
 
 
@@ -1584,6 +1620,9 @@ def evaluate_v39_policy(
             for key, value in pred_pack.items():
                 keep_sampling_diagnostic = (
                     key.startswith("sample_latent_cvae_")
+                    or key.startswith("sample_intent_")
+                    or key.startswith("sample_owned_")
+                    or key.startswith("sample_hierarchical_mmdit_")
                     or key.startswith("sample_arm_null_")
                     or key.startswith("sample_grip_null_")
                 )
@@ -1844,6 +1883,114 @@ def _sync_loss_row(losses: dict[str, Tensor], *, grad: Tensor | float | None = N
     return row
 
 
+def _owned_serial_log_line(
+    row: dict[str, float],
+    *,
+    epoch: int,
+    batch_index: int,
+    learning_rate: float,
+    seconds_per_batch: float,
+) -> str:
+    """High-signal batch line for the clean owned-evidence decoder.
+
+    Full scalar diagnostics remain in the epoch JSON.  This line deliberately
+    omits retired latent-CVAE fields instead of rendering them as misleading
+    zeroes beside the active serial decoder gauges.
+    """
+    return (
+        f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
+        f"pflow={row['physical_flow']:.6f} "
+        f"pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
+        f"pfn={row.get('physical_flow_native', 0.0):.6f} "
+        f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} "
+        f"gfmf={row.get('gripper_fm_field', 0.0):.5f} "
+        f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} "
+        f"anull={row.get('arm_fm_null_output_fraction', 0.0):.4f} "
+        f"gnull={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
+        f"decode={row.get('decoded_action', 0.0):.6f} "
+        f"rollout={row.get('rollout_dynamics', 0.0):.6f} "
+        f"rvar={row.get('rollout_variance', 0.0):.4f} "
+        f"rnorm={row.get('rollout_norm', 0.0):.4f} "
+        f"rstep={row.get('rollout_milestone_delta_match', 0.0):.4f} "
+        f"first8={row.get('first8_physical_flow', 0.0):.6f} "
+        f"tail={row.get('tail_physical_flow', 0.0):.6f} "
+        f"delta={row.get('rollout_delta', 0.0):.6f} "
+        f"contrast={row.get('rollout_contrast', 0.0):.6f} "
+        f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
+        f"stdr={row.get('rollout_pred_std_ratio', 0.0):.4f} "
+        f"dnratio={row.get('rollout_milestone_delta_norm_ratio', 0.0):.4f} "
+        f"event={row.get('event', 0.0):.6f} "
+        f"icgs={row.get('intent_global_stage_cosine', 0.0):.3f} "
+        f"icgr={row.get('intent_global_read_cosine', 0.0):.3f} "
+        f"icsr={row.get('intent_stage_read_cosine', 0.0):.3f} "
+        f"icdiv={row.get('intent_global_batch_diversity', 0.0):.2f}/"
+        f"{row.get('intent_stage_batch_diversity', 0.0):.2f}/"
+        f"{row.get('intent_read_batch_diversity', 0.0):.2f} "
+        f"hmdu={row.get('hierarchical_mmdit_action_update_norm', 0.0):.3f} "
+        f"hmur={row.get('hierarchical_mmdit_action_update_ratio', 0.0):.3f} "
+        f"hmcan={row.get('hierarchical_mmdit_action_serial_cancellation_fraction', 0.0):.3f} "
+        f"hmorth={row.get('hierarchical_mmdit_action_serial_cancellation_orthogonal_baseline', 0.0):.3f} "
+        f"hmxcan={row.get('hierarchical_mmdit_action_serial_cancellation_excess', 0.0):+.3f} "
+        f"hmbdot={row.get('hierarchical_mmdit_action_branch_weighted_cosine', 0.0):+.3f} "
+        f"hmout={row.get('hierarchical_mmdit_action_output_norm_update_ratio', 0.0):.3f} "
+        f"hmcos={row.get('hierarchical_mmdit_action_state_cosine', 0.0):.3f} "
+        f"hmbcos={row.get('hierarchical_mmdit_action_noisy_stage_cosine', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_low_cosine', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_noisy_low_cosine', 0.0):.3f} "
+        f"hmnu={row.get('hierarchical_mmdit_action_noisy_update_norm', 0.0):.3f} "
+        f"hmsu={row.get('hierarchical_mmdit_action_stage_update_norm', 0.0):.3f} "
+        f"hmlu={row.get('hierarchical_mmdit_action_low_update_norm', 0.0):.3f} "
+        f"hmnf={row.get('hierarchical_mmdit_action_noisy_update_fraction', 0.0):.3f} "
+        f"hmsf={row.get('hierarchical_mmdit_action_stage_update_fraction', 0.0):.3f} "
+        f"hmlf={row.get('hierarchical_mmdit_action_low_update_fraction', 0.0):.3f} "
+        f"hmnw={row.get('hierarchical_mmdit_noisy_to_workspace_update_ratio', 0.0):.3f} "
+        f"hmng={row.get('hierarchical_mmdit_action_noisy_gate', 0.0):.3f} "
+        f"hmsg={row.get('hierarchical_mmdit_action_stage_gate', 0.0):.3f} "
+        f"hmlg={row.get('hierarchical_mmdit_action_low_gate', 0.0):.3f} "
+        f"hmsrms={row.get('hierarchical_mmdit_action_stage_projected_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_normalized_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_realized_scale', 0.0):.3f} "
+        f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+        f"hmnmax={row.get('hierarchical_mmdit_action_noisy_attention_max', 0.0):.3f} "
+        f"hmsmax={row.get('hierarchical_mmdit_action_stage_attention_max', 0.0):.3f} "
+        f"hmlmax={row.get('hierarchical_mmdit_action_low_attention_max', 0.0):.3f} "
+        f"hmnfT={row.get('hierarchical_mmdit_noisy_update_fraction_t0_sum', 0.0) / max(row.get('hierarchical_mmdit_update_fraction_t0_count', 0.0), 1e-6):.3f}/"
+        f"{row.get('hierarchical_mmdit_noisy_update_fraction_t1_sum', 0.0) / max(row.get('hierarchical_mmdit_update_fraction_t1_count', 0.0), 1e-6):.3f}/"
+        f"{row.get('hierarchical_mmdit_noisy_update_fraction_t2_sum', 0.0) / max(row.get('hierarchical_mmdit_update_fraction_t2_count', 0.0), 1e-6):.3f} "
+        f"hmwfT={row.get('hierarchical_mmdit_workspace_update_fraction_t0_sum', 0.0) / max(row.get('hierarchical_mmdit_update_fraction_t0_count', 0.0), 1e-6):.3f}/"
+        f"{row.get('hierarchical_mmdit_workspace_update_fraction_t1_sum', 0.0) / max(row.get('hierarchical_mmdit_update_fraction_t1_count', 0.0), 1e-6):.3f}/"
+        f"{row.get('hierarchical_mmdit_workspace_update_fraction_t2_sum', 0.0) / max(row.get('hierarchical_mmdit_update_fraction_t2_count', 0.0), 1e-6):.3f} "
+        f"halreff={row.get('hierarchical_mmdit_action_low_role_effective_count', 0.0):.2f} "
+        f"hal={row.get('hierarchical_mmdit_action_low_role_geom_attention', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_role_transition_attention', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_role_event_attention', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_role_state_attention', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_role_layer_attention', 0.0):.3f} "
+        f"olupd={row.get('owned_hierarchical_low_role_geom_update_norm', 0.0):.3f}/"
+        f"{row.get('owned_hierarchical_low_role_transition_update_norm', 0.0):.3f}/"
+        f"{row.get('owned_hierarchical_low_role_event_update_norm', 0.0):.3f}/"
+        f"{row.get('owned_hierarchical_low_role_state_update_norm', 0.0):.3f}/"
+        f"{row.get('owned_hierarchical_low_role_layer_update_norm', 0.0):.3f} "
+        f"ohsupd={row.get('owned_hierarchical_stage_update_norm', 0.0):.3f} "
+        f"ohsret={row.get('owned_hierarchical_stage_retain_mean', 0.0):.3f} "
+        f"ohprom={row.get('owned_hierarchical_manager_promote_gate', 0.0):.3f} "
+        f"ohprms={row.get('owned_hierarchical_stage_promoted_projected_rms', 0.0):.3f}/"
+        f"{row.get('owned_hierarchical_stage_promoted_normalized_rms', 0.0):.3f}/"
+        f"{row.get('owned_hierarchical_stage_promoted_realized_scale', 0.0):.3f} "
+        f"ohgerr={row.get('owned_hierarchical_stage_promote_gate_scale_error', 0.0):.1e} "
+        f"ohmrole={row.get('owned_hierarchical_manager_role_entropy', 0.0):.3f} "
+        f"owned={row.get('owned_hierarchical_manager_fixed_output_prior', 0.0):.0f}/"
+        f"{row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f}/"
+        f"{row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
+        f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
+        f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
+        f"owgrad={row.get('grad_owned_workspace', 0.0):.3e} "
+        f"hmbgrad={row.get('grad_hierarchical_mmdit_blocks', 0.0):.3e} "
+        f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
+        f"grad={row['grad']:.3e} lr={learning_rate:.3e} spb={seconds_per_batch:.3f}"
+    )
+
+
 def _module_grad_norm(module: torch.nn.Module, *, reference: Tensor) -> Tensor:
     """Return a detached scalar grad norm for diagnostics only."""
     total = torch.zeros((), device=reference.device, dtype=torch.float32)
@@ -1882,6 +2029,21 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_residual_action_flow"] = _module_grad_norm(planner.residual_action_flow_denoiser, reference=reference)
     if getattr(planner, "latent_main_action_decoder", None) is not None:
         losses["grad_latent_main_action"] = _module_grad_norm(planner.latent_main_action_decoder, reference=reference)
+    if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
+        decoder = planner.hierarchical_mmdit_action_decoder
+        losses["grad_hierarchical_mmdit_action"] = _module_grad_norm(decoder, reference=reference)
+        losses["grad_intent_contract_compiler"] = _module_grad_norm(
+            decoder.intent_compiler, reference=reference,
+        )
+        losses["grad_condition_organizer"] = _module_grad_norm(
+            decoder.organizer, reference=reference,
+        )
+        losses["grad_owned_workspace"] = _module_grad_norm(
+            decoder.workspace, reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_blocks"] = _module_grad_norm(
+            decoder.blocks, reference=reference,
+        )
     if getattr(planner, "latent_cvae_action_decoder", None) is not None:
         decoder = planner.latent_cvae_action_decoder
         losses["grad_latent_cvae_action"] = _module_grad_norm(decoder, reference=reference)
@@ -1978,6 +2140,7 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
     complete_latent_decoder = (
         getattr(planner, "latent_cvae_action_decoder", None) is not None
         or getattr(planner, "latent_main_action_decoder", None) is not None
+        or getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None
     )
     legacy_action_readers = [] if complete_latent_decoder else [planner.direct_physical_head, planner.rollout_residual_head]
     legacy_motion_readers = [] if complete_latent_decoder else [planner.motion_probe]
@@ -2014,6 +2177,8 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                 final_modules.append(planner.latent_main_action_decoder)
             if getattr(planner, "latent_cvae_action_decoder", None) is not None:
                 final_modules.append(planner.latent_cvae_action_decoder)
+            if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
+                final_modules.append(planner.hierarchical_mmdit_action_decoder)
             if float(getattr(trainer, "layer_contract_final_action_loss_weight", 0.0)) > 0:
                 groups.append({"params": _unique_params(final_modules), "lr": trainer.lr * float(getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)), "name": "weak_final_policy_probe"})
             groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
@@ -2059,6 +2224,12 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                     "params": list(planner.latent_cvae_action_decoder.parameters()),
                     "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                     "name": "latent_cvae_action_decoder",
+                })
+            if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
+                groups.append({
+                    "params": list(planner.hierarchical_mmdit_action_decoder.parameters()),
+                    "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                    "name": "hierarchical_mmdit_action_decoder",
                 })
             groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
         return [group for group in groups if len(group["params"]) > 0]
@@ -2107,6 +2278,12 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                 "params": list(planner.latent_cvae_action_decoder.parameters()),
                 "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                 "name": "latent_cvae_action_decoder",
+            })
+        if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
+            groups.append({
+                "params": list(planner.hierarchical_mmdit_action_decoder.parameters()),
+                "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                "name": "hierarchical_mmdit_action_decoder",
             })
         groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
     return [group for group in groups if len(group["params"]) > 0]
@@ -2160,6 +2337,54 @@ def train_v39_policy(
         if payload.get("schema") not in POLICY_CHECKPOINT_SCHEMAS:
             raise ValueError("resume checkpoint is not V39/V40 policy")
         saved_policy = payload.get("policy_config", {})
+        saved_final_decoder = str(saved_policy.get("final_action_decoder", "legacy"))
+        current_final_decoder = str(getattr(system.policy_config, "final_action_decoder", "legacy"))
+        if saved_final_decoder != current_final_decoder:
+            raise ValueError(
+                "resume final-action-decoder mismatch: "
+                f"checkpoint={saved_final_decoder!r}, current={current_final_decoder!r}"
+            )
+        if current_final_decoder == "hierarchical_mmdit_action":
+            saved_architecture = str(
+                saved_policy.get("hierarchical_mmdit_architecture_version", "competitive_v1")
+            )
+            current_architecture = str(
+                getattr(system.policy_config, "hierarchical_mmdit_architecture_version", "serial_owned_rms_v3")
+            )
+            if saved_architecture != current_architecture:
+                raise ValueError(
+                    "resume hierarchical-MMDiT architecture mismatch: "
+                    f"checkpoint={saved_architecture!r}, current={current_architecture!r}; "
+                    "use the checkpoint as --stage1-checkpoint to retain the trunk while "
+                    "reinitializing the final decoder"
+                )
+            for field in (
+                "hierarchical_mmdit_depth",
+                "hierarchical_mmdit_refine_steps",
+                "hierarchical_mmdit_low_slots",
+                "hierarchical_mmdit_stage_slots",
+                "hierarchical_mmdit_noisy_causal",
+                "hierarchical_mmdit_noisy_gate_mode",
+                "hierarchical_mmdit_output_contract",
+            ):
+                saved_value = int(saved_policy.get(field, getattr(system.policy_config, field)))
+                current_value = int(getattr(system.policy_config, field))
+                if saved_value != current_value:
+                    raise ValueError(
+                        f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
+                    )
+            for field in (
+                "hierarchical_mmdit_ffn_expansion",
+                "hierarchical_mmdit_residual_scale_max",
+                "hierarchical_mmdit_noisy_gate_min",
+                "hierarchical_mmdit_noisy_gate_power",
+            ):
+                saved_value = float(saved_policy.get(field, getattr(system.policy_config, field)))
+                current_value = float(getattr(system.policy_config, field))
+                if not math.isclose(saved_value, current_value, rel_tol=0.0, abs_tol=1e-12):
+                    raise ValueError(
+                        f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
+                    )
         saved_workspace_tokens = int(saved_policy.get("latent_cvae_horizon_tokens", 24))
         current_workspace_tokens = int(getattr(system.policy_config, "latent_cvae_horizon_tokens", 24))
         if saved_workspace_tokens != current_workspace_tokens:
@@ -2279,16 +2504,21 @@ def train_v39_policy(
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_backward", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
             latent_decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
+            clean_decoder = getattr(system.planner, "hierarchical_mmdit_action_decoder", None)
+            decoder_for_local_clip = clean_decoder if clean_decoder is not None else latent_decoder
             latent_clip = float(getattr(trainer, "latent_cvae_grad_clip", 0.0))
-            if latent_decoder is not None and latent_clip > 0:
+            if decoder_for_local_clip is not None and latent_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
-                    latent_decoder.parameters(),
+                    decoder_for_local_clip.parameters(),
                     latent_clip,
                     error_if_nonfinite=True,
                 )
-                losses["grad_latent_cvae_action_post_clip"] = _module_grad_norm(
-                    latent_decoder,
-                    reference=losses["loss"],
+                clip_key = (
+                    "grad_hierarchical_mmdit_action_post_clip"
+                    if clean_decoder is not None else "grad_latent_cvae_action_post_clip"
+                )
+                losses[clip_key] = _module_grad_norm(
+                    decoder_for_local_clip, reference=losses["loss"],
                 )
             grad = torch.nn.utils.clip_grad_norm_(
                 system.parameters(),
@@ -2310,6 +2540,13 @@ def train_v39_policy(
                 throughput_start = throughput_now
                 throughput_batch = batch_index
                 print(
+                    _owned_serial_log_line(
+                        row,
+                        epoch=epoch,
+                        batch_index=batch_index,
+                        learning_rate=float(optimizer.param_groups[0]["lr"]),
+                        seconds_per_batch=seconds_per_batch,
+                    ) if clean_decoder is not None else (
                     f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
                     f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
                     f"pfn={row.get('physical_flow_native', 0.0):.6f} pfnu={row.get('physical_flow_native_uniform', 0.0):.6f} "
@@ -2436,6 +2673,9 @@ def train_v39_policy(
                     f"wpq={row.get('latent_cvae_workspace_progress_query_norm', 0.0):.3f} "
                     f"wpupd={row.get('latent_cvae_workspace_progress_update_norm', 0.0):.3f} "
                     f"wpact={row.get('latent_cvae_workspace_progress_action_dependence', 0.0):.3f} "
+                    f"rstem={row.get('latent_cvae_legacy_stem_effect_ratio', 0.0):.3f} "
+                    f"zzero={row.get('latent_cvae_z_zero_delta', 0.0):.3f} "
+                    f"zshuf={row.get('latent_cvae_z_shuffle_delta', 0.0):.3f} "
                     f"wscan={row.get('latent_cvae_workspace_scan_attention', 0.0):.3f} "
                     f"wlat={row.get('latent_cvae_workspace_lateral_attention', 0.0):.3f} "
                     f"wtrans={row.get('latent_cvae_workspace_transition_total_attention', row.get('latent_cvae_workspace_transition_attention', 0.0)):.3f} "
@@ -2479,6 +2719,57 @@ def train_v39_policy(
                     f"cscmse={row.get('consequence_self_condition_target_mse', 0.0):.4f} "
                     f"cscnmse={row.get('consequence_self_condition_noisy_mse', 0.0):.4f} "
                     f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
+                    f"iglob={row.get('intent_global_norm', 0.0):.2f} "
+                    f"istage={row.get('intent_stage_contract_norm', 0.0):.2f} "
+                    f"iread={row.get('intent_read_contract_norm', 0.0):.2f} "
+                    f"icgs={row.get('intent_global_stage_cosine', 0.0):.3f} "
+                    f"icgr={row.get('intent_global_read_cosine', 0.0):.3f} "
+                    f"icsr={row.get('intent_stage_read_cosine', 0.0):.3f} "
+                    f"hmdu={row.get('hierarchical_mmdit_action_update_norm', 0.0):.3f} "
+                    f"hmur={row.get('hierarchical_mmdit_action_update_ratio', 0.0):.3f} "
+                    f"hmcan={row.get('hierarchical_mmdit_action_serial_cancellation_fraction', 0.0):.3f} "
+                    f"hmorth={row.get('hierarchical_mmdit_action_serial_cancellation_orthogonal_baseline', 0.0):.3f} "
+                    f"hmxcan={row.get('hierarchical_mmdit_action_serial_cancellation_excess', 0.0):+.3f} "
+                    f"hmbdot={row.get('hierarchical_mmdit_action_branch_weighted_cosine', 0.0):+.3f} "
+                    f"hmout={row.get('hierarchical_mmdit_action_output_norm_update_ratio', 0.0):.3f} "
+                    f"hmcos={row.get('hierarchical_mmdit_action_state_cosine', 0.0):.3f} "
+                    f"hmnu={row.get('hierarchical_mmdit_action_noisy_update_norm', 0.0):.3f} "
+                    f"hmsu={row.get('hierarchical_mmdit_action_stage_update_norm', 0.0):.3f} "
+                    f"hmlu={row.get('hierarchical_mmdit_action_low_update_norm', 0.0):.3f} "
+                    f"hmnf={row.get('hierarchical_mmdit_action_noisy_update_fraction', 0.0):.3f} "
+                    f"hmsf={row.get('hierarchical_mmdit_action_stage_update_fraction', 0.0):.3f} "
+                    f"hmlf={row.get('hierarchical_mmdit_action_low_update_fraction', 0.0):.3f} "
+                    f"hmng={row.get('hierarchical_mmdit_action_noisy_gate', 0.0):.3f} "
+                    f"hmsg={row.get('hierarchical_mmdit_action_stage_gate', 0.0):.3f} "
+                    f"hmlg={row.get('hierarchical_mmdit_action_low_gate', 0.0):.3f} "
+                    f"hmsrms={row.get('hierarchical_mmdit_action_stage_projected_rms', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_normalized_rms', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_realized_scale', 0.0):.3f} "
+                    f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                    f"hmnmax={row.get('hierarchical_mmdit_action_noisy_attention_max', 0.0):.3f} "
+                    f"hmsmax={row.get('hierarchical_mmdit_action_stage_attention_max', 0.0):.3f} "
+                    f"hmlmax={row.get('hierarchical_mmdit_action_low_attention_max', 0.0):.3f} "
+                    f"halreff={row.get('hierarchical_mmdit_action_low_role_effective_count', 0.0):.2f} "
+                    f"halgeo={row.get('hierarchical_mmdit_action_low_role_geom_attention', 0.0):.3f} "
+                    f"haltrn={row.get('hierarchical_mmdit_action_low_role_transition_attention', 0.0):.3f} "
+                    f"halevt={row.get('hierarchical_mmdit_action_low_role_event_attention', 0.0):.3f} "
+                    f"halsta={row.get('hierarchical_mmdit_action_low_role_state_attention', 0.0):.3f} "
+                    f"hallay={row.get('hierarchical_mmdit_action_low_role_layer_attention', 0.0):.3f} "
+                    f"ogeo={row.get('owned_workspace_role_geom_attention', 0.0):.3f} "
+                    f"otrn={row.get('owned_workspace_role_transition_attention', 0.0):.3f} "
+                    f"oevt={row.get('owned_workspace_role_event_attention', 0.0):.3f} "
+                    f"osta={row.get('owned_workspace_role_state_attention', 0.0):.3f} "
+                    f"olay={row.get('owned_workspace_role_layer_attention', 0.0):.3f} "
+                    f"ofixed={row.get('owned_hierarchical_manager_fixed_output_prior', 0.0):.0f} "
+                    f"ofrole={row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f} "
+                    f"ostrat={row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
+                    f"ohmrole={row.get('owned_hierarchical_manager_role_entropy', 0.0):.3f} "
+                    f"ohsupd={row.get('owned_hierarchical_stage_update_norm', 0.0):.3f} "
+                    f"ohprom={row.get('owned_hierarchical_manager_promote_gate', 0.0):.3f} "
+                    f"ohprms={row.get('owned_hierarchical_stage_promoted_projected_rms', 0.0):.3f}/"
+                    f"{row.get('owned_hierarchical_stage_promoted_normalized_rms', 0.0):.3f}/"
+                    f"{row.get('owned_hierarchical_stage_promoted_realized_scale', 0.0):.3f} "
+                    f"ohgerr={row.get('owned_hierarchical_stage_promote_gate_scale_error', 0.0):.1e} "
                     f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
                     f"hwgrad={row.get('grad_latent_cvae_hierarchical_workspace', 0.0):.3e} "
                     f"hlgrad={row.get('grad_latent_cvae_hierarchical_low', 0.0):.3e} "
@@ -2490,8 +2781,13 @@ def train_v39_policy(
                     f"rcgrad={row.get('grad_latent_cvae_rollout_condition', 0.0):.3e} "
                     f"wgrad={row.get('grad_latent_cvae_workspace', 0.0):.3e} "
                     f"zpgrad={row.get('grad_latent_cvae_primary_modulation', 0.0):.3e} "
+                    f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
+                    f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
+                    f"owgrad={row.get('grad_owned_workspace', 0.0):.3e} "
+                    f"hmbgrad={row.get('grad_hierarchical_mmdit_blocks', 0.0):.3e} "
+                    f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
                     f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e} "
-                    f"spb={seconds_per_batch:.3f}",
+                    f"spb={seconds_per_batch:.3f}"),
                     flush=True,
                 )
         train_metrics = _finalize_metric_tensors(metric_sums, metric_count)

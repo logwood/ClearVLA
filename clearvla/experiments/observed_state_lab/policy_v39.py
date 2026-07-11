@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from .policy import RejectableHistoryProposal
 from .policy_v36_2 import ParsevalGripperTemporalFrame, PhysicalActionCodec, PhysicalActionTokenLift
 from .policy_v36_3 import TransitionAwarePhysicalVelocityHead
-from .world_model import BiasFreeFFN
+from .world_model import BiasFreeFFN, sinusoidal_positions
 from .policy_v38 import (
     CanvasPhysicalVelocityHead,
     ControlledResidualLatentDynamics,
@@ -184,6 +184,12 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_consequence_scale_max: float = 0.50
     latent_cvae_event_gripper_gate: int = 1
     latent_cvae_inference_sample: int = 0
+    # CR1/B1: 1 = legacy variational training (posterior/KL/aux decode);
+    # 0 = deterministic bypass with identical deploy mapping (prior mean only).
+    latent_cvae_variational: int = 1
+    # CR0 (§14.2): eval-time z zero/shuffle intervention probes on the legacy
+    # decoder.  Costs two extra decodes per eval batch; diagnostic runs only.
+    latent_cvae_z_probe: int = 0
     latent_cvae_output_init_std: float = 1e-3
     latent_cvae_mu_bound: float = 1.5
     latent_cvae_min_std: float = 0.5
@@ -262,6 +268,38 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_hierarchical_workspace: int = 0
     latent_cvae_stage_slots: int = 6
     latent_cvae_stage_promote_scale_init: float = 0.05
+
+    # Pre-V76 phase 1: deterministic intent contracts plus one-owner MMDiT
+    # evidence consumption.  This is an independent final decoder rather than
+    # another behavior flag inside the historical CVAE tower.  It has no
+    # posterior, target-action input, latent sampling, or legacy output bypass.
+    hierarchical_mmdit_depth: int = 3
+    hierarchical_mmdit_refine_steps: int = 3
+    hierarchical_mmdit_low_slots: int = 25
+    hierarchical_mmdit_stage_slots: int = 6
+    hierarchical_mmdit_ffn_expansion: float = 2.0
+    hierarchical_mmdit_layer_grad_scale: float = 0.0
+    hierarchical_mmdit_source_grad_scale: float = 0.0
+    hierarchical_mmdit_consequence_scale_init: float = 0.10
+    hierarchical_mmdit_consequence_scale_max: float = 0.50
+    hierarchical_mmdit_noisy_causal: int = 1
+    hierarchical_mmdit_noisy_gate_min: float = 0.05
+    hierarchical_mmdit_noisy_gate_power: float = 1.5
+    hierarchical_mmdit_stage_promote_scale_init: float = 0.05
+    hierarchical_mmdit_output_init_std: float = 1e-3
+    hierarchical_mmdit_residual_scale_max: float = 0.20
+    # V77: every residual writer is normalized before its scalar amplitude
+    # control, so projection weights cannot bypass the ownership contract.
+    hierarchical_mmdit_architecture_version: str = "serial_owned_rms_v3"
+    # CR7 fallback (§23): dedicated restricted contract for event/motion
+    # subheads (never velocity).  0 = action-only output (mainline first try).
+    hierarchical_mmdit_output_contract: int = 0
+    # Compatibility switch retained for v76a metadata/checkpoints.  The clean
+    # serial decoder no longer has a condition-group market, so this flag is a
+    # no-op there; legacy MMDiT paths keep their historical behavior.
+    hierarchical_mmdit_noisy_market_bias: int = 0
+    # 0 = no noisy value gate; 1 = a post-normalization residual-amplitude schedule.
+    hierarchical_mmdit_noisy_gate_mode: int = 0
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
     # small shared recurrent refinement loop.  Each token can read a causal
@@ -369,8 +407,8 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("action_consequence_self_condition must be 0 or 1")
         if int(self.layer_zero_base_diagnostic) not in (0, 1):
             raise ValueError("layer_zero_base_diagnostic must be 0 or 1")
-        if str(self.final_action_decoder) not in {"legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"}:
-            raise ValueError("final_action_decoder must be legacy, residual_action_flow, layered_residual_action_flow, latent_main_action, latent_cvae_action, or adaptive_recurrent_cvae_action")
+        if str(self.final_action_decoder) not in {"legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action", "hierarchical_mmdit_action"}:
+            raise ValueError("final_action_decoder must be legacy, residual_action_flow, layered_residual_action_flow, latent_main_action, latent_cvae_action, adaptive_recurrent_cvae_action, or hierarchical_mmdit_action")
         if int(self.action_flow_residual_depth) < 1:
             raise ValueError("action_flow_residual_depth must be >= 1")
         if int(self.action_flow_residual_high_slots) < 1:
@@ -427,7 +465,8 @@ class V39PolicyConfig(V38PolicyConfig):
             "latent_cvae_layer_detach", "latent_cvae_condition_source_norm",
             "latent_cvae_bounded_consequence_fusion",
             "latent_cvae_event_gripper_gate",
-            "latent_cvae_inference_sample", "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
+            "latent_cvae_inference_sample", "latent_cvae_variational", "latent_cvae_z_probe",
+            "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
             "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
             "latent_cvae_mmdit_noisy_logit_gate",
             "latent_cvae_progress_action_isolation",
@@ -449,6 +488,60 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_stage_slots must be >= 1")
         if not (0.0 <= float(self.latent_cvae_stage_promote_scale_init) <= 1.0):
             raise ValueError("latent_cvae_stage_promote_scale_init must be in [0, 1]")
+        if int(self.hierarchical_mmdit_depth) < 1:
+            raise ValueError("hierarchical_mmdit_depth must be >= 1")
+        if int(self.hierarchical_mmdit_refine_steps) < 1:
+            raise ValueError("hierarchical_mmdit_refine_steps must be >= 1")
+        if int(self.hierarchical_mmdit_low_slots) < 1:
+            raise ValueError("hierarchical_mmdit_low_slots must be >= 1")
+        if int(self.hierarchical_mmdit_stage_slots) < 1:
+            raise ValueError("hierarchical_mmdit_stage_slots must be >= 1")
+        if float(self.hierarchical_mmdit_ffn_expansion) < 1.0:
+            raise ValueError("hierarchical_mmdit_ffn_expansion must be >= 1")
+        for name in ("hierarchical_mmdit_layer_grad_scale", "hierarchical_mmdit_source_grad_scale"):
+            if not (0.0 <= float(getattr(self, name)) <= 1.0):
+                raise ValueError(f"{name} must be in [0, 1]")
+        if float(self.hierarchical_mmdit_consequence_scale_max) <= 0.0:
+            raise ValueError("hierarchical_mmdit_consequence_scale_max must be positive")
+        if not (
+            0.0 <= float(self.hierarchical_mmdit_consequence_scale_init)
+            <= float(self.hierarchical_mmdit_consequence_scale_max)
+        ):
+            raise ValueError("hierarchical_mmdit_consequence_scale_init must be in [0, max]")
+        if int(self.hierarchical_mmdit_noisy_causal) not in (0, 1):
+            raise ValueError("hierarchical_mmdit_noisy_causal must be 0 or 1")
+        if int(self.hierarchical_mmdit_output_contract) not in (0, 1):
+            raise ValueError("hierarchical_mmdit_output_contract must be 0 or 1")
+        if int(self.hierarchical_mmdit_noisy_market_bias) not in (0, 1):
+            raise ValueError("hierarchical_mmdit_noisy_market_bias must be 0 or 1")
+        if int(self.hierarchical_mmdit_noisy_gate_mode) not in (0, 1):
+            raise ValueError("hierarchical_mmdit_noisy_gate_mode must be 0 or 1")
+        if not (0.0 <= float(self.hierarchical_mmdit_noisy_gate_min) <= 1.0):
+            raise ValueError("hierarchical_mmdit_noisy_gate_min must be in [0, 1]")
+        if float(self.hierarchical_mmdit_noisy_gate_power) <= 0.0:
+            raise ValueError("hierarchical_mmdit_noisy_gate_power must be positive")
+        if not (0.0 <= float(self.hierarchical_mmdit_stage_promote_scale_init) <= 1.0):
+            raise ValueError("hierarchical_mmdit_stage_promote_scale_init must be in [0, 1]")
+        if float(self.hierarchical_mmdit_output_init_std) < 0.0:
+            raise ValueError("hierarchical_mmdit_output_init_std must be non-negative")
+        if not (0.0 < float(self.hierarchical_mmdit_residual_scale_max) <= 1.0):
+            raise ValueError("hierarchical_mmdit_residual_scale_max must be in (0, 1]")
+        if str(self.hierarchical_mmdit_architecture_version) != "serial_owned_rms_v3":
+            raise ValueError(
+                "unsupported hierarchical_mmdit_architecture_version: "
+                f"{self.hierarchical_mmdit_architecture_version!r}"
+            )
+        if str(self.final_action_decoder) == "hierarchical_mmdit_action" and not int(self.layer_contract_adapters):
+            raise ValueError("hierarchical_mmdit_action requires layer_contract_adapters=1")
+        if str(self.final_action_decoder) == "hierarchical_mmdit_action":
+            if int(self.hierarchical_mmdit_low_slots) < 5 or int(self.hierarchical_mmdit_low_slots) % 5 != 0:
+                raise ValueError(
+                    "hierarchical_mmdit_action requires low slots to be a positive multiple of five"
+                )
+            if int(self.hierarchical_mmdit_refine_steps) < int(self.hierarchical_mmdit_depth):
+                raise ValueError(
+                    "hierarchical_mmdit_refine_steps must cover every distinct action block"
+                )
         if int(self.latent_cvae_hierarchical_workspace):
             if str(self.final_action_decoder) != "adaptive_recurrent_cvae_action":
                 raise ValueError("hierarchical workspace requires adaptive_recurrent_cvae_action")
@@ -2116,6 +2209,12 @@ class EvidenceMemoryBank(nn.Module):
         "scan": "global",
         "lateral": "global",
     }
+    # NOTE (legacy-path gauge caveat): on this legacy bank no source maps to
+    # the "event" role -- it is a reserved seat whose real owner exists only
+    # in OwnedEvidenceMemoryBank (the hierarchical/v76 line).  Console `wevt`
+    # therefore reads 0 on B0/B1-style arms BY CONSTRUCTION; read the
+    # transition-family share via the "transition" role instead.  Full
+    # taxonomy cleanup is CR9 scope (do_before_v76 §11).
     ROLE_NAMES = ("geom", "transition", "event", "state", "layer", "global")
 
     def __init__(self, config: V39PolicyConfig) -> None:
@@ -2249,8 +2348,78 @@ class EvidenceMemoryBank(nn.Module):
         return bias
 
 
+class OwnedEvidenceMemoryBank(EvidenceMemoryBank):
+    """Strict five-role evidence store for the deterministic intent decoder.
+
+    Global summaries belong to the intent compiler and are intentionally not
+    valid values here.  Event and state are first-class sources rather than
+    semantics hidden inside a lateral/global summary.
+    """
+
+    SOURCE_NAMES = (
+        "layer",
+        "trajectory",
+        "rollout",
+        "transition",
+        "event",
+        "state",
+    )
+    SOURCE_ROLES = {
+        "layer": "layer",
+        "trajectory": "geom",
+        "rollout": "geom",
+        "transition": "transition",
+        "event": "event",
+        "state": "state",
+    }
+    ROLE_NAMES = ("geom", "transition", "event", "state", "layer")
+
+    def prepare_sources(
+        self,
+        sources: dict[str, Tensor],
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        allow_empty: bool,
+    ) -> tuple[Tensor | None, Tensor, dict[str, tuple[int, int]]]:
+        memory, _, ranges = super().prepare_sources(
+            sources,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+            allow_empty=allow_empty,
+        )
+        counts = self.role_token_counts(ranges)
+        if not allow_empty:
+            missing = [role for role in self.ROLE_NAMES if counts.get(role, 0) <= 0]
+            if missing:
+                raise RuntimeError(
+                    "owned evidence memory requires every semantic role; missing "
+                    + ", ".join(missing)
+                )
+        total_tokens = max((stop for _, stop in ranges.values()), default=0)
+        key_bias = torch.zeros(total_tokens, device=device, dtype=torch.float32)
+        for name, (start, stop) in ranges.items():
+            role_count = max(int(counts[self._source_role(name)]), 1)
+            # Every active role receives one unit of prior probability mass.
+            # Multiple sources inside geom therefore share rather than duplicate
+            # its budget.
+            key_bias[start:stop] = -math.log(float(role_count))
+        return memory, key_bias, ranges
+
+
 class WorkspaceController(nn.Module):
-    """Central capacity and role controller for workspace memory retrieval."""
+    """Central capacity and role controller for workspace memory retrieval.
+
+    Firewall contract (red-line fix, v74b review): ``value_state`` is computed
+    from condition+step ONLY and is the sole input to the workspace value
+    FiLM; ``select_state`` may additionally read the action summary but feeds
+    only selection-level controls (query modulation, role logits, capacity,
+    delay, temperature).  Action content can therefore steer WHERE to read
+    but can never write into WHAT the evidence says -- the same discipline
+    enforced in v72's progress isolation and the hierarchical manager.
+    """
 
     def __init__(self, config: V39PolicyConfig, role_names: tuple[str, ...]) -> None:
         super().__init__()
@@ -2327,13 +2496,23 @@ class WorkspaceController(nn.Module):
 class SemanticEvidenceWorkspaceBlock(nn.Module):
     """AdaLN-conditioned workspace block with one evidence write path."""
 
-    def __init__(self, config: V39PolicyConfig) -> None:
+    def __init__(
+        self,
+        config: V39PolicyConfig,
+        *,
+        ffn_expansion: float | None = None,
+        causal_attention: bool | None = None,
+    ) -> None:
         super().__init__()
         h = int(config.hidden_size)
         heads = int(config.num_heads)
         if h % heads != 0:
             raise ValueError("hidden_size must be divisible by num_heads for evidence workspace")
         self.config = config
+        self.causal_attention = (
+            bool(int(getattr(config, "latent_cvae_causal_attention", 1)))
+            if causal_attention is None else bool(causal_attention)
+        )
         self.heads = heads
         self.head_dim = h // heads
         self.self_norm = nn.LayerNorm(h, elementwise_affine=False)
@@ -2345,7 +2524,11 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         self.cross_v = nn.Linear(h, h, bias=False)
         self.cross_out = nn.Linear(h, h)
         self.ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
-        self.ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        expansion = (
+            float(getattr(config, "latent_cvae_ffn_expansion", 2.0))
+            if ffn_expansion is None else float(ffn_expansion)
+        )
+        self.ffn = BiasFreeFFN(h, expansion)
         self.mod = nn.Linear(h, 9 * h)
         self.drop = nn.Dropout(float(config.dropout))
         nn.init.zeros_(self.mod.weight)
@@ -2384,14 +2567,16 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         key_bias: Tensor,
         query_context: Tensor,
         read_scale: Tensor | None = None,
+        self_attention_mask: Tensor | None = None,
+        cross_attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         (
             self_s, self_c, self_g,
             cross_s, cross_c, cross_g,
             ffn_s, ffn_c, ffn_g,
         ) = self.mod(primary_cond).chunk(9, dim=-1)
-        causal_mask = None
-        if int(getattr(self.config, "latent_cvae_causal_attention", 1)):
+        causal_mask = self_attention_mask
+        if causal_mask is None and self.causal_attention:
             n = int(workspace.shape[1])
             causal_mask = torch.triu(torch.ones(n, n, device=workspace.device, dtype=torch.bool), diagonal=1)
         self_value = self._modulate(self.self_norm(workspace), self_s, self_c)
@@ -2417,6 +2602,16 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
             scores = scores + key_bias[:, None, None]
         else:
             raise ValueError(f"key_bias must be [M] or [B,M], got {tuple(key_bias.shape)}")
+        if cross_attention_mask is not None:
+            expected = (int(workspace.shape[1]), int(memory_k.shape[2]))
+            if tuple(cross_attention_mask.shape) != expected:
+                raise ValueError(
+                    f"cross_attention_mask must be {expected}, got {tuple(cross_attention_mask.shape)}"
+                )
+            scores = scores.masked_fill(
+                cross_attention_mask.to(device=scores.device, dtype=torch.bool)[None, None],
+                torch.finfo(scores.dtype).min,
+            )
         weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
         cross_update = torch.matmul(weights, memory_v)
         cross_update = self.cross_out(self._merge_heads(cross_update))
@@ -2695,11 +2890,20 @@ class HierarchicalWorkspaceManager(nn.Module):
     from condition+step only, so stage cannot modulate the low value stream.
     """
 
-    def __init__(self, config: V39PolicyConfig, role_names: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        config: V39PolicyConfig,
+        role_names: tuple[str, ...],
+        *,
+        manage_output_strength: bool = True,
+        manage_role_strength: bool = True,
+    ) -> None:
         super().__init__()
         h = int(config.hidden_size)
         self.hidden_size = h
         self.role_names = tuple(role_names)
+        self.manage_output_strength = bool(manage_output_strength)
+        self.manage_role_strength = bool(manage_role_strength)
         self.base_fusion = nn.Sequential(
             nn.LayerNorm(2 * h),
             nn.Linear(2 * h, h),
@@ -2715,17 +2919,18 @@ class HierarchicalWorkspaceManager(nn.Module):
         self.stage_summary_out = nn.Linear(h, h)
         self.select_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.query_shift = nn.Linear(h, h)
-        self.role_head = nn.Linear(h, len(self.role_names))
+        self.role_head = nn.Linear(h, len(self.role_names)) if self.manage_role_strength else None
         self.promote_head = nn.Linear(h, 1)
-        self.low_output_head = nn.Linear(h, 1)
-        self.stage_output_head = nn.Linear(h, 1)
-        for module in (
-            self.query_shift,
-            self.role_head,
-            self.promote_head,
-            self.low_output_head,
-            self.stage_output_head,
-        ):
+        self.low_output_head = nn.Linear(h, 1) if self.manage_output_strength else None
+        self.stage_output_head = nn.Linear(h, 1) if self.manage_output_strength else None
+        controlled_modules = [self.query_shift, self.promote_head]
+        if self.role_head is not None:
+            controlled_modules.append(self.role_head)
+        if self.low_output_head is not None:
+            controlled_modules.append(self.low_output_head)
+        if self.stage_output_head is not None:
+            controlled_modules.append(self.stage_output_head)
+        for module in controlled_modules:
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
         # Begin as a conservative promotion controller. This gate remains
@@ -2733,8 +2938,9 @@ class HierarchicalWorkspaceManager(nn.Module):
         nn.init.constant_(self.promote_head.bias, math.log(0.10 / 0.90))
         # Stage is a new condition group on top of a pretrained MMDiT. Let it
         # enter with 0.1 prior strength and earn more attention during training.
-        stage_fraction = 0.10 / 1.50
-        nn.init.constant_(self.stage_output_head.bias, math.log(stage_fraction / (1.0 - stage_fraction)))
+        if self.stage_output_head is not None:
+            stage_fraction = 0.10 / 1.50
+            nn.init.constant_(self.stage_output_head.bias, math.log(stage_fraction / (1.0 - stage_fraction)))
 
     def forward(
         self,
@@ -2758,13 +2964,34 @@ class HierarchicalWorkspaceManager(nn.Module):
         select_state = self.select_norm(base_state + stage_summary)
 
         query_shift = self.query_shift(select_state)
-        role_logits = self.role_head(select_state)
-        role_key_bias = memory_bank.role_key_bias(role_logits, ranges)
+        if self.role_head is None:
+            role_logits = torch.zeros(
+                int(select_state.shape[0]), len(self.role_names),
+                device=select_state.device, dtype=select_state.dtype,
+            )
+            role_key_bias = torch.zeros(
+                int(select_state.shape[0]),
+                max((stop for _, stop in ranges.values()), default=0),
+                device=select_state.device,
+                dtype=select_state.dtype,
+            )
+        else:
+            role_logits = self.role_head(select_state)
+            role_key_bias = memory_bank.role_key_bias(role_logits, ranges)
         promote_gate = torch.sigmoid(self.promote_head(select_state)).squeeze(-1)
         # This head never sees stage_summary/select_state. That is the explicit
         # stage -> low-value firewall; stage affects only query/role selection.
-        low_output_strength = torch.exp(0.5 * torch.tanh(self.low_output_head(base_state))).squeeze(-1)
-        stage_output_strength = 1.5 * torch.sigmoid(self.stage_output_head(select_state)).squeeze(-1)
+        if self.low_output_head is None or self.stage_output_head is None:
+            # The clean decoder has one owner for final evidence consumption:
+            # MMDiT attention.  The manager still selects evidence and controls
+            # promotion, but cannot independently silence either output group.
+            low_output_strength = torch.ones(
+                int(base_state.shape[0]), device=base_state.device, dtype=base_state.dtype
+            )
+            stage_output_strength = torch.ones_like(low_output_strength)
+        else:
+            low_output_strength = torch.exp(0.5 * torch.tanh(self.low_output_head(base_state))).squeeze(-1)
+            stage_output_strength = 1.5 * torch.sigmoid(self.stage_output_head(select_state)).squeeze(-1)
 
         role_counts = memory_bank.role_token_counts(ranges)
         active_mask = torch.tensor(
@@ -2785,6 +3012,12 @@ class HierarchicalWorkspaceManager(nn.Module):
             "hierarchical_manager_promote_gate": promote_gate.detach().float().mean(),
             "hierarchical_manager_low_output_strength": low_output_strength.detach().float().mean(),
             "hierarchical_manager_stage_output_strength": stage_output_strength.detach().float().mean(),
+            "hierarchical_manager_fixed_output_prior": torch.as_tensor(
+                float(not self.manage_output_strength), device=base_state.device, dtype=torch.float32
+            ),
+            "hierarchical_manager_fixed_role_prior": torch.as_tensor(
+                float(not self.manage_role_strength), device=base_state.device, dtype=torch.float32
+            ),
         }
         for index, role in enumerate(self.role_names):
             metrics[f"hierarchical_manager_role_{role}_prob"] = role_probs[:, index].detach().float().mean()
@@ -2801,7 +3034,21 @@ class HierarchicalWorkspaceManager(nn.Module):
 class HierarchicalEvidenceWorkspace(nn.Module):
     """Temporary low reads plus persistent, role-separated stage memory."""
 
-    def __init__(self, config: V39PolicyConfig) -> None:
+    def __init__(
+        self,
+        config: V39PolicyConfig,
+        *,
+        owned_evidence: bool = False,
+        manage_output_strength: bool = True,
+        contract_conditioning: bool = False,
+        stratified_roles: bool = False,
+        low_count: int | None = None,
+        stage_count: int | None = None,
+        refine_steps: int | None = None,
+        ffn_expansion: float | None = None,
+        causal_attention: bool | None = None,
+        stage_promote_scale_init: float | None = None,
+    ) -> None:
         super().__init__()
         self.config = config
         h = int(config.hidden_size)
@@ -2811,18 +3058,63 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         self.hidden_size = h
         self.heads = heads
         self.head_dim = h // heads
-        self.low_count = int(getattr(config, "latent_cvae_horizon_tokens", config.action_horizon))
-        self.stage_count = int(getattr(config, "latent_cvae_stage_slots", 6))
-        self.refine_steps = max(int(getattr(config, "adaptive_cvae_refine_steps", 1)), 1)
-        self.memory_bank = EvidenceMemoryBank(config)
+        self.low_count = int(
+            getattr(config, "latent_cvae_horizon_tokens", config.action_horizon)
+            if low_count is None else low_count
+        )
+        self.stage_count = int(
+            getattr(config, "latent_cvae_stage_slots", 6)
+            if stage_count is None else stage_count
+        )
+        self.refine_steps = max(int(
+            getattr(config, "adaptive_cvae_refine_steps", 1)
+            if refine_steps is None else refine_steps
+        ), 1)
+        self.contract_conditioning = bool(contract_conditioning)
+        self.memory_bank = OwnedEvidenceMemoryBank(config) if owned_evidence else EvidenceMemoryBank(config)
+        self.stratified_roles = bool(stratified_roles)
+        if self.stratified_roles and not owned_evidence:
+            raise ValueError("role-stratified workspace requires owned_evidence=True")
 
         # Value and selector identities are separate parameters. Per-sample
         # stage state is never added to low_value_seed.
         self.low_value_seed = nn.Parameter(torch.randn(1, self.low_count, h) * 0.02)
         self.low_selector_seed = nn.Parameter(torch.randn(1, self.low_count, h) * 0.02)
         self.step_embedding = nn.Parameter(torch.randn(1, self.refine_steps, h) * 0.02)
-        self.condition_query = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-        self.manager = HierarchicalWorkspaceManager(config, EvidenceMemoryBank.ROLE_NAMES)
+        self.condition_query = (
+            None if self.contract_conditioning else nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        )
+        self.read_contract_norm = nn.LayerNorm(h, elementwise_affine=False) if self.contract_conditioning else None
+        self.read_contract_mod = nn.Linear(h, 2 * h) if self.contract_conditioning else None
+        if self.read_contract_mod is not None:
+            nn.init.normal_(self.read_contract_mod.weight, mean=0.0, std=1e-3)
+            nn.init.zeros_(self.read_contract_mod.bias)
+        self.manager = HierarchicalWorkspaceManager(
+            config,
+            self.memory_bank.ROLE_NAMES,
+            manage_output_strength=manage_output_strength,
+            manage_role_strength=not self.stratified_roles,
+        )
+        role_count = len(self.memory_bank.ROLE_NAMES)
+        if self.stratified_roles and self.low_count < role_count:
+            raise ValueError(
+                f"role-stratified workspace needs at least {role_count} low slots, got {self.low_count}"
+            )
+        if self.stratified_roles and self.low_count % role_count != 0:
+            raise ValueError(
+                "role-stratified workspace requires an equal number of slots per role: "
+                f"low_count={self.low_count}, role_count={role_count}"
+            )
+        low_role_ids = torch.arange(self.low_count, dtype=torch.long) % max(role_count, 1)
+        self.register_buffer(
+            "low_slot_role_ids",
+            low_role_ids,
+            persistent=self.stratified_roles,
+        )
+        self.low_role_embed = (
+            nn.Parameter(torch.randn(1, role_count, h) * 0.02)
+            if self.stratified_roles else None
+        )
 
         self.low_stage_query = nn.Linear(h, h, bias=False)
         self.stage_role_selector_norm = nn.LayerNorm(h, elementwise_affine=False)
@@ -2832,17 +3124,33 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         self.low_stage_role_value = nn.Linear(h, h, bias=False)
         self.low_stage_content_value = nn.Linear(h, h, bias=False)
         self.low_stage_out = nn.Linear(h, h)
-        self.low_blocks = nn.ModuleList([SemanticEvidenceWorkspaceBlock(config) for _ in range(2)])
+        self.low_blocks = nn.ModuleList([
+            SemanticEvidenceWorkspaceBlock(
+                config,
+                ffn_expansion=ffn_expansion,
+                causal_attention=causal_attention,
+            )
+            for _ in range(2)
+        ])
         self.low_final_norm = nn.LayerNorm(h, elementwise_affine=False)
 
         # Role is a persistent learned identity. Content is the only recurrent
         # state and is initialized without adding the role tensor. One shared
         # seed avoids both zero-LayerNorm gain and a second hidden slot-role.
         self.stage_role = nn.Parameter(torch.randn(1, self.stage_count, h) * 0.02)
-        self.stage_content_seed = nn.Parameter(torch.randn(1, 1, h) * 0.02)
-        self.stage_init = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-        nn.init.zeros_(self.stage_init[-1].weight)
-        nn.init.zeros_(self.stage_init[-1].bias)
+        stage_seed_count = self.stage_count if self.contract_conditioning else 1
+        self.stage_content_seed = nn.Parameter(torch.randn(1, stage_seed_count, h) * 0.02)
+        self.stage_init = (
+            None if self.contract_conditioning else nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        )
+        if self.stage_init is not None:
+            nn.init.zeros_(self.stage_init[-1].weight)
+            nn.init.zeros_(self.stage_init[-1].bias)
+        self.stage_contract_norm = nn.LayerNorm(h, elementwise_affine=False) if self.contract_conditioning else None
+        self.stage_contract_mod = nn.Linear(h, 2 * h) if self.contract_conditioning else None
+        if self.stage_contract_mod is not None:
+            nn.init.normal_(self.stage_contract_mod.weight, mean=0.0, std=1e-3)
+            nn.init.zeros_(self.stage_contract_mod.bias)
         self.stage_role_query = nn.Linear(h, h, bias=False)
         self.stage_content_query = nn.Linear(h, h, bias=False)
         self.stage_condition_query = nn.Linear(h, h, bias=False)
@@ -2857,7 +3165,11 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             # PyTorch GRU gate order is reset, update(retain), candidate.
             self.stage_gru.bias_ih[h:2 * h].fill_(0.5)
             self.stage_gru.bias_hh[h:2 * h].fill_(0.5)
-        promote_init = min(max(float(getattr(config, "latent_cvae_stage_promote_scale_init", 0.05)), 1e-4), 1.0 - 1e-4)
+        promote_value = (
+            float(getattr(config, "latent_cvae_stage_promote_scale_init", 0.05))
+            if stage_promote_scale_init is None else float(stage_promote_scale_init)
+        )
+        promote_init = min(max(promote_value, 1e-4), 1.0 - 1e-4)
         self.stage_promote_scale_logit = nn.Parameter(torch.tensor(math.log(promote_init / (1.0 - promote_init))))
         self.stage_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.stage_content_out = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
@@ -2904,18 +3216,52 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             dtype=dtype,
         )
 
-    def init_stage(self, primary_cond: Tensor) -> Tensor:
-        batch = int(primary_cond.shape[0])
-        content = self.stage_content_seed.to(device=primary_cond.device, dtype=primary_cond.dtype).expand(
+    def _role_masks(
+        self,
+        prepared_evidence: PreparedEvidenceMemory,
+        *,
+        device: torch.device,
+    ) -> tuple[Tensor | None, Tensor | None]:
+        if not self.stratified_roles:
+            return None, None
+        role_to_index = {role: index for index, role in enumerate(self.memory_bank.ROLE_NAMES)}
+        memory_count = max((stop for _, stop in prepared_evidence.ranges.values()), default=0)
+        memory_roles = torch.full((memory_count,), -1, device=device, dtype=torch.long)
+        for name, (start, stop) in prepared_evidence.ranges.items():
+            role = self.memory_bank._source_role(name)
+            memory_roles[start:stop] = int(role_to_index[role])
+        if bool((memory_roles < 0).any()):
+            raise RuntimeError("owned evidence role mask contains unassigned memory tokens")
+        slot_roles = self.low_slot_role_ids.to(device=device)
+        cross_mask = slot_roles[:, None] != memory_roles[None, :]
+        self_mask = slot_roles[:, None] != slot_roles[None, :]
+        if self.low_blocks and self.low_blocks[0].causal_attention:
+            self_mask = self_mask | torch.triu(
+                torch.ones(self.low_count, self.low_count, device=device, dtype=torch.bool), diagonal=1
+            )
+        return self_mask, cross_mask
+
+    def init_stage(self, stage_contract: Tensor) -> Tensor:
+        batch = int(stage_contract.shape[0])
+        content = self.stage_content_seed.to(device=stage_contract.device, dtype=stage_contract.dtype).expand(
             batch, self.stage_count, -1
         )
-        content = content + self.stage_init(primary_cond)[:, None]
+        if self.contract_conditioning:
+            if self.stage_contract_norm is None or self.stage_contract_mod is None:
+                raise RuntimeError("factorized stage contract modules are not initialized")
+            shift, scale = self.stage_contract_mod(self.stage_contract_norm(stage_contract)).chunk(2, dim=-1)
+            content = self.stage_norm(content) * (1.0 + scale[:, None]) + shift[:, None]
+        else:
+            if self.stage_init is None:
+                raise RuntimeError("legacy stage initializer is not initialized")
+            content = content + self.stage_init(stage_contract)[:, None]
         return self.stage_norm(content)
 
     def _low_selector_context(
         self,
         *,
         primary_cond: Tensor,
+        read_contract: Tensor | None,
         step_state: Tensor,
         manager_shift: Tensor,
         stage_role: Tensor,
@@ -2923,7 +3269,16 @@ class HierarchicalEvidenceWorkspace(nn.Module):
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         batch = int(primary_cond.shape[0])
         selector_seed = self.low_selector_seed.to(device=primary_cond.device, dtype=primary_cond.dtype).expand(batch, -1, -1)
-        selector_seed = selector_seed + self.condition_query(primary_cond)[:, None] + step_state[:, None] + manager_shift[:, None]
+        if self.contract_conditioning:
+            if read_contract is None or self.read_contract_norm is None or self.read_contract_mod is None:
+                raise ValueError("factorized hierarchical workspace requires a read contract")
+            shift, scale = self.read_contract_mod(self.read_contract_norm(read_contract)).chunk(2, dim=-1)
+            selector_seed = self.low_final_norm(selector_seed) * (1.0 + scale[:, None]) + shift[:, None]
+        else:
+            if self.condition_query is None:
+                raise RuntimeError("legacy condition query is not initialized")
+            selector_seed = selector_seed + self.condition_query(primary_cond)[:, None]
+        selector_seed = selector_seed + step_state[:, None] + manager_shift[:, None]
         q = self.low_stage_query(selector_seed)
         normalized_role = self.stage_role_selector_norm(stage_role)
         normalized_content = self.stage_content_selector_norm(stage_content)
@@ -2953,7 +3308,7 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         primary_cond: Tensor,
         step_state: Tensor,
         promote_gate: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         normalized_role = self.stage_role_selector_norm(stage_role)
         normalized_content = self.stage_content_selector_norm(stage_content)
         q = (
@@ -2965,17 +3320,27 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         v = self.stage_low_value(low_tokens)
         promoted, weights = self._attention(q, k, v)
         promoted = self.stage_promote_out(promoted)
-        gated_promoted = promoted * promote_gate[:, None, None].to(dtype=promoted.dtype)
-        # Normalize first. Reversing this order would cancel the scalar gate
-        # and silently turn promotion strength into a fake control surface.
-        gru_input = self.stage_input_norm(promoted) * promote_gate[:, None, None].to(dtype=promoted.dtype)
+        # Both recurrent and additive promotion paths consume the same
+        # non-affine normalized evidence. Otherwise stage_promote_out can grow
+        # around the scalar controller through the additive residual path.
+        normalized_promoted = self.stage_input_norm(promoted)
+        gated_promoted = normalized_promoted * promote_gate[:, None, None].to(dtype=promoted.dtype)
+        gru_input = gated_promoted
         flat_input = gru_input.reshape(-1, self.hidden_size)
         flat_hidden = stage_content.reshape(-1, self.hidden_size)
         retain = self._stage_retain_gate(flat_input, flat_hidden)
         recurrent = self.stage_gru(flat_input, flat_hidden).reshape_as(stage_content)
         promote_scale = torch.sigmoid(self.stage_promote_scale_logit).to(device=stage_content.device, dtype=stage_content.dtype)
         next_content = self.stage_norm(recurrent + promote_scale * gated_promoted)
-        return next_content, weights, promoted, retain, promote_scale
+        return (
+            next_content,
+            weights,
+            promoted,
+            normalized_promoted,
+            gated_promoted,
+            retain,
+            promote_scale,
+        )
 
     @staticmethod
     def _slot_diversity(x: Tensor) -> Tensor:
@@ -2988,6 +3353,8 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         stage_content: Tensor,
         primary_cond: Tensor,
         step_index: int,
+        read_contract: Tensor | None = None,
+        step_state_override: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
         batch = int(primary_cond.shape[0])
         device = primary_cond.device
@@ -3001,7 +3368,15 @@ class HierarchicalEvidenceWorkspace(nn.Module):
                 f"stage content must be {(batch, self.stage_count, self.hidden_size)}, got {tuple(stage_content.shape)}"
             )
         stage_role = self.stage_role.to(device=device, dtype=dtype).expand(batch, -1, -1)
-        step_state = self._step_state(step_index, batch=batch, device=device, dtype=dtype)
+        if step_state_override is None:
+            step_state = self._step_state(step_index, batch=batch, device=device, dtype=dtype)
+        else:
+            if tuple(step_state_override.shape) != (batch, self.hidden_size):
+                raise ValueError(
+                    "hierarchical workspace step_state_override must be "
+                    f"{(batch, self.hidden_size)}, got {tuple(step_state_override.shape)}"
+                )
+            step_state = step_state_override.to(device=device, dtype=dtype)
         (
             manager_shift,
             role_bias,
@@ -3019,6 +3394,7 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         )
         query_context, selector_weights, selector_role, selector_content = self._low_selector_context(
             primary_cond=primary_cond,
+            read_contract=read_contract,
             step_state=step_state,
             manager_shift=manager_shift,
             stage_role=stage_role,
@@ -3030,6 +3406,9 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         low = self.low_value_seed.to(device=device, dtype=dtype).expand(batch, -1, -1)
         low_seed = low
         key_bias = prepared_evidence.key_bias.to(device=device) + role_bias.to(device=device, dtype=torch.float32)
+        self_attention_mask, cross_attention_mask = self._role_masks(
+            prepared_evidence, device=device,
+        )
         evidence_weight_rows: list[Tensor] = []
         for block_index, block in enumerate(self.low_blocks):
             memory_k, memory_v = prepared_evidence.block_kv[block_index]
@@ -3041,13 +3420,26 @@ class HierarchicalEvidenceWorkspace(nn.Module):
                 key_bias=key_bias,
                 query_context=query_context,
                 read_scale=None,
+                self_attention_mask=self_attention_mask,
+                cross_attention_mask=cross_attention_mask,
             )
             evidence_weight_rows.append(weights.detach().float())
-        low_pre_norm = low
+        low_evidence_pre_norm = low
+        if self.low_role_embed is not None:
+            role_embed = self.low_role_embed[:, self.low_slot_role_ids].to(device=device, dtype=dtype)
+            low = low + role_embed
         low = self.low_final_norm(low)
         low_for_action = low
 
-        next_stage_content, promote_weights, promoted, retain, promote_scale = self._promote_stage(
+        (
+            next_stage_content,
+            promote_weights,
+            promoted,
+            normalized_promoted,
+            gated_promoted,
+            retain,
+            promote_scale,
+        ) = self._promote_stage(
             low_tokens=low,
             stage_role=stage_role,
             stage_content=stage_content,
@@ -3074,7 +3466,9 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         metrics: dict[str, Tensor] = {
             "workspace_token_count": torch.tensor(float(self.low_count), device=device, dtype=torch.float32),
             "workspace_token_norm": low_for_action.detach().float().norm(dim=-1).mean(),
-            "workspace_update_norm": (low_pre_norm.detach() - low_seed.detach()).float().norm(dim=-1).mean(),
+            "workspace_update_norm": (
+                low_evidence_pre_norm.detach() - low_seed.detach()
+            ).float().norm(dim=-1).mean(),
             "workspace_global_state_norm": zero,
             "workspace_global_slot_delta_norm": zero,
             "workspace_global_slot_diversity": zero,
@@ -3089,6 +3483,14 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             ).sum(dim=-1).mean(),
             "workspace_attention_mass_error": (group_weights.sum(dim=-1) - 1.0).abs().mean(),
             "hierarchical_low_token_count": torch.tensor(float(self.low_count), device=device, dtype=torch.float32),
+            "hierarchical_low_role_stratified": torch.tensor(
+                float(self.stratified_roles), device=device, dtype=torch.float32
+            ),
+            "hierarchical_low_causal_attention": torch.tensor(
+                float(bool(self.low_blocks and self.low_blocks[0].causal_attention)),
+                device=device,
+                dtype=torch.float32,
+            ),
             "hierarchical_low_token_norm": low_for_action.detach().float().norm(dim=-1).mean(),
             "hierarchical_low_selector_stage_entropy": -(selector_prob * selector_prob.log()).sum(dim=-1).mean(),
             "hierarchical_low_selector_stage_max": selector_prob.max(dim=-1).values.mean(),
@@ -3115,11 +3517,34 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             "hierarchical_stage_promote_attention_entropy": -(promote_prob * promote_prob.log()).sum(dim=-1).mean(),
             "hierarchical_stage_promote_attention_max": promote_prob.max(dim=-1).values.mean(),
             "hierarchical_stage_promoted_norm": promoted.detach().float().norm(dim=-1).mean(),
+            "hierarchical_stage_promoted_projected_rms": (
+                promoted.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
+            ),
+            "hierarchical_stage_promoted_normalized_rms": (
+                normalized_promoted.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
+            ),
+            "hierarchical_stage_promoted_realized_scale": (
+                gated_promoted.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
+            ),
+            "hierarchical_stage_promote_gate_scale_error": (
+                gated_promoted.detach().float().square().mean(dim=(1, 2)).sqrt()
+                - promote_gate.detach().float().abs()
+            ).abs().mean(),
             "hierarchical_stage_promote_scale": promote_scale.detach().float(),
         }
         metrics["workspace_group_effective_sources"] = torch.exp(metrics["workspace_group_attention_entropy"])
         metrics.update(manager_metrics)
         metrics.update(self.memory_bank.role_attention_metrics(weights, prepared_evidence.ranges))
+        if self.stratified_roles:
+            evidence_delta = (low_evidence_pre_norm.detach() - low_seed.detach()).float()
+            for role_index, role in enumerate(self.memory_bank.ROLE_NAMES):
+                role_mask = self.low_slot_role_ids.to(device=device) == role_index
+                metrics[f"hierarchical_low_role_{role}_update_norm"] = (
+                    evidence_delta[:, role_mask].norm(dim=-1).mean()
+                )
+                metrics[f"hierarchical_low_role_{role}_output_norm"] = (
+                    low_for_action.detach().float()[:, role_mask].norm(dim=-1).mean()
+                )
         for name, (start, stop) in prepared_evidence.ranges.items():
             metrics[f"workspace_{name}_attention"] = weights[..., start:stop].sum(dim=-1).mean()
         transition_mass = [
@@ -3153,7 +3578,14 @@ class LatentCVAEMMDiTBlock(nn.Module):
     being written into condition tokens and returning as a shortcut.
     """
 
-    def __init__(self, config: V39PolicyConfig) -> None:
+    def __init__(
+        self,
+        config: V39PolicyConfig,
+        *,
+        ffn_expansion: float | None = None,
+        causal_attention: bool | None = None,
+        noisy_causal: bool | None = None,
+    ) -> None:
         super().__init__()
         self.config = config
         h = int(config.hidden_size)
@@ -3163,6 +3595,14 @@ class LatentCVAEMMDiTBlock(nn.Module):
         self.hidden_size = h
         self.heads = heads
         self.head_dim = h // heads
+        self.causal_attention = (
+            bool(int(getattr(config, "latent_cvae_causal_attention", 1)))
+            if causal_attention is None else bool(causal_attention)
+        )
+        self.noisy_causal = (
+            bool(int(getattr(config, "latent_cvae_mmdit_noisy_causal", 1)))
+            if noisy_causal is None else bool(noisy_causal)
+        )
         self.action_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.cond_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_qkv = nn.Linear(h, 3 * h)
@@ -3171,8 +3611,12 @@ class LatentCVAEMMDiTBlock(nn.Module):
         self.cond_out = nn.Linear(h, h)
         self.action_ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.cond_ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
-        self.action_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
-        self.cond_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
+        expansion = (
+            float(getattr(config, "latent_cvae_ffn_expansion", 2.0))
+            if ffn_expansion is None else float(ffn_expansion)
+        )
+        self.action_ffn = BiasFreeFFN(h, expansion)
+        self.cond_ffn = BiasFreeFFN(h, expansion)
         self.global_cond_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_mod = nn.Linear(h, 6 * h)
         self.cond_mod = nn.Linear(h, 6 * h)
@@ -3216,13 +3660,13 @@ class LatentCVAEMMDiTBlock(nn.Module):
         return torch.matmul(weights, v), weights
 
     def _action_mask(self, action_len: int, cond_len: int, noisy_start: int, noisy_len: int, device: torch.device) -> Tensor | None:
-        if not int(getattr(self.config, "latent_cvae_causal_attention", 1)):
+        if not self.causal_attention:
             return None
         total = action_len + cond_len
         mask = torch.zeros(action_len, total, device=device, dtype=torch.bool)
         future_action = torch.triu(torch.ones(action_len, action_len, device=device, dtype=torch.bool), diagonal=1)
         mask[:, :action_len] = future_action
-        if int(getattr(self.config, "latent_cvae_mmdit_noisy_causal", 1)) and noisy_len > 0:
+        if self.noisy_causal and noisy_len > 0:
             horizon = torch.arange(action_len, device=device)[:, None]
             noisy_pos = torch.arange(noisy_len, device=device)[None]
             future_noisy = noisy_pos > horizon
@@ -3306,6 +3750,7 @@ class LatentCVAEMMDiTBlock(nn.Module):
         noisy_logit_bias: Tensor | None = None,
         low_logit_bias: Tensor | None = None,
         stage_logit_bias: Tensor | None = None,
+        noisy_value_gate: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         action_before = action
         cond_before = cond_tokens
@@ -3321,6 +3766,20 @@ class LatentCVAEMMDiTBlock(nn.Module):
         cq, ck, cv = (self._split_heads(part) for part in c_qkv)
         k_all = torch.cat([ak, ck], dim=2)
         v_all = torch.cat([av, cv], dim=2)
+        if noisy_value_gate is not None and int(noisy_len) > 0:
+            # Real value-domain t-gate (noisy_gate_mode=1).  Applied AFTER
+            # cond_norm/QKV so the scale-invariant LayerNorm cannot cancel it:
+            # bids (keys) keep full strength at every t, only the information
+            # amplitude delivered on attention is attenuated at low t.
+            gate_start = int(action.shape[1]) + int(noisy_start)
+            gate_stop = min(gate_start + int(noisy_len), int(v_all.shape[2]))
+            if gate_start < gate_stop:
+                scale = noisy_value_gate.to(device=v_all.device, dtype=v_all.dtype)
+                v_all = torch.cat([
+                    v_all[:, :, :gate_start],
+                    v_all[:, :, gate_start:gate_stop] * scale[:, None, None, None],
+                    v_all[:, :, gate_stop:],
+                ], dim=2)
         mask = self._action_mask(int(action.shape[1]), int(cond_tokens.shape[1]), int(noisy_start), int(noisy_len), action.device)
         hierarchical_groups = int(low_len) > 0 or int(stage_len) > 0
         if hierarchical_groups:
@@ -4626,7 +5085,51 @@ class LatentCVAEActionDecoder(nn.Module):
             evidence_sources=evidence_sources,
         )
 
-        posterior_used = target_physical is not None
+        # CR0 probe (do_before_v76 §14.2): flag-gated eval-time z interventions.
+        # Two counterfactual prior decodes measure how much the deployed
+        # velocity actually depends on z: zero (channel removed) and batch
+        # shuffle (wrong sample's z).  Uses a dedicated CPU generator so the
+        # global RNG stream -- and therefore paired-seed comparability -- is
+        # untouched.  Costs two extra decodes per eval batch; keep the flag
+        # off for training arms and enable it only in short diagnostic runs.
+        z_zero_delta = torch.zeros((), device=device, dtype=torch.float32)
+        z_shuffle_delta = torch.zeros((), device=device, dtype=torch.float32)
+        if int(getattr(cfg, "latent_cvae_z_probe", 0)) and not self.training:
+            with torch.no_grad():
+                probe_kwargs = dict(
+                    noisy_physical=noisy_physical,
+                    time=time,
+                    trajectory_tokens=trajectory_tokens,
+                    rollout_tokens=rollout_condition,
+                    cond=cond,
+                    layer_stack=layer_stack,
+                    evidence_sources=evidence_sources,
+                )
+                zero_out = self._decode_with_z(z=torch.zeros_like(prior_z), **probe_kwargs)
+                probe_gen = torch.Generator(device="cpu")
+                probe_gen.manual_seed(20260710 + int(prior_z.shape[0]))
+                perm = torch.randperm(int(prior_z.shape[0]), generator=probe_gen).to(prior_z.device)
+                shuffle_out = self._decode_with_z(z=prior_z[perm], **probe_kwargs)
+                reference = prior_out["pred_velocity"].detach().float()
+                reference_norm = reference.norm(dim=-1).mean().clamp_min(1e-6)
+                z_zero_delta = (
+                    (zero_out["pred_velocity"].detach().float() - reference).norm(dim=-1).mean()
+                    / reference_norm
+                )
+                z_shuffle_delta = (
+                    (shuffle_out["pred_velocity"].detach().float() - reference).norm(dim=-1).mean()
+                    / reference_norm
+                )
+
+        # CR1/B1 (do_before_v76 §15): with latent_cvae_variational=0 the
+        # posterior/KL/sampling scaffold is bypassed while the deploy function
+        # is kept BIT-IDENTICAL (prior_z = mu_p(cond), tanh mu_bound and std
+        # clamps untouched -- they are part of the deployed mapping and their
+        # removal belongs to B2/B3, not here).  This arm answers exactly one
+        # question: does variational TRAINING itself buy reproducible value?
+        posterior_used = target_physical is not None and bool(
+            int(getattr(cfg, "latent_cvae_variational", 1))
+        )
         kl = torch.zeros((), device=device, dtype=dtype)
         post_std = torch.zeros((), device=device, dtype=torch.float32)
         mu_gap = torch.zeros((), device=device, dtype=torch.float32)
@@ -4661,6 +5164,8 @@ class LatentCVAEActionDecoder(nn.Module):
             "action_tokens": prior_out["action_tokens"],
             "transition_latent": prior_out["transition_latent"],
             "cvae_kl": kl,
+            "cvae_z_zero_delta": z_zero_delta,
+            "cvae_z_shuffle_delta": z_shuffle_delta,
             "cvae_prior_std": prior_std,
             "cvae_post_std": post_std,
             "cvae_z_norm": prior_z.detach().float().norm(dim=-1).mean(),
@@ -4779,6 +5284,7 @@ class LatentCVAEActionDecoder(nn.Module):
             "primary_z_effect_norm",
             "workspace_progress_update_norm",
             "workspace_progress_action_dependence",
+            "legacy_stem_effect_ratio",
             "workspace_token_count",
             "workspace_token_norm",
             "workspace_update_norm",
@@ -4847,6 +5353,10 @@ class LatentCVAEActionDecoder(nn.Module):
             "hierarchical_stage_promote_attention_entropy",
             "hierarchical_stage_promote_attention_max",
             "hierarchical_stage_promoted_norm",
+            "hierarchical_stage_promoted_projected_rms",
+            "hierarchical_stage_promoted_normalized_rms",
+            "hierarchical_stage_promoted_realized_scale",
+            "hierarchical_stage_promote_gate_scale_error",
             "hierarchical_stage_promote_scale",
             "hierarchical_manager_stage_attention_entropy",
             "hierarchical_manager_stage_attention_max",
@@ -5716,8 +6226,16 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         else:
             seed_delta = torch.zeros_like(base_action)
             action = base_action + self.z_to_token(z.to(device=device, dtype=dtype))[:, None]
+        # CR0 probe (do_before_v76 §7/§14.1): the frozen legacy CVAE stem is
+        # still an active conditional operator; measure how much it moves the
+        # action state so B0 attribution has numbers instead of assumptions.
+        stem_before = action
         for block in self.blocks:
             action = block(action, cond_time)
+        legacy_stem_effect_ratio = (
+            (action - stem_before).detach().float().norm(dim=-1).mean()
+            / stem_before.detach().float().norm(dim=-1).mean().clamp_min(1e-6)
+        )
         if hierarchical_refine:
             context_capsules = None
             capsule_layer_entropy = z0
@@ -6212,6 +6730,7 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
             "adaptive_output_adapter_norm": output_delta.detach().float().norm(dim=-1).mean(),
             "adaptive_function_delta_norm": torch.stack(function_rows).mean() if function_rows else z0,
             "adaptive_base_highfreq_norm": base_highfreq,
+            "legacy_stem_effect_ratio": legacy_stem_effect_ratio,
             "adaptive_refine_step_bias_norm": torch.stack(step_bias_rows).mean() if step_bias_rows else z0,
             "adaptive_capsule_layer_entropy": capsule_layer_entropy.to(device=device),
             "adaptive_capsule_layer_max": capsule_layer_max.to(device=device),
@@ -6273,6 +6792,1250 @@ class AdaptiveRecurrentCVAEActionDecoder(LatentCVAEActionDecoder):
         return out
 
 
+class PolicyConditionOrganizer(nn.Module):
+    """Turn trunk outputs into typed summaries and owned evidence tokens.
+
+    This module has no action/noise/time input.  Ordered layer information is
+    scanned rather than flattened, and global summaries are returned only to
+    the intent compiler; they are never inserted into the evidence value bank.
+    """
+
+    _LAYER_KEYS = LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+    # trajectory_pooled is derived from the noisy-action canvas and therefore
+    # belongs to neither stable intent nor world evidence.  Keeping it in a
+    # "world" layer summary recreates x_t under a different source name.
+    _WORLD_KEYS = frozenset(("rollout_tokens",))
+    _DISALLOWED_LAYER_KEYS = frozenset(("trajectory_pooled",))
+    _INTENT_SOURCE_NAMES = (
+        "task",
+        "state",
+        "state_history",
+        "executed",
+        "proposal",
+        "visual",
+    )
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        self.config = config
+        h = int(config.hidden_size)
+        self.hidden_size = h
+        self.depth = int(config.depth)
+        self.layer_key_proj = nn.ModuleList([
+            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            for _ in self._LAYER_KEYS
+        ])
+        self.layer_key_embed = nn.Parameter(torch.randn(1, len(self._LAYER_KEYS), h) * 0.02)
+        self.world_key_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
+        self.consequence_key_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
+        nn.init.zeros_(self.world_key_gate[-1].weight)
+        nn.init.zeros_(self.world_key_gate[-1].bias)
+        nn.init.zeros_(self.consequence_key_gate[-1].weight)
+        nn.init.zeros_(self.consequence_key_gate[-1].bias)
+        consequence_max = float(config.hierarchical_mmdit_consequence_scale_max)
+        consequence_init = float(config.hierarchical_mmdit_consequence_scale_init)
+        ratio = min(max(consequence_init / consequence_max, 1e-4), 1.0 - 1e-4)
+        self.consequence_scale_logit = nn.Parameter(torch.tensor(math.log(ratio / (1.0 - ratio))))
+        self.layer_proj = nn.ModuleList([
+            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
+            for _ in range(self.depth)
+        ])
+        self.layer_embed = nn.Parameter(torch.randn(1, self.depth, h) * 0.02)
+        self.layer_scan = nn.GRUCell(h, h)
+        self.layer_scan_init = nn.Parameter(torch.zeros(1, h))
+        self.layer_stack_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+        def token_projector(input_dim: int = h) -> nn.Module:
+            return nn.Sequential(nn.LayerNorm(input_dim), nn.Linear(input_dim, h))
+
+        self.trajectory_token_proj = token_projector()
+        self.rollout_token_proj = token_projector()
+        self.transition_token_proj = token_projector()
+        self.state_token_proj = token_projector()
+        self.event_token_proj = token_projector(3)
+        self.intent_token_proj = nn.ModuleDict({
+            name: token_projector() for name in self._INTENT_SOURCE_NAMES
+        })
+        self.intent_source_embed = nn.Parameter(
+            torch.randn(1, len(self._INTENT_SOURCE_NAMES), h) * 0.02
+        )
+        self.geom_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
+        self.global_summary_proj = nn.Sequential(
+            nn.LayerNorm(len(self._INTENT_SOURCE_NAMES) * h),
+            nn.Linear(len(self._INTENT_SOURCE_NAMES) * h, h),
+            nn.SiLU(),
+            nn.Linear(h, h),
+        )
+        self.transition_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.state_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        self.event_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+
+    @staticmethod
+    def _groups(memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None) -> list[Tensor]:
+        if memory is None:
+            return []
+        return [memory] if isinstance(memory, Tensor) else list(memory)
+
+    def _project_memory(
+        self,
+        memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
+        *,
+        projector: nn.Module,
+        reference: Tensor,
+        input_dim: int,
+    ) -> Tensor:
+        parts: list[Tensor] = []
+        grad_scale = float(self.config.hierarchical_mmdit_source_grad_scale)
+        for value in self._groups(memory):
+            if not isinstance(value, Tensor) or value.ndim != 3 or int(value.shape[-1]) != int(input_dim):
+                raise ValueError(
+                    f"owned evidence memory must be [B,N,{input_dim}], got "
+                    f"{type(value).__name__}{'' if not isinstance(value, Tensor) else tuple(value.shape)}"
+                )
+            source = _scaled_contract_view(value, grad_scale)
+            parts.append(projector(source.to(device=reference.device, dtype=reference.dtype)))
+        if not parts:
+            return reference.new_zeros(int(reference.shape[0]), 0, self.hidden_size)
+        return torch.cat(parts, dim=1)
+
+    def _project_intent_memory(
+        self,
+        memory: dict[str, Tensor],
+        *,
+        reference: Tensor,
+    ) -> tuple[Tensor, dict[str, int]]:
+        unknown = set(memory).difference(self._INTENT_SOURCE_NAMES)
+        missing = set(self._INTENT_SOURCE_NAMES).difference(memory)
+        if unknown or missing:
+            raise ValueError(
+                "intent memory ownership mismatch: "
+                f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+            )
+        grad_scale = float(self.config.hierarchical_mmdit_source_grad_scale)
+        summary_parts: list[Tensor] = []
+        counts: dict[str, int] = {}
+        for index, name in enumerate(self._INTENT_SOURCE_NAMES):
+            value = memory[name]
+            if value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
+                raise ValueError(
+                    f"intent source {name!r} must be [B,N,{self.hidden_size}], got {tuple(value.shape)}"
+                )
+            if int(value.shape[0]) != int(reference.shape[0]) or int(value.shape[1]) <= 0:
+                raise ValueError(
+                    f"intent source {name!r} must be nonempty with batch={int(reference.shape[0])}, "
+                    f"got {tuple(value.shape)}"
+                )
+            source = _scaled_contract_view(value, grad_scale)
+            projected = self.intent_token_proj[name](
+                source.to(device=reference.device, dtype=reference.dtype)
+            )
+            projected = projected + self.intent_source_embed[:, index:index + 1].to(
+                device=reference.device, dtype=reference.dtype
+            )
+            summary_parts.append(projected.mean(dim=1))
+            counts[name] = int(projected.shape[1])
+        return torch.cat(summary_parts, dim=-1), counts
+
+    def _layer_summary(self, entry: dict[str, Tensor], layer_index: int) -> tuple[Tensor, Tensor, Tensor]:
+        world: list[Tensor] = []
+        consequence: list[Tensor] = []
+        grad_scale = float(self.config.hierarchical_mmdit_layer_grad_scale)
+        for key_index, key in enumerate(self._LAYER_KEYS):
+            if key in self._DISALLOWED_LAYER_KEYS:
+                continue
+            value = entry.get(key)
+            if not isinstance(value, Tensor) or value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
+                continue
+            pooled = _scaled_contract_view(value, grad_scale).mean(dim=1)
+            typed = self.layer_key_proj[key_index](pooled)
+            typed = typed + self.layer_key_embed[:, key_index].to(device=typed.device, dtype=typed.dtype)
+            (world if key in self._WORLD_KEYS else consequence).append(typed)
+        if not world:
+            raise RuntimeError(f"layer contract {layer_index} has no world-summary source")
+
+        def select(values: list[Tensor], gate: nn.Module, ref: Tensor) -> Tensor:
+            if not values:
+                return torch.zeros_like(ref)
+            stack = torch.stack(values, dim=1)
+            weight = torch.softmax(gate(stack).float(), dim=1).to(dtype=stack.dtype)
+            return (stack * weight).sum(dim=1)
+
+        world_summary = select(world, self.world_key_gate, world[0])
+        consequence_summary = select(consequence, self.consequence_key_gate, world_summary)
+        scale = float(self.config.hierarchical_mmdit_consequence_scale_max) * torch.sigmoid(
+            self.consequence_scale_logit
+        ).to(device=world_summary.device, dtype=world_summary.dtype)
+        combined = world_summary + scale * consequence_summary
+        layer = self.layer_proj[layer_index](combined)
+        layer = layer + self.layer_embed[:, layer_index].to(device=layer.device, dtype=layer.dtype)
+        return self.layer_stack_norm(layer), world_summary, consequence_summary
+
+    def forward(
+        self,
+        *,
+        trajectory_tokens: Tensor,
+        trajectory_workspace_tokens: Tensor,
+        rollout_tokens: Tensor,
+        transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...],
+        event_evidence: Tensor,
+        state_memory: Tensor | list[Tensor] | tuple[Tensor, ...],
+        intent_memory: dict[str, Tensor],
+        layer_contracts: list[dict[str, Tensor]],
+    ) -> dict[str, Tensor | dict[str, Tensor]]:
+        if len(layer_contracts) != self.depth:
+            raise RuntimeError(
+                f"hierarchical MMDiT requires {self.depth} ordered layer contracts, got {len(layer_contracts)}"
+            )
+        if trajectory_tokens.ndim != 3 or int(trajectory_tokens.shape[-1]) != self.hidden_size:
+            raise ValueError(f"trajectory_tokens must be [B,T,H], got {tuple(trajectory_tokens.shape)}")
+        reference = trajectory_tokens
+        trajectory_evidence = self._project_memory(
+            trajectory_workspace_tokens,
+            projector=self.trajectory_token_proj,
+            reference=reference,
+            input_dim=self.hidden_size,
+        )
+        rollout_evidence = self._project_memory(
+            rollout_tokens,
+            projector=self.rollout_token_proj,
+            reference=reference,
+            input_dim=self.hidden_size,
+        )
+        transition_evidence = self._project_memory(
+            transition_memory,
+            projector=self.transition_token_proj,
+            reference=reference,
+            input_dim=self.hidden_size,
+        )
+        event_tokens = self._project_memory(
+            event_evidence,
+            projector=self.event_token_proj,
+            reference=reference,
+            input_dim=3,
+        )
+        state_tokens = self._project_memory(
+            state_memory,
+            projector=self.state_token_proj,
+            reference=reference,
+            input_dim=self.hidden_size,
+        )
+        intent_summary_input, intent_counts = self._project_intent_memory(
+            intent_memory,
+            reference=reference,
+        )
+        required = {
+            "trajectory": trajectory_evidence,
+            "rollout": rollout_evidence,
+            "transition": transition_evidence,
+            "event": event_tokens,
+            "state": state_tokens,
+        }
+        empty = [name for name, value in required.items() if int(value.shape[1]) == 0]
+        if empty:
+            raise RuntimeError("owned evidence sources cannot be empty: " + ", ".join(empty))
+
+        layer_rows: list[Tensor] = []
+        world_rows: list[Tensor] = []
+        consequence_rows: list[Tensor] = []
+        for index, entry in enumerate(layer_contracts):
+            layer, world, consequence = self._layer_summary(entry, index)
+            layer_rows.append(layer)
+            world_rows.append(world)
+            consequence_rows.append(consequence)
+        layer_stack = torch.stack(layer_rows, dim=1)
+        scan = self.layer_scan_init.to(device=reference.device, dtype=reference.dtype).expand(
+            int(reference.shape[0]), -1
+        )
+        for index in range(self.depth):
+            scan = self.layer_scan(layer_stack[:, index], scan)
+        scan = self.layer_stack_norm(scan)
+
+        trajectory_summary = self.trajectory_token_proj(
+            _scaled_contract_view(trajectory_tokens, float(self.config.hierarchical_mmdit_source_grad_scale))
+        ).mean(dim=1)
+        geom_summary = self.geom_summary_proj(trajectory_summary)
+        global_summary = self.global_summary_proj(intent_summary_input)
+        transition_summary = self.transition_summary_proj(transition_evidence.mean(dim=1))
+        event_summary = self.event_summary_proj(event_tokens.mean(dim=1))
+        state_summary = self.state_summary_proj(state_tokens.mean(dim=1))
+        consequence_scale = float(self.config.hierarchical_mmdit_consequence_scale_max) * torch.sigmoid(
+            self.consequence_scale_logit
+        )
+        evidence_sources = {
+            "layer": layer_stack,
+            "trajectory": trajectory_evidence,
+            "rollout": rollout_evidence,
+            "transition": transition_evidence,
+            "event": event_tokens,
+            "state": state_tokens,
+        }
+        metrics = {
+            "intent_layer_stack_norm": layer_stack.detach().float().norm(dim=-1).mean(),
+            "intent_layer_scan_norm": scan.detach().float().norm(dim=-1).mean(),
+            "intent_layer_world_norm": torch.stack(world_rows).detach().float().norm(dim=-1).mean(),
+            "intent_layer_consequence_norm": torch.stack(consequence_rows).detach().float().norm(dim=-1).mean(),
+            "intent_consequence_scale": consequence_scale.detach().float(),
+            "intent_geom_summary_norm": geom_summary.detach().float().norm(dim=-1).mean(),
+            "intent_global_summary_norm": global_summary.detach().float().norm(dim=-1).mean(),
+            "intent_transition_summary_norm": transition_summary.detach().float().norm(dim=-1).mean(),
+            "intent_event_summary_norm": event_summary.detach().float().norm(dim=-1).mean(),
+            "intent_state_summary_norm": state_summary.detach().float().norm(dim=-1).mean(),
+        }
+        for name, value in evidence_sources.items():
+            metrics[f"owned_workspace_source_{name}_tokens"] = torch.tensor(
+                float(value.shape[1]), device=reference.device, dtype=torch.float32
+            )
+        for name, count in intent_counts.items():
+            metrics[f"intent_source_{name}_tokens"] = torch.tensor(
+                float(count), device=reference.device, dtype=torch.float32
+            )
+        return {
+            "layer_scan": scan,
+            "geom_summary": geom_summary,
+            "global_summary": global_summary,
+            "transition_summary": transition_summary,
+            "event_summary": event_summary,
+            "state_summary": state_summary,
+            "evidence_sources": evidence_sources,
+            "metrics": metrics,
+        }
+
+
+class IndependentIntentFusion(nn.Module):
+    """One contract-specific vector fusion with no slot-template output."""
+
+    def __init__(self, hidden_size: int, source_count: int) -> None:
+        super().__init__()
+        h = int(hidden_size)
+        self.source_count = int(source_count)
+        self.net = nn.Sequential(
+            nn.LayerNorm(self.source_count * h),
+            nn.Linear(self.source_count * h, h),
+            nn.SiLU(),
+            nn.Linear(h, h),
+        )
+        self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+    def forward(self, *sources: Tensor) -> Tensor:
+        if len(sources) != self.source_count:
+            raise ValueError(f"intent fusion expected {self.source_count} sources, got {len(sources)}")
+        return self.out_norm(self.net(torch.cat(list(sources), dim=-1)))
+
+
+class IntentContractCompiler(nn.Module):
+    """Deterministic replacement for the historical CVAE latent contract.
+
+    Global intent, stage initialization, and evidence-read selection are
+    compiled by separate functions.  The API deliberately has no target,
+    noisy action, diffusion time, random sample, posterior, or KL term.
+    """
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        self.global_fusion = IndependentIntentFusion(h, 3)
+        self.stage_fusion = IndependentIntentFusion(h, 3)
+        self.read_fusion = IndependentIntentFusion(h, 5)
+
+    @staticmethod
+    def _cosine(a: Tensor, b: Tensor) -> Tensor:
+        return F.cosine_similarity(a.detach().float(), b.detach().float(), dim=-1).mean()
+
+    @staticmethod
+    def _batch_diversity(value: Tensor) -> Tensor:
+        detached = value.detach().float()
+        return (detached - detached.mean(dim=0, keepdim=True)).norm(dim=-1).mean()
+
+    def forward(
+        self,
+        *,
+        layer_scan: Tensor,
+        geom_summary: Tensor,
+        global_summary: Tensor,
+        transition_summary: Tensor,
+        event_summary: Tensor,
+        state_summary: Tensor,
+    ) -> dict[str, Tensor]:
+        # Global and stage values are compiled exclusively from pre-DiT,
+        # deploy-safe sources.  Post-DiT layer/transition/event summaries can
+        # depend on the current flow sample; they may steer retrieval through
+        # read_contract, but cannot write noisy-action content into intent or
+        # persistent stage initialization.
+        global_intent = self.global_fusion(global_summary, geom_summary, state_summary)
+        stage_contract = self.stage_fusion(global_summary, geom_summary, state_summary)
+        read_contract = self.read_fusion(
+            layer_scan,
+            geom_summary,
+            transition_summary,
+            state_summary,
+            event_summary,
+        )
+        return {
+            "global_intent": global_intent,
+            "stage_contract": stage_contract,
+            "read_contract": read_contract,
+            "intent_global_norm": global_intent.detach().float().norm(dim=-1).mean(),
+            "intent_stage_contract_norm": stage_contract.detach().float().norm(dim=-1).mean(),
+            "intent_read_contract_norm": read_contract.detach().float().norm(dim=-1).mean(),
+            "intent_global_stage_cosine": self._cosine(global_intent, stage_contract),
+            "intent_global_read_cosine": self._cosine(global_intent, read_contract),
+            "intent_stage_read_cosine": self._cosine(stage_contract, read_contract),
+            "intent_global_batch_diversity": self._batch_diversity(global_intent),
+            "intent_stage_batch_diversity": self._batch_diversity(stage_contract),
+            "intent_read_batch_diversity": self._batch_diversity(read_contract),
+            "intent_global_dynamic_inputs": torch.zeros(
+                (), device=global_intent.device, dtype=torch.float32
+            ),
+            "intent_stage_dynamic_inputs": torch.zeros(
+                (), device=global_intent.device, dtype=torch.float32
+            ),
+            "intent_read_selector_only": torch.ones(
+                (), device=global_intent.device, dtype=torch.float32
+            ),
+            "intent_contract_deterministic": torch.ones(
+                (), device=global_intent.device, dtype=torch.float32
+            ),
+        }
+
+
+class ConditionNeutralActionInitializer(nn.Module):
+    """Causal horizon geometry that cannot inspect condition or x_t."""
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        horizon = int(config.action_horizon)
+        self.hidden_size = h
+        self.horizon = horizon
+        self.seed = nn.Parameter(torch.randn(1, horizon, h) * 0.02)
+        self.register_buffer(
+            "horizon_position",
+            sinusoidal_positions(range(1, horizon + 1), h)[None],
+            persistent=True,
+        )
+        self.norm1 = nn.LayerNorm(h, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(
+            h, int(config.num_heads), batch_first=True, dropout=float(config.dropout)
+        )
+        self.norm2 = nn.LayerNorm(h, elementwise_affine=False)
+        self.ffn = BiasFreeFFN(h, float(config.hierarchical_mmdit_ffn_expansion))
+        self.drop = nn.Dropout(float(config.dropout))
+        # Start as pure horizon geometry.  The conditioner remains absent and
+        # the two optional internal transforms earn their influence through
+        # training instead of injecting random cold-start motion.
+        self.attn_gate = nn.Parameter(torch.zeros(()))
+        self.ffn_gate = nn.Parameter(torch.zeros(()))
+        self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
+
+    def forward(
+        self,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        x = self.seed.to(device=device, dtype=dtype).expand(batch_size, -1, -1)
+        x = x + self.horizon_position.to(device=device, dtype=dtype)
+        causal = torch.triu(
+            torch.ones(self.horizon, self.horizon, device=device, dtype=torch.bool), diagonal=1
+        )
+        value = self.norm1(x)
+        update, _ = self.attn(value, value, value, attn_mask=causal, need_weights=False)
+        x = x + torch.tanh(self.attn_gate).to(dtype=dtype) * self.drop(update)
+        x = x + torch.tanh(self.ffn_gate).to(dtype=dtype) * self.drop(self.ffn(self.norm2(x)))
+        x = self.out_norm(x)
+        return x, {
+            "hierarchical_mmdit_initializer_norm": x.detach().float().norm(dim=-1).mean(),
+            "hierarchical_mmdit_initializer_slot_diversity": (
+                x.detach().float() - x.detach().float().mean(dim=1, keepdim=True)
+            ).norm(dim=-1).mean(),
+        }
+
+
+class ActionOnlyPhysicalVelocityHead(nn.Module):
+    """Typed physical velocity readout with no auxiliary correction latent."""
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        ad = int(config.arm_dim)
+        self.norm = nn.LayerNorm(h)
+        self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        if self.parseval_gripper:
+            self.arm_field = nn.Linear(h, 2 * ad)
+            self.grip_field = nn.Linear(h, int(config.gripper_field_dim))
+        else:
+            self.arm_abs = nn.Linear(h, ad)
+            self.arm_delta = nn.Linear(h, ad)
+            self.grip_value = nn.Linear(h, 1)
+            self.grip_delta = nn.Linear(h, 1)
+            self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
+
+    def output_layers(self) -> tuple[nn.Linear, ...]:
+        if self.parseval_gripper:
+            return self.arm_field, self.grip_field
+        return self.arm_abs, self.arm_delta, self.grip_value, self.grip_delta, self.grip_extra
+
+    def forward(self, tokens: Tensor) -> Tensor:
+        x = self.norm(tokens)
+        if self.parseval_gripper:
+            return torch.cat([self.arm_field(x), self.grip_field(x)], dim=-1)
+        parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(x), self.grip_delta(x)]
+        if int(self.grip_extra.out_features) > 0:
+            parts.append(self.grip_extra(x))
+        return torch.cat(parts, dim=-1)
+
+
+class OwnedHierarchicalActionBlock(nn.Module):
+    """Serial action refinement with one explicit function per condition role.
+
+    Unlike the historical MMDiT market, noisy/stage/low evidence never compete
+    for one softmax budget.  Each branch transforms the state produced by the
+    preceding branch, so depth is function composition rather than a wider set
+    of interchangeable residual writers.
+    """
+
+    _BRANCH_NAMES = ("self", "noisy", "stage", "low", "ffn")
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        heads = int(config.num_heads)
+        if h % heads != 0:
+            raise ValueError("hidden_size must be divisible by num_heads")
+        self.config = config
+        self.hidden_size = h
+        self.heads = heads
+        self.head_dim = h // heads
+        self.scale_max = float(config.hierarchical_mmdit_residual_scale_max)
+        self.state_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.condition_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.global_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.self_qkv = nn.Linear(h, 3 * h)
+        self.self_out = nn.Linear(h, h)
+        self.cross_q = nn.Linear(h, h)
+        self.noisy_kv = nn.Linear(h, 2 * h)
+        self.stage_kv = nn.Linear(h, 2 * h)
+        self.low_kv = nn.Linear(h, 2 * h)
+        self.noisy_out = nn.Linear(h, h)
+        self.stage_out = nn.Linear(h, h)
+        self.low_out = nn.Linear(h, h)
+        self.ffn = BiasFreeFFN(h, float(config.hierarchical_mmdit_ffn_expansion))
+        # Shared AdaLN geometry plus five scalar LayerScale controls.  The
+        # controls are bounded; they regulate numerical step size, not whether
+        # a semantic source exists in the graph.
+        self.mod = nn.Linear(h, 2 * h + len(self._BRANCH_NAMES))
+        self.drop = nn.Dropout(float(config.dropout))
+        self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
+        nn.init.zeros_(self.mod.weight)
+        nn.init.zeros_(self.mod.bias)
+        initial = {
+            "self": 0.02,
+            "noisy": 0.08,
+            "stage": 0.04,
+            "low": 0.06,
+            "ffn": 0.02,
+        }
+        with torch.no_grad():
+            for index, name in enumerate(self._BRANCH_NAMES):
+                ratio = min(max(initial[name] / self.scale_max, -0.999), 0.999)
+                self.mod.bias[2 * h + index] = math.atanh(ratio)
+
+    @staticmethod
+    def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        return x * (1.0 + scale[:, None]) + shift[:, None]
+
+    def _split_heads(self, x: Tensor) -> Tensor:
+        b, n, h = x.shape
+        return x.reshape(b, n, self.heads, h // self.heads).transpose(1, 2)
+
+    @staticmethod
+    def _merge_heads(x: Tensor) -> Tensor:
+        b, heads, n, d = x.shape
+        return x.transpose(1, 2).reshape(b, n, heads * d)
+
+    @staticmethod
+    def _attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        mask: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        score = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (float(q.shape[-1]) ** -0.5)
+        if mask is not None:
+            score = score.masked_fill(
+                mask.to(device=score.device, dtype=torch.bool)[None, None],
+                torch.finfo(score.dtype).min,
+            )
+        weight = torch.softmax(score, dim=-1).to(dtype=q.dtype)
+        return torch.matmul(weight, v), weight
+
+    @staticmethod
+    def _row_norm(x: Tensor) -> Tensor:
+        return x.detach().float().norm(dim=-1).mean(dim=1)
+
+    @staticmethod
+    def _sample_rms(x: Tensor) -> Tensor:
+        """RMS over the complete token field controlled by one sample gate."""
+        return x.float().square().mean(dim=(1, 2)).clamp_min(0.0).sqrt()
+
+    @classmethod
+    def _normalize_residual(cls, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Remove branch-wide scale while preserving relative horizon amplitudes."""
+        raw = x.float()
+        denominator = raw.square().mean(dim=(1, 2), keepdim=True).add(1e-6).sqrt()
+        normalized = (raw / denominator).to(dtype=x.dtype)
+        return normalized, cls._sample_rms(x).detach(), cls._sample_rms(normalized).detach()
+
+    @classmethod
+    def _branch_geometry(
+        cls,
+        updates: tuple[Tensor, ...],
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Measure alignment against the unequal-norm orthogonal baseline."""
+        if not updates:
+            raise ValueError("branch geometry requires at least one update")
+        detached_updates = tuple(update.detach().float() for update in updates)
+        branch_token_norms = torch.stack(
+            [update.norm(dim=-1) for update in detached_updates], dim=2
+        )
+        branch_rows = branch_token_norms.mean(dim=1)
+        branch_sum = detached_updates[0]
+        for update in detached_updates[1:]:
+            branch_sum = branch_sum + update
+        denominator = branch_rows.sum(dim=-1)
+        valid = denominator > 1e-8
+        net_rows = branch_sum.norm(dim=-1).mean(dim=1)
+        # Preserve token-local amplitude structure: under orthogonality the
+        # expected net norm is sqrt(sum_i ||u_i,t||^2) at each horizon token,
+        # not sqrt(sum_i mean_t(||u_i,t||)^2).
+        orthogonal_rows = branch_token_norms.square().sum(dim=2).sqrt().mean(dim=1)
+        cancellation_rows = torch.where(
+            valid,
+            1.0 - net_rows / denominator.clamp_min(1e-8),
+            torch.zeros_like(denominator),
+        ).clamp(0.0, 1.0)
+        orthogonal_baseline_rows = torch.where(
+            valid,
+            1.0 - orthogonal_rows / denominator.clamp_min(1e-8),
+            torch.zeros_like(denominator),
+        ).clamp(0.0, 1.0)
+
+        token_norm_sum = branch_token_norms.sum(dim=2)
+        pair_denominator = (
+            token_norm_sum.square() - branch_token_norms.square().sum(dim=2)
+        )
+        pair_numerator = (
+            branch_sum.square().sum(dim=-1)
+            - torch.stack(
+                [update.square().sum(dim=-1) for update in detached_updates], dim=2
+            ).sum(dim=2)
+        )
+        weighted_pair_cosine = torch.where(
+            pair_denominator > 1e-8,
+            pair_numerator / pair_denominator.clamp_min(1e-8),
+            torch.zeros_like(pair_denominator),
+        ).clamp(-1.0, 1.0).mean()
+        return (
+            branch_rows,
+            branch_sum,
+            cancellation_rows.mean(),
+            orthogonal_baseline_rows.mean(),
+            (cancellation_rows - orthogonal_baseline_rows).mean(),
+            weighted_pair_cosine,
+        )
+
+    @staticmethod
+    def _attention_stats(weight: Tensor) -> tuple[Tensor, Tensor]:
+        prob = weight.detach().float().clamp_min(1e-8)
+        entropy = -(prob * prob.log()).sum(dim=-1).mean()
+        maximum = prob.max(dim=-1).values.mean()
+        return entropy, maximum
+
+    def _cross_update(
+        self,
+        action: Tensor,
+        memory: Tensor,
+        *,
+        kv_proj: nn.Linear,
+        out_proj: nn.Linear,
+        shift: Tensor,
+        scale: Tensor,
+        gate: Tensor,
+        mask: Tensor | None = None,
+        value_gate: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        query_value = self._modulate(self.state_norm(action), shift, scale)
+        q = self._split_heads(self.cross_q(query_value))
+        key, value = kv_proj(self.condition_norm(memory)).chunk(2, dim=-1)
+        k = self._split_heads(key)
+        v = self._split_heads(value)
+        attended, weight = self._attention(q, k, v, mask)
+        projected = self.drop(out_proj(self._merge_heads(attended)))
+        direction, projected_rms, normalized_rms = self._normalize_residual(projected)
+        amplitude = gate
+        if value_gate is not None:
+            if tuple(value_gate.shape) != (int(action.shape[0]),):
+                raise ValueError(
+                    "cross-update value_gate must be one scalar per sample, got "
+                    f"{tuple(value_gate.shape)}"
+                )
+            amplitude = amplitude * value_gate.to(device=amplitude.device, dtype=amplitude.dtype)
+        # All scale controls act after non-affine normalization. Projection
+        # weights can choose direction/content, but cannot counterfeit amplitude.
+        update = amplitude[:, None, None] * direction
+        realized_scale = self._sample_rms(update).detach() / normalized_rms.clamp_min(1e-8)
+        return action + update, update, weight, projected_rms, normalized_rms, realized_scale
+
+    def forward(
+        self,
+        action: Tensor,
+        *,
+        noisy_tokens: Tensor,
+        stage_tokens: Tensor,
+        low_tokens: Tensor,
+        global_cond: Tensor,
+        noisy_value_gate: Tensor | None = None,
+        low_role_ids: Tensor | None = None,
+        low_role_names: tuple[str, ...] | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        before = action
+        mod = self.mod(self.global_norm(global_cond))
+        # Bound AdaLN itself as well as the residual gates.  Otherwise a small
+        # residual gate can coexist with an arbitrarily large normalized
+        # query/value transform and recreate the old scale gauge internally.
+        shift = 0.5 * torch.tanh(mod[:, :self.hidden_size])
+        scale = 0.5 * torch.tanh(mod[:, self.hidden_size:2 * self.hidden_size])
+        gates = self.scale_max * torch.tanh(mod[:, 2 * self.hidden_size:])
+
+        value = self._modulate(self.state_norm(action), shift, scale)
+        sq, sk, sv = (self._split_heads(part) for part in self.self_qkv(value).chunk(3, dim=-1))
+        self_mask = torch.triu(
+            torch.ones(int(action.shape[1]), int(action.shape[1]), device=action.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        self_attended, self_weight = self._attention(sq, sk, sv, self_mask)
+        self_projected = self.drop(self.self_out(self._merge_heads(self_attended)))
+        self_direction, self_projected_rms, self_normalized_rms = self._normalize_residual(self_projected)
+        self_update = gates[:, 0, None, None] * self_direction
+        self_realized_scale = self._sample_rms(self_update).detach() / self_normalized_rms.clamp_min(1e-8)
+        action = action + self_update
+
+        noisy_mask = None
+        if bool(int(self.config.hierarchical_mmdit_noisy_causal)):
+            action_pos = torch.arange(int(action.shape[1]), device=action.device)[:, None]
+            noisy_pos = torch.arange(int(noisy_tokens.shape[1]), device=action.device)[None]
+            noisy_mask = noisy_pos > action_pos
+        (
+            action,
+            noisy_update,
+            noisy_weight,
+            noisy_projected_rms,
+            noisy_normalized_rms,
+            noisy_realized_scale,
+        ) = self._cross_update(
+            action,
+            noisy_tokens,
+            kv_proj=self.noisy_kv,
+            out_proj=self.noisy_out,
+            shift=shift,
+            scale=scale,
+            gate=gates[:, 1],
+            mask=noisy_mask,
+            value_gate=noisy_value_gate,
+        )
+        (
+            action,
+            stage_update,
+            stage_weight,
+            stage_projected_rms,
+            stage_normalized_rms,
+            stage_realized_scale,
+        ) = self._cross_update(
+            action,
+            stage_tokens,
+            kv_proj=self.stage_kv,
+            out_proj=self.stage_out,
+            shift=shift,
+            scale=scale,
+            gate=gates[:, 2],
+        )
+        (
+            action,
+            low_update,
+            low_weight,
+            low_projected_rms,
+            low_normalized_rms,
+            low_realized_scale,
+        ) = self._cross_update(
+            action,
+            low_tokens,
+            kv_proj=self.low_kv,
+            out_proj=self.low_out,
+            shift=shift,
+            scale=scale,
+            gate=gates[:, 3],
+        )
+        ffn_value = self._modulate(self.state_norm(action), shift, scale)
+        ffn_projected = self.drop(self.ffn(ffn_value))
+        ffn_direction, ffn_projected_rms, ffn_normalized_rms = self._normalize_residual(ffn_projected)
+        ffn_update = gates[:, 4, None, None] * ffn_direction
+        ffn_realized_scale = self._sample_rms(ffn_update).detach() / ffn_normalized_rms.clamp_min(1e-8)
+        pre_norm_action = action + ffn_update
+        action = self.out_norm(pre_norm_action)
+
+        updates = (self_update, noisy_update, stage_update, low_update, ffn_update)
+        (
+            branch_rows,
+            branch_sum,
+            serial_cancellation,
+            orthogonal_baseline,
+            cancellation_excess,
+            weighted_pair_cosine,
+        ) = self._branch_geometry(updates)
+        fractions = branch_rows / branch_rows.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        total_rows = self._row_norm(action - before)
+        pre_norm_rows = branch_sum.norm(dim=-1).mean(dim=1)
+        output_norm_rows = self._row_norm(action - pre_norm_action)
+        before_rows = self._row_norm(before).clamp_min(1e-6)
+        self_entropy, self_max = self._attention_stats(self_weight)
+        noisy_entropy, noisy_max = self._attention_stats(noisy_weight)
+        stage_entropy, stage_max = self._attention_stats(stage_weight)
+        low_entropy, low_max = self._attention_stats(low_weight)
+        metrics: dict[str, Tensor] = {
+            "action_update_norm": total_rows.mean(),
+            "action_update_ratio": (total_rows / before_rows).mean(),
+            "action_pre_norm_update_norm": pre_norm_rows.mean(),
+            "action_output_norm_update_norm": output_norm_rows.mean(),
+            "action_output_norm_update_ratio": (
+                output_norm_rows / pre_norm_rows.clamp_min(1e-6)
+            ).mean(),
+            "action_serial_cancellation_fraction": serial_cancellation,
+            "action_serial_cancellation_orthogonal_baseline": orthogonal_baseline,
+            "action_serial_cancellation_excess": cancellation_excess,
+            "action_branch_weighted_cosine": weighted_pair_cosine,
+            "action_state_cosine": F.cosine_similarity(
+                action.detach().float(), before.detach().float(), dim=-1
+            ).mean(),
+            "action_noisy_stage_cosine": F.cosine_similarity(
+                noisy_update.detach().float(), stage_update.detach().float(), dim=-1
+            ).mean(),
+            "action_stage_low_cosine": F.cosine_similarity(
+                stage_update.detach().float(), low_update.detach().float(), dim=-1
+            ).mean(),
+            "action_noisy_low_cosine": F.cosine_similarity(
+                noisy_update.detach().float(), low_update.detach().float(), dim=-1
+            ).mean(),
+            "action_self_update_norm": branch_rows[:, 0].mean(),
+            "action_noisy_update_norm": branch_rows[:, 1].mean(),
+            "action_stage_update_norm": branch_rows[:, 2].mean(),
+            "action_low_update_norm": branch_rows[:, 3].mean(),
+            "action_ffn_update_norm": branch_rows[:, 4].mean(),
+            "action_noisy_update_fraction": fractions[:, 1].mean(),
+            "action_stage_update_fraction": fractions[:, 2].mean(),
+            "action_low_update_fraction": fractions[:, 3].mean(),
+            "action_noisy_update_fraction_rows": fractions[:, 1],
+            "action_stage_update_fraction_rows": fractions[:, 2],
+            "action_low_update_fraction_rows": fractions[:, 3],
+            "action_workspace_update_fraction_rows": fractions[:, 2] + fractions[:, 3],
+            "action_self_attention_entropy": self_entropy,
+            "action_self_attention_max": self_max,
+            "action_noisy_attention_entropy": noisy_entropy,
+            "action_noisy_attention_max": noisy_max,
+            "action_stage_attention_entropy": stage_entropy,
+            "action_stage_attention_max": stage_max,
+            "action_low_attention_entropy": low_entropy,
+            "action_low_attention_max": low_max,
+        }
+        projected_rms_rows = (
+            self_projected_rms,
+            noisy_projected_rms,
+            stage_projected_rms,
+            low_projected_rms,
+            ffn_projected_rms,
+        )
+        normalized_rms_rows = (
+            self_normalized_rms,
+            noisy_normalized_rms,
+            stage_normalized_rms,
+            low_normalized_rms,
+            ffn_normalized_rms,
+        )
+        realized_scale_rows = (
+            self_realized_scale,
+            noisy_realized_scale,
+            stage_realized_scale,
+            low_realized_scale,
+            ffn_realized_scale,
+        )
+        expected_scale_rows = [gates[:, index].detach().float().abs() for index in range(len(self._BRANCH_NAMES))]
+        if noisy_value_gate is not None:
+            expected_scale_rows[1] = expected_scale_rows[1] * noisy_value_gate.detach().float().abs()
+        for index, name in enumerate(self._BRANCH_NAMES):
+            metrics[f"action_{name}_gate"] = gates[:, index].detach().float().mean()
+            metrics[f"action_{name}_gate_abs_mean"] = gates[:, index].detach().float().abs().mean()
+            metrics[f"action_{name}_projected_rms"] = projected_rms_rows[index].mean()
+            metrics[f"action_{name}_normalized_rms"] = normalized_rms_rows[index].mean()
+            metrics[f"action_{name}_realized_scale"] = realized_scale_rows[index].mean()
+            metrics[f"action_{name}_gate_scale_error"] = (
+                realized_scale_rows[index] - expected_scale_rows[index]
+            ).abs().mean()
+        if low_role_ids is not None:
+            role_ids = low_role_ids.to(device=low_weight.device, dtype=torch.long).reshape(-1)
+            if int(role_ids.numel()) != int(low_weight.shape[-1]):
+                raise ValueError(
+                    "low_role_ids must match low token count: "
+                    f"{int(role_ids.numel())} vs {int(low_weight.shape[-1])}"
+                )
+            role_names = tuple(low_role_names or ())
+            role_count = len(role_names)
+            if role_count <= 0:
+                raise ValueError("low_role_names cannot be empty when low_role_ids are provided")
+            role_rows = torch.stack([
+                low_weight.detach().float()[..., role_ids == role_index].sum(dim=-1)
+                for role_index in range(role_count)
+            ], dim=-1)
+            role_prob = role_rows.clamp_min(1e-8)
+            role_entropy = -(role_prob * role_prob.log()).sum(dim=-1).mean()
+            metrics["action_low_role_entropy"] = role_entropy
+            metrics["action_low_role_effective_count"] = torch.exp(role_entropy)
+            metrics["action_low_role_max"] = role_rows.max(dim=-1).values.mean()
+            for role_index, role in enumerate(role_names):
+                metrics[f"action_low_role_{role}_attention"] = role_rows[..., role_index].mean()
+        return action, metrics
+
+
+class HierarchicalMMDiTActionDecoder(nn.Module):
+    """Owned-evidence deterministic action decoder used before V76 depth work."""
+
+    def __init__(self, config: V39PolicyConfig) -> None:
+        super().__init__()
+        self.config = config
+        h = int(config.hidden_size)
+        self.hidden_size = h
+        self.block_count = int(config.hierarchical_mmdit_depth)
+        self.refine_steps = int(config.hierarchical_mmdit_refine_steps)
+        self.organizer = PolicyConditionOrganizer(config)
+        self.intent_compiler = IntentContractCompiler(config)
+        self.action_initializer = ConditionNeutralActionInitializer(config)
+        self.time = TimeEmbedding(h)
+        self.time_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+        parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        self.noisy_action_lift = (
+            PhysicalActionTokenLift(config)
+            if parseval_gripper
+            else nn.Sequential(
+                nn.LayerNorm(int(config.physical_action_dim)),
+                nn.Linear(int(config.physical_action_dim), h),
+            )
+        )
+        self.workspace = HierarchicalEvidenceWorkspace(
+            config,
+            owned_evidence=True,
+            manage_output_strength=False,
+            contract_conditioning=True,
+            stratified_roles=True,
+            low_count=int(config.hierarchical_mmdit_low_slots),
+            stage_count=int(config.hierarchical_mmdit_stage_slots),
+            refine_steps=self.refine_steps,
+            ffn_expansion=float(config.hierarchical_mmdit_ffn_expansion),
+            # Low slots are semantic shelves, not horizon positions.  Only
+            # cross-role communication is blocked; an arbitrary causal order
+            # inside one role would throw away usable evidence capacity.
+            causal_attention=False,
+            stage_promote_scale_init=float(config.hierarchical_mmdit_stage_promote_scale_init),
+        )
+        self.blocks = nn.ModuleList([
+            OwnedHierarchicalActionBlock(config)
+            for _ in range(self.block_count)
+        ])
+        self.block_identity = nn.Parameter(torch.randn(1, self.block_count, h) * 0.02)
+        self.budget_proj = nn.Sequential(nn.Linear(2, h), nn.SiLU(), nn.Linear(h, h))
+        self.step_state_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.workspace_condition = nn.Sequential(
+            nn.LayerNorm(2 * h),
+            nn.Linear(2 * h, h),
+            nn.SiLU(),
+            nn.Linear(h, h),
+            nn.LayerNorm(h, elementwise_affine=False),
+        )
+        self.global_condition = nn.Sequential(
+            nn.LayerNorm(3 * h),
+            nn.Linear(3 * h, h),
+            nn.SiLU(),
+            nn.Linear(h, h),
+            nn.LayerNorm(h, elementwise_affine=False),
+        )
+        self.condition_type = nn.Parameter(torch.randn(1, 3, h) * 0.02)
+        self.action_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.velocity_head = ActionOnlyPhysicalVelocityHead(config)
+        self.event_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, 3))
+        self.motion_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, 1))
+        # CR7 fallback (do_before_v76 §23): a dedicated, restricted output
+        # contract for the event/motion subheads only.  It shares NO layer with
+        # the global intent contract, never touches the velocity head, and its
+        # injection projection is zero-initialized so flag=1 starts exactly at
+        # the action-only behavior.  Prepared in advance so a gripper-event
+        # regression at E3 costs a flag flip, not a coding window.
+        if int(getattr(config, "hierarchical_mmdit_output_contract", 0)):
+            self.output_contract_fusion = IndependentIntentFusion(h, 3)
+            self.output_contract_proj = nn.Linear(h, h)
+            nn.init.zeros_(self.output_contract_proj.weight)
+            nn.init.zeros_(self.output_contract_proj.bias)
+        else:
+            self.output_contract_fusion = None
+            self.output_contract_proj = None
+        # State-dict compatibility with the short-lived competitive-market
+        # decoder.  The serial decoder has a mandatory noisy branch, so a
+        # learnable group-logit subsidy is neither consumed nor optimized.
+        self.register_buffer("noisy_market_bias", torch.zeros(()), persistent=True)
+        self._initialize_outputs()
+
+    def _initialize_outputs(self) -> None:
+        std = float(self.config.hierarchical_mmdit_output_init_std)
+        for module in self.velocity_head.output_layers():
+            if std > 0.0:
+                nn.init.normal_(module.weight, mean=0.0, std=std)
+            else:
+                nn.init.zeros_(module.weight)
+            nn.init.zeros_(module.bias)
+        for head in (self.event_head, self.motion_head):
+            nn.init.zeros_(head[-1].weight)
+            nn.init.zeros_(head[-1].bias)
+
+    def _step_state(
+        self,
+        step_index: int,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, int]:
+        block_index = min(max(int(step_index), 0), self.block_count - 1)
+        if self.refine_steps <= 1:
+            progress = 1.0
+        else:
+            progress = float(step_index) / float(self.refine_steps - 1)
+        remaining = float(self.refine_steps - step_index - 1) / float(max(self.refine_steps, 1))
+        budget = torch.tensor([progress, remaining], device=device, dtype=dtype)[None].expand(batch_size, -1)
+        identity = self.block_identity[:, block_index].to(device=device, dtype=dtype).expand(batch_size, -1)
+        return self.step_state_norm(identity + self.budget_proj(budget)), block_index
+
+    def _gate_noisy_tokens(self, noisy: Tensor, time: Tensor) -> tuple[Tensor, Tensor | None, Tensor]:
+        """Return (tokens, per-sample value gate or None, gate mean gauge).
+
+        Tokens are returned UNGATED in both modes: pre-block multiplicative
+        scaling is arithmetically cancelled by the block's scale-invariant
+        cond_norm (LayerNorm), which is why the historical outer gate never
+        did anything.  Mode 0 codifies that no-gate regime honestly (gauge
+        reads 1.0); mode 1 hands the g(t) schedule to the block, which applies
+        it after non-affine branch normalization where it cannot be cancelled.
+        """
+        if int(getattr(self.config, "hierarchical_mmdit_noisy_gate_mode", 0)) == 0:
+            return noisy, None, torch.ones((), device=noisy.device, dtype=torch.float32)
+        minimum = float(self.config.hierarchical_mmdit_noisy_gate_min)
+        power = float(self.config.hierarchical_mmdit_noisy_gate_power)
+        gate = minimum + (1.0 - minimum) * time.float().clamp(0.0, 1.0).pow(power)
+        return noisy, gate, gate.detach().mean()
+
+    @staticmethod
+    def _mean_metrics(rows: list[dict[str, Tensor]]) -> dict[str, Tensor]:
+        if not rows:
+            return {}
+        keys = set.intersection(*(set(row) for row in rows))
+        return {
+            key: torch.stack([row[key] for row in rows], dim=0).mean(dim=0)
+            for key in keys
+            if all(torch.is_tensor(row[key]) for row in rows)
+        }
+
+    def forward(
+        self,
+        *,
+        noisy_physical: Tensor,
+        time: Tensor,
+        trajectory_tokens: Tensor,
+        trajectory_workspace_tokens: Tensor,
+        rollout_tokens: Tensor,
+        transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...],
+        event_evidence: Tensor,
+        state_memory: Tensor | list[Tensor] | tuple[Tensor, ...],
+        intent_memory: dict[str, Tensor],
+        layer_contracts: list[dict[str, Tensor]],
+    ) -> dict[str, Tensor]:
+        device = noisy_physical.device
+        dtype = noisy_physical.dtype
+        batch = int(noisy_physical.shape[0])
+        organized = self.organizer(
+            trajectory_tokens=trajectory_tokens,
+            trajectory_workspace_tokens=trajectory_workspace_tokens,
+            rollout_tokens=rollout_tokens,
+            transition_memory=transition_memory,
+            event_evidence=event_evidence,
+            state_memory=state_memory,
+            intent_memory=intent_memory,
+            layer_contracts=layer_contracts,
+        )
+        contracts = self.intent_compiler(
+            layer_scan=organized["layer_scan"],
+            geom_summary=organized["geom_summary"],
+            global_summary=organized["global_summary"],
+            transition_summary=organized["transition_summary"],
+            event_summary=organized["event_summary"],
+            state_summary=organized["state_summary"],
+        )
+        evidence_sources = organized["evidence_sources"]
+        if not isinstance(evidence_sources, dict):
+            raise TypeError("condition organizer returned invalid evidence sources")
+        prepared = self.workspace.prepare_evidence(
+            evidence_sources,
+            batch_size=batch,
+            device=device,
+            dtype=dtype,
+        )
+        stage_content = self.workspace.init_stage(contracts["stage_contract"])
+        action, initializer_metrics = self.action_initializer(
+            batch_size=batch,
+            device=device,
+            dtype=dtype,
+        )
+        noisy, noisy_value_gate, noisy_gate_mean = self._gate_noisy_tokens(self.noisy_action_lift(noisy_physical), time)
+        time_state = self.time_lift(self.time(time.to(dtype=dtype)))
+        workspace_condition = self.workspace_condition(torch.cat([
+            contracts["global_intent"],
+            time_state,
+        ], dim=-1))
+        workspace_rows: list[dict[str, Tensor]] = []
+        mmdit_rows: list[dict[str, Tensor]] = []
+        condition_norm_rows: list[Tensor] = []
+        step_state_rows: list[Tensor] = []
+        for step_index in range(self.refine_steps):
+            step_state, block_index = self._step_state(
+                step_index,
+                batch_size=batch,
+                device=device,
+                dtype=dtype,
+            )
+            global_condition = self.global_condition(torch.cat([
+                contracts["global_intent"],
+                time_state,
+                step_state,
+            ], dim=-1))
+            (
+                low,
+                stage_content,
+                stage_for_action,
+                _low_logit_bias,
+                _stage_logit_bias,
+                workspace_metrics,
+            ) = self.workspace.step(
+                prepared_evidence=prepared,
+                stage_content=stage_content,
+                primary_cond=workspace_condition,
+                step_index=step_index,
+                read_contract=contracts["read_contract"],
+                step_state_override=step_state,
+            )
+            low = low + self.condition_type[:, 0:1].to(device=device, dtype=dtype)
+            stage_for_action = stage_for_action + self.condition_type[:, 1:2].to(device=device, dtype=dtype)
+            noisy_typed = noisy + self.condition_type[:, 2:3].to(device=device, dtype=dtype)
+            action, mmdit_metrics = self.blocks[block_index](
+                action,
+                noisy_tokens=noisy_typed,
+                stage_tokens=stage_for_action,
+                low_tokens=low,
+                global_cond=global_condition,
+                noisy_value_gate=noisy_value_gate,
+                low_role_ids=self.workspace.low_slot_role_ids,
+                low_role_names=self.workspace.memory_bank.ROLE_NAMES,
+            )
+            workspace_rows.append(workspace_metrics)
+            mmdit_rows.append(mmdit_metrics)
+            condition_norm_rows.append(torch.stack([
+                low.detach().float().norm(dim=-1).mean(),
+                stage_for_action.detach().float().norm(dim=-1).mean(),
+                noisy_typed.detach().float().norm(dim=-1).mean(),
+            ]).mean())
+            step_state_rows.append(step_state.detach().float().norm(dim=-1).mean())
+
+        action = self.action_norm(action)
+        pred_velocity = self.velocity_head(action)
+        output_contract_norm = torch.zeros((), device=device, dtype=torch.float32)
+        if self.output_contract_fusion is not None and self.output_contract_proj is not None:
+            # Restricted contract: event/motion subheads only; velocity reads
+            # raw action tokens above and is untouched by construction.
+            g_out = self.output_contract_fusion(
+                organized["layer_scan"],
+                organized["transition_summary"],
+                organized["event_summary"],
+            )
+            subhead_tokens = action + self.output_contract_proj(g_out)[:, None]
+            output_contract_norm = g_out.detach().float().norm(dim=-1).mean()
+        else:
+            subhead_tokens = action
+        event_logits = self.event_head(subhead_tokens)
+        motion_logits = self.motion_head(subhead_tokens).squeeze(-1)
+        result: dict[str, Tensor] = {
+            "hierarchical_mmdit_output_contract_norm": output_contract_norm,
+            "pred_velocity": pred_velocity,
+            "event_logits": event_logits,
+            "motion_logits": motion_logits,
+            "action_tokens": action,
+            "transition_latent": action,
+            "hierarchical_mmdit_action_token_norm": action.detach().float().norm(dim=-1).mean(),
+            "hierarchical_mmdit_condition_token_norm": torch.stack(condition_norm_rows).mean(),
+            "hierarchical_mmdit_noisy_token_norm": noisy.detach().float().norm(dim=-1).mean(),
+            "hierarchical_mmdit_noisy_gate_mean": noisy_gate_mean,
+            "hierarchical_mmdit_noisy_market_bias": self.noisy_market_bias.detach().float(),
+            "hierarchical_mmdit_step_state_norm": torch.stack(step_state_rows).mean(),
+            "hierarchical_mmdit_refine_steps": torch.tensor(float(self.refine_steps), device=device),
+            "hierarchical_mmdit_distinct_blocks": torch.tensor(float(self.block_count), device=device),
+            "hierarchical_mmdit_single_consumption_owner": torch.ones((), device=device),
+            "hierarchical_mmdit_serial_composition": torch.ones((), device=device),
+            "hierarchical_mmdit_competitive_market": torch.zeros((), device=device),
+            "owned_workspace_state_pre_dit": torch.ones((), device=device),
+            "owned_workspace_trajectory_is_proposal": torch.ones((), device=device),
+            "intent_noisy_input_present": torch.zeros((), device=device),
+            "owned_workspace_fixed_role_prior": torch.ones((), device=device),
+            "owned_workspace_role_count": torch.tensor(
+                float(len(self.workspace.memory_bank.ROLE_NAMES)), device=device
+            ),
+            **initializer_metrics,
+        }
+        organizer_metrics = organized["metrics"]
+        if isinstance(organizer_metrics, dict):
+            result.update({key: value for key, value in organizer_metrics.items() if torch.is_tensor(value)})
+        result.update({
+            key: value
+            for key, value in contracts.items()
+            if key.startswith("intent_") and torch.is_tensor(value)
+        })
+        workspace_mean = self._mean_metrics(workspace_rows)
+        for key, value in workspace_mean.items():
+            result[f"owned_{key}"] = value
+        mmdit_mean = self._mean_metrics(mmdit_rows)
+        for key, value in mmdit_mean.items():
+            if not key.endswith("_rows"):
+                result[f"hierarchical_mmdit_{key}"] = value
+        if all(key in mmdit_mean for key in (
+            "action_noisy_update_fraction_rows",
+            "action_workspace_update_fraction_rows",
+            "action_low_update_fraction_rows",
+            "action_stage_update_fraction_rows",
+        )):
+            stratified = LatentCVAEActionDecoder._time_stratified_attention(
+                time,
+                mmdit_mean["action_noisy_update_fraction_rows"],
+                mmdit_mean["action_workspace_update_fraction_rows"],
+                mmdit_mean["action_low_update_fraction_rows"],
+                mmdit_mean["action_stage_update_fraction_rows"],
+            )
+            for key, value in stratified.items():
+                renamed = key.replace("_attn_", "_update_fraction_")
+                result[f"hierarchical_{renamed}"] = value
+        return result
+
+
 class TemporalMidcutWorldActionDiT(nn.Module):
     """V38 DiT split into a mid-cut contract trunk and a policy tail."""
 
@@ -6308,6 +8071,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         self.event_probe = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 3))
         self.motion_probe = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
         final_decoder = str(getattr(config, "final_action_decoder", "legacy"))
+        self.hierarchical_mmdit_action_decoder: HierarchicalMMDiTActionDecoder | None = None
         if final_decoder == "residual_action_flow":
             self.residual_action_flow_denoiser = V37StyleResidualActionFlowDenoiser(config)
             self.latent_main_action_decoder = None
@@ -6328,11 +8092,20 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             self.residual_action_flow_denoiser = None
             self.latent_main_action_decoder = None
             self.latent_cvae_action_decoder = AdaptiveRecurrentCVAEActionDecoder(config)
+        elif final_decoder == "hierarchical_mmdit_action":
+            self.residual_action_flow_denoiser = None
+            self.latent_main_action_decoder = None
+            self.latent_cvae_action_decoder = None
+            self.hierarchical_mmdit_action_decoder = HierarchicalMMDiTActionDecoder(config)
         else:
             self.residual_action_flow_denoiser = None
             self.latent_main_action_decoder = None
             self.latent_cvae_action_decoder = None
-        if self.latent_cvae_action_decoder is not None or self.latent_main_action_decoder is not None:
+        if (
+            self.latent_cvae_action_decoder is not None
+            or self.latent_main_action_decoder is not None
+            or self.hierarchical_mmdit_action_decoder is not None
+        ):
             # These readers belong to the legacy action tower. Keep the modules
             # for checkpoint compatibility and the parameter-free pooled()
             # helper, but do not allocate gradients/optimizer state for outputs
@@ -6422,6 +8195,23 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             proposal_keep=proposal_keep,
             rollout_init=rollout_init,
         )
+        # Ownership snapshots are taken before any canvas self-attention.  The
+        # final state/trajectory slices are contextual mixtures and can carry
+        # noisy-action content, so using them as evidence recreates the exact
+        # action -> evidence -> action echo this decoder is meant to remove.
+        owned_state_memory = [
+            canvas[:, slices["state"]],
+            canvas[:, slices["state_history"]],
+        ]
+        owned_trajectory_memory = canvas[:, slices["proposal"]]
+        owned_intent_memory = {
+            "task": canvas[:, slices["task"]],
+            "state": canvas[:, slices["state"]],
+            "state_history": canvas[:, slices["state_history"]],
+            "executed": canvas[:, slices["executed"]],
+            "proposal": canvas[:, slices["proposal"]],
+            "visual": canvas[:, slices["rollout"]].mean(dim=1, keepdim=True),
+        }
         rollout_seed = canvas[:, slices["rollout"]].detach()
         time_emb = self.time(time.to(dtype=canvas.dtype))
         gate_rows: list[dict[str, Tensor]] = []
@@ -6437,6 +8227,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         force_layer_contracts = (
             final_decoder == "latent_main_action"
             or (final_decoder in {"latent_cvae_action", "adaptive_recurrent_cvae_action"} and bool(int(getattr(cfg, "latent_cvae_layer_memory", 1))))
+            or final_decoder == "hierarchical_mmdit_action"
         )
         effective_layer_contracts = bool(enable_layer_contracts) or force_layer_contracts
         cut = int(cfg.midcut_layer)
@@ -6617,6 +8408,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         residual_action_flow: dict[str, Tensor] | None = None
         latent_main_action: dict[str, Tensor] | None = None
         latent_cvae_action: dict[str, Tensor] | None = None
+        hierarchical_mmdit_action: dict[str, Tensor] | None = None
         if not enable_final_action_decoder:
             # Counterfactual rollout branches consume only dynamics and layer
             # contracts. Running the final CVAE/MMDiT tower here duplicated a
@@ -6628,6 +8420,33 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             legacy_motion_logits = event_context.new_zeros(
                 int(event_context.shape[0]), int(event_context.shape[1])
             )
+        elif self.hierarchical_mmdit_action_decoder is not None:
+            if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
+                transition_memory = [controlled_delta]
+            else:
+                transition_memory = [controlled_delta, rollout_effect_pred]
+            event_evidence = None
+            if layer_contracts:
+                candidate = layer_contracts[-1].get("event_logits")
+                if isinstance(candidate, Tensor) and candidate.ndim == 3 and int(candidate.shape[-1]) == 3:
+                    event_evidence = candidate
+            if event_evidence is None:
+                event_evidence = self.event_probe(event_context)
+            hierarchical_mmdit_action = self.hierarchical_mmdit_action_decoder(
+                noisy_physical=noisy_physical,
+                time=time,
+                trajectory_tokens=owned_trajectory_memory,
+                trajectory_workspace_tokens=owned_trajectory_memory,
+                rollout_tokens=rollout,
+                transition_memory=transition_memory,
+                event_evidence=event_evidence,
+                state_memory=owned_state_memory,
+                intent_memory=owned_intent_memory,
+                layer_contracts=layer_contracts,
+            )
+            pred_physical_velocity = hierarchical_mmdit_action["pred_velocity"]
+            legacy_event_logits = hierarchical_mmdit_action["event_logits"]
+            legacy_motion_logits = hierarchical_mmdit_action["motion_logits"]
         elif self.latent_cvae_action_decoder is not None:
             context_memory = [
                 canvas[:, slices["state"]],
@@ -7140,7 +8959,11 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             "action_effect_pred": rollout_effect_pred,
             "event_logits": legacy_event_logits,
             "motion_logits": legacy_motion_logits,
-            "transition_latent": event_context,
+            "transition_latent": (
+                event_context
+                if hierarchical_mmdit_action is None
+                else hierarchical_mmdit_action["transition_latent"]
+            ),
             "gate_self": gate_mean["gate_self"],
             "gate_visual": gate_mean["gate_visual"],
             "gate_rollout": gate_mean["gate_rollout"],
@@ -7179,6 +9002,15 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             ):
                 if key in latent_cvae_action:
                     out[f"latent_{key}"] = latent_cvae_action[key]
+        if hierarchical_mmdit_action is not None:
+            for key in tuple(out):
+                if key.startswith("latent_cvae_"):
+                    out.pop(key)
+            for key, value in hierarchical_mmdit_action.items():
+                if not isinstance(value, Tensor):
+                    continue
+                if key.startswith(("intent_", "owned_", "hierarchical_mmdit_")):
+                    out[key] = value
         return out
 
     @torch.no_grad()
@@ -7560,6 +9392,9 @@ class V39PolicySystem(nn.Module):
                     key.startswith("latent_cvae_workspace_")
                     or key.startswith("latent_cvae_mmdit_")
                     or key.startswith("latent_cvae_hierarchical_")
+                    or key.startswith("intent_")
+                    or key.startswith("owned_")
+                    or key.startswith("hierarchical_mmdit_")
                     or key in (
                         "latent_cvae_primary_condition_norm",
                         "latent_cvae_primary_z_effect_norm",
@@ -7627,6 +9462,10 @@ class V39PolicySystem(nn.Module):
                 0 if getattr(self.planner, "latent_cvae_action_decoder", None) is None
                 else sum(p.numel() for p in self.planner.latent_cvae_action_decoder.parameters())
             ),
+            "hierarchical_mmdit_action_decoder": (
+                0 if getattr(self.planner, "hierarchical_mmdit_action_decoder", None) is None
+                else sum(p.numel() for p in self.planner.hierarchical_mmdit_action_decoder.parameters())
+            ),
             "staged_midcut_dit": sum(p.numel() for p in self.planner.parameters()),
         }
         report["total"] = sum(p.numel() for p in self.parameters())
@@ -7638,6 +9477,10 @@ __all__ = [
     "V39PolicyConfig",
     "MidcutContractHeads",
     "LayerContractAdapterHeads",
+    "OwnedEvidenceMemoryBank",
+    "IntentContractCompiler",
+    "PolicyConditionOrganizer",
+    "HierarchicalMMDiTActionDecoder",
     "SharedLayerFlowActionProbe",
     "V37StyleResidualActionBlock",
     "V37StyleResidualActionFlowDenoiser",

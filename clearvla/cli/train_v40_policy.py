@@ -244,7 +244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arm-noise-temporal-rho", type=float, default=0.0)
     parser.add_argument("--gripper-field-dim", type=int, default=12)
     parser.add_argument("--gripper-field-mode", choices=("legacy_handcrafted", "parseval_temporal"), default="legacy_handcrafted")
-    parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action"], default="legacy")
+    parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action", "hierarchical_mmdit_action"], default="legacy")
     parser.add_argument("--action-flow-residual-depth", type=int, default=2)
     parser.add_argument("--action-flow-residual-high-slots", type=int, default=4)
     parser.add_argument("--action-flow-residual-max-scale", type=float, default=0.20)
@@ -288,6 +288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-consequence-scale-max", type=float, default=0.50, help="Upper bound for action-conditioned layer-contract summary strength.")
     parser.add_argument("--latent-cvae-event-gripper-gate", type=int, default=1)
     parser.add_argument("--latent-cvae-inference-sample", type=int, default=0)
+    parser.add_argument("--latent-cvae-variational", type=int, default=1, help="CR1/B1: 0 bypasses posterior/KL/aux-decode training scaffold while keeping the deterministic prior-mean deploy mapping bit-identical.")
     parser.add_argument("--latent-cvae-output-init-std", type=float, default=1e-3)
     parser.add_argument("--latent-cvae-mu-bound", type=float, default=1.5)
     parser.add_argument("--latent-cvae-min-std", type=float, default=0.5)
@@ -316,6 +317,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-hierarchical-workspace", type=int, default=0, help="V75: use temporary low evidence reads plus persistent role-separated stage memory.")
     parser.add_argument("--latent-cvae-stage-slots", type=int, default=6, help="Number of persistent stage-memory slots in the hierarchical workspace.")
     parser.add_argument("--latent-cvae-stage-promote-scale-init", type=float, default=0.05, help="Initial bounded residual scale for low-to-stage promotion.")
+    parser.add_argument("--hierarchical-mmdit-depth", type=int, default=3, help="Number of distinct action MMDiT blocks in the deterministic intent decoder.")
+    parser.add_argument("--hierarchical-mmdit-refine-steps", type=int, default=3, help="Fixed phase-1 refinement depth; adaptive depth is introduced separately in V76.")
+    parser.add_argument("--hierarchical-mmdit-low-slots", type=int, default=25, help="Role-stratified low evidence slots; 25 gives five slots to each owned role.")
+    parser.add_argument("--hierarchical-mmdit-stage-slots", type=int, default=6, help="Persistent stage-content slots; role identity remains a separate tensor.")
+    parser.add_argument("--hierarchical-mmdit-ffn-expansion", type=float, default=2.0)
+    parser.add_argument("--hierarchical-mmdit-layer-grad-scale", type=float, default=0.0)
+    parser.add_argument("--hierarchical-mmdit-source-grad-scale", type=float, default=0.0)
+    parser.add_argument("--hierarchical-mmdit-consequence-scale-init", type=float, default=0.10)
+    parser.add_argument("--hierarchical-mmdit-consequence-scale-max", type=float, default=0.50)
+    parser.add_argument("--hierarchical-mmdit-noisy-causal", type=int, default=1)
+    parser.add_argument("--hierarchical-mmdit-noisy-gate-min", type=float, default=0.05)
+    parser.add_argument("--hierarchical-mmdit-noisy-gate-power", type=float, default=1.5)
+    parser.add_argument("--hierarchical-mmdit-stage-promote-scale-init", type=float, default=0.05)
+    parser.add_argument("--hierarchical-mmdit-output-init-std", type=float, default=1e-3)
+    parser.add_argument("--hierarchical-mmdit-residual-scale-max", type=float, default=0.20, help="Maximum absolute LayerScale for each serial action-refinement stage.")
+    parser.add_argument("--hierarchical-mmdit-output-contract", type=int, default=0, help="CR7 fallback: dedicated restricted contract for event/motion subheads only (zero-init injection; velocity head untouched).")
+    parser.add_argument("--hierarchical-mmdit-noisy-market-bias", type=int, default=0, help="Compatibility flag for v76a checkpoints; the serial clean decoder has no condition-group market.")
+    parser.add_argument("--hierarchical-mmdit-noisy-gate-mode", type=int, default=0, help="0 = no noisy gate (honest codification: the outer multiplicative gate was cancelled by scale-invariant cond_norm in every arm); 1 = real post-norm value-domain gate inside the block.")
+    parser.add_argument("--latent-cvae-z-probe", type=int, default=0, help="CR0: eval-time z zero/shuffle intervention probes on the legacy decoder (two extra decodes per eval batch; diagnostic runs only).")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -569,6 +589,7 @@ def main() -> None:
         latent_cvae_consequence_scale_max=args.latent_cvae_consequence_scale_max,
         latent_cvae_event_gripper_gate=args.latent_cvae_event_gripper_gate,
         latent_cvae_inference_sample=args.latent_cvae_inference_sample,
+        latent_cvae_variational=args.latent_cvae_variational,
         latent_cvae_output_init_std=args.latent_cvae_output_init_std,
         latent_cvae_mu_bound=args.latent_cvae_mu_bound,
         latent_cvae_min_std=args.latent_cvae_min_std,
@@ -597,6 +618,25 @@ def main() -> None:
         latent_cvae_hierarchical_workspace=args.latent_cvae_hierarchical_workspace,
         latent_cvae_stage_slots=args.latent_cvae_stage_slots,
         latent_cvae_stage_promote_scale_init=args.latent_cvae_stage_promote_scale_init,
+        hierarchical_mmdit_depth=args.hierarchical_mmdit_depth,
+        hierarchical_mmdit_refine_steps=args.hierarchical_mmdit_refine_steps,
+        hierarchical_mmdit_low_slots=args.hierarchical_mmdit_low_slots,
+        hierarchical_mmdit_stage_slots=args.hierarchical_mmdit_stage_slots,
+        hierarchical_mmdit_ffn_expansion=args.hierarchical_mmdit_ffn_expansion,
+        hierarchical_mmdit_layer_grad_scale=args.hierarchical_mmdit_layer_grad_scale,
+        hierarchical_mmdit_source_grad_scale=args.hierarchical_mmdit_source_grad_scale,
+        hierarchical_mmdit_consequence_scale_init=args.hierarchical_mmdit_consequence_scale_init,
+        hierarchical_mmdit_consequence_scale_max=args.hierarchical_mmdit_consequence_scale_max,
+        hierarchical_mmdit_noisy_causal=args.hierarchical_mmdit_noisy_causal,
+        hierarchical_mmdit_noisy_gate_min=args.hierarchical_mmdit_noisy_gate_min,
+        hierarchical_mmdit_noisy_gate_power=args.hierarchical_mmdit_noisy_gate_power,
+        hierarchical_mmdit_stage_promote_scale_init=args.hierarchical_mmdit_stage_promote_scale_init,
+        hierarchical_mmdit_output_init_std=args.hierarchical_mmdit_output_init_std,
+        hierarchical_mmdit_residual_scale_max=args.hierarchical_mmdit_residual_scale_max,
+        hierarchical_mmdit_output_contract=args.hierarchical_mmdit_output_contract,
+        hierarchical_mmdit_noisy_market_bias=args.hierarchical_mmdit_noisy_market_bias,
+        hierarchical_mmdit_noisy_gate_mode=args.hierarchical_mmdit_noisy_gate_mode,
+        latent_cvae_z_probe=args.latent_cvae_z_probe,
         adaptive_cvae_refine_steps=args.adaptive_cvae_refine_steps,
         adaptive_cvae_progress_memory=args.adaptive_cvae_progress_memory,
         adaptive_cvae_progress_steps=args.adaptive_cvae_progress_steps,
@@ -688,6 +728,29 @@ def main() -> None:
                 f"{skipped_v74_time_keys[:8]} count={len(skipped_v74_time_keys)}",
                 flush=True,
             )
+        if str(args.final_action_decoder) == "hierarchical_mmdit_action":
+            # A stage1 checkpoint supplies the trunk/contracts only.  Both the
+            # historical CVAE tower and the short-lived competitive clean
+            # decoder have incompatible ownership semantics and must start
+            # fresh; use --resume, not --stage1-checkpoint, to continue a
+            # checkpoint produced by this exact serial architecture.
+            obsolete_prefixes = (
+                "planner.latent_cvae_action_decoder.",
+                "planner.hierarchical_mmdit_action_decoder.",
+            )
+            skipped_obsolete_decoder = [
+                key for key in stage_state if key.startswith(obsolete_prefixes)
+            ]
+            if skipped_obsolete_decoder:
+                stage_state = {
+                    key: value for key, value in stage_state.items()
+                    if not key.startswith(obsolete_prefixes)
+                }
+                print(
+                    f"[v39-init] skipped stage1 final-decoder keys: "
+                    f"{skipped_obsolete_decoder[:8]} count={len(skipped_obsolete_decoder)}",
+                    flush=True,
+                )
         stage_state, skipped_shape_keys = _filter_shape_mismatched_state_dict(stage_state, system.state_dict())
         if skipped_shape_keys:
             print(
@@ -743,6 +806,21 @@ def main() -> None:
             "latent_cvae_single_final_path": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
             "latent_cvae_no_legacy_velocity_base": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
+            "hierarchical_mmdit_action_decoder": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_deterministic_intent_contracts": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_no_target_or_posterior_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_owned_five_role_evidence": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_fixed_role_prior": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_manager_selector_only": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_mmdit_owns_final_consumption": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_serial_condition_composition": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_competitive_condition_market": False,
+            "hierarchical_mmdit_identifiable_residual_gates": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_dynamic_orthogonal_baseline": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_architecture_version": policy_config.hierarchical_mmdit_architecture_version,
+            "hierarchical_mmdit_residual_scale_max": float(args.hierarchical_mmdit_residual_scale_max),
+            "hierarchical_mmdit_distinct_blocks": int(args.hierarchical_mmdit_depth),
+            "hierarchical_mmdit_fixed_refine_steps": int(args.hierarchical_mmdit_refine_steps),
             "latent_cvae_mmdit_decoder": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_mmdit_no_direct_noisy_residual": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_mmdit_condition_update": bool(int(args.latent_cvae_mmdit_cond_update)),

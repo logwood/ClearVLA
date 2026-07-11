@@ -18,6 +18,24 @@ DINO_CACHE_DIR=${DINO_CACHE_DIR:-/home/sen.wang/workspace/robotics/clear/data/di
 STAGE1_CHECKPOINT=${STAGE1_CHECKPOINT:-/home/sen.wang/workspace/robotics/clear/clearvla_v40_2_goodcheck/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt}
 OUT_DIR=${OUT_DIR:-runs/v48_justok_b8}
 
+# ---------------------------------------------------------------------------
+# Code provenance snapshot (added after the v76 incident: an in-place,
+# uncommitted structural edit made the exact source of a finished run
+# unrecoverable from the repo).  Every run now archives the code it actually
+# executes into its own OUT_DIR before launch: git SHA if available, the full
+# uncommitted diff, and a source tarball as the commit-independent fallback.
+# ~2 MB per run buys permanent reproducibility; disable with SNAPSHOT_CODE=0.
+# ---------------------------------------------------------------------------
+if [ "${SNAPSHOT_CODE:-1}" = "1" ]; then
+  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  mkdir -p "${OUT_DIR}/code_snapshot"
+  { git -C "${REPO_ROOT}" rev-parse HEAD > "${OUT_DIR}/code_snapshot/git_sha.txt" \
+      && git -C "${REPO_ROOT}" diff > "${OUT_DIR}/code_snapshot/uncommitted.diff" \
+      && git -C "${REPO_ROOT}" status --short > "${OUT_DIR}/code_snapshot/git_status.txt"; } 2>/dev/null || true
+  tar czf "${OUT_DIR}/code_snapshot/source.tgz" \
+      -C "${REPO_ROOT}" clearvla scripts tests 2>/dev/null || true
+fi
+
 exec python -u -m clearvla.cli.train_v40_policy \
   --data-root "${DATA_ROOT}" \
   --glob '*.hdf5' \

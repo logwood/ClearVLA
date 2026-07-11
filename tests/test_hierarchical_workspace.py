@@ -118,6 +118,57 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
         self.assertGreater(float(metrics["hierarchical_stage_update_norm"]), 0.0)
         self.assertGreater(float(metrics["hierarchical_stage_role_diversity"]), 0.0)
 
+    def test_promotion_projection_scale_cannot_bypass_manager_gate(self) -> None:
+        prepared = self._prepared(token_count=3)
+        content = self.workspace.init_stage(self.primary)
+        baseline = self.workspace.step(
+            prepared_evidence=prepared,
+            stage_content=content,
+            primary_cond=self.primary,
+            step_index=0,
+        )
+        state = {
+            name: value.detach().clone()
+            for name, value in self.workspace.stage_promote_out.state_dict().items()
+        }
+        with torch.no_grad():
+            self.workspace.stage_promote_out.weight.mul_(100.0)
+            self.workspace.stage_promote_out.bias.mul_(100.0)
+        scaled = self.workspace.step(
+            prepared_evidence=prepared,
+            stage_content=content,
+            primary_cond=self.primary,
+            step_index=0,
+        )
+        torch.testing.assert_close(scaled[1], baseline[1], atol=5e-4, rtol=5e-4)
+        torch.testing.assert_close(scaled[2], baseline[2], atol=5e-4, rtol=5e-4)
+        baseline_metrics = baseline[-1]
+        scaled_metrics = scaled[-1]
+        self.assertGreater(
+            float(scaled_metrics["hierarchical_stage_promoted_norm"]),
+            50.0 * float(baseline_metrics["hierarchical_stage_promoted_norm"]),
+        )
+        self.assertGreater(
+            float(scaled_metrics["hierarchical_stage_promoted_projected_rms"]),
+            50.0 * float(baseline_metrics["hierarchical_stage_promoted_projected_rms"]),
+        )
+        torch.testing.assert_close(
+            scaled_metrics["hierarchical_stage_promoted_normalized_rms"],
+            baseline_metrics["hierarchical_stage_promoted_normalized_rms"],
+            atol=5e-4,
+            rtol=5e-4,
+        )
+        torch.testing.assert_close(
+            scaled_metrics["hierarchical_stage_promoted_realized_scale"],
+            baseline_metrics["hierarchical_stage_promoted_realized_scale"],
+            atol=5e-4,
+            rtol=5e-4,
+        )
+        self.assertLess(
+            float(scaled_metrics["hierarchical_stage_promote_gate_scale_error"]), 2e-5
+        )
+        self.workspace.stage_promote_out.load_state_dict(state)
+
     def test_mmdit_condition_groups_have_length_fair_prior_mass(self) -> None:
         block = LatentCVAEMMDiTBlock(self.config)
         bias = block._hierarchical_key_bias(
