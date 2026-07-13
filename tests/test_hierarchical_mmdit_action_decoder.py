@@ -6,17 +6,48 @@ import unittest
 import torch
 
 from clearvla.experiments.observed_state_lab.policy_v39 import (
+    ActionOnlyPhysicalVelocityHead,
+    ConditionNeutralActionInitializer,
     HierarchicalMMDiTActionDecoder,
     HierarchicalEvidenceWorkspace,
     IntentContractCompiler,
     LayeredV37StyleResidualActionFlowDenoiser,
     OwnedEvidenceMemoryBank,
+    OwnedHierarchicalActionBlock,
     PolicyConditionOrganizer,
     V39PolicyConfig,
+)
+from clearvla.policy.decoder import (
+    ActionOnlyPhysicalVelocityHead as PackagedActionOnlyPhysicalVelocityHead,
+    ConditionNeutralActionInitializer as PackagedConditionNeutralActionInitializer,
+    HierarchicalMMDiTActionDecoder as PackagedHierarchicalMMDiTActionDecoder,
+    OwnedHierarchicalActionBlock as PackagedOwnedHierarchicalActionBlock,
+)
+from clearvla.policy.intent import (
+    IntentContractCompiler as PackagedIntentContractCompiler,
+    PolicyConditionOrganizer as PackagedPolicyConditionOrganizer,
+)
+from clearvla.policy.evidence import (
+    HierarchicalEvidenceWorkspace as PackagedHierarchicalEvidenceWorkspace,
+    OwnedEvidenceMemoryBank as PackagedOwnedEvidenceMemoryBank,
 )
 
 
 class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
+    def test_intent_legacy_imports_are_packaged_classes(self) -> None:
+        self.assertIs(IntentContractCompiler, PackagedIntentContractCompiler)
+        self.assertIs(PolicyConditionOrganizer, PackagedPolicyConditionOrganizer)
+
+    def test_evidence_legacy_imports_are_packaged_classes(self) -> None:
+        self.assertIs(HierarchicalEvidenceWorkspace, PackagedHierarchicalEvidenceWorkspace)
+        self.assertIs(OwnedEvidenceMemoryBank, PackagedOwnedEvidenceMemoryBank)
+
+    def test_decoder_legacy_imports_are_packaged_classes(self) -> None:
+        self.assertIs(ActionOnlyPhysicalVelocityHead, PackagedActionOnlyPhysicalVelocityHead)
+        self.assertIs(ConditionNeutralActionInitializer, PackagedConditionNeutralActionInitializer)
+        self.assertIs(HierarchicalMMDiTActionDecoder, PackagedHierarchicalMMDiTActionDecoder)
+        self.assertIs(OwnedHierarchicalActionBlock, PackagedOwnedHierarchicalActionBlock)
+
     @staticmethod
     def _config() -> V39PolicyConfig:
         return V39PolicyConfig(
