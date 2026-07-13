@@ -2118,11 +2118,14 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     losses["grad_final_policy_heads"] = _module_grad_norm(final, reference=reference)
 
 
-def _unique_params(modules: Sequence[torch.nn.Module]) -> list[torch.nn.Parameter]:
+def _unique_params(
+    sources: Sequence[torch.nn.Module | torch.nn.Parameter],
+) -> list[torch.nn.Parameter]:
     params: list[torch.nn.Parameter] = []
     seen: set[int] = set()
-    for module in modules:
-        for param in module.parameters():
+    for source in sources:
+        candidates = (source,) if isinstance(source, torch.nn.Parameter) else source.parameters()
+        for param in candidates:
             ident = id(param)
             if param.requires_grad and ident not in seen:
                 seen.add(ident)
@@ -2146,7 +2149,14 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
     legacy_motion_readers = [] if complete_latent_decoder else [planner.motion_probe]
 
     if _uses_layer_adapter_contract(trainer) and len(getattr(planner, "layer_contract_heads", [])) > 0:
-        shared_modules = [planner.visual_memory, planner.rollout_codec, planner.seed, planner.time, planner.content_mod]
+        shared_modules = [
+            planner.visual_memory,
+            planner.rollout_codec,
+            planner.seed,
+            planner.time,
+            planner.content_mod,
+            planner.content_mod_scale,
+        ]
         depth = len(planner.blocks)
         min_scale = float(getattr(trainer, "layerwise_lr_min_scale", 0.30))
         min_scale = min(max(min_scale, 0.01), 1.0)
@@ -2227,7 +2237,7 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                 })
             if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
                 groups.append({
-                    "params": list(planner.hierarchical_mmdit_action_decoder.parameters()),
+                    "params": _unique_params([planner.hierarchical_mmdit_action_decoder]),
                     "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                     "name": "hierarchical_mmdit_action_decoder",
                 })
@@ -2240,6 +2250,7 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
         planner.seed,
         planner.time,
         planner.content_mod,
+        planner.content_mod_scale,
         *list(planner.blocks[:cut]),
         planner.midcut_norm,
     ]
@@ -2281,7 +2292,7 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             })
         if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
             groups.append({
-                "params": list(planner.hierarchical_mmdit_action_decoder.parameters()),
+                "params": _unique_params([planner.hierarchical_mmdit_action_decoder]),
                 "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                 "name": "hierarchical_mmdit_action_decoder",
             })
@@ -2326,6 +2337,17 @@ def train_v39_policy(
     steps_per_epoch = trainer.max_train_batches or len(train_loader)
     schedule = scheduler(optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio)
     start_epoch, global_step = 1, 0
+    # do_before_v78 M1 quarantine proof: CALLGRAPH_AUDIT=1 turns this run into
+    # a one-batch diagnostic -- hooks attach here, the report is written right
+    # after the first backward (plus one sampled eval batch), then the run
+    # exits.  Zero effect when the env var is absent.
+    callgraph_auditor = None
+    import os as _os
+    if _os.environ.get("CALLGRAPH_AUDIT", "0") == "1":
+        from clearvla.tools.callgraph_audit import CallGraphAuditor
+        callgraph_auditor = CallGraphAuditor(system)
+        callgraph_auditor.attach(first_phase="train")
+        print("[callgraph-audit] hooks attached; diagnostic run, will exit after first batch", flush=True)
     history: list[dict[str, Any]] = []
     best = {
         "full_mse": float("inf"), "gripper_f1": -float("inf"),
@@ -2501,6 +2523,31 @@ def train_v39_policy(
                 )
             losses["loss"].float().backward()
             _attach_grad_diagnostics(losses, system)
+            if callgraph_auditor is not None:
+                callgraph_auditor.capture_gradients()
+                callgraph_auditor.begin_phase("sample")
+                with torch.no_grad():
+                    evaluate_v39_policy(
+                        system=system,
+                        loader=val_loader,
+                        conditioner=conditioner,
+                        device=device,
+                        dtype=dtype,
+                        camera_names=camera_names,
+                        action_normalizer=action_normalizer,
+                        trainer=trainer,
+                        max_batches=1,
+                    )
+                callgraph_auditor.detach()
+                report_path = callgraph_auditor.write_report(
+                    out_dir / "callgraph_audit",
+                    context_note=(
+                        f"epoch={epoch} batch={batch_index} decoder="
+                        + ("hierarchical" if getattr(system.planner, "hierarchical_mmdit_action_decoder", None) is not None else "legacy")
+                    ),
+                )
+                print(f"[callgraph-audit] report written to {report_path}; exiting diagnostic run", flush=True)
+                return {"callgraph_audit": str(report_path)}
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_backward", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
             latent_decoder = getattr(system.planner, "latent_cvae_action_decoder", None)

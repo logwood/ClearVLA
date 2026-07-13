@@ -7745,6 +7745,11 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             causal_attention=False,
             stage_promote_scale_init=float(config.hierarchical_mmdit_stage_promote_scale_init),
         )
+        # This decoder owns progress through block_identity + budget_proj and
+        # always supplies step_state_override. Keep the fallback parameter in
+        # the state dict for checkpoint compatibility, but do not optimize an
+        # unreachable second definition of decoder time.
+        self.workspace.step_embedding.requires_grad_(False)
         self.blocks = nn.ModuleList([
             OwnedHierarchicalActionBlock(config)
             for _ in range(self.block_count)
