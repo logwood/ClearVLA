@@ -36,7 +36,6 @@ class BiasFreeFFN(nn.Module):
         return self.net(x)
 
 
-
 class TimeEmbedding(nn.Module):
     def __init__(self, hidden: int) -> None:
         super().__init__()

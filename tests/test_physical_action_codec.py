@@ -16,7 +16,9 @@ from clearvla.policy.codec import (
     PhysicalActionCodec as PackagedPhysicalActionCodec,
     PhysicalActionTokenLift as PackagedPhysicalActionTokenLift,
     PhysicalVelocityHead as PackagedPhysicalVelocityHead,
+    TransitionAwarePhysicalVelocityHead as PackagedTransitionAwarePhysicalVelocityHead,
 )
+from clearvla.experiments.observed_state_lab.policy_v36_3 import TransitionAwarePhysicalVelocityHead
 
 
 class PhysicalActionCodecManifoldTest(unittest.TestCase):
@@ -25,6 +27,7 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         self.assertIs(PhysicalActionCodec, PackagedPhysicalActionCodec)
         self.assertIs(PhysicalActionTokenLift, PackagedPhysicalActionTokenLift)
         self.assertIs(PhysicalVelocityHead, PackagedPhysicalVelocityHead)
+        self.assertIs(TransitionAwarePhysicalVelocityHead, PackagedTransitionAwarePhysicalVelocityHead)
 
     def setUp(self) -> None:
         self.config = V362PolicyConfig(

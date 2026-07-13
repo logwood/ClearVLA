@@ -16,8 +16,6 @@ The world encoder and proposal contract are intentionally kept stable so that
 V36.2 isolates the action-coordinate and early action-token bottleneck issues.
 """
 
-from dataclasses import dataclass
-
 import torch
 from torch import Tensor, nn
 
@@ -27,113 +25,11 @@ from clearvla.policy.codec import (
     PhysicalActionTokenLift,
     PhysicalVelocityHead,
 )
+from clearvla.policy.config import V362PolicyConfig
+from clearvla.policy.trunk_primitives import HorizonRoleEmbedding
 
 from .policy import RejectableHistoryProposal, TimeEmbedding
 from .world_model import BiasFreeFFN, V35WorldConfig, WorldEvidenceEncoder, sinusoidal_positions
-
-
-@dataclass(frozen=True)
-class V362PolicyConfig:
-    action_dim: int = 7
-    state_dim: int = 7
-    action_horizon: int = 24
-    executed_history_length: int = 3
-    hidden_size: int = 512
-    num_heads: int = 8
-    depth: int = 6
-    action_decoder_depth: int = 4
-    proposal_depth: int = 2
-    ffn_expansion: float = 4.0
-    proposal_dropout: float = 0.25
-    dropout: float = 0.05
-    event_tokens: int = 3
-    gripper_dim_index: int = -1
-    inference_steps: int = 5
-    first_execution_steps: int = 4
-    mid_execution_steps: int = 8
-    physical_decode_delta_blend: float = 0.25
-    gripper_field_dim: int = 12
-    gripper_field_mode: str = "legacy_handcrafted"
-    # Historical runs sampled arm_abs/arm_delta independently. New runs can
-    # instead sample one native arm trajectory and map it into the redundant
-    # [absolute, delta] coordinates used by the policy.
-    arm_flow_mode: str = "legacy_independent"
-    arm_noise_temporal_rho: float = 0.0
-
-    def validate(self) -> None:
-        if min(
-            self.action_dim,
-            self.state_dim,
-            self.action_horizon,
-            self.executed_history_length,
-            self.hidden_size,
-            self.num_heads,
-            self.depth,
-            self.action_decoder_depth,
-            self.proposal_depth,
-            self.event_tokens,
-            self.inference_steps,
-            self.first_execution_steps,
-            self.mid_execution_steps,
-        ) <= 0:
-            raise ValueError("V36.2 policy dimensions must be positive")
-        if self.hidden_size % self.num_heads:
-            raise ValueError("hidden_size must be divisible by num_heads")
-        if self.action_dim != self.state_dim:
-            raise ValueError("action/state dimensions must match")
-        if not 0 <= self.proposal_dropout < 1:
-            raise ValueError("proposal_dropout must be in [0,1)")
-        if not 0 <= self.dropout < 1:
-            raise ValueError("dropout must be in [0,1)")
-        if not 0 <= self.physical_decode_delta_blend <= 1:
-            raise ValueError("physical_decode_delta_blend must be in [0,1]")
-        if int(self.gripper_field_dim) < 2:
-            raise ValueError("gripper_field_dim must be >= 2")
-        if str(self.gripper_field_mode) not in {"legacy_handcrafted", "parseval_temporal"}:
-            raise ValueError("gripper_field_mode must be legacy_handcrafted or parseval_temporal")
-        if str(self.arm_flow_mode) not in {"legacy_independent", "manifold_native"}:
-            raise ValueError("arm_flow_mode must be legacy_independent or manifold_native")
-        if not 0.0 <= float(self.arm_noise_temporal_rho) < 1.0:
-            raise ValueError("arm_noise_temporal_rho must be in [0,1)")
-        if self.first_execution_steps > self.action_horizon:
-            raise ValueError("first_execution_steps cannot exceed action_horizon")
-        if self.mid_execution_steps > self.action_horizon:
-            raise ValueError("mid_execution_steps cannot exceed action_horizon")
-
-    @property
-    def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.action_dim + self.gripper_dim_index
-
-    @property
-    def arm_dim(self) -> int:
-        return self.action_dim - 1
-
-    @property
-    def physical_action_dim(self) -> int:
-        # arm_abs + arm_delta + expanded gripper field. Legacy mode reserves
-        # value/delta channels; Parseval mode reconstructs the native gripper
-        # trajectory jointly from every field channel.
-        return 2 * self.arm_dim + int(self.gripper_field_dim)
-
-
-class HorizonRoleEmbedding(nn.Module):
-    """Explicit execution/planning role embedding for horizon tokens."""
-
-    def __init__(self, config: V362PolicyConfig) -> None:
-        super().__init__()
-        self.config = config
-        h = config.hidden_size
-        self.execution = nn.Parameter(torch.randn(1, 1, h) * 0.02)
-        self.mid = nn.Parameter(torch.randn(1, 1, h) * 0.02)
-        self.tail = nn.Parameter(torch.randn(1, 1, h) * 0.02)
-
-    def forward(self, batch: int, *, device: torch.device, dtype: torch.dtype) -> Tensor:
-        h = self.execution.shape[-1]
-        role = torch.empty(1, self.config.action_horizon, h, device=device, dtype=dtype)
-        role[:, : self.config.first_execution_steps] = self.execution.to(device=device, dtype=dtype)
-        role[:, self.config.first_execution_steps : self.config.mid_execution_steps] = self.mid.to(device=device, dtype=dtype)
-        role[:, self.config.mid_execution_steps :] = self.tail.to(device=device, dtype=dtype)
-        return role.expand(batch, -1, -1)
 
 
 class DiTPlannerBlock(nn.Module):

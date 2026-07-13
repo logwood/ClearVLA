@@ -7,12 +7,18 @@ replay both pass.
 ## Current Ownership
 
 - `clearvla.policy.primitives`: shared position, time, and FFN primitives.
+- `clearvla.policy.config`: V362/V38/V39 configuration lineage.
 - `clearvla.policy.contracts`: layer-contract constants and gradient views.
 - `clearvla.policy.codec`: native action to physical-flow coordinates.
+- `clearvla.policy.proposal`: rejectable executed-history proposal.
 - `clearvla.policy.intent`: typed condition organization and intent contracts.
 - `clearvla.policy.evidence`: evidence memory, retrieval, and stage promotion.
 - `clearvla.policy.decoder`: serial-owned MMDiT action refinement and readout.
+- `clearvla.policy.trunk_primitives`: shared V38 world/action trunk components.
+- `clearvla.policy.trunk`: current DiT trunk and layer-contract heads.
+- `clearvla.policy.system`: top-level current policy composition.
 - `clearvla.policy.gauges`: pure diagnostic reductions.
+- `clearvla.policy.legacy`: residual, latent-main, and CVAE decoder generations.
 
 The dependency direction is strictly inward: files under `clearvla.policy`
 cannot import `clearvla.experiments`. Legacy paths re-export the packaged class
@@ -21,14 +27,11 @@ Module attributes, constructor statement order, state-dict paths, forward
 signatures, metric keys, and numerical expressions are frozen during this
 phase.
 
-## Remaining Boundary
-
-`TemporalMidcutWorldActionDiT`, its contract heads, `V39PolicyConfig`, and
-`V39PolicySystem` remain in the V39 facade for now. The trunk still has dense
-dependencies on V38 world-model components and legacy decoder families; moving
-it before those dependencies are isolated would replace one monolith with a
-cycle. The next batch first quarantines that legacy cluster, then extracts the
-trunk and system composition.
+`policy_v39.py` is now a compatibility facade only: it contains no class or
+function definitions. Runtime, evaluation, and CLI code intentionally continue
+to import that facade until dynamic Golden and real-data replay pass. The next
+refactor boundary is runtime/training; splitting the dense legacy CVAE file more
+finely is optional cleanup and not required to promote the current policy.
 
 ## Promotion Gates
 

@@ -10,6 +10,8 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
+from .primitives import BiasFreeFFN
+
 
 class PolicyEvidenceConfig(Protocol):
     hidden_size: int
@@ -267,8 +269,6 @@ class OwnedEvidenceMemoryBank(EvidenceMemoryBank):
         return memory, key_bias, ranges
 
 
-
-
 class SemanticEvidenceWorkspaceBlock(nn.Module):
     """AdaLN-conditioned workspace block with one evidence write path."""
 
@@ -399,8 +399,6 @@ class SemanticEvidenceWorkspaceBlock(nn.Module):
         ffn_update = self.ffn(self._modulate(self.ffn_norm(workspace), ffn_s, ffn_c))
         workspace = workspace + torch.tanh(ffn_g)[:, None] * self.drop(ffn_update)
         return workspace, weights
-
-
 
 
 class HierarchicalWorkspaceManager(nn.Module):

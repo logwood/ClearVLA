@@ -523,3 +523,55 @@ class PhysicalVelocityHead(nn.Module):
         if int(self.grip_extra.out_features) > 0:
             parts.append(self.grip_extra(x))
         return torch.cat(parts, dim=-1)
+
+
+class TransitionAwarePhysicalVelocityHead(nn.Module):
+    """V36.2 typed velocity head with in-head gripper latent modulation.
+
+    The arm channels are emitted exactly from the normalized action tokens.  The
+    gripper channels are emitted from the same tokens after a zero-initialized
+    transition-latent residual.  This is not a separate gripper command head:
+    the unique action output is still the typed physical velocity tensor.
+    """
+
+    def __init__(self, config: PhysicalActionConfig) -> None:
+        super().__init__()
+        h = config.hidden_size
+        ad = config.arm_dim
+        self.config = config
+        self.norm = nn.LayerNorm(h)
+        self.transition_norm = nn.LayerNorm(h)
+        self.gripper_delta = nn.Linear(h, h)
+        self.gripper_gate = nn.Linear(h, h)
+        nn.init.zeros_(self.gripper_delta.weight)
+        nn.init.zeros_(self.gripper_delta.bias)
+        nn.init.zeros_(self.gripper_gate.weight)
+        nn.init.zeros_(self.gripper_gate.bias)
+        self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        if self.parseval_gripper:
+            self.arm_field = nn.Linear(h, 2 * ad)
+            self.grip_field = nn.Linear(h, int(config.gripper_field_dim))
+        else:
+            self.arm_abs = nn.Linear(h, ad)
+            self.arm_delta = nn.Linear(h, ad)
+            self.grip_value = nn.Linear(h, 1)
+            self.grip_delta = nn.Linear(h, 1)
+            self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
+
+    def output_layers(self) -> tuple[nn.Linear, ...]:
+        if self.parseval_gripper:
+            return self.arm_field, self.grip_field
+        return self.arm_abs, self.arm_delta, self.grip_value, self.grip_delta, self.grip_extra
+
+    def forward(self, tokens: Tensor, transition_latent: Tensor | None = None) -> Tensor:
+        x = self.norm(tokens)
+        grip_x = x
+        if transition_latent is not None:
+            z = self.transition_norm(transition_latent)
+            grip_x = grip_x + torch.sigmoid(self.gripper_gate(z)) * self.gripper_delta(z)
+        if self.parseval_gripper:
+            return torch.cat([self.arm_field(x), self.grip_field(grip_x)], dim=-1)
+        parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(grip_x), self.grip_delta(grip_x)]
+        if int(self.grip_extra.out_features) > 0:
+            parts.append(self.grip_extra(grip_x))
+        return torch.cat(parts, dim=-1)

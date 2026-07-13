@@ -9,7 +9,9 @@ from .codec import (
     PhysicalActionCodec,
     PhysicalActionTokenLift,
     PhysicalVelocityHead,
+    TransitionAwarePhysicalVelocityHead,
 )
+from .config import V362PolicyConfig, V38PolicyConfig, V39PolicyConfig
 from .decoder import (
     ActionOnlyPhysicalVelocityHead,
     ConditionNeutralActionInitializer,
@@ -26,12 +28,37 @@ from .evidence import (
 )
 from .intent import IndependentIntentFusion, IntentContractCompiler, PolicyConditionOrganizer
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
+from .proposal import ProposalBlock, RejectableHistoryProposal
+from .trunk_primitives import (
+    CanvasPhysicalVelocityHead,
+    ControlledResidualLatentDynamics,
+    DenseVisualMemory,
+    HorizonRoleEmbedding,
+    RolloutActionResidualHead,
+    RolloutTargetCodec,
+    TemporalDynamicsBoundDiTBlock,
+    UnifiedCanvasSeed,
+)
+from .trunk import (
+    LayerContractAdapterHeads,
+    LayerRoleScheduler,
+    MidcutContractHeads,
+    RecurrentMilestoneConsequenceCell,
+    SharedLayerFlowActionProbe,
+    TemporalMidcutWorldActionDiT,
+    UnifiedInterventionBlock,
+)
+from .system import V39PolicySystem
 
 __all__ = [
     "ParsevalGripperTemporalFrame",
     "PhysicalActionCodec",
     "PhysicalActionTokenLift",
     "PhysicalVelocityHead",
+    "TransitionAwarePhysicalVelocityHead",
+    "V362PolicyConfig",
+    "V38PolicyConfig",
+    "V39PolicyConfig",
     "ActionOnlyPhysicalVelocityHead",
     "ConditionNeutralActionInitializer",
     "HierarchicalMMDiTActionDecoder",
@@ -48,4 +75,22 @@ __all__ = [
     "BiasFreeFFN",
     "TimeEmbedding",
     "sinusoidal_positions",
+    "ProposalBlock",
+    "RejectableHistoryProposal",
+    "CanvasPhysicalVelocityHead",
+    "ControlledResidualLatentDynamics",
+    "DenseVisualMemory",
+    "HorizonRoleEmbedding",
+    "RolloutActionResidualHead",
+    "RolloutTargetCodec",
+    "TemporalDynamicsBoundDiTBlock",
+    "UnifiedCanvasSeed",
+    "LayerContractAdapterHeads",
+    "LayerRoleScheduler",
+    "MidcutContractHeads",
+    "RecurrentMilestoneConsequenceCell",
+    "SharedLayerFlowActionProbe",
+    "TemporalMidcutWorldActionDiT",
+    "UnifiedInterventionBlock",
+    "V39PolicySystem",
 ]
