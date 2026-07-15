@@ -1540,7 +1540,13 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             for key, value in hierarchical_mmdit_action.items():
                 if not isinstance(value, Tensor):
                     continue
-                if key.startswith(("intent_", "owned_", "hierarchical_mmdit_")):
+                if key.startswith((
+                    "intent_",
+                    "owned_",
+                    "hierarchical_mmdit_",
+                    "refinement_probe_",
+                    "refinement_shadow_probe_",
+                )):
                     out[key] = value
         return out
 

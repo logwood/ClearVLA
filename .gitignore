@@ -7,3 +7,4 @@ clearvla_backup/
 clearvla_justok/
 .agents/
 policy_semantic_map/
+.worktrees/

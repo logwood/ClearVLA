@@ -21,10 +21,13 @@ VARIANT=$1
 OUTPUT_DIR=$2
 PYTHON_BIN=${3:-python}
 
-if [[ $VARIANT != "v76" && $VARIANT != "v77" ]]; then
-  echo "VARIANT must be v76 or v77" >&2
-  exit 2
-fi
+case $VARIANT in
+  v76|v77|v78|v79|v80|v81|v82|v84) ;;
+  *)
+    echo "VARIANT must be v76, v77, v78, v79, v80, v81, v82, or v84" >&2
+    exit 2
+    ;;
+esac
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 HARNESS=$REPO_ROOT/clearvla/tools/policy_golden.py

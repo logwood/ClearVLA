@@ -13,6 +13,7 @@ replay both pass.
 - `clearvla.policy.proposal`: rejectable executed-history proposal.
 - `clearvla.policy.intent`: typed condition organization and intent contracts.
 - `clearvla.policy.evidence`: evidence memory, retrieval, and stage promotion.
+- `clearvla.policy.refinement`: stage-owned nested contraction operators.
 - `clearvla.policy.decoder`: serial-owned MMDiT action refinement and readout.
 - `clearvla.policy.trunk_primitives`: shared V38 world/action trunk components.
 - `clearvla.policy.trunk`: current DiT trunk and layer-contract heads.
@@ -25,7 +26,9 @@ cannot import `clearvla.experiments`. Legacy paths re-export the packaged class
 objects, so old imports and old full-object pickle references remain resolvable.
 Module attributes, constructor statement order, state-dict paths, forward
 signatures, metric keys, and numerical expressions are frozen during this
-phase.
+phase. V84 adds the contraction sidecar, stage/dwell controller, exhaustion
+probes, and oracle exit head inside these existing ownership boundaries; it
+does not move evidence values back into the decoder or experiment facade.
 
 `policy_v39.py` is now a compatibility facade only: it contains no class or
 function definitions. Runtime, evaluation, and CLI code intentionally continue

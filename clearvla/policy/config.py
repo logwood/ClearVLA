@@ -315,7 +315,7 @@ class V39PolicyConfig(V38PolicyConfig):
     # CR1/B1: 1 = legacy variational training (posterior/KL/aux decode);
     # 0 = deterministic bypass with identical deploy mapping (prior mean only).
     latent_cvae_variational: int = 1
-    # CR0 (§14.2): eval-time z zero/shuffle intervention probes on the legacy
+    # CR0 (item 14.2): eval-time z zero/shuffle intervention probes on the legacy
     # decoder.  Costs two extra decodes per eval batch; diagnostic runs only.
     latent_cvae_z_probe: int = 0
     latent_cvae_output_init_std: float = 1e-3
@@ -401,6 +401,10 @@ class V39PolicyConfig(V38PolicyConfig):
     # evidence consumption.  This is an independent final decoder rather than
     # another behavior flag inside the historical CVAE tower.  It has no
     # posterior, target-action input, latent sampling, or legacy output bypass.
+    # ``depth`` counts the explicit refinement ownership blocks;
+    # ``refine_steps`` is the maximum recurrent compute budget.  Operator
+    # stages are a separate semantic repertoire: the default three blocks each
+    # select locally between two of six stage-owned contraction paths.
     hierarchical_mmdit_depth: int = 3
     hierarchical_mmdit_refine_steps: int = 3
     hierarchical_mmdit_low_slots: int = 25
@@ -415,18 +419,39 @@ class V39PolicyConfig(V38PolicyConfig):
     hierarchical_mmdit_noisy_gate_power: float = 1.5
     hierarchical_mmdit_stage_promote_scale_init: float = 0.05
     hierarchical_mmdit_output_init_std: float = 1e-3
+    # V82: every refinement block owns a full-rank MMDiT function. External
+    # stage banks continuously contract its normalized branch updates along
+    # ordered orthonormal paths. Maximum depth is the original operation.
+    hierarchical_mmdit_operator_stages: int = 6
+    hierarchical_mmdit_operator_rank: int = 32
+    hierarchical_mmdit_operator_groups: int = 32
+    hierarchical_mmdit_operator_depth_logit_init: float = 2.0
+    hierarchical_mmdit_operator_contraction_warmup_steps: int = 200
+    hierarchical_mmdit_operator_contraction_transition_steps: int = 1500
+    # Training schedule and deployment routing are orthogonal controls. Random
+    # dwell changes block residence during training; shadow/adaptive exhaustion
+    # reads detached action response and stage pressure without a learned gate.
+    hierarchical_mmdit_schedule_mode: str = "fixed"
+    hierarchical_mmdit_random_prefix_probability: float = 0.0
+    hierarchical_mmdit_exhaustion_mode: str = "off"
+    hierarchical_mmdit_action_response_thresholds: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    hierarchical_mmdit_stage_pressure_thresholds: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    hierarchical_mmdit_action_response_floor: float = 0.05
+    hierarchical_mmdit_exhaustion_confirm_steps: int = 2
+    # V77 host-gate profile.  Contraction is a post-gate sidecar and must not
+    # introduce a second residual-amplitude owner.
+    hierarchical_mmdit_residual_scale_init: float = 0.05
     hierarchical_mmdit_residual_scale_max: float = 0.20
-    # V77: every residual writer is normalized before its scalar amplitude
-    # control, so projection weights cannot bypass the ownership contract.
-    hierarchical_mmdit_architecture_version: str = "serial_owned_rms_v3"
-    # CR7 fallback (§23): dedicated restricted contract for event/motion
+    hierarchical_mmdit_architecture_version: str = "post_gate_contraction_sidecar_v11_oracle_router"
+    # CR7 fallback (item 23): dedicated restricted contract for event/motion
     # subheads (never velocity).  0 = action-only output (mainline first try).
     hierarchical_mmdit_output_contract: int = 0
     # Compatibility switch retained for v76a metadata/checkpoints.  The clean
     # serial decoder no longer has a condition-group market, so this flag is a
     # no-op there; legacy MMDiT paths keep their historical behavior.
     hierarchical_mmdit_noisy_market_bias: int = 0
-    # 0 = no noisy value gate; 1 = a post-normalization residual-amplitude schedule.
+    # The post-gate sidecar requires 0: noisy evidence is not amplitude-gated
+    # by a second schedule outside the V77 host block.
     hierarchical_mmdit_noisy_gate_mode: int = 0
     # V43: adaptive recurrent CVAE action decoder.  This mode keeps the V42
     # prior/posterior CVAE contract but lets the final action tokens run a
@@ -654,7 +679,69 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("hierarchical_mmdit_output_init_std must be non-negative")
         if not (0.0 < float(self.hierarchical_mmdit_residual_scale_max) <= 1.0):
             raise ValueError("hierarchical_mmdit_residual_scale_max must be in (0, 1]")
-        if str(self.hierarchical_mmdit_architecture_version) != "serial_owned_rms_v3":
+        if not (
+            0.0 < float(self.hierarchical_mmdit_residual_scale_init)
+            <= float(self.hierarchical_mmdit_residual_scale_max)
+        ):
+            raise ValueError("hierarchical_mmdit_residual_scale_init must be in (0, max]")
+        if int(self.hierarchical_mmdit_operator_stages) < 1:
+            raise ValueError("hierarchical_mmdit_operator_stages must be positive")
+        if int(self.hierarchical_mmdit_operator_stages) < int(self.hierarchical_mmdit_depth):
+            raise ValueError("operator stages must cover every refinement ownership block")
+        if int(self.hierarchical_mmdit_operator_rank) < 1:
+            raise ValueError("hierarchical_mmdit_operator_rank must be positive")
+        if int(self.hierarchical_mmdit_operator_rank) > int(self.hidden_size):
+            raise ValueError("hierarchical_mmdit_operator_rank cannot exceed hidden_size")
+        if int(self.hierarchical_mmdit_operator_groups) < 1:
+            raise ValueError("hierarchical_mmdit_operator_groups must be positive")
+        if int(self.hierarchical_mmdit_operator_rank) % int(self.hierarchical_mmdit_operator_groups):
+            raise ValueError("hierarchical_mmdit_operator_rank must be divisible by groups")
+        if float(self.hierarchical_mmdit_operator_depth_logit_init) <= 0.0:
+            raise ValueError("operator depth logit init must be positive")
+        if int(self.hierarchical_mmdit_operator_contraction_warmup_steps) < 0:
+            raise ValueError("operator contraction warmup steps must be non-negative")
+        if int(self.hierarchical_mmdit_operator_contraction_transition_steps) < 1:
+            raise ValueError("operator contraction transition steps must be positive")
+        if str(self.hierarchical_mmdit_schedule_mode) not in {"fixed", "random_dwell"}:
+            raise ValueError("hierarchical_mmdit_schedule_mode must be fixed or random_dwell")
+        if not 0.0 <= float(self.hierarchical_mmdit_random_prefix_probability) <= 1.0:
+            raise ValueError("hierarchical_mmdit_random_prefix_probability must be in [0,1]")
+        if str(self.hierarchical_mmdit_exhaustion_mode) not in {
+            "off", "shadow", "adaptive", "learned_shadow", "learned",
+        }:
+            raise ValueError(
+                "hierarchical_mmdit_exhaustion_mode must be off, shadow, adaptive, "
+                "learned_shadow, or learned"
+            )
+        for name in (
+            "hierarchical_mmdit_action_response_thresholds",
+            "hierarchical_mmdit_stage_pressure_thresholds",
+        ):
+            values = tuple(float(value) for value in getattr(self, name))
+            if len(values) != 3 or any(value < 0.0 for value in values):
+                raise ValueError(f"{name} must contain three non-negative values")
+        if str(self.hierarchical_mmdit_exhaustion_mode) in {"shadow", "adaptive"}:
+            action_thresholds = tuple(
+                float(value) for value in self.hierarchical_mmdit_action_response_thresholds
+            )
+            stage_thresholds = tuple(
+                float(value) for value in self.hierarchical_mmdit_stage_pressure_thresholds
+            )
+            if any(value <= 0.0 for value in action_thresholds):
+                raise ValueError(
+                    "shadow/adaptive exhaustion requires three calibrated positive action-response thresholds"
+                )
+            if any(value <= 0.0 for value in stage_thresholds):
+                raise ValueError(
+                    "shadow/adaptive exhaustion requires three calibrated positive stage-pressure thresholds"
+                )
+        if float(self.hierarchical_mmdit_action_response_floor) <= 0.0:
+            raise ValueError("hierarchical_mmdit_action_response_floor must be positive")
+        if int(self.hierarchical_mmdit_exhaustion_confirm_steps) < 1:
+            raise ValueError("hierarchical_mmdit_exhaustion_confirm_steps must be positive")
+        if str(self.hierarchical_mmdit_architecture_version) != (
+            "post_gate_contraction_sidecar_v11_oracle_router"
+        ):
             raise ValueError(
                 "unsupported hierarchical_mmdit_architecture_version: "
                 f"{self.hierarchical_mmdit_architecture_version!r}"
@@ -662,13 +749,31 @@ class V39PolicyConfig(V38PolicyConfig):
         if str(self.final_action_decoder) == "hierarchical_mmdit_action" and not int(self.layer_contract_adapters):
             raise ValueError("hierarchical_mmdit_action requires layer_contract_adapters=1")
         if str(self.final_action_decoder) == "hierarchical_mmdit_action":
+            if int(self.hierarchical_mmdit_refine_steps) < int(self.hierarchical_mmdit_depth):
+                raise ValueError(
+                    "hierarchical_mmdit_refine_steps must cover every distinct refinement block"
+                )
             if int(self.hierarchical_mmdit_low_slots) < 5 or int(self.hierarchical_mmdit_low_slots) % 5 != 0:
                 raise ValueError(
                     "hierarchical_mmdit_action requires low slots to be a positive multiple of five"
                 )
-            if int(self.hierarchical_mmdit_refine_steps) < int(self.hierarchical_mmdit_depth):
+            if int(self.hierarchical_mmdit_stage_slots) < int(
+                self.hierarchical_mmdit_operator_stages
+            ):
                 raise ValueError(
-                    "hierarchical_mmdit_refine_steps must cover every distinct action block"
+                    "hierarchical_mmdit_stage_slots must cover every operator stage"
+                )
+            if (
+                str(self.hierarchical_mmdit_schedule_mode) == "random_dwell"
+                and int(self.hierarchical_mmdit_refine_steps)
+                < int(self.hierarchical_mmdit_depth)
+            ):
+                raise ValueError(
+                    "random_dwell requires enough refine steps to cover every refinement block"
+                )
+            if int(self.hierarchical_mmdit_noisy_gate_mode) != 0:
+                raise ValueError(
+                    "post_gate_contraction_sidecar_v11 does not add an external noisy amplitude gate"
                 )
         if int(self.latent_cvae_hierarchical_workspace):
             if str(self.final_action_decoder) != "adaptive_recurrent_cvae_action":

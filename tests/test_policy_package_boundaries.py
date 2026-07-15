@@ -12,6 +12,7 @@ import torch
 from clearvla.experiments.observed_state_lab.policy import TimeEmbedding
 from clearvla.experiments.observed_state_lab.policy_v39 import (
     AdaptiveRecurrentCVAEActionDecoder,
+    HierarchicalMMDiTActionDecoder,
     HierarchicalLatentMainActionDecoder,
     LatentCVAEActionDecoder,
     LayeredV37StyleResidualActionFlowDenoiser,
@@ -26,8 +27,12 @@ from clearvla.experiments.observed_state_lab.policy_v38 import (
     ControlledResidualLatentDynamics,
     DenseVisualMemory,
 )
+from clearvla.policy import NestedLowRankContractionBank as ExportedNestedLowRankContractionBank
 from clearvla.policy.gauges import time_stratified_attention
 from clearvla.policy.config import V39PolicyConfig as PackagedV39PolicyConfig
+from clearvla.policy.decoder import (
+    HierarchicalMMDiTActionDecoder as PackagedHierarchicalMMDiTActionDecoder,
+)
 from clearvla.policy.legacy import (
     AdaptiveRecurrentCVAEActionDecoder as PackagedAdaptiveRecurrentCVAEActionDecoder,
     HierarchicalLatentMainActionDecoder as PackagedHierarchicalLatentMainActionDecoder,
@@ -43,6 +48,7 @@ from clearvla.policy.primitives import (
     TimeEmbedding as PackagedTimeEmbedding,
     sinusoidal_positions as packaged_sinusoidal_positions,
 )
+from clearvla.policy.refinement import NestedLowRankContractionBank
 from clearvla.policy.trunk_primitives import (
     ControlledResidualLatentDynamics as PackagedControlledResidualLatentDynamics,
     DenseVisualMemory as PackagedDenseVisualMemory,
@@ -92,6 +98,10 @@ class PolicyPackageBoundaryTest(unittest.TestCase):
         self.assertIs(DenseVisualMemory, PackagedDenseVisualMemory)
         self.assertIs(TemporalMidcutWorldActionDiT, PackagedTemporalMidcutWorldActionDiT)
         self.assertIs(V39PolicySystem, PackagedV39PolicySystem)
+
+    def test_current_decoder_and_refinement_operator_are_packaged(self) -> None:
+        self.assertIs(HierarchicalMMDiTActionDecoder, PackagedHierarchicalMMDiTActionDecoder)
+        self.assertIs(ExportedNestedLowRankContractionBank, NestedLowRankContractionBank)
 
     def test_packaged_policy_has_no_experiment_imports(self) -> None:
         root = Path(__file__).resolve().parents[1] / "clearvla" / "policy"

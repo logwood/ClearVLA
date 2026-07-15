@@ -42,10 +42,18 @@ the default `--through checkpoint` runs the complete protocol.
 
 - `v76`: `serial_owned_v2`, projected branch scale.
 - `v77`: `serial_owned_rms_v3`, identifiable post-normalization RMS scale.
+- `v84`: `post_gate_contraction_sidecar_v11_oracle_router`, V77 host blocks
+  with stage-owned nested contraction and a detached-target exit controller.
 
 The variants are complete presets, not individual flags. Compare a refactor
 against the matching historical preset. A direct V76-to-V77 comparison is an
 intentional semantic diff and should not pass.
+
+For the V84 package migration, compare the monolithic V84 source and packaged
+candidate with `--variant v84`. The class extraction intentionally changes the
+`structure/modules` owner strings; review that manifest and, if it is the only
+structural difference, ignore that prefix while keeping all tensors, state
+keys, optimizer ownership, gradients, and checkpoint categories exact.
 
 ## Worktree Comparison
 

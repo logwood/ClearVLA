@@ -29,6 +29,7 @@ from .evidence import (
 from .intent import IndependentIntentFusion, IntentContractCompiler, PolicyConditionOrganizer
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .proposal import ProposalBlock, RejectableHistoryProposal
+from .refinement import NestedLowRankContractionBank
 from .trunk_primitives import (
     CanvasPhysicalVelocityHead,
     ControlledResidualLatentDynamics,
@@ -77,6 +78,7 @@ __all__ = [
     "sinusoidal_positions",
     "ProposalBlock",
     "RejectableHistoryProposal",
+    "NestedLowRankContractionBank",
     "CanvasPhysicalVelocityHead",
     "ControlledResidualLatentDynamics",
     "DenseVisualMemory",

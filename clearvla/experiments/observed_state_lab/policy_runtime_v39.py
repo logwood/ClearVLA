@@ -8,7 +8,7 @@ import random
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 import torch
@@ -101,6 +101,18 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     # to the conditional prior used at inference without letting KL dominate
     # the action flow/chunk reconstruction objective.
     latent_cvae_action_decoder_lr_scale: float = 1.0
+    # The complete V77 host block uses the ordinary decoder rate. Only
+    # orthogonal sidecar bases and depth predictors use this rate.
+    hierarchical_mmdit_contraction_lr_scale: float = 2.0
+    hierarchical_mmdit_shared_base_lr_scale: float = 1.0
+    # Weak cost on the selected nested depth.  It begins only after the exact
+    # identity warm-up and cannot change basis scale or residual amplitude.
+    hierarchical_mmdit_depth_usage_loss_weight: float = 2e-4
+    # Target-aware supervision is confined to the training loss. Candidate
+    # errors are detached, so only the read-only exit controller receives it.
+    hierarchical_mmdit_oracle_route_loss_weight: float = 0.0
+    hierarchical_mmdit_oracle_route_relative_tolerance: float = 0.0
+    hierarchical_mmdit_oracle_route_warmup_steps: int = 200
     # V42.1: train the deploy/inference prior path directly.  The posterior path
     # remains a weak auxiliary reconstruction target instead of being allowed to
     # carry the main policy loss by looking at the target chunk.
@@ -802,6 +814,142 @@ def micro_refine_supervision_losses(
         "latent_cvae_micro_weight_last": weights[:, -1].mean().detach(),
     }
 
+def _shadow_refinement_probe_metrics(
+    system: V39PolicySystem,
+    output: dict[str, Tensor],
+    *,
+    arm_null_weight: float,
+) -> dict[str, Tensor]:
+    """Measure shadow early-exit quality without feeding target error to routing."""
+    shadow_predictions = output.get("refinement_shadow_probe_pred_velocity")
+    shadow_active = output.get("refinement_shadow_probe_active")
+    fixed_predictions = output.get("refinement_probe_pred_velocity")
+    fixed_active = output.get("refinement_probe_active")
+    target_velocity = output.get("target_physical_velocity")
+    if not all(torch.is_tensor(value) for value in (
+        shadow_predictions, shadow_active, fixed_predictions, fixed_active, target_velocity,
+    )):
+        return {}
+
+    def final_error(predictions: Tensor, active: Tensor) -> Tensor:
+        residual = predictions.float() - target_velocity.detach().float()[:, None]
+        step_error = semantic_physical_velocity_error(
+            system,
+            residual,
+            arm_null_weight=arm_null_weight,
+        ).mean(dim=-1)
+        final_index = active.float().sum(dim=1).long().clamp_min(1)
+        return step_error.gather(1, final_index[:, None]).squeeze(1)
+
+    with torch.no_grad():
+        shadow_error = final_error(shadow_predictions, shadow_active)
+        fixed_error = final_error(fixed_predictions, fixed_active)
+        shadow_steps = shadow_active.float().sum(dim=1)
+        fixed_steps = fixed_active.float().sum(dim=1)
+        return {
+            "hierarchical_mmdit_shadow_refine_error_final": shadow_error.mean(),
+            "hierarchical_mmdit_shadow_refine_error_gap": (
+                shadow_error - fixed_error
+            ).mean(),
+            "hierarchical_mmdit_shadow_refine_error_ratio": (
+                shadow_error / fixed_error.clamp_min(1e-8)
+            ).mean(),
+            "hierarchical_mmdit_shadow_step_saving": (
+                fixed_steps - shadow_steps
+            ).mean(),
+        }
+
+
+def _oracle_exit_supervision(
+    *,
+    exit_logits: Tensor,
+    candidate_error: Tensor,
+    initial_error: Tensor,
+    candidate_mask: Tensor,
+    relative_tolerance: float,
+) -> dict[str, Tensor]:
+    """Train an online stop/continue head from detached full-prefix errors."""
+    if exit_logits.ndim != 2:
+        raise ValueError("exit_logits must be [B,S]")
+    expected = tuple(exit_logits.shape)
+    if tuple(candidate_error.shape) != expected or tuple(candidate_mask.shape) != expected:
+        raise ValueError("oracle route tensors must share [B,S] geometry")
+    if tuple(initial_error.shape) != (expected[0],):
+        raise ValueError("initial_error must be [B]")
+    if float(relative_tolerance) < 0.0:
+        raise ValueError("relative_tolerance must be non-negative")
+
+    device = exit_logits.device
+    steps = int(exit_logits.shape[1])
+    indices = torch.arange(steps, device=device, dtype=torch.long)[None]
+    mask = candidate_mask.detach().bool()
+    errors = candidate_error.detach().float()
+    initial = initial_error.detach().float().abs().clamp_min(1e-6)
+    valid = mask.any(dim=1)
+    valid_float = valid.float()
+    valid_denominator = valid_float.sum().clamp_min(1.0)
+
+    masked_error = torch.where(mask, errors, torch.full_like(errors, float("inf")))
+    best_error = masked_error.min(dim=1).values
+    safe_best_error = torch.where(valid, best_error, torch.zeros_like(best_error))
+    tolerance = float(relative_tolerance) * initial
+    near_best = mask & (errors <= best_error[:, None] + tolerance[:, None])
+    oracle_index = near_best.float().argmax(dim=1)
+
+    decision_mask = mask & (indices <= oracle_index[:, None])
+    stop_target = (indices == oracle_index[:, None]).to(dtype=exit_logits.dtype)
+    decision_float = decision_mask.to(dtype=exit_logits.dtype)
+    route_loss = (
+        F.binary_cross_entropy_with_logits(
+            exit_logits.float(), stop_target.float(), reduction="none"
+        ) * decision_float.float()
+    ).sum() / decision_float.float().sum().clamp_min(1.0)
+
+    with torch.no_grad():
+        probabilities = torch.sigmoid(exit_logits.detach().float())
+        candidate_depth = mask.long().cumsum(dim=1)
+        predicted_stop = mask & (probabilities > 0.5)
+        sentinel = torch.full_like(indices, steps)
+        first_predicted = torch.where(predicted_stop, indices, sentinel).min(dim=1).values
+        last_candidate = torch.where(mask, indices, torch.full_like(indices, -1)).max(dim=1).values
+        predicted_index = torch.where(
+            first_predicted < steps,
+            first_predicted,
+            last_candidate.clamp_min(0),
+        )
+        predicted_error = errors.gather(1, predicted_index[:, None]).squeeze(1)
+        oracle_error = errors.gather(1, oracle_index[:, None]).squeeze(1)
+        oracle_depth = candidate_depth.gather(
+            1, oracle_index[:, None]
+        ).squeeze(1).float()
+        predicted_depth = candidate_depth.gather(
+            1, predicted_index[:, None]
+        ).squeeze(1).float()
+        mean_probability = (
+            probabilities * mask.float()
+        ).sum() / mask.float().sum().clamp_min(1.0)
+
+    return {
+        "loss": route_loss,
+        "target_depth": (oracle_depth * valid_float).sum() / valid_denominator,
+        "predicted_depth": (predicted_depth * valid_float).sum() / valid_denominator,
+        "depth_accuracy": (
+            (predicted_index == oracle_index).float() * valid_float
+        ).sum() / valid_denominator,
+        "depth_mae": (
+            (predicted_depth - oracle_depth).abs() * valid_float
+        ).sum() / valid_denominator,
+        "best_error": (safe_best_error * valid_float).sum() / valid_denominator,
+        "target_error": (oracle_error * valid_float).sum() / valid_denominator,
+        "predicted_error": (predicted_error * valid_float).sum() / valid_denominator,
+        "predicted_regret": (
+            (predicted_error - safe_best_error).clamp_min(0.0) * valid_float
+        ).sum() / valid_denominator,
+        "stop_probability": mean_probability,
+        "valid_fraction": valid_float.mean(),
+    }
+
+
 def flow_losses(
     system: V39PolicySystem,
     sample: dict[str, Tensor],
@@ -921,6 +1069,93 @@ def flow_losses(
         losses["latent_cvae_adaptive_route_entropy_weight"] = torch.as_tensor(route_weight, device=route_reg.device, dtype=route_reg.dtype)
         if route_weight > 0:
             losses["loss"] = losses["loss"] + route_weight * route_reg
+    if "hierarchical_mmdit_depth_usage_regularizer" in output:
+        depth_reg = output["hierarchical_mmdit_depth_usage_regularizer"]
+        depth_weight = float(
+            getattr(trainer, "hierarchical_mmdit_depth_usage_loss_weight", 0.0)
+        )
+        losses["hierarchical_mmdit_depth_usage_regularizer"] = depth_reg.detach().float()
+        losses["hierarchical_mmdit_depth_usage_loss_weight"] = torch.as_tensor(
+            depth_weight, device=depth_reg.device, dtype=depth_reg.dtype
+        )
+        if depth_weight > 0.0:
+            losses["loss"] = losses["loss"] + depth_weight * depth_reg
+    exit_logits = output.get("hierarchical_mmdit_exit_logits")
+    probe_predictions = output.get("refinement_probe_pred_velocity")
+    probe_active = output.get("refinement_probe_active")
+    exit_candidates = output.get("refinement_probe_exit_candidates")
+    target_velocity = output.get("target_physical_velocity")
+    base_route_weight = max(
+        float(trainer.hierarchical_mmdit_oracle_route_loss_weight), 0.0
+    )
+    if base_route_weight > 0.0 and str(
+        system.policy_config.hierarchical_mmdit_schedule_mode
+    ) != "fixed":
+        raise ValueError(
+            "oracle route supervision requires hierarchical_mmdit_schedule_mode=fixed"
+        )
+    route_inputs = {
+        "exit_logits": exit_logits,
+        "probe_predictions": probe_predictions,
+        "probe_active": probe_active,
+        "exit_candidates": exit_candidates,
+        "target_velocity": target_velocity,
+    }
+    if base_route_weight > 0.0:
+        missing_route_inputs = [
+            name for name, value in route_inputs.items() if not torch.is_tensor(value)
+        ]
+        if missing_route_inputs:
+            raise RuntimeError(
+                "oracle route supervision is enabled but decoder probes are missing: "
+                + ", ".join(missing_route_inputs)
+            )
+        with torch.no_grad():
+            route_residual = (
+                probe_predictions.float()
+                - target_velocity.detach().float()[:, None]
+            )
+            route_horizon_error = semantic_physical_velocity_error(
+                system,
+                route_residual,
+                arm_null_weight=trainer.arm_manifold_null_weight,
+            )
+            route_position_weight = position_weights(
+                system.policy_config, trainer, route_horizon_error.device
+            ).to(dtype=route_horizon_error.dtype)
+            route_step_error = (
+                route_horizon_error * route_position_weight[None, None]
+            ).mean(dim=-1)
+        route = _oracle_exit_supervision(
+            exit_logits=exit_logits,
+            candidate_error=route_step_error[:, 1:],
+            initial_error=route_step_error[:, 0],
+            candidate_mask=probe_active.bool() & exit_candidates.bool(),
+            relative_tolerance=float(
+                trainer.hierarchical_mmdit_oracle_route_relative_tolerance
+            ),
+        )
+        route_warmup = max(
+            int(trainer.hierarchical_mmdit_oracle_route_warmup_steps), 0
+        )
+        step_value = 0 if global_step is None else max(int(global_step), 0)
+        route_weight = (
+            base_route_weight
+            if system.training and step_value >= route_warmup
+            else 0.0
+        )
+        losses["hierarchical_mmdit_oracle_route_loss"] = route["loss"].detach().float()
+        losses["hierarchical_mmdit_oracle_route_weight"] = torch.as_tensor(
+            route_weight, device=exit_logits.device, dtype=torch.float32
+        )
+        losses["hierarchical_mmdit_oracle_position_weighted"] = torch.ones(
+            (), device=exit_logits.device, dtype=torch.float32
+        )
+        for name, value in route.items():
+            if name != "loss":
+                losses[f"hierarchical_mmdit_oracle_{name}"] = value.detach().float()
+        if route_weight > 0.0:
+            losses["loss"] = losses["loss"] + route_weight * route["loss"]
     # V70: stable-denominator replacements for the retired xratio gauge.
     # volume parity = noisy token norm vs workspace token norm (1.0 = parity;
     # after the noisy LayerNorm lands this pins to 1 by construction).
@@ -1221,12 +1456,125 @@ def flow_losses(
     ):
         if key in output:
             losses[key] = output[key].detach().float()
+    probe_predictions = output.get("refinement_probe_pred_velocity")
+    probe_active = output.get("refinement_probe_active")
+    probe_response = output.get("refinement_probe_action_response_rel")
+    probe_pressure = output.get("refinement_probe_stage_pressure_rel")
+    probe_stage_ids = output.get("refinement_probe_stage_ids")
+    probe_block_ids = output.get("refinement_probe_block_ids")
+    target_velocity = output.get("target_physical_velocity")
+    if all(torch.is_tensor(value) for value in (
+        probe_predictions, probe_active, probe_response, probe_pressure,
+        probe_stage_ids, probe_block_ids, target_velocity,
+    )):
+        with torch.no_grad():
+            residual = probe_predictions.float() - target_velocity.detach().float()[:, None]
+            step_error = semantic_physical_velocity_error(
+                system,
+                residual,
+                arm_null_weight=trainer.arm_manifold_null_weight,
+            ).mean(dim=-1)
+            marginal_gain = step_error[:, :-1] - step_error[:, 1:]
+            active = probe_active.float()
+            denominator = active.sum().clamp_min(1.0)
+            losses["hierarchical_mmdit_refine_error_initial"] = step_error[:, 0].mean()
+            final_index = active.sum(dim=1).long().clamp_min(1)
+            final_error = step_error.gather(1, final_index[:, None]).squeeze(1)
+            losses["hierarchical_mmdit_refine_error_final"] = final_error.mean()
+            losses["hierarchical_mmdit_refine_gain"] = (marginal_gain * active).sum() / denominator
+            losses["hierarchical_mmdit_refine_positive_gain_fraction"] = (
+                (marginal_gain > 0).float() * active
+            ).sum() / denominator
+
+            def masked_correlation(
+                x: Tensor,
+                y: Tensor,
+                selected: Tensor | None = None,
+            ) -> Tensor:
+                if selected is None:
+                    selected = active.bool()
+                x_rows = x[selected].float()
+                y_rows = y[selected].float()
+                if int(x_rows.numel()) < 2:
+                    return torch.zeros((), device=x.device, dtype=torch.float32)
+                x_rows = x_rows - x_rows.mean()
+                y_rows = y_rows - y_rows.mean()
+                scale = x_rows.square().sum().sqrt() * y_rows.square().sum().sqrt()
+                return (x_rows * y_rows).sum() / scale.clamp_min(1e-8)
+
+            losses["hierarchical_mmdit_response_gain_corr"] = masked_correlation(
+                probe_response, marginal_gain,
+            )
+            losses["hierarchical_mmdit_pressure_gain_corr"] = masked_correlation(
+                probe_pressure, marginal_gain,
+            )
+            probe_time = output.get("time")
+            if torch.is_tensor(probe_time) and tuple(probe_time.shape) == (
+                int(active.shape[0]),
+            ):
+                time_bins = torch.clamp(
+                    (probe_time.detach().float().clamp(0.0, 1.0) * 3.0).long(),
+                    max=2,
+                )
+                for time_bin in range(3):
+                    selected = active.bool() & (time_bins[:, None] == time_bin)
+                    selected_float = selected.float()
+                    selected_denominator = selected_float.sum().clamp_min(1.0)
+                    losses[
+                        f"hierarchical_mmdit_response_gain_corr_t{time_bin}"
+                    ] = masked_correlation(probe_response, marginal_gain, selected)
+                    losses[
+                        f"hierarchical_mmdit_pressure_gain_corr_t{time_bin}"
+                    ] = masked_correlation(probe_pressure, marginal_gain, selected)
+                    losses[f"hierarchical_mmdit_refine_gain_t{time_bin}"] = (
+                        marginal_gain * selected_float
+                    ).sum() / selected_denominator
+                    losses[
+                        f"hierarchical_mmdit_refine_positive_gain_fraction_t{time_bin}"
+                    ] = (
+                        (marginal_gain > 0).float() * selected_float
+                    ).sum() / selected_denominator
+            for step_index in range(int(active.shape[1])):
+                step_mask = active[:, step_index]
+                step_denominator = step_mask.sum().clamp_min(1.0)
+                losses[f"hierarchical_mmdit_step_{step_index}_gain"] = (
+                    marginal_gain[:, step_index] * step_mask
+                ).sum() / step_denominator
+                losses[f"hierarchical_mmdit_step_{step_index}_positive_gain_fraction"] = (
+                    (marginal_gain[:, step_index] > 0).float() * step_mask
+                ).sum() / step_denominator
+            for stage_index in range(
+                int(system.policy_config.hierarchical_mmdit_operator_stages)
+            ):
+                stage_mask = active * (probe_stage_ids == stage_index).float()
+                stage_denominator = stage_mask.sum().clamp_min(1.0)
+                losses[f"hierarchical_mmdit_stage_{stage_index}_gain"] = (
+                    marginal_gain * stage_mask
+                ).sum() / stage_denominator
+            for block_index in range(
+                int(system.policy_config.hierarchical_mmdit_depth)
+            ):
+                block_mask = active * (probe_block_ids == block_index).float()
+                block_denominator = block_mask.sum().clamp_min(1.0)
+                losses[f"hierarchical_mmdit_block_{block_index}_gain"] = (
+                    marginal_gain * block_mask
+                ).sum() / block_denominator
+    losses.update(_shadow_refinement_probe_metrics(
+        system,
+        output,
+        arm_null_weight=trainer.arm_manifold_null_weight,
+    ))
+
     # The deterministic decoder intentionally does not alias its diagnostics
     # into latent_cvae_* names.  Prefix pass-through keeps the new contract
     # auditable without reviving retired CVAE losses or zero-filled log fields.
     for key, value in output.items():
-        if key.startswith(("intent_", "owned_", "hierarchical_mmdit_")) and torch.is_tensor(value):
-            losses[key] = value.detach().float()
+        if (
+            key.startswith(("intent_", "owned_", "hierarchical_mmdit_"))
+            and torch.is_tensor(value)
+            and value.numel() == 1
+        ):
+            losses[key] = value.detach().float().reshape(())
     clean_noisy_vol = output.get("hierarchical_mmdit_noisy_token_norm")
     clean_cond_vol = output.get("hierarchical_mmdit_condition_token_norm")
     if torch.is_tensor(clean_noisy_vol) and torch.is_tensor(clean_cond_vol):
@@ -1580,6 +1928,12 @@ def evaluate_v39_policy(
     contract_metric_count = 0
     sampling_diagnostic_sums: dict[str, float] = {}
     sampling_diagnostic_counts: dict[str, int] = {}
+    shadow_probe_eval = (
+        str(getattr(system.policy_config, "final_action_decoder", "legacy"))
+        == "hierarchical_mmdit_action"
+        and str(getattr(system.policy_config, "hierarchical_mmdit_exhaustion_mode", "off"))
+        == "shadow"
+    )
     for batch_index, batch in enumerate(loader, start=1):
         if max_batches and batch_index > max_batches:
             break
@@ -1638,6 +1992,42 @@ def evaluate_v39_policy(
                 steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
                 stop_at_midcut=stop_midcut_eval,
             )
+            if shadow_probe_eval:
+                fork_devices = (
+                    [device.index if device.index is not None else torch.cuda.current_device()]
+                    if device.type == "cuda"
+                    else []
+                )
+                with torch.random.fork_rng(devices=fork_devices):
+                    probe_seed = 91073 + batch_index
+                    torch.manual_seed(probe_seed)
+                    if device.type == "cuda":
+                        torch.cuda.manual_seed_all(probe_seed)
+                    shadow_output = system.flow_training_forward(
+                        sample["visual"],
+                        sample["history_state"],
+                        sample["executed_action_history"],
+                        sample["state"],
+                        sample["policy_action"],
+                        action_state=sample["action_state"],
+                        proposal_dropout=0.0,
+                        make_counterfactuals=False,
+                        stop_at_midcut=False,
+                    )
+                shadow_metrics = _shadow_refinement_probe_metrics(
+                    system,
+                    shadow_output,
+                    arm_null_weight=trainer.arm_manifold_null_weight,
+                )
+                for key, value in shadow_metrics.items():
+                    metric_key = f"sample_{key}"
+                    sampling_diagnostic_sums[metric_key] = (
+                        sampling_diagnostic_sums.get(metric_key, 0.0)
+                        + float(value.detach().float().cpu()) * diagnostic_weight
+                    )
+                    sampling_diagnostic_counts[metric_key] = (
+                        sampling_diagnostic_counts.get(metric_key, 0) + diagnostic_weight
+                    )
             if system.codec.uses_parseval_gripper_field:
                 ad = int(system.policy_config.arm_dim)
                 gf = int(system.policy_config.gripper_field_dim)
@@ -1859,28 +2249,75 @@ class CudaMemoryReporter:
         return row
 
 
+def _detached_scalar_metric(key: str, value: Tensor) -> Tensor:
+    detached = value.detach().float()
+    if detached.numel() != 1:
+        raise ValueError(
+            f"metric {key!r} must contain exactly one element; "
+            f"got shape={tuple(detached.shape)}"
+        )
+    return detached.reshape(())
+
+
 def _accumulate_metric_tensors(acc: dict[str, Tensor], losses: dict[str, Tensor], *, grad: Tensor | float | None = None) -> None:
     for key, value in losses.items():
         if not torch.is_tensor(value):
             continue
-        detached = value.detach().float()
+        detached = _detached_scalar_metric(key, value)
         acc[key] = acc.get(key, torch.zeros((), device=detached.device, dtype=torch.float32)) + detached
     if grad is not None:
-        g = grad.detach().float() if torch.is_tensor(grad) else torch.tensor(float(grad))
+        g = _detached_scalar_metric("grad", grad) if torch.is_tensor(grad) else torch.tensor(float(grad))
         acc["grad"] = acc.get("grad", torch.zeros((), device=g.device, dtype=torch.float32)) + g
 
 
 def _finalize_metric_tensors(acc: dict[str, Tensor], count: int) -> dict[str, float]:
     if count <= 0:
         return {}
-    return {key: float((value / float(count)).detach().cpu()) for key, value in acc.items()}
+    return {
+        key: float((_detached_scalar_metric(key, value) / float(count)).cpu())
+        for key, value in acc.items()
+    }
 
 
 def _sync_loss_row(losses: dict[str, Tensor], *, grad: Tensor | float | None = None) -> dict[str, float]:
-    row = {key: float(value.detach().float().cpu()) for key, value in losses.items() if torch.is_tensor(value)}
+    row = {
+        key: float(_detached_scalar_metric(key, value).cpu())
+        for key, value in losses.items()
+        if torch.is_tensor(value)
+    }
     if grad is not None:
-        row["grad"] = float(grad.detach().float().cpu()) if torch.is_tensor(grad) else float(grad)
+        row["grad"] = (
+            float(_detached_scalar_metric("grad", grad).cpu())
+            if torch.is_tensor(grad)
+            else float(grad)
+        )
     return row
+
+
+def _format_hierarchical_stage_usage(row: dict[str, float]) -> str:
+    count = int(round(row.get("hierarchical_mmdit_operator_stage_count", 0.0)))
+    if count <= 0:
+        prefix = "hierarchical_mmdit_stage_"
+        suffix = "_usage"
+        indices = []
+        for key in row:
+            if key.startswith(prefix) and key.endswith(suffix):
+                middle = key[len(prefix) : -len(suffix)]
+                if middle.isdigit():
+                    indices.append(int(middle))
+        count = max(indices, default=-1) + 1
+    return "/".join(
+        f"{row.get(f'hierarchical_mmdit_stage_{index}_usage', 0.0):.2f}"
+        for index in range(count)
+    ) or "-"
+
+
+def _format_hierarchical_block_usage(row: dict[str, float]) -> str:
+    count = int(round(row.get("hierarchical_mmdit_refine_block_count", 0.0)))
+    return "/".join(
+        f"{row.get(f'hierarchical_mmdit_block_{index}_usage', 0.0):.2f}"
+        for index in range(count)
+    ) or "-"
 
 
 def _owned_serial_log_line(
@@ -1932,7 +2369,6 @@ def _owned_serial_log_line(
         f"hmorth={row.get('hierarchical_mmdit_action_serial_cancellation_orthogonal_baseline', 0.0):.3f} "
         f"hmxcan={row.get('hierarchical_mmdit_action_serial_cancellation_excess', 0.0):+.3f} "
         f"hmbdot={row.get('hierarchical_mmdit_action_branch_weighted_cosine', 0.0):+.3f} "
-        f"hmout={row.get('hierarchical_mmdit_action_output_norm_update_ratio', 0.0):.3f} "
         f"hmcos={row.get('hierarchical_mmdit_action_state_cosine', 0.0):.3f} "
         f"hmbcos={row.get('hierarchical_mmdit_action_noisy_stage_cosine', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_stage_low_cosine', 0.0):.3f}/"
@@ -1944,13 +2380,106 @@ def _owned_serial_log_line(
         f"hmsf={row.get('hierarchical_mmdit_action_stage_update_fraction', 0.0):.3f} "
         f"hmlf={row.get('hierarchical_mmdit_action_low_update_fraction', 0.0):.3f} "
         f"hmnw={row.get('hierarchical_mmdit_noisy_to_workspace_update_ratio', 0.0):.3f} "
-        f"hmng={row.get('hierarchical_mmdit_action_noisy_gate', 0.0):.3f} "
-        f"hmsg={row.get('hierarchical_mmdit_action_stage_gate', 0.0):.3f} "
-        f"hmlg={row.get('hierarchical_mmdit_action_low_gate', 0.0):.3f} "
-        f"hmsrms={row.get('hierarchical_mmdit_action_stage_projected_rms', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_action_stage_normalized_rms', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_action_stage_realized_scale', 0.0):.3f} "
+        f"hmdepth={row.get('hierarchical_mmdit_action_noisy_depth_ratio', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_depth_ratio', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_low_depth_ratio', 0.0):.2f} "
+        f"hmraw={row.get('hierarchical_mmdit_action_noisy_raw_depth_ratio', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_raw_depth_ratio', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_low_raw_depth_ratio', 0.0):.2f} "
+        f"hmedepth={row.get('hierarchical_mmdit_action_noisy_effective_depth', 0.0):.1f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_effective_depth', 0.0):.1f}/"
+        f"{row.get('hierarchical_mmdit_action_low_effective_depth', 0.0):.1f} "
+        f"hmcontract={row.get('hierarchical_mmdit_action_noisy_contraction_ratio', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_contraction_ratio', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_contraction_ratio', 0.0):.3f} "
+        f"hmhost={row.get('hierarchical_mmdit_action_noisy_host_update_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_host_update_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_host_update_rms', 0.0):.3f} "
+        f"hmcover={row.get('hierarchical_mmdit_action_noisy_subspace_energy_fraction', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_subspace_energy_fraction', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_subspace_energy_fraction', 0.0):.3f} "
+        f"hmremove={row.get('hierarchical_mmdit_action_noisy_removed_fraction', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_removed_fraction', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_removed_fraction', 0.0):.3f} "
+        f"hmdepthreg={row.get('hierarchical_mmdit_operator_contraction_progress', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_depth_usage_regularizer', 0.0):.4f} "
+        f"hmsel={row.get('hierarchical_mmdit_stage_selector_entropy', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_selector_max', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_selector_exploration', 0.0):.2f} "
+        f"hmselq={row.get('hierarchical_mmdit_stage_selector_query_change', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_selector_same_block_query_change', 0.0):.3f} "
+        f"hmexit={row.get('hierarchical_mmdit_exit_probability', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_exit_candidate_rate', 0.0):.3f} "
+        f"hmoracle={row.get('hierarchical_mmdit_oracle_route_loss', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_oracle_route_weight', 0.0):.3f} "
+        f"hmodepth={row.get('hierarchical_mmdit_oracle_target_depth', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_oracle_predicted_depth', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_oracle_depth_accuracy', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_oracle_predicted_regret', 0.0):.4f} "
+        f"hmstage={_format_hierarchical_stage_usage(row)} "
+        f"hmblock={_format_hierarchical_block_usage(row)} "
+        f"hmopgain={row.get('hierarchical_mmdit_action_noisy_operator_gain', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_operator_gain', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_operator_gain', 0.0):.3f} "
+        f"hmdir={row.get('hierarchical_mmdit_action_noisy_direction_change', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_direction_change', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_direction_change', 0.0):.3f} "
+        f"hmbcos2={row.get('hierarchical_mmdit_action_noisy_direction_cosine', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_direction_cosine', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_action_low_direction_cosine', 0.0):+.2f} "
+        f"hmbgain={row.get('hierarchical_mmdit_action_noisy_base_data_gain', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_base_data_gain', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_low_base_data_gain', 0.0):.2f} "
+        f"hmbprm={row.get('hierarchical_mmdit_action_noisy_base_parameter_rms', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_base_parameter_rms', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_low_base_parameter_rms', 0.0):.2f} "
+        f"hmgate={row.get('hierarchical_mmdit_action_self_base_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_noisy_base_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_base_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_base_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_ffn_base_gate', 0.0):.3f} "
         f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+        f"hmnrms={row.get('hierarchical_mmdit_action_pre_norm_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_post_norm_rms', 0.0):.3f} "
+        f"hmbound={max(row.get(f'hierarchical_mmdit_action_{name}_boundary_identity_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+        f"hmnexp={max(row.get(f'hierarchical_mmdit_action_{name}_nonexpansive_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+        f"hmnest={max(row.get(f'hierarchical_mmdit_action_{name}_nested_order_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+        f"hmbasis={max(row.get(f'hierarchical_mmdit_action_{name}_basis_norm_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e}/"
+        f"{max(row.get(f'hierarchical_mmdit_action_{name}_basis_orthogonality_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+        f"hexh={row.get('hierarchical_mmdit_executed_steps', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_response_rel', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_pressure_rel', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_refine_gain', 0.0):+.4f}/"
+        f"{row.get('hierarchical_mmdit_response_gain_corr', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_unresolved_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_budget_exhausted_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_final_block', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_final_stage', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_early_exit_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_block_advance_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f} "
+        f"hmuresp={row.get('hierarchical_mmdit_action_response_arm', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_gripper', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_arm_null', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_gripper_null', 0.0):.3f} "
+        f"hmuq={row.get('hierarchical_mmdit_action_response_p25', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_p50', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_p75', 0.0):.3f} "
+        f"hmpq={row.get('hierarchical_mmdit_stage_pressure_p25', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_pressure_p50', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_pressure_p75', 0.0):.3f} "
+        f"hmuT50={row.get('hierarchical_mmdit_action_response_t0_p50', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_t1_p50', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_response_t2_p50', 0.0):.3f} "
+        f"hmpT50={row.get('hierarchical_mmdit_stage_pressure_t0_p50', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_pressure_t1_p50', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_stage_pressure_t2_p50', 0.0):.3f} "
+        f"hmucT={row.get('hierarchical_mmdit_response_gain_corr_t0', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_response_gain_corr_t1', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_response_gain_corr_t2', 0.0):+.2f} "
+        f"hmpcT={row.get('hierarchical_mmdit_pressure_gain_corr_t0', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_pressure_gain_corr_t1', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_pressure_gain_corr_t2', 0.0):+.2f} "
         f"hmnmax={row.get('hierarchical_mmdit_action_noisy_attention_max', 0.0):.3f} "
         f"hmsmax={row.get('hierarchical_mmdit_action_stage_attention_max', 0.0):.3f} "
         f"hmlmax={row.get('hierarchical_mmdit_action_low_attention_max', 0.0):.3f} "
@@ -1983,9 +2512,20 @@ def _owned_serial_log_line(
         f"{row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f}/"
         f"{row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
         f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
+        f"hmvgrad={row.get('grad_hierarchical_mmdit_velocity_head', 0.0):.3e} "
         f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
         f"owgrad={row.get('grad_owned_workspace', 0.0):.3e} "
         f"hmbgrad={row.get('grad_hierarchical_mmdit_blocks', 0.0):.3e} "
+        f"hmbasegrad={row.get('grad_hierarchical_mmdit_shared_base', 0.0):.3e} "
+        f"hmwgrad={row.get('grad_hierarchical_mmdit_base_projection', 0.0):.3e} "
+        f"hmcopgrad={row.get('grad_hierarchical_mmdit_contractions', 0.0):.3e} "
+        f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e}/"
+        f"{row.get('grad_hierarchical_mmdit_contraction_depth', 0.0):.3e} "
+        f"hmselgrad={row.get('grad_hierarchical_mmdit_stage_selector', 0.0):.3e} "
+        f"hmexitgrad={row.get('grad_hierarchical_mmdit_exit_controller', 0.0):.3e}/"
+        f"{row.get('grad_hierarchical_mmdit_exit_controller_post_clip', 0.0):.3e} "
+        f"hmcmodgrad={row.get('grad_hierarchical_mmdit_content_modulation', 0.0):.3e} "
+        f"hmgategrad={row.get('grad_hierarchical_mmdit_host_gates', 0.0):.3e} "
         f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
         f"grad={row['grad']:.3e} lr={learning_rate:.3e} spb={seconds_per_batch:.3f}"
     )
@@ -1998,6 +2538,34 @@ def _module_grad_norm(module: torch.nn.Module, *, reference: Tensor) -> Tensor:
         if param.grad is None:
             continue
         total = total + param.grad.detach().float().pow(2).sum()
+    return total.sqrt()
+
+
+def _parameter_grad_norm(
+    parameters: Iterable[torch.nn.Parameter], *, reference: Tensor
+) -> Tensor:
+    total = torch.zeros((), device=reference.device, dtype=torch.float32)
+    for parameter in parameters:
+        if parameter.grad is not None:
+            total = total + parameter.grad.detach().float().pow(2).sum()
+    return total.sqrt()
+
+
+def _linear_row_grad_norm(
+    modules: Iterable[torch.nn.Linear],
+    *,
+    start: int,
+    stop: int | None,
+    reference: Tensor,
+) -> Tensor:
+    """Gradient norm for an output-row contract inside shared Linear owners."""
+    total = torch.zeros((), device=reference.device, dtype=torch.float32)
+    for module in modules:
+        weight_grad = module.weight.grad
+        if weight_grad is not None:
+            total = total + weight_grad.detach().float()[start:stop].pow(2).sum()
+        if module.bias is not None and module.bias.grad is not None:
+            total = total + module.bias.grad.detach().float()[start:stop].pow(2).sum()
     return total.sqrt()
 
 
@@ -2032,6 +2600,9 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
         decoder = planner.hierarchical_mmdit_action_decoder
         losses["grad_hierarchical_mmdit_action"] = _module_grad_norm(decoder, reference=reference)
+        losses["grad_hierarchical_mmdit_velocity_head"] = _module_grad_norm(
+            decoder.velocity_head, reference=reference,
+        )
         losses["grad_intent_contract_compiler"] = _module_grad_norm(
             decoder.intent_compiler, reference=reference,
         )
@@ -2041,8 +2612,78 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_owned_workspace"] = _module_grad_norm(
             decoder.workspace, reference=reference,
         )
+        blocks = decoder.blocks
         losses["grad_hierarchical_mmdit_blocks"] = _module_grad_norm(
-            decoder.blocks, reference=reference,
+            blocks, reference=reference,
+        )
+        shared_base_modules = torch.nn.ModuleList([
+            module
+            for block in blocks
+            for module in (
+                block.self_qkv,
+                block.self_out,
+                block.cross_q,
+                block.noisy_kv,
+                block.stage_kv,
+                block.low_kv,
+                block.noisy_out,
+                block.stage_out,
+                block.low_out,
+                block.ffn,
+            )
+        ])
+        losses["grad_hierarchical_mmdit_shared_base"] = _module_grad_norm(
+            shared_base_modules, reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_distinct_base"] = losses[
+            "grad_hierarchical_mmdit_shared_base"
+        ]
+        base_projection_modules = torch.nn.ModuleList([
+            module
+            for block in blocks
+            for module in (
+                block.self_out,
+                block.noisy_out,
+                block.stage_out,
+                block.low_out,
+                block.ffn.net[2],
+            )
+        ])
+        losses["grad_hierarchical_mmdit_base_projection"] = _module_grad_norm(
+            base_projection_modules, reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_contractions"] = _module_grad_norm(
+            decoder.operator_contractions, reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_contraction_basis"] = _parameter_grad_norm(
+            decoder.factor_parameters(), reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_contraction_depth"] = _parameter_grad_norm(
+            (
+                parameter
+                for bank in decoder.operator_contractions
+                for contraction in bank.values()
+                for parameter in (contraction.depth_weight, contraction.depth_bias)
+            ),
+            reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_stage_selector"] = _parameter_grad_norm(
+            decoder.stage_selector_parameters(), reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_exit_controller"] = _parameter_grad_norm(
+            decoder.exit_controller_parameters(), reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_content_modulation"] = _linear_row_grad_norm(
+            (block.mod for block in blocks),
+            start=0,
+            stop=2 * int(decoder.hidden_size),
+            reference=reference,
+        )
+        losses["grad_hierarchical_mmdit_host_gates"] = _linear_row_grad_norm(
+            (block.mod for block in blocks),
+            start=2 * int(decoder.hidden_size),
+            stop=None,
+            reference=reference,
         )
     if getattr(planner, "latent_cvae_action_decoder", None) is not None:
         decoder = planner.latent_cvae_action_decoder
@@ -2148,6 +2789,56 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
     legacy_action_readers = [] if complete_latent_decoder else [planner.direct_physical_head, planner.rollout_residual_head]
     legacy_motion_readers = [] if complete_latent_decoder else [planner.motion_probe]
 
+    def add_hierarchical_decoder_groups(*, lr: float, name: str) -> None:
+        decoder = getattr(planner, "hierarchical_mmdit_action_decoder", None)
+        if decoder is None:
+            return
+        factor_params = list(decoder.factor_parameters())
+        contraction_control_params = list(decoder.contraction_control_parameters())
+        base_scale_params = list(decoder.scale_invariant_base_parameters())
+        factor_ids = {id(parameter) for parameter in factor_params}
+        contraction_control_ids = {id(parameter) for parameter in contraction_control_params}
+        base_scale_ids = {id(parameter) for parameter in base_scale_params}
+        owner_sets = (
+            factor_ids,
+            contraction_control_ids,
+            base_scale_ids,
+        )
+        if any(
+            left & right
+            for index, left in enumerate(owner_sets)
+            for right in owner_sets[index + 1:]
+        ):
+            raise RuntimeError("hierarchical MMDiT optimizer parameter owners overlap")
+        special_ids = set().union(*owner_sets)
+        regular_params = [
+            parameter for parameter in decoder.parameters()
+            if parameter.requires_grad and id(parameter) not in special_ids
+        ]
+        if regular_params:
+            groups.append({"params": regular_params, "lr": lr, "name": name})
+        if factor_params:
+            groups.append({
+                "params": factor_params,
+                "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
+                "weight_decay": 0.0,
+                "name": f"{name}_contraction_basis_no_decay",
+            })
+        if contraction_control_params:
+            groups.append({
+                "params": contraction_control_params,
+                "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
+                "weight_decay": 0.0,
+                "name": f"{name}_contraction_depth_no_decay",
+            })
+        if base_scale_params:
+            groups.append({
+                "params": base_scale_params,
+                "lr": lr * float(trainer.hierarchical_mmdit_shared_base_lr_scale),
+                "weight_decay": 0.0,
+                "name": f"{name}_scale_invariant_base_no_decay",
+            })
+
     if _uses_layer_adapter_contract(trainer) and len(getattr(planner, "layer_contract_heads", [])) > 0:
         shared_modules = [
             planner.visual_memory,
@@ -2187,10 +2878,12 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                 final_modules.append(planner.latent_main_action_decoder)
             if getattr(planner, "latent_cvae_action_decoder", None) is not None:
                 final_modules.append(planner.latent_cvae_action_decoder)
-            if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
-                final_modules.append(planner.hierarchical_mmdit_action_decoder)
             if float(getattr(trainer, "layer_contract_final_action_loss_weight", 0.0)) > 0:
                 groups.append({"params": _unique_params(final_modules), "lr": trainer.lr * float(getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)), "name": "weak_final_policy_probe"})
+                add_hierarchical_decoder_groups(
+                    lr=trainer.lr * float(getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)),
+                    name="weak_hierarchical_mmdit_action_decoder",
+                )
             groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
         else:
             upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
@@ -2236,11 +2929,10 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                     "name": "latent_cvae_action_decoder",
                 })
             if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
-                groups.append({
-                    "params": _unique_params([planner.hierarchical_mmdit_action_decoder]),
-                    "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
-                    "name": "hierarchical_mmdit_action_decoder",
-                })
+                add_hierarchical_decoder_groups(
+                    lr=trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                    name="hierarchical_mmdit_action_decoder",
+                )
             groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
         return [group for group in groups if len(group["params"]) > 0]
 
@@ -2291,11 +2983,10 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                 "name": "latent_cvae_action_decoder",
             })
         if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
-            groups.append({
-                "params": _unique_params([planner.hierarchical_mmdit_action_decoder]),
-                "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
-                "name": "hierarchical_mmdit_action_decoder",
-            })
+            add_hierarchical_decoder_groups(
+                lr=trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                name="hierarchical_mmdit_action_decoder",
+            )
         groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
     return [group for group in groups if len(group["params"]) > 0]
 
@@ -2371,7 +3062,11 @@ def train_v39_policy(
                 saved_policy.get("hierarchical_mmdit_architecture_version", "competitive_v1")
             )
             current_architecture = str(
-                getattr(system.policy_config, "hierarchical_mmdit_architecture_version", "serial_owned_rms_v3")
+                getattr(
+                    system.policy_config,
+                    "hierarchical_mmdit_architecture_version",
+                    "post_gate_contraction_sidecar_v11_oracle_router",
+                )
             )
             if saved_architecture != current_architecture:
                 raise ValueError(
@@ -2388,6 +3083,11 @@ def train_v39_policy(
                 "hierarchical_mmdit_noisy_causal",
                 "hierarchical_mmdit_noisy_gate_mode",
                 "hierarchical_mmdit_output_contract",
+                "hierarchical_mmdit_operator_stages",
+                "hierarchical_mmdit_operator_rank",
+                "hierarchical_mmdit_operator_groups",
+                "hierarchical_mmdit_operator_contraction_warmup_steps",
+                "hierarchical_mmdit_operator_contraction_transition_steps",
             ):
                 saved_value = int(saved_policy.get(field, getattr(system.policy_config, field)))
                 current_value = int(getattr(system.policy_config, field))
@@ -2397,15 +3097,44 @@ def train_v39_policy(
                     )
             for field in (
                 "hierarchical_mmdit_ffn_expansion",
-                "hierarchical_mmdit_residual_scale_max",
                 "hierarchical_mmdit_noisy_gate_min",
                 "hierarchical_mmdit_noisy_gate_power",
+                "hierarchical_mmdit_operator_depth_logit_init",
+                "hierarchical_mmdit_residual_scale_init",
+                "hierarchical_mmdit_residual_scale_max",
+                "hierarchical_mmdit_random_prefix_probability",
             ):
                 saved_value = float(saved_policy.get(field, getattr(system.policy_config, field)))
                 current_value = float(getattr(system.policy_config, field))
                 if not math.isclose(saved_value, current_value, rel_tol=0.0, abs_tol=1e-12):
                     raise ValueError(
                         f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
+                    )
+            for field in ("hierarchical_mmdit_schedule_mode",):
+                saved_value = str(saved_policy.get(field, getattr(system.policy_config, field)))
+                current_value = str(getattr(system.policy_config, field))
+                if saved_value != current_value:
+                    raise ValueError(
+                        f"resume {field} mismatch: checkpoint={saved_value!r}, current={current_value!r}"
+                    )
+            runtime_override_fields = (
+                "hierarchical_mmdit_exhaustion_mode",
+                "hierarchical_mmdit_action_response_thresholds",
+                "hierarchical_mmdit_stage_pressure_thresholds",
+                "hierarchical_mmdit_action_response_floor",
+                "hierarchical_mmdit_exhaustion_confirm_steps",
+            )
+            for field in runtime_override_fields:
+                saved_value = saved_policy.get(field, getattr(system.policy_config, field))
+                current_value = getattr(system.policy_config, field)
+                if field.endswith("_thresholds"):
+                    saved_value = tuple(float(value) for value in saved_value)
+                    current_value = tuple(float(value) for value in current_value)
+                if saved_value != current_value:
+                    print(
+                        f"[v39-resume] runtime refinement override {field}: "
+                        f"checkpoint={saved_value!r} current={current_value!r}",
+                        flush=True,
                     )
         saved_workspace_tokens = int(saved_policy.get("latent_cvae_horizon_tokens", 24))
         current_workspace_tokens = int(getattr(system.policy_config, "latent_cvae_horizon_tokens", 24))
@@ -2464,6 +3193,11 @@ def train_v39_policy(
             # frozen out of the current optimizer stage.  This prevents stale
             # gradients from accumulating and polluting global grad clipping.
             system.zero_grad(set_to_none=True)
+            hierarchical_decoder = getattr(
+                system.planner, "hierarchical_mmdit_action_decoder", None
+            )
+            if hierarchical_decoder is not None:
+                hierarchical_decoder.set_operator_contraction_training_step(global_step)
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_zero_grad", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
             layer_mode = _uses_layer_adapter_contract(trainer)
@@ -2553,10 +3287,21 @@ def train_v39_policy(
             latent_decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
             clean_decoder = getattr(system.planner, "hierarchical_mmdit_action_decoder", None)
             decoder_for_local_clip = clean_decoder if clean_decoder is not None else latent_decoder
+            exit_controller_params = (
+                list(clean_decoder.exit_controller_parameters())
+                if clean_decoder is not None else []
+            )
+            exit_controller_ids = {
+                id(parameter) for parameter in exit_controller_params
+            }
             latent_clip = float(getattr(trainer, "latent_cvae_grad_clip", 0.0))
             if decoder_for_local_clip is not None and latent_clip > 0:
+                local_clip_params = [
+                    parameter for parameter in decoder_for_local_clip.parameters()
+                    if id(parameter) not in exit_controller_ids
+                ]
                 torch.nn.utils.clip_grad_norm_(
-                    decoder_for_local_clip.parameters(),
+                    local_clip_params,
                     latent_clip,
                     error_if_nonfinite=True,
                 )
@@ -2564,14 +3309,29 @@ def train_v39_policy(
                     "grad_hierarchical_mmdit_action_post_clip"
                     if clean_decoder is not None else "grad_latent_cvae_action_post_clip"
                 )
-                losses[clip_key] = _module_grad_norm(
-                    decoder_for_local_clip, reference=losses["loss"],
+                losses[clip_key] = _parameter_grad_norm(
+                    local_clip_params, reference=losses["loss"],
                 )
+            main_clip_params = [
+                parameter for parameter in system.parameters()
+                if id(parameter) not in exit_controller_ids
+            ]
             grad = torch.nn.utils.clip_grad_norm_(
-                system.parameters(),
+                main_clip_params,
                 trainer.grad_clip,
                 error_if_nonfinite=True,
             )
+            if exit_controller_params:
+                torch.nn.utils.clip_grad_norm_(
+                    exit_controller_params,
+                    trainer.grad_clip,
+                    error_if_nonfinite=True,
+                )
+                losses["grad_hierarchical_mmdit_exit_controller_post_clip"] = (
+                    _parameter_grad_norm(
+                        exit_controller_params, reference=losses["loss"],
+                    )
+                )
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(tag="train_after_clip", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
             optimizer.step(); schedule.step(); global_step += 1
@@ -2778,7 +3538,6 @@ def train_v39_policy(
                     f"hmorth={row.get('hierarchical_mmdit_action_serial_cancellation_orthogonal_baseline', 0.0):.3f} "
                     f"hmxcan={row.get('hierarchical_mmdit_action_serial_cancellation_excess', 0.0):+.3f} "
                     f"hmbdot={row.get('hierarchical_mmdit_action_branch_weighted_cosine', 0.0):+.3f} "
-                    f"hmout={row.get('hierarchical_mmdit_action_output_norm_update_ratio', 0.0):.3f} "
                     f"hmcos={row.get('hierarchical_mmdit_action_state_cosine', 0.0):.3f} "
                     f"hmnu={row.get('hierarchical_mmdit_action_noisy_update_norm', 0.0):.3f} "
                     f"hmsu={row.get('hierarchical_mmdit_action_stage_update_norm', 0.0):.3f} "
@@ -2786,13 +3545,106 @@ def train_v39_policy(
                     f"hmnf={row.get('hierarchical_mmdit_action_noisy_update_fraction', 0.0):.3f} "
                     f"hmsf={row.get('hierarchical_mmdit_action_stage_update_fraction', 0.0):.3f} "
                     f"hmlf={row.get('hierarchical_mmdit_action_low_update_fraction', 0.0):.3f} "
-                    f"hmng={row.get('hierarchical_mmdit_action_noisy_gate', 0.0):.3f} "
-                    f"hmsg={row.get('hierarchical_mmdit_action_stage_gate', 0.0):.3f} "
-                    f"hmlg={row.get('hierarchical_mmdit_action_low_gate', 0.0):.3f} "
-                    f"hmsrms={row.get('hierarchical_mmdit_action_stage_projected_rms', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_normalized_rms', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_realized_scale', 0.0):.3f} "
+                    f"hmdepth={row.get('hierarchical_mmdit_action_noisy_depth_ratio', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_depth_ratio', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_depth_ratio', 0.0):.2f} "
+                    f"hmraw={row.get('hierarchical_mmdit_action_noisy_raw_depth_ratio', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_raw_depth_ratio', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_raw_depth_ratio', 0.0):.2f} "
+                    f"hmedepth={row.get('hierarchical_mmdit_action_noisy_effective_depth', 0.0):.1f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_effective_depth', 0.0):.1f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_effective_depth', 0.0):.1f} "
+                    f"hmcontract={row.get('hierarchical_mmdit_action_noisy_contraction_ratio', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_contraction_ratio', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_contraction_ratio', 0.0):.3f} "
+                    f"hmhost={row.get('hierarchical_mmdit_action_noisy_host_update_rms', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_host_update_rms', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_host_update_rms', 0.0):.3f} "
+                    f"hmcover={row.get('hierarchical_mmdit_action_noisy_subspace_energy_fraction', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_subspace_energy_fraction', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_subspace_energy_fraction', 0.0):.3f} "
+                    f"hmremove={row.get('hierarchical_mmdit_action_noisy_removed_fraction', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_removed_fraction', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_removed_fraction', 0.0):.3f} "
+                    f"hmdepthreg={row.get('hierarchical_mmdit_operator_contraction_progress', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_depth_usage_regularizer', 0.0):.4f} "
+                    f"hmsel={row.get('hierarchical_mmdit_stage_selector_entropy', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_selector_max', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_selector_exploration', 0.0):.2f} "
+                    f"hmselq={row.get('hierarchical_mmdit_stage_selector_query_change', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_selector_same_block_query_change', 0.0):.3f} "
+                    f"hmexit={row.get('hierarchical_mmdit_exit_probability', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_exit_candidate_rate', 0.0):.3f} "
+                    f"hmoracle={row.get('hierarchical_mmdit_oracle_route_loss', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_oracle_route_weight', 0.0):.3f} "
+                    f"hmodepth={row.get('hierarchical_mmdit_oracle_target_depth', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_oracle_predicted_depth', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_oracle_depth_accuracy', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_oracle_predicted_regret', 0.0):.4f} "
+                    f"hmstage={_format_hierarchical_stage_usage(row)} "
+                    f"hmblock={_format_hierarchical_block_usage(row)} "
+                    f"hmopgain={row.get('hierarchical_mmdit_action_noisy_operator_gain', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_operator_gain', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_operator_gain', 0.0):.3f} "
+                    f"hmdir={row.get('hierarchical_mmdit_action_noisy_direction_change', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_direction_change', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_direction_change', 0.0):.3f} "
+                    f"hmbcos2={row.get('hierarchical_mmdit_action_noisy_direction_cosine', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_direction_cosine', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_direction_cosine', 0.0):+.2f} "
+                    f"hmbgain={row.get('hierarchical_mmdit_action_noisy_base_data_gain', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_base_data_gain', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_base_data_gain', 0.0):.2f} "
+                    f"hmbprm={row.get('hierarchical_mmdit_action_noisy_base_parameter_rms', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_base_parameter_rms', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_base_parameter_rms', 0.0):.2f} "
+                    f"hmgate={row.get('hierarchical_mmdit_action_self_base_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_noisy_base_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_base_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_base_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_ffn_base_gate', 0.0):.3f} "
                     f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                    f"hmnrms={row.get('hierarchical_mmdit_action_pre_norm_rms', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_post_norm_rms', 0.0):.3f} "
+                    f"hmbound={max(row.get(f'hierarchical_mmdit_action_{name}_boundary_identity_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                    f"hmnexp={max(row.get(f'hierarchical_mmdit_action_{name}_nonexpansive_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                    f"hmnest={max(row.get(f'hierarchical_mmdit_action_{name}_nested_order_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                    f"hmbasis={max(row.get(f'hierarchical_mmdit_action_{name}_basis_norm_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e}/"
+                    f"{max(row.get(f'hierarchical_mmdit_action_{name}_basis_orthogonality_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                    f"hexh={row.get('hierarchical_mmdit_executed_steps', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_rel', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_pressure_rel', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_refine_gain', 0.0):+.4f}/"
+                    f"{row.get('hierarchical_mmdit_response_gain_corr', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_unresolved_rate', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_budget_exhausted_rate', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_final_block', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_final_stage', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_early_exit_rate', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_block_advance_rate', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f} "
+                    f"hmuresp={row.get('hierarchical_mmdit_action_response_arm', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_gripper', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_arm_null', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_gripper_null', 0.0):.3f} "
+                    f"hmuq={row.get('hierarchical_mmdit_action_response_p25', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_p50', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_p75', 0.0):.3f} "
+                    f"hmpq={row.get('hierarchical_mmdit_stage_pressure_p25', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_pressure_p50', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_pressure_p75', 0.0):.3f} "
+                    f"hmuT50={row.get('hierarchical_mmdit_action_response_t0_p50', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_t1_p50', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_response_t2_p50', 0.0):.3f} "
+                    f"hmpT50={row.get('hierarchical_mmdit_stage_pressure_t0_p50', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_pressure_t1_p50', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_stage_pressure_t2_p50', 0.0):.3f} "
+                    f"hmucT={row.get('hierarchical_mmdit_response_gain_corr_t0', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_response_gain_corr_t1', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_response_gain_corr_t2', 0.0):+.2f} "
+                    f"hmpcT={row.get('hierarchical_mmdit_pressure_gain_corr_t0', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_pressure_gain_corr_t1', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_pressure_gain_corr_t2', 0.0):+.2f} "
                     f"hmnmax={row.get('hierarchical_mmdit_action_noisy_attention_max', 0.0):.3f} "
                     f"hmsmax={row.get('hierarchical_mmdit_action_stage_attention_max', 0.0):.3f} "
                     f"hmlmax={row.get('hierarchical_mmdit_action_low_attention_max', 0.0):.3f} "
@@ -2829,9 +3681,20 @@ def train_v39_policy(
                     f"wgrad={row.get('grad_latent_cvae_workspace', 0.0):.3e} "
                     f"zpgrad={row.get('grad_latent_cvae_primary_modulation', 0.0):.3e} "
                     f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
+                    f"hmvgrad={row.get('grad_hierarchical_mmdit_velocity_head', 0.0):.3e} "
                     f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
                     f"owgrad={row.get('grad_owned_workspace', 0.0):.3e} "
                     f"hmbgrad={row.get('grad_hierarchical_mmdit_blocks', 0.0):.3e} "
+                    f"hmbasegrad={row.get('grad_hierarchical_mmdit_shared_base', 0.0):.3e} "
+                    f"hmwgrad={row.get('grad_hierarchical_mmdit_base_projection', 0.0):.3e} "
+                    f"hmcopgrad={row.get('grad_hierarchical_mmdit_contractions', 0.0):.3e} "
+                    f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e}/"
+                    f"{row.get('grad_hierarchical_mmdit_contraction_depth', 0.0):.3e} "
+                    f"hmselgrad={row.get('grad_hierarchical_mmdit_stage_selector', 0.0):.3e} "
+                    f"hmexitgrad={row.get('grad_hierarchical_mmdit_exit_controller', 0.0):.3e}/"
+                    f"{row.get('grad_hierarchical_mmdit_exit_controller_post_clip', 0.0):.3e} "
+                    f"hmcmodgrad={row.get('grad_hierarchical_mmdit_content_modulation', 0.0):.3e} "
+                    f"hmgategrad={row.get('grad_hierarchical_mmdit_host_gates', 0.0):.3e} "
                     f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
                     f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e} "
                     f"spb={seconds_per_batch:.3f}"),

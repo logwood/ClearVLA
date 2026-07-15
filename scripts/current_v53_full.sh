@@ -119,10 +119,14 @@ LATENT_CVAE_LEGACY_ANCHOR_MIN_WEIGHT=${LATENT_CVAE_LEGACY_ANCHOR_MIN_WEIGHT:-0.0
 STAGE1_RESET_DIRTY_ADAPTERS=${STAGE1_RESET_DIRTY_ADAPTERS:-1}
 LAYER_CONTRACT_ADAPTER_POLICY_LR_SCALE=${LAYER_CONTRACT_ADAPTER_POLICY_LR_SCALE:-${STAGE1_RESET_DIRTY_ADAPTERS}}
 STAGE1_CHECKPOINT=${STAGE1_CHECKPOINT:-runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt}
-if [[ ! -f "${STAGE1_CHECKPOINT}" && -f "/home/sen.wang/workspace/robotics/clear/clearvla_v40_2_goodcheck/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt" ]]; then
-  STAGE1_CHECKPOINT=/home/sen.wang/workspace/robotics/clear/clearvla_v40_2_goodcheck/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt
-elif [[ ! -f "${STAGE1_CHECKPOINT}" && -f "/home/sen.wang/workspace/robotics/clear/clearvla_v40_2/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt" ]]; then
-  STAGE1_CHECKPOINT=/home/sen.wang/workspace/robotics/clear/clearvla_v40_2/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt
+STAGE1_CHECKPOINT_ARGS=()
+if [[ "${STAGE1_CHECKPOINT}" != "none" ]]; then
+  if [[ ! -f "${STAGE1_CHECKPOINT}" && -f "/home/sen.wang/workspace/robotics/clear/clearvla_v40_2_goodcheck/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt" ]]; then
+    STAGE1_CHECKPOINT=/home/sen.wang/workspace/robotics/clear/clearvla_v40_2_goodcheck/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt
+  elif [[ ! -f "${STAGE1_CHECKPOINT}" && -f "/home/sen.wang/workspace/robotics/clear/clearvla_v40_2/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt" ]]; then
+    STAGE1_CHECKPOINT=/home/sen.wang/workspace/robotics/clear/clearvla_v40_2/runs/v40_1_k6a6_statecf1_norm_full_b8/checkpoints/best_contract.pt
+  fi
+  STAGE1_CHECKPOINT_ARGS=(--stage1-checkpoint "${STAGE1_CHECKPOINT}")
 fi
 
 python -u -m clearvla.cli.train_v40_policy \
@@ -144,7 +148,7 @@ python -u -m clearvla.cli.train_v40_policy \
   --num-workers 4 \
   --normalizer zscore \
   --out-dir "${OUT_DIR}" \
-  --stage1-checkpoint "${STAGE1_CHECKPOINT}" \
+  "${STAGE1_CHECKPOINT_ARGS[@]}" \
   --stage1-reset-dirty-adapters "${STAGE1_RESET_DIRTY_ADAPTERS}" \
   --condition-mode dinov2-cache \
   --dinov2-model facebook/dinov2-base \
