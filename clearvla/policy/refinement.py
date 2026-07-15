@@ -189,6 +189,7 @@ class NestedLowRankContractionBank(nn.Module):
         contraction_progress: Tensor | float = 0.0,
         prepared_factors: Tensor | None = None,
         depth_ratio_override: Tensor | float | None = None,
+        raw_depth_ratio_override: Tensor | float | None = None,
         identity_bypass: bool | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         if base_update.ndim != 3 or int(base_update.shape[-1]) != self.hidden_size:
@@ -236,15 +237,27 @@ class NestedLowRankContractionBank(nn.Module):
             device=base_update.device,
         )
 
-        normalized_condition = self.condition_norm(condition).float()
-        depth_weight = self._candidate_rows(
-            self.depth_weight.float(), stage_candidates
-        )
-        depth_bias = self._candidate_rows(self.depth_bias.float(), stage_candidates)
-        depth_logits = torch.einsum(
-            "bh,bkh->bk", normalized_condition, depth_weight
-        ) / math.sqrt(float(self.condition_size))
-        raw_depth_ratio = torch.sigmoid(depth_logits + depth_bias)
+        if depth_ratio_override is not None and raw_depth_ratio_override is not None:
+            raise ValueError(
+                "depth_ratio_override and raw_depth_ratio_override are mutually exclusive"
+            )
+        if raw_depth_ratio_override is None:
+            normalized_condition = self.condition_norm(condition).float()
+            depth_weight = self._candidate_rows(
+                self.depth_weight.float(), stage_candidates
+            )
+            depth_bias = self._candidate_rows(self.depth_bias.float(), stage_candidates)
+            depth_logits = torch.einsum(
+                "bh,bkh->bk", normalized_condition, depth_weight
+            ) / math.sqrt(float(self.condition_size))
+            raw_depth_ratio = torch.sigmoid(depth_logits + depth_bias)
+        else:
+            raw_depth_ratio = self._depth_override(
+                raw_depth_ratio_override,
+                batch=batch,
+                candidate_count=candidate_count,
+                device=base_update.device,
+            )
 
         progress = torch.as_tensor(
             contraction_progress,
@@ -258,8 +271,8 @@ class NestedLowRankContractionBank(nn.Module):
             # CPU probes may infer the fast path directly. Production passes a
             # Python boolean from the global-step schedule, avoiding a GPU
             # scalar synchronization for every branch and refinement step. An
-            # explicit depth override takes precedence over the inferred
-            # warm-up boundary so probes exercise the requested operator.
+            # An exact depth override takes precedence over the inferred
+            # warm-up boundary. A raw-depth override still obeys warm-up.
             identity_bypass = (
                 depth_ratio_override is None
                 and progress.device.type == "cpu"

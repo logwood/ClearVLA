@@ -336,8 +336,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hierarchical-mmdit-operator-rank", type=int, default=32, help="Maximum number of ordered contraction directions per semantic stage.")
     parser.add_argument("--hierarchical-mmdit-operator-groups", type=int, default=32, help="Number of ordered transparency groups; set equal to rank for channel-continuous depth.")
     parser.add_argument("--hierarchical-mmdit-operator-depth-logit-init", type=float, default=2.0, help="Initial retained-depth logit after the exact identity warm-up.")
+    parser.add_argument("--hierarchical-mmdit-exit-logit-init", type=float, default=-4.0, help="Initial exit logit; negative keeps the controller on the continue path before evidence supports early exit.")
     parser.add_argument("--hierarchical-mmdit-operator-contraction-warmup-steps", type=int, default=200, help="Steps for which contraction is pinned exactly to the original operation.")
     parser.add_argument("--hierarchical-mmdit-operator-contraction-transition-steps", type=int, default=1500, help="Steps over which the learned nested contraction is introduced continuously.")
+    parser.add_argument("--hierarchical-mmdit-unified-controller", type=int, default=0, help="Use the recurrent multi-token controller for retrieval, promotion, operator selection, and compute value.")
+    parser.add_argument("--hierarchical-mmdit-control-tokens", type=int, default=8, help="Number of exchangeable recurrent controller state tokens.")
+    parser.add_argument("--hierarchical-mmdit-controller-depth", type=int, default=2)
+    parser.add_argument("--hierarchical-mmdit-controller-heads", type=int, default=8)
+    parser.add_argument("--hierarchical-mmdit-controller-ffn-expansion", type=float, default=2.0)
+    parser.add_argument("--hierarchical-mmdit-operation-candidate-probes", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--hierarchical-mmdit-operation-route-loss-weight", type=float, default=0.0)
+    parser.add_argument("--hierarchical-mmdit-operation-route-temperature", type=float, default=0.5)
+    parser.add_argument("--hierarchical-mmdit-operation-route-warmup-steps", type=int, default=0)
     parser.add_argument("--hierarchical-mmdit-schedule-mode", choices=["fixed", "random_dwell"], default="fixed")
     parser.add_argument("--hierarchical-mmdit-random-prefix-probability", type=float, default=0.0)
     parser.add_argument(
@@ -408,7 +418,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-micro-progress-distance-scale", type=float, default=4.0)
 
     defaults = V39PolicyTrainerConfig()
+    # These fields are also policy-config arguments above because the same
+    # command-line value controls both decoder construction and the training
+    # objective. Do not register them a second time in the generic trainer
+    # field loop.
+    explicitly_registered_trainer_fields = {
+        "hierarchical_mmdit_operation_candidate_probes",
+        "hierarchical_mmdit_operation_route_loss_weight",
+        "hierarchical_mmdit_operation_route_temperature",
+        "hierarchical_mmdit_operation_route_warmup_steps",
+    }
     for field in V39PolicyTrainerConfig.__dataclass_fields__:
+        if field in explicitly_registered_trainer_fields:
+            continue
         value = getattr(defaults, field)
         parser.add_argument("--" + field.replace("_", "-"), dest=field, type=type(value), default=value)
     # The V40 entry point is specifically the multi-layer intervention-latent
@@ -655,8 +677,15 @@ def main() -> None:
         hierarchical_mmdit_operator_rank=args.hierarchical_mmdit_operator_rank,
         hierarchical_mmdit_operator_groups=args.hierarchical_mmdit_operator_groups,
         hierarchical_mmdit_operator_depth_logit_init=args.hierarchical_mmdit_operator_depth_logit_init,
+        hierarchical_mmdit_exit_logit_init=args.hierarchical_mmdit_exit_logit_init,
         hierarchical_mmdit_operator_contraction_warmup_steps=args.hierarchical_mmdit_operator_contraction_warmup_steps,
         hierarchical_mmdit_operator_contraction_transition_steps=args.hierarchical_mmdit_operator_contraction_transition_steps,
+        hierarchical_mmdit_unified_controller=args.hierarchical_mmdit_unified_controller,
+        hierarchical_mmdit_control_tokens=args.hierarchical_mmdit_control_tokens,
+        hierarchical_mmdit_controller_depth=args.hierarchical_mmdit_controller_depth,
+        hierarchical_mmdit_controller_heads=args.hierarchical_mmdit_controller_heads,
+        hierarchical_mmdit_controller_ffn_expansion=args.hierarchical_mmdit_controller_ffn_expansion,
+        hierarchical_mmdit_operation_candidate_probes=args.hierarchical_mmdit_operation_candidate_probes,
         hierarchical_mmdit_schedule_mode=args.hierarchical_mmdit_schedule_mode,
         hierarchical_mmdit_random_prefix_probability=args.hierarchical_mmdit_random_prefix_probability,
         hierarchical_mmdit_exhaustion_mode=args.hierarchical_mmdit_exhaustion_mode,
@@ -840,10 +869,51 @@ def main() -> None:
             "latent_cvae_no_legacy_velocity_base": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
             "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
             "hierarchical_mmdit_action_decoder": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_native_time_input_chart": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and (
+                    str(args.arm_flow_mode) == "manifold_native"
+                    or str(args.gripper_field_mode) == "parseval_temporal"
+                )
+            ),
+            "hierarchical_mmdit_native_time_tangent_output": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and (
+                    str(args.arm_flow_mode) == "manifold_native"
+                    or str(args.gripper_field_mode) == "parseval_temporal"
+                )
+            ),
+            "hierarchical_mmdit_native_time_position_alignment": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and (
+                    str(args.arm_flow_mode) == "manifold_native"
+                    or str(args.gripper_field_mode) == "parseval_temporal"
+                )
+            ),
+            "hierarchical_mmdit_field_coordinates_outside_token_network": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and str(args.arm_flow_mode) == "manifold_native"
+                and str(args.gripper_field_mode) == "parseval_temporal"
+            ),
             "hierarchical_mmdit_deterministic_intent_contracts": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_no_target_or_posterior_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_owned_five_role_evidence": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_fixed_role_prior": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_fixed_role_prior": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and not bool(int(args.hierarchical_mmdit_unified_controller))
+            ),
+            "hierarchical_mmdit_unified_role_selector": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and bool(int(args.hierarchical_mmdit_unified_controller))
+            ),
+            "hierarchical_mmdit_workspace_controller_token_interface": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and bool(int(args.hierarchical_mmdit_unified_controller))
+            ),
+            "hierarchical_mmdit_workspace_controller_value_firewall": (
+                str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and bool(int(args.hierarchical_mmdit_unified_controller))
+            ),
             "hierarchical_mmdit_manager_selector_only": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_mmdit_owns_final_consumption": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_serial_condition_composition": str(args.final_action_decoder) == "hierarchical_mmdit_action",
@@ -856,6 +926,11 @@ def main() -> None:
             "hierarchical_mmdit_post_gate_sidecar": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_shared_amplitude_owner": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_duplicate_amplitude_owner": False,
+            "hierarchical_mmdit_host_update_amplitude_owner": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_unified_update_amplitude_owner": False,
+            "hierarchical_mmdit_unified_relative_update_keep_owner": bool(
+                int(args.hierarchical_mmdit_unified_controller)
+            ),
             "hierarchical_mmdit_shared_full_rank_path": False,
             "hierarchical_mmdit_distinct_full_rank_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_step_conditioned_full_rank": str(args.final_action_decoder) == "hierarchical_mmdit_action",
@@ -875,6 +950,15 @@ def main() -> None:
             "hierarchical_mmdit_operator_continuous_depth": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_operator_nonexpansive": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_operator_post_contraction_renorm": False,
+            "hierarchical_mmdit_unified_controller": bool(int(args.hierarchical_mmdit_unified_controller)),
+            "hierarchical_mmdit_unified_operator_depth_owner": bool(int(args.hierarchical_mmdit_unified_controller)),
+            "hierarchical_mmdit_control_tokens": int(args.hierarchical_mmdit_control_tokens),
+            "hierarchical_mmdit_operation_candidate_probes": bool(
+                int(args.hierarchical_mmdit_operation_candidate_probes)
+            ),
+            "hierarchical_mmdit_controller_depth": int(args.hierarchical_mmdit_controller_depth),
+            "hierarchical_mmdit_controller_heads": int(args.hierarchical_mmdit_controller_heads),
+            "hierarchical_mmdit_controller_ffn_expansion": float(args.hierarchical_mmdit_controller_ffn_expansion),
             "hierarchical_mmdit_schedule_mode": str(args.hierarchical_mmdit_schedule_mode),
             "hierarchical_mmdit_exhaustion_mode": str(args.hierarchical_mmdit_exhaustion_mode),
             "hierarchical_mmdit_distinct_blocks": int(args.hierarchical_mmdit_depth),

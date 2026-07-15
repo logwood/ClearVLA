@@ -9,9 +9,14 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from .codec import PhysicalActionCodec, PhysicalActionTokenLift
-from .evidence import HierarchicalEvidenceWorkspace
-from .gauges import time_stratified_attention
+from .codec import NativeTimePhysicalActionTokenLift, PhysicalActionCodec
+from .controller import UnifiedControllerOutput, UnifiedHierarchicalController
+from .evidence import (
+    HierarchicalEvidenceWorkspace,
+    PreparedEvidenceMemory,
+    WorkspaceControlOverride,
+)
+from .gauges import fp32_diagnostic, time_stratified_attention
 from .intent import IndependentIntentFusion, IntentContractCompiler, PolicyConditionOrganizer
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .refinement import NestedLowRankContractionBank
@@ -23,6 +28,7 @@ class PolicyDecoderConfig(Protocol):
     num_heads: int
     dropout: float
     arm_dim: int
+    arm_flow_mode: str
     gripper_field_dim: int
     gripper_field_mode: str
     physical_action_dim: int
@@ -42,6 +48,12 @@ class PolicyDecoderConfig(Protocol):
     hierarchical_mmdit_operator_depth_logit_init: float
     hierarchical_mmdit_operator_contraction_warmup_steps: int
     hierarchical_mmdit_operator_contraction_transition_steps: int
+    hierarchical_mmdit_unified_controller: int
+    hierarchical_mmdit_control_tokens: int
+    hierarchical_mmdit_controller_depth: int
+    hierarchical_mmdit_controller_heads: int
+    hierarchical_mmdit_controller_ffn_expansion: float
+    hierarchical_mmdit_operation_candidate_probes: int
     hierarchical_mmdit_schedule_mode: str
     hierarchical_mmdit_random_prefix_probability: float
     hierarchical_mmdit_exhaustion_mode: str
@@ -109,45 +121,81 @@ class ConditionNeutralActionInitializer(nn.Module):
 
 
 class ActionOnlyPhysicalVelocityHead(nn.Module):
-    """Typed physical velocity readout with no auxiliary correction latent."""
+    """Native-time velocity readout followed by deterministic field analysis."""
 
     def __init__(self, config: PolicyDecoderConfig) -> None:
         super().__init__()
         h = int(config.hidden_size)
         ad = int(config.arm_dim)
+        self.codec = PhysicalActionCodec(config)
         self.norm = nn.LayerNorm(h)
+        self.arm_manifold = str(config.arm_flow_mode) == "manifold_native"
         self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
-        if self.parseval_gripper:
-            self.arm_field = nn.Linear(h, 2 * ad)
-            self.grip_field = nn.Linear(h, int(config.gripper_field_dim))
+        if self.arm_manifold:
+            self.arm_native = nn.Linear(h, ad)
+            self.arm_abs = None
+            self.arm_delta = None
         else:
             self.arm_abs = nn.Linear(h, ad)
             self.arm_delta = nn.Linear(h, ad)
+            self.arm_native = None
+        if self.parseval_gripper:
+            self.grip_native = nn.Linear(h, 1)
+            self.grip_value = None
+            self.grip_delta = None
+            self.grip_extra = None
+        else:
+            self.grip_native = None
             self.grip_value = nn.Linear(h, 1)
             self.grip_delta = nn.Linear(h, 1)
             self.grip_extra = nn.Linear(h, max(int(config.gripper_field_dim) - 2, 0))
 
     def output_layers(self) -> tuple[nn.Linear, ...]:
-        if self.parseval_gripper:
-            return self.arm_field, self.grip_field
-        return self.arm_abs, self.arm_delta, self.grip_value, self.grip_delta, self.grip_extra
+        arm_layers = (
+            (self.arm_native,)
+            if self.arm_native is not None
+            else (self.arm_abs, self.arm_delta)
+        )
+        gripper_layers = (
+            (self.grip_native,)
+            if self.grip_native is not None
+            else (self.grip_value, self.grip_delta, self.grip_extra)
+        )
+        if any(layer is None for layer in (*arm_layers, *gripper_layers)):
+            raise RuntimeError("physical velocity head has an incomplete chart")
+        return tuple(layer for layer in (*arm_layers, *gripper_layers) if layer is not None)
 
     def forward(self, tokens: Tensor) -> Tensor:
         x = self.norm(tokens)
-        if self.parseval_gripper:
-            return torch.cat([self.arm_field(x), self.grip_field(x)], dim=-1)
-        parts = [self.arm_abs(x), self.arm_delta(x), self.grip_value(x), self.grip_delta(x)]
-        if int(self.grip_extra.out_features) > 0:
-            parts.append(self.grip_extra(x))
-        return torch.cat(parts, dim=-1)
+        if self.arm_native is not None:
+            arm_field = self.codec.encode_arm_tangent(self.arm_native(x))
+        else:
+            if self.arm_abs is None or self.arm_delta is None:
+                raise RuntimeError("legacy arm velocity heads are not initialized")
+            arm_field = torch.cat([self.arm_abs(x), self.arm_delta(x)], dim=-1)
+        if self.grip_native is not None:
+            grip_field = self.codec.encode_gripper_tangent(self.grip_native(x))
+        else:
+            if (
+                self.grip_value is None
+                or self.grip_delta is None
+                or self.grip_extra is None
+            ):
+                raise RuntimeError("legacy gripper velocity heads are not initialized")
+            grip_parts = [self.grip_value(x), self.grip_delta(x)]
+            if int(self.grip_extra.out_features) > 0:
+                grip_parts.append(self.grip_extra(x))
+            grip_field = torch.cat(grip_parts, dim=-1)
+        return torch.cat([arm_field, grip_field], dim=-1)
 
 
 class OwnedHierarchicalActionBlock(nn.Module):
     """A V77 refinement block with a post-gate contraction sidecar.
 
     The host block owns content, direction, AdaLN, and its original LayerScale
-    gates.  Semantic stages can only remove components from the complete gated
-    branch update; they never receive a second residual-amplitude control.
+    gates. Semantic stages can only contract the complete gated branch update.
+    A unified controller may retain a relative fraction afterwards, but cannot
+    replace or reparameterize the host amplitude.
     """
 
     _BRANCH_NAMES = ("self", "noisy", "stage", "low", "ffn")
@@ -187,6 +235,8 @@ class OwnedHierarchicalActionBlock(nn.Module):
         nn.init.zeros_(self.mod.weight)
         nn.init.zeros_(self.mod.bias)
         # Preserve the established V77 profile when residual_scale_init=0.05.
+        # These rows remain the sole owner of host residual amplitude.  A
+        # controller keep is only a relative mask on the completed operation.
         base_step = float(config.hierarchical_mmdit_residual_scale_init)
         initial_steps = torch.tensor((
             0.4 * base_step,
@@ -267,18 +317,30 @@ class OwnedHierarchicalActionBlock(nn.Module):
         operator_cond: Tensor,
         stage_index: Tensor,
         base_gate: Tensor,
+        update_keep: Tensor | None = None,
         contraction_identity_bypass: bool | None = None,
         stage_candidates: Tensor | None = None,
         stage_probabilities: Tensor | None = None,
+        raw_depth_ratio_override: Tensor | None = None,
         prepared_factors: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         base_output, base_parameter_rms = self._base_project(
             base_projection, projection_input
         )
         projection_rms_rows = self._sample_rms(projection_input.detach())
-        # Reconstruct the complete V77 branch first.  The sidecar receives the
-        # already gated update, so identity mode preserves both its value and
-        # Jacobian and contraction cannot create a new amplitude owner.
+        if tuple(base_gate.shape) != (int(projection_input.shape[0]),):
+            raise ValueError("base_gate must contain one host gate per sample")
+        if update_keep is None:
+            update_keep_rows = torch.ones_like(base_gate, dtype=torch.float32)
+        else:
+            if tuple(update_keep.shape) != tuple(base_gate.shape):
+                raise ValueError("update_keep must match base_gate")
+            update_keep_rows = update_keep.float().clamp(0.0, 1.0)
+
+        # Reconstruct the complete V77 branch first.  Contraction consumes the
+        # already gated host update.  The controller can then retain a relative
+        # fraction of that completed operation, but cannot replace its learned
+        # amplitude or remove gradient ownership from the host gate rows.
         base_activated = self.drop(base_output)
         base_direction, base_activated_rms_rows, base_normalized_rms_rows = (
             self._normalize_residual(base_activated)
@@ -287,7 +349,7 @@ class OwnedHierarchicalActionBlock(nn.Module):
             base_gate[:, None, None].to(dtype=base_direction.dtype)
             * base_direction
         )
-        update, contraction_metrics = contraction(
+        contracted_update, contraction_metrics = contraction(
             host_update,
             operator_cond,
             stage_index,
@@ -296,16 +358,21 @@ class OwnedHierarchicalActionBlock(nn.Module):
             contraction_progress=contraction_progress,
             prepared_factors=prepared_factors,
             identity_bypass=contraction_identity_bypass,
+            raw_depth_ratio_override=raw_depth_ratio_override,
+        )
+        update = contracted_update * update_keep_rows[:, None, None].to(
+            dtype=contracted_update.dtype
         )
         with torch.no_grad():
             base_rms_rows = self._sample_rms(base_output)
             host_update_rms_rows = self._sample_rms(host_update)
+            contracted_rms_rows = self._sample_rms(contracted_update)
             update_rms_rows = self._sample_rms(update)
             direction_change_rows = self._sample_rms(
-                update - host_update
+                contracted_update - host_update
             )
             direction_cosine_rows = F.cosine_similarity(
-                update.float(),
+                contracted_update.float(),
                 host_update.float(),
                 dim=-1,
             ).mean(dim=1)
@@ -315,6 +382,13 @@ class OwnedHierarchicalActionBlock(nn.Module):
             gate_scale_error_rows = (
                 host_update_rms_rows - expected_host_rms_rows
             ).abs()
+            keep_scale_error_rows = (
+                update_rms_rows
+                - contracted_rms_rows * update_keep_rows.detach().abs()
+            ).abs()
+            effective_gate_rows = (
+                base_gate.detach().float() * update_keep_rows.detach()
+            )
         metrics = dict(contraction_metrics)
         metrics.update({
             "base_rms": base_rms_rows.detach().mean(),
@@ -326,19 +400,26 @@ class OwnedHierarchicalActionBlock(nn.Module):
             "base_activated_rms": base_activated_rms_rows.detach().mean(),
             "base_normalized_rms": base_normalized_rms_rows.detach().mean(),
             "host_update_rms": host_update_rms_rows.detach().mean(),
-            "contracted_rms": update_rms_rows.detach().mean(),
+            "contracted_rms": contracted_rms_rows.detach().mean(),
             "direction_change": direction_change_rows.detach().mean(),
             "direction_cosine": direction_cosine_rows.detach().mean(),
             "base_gate": base_gate.detach().mean(),
             "base_gate_abs_mean": base_gate.detach().float().abs().mean(),
+            "effective_gate": effective_gate_rows.mean(),
+            "effective_gate_abs_mean": effective_gate_rows.abs().mean(),
             "gate_scale_error": gate_scale_error_rows.detach().mean(),
+            "keep_scale_error": keep_scale_error_rows.detach().mean(),
+            "update_keep": update_keep_rows.detach().mean(),
             "realized_scale": update_rms_rows.detach().mean(),
             "operator_gain": (
                 update_rms_rows / projection_rms_rows.clamp_min(1e-6)
             ).detach().mean(),
             "update_rms": update_rms_rows.detach().mean(),
             "host_update_rms_rows": host_update_rms_rows.detach(),
+            "contracted_rms_rows": contracted_rms_rows.detach(),
             "base_gate_rows": base_gate.detach(),
+            "effective_gate_rows": effective_gate_rows,
+            "update_keep_rows": update_keep_rows.detach(),
             "operator_gain_rows": (
                 update_rms_rows / projection_rms_rows.clamp_min(1e-6)
             ).detach(),
@@ -427,9 +508,11 @@ class OwnedHierarchicalActionBlock(nn.Module):
         operator_cond: Tensor,
         stage_index: Tensor,
         base_gate: Tensor,
+        update_keep: Tensor | None = None,
         contraction_identity_bypass: bool | None = None,
         stage_candidates: Tensor | None = None,
         stage_probabilities: Tensor | None = None,
+        raw_depth_ratio_override: Tensor | None = None,
         mask: Tensor | None = None,
         prepared_factors: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
@@ -448,8 +531,10 @@ class OwnedHierarchicalActionBlock(nn.Module):
             contraction_progress=contraction_progress,
             operator_cond=operator_cond,
             stage_index=stage_index,
+            update_keep=update_keep,
             stage_candidates=stage_candidates,
             stage_probabilities=stage_probabilities,
+            raw_depth_ratio_override=raw_depth_ratio_override,
             base_gate=base_gate,
             contraction_identity_bypass=contraction_identity_bypass,
             prepared_factors=prepared_factors,
@@ -471,6 +556,8 @@ class OwnedHierarchicalActionBlock(nn.Module):
         contraction_identity_bypass: bool | None = None,
         stage_candidates: Tensor | None = None,
         stage_probabilities: Tensor | None = None,
+        raw_depth_ratio_overrides: dict[str, Tensor] | None = None,
+        branch_update_keeps: Tensor | None = None,
         contraction_factors: dict[str, Tensor] | None = None,
         low_role_ids: Tensor | None = None,
         low_role_names: tuple[str, ...] | None = None,
@@ -482,9 +569,19 @@ class OwnedHierarchicalActionBlock(nn.Module):
         scale = 0.5 * torch.tanh(
             mod[:, self.hidden_size:2 * self.hidden_size]
         )
-        gates = self.scale_max * torch.tanh(
+        legacy_gates = self.scale_max * torch.tanh(
             mod[:, 2 * self.hidden_size:]
         )
+        if branch_update_keeps is None:
+            update_keeps = torch.ones_like(legacy_gates, dtype=torch.float32)
+        else:
+            expected = (int(action.shape[0]), len(self._BRANCH_NAMES))
+            if tuple(branch_update_keeps.shape) != expected:
+                raise ValueError(
+                    f"branch_update_keeps must have shape {expected}, "
+                    f"got {tuple(branch_update_keeps.shape)}"
+                )
+            update_keeps = branch_update_keeps.float().clamp(0.0, 1.0)
         if contraction_progress.ndim != 0:
             raise ValueError("contraction_progress must be scalar")
 
@@ -506,7 +603,12 @@ class OwnedHierarchicalActionBlock(nn.Module):
             stage_index=stage_index,
             stage_candidates=stage_candidates,
             stage_probabilities=stage_probabilities,
-            base_gate=gates[:, 0],
+            raw_depth_ratio_override=(
+                None if raw_depth_ratio_overrides is None
+                else raw_depth_ratio_overrides["self"]
+            ),
+            base_gate=legacy_gates[:, 0],
+            update_keep=update_keeps[:, 0],
             contraction_identity_bypass=contraction_identity_bypass,
             prepared_factors=None if contraction_factors is None else contraction_factors["self"],
         )
@@ -536,7 +638,12 @@ class OwnedHierarchicalActionBlock(nn.Module):
             stage_index=stage_index,
             stage_candidates=stage_candidates,
             stage_probabilities=stage_probabilities,
-            base_gate=gates[:, 1],
+            raw_depth_ratio_override=(
+                None if raw_depth_ratio_overrides is None
+                else raw_depth_ratio_overrides["noisy"]
+            ),
+            base_gate=legacy_gates[:, 1],
+            update_keep=update_keeps[:, 1],
             contraction_identity_bypass=contraction_identity_bypass,
             mask=noisy_mask,
             prepared_factors=None if contraction_factors is None else contraction_factors["noisy"],
@@ -560,7 +667,12 @@ class OwnedHierarchicalActionBlock(nn.Module):
             stage_index=stage_index,
             stage_candidates=stage_candidates,
             stage_probabilities=stage_probabilities,
-            base_gate=gates[:, 2],
+            raw_depth_ratio_override=(
+                None if raw_depth_ratio_overrides is None
+                else raw_depth_ratio_overrides["stage"]
+            ),
+            base_gate=legacy_gates[:, 2],
+            update_keep=update_keeps[:, 2],
             contraction_identity_bypass=contraction_identity_bypass,
             prepared_factors=None if contraction_factors is None else contraction_factors["stage"],
         )
@@ -583,7 +695,12 @@ class OwnedHierarchicalActionBlock(nn.Module):
             stage_index=stage_index,
             stage_candidates=stage_candidates,
             stage_probabilities=stage_probabilities,
-            base_gate=gates[:, 3],
+            raw_depth_ratio_override=(
+                None if raw_depth_ratio_overrides is None
+                else raw_depth_ratio_overrides["low"]
+            ),
+            base_gate=legacy_gates[:, 3],
+            update_keep=update_keeps[:, 3],
             contraction_identity_bypass=contraction_identity_bypass,
             prepared_factors=None if contraction_factors is None else contraction_factors["low"],
         )
@@ -599,7 +716,12 @@ class OwnedHierarchicalActionBlock(nn.Module):
             stage_index=stage_index,
             stage_candidates=stage_candidates,
             stage_probabilities=stage_probabilities,
-            base_gate=gates[:, 4],
+            raw_depth_ratio_override=(
+                None if raw_depth_ratio_overrides is None
+                else raw_depth_ratio_overrides["ffn"]
+            ),
+            base_gate=legacy_gates[:, 4],
+            update_keep=update_keeps[:, 4],
             contraction_identity_bypass=contraction_identity_bypass,
             prepared_factors=None if contraction_factors is None else contraction_factors["ffn"],
         )
@@ -688,7 +810,10 @@ class OwnedHierarchicalActionBlock(nn.Module):
                 "projection_input_rms", "base_data_gain", "base_activated_rms",
                 "base_normalized_rms", "host_update_rms", "contracted_rms",
                 "direction_change", "direction_cosine", "base_gate",
-                "base_gate_abs_mean", "gate_scale_error", "realized_scale",
+                "base_gate_abs_mean", "effective_gate",
+                "effective_gate_abs_mean", "gate_scale_error",
+                "keep_scale_error", "realized_scale",
+                "update_keep",
             ):
                 metrics[f"action_{name}_{metric_name}"] = operator_metrics[metric_name]
             for metric_name in (
@@ -697,8 +822,9 @@ class OwnedHierarchicalActionBlock(nn.Module):
                 "removed_fraction_rows",
                 "nonexpansive_violation_rows",
                 "operator_gain_rows", "update_rms_rows", "host_update_rms_rows",
-                "base_gate_rows",
+                "contracted_rms_rows", "base_gate_rows", "effective_gate_rows",
                 "direction_change_rows",
+                "update_keep_rows",
             ):
                 metrics[f"action_{name}_{metric_name}"] = operator_metrics[metric_name]
         if low_role_ids is not None:
@@ -734,6 +860,8 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         self.config = config
         h = int(config.hidden_size)
         self.hidden_size = h
+        self.action_horizon = int(config.action_horizon)
+        self.physical_action_dim = int(config.physical_action_dim)
         self.refine_block_count = int(config.hierarchical_mmdit_depth)
         self.operator_stage_count = int(config.hierarchical_mmdit_operator_stages)
         self.refine_steps = int(config.hierarchical_mmdit_refine_steps)
@@ -742,10 +870,13 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         self.action_initializer = ConditionNeutralActionInitializer(config)
         self.time = TimeEmbedding(h)
         self.time_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-        parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        self.native_time_action_chart = bool(
+            str(config.arm_flow_mode) == "manifold_native"
+            or str(config.gripper_field_mode) == "parseval_temporal"
+        )
         self.noisy_action_lift = (
-            PhysicalActionTokenLift(config)
-            if parseval_gripper
+            NativeTimePhysicalActionTokenLift(config)
+            if self.native_time_action_chart
             else nn.Sequential(
                 nn.LayerNorm(int(config.physical_action_dim)),
                 nn.Linear(int(config.physical_action_dim), h),
@@ -892,6 +1023,34 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             ])
         finally:
             torch.set_rng_state(host_rng_state)
+        self.unified_controller: UnifiedHierarchicalController | None = None
+        if int(config.hierarchical_mmdit_unified_controller):
+            host_rng_state = torch.get_rng_state()
+            controller_generator = torch.Generator(device="cpu")
+            controller_generator.manual_seed(
+                (int(torch.initial_seed()) ^ 0x43C07A01) % (2**63 - 1)
+            )
+            try:
+                torch.set_rng_state(controller_generator.get_state())
+                self.unified_controller = UnifiedHierarchicalController(
+                    config,
+                    operator_branch_count=len(OwnedHierarchicalActionBlock._BRANCH_NAMES),
+                )
+            finally:
+                torch.set_rng_state(host_rng_state)
+            self.operator_stage_identity.requires_grad_(False)
+            for legacy_module in (
+                self.stage_selector_control,
+                self.stage_selector_query,
+                self.exit_controller,
+                self.workspace.manager,
+                self.operator_condition,
+            ):
+                legacy_module.requires_grad_(False)
+            for bank in self.operator_contractions:
+                for contraction in bank.values():
+                    contraction.depth_weight.requires_grad_(False)
+                    contraction.depth_bias.requires_grad_(False)
         self.register_buffer(
             "contraction_progress",
             torch.zeros((), dtype=torch.float32),
@@ -983,6 +1142,14 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         )
 
     def contraction_control_parameters(self) -> tuple[nn.Parameter, ...]:
+        contraction = tuple(
+            parameter
+            for bank in self.operator_contractions
+            for value in bank.values()
+            for parameter in value.control_parameters()
+        )
+        if self.unified_controller is not None:
+            return ()
         return (
             *(
                 parameter
@@ -997,6 +1164,8 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         )
 
     def stage_selector_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self.unified_controller is not None:
+            return ()
         return (
             self.operator_stage_identity,
             *tuple(self.stage_selector_control.parameters()),
@@ -1004,7 +1173,34 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         )
 
     def exit_controller_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self.unified_controller is not None:
+            return ()
         return tuple(self.exit_controller.parameters())
+
+    def unified_controller_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self.unified_controller is None:
+            return ()
+        interface = self.workspace.controller_interface
+        if interface is None:
+            raise RuntimeError("unified controller is missing its workspace interface")
+        return (
+            *tuple(self.unified_controller.parameters()),
+            *tuple(interface.parameters()),
+        )
+
+    def unified_controller_parameter_groups(
+        self,
+    ) -> dict[str, tuple[nn.Parameter, ...]]:
+        if self.unified_controller is None:
+            return {}
+        groups = self.unified_controller.parameter_groups()
+        interface = self.workspace.controller_interface
+        if interface is None:
+            raise RuntimeError("unified controller is missing its workspace interface")
+        return {
+            **groups,
+            "workspace_interface": tuple(interface.parameters()),
+        }
 
     def scale_invariant_base_parameters(self) -> tuple[nn.Parameter, ...]:
         return ()
@@ -1256,6 +1452,164 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             exploration,
         )
 
+    def _select_unified_stages(
+        self,
+        *,
+        block_index: Tensor,
+        operator_logits: Tensor,
+        controller_state: Tensor,
+        uniform_owner: int | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Select an owned operator from continuous controller scores."""
+        batch = int(operator_logits.shape[0])
+        if tuple(operator_logits.shape) != (batch, self.operator_stage_count):
+            raise ValueError("unified operator logits have the wrong shape")
+        if uniform_owner is not None:
+            candidates_1d = self._fixed_stage_candidates(
+                uniform_owner, device=operator_logits.device
+            )
+            candidates = candidates_1d[None].expand(batch, -1)
+            logits = operator_logits.index_select(1, candidates_1d).float()
+            learned_probabilities = torch.softmax(logits, dim=-1)
+            exploration_value = (
+                max(0.0, 1.0 - float(self._contraction_progress_value))
+                if self.training and int(candidates.shape[1]) > 1 else 0.0
+            )
+            if exploration_value > 0.0:
+                uniform = torch.full_like(
+                    learned_probabilities,
+                    1.0 / float(int(candidates.shape[1])),
+                )
+                probabilities = (
+                    learned_probabilities * (1.0 - exploration_value)
+                    + uniform * exploration_value
+                )
+            else:
+                probabilities = learned_probabilities
+            if self.training and self._contraction_progress_value > 0.0 and exploration_value > 0.0:
+                selected_local = torch.multinomial(
+                    probabilities, num_samples=1
+                ).squeeze(1)
+            else:
+                selected_local = probabilities.argmax(dim=-1)
+            selected = candidates.gather(1, selected_local[:, None]).squeeze(1)
+        else:
+            candidates = torch.empty(
+                batch, 1, device=operator_logits.device, dtype=torch.long
+            )
+            probabilities = torch.ones(
+                batch, 1, device=operator_logits.device, dtype=torch.float32
+            )
+            selected = torch.empty(
+                batch, device=operator_logits.device, dtype=torch.long
+            )
+            for owner in range(self.refine_block_count):
+                rows = torch.nonzero(block_index == owner, as_tuple=False).flatten()
+                if int(rows.numel()) == 0:
+                    continue
+                owned = self._fixed_stage_candidates(owner, device=operator_logits.device)
+                owned_logits = operator_logits.index_select(0, rows).index_select(1, owned)
+                owned_selected = owned.index_select(
+                    0, owned_logits.argmax(dim=-1)
+                )
+                selected.index_copy_(0, rows, owned_selected)
+                candidates.index_copy_(0, rows, owned_selected[:, None])
+        detached = probabilities.detach().float().clamp_min(1e-8)
+        entropy = -(detached * detached.log()).sum(dim=-1)
+        maximum = detached.max(dim=-1).values
+        diagnostic_query = F.normalize(
+            controller_state.detach().float().mean(dim=1), dim=-1
+        )
+        exploration = torch.full(
+            (batch,),
+            (
+                max(0.0, 1.0 - float(self._contraction_progress_value))
+                if self.training and int(probabilities.shape[1]) > 1 else 0.0
+            ),
+            device=operator_logits.device,
+            dtype=torch.float32,
+        )
+        return (
+            selected,
+            candidates,
+            probabilities,
+            entropy,
+            maximum,
+            diagnostic_query,
+            exploration,
+        )
+
+    def _select_unified_operation(
+        self,
+        *,
+        current_block: Tensor,
+        operator_logits: Tensor,
+        exit_logit: Tensor,
+        controller_state: Tensor,
+        active_rows: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Select one legal operation at the start of a refinement step.
+
+        The controller scores a single legal set containing exit, the stages
+        owned by the current block, and the stages owned by the next block.
+        The fixed current-stage choice wins exact ties, preserving the neutral
+        initialization.  No threshold or scalar dwell value is involved.
+        """
+        batch = int(operator_logits.shape[0])
+        if tuple(operator_logits.shape) != (batch, self.operator_stage_count):
+            raise ValueError("unified operator logits have the wrong shape")
+        if tuple(exit_logit.shape) != (batch,):
+            raise ValueError("unified exit logits have the wrong shape")
+        legal = torch.zeros(
+            batch, self.operator_stage_count + 1,
+            device=operator_logits.device, dtype=torch.bool,
+        )
+        legal[:, 0] = True
+        nominal_stage = torch.zeros(batch, device=operator_logits.device, dtype=torch.long)
+        for owner in range(self.refine_block_count):
+            rows = torch.nonzero(current_block == owner, as_tuple=False).flatten()
+            if int(rows.numel()) == 0:
+                continue
+            current = self._fixed_stage_candidates(owner, device=operator_logits.device)
+            legal[rows[:, None], current[None] + 1] = True
+            nominal_stage.index_copy_(0, rows, current[0].expand(int(rows.numel())))
+            if owner + 1 < self.refine_block_count:
+                following = self._fixed_stage_candidates(
+                    owner + 1, device=operator_logits.device
+                )
+                legal[rows[:, None], following[None] + 1] = True
+        scores = torch.cat([exit_logit[:, None], operator_logits], dim=1).float()
+        legal_scores = scores.masked_fill(~legal, torch.finfo(scores.dtype).min)
+        probabilities = torch.softmax(legal_scores, dim=-1)
+        maximum, greedy = legal_scores.max(dim=-1)
+        nominal = nominal_stage + 1
+        nominal_score = legal_scores.gather(1, nominal[:, None]).squeeze(1)
+        selected = torch.where(nominal_score >= maximum, nominal, greedy)
+        selected_exit = selected == 0
+        selected_stage = (selected - 1).clamp_min(0)
+        selected_stage = torch.where(selected_exit, nominal_stage, selected_stage)
+        selected_block = self._operator_stage_to_block(selected_stage)
+        stage_candidates = selected_stage[:, None]
+        stage_probabilities = torch.ones(
+            batch, 1, device=operator_logits.device, dtype=torch.float32
+        )
+        detached = probabilities.detach().float().clamp_min(1e-8)
+        entropy = -(detached * detached.log()).sum(dim=-1)
+        diagnostic_query = F.normalize(
+            controller_state.detach().float().mean(dim=1), dim=-1
+        )
+        return (
+            selected_block,
+            selected_stage,
+            stage_candidates,
+            stage_probabilities,
+            entropy,
+            detached.max(dim=-1).values,
+            diagnostic_query,
+            torch.zeros(batch, device=operator_logits.device, dtype=torch.float32),
+            selected_exit & active_rows,
+        )
+
     def _fixed_schedule(self, *, device: torch.device) -> tuple[Tensor, Tensor, int]:
         blocks = torch.tensor(
             [self._block_for_step(step) for step in range(self.refine_steps)],
@@ -1366,6 +1720,50 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             if all(torch.is_tensor(row[key]) for row in rows)
         }
 
+    def _controller_operator_controls(
+        self,
+        output: UnifiedControllerOutput,
+        *,
+        stage_index: Tensor,
+        stage_candidates: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Resolve candidate depth and selected update controls.
+
+        Update and depth share the same stage/branch query bandwidth but keep
+        separate execution semantics.  The global contraction schedule opens
+        both controls continuously from the exact V77 identity boundary.
+        """
+        batch, candidate_count = stage_candidates.shape
+        expected = (
+            batch,
+            self.operator_stage_count,
+            len(OwnedHierarchicalActionBlock._BRANCH_NAMES),
+        )
+        if tuple(output.operator_update_logits.shape) != expected:
+            raise ValueError("unified operator update logits have the wrong shape")
+        if tuple(output.operator_depth_logits.shape) != expected:
+            raise ValueError("unified operator depth logits have the wrong shape")
+        gather_index = stage_candidates[:, :, None].expand(
+            batch, candidate_count, expected[-1]
+        )
+        raw_update = torch.sigmoid(
+            output.operator_update_logits.gather(1, gather_index).float()
+        )
+        raw_depth = torch.sigmoid(
+            output.operator_depth_logits.gather(1, gather_index).float()
+        )
+        progress = float(self._contraction_progress_value)
+        candidate_update_keep = 1.0 - progress * (1.0 - raw_update)
+        candidate_depth_keep = 1.0 - progress * (1.0 - raw_depth)
+        selected_mask = (stage_candidates == stage_index[:, None]).float()
+        selected_update_keep = (
+            candidate_update_keep * selected_mask[:, :, None]
+        ).sum(dim=1)
+        selected_depth_keep = (
+            candidate_depth_keep * selected_mask[:, :, None]
+        ).sum(dim=1)
+        return raw_depth, selected_update_keep, selected_depth_keep
+
     def _run_owned_blocks(
         self,
         action: Tensor,
@@ -1379,6 +1777,8 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         stage_index: Tensor,
         stage_candidates: Tensor,
         stage_probabilities: Tensor,
+        stage_raw_depth_ratios: Tensor | None,
+        stage_update_keeps: Tensor | None,
         contraction_factors: tuple[dict[str, Tensor], ...] | None,
         uniform_owner: int | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
@@ -1413,6 +1813,15 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 ),
                 stage_candidates=local_candidates,
                 stage_probabilities=stage_probabilities,
+                raw_depth_ratio_overrides=(
+                    None if stage_raw_depth_ratios is None else {
+                        name: stage_raw_depth_ratios[..., branch_index]
+                        for branch_index, name in enumerate(
+                            OwnedHierarchicalActionBlock._BRANCH_NAMES
+                        )
+                    }
+                ),
+                branch_update_keeps=stage_update_keeps,
                 contraction_factors=(
                     None if contraction_factors is None
                     else contraction_factors[owner]
@@ -1452,6 +1861,18 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 ),
                 stage_candidates=local_candidates,
                 stage_probabilities=stage_probabilities.index_select(0, indices),
+                raw_depth_ratio_overrides=(
+                    None if stage_raw_depth_ratios is None else {
+                        name: stage_raw_depth_ratios.index_select(0, indices)[..., branch_index]
+                        for branch_index, name in enumerate(
+                            OwnedHierarchicalActionBlock._BRANCH_NAMES
+                        )
+                        }
+                ),
+                branch_update_keeps=(
+                    None if stage_update_keeps is None
+                    else stage_update_keeps.index_select(0, indices)
+                ),
                 contraction_factors=(
                     None if contraction_factors is None
                     else contraction_factors[owner]
@@ -1498,6 +1919,95 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         # probe outside the objective while preserving a grad-capable AMP cache.
         return self.velocity_head(self.action_norm(action.detach())).detach()
 
+    @torch.no_grad()
+    def _probe_operation_candidates(
+        self,
+        *,
+        action: Tensor,
+        current_block: Tensor,
+        active_rows: Tensor,
+        noisy_tokens: Tensor,
+        stage_tokens: Tensor,
+        low_tokens: Tensor,
+        shared_cond: Tensor,
+        operator_cond: Tensor,
+        unified_output: UnifiedControllerOutput,
+        contraction_factors: tuple[dict[str, Tensor], ...] | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Evaluate legal current/next-stage candidates without gradient flow."""
+        batch = int(action.shape[0])
+        candidate_count = self.operator_stage_count + 1
+        candidate_predictions = torch.zeros(
+            batch, candidate_count, self.action_horizon, self.physical_action_dim,
+            device=action.device, dtype=action.dtype,
+        )
+        candidate_predictions[:, 0] = self._detached_velocity_prediction(action)
+        candidate_mask = torch.zeros(
+            batch, candidate_count, device=action.device, dtype=torch.bool
+        )
+        candidate_mask[:, 0] = active_rows
+        rows_parts: list[Tensor] = []
+        stages_parts: list[Tensor] = []
+        for owner in range(self.refine_block_count):
+            rows = torch.nonzero(
+                (current_block == owner) & active_rows, as_tuple=False
+            ).flatten()
+            if int(rows.numel()) == 0:
+                continue
+            owners = [owner]
+            if owner + 1 < self.refine_block_count:
+                owners.append(owner + 1)
+            for candidate_owner in owners:
+                stages = self._fixed_stage_candidates(
+                    candidate_owner, device=action.device
+                )
+                for stage in stages.tolist():
+                    rows_parts.append(rows)
+                    stages_parts.append(torch.full_like(rows, int(stage)))
+                    candidate_mask[rows, int(stage) + 1] = True
+        if not rows_parts:
+            return candidate_predictions, candidate_mask
+        probe_rows = torch.cat(rows_parts, dim=0)
+        probe_stages = torch.cat(stages_parts, dim=0)
+        probe_blocks = self._operator_stage_to_block(probe_stages)
+        probe_raw_update = torch.sigmoid(
+            unified_output.operator_update_logits[
+                probe_rows, probe_stages
+            ].float()
+        )
+        probe_update_keeps = 1.0 - float(self._contraction_progress_value) * (
+            1.0 - probe_raw_update
+        )
+        probe_action, _ = self._run_owned_blocks(
+            action.index_select(0, probe_rows),
+            block_index=probe_blocks,
+            noisy_tokens=noisy_tokens.index_select(0, probe_rows),
+            stage_tokens=stage_tokens.index_select(0, probe_rows),
+            low_tokens=low_tokens.index_select(0, probe_rows),
+            shared_cond=shared_cond.index_select(0, probe_rows),
+            operator_cond=operator_cond.index_select(0, probe_rows),
+            stage_index=probe_stages,
+            stage_candidates=probe_stages[:, None],
+            stage_probabilities=torch.ones(
+                int(probe_rows.numel()), 1,
+                device=action.device, dtype=torch.float32,
+            ),
+            stage_raw_depth_ratios=torch.sigmoid(
+                unified_output.operator_depth_logits[
+                    probe_rows, probe_stages
+                ].float()
+            ),
+            stage_update_keeps=probe_update_keeps,
+            contraction_factors=contraction_factors,
+            uniform_owner=None,
+        )
+        probe_prediction = self._detached_velocity_prediction(probe_action)
+        for index in range(int(probe_rows.numel())):
+            row = int(probe_rows[index].item())
+            stage = int(probe_stages[index].item())
+            candidate_predictions[row, stage + 1] = probe_prediction[index]
+        return candidate_predictions, candidate_mask
+
     def _run_refinement(
         self,
         *,
@@ -1516,9 +2026,14 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         dtype = action.dtype
         if routing_mode not in {"fixed", "random_dwell", "adaptive", "learned"}:
             raise ValueError(f"unsupported refinement routing mode: {routing_mode!r}")
+        dynamic_learned = (
+            routing_mode == "learned" and self.unified_controller is not None
+        )
         if routing_mode == "random_dwell":
             schedule, schedule_active, scheduled_steps = self._random_dwell_schedule(device=device)
-        elif routing_mode in {"fixed", "learned"}:
+        elif routing_mode == "fixed" or (
+            routing_mode == "learned" and not dynamic_learned
+        ):
             schedule, schedule_active, scheduled_steps = self._fixed_schedule(device=device)
         else:
             schedule = torch.zeros(self.refine_steps, device=device, dtype=torch.long)
@@ -1534,16 +2049,35 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             batch, self.refine_block_count, device=device, dtype=torch.float32
         )
         previous_response_rel = torch.zeros(batch, device=device, dtype=torch.float32)
+        previous_response_abs = torch.zeros(batch, device=device, dtype=torch.float32)
+        previous_response_arm = torch.zeros(batch, device=device, dtype=torch.float32)
+        previous_response_gripper = torch.zeros(batch, device=device, dtype=torch.float32)
+        previous_response_arm_null = torch.zeros(batch, device=device, dtype=torch.float32)
+        previous_response_gripper_null = torch.zeros(batch, device=device, dtype=torch.float32)
+        previous_pressure_abs = torch.zeros(batch, device=device, dtype=torch.float32)
         previous_pressure_rel = torch.zeros(batch, device=device, dtype=torch.float32)
         has_previous_response = torch.zeros(batch, device=device, dtype=torch.float32)
-        action_threshold = self._threshold_rows(
-            time,
-            tuple(float(value) for value in self.config.hierarchical_mmdit_action_response_thresholds),
+        controller_state: Tensor | None = None
+        branch_count = len(OwnedHierarchicalActionBlock._BRANCH_NAMES)
+        previous_update_keeps = torch.ones(
+            batch, branch_count, device=device, dtype=torch.float32
         )
-        stage_threshold = self._threshold_rows(
-            time,
-            tuple(float(value) for value in self.config.hierarchical_mmdit_stage_pressure_thresholds),
+        previous_depth_keeps = torch.ones_like(previous_update_keeps)
+        previous_continue_keep = torch.ones(
+            batch, device=device, dtype=torch.float32
         )
+        if routing_mode == "adaptive":
+            action_threshold = self._threshold_rows(
+                time,
+                tuple(float(value) for value in self.config.hierarchical_mmdit_action_response_thresholds),
+            )
+            stage_threshold = self._threshold_rows(
+                time,
+                tuple(float(value) for value in self.config.hierarchical_mmdit_stage_pressure_thresholds),
+            )
+        else:
+            action_threshold = torch.zeros(batch, device=device, dtype=torch.float32)
+            stage_threshold = torch.zeros_like(action_threshold)
 
         workspace_rows: list[dict[str, Tensor]] = []
         mmdit_rows: list[dict[str, Tensor]] = []
@@ -1567,6 +2101,13 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         exit_logit_rows: list[Tensor] = []
         exit_probability_rows: list[Tensor] = []
         exit_candidate_rows: list[Tensor] = []
+        controller_rows: list[dict[str, Tensor]] = []
+        operation_logits_rows: list[Tensor] = []
+        operation_update_rows: list[Tensor] = []
+        operation_exit_rows: list[Tensor] = []
+        operation_candidate_prediction_rows: list[Tensor] = []
+        operation_candidate_mask_rows: list[Tensor] = []
+        operation_decision_rows: list[Tensor] = []
         prediction = self._detached_velocity_prediction(action)
         prediction_rows: list[Tensor] = [prediction]
         contraction_factors = (
@@ -1578,7 +2119,7 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         for step_index in range(self.refine_steps):
             if routing_mode not in {"adaptive", "learned"} and step_index >= scheduled_steps:
                 break
-            if routing_mode == "adaptive":
+            if routing_mode == "adaptive" or dynamic_learned:
                 uniform_owner = None
                 block_index = current_block
                 step_active = active_rows
@@ -1590,6 +2131,7 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                     step_active = step_active & active_rows
             if routing_mode in {"adaptive", "learned"} and not bool(step_active.any()):
                 break
+            decision_block = block_index.detach().clone()
 
             remaining = float(scheduled_steps - step_index - 1) / float(max(self.refine_steps, 1))
             progress = (
@@ -1612,7 +2154,110 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 local_dwell,
                 has_previous_response,
             ], dim=-1)
-            if routing_mode == "adaptive":
+            workspace_control: WorkspaceControlOverride | None = None
+            unified_output = None
+            stage_raw_depth_ratios: Tensor | None = None
+            stage_update_keeps: Tensor | None = None
+            selected_depth_keeps: Tensor | None = None
+            if self.unified_controller is not None:
+                response_feedback = torch.stack([
+                    previous_response_abs,
+                    previous_response_rel,
+                    previous_response_arm,
+                    previous_response_gripper,
+                    previous_response_arm_null,
+                    previous_response_gripper_null,
+                    previous_pressure_abs,
+                    previous_pressure_rel,
+                    local_dwell,
+                    has_previous_response,
+                ], dim=-1)
+                controller_feedback = torch.cat([
+                    response_feedback,
+                    previous_update_keeps,
+                    previous_depth_keeps,
+                    previous_continue_keep[:, None],
+                ], dim=-1)
+                stage_role = self.workspace.stage_role.to(
+                    device=device, dtype=dtype
+                ).expand(batch, -1, -1)
+                unified_output = self.unified_controller(
+                    previous_state=controller_state,
+                    global_intent=contracts["global_intent"],
+                    flow_time=time_state,
+                    refine_time=step_state,
+                    action_tokens=action,
+                    evidence_tokens=prepared_evidence.tokens,
+                    evidence_ranges=prepared_evidence.ranges,
+                    evidence_role_ranges=prepared_evidence.role_ranges,
+                    stage_role=stage_role,
+                    stage_content=stage_content,
+                    feedback=controller_feedback,
+                )
+                controller_state = unified_output.state
+                if dynamic_learned:
+                    (
+                        block_index,
+                        stage_index,
+                        stage_candidates,
+                        stage_probabilities,
+                        selector_entropy,
+                        selector_max,
+                        selector_query,
+                        selector_exploration,
+                        operation_exit,
+                    ) = self._select_unified_operation(
+                        current_block=block_index,
+                        operator_logits=unified_output.operator_logits,
+                        exit_logit=unified_output.exit_logit,
+                        controller_state=unified_output.state,
+                        active_rows=active_rows,
+                    )
+                    step_active = active_rows & ~operation_exit
+                else:
+                    (
+                        stage_index,
+                        stage_candidates,
+                        stage_probabilities,
+                        selector_entropy,
+                        selector_max,
+                        selector_query,
+                        selector_exploration,
+                    ) = self._select_unified_stages(
+                        block_index=block_index,
+                        operator_logits=unified_output.operator_logits,
+                        controller_state=unified_output.state,
+                        uniform_owner=uniform_owner,
+                    )
+                    operation_exit = torch.zeros(
+                        batch, device=device, dtype=torch.bool
+                    )
+                step_state = self._step_state(
+                    block_index,
+                    progress_fraction=progress,
+                    remaining_fraction=remaining,
+                    dtype=dtype,
+                )
+                (
+                    stage_raw_depth_ratios,
+                    stage_update_keeps,
+                    selected_depth_keeps,
+                ) = self._controller_operator_controls(
+                    unified_output,
+                    stage_index=stage_index,
+                    stage_candidates=stage_candidates,
+                )
+                workspace_control = WorkspaceControlOverride(
+                    control_tokens=unified_output.memory.content,
+                    control_addresses=unified_output.memory.address,
+                )
+                controller_rows.append(unified_output.metrics)
+                operation_logits_rows.append(unified_output.operator_logits)
+                operation_update_rows.append(
+                    unified_output.operator_update_logits
+                )
+                operation_exit_rows.append(unified_output.exit_logit)
+            elif routing_mode == "adaptive":
                 (
                     stage_index,
                     stage_candidates,
@@ -1648,16 +2293,22 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                     action=action,
                     control_state=selector_control_state,
                 )
-            operator_condition = self.operator_condition(torch.cat([
-                contracts["global_intent"],
-                time_state,
-                step_state,
-            ], dim=-1))
             shared_condition = self.shared_condition(torch.cat([
                 contracts["global_intent"],
                 time_state,
                 step_state,
             ], dim=-1))
+            if self.unified_controller is None:
+                operator_condition = self.operator_condition(torch.cat([
+                    contracts["global_intent"],
+                    time_state,
+                    step_state,
+                ], dim=-1))
+            else:
+                # Unified raw-depth overrides make the legacy per-bank depth
+                # conditioner semantically unreachable.  Keep only the shape
+                # contract without paying for or training a second controller.
+                operator_condition = shared_condition.detach()
             previous_stage = stage_content
             (
                 low,
@@ -1673,6 +2324,7 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 step_index=step_index,
                 read_contract=contracts["read_contract"],
                 step_state_override=step_state,
+                control_override=workspace_control,
             )
             stage_content = torch.where(
                 step_active[:, None, None], candidate_stage, previous_stage
@@ -1691,10 +2343,43 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 stage_index=stage_index,
                 stage_candidates=stage_candidates,
                 stage_probabilities=stage_probabilities,
+                stage_raw_depth_ratios=stage_raw_depth_ratios,
+                stage_update_keeps=stage_update_keeps,
                 contraction_factors=contraction_factors,
                 uniform_owner=uniform_owner,
             )
+            if (
+                unified_output is not None
+                and int(self.config.hierarchical_mmdit_operation_candidate_probes)
+            ):
+                candidate_predictions, candidate_mask = self._probe_operation_candidates(
+                    action=action,
+                    current_block=decision_block,
+                    active_rows=active_rows,
+                    noisy_tokens=noisy_typed,
+                    stage_tokens=stage_for_action,
+                    low_tokens=low,
+                    shared_cond=shared_condition,
+                    operator_cond=operator_condition,
+                    unified_output=unified_output,
+                    contraction_factors=contraction_factors,
+                )
+                operation_candidate_prediction_rows.append(candidate_predictions)
+                operation_candidate_mask_rows.append(candidate_mask)
             action = torch.where(step_active[:, None, None], candidate_action, action)
+            if stage_update_keeps is not None and selected_depth_keeps is not None:
+                with torch.no_grad():
+                    previous_update_keeps = torch.where(
+                        step_active[:, None],
+                        stage_update_keeps.detach().float(),
+                        previous_update_keeps,
+                    )
+                    previous_depth_keeps = torch.where(
+                        step_active[:, None],
+                        selected_depth_keeps.detach().float(),
+                        previous_depth_keeps,
+                    )
+                    previous_continue_keep = step_active.detach().float()
             next_prediction = self._detached_velocity_prediction(action)
             with torch.no_grad():
                 response_abs, response_rel, response_components = self._physical_response(
@@ -1711,6 +2396,30 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 pressure_rel = torch.where(step_active, pressure_rel, torch.zeros_like(pressure_rel))
                 previous_response_rel = torch.where(
                     step_active, response_rel, previous_response_rel
+                )
+                previous_response_abs = torch.where(
+                    step_active, response_abs, previous_response_abs
+                )
+                previous_response_arm = torch.where(
+                    step_active, response_components["arm"], previous_response_arm
+                )
+                previous_response_gripper = torch.where(
+                    step_active,
+                    response_components["gripper"],
+                    previous_response_gripper,
+                )
+                previous_response_arm_null = torch.where(
+                    step_active,
+                    response_components["arm_null"],
+                    previous_response_arm_null,
+                )
+                previous_response_gripper_null = torch.where(
+                    step_active,
+                    response_components["gripper_null"],
+                    previous_response_gripper_null,
+                )
+                previous_pressure_abs = torch.where(
+                    step_active, pressure_abs, previous_pressure_abs
                 )
                 previous_pressure_rel = torch.where(
                     step_active, pressure_rel, previous_pressure_rel
@@ -1729,26 +2438,32 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             post_local_dwell = block_visit_count.gather(
                 1, block_index[:, None]
             ).squeeze(1) / float(max(self.refine_steps, 1))
+            operation_decision = torch.full(
+                (batch,), -1, device=device, dtype=torch.long
+            )
             exit_control_state = torch.stack([
                 torch.log1p(response_rel.detach().float().clamp_min(0.0)),
                 torch.log1p(pressure_rel.detach().float().clamp_min(0.0)),
                 post_local_dwell.detach().float(),
                 torch.ones_like(post_local_dwell, dtype=torch.float32),
             ], dim=-1)
-            exit_query = self._controller_query(
-                global_intent=contracts["global_intent"],
-                time_state=time_state,
-                step_state=step_state,
-                action=action,
-                control_state=exit_control_state,
-            )
-            # Oracle route supervision owns only the exit head.  The shared
-            # query encoder also serves stage selection, so allowing this loss
-            # through it would silently change stage routing while claiming to
-            # train only the stop/continue decision.
-            exit_logit = self._exit_logit(exit_query)
-            exit_probability = torch.sigmoid(exit_logit.detach().float())
-            if routing_mode == "adaptive":
+            if unified_output is None:
+                exit_query = self._controller_query(
+                    global_intent=contracts["global_intent"],
+                    time_state=time_state,
+                    step_state=step_state,
+                    action=action,
+                    control_state=exit_control_state,
+                )
+                # Oracle route supervision owns only the legacy exit head.
+                exit_logit = self._exit_logit(exit_query)
+                exit_probability = torch.sigmoid(exit_logit.detach().float())
+            else:
+                exit_logit = unified_output.exit_logit
+                exit_probability = torch.sigmoid(exit_logit.detach().float())
+            if dynamic_learned:
+                exit_candidate = operation_exit
+            elif routing_mode == "adaptive":
                 exit_candidate = step_active
             else:
                 next_step = step_index + 1
@@ -1808,10 +2523,23 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 active_rows = active_rows & ~stop
             elif routing_mode == "learned":
                 final_candidate = step_index + 1 >= scheduled_steps
-                learned_stop = exit_candidate & (
-                    (exit_probability > 0.5) | final_candidate
-                )
-                active_rows = active_rows & ~learned_stop
+                if unified_output is None:
+                    learned_decision = exit_probability > 0.5
+                    learned_stop = exit_candidate & (
+                        learned_decision | final_candidate
+                    )
+                    active_rows = active_rows & ~learned_stop
+                else:
+                    operation_decision = torch.where(
+                        operation_exit,
+                        torch.full_like(operation_exit, 2, dtype=torch.long),
+                        (block_index > decision_block).long(),
+                    )
+                    current_block = torch.where(
+                        step_active, block_index, current_block
+                    )
+                    active_rows = active_rows & ~operation_exit
+            operation_decision_rows.append(operation_decision.detach())
 
         budget_exhausted_rows = (
             active_rows.detach().clone()
@@ -1847,6 +2575,30 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 batch, device=device, dtype=torch.bool
             ))
             prediction_rows.append(prediction)
+            operation_decision_rows.append(torch.full(
+                (batch,), -1, device=device, dtype=torch.long
+            ))
+        while self.unified_controller is not None and len(operation_logits_rows) < self.refine_steps:
+            operation_logits_rows.append(torch.zeros(
+                batch, self.operator_stage_count, device=device, dtype=torch.float32
+            ))
+            operation_update_rows.append(torch.zeros(
+                batch,
+                self.operator_stage_count,
+                branch_count,
+                device=device,
+                dtype=torch.float32,
+            ))
+            operation_exit_rows.append(torch.zeros(
+                batch, device=device, dtype=torch.float32
+            ))
+            operation_candidate_prediction_rows.append(torch.zeros(
+                batch, self.operator_stage_count + 1, self.action_horizon,
+                self.physical_action_dim, device=device, dtype=dtype
+            ))
+            operation_candidate_mask_rows.append(torch.zeros(
+                batch, self.operator_stage_count + 1, device=device, dtype=torch.bool
+            ))
 
         active_stack = torch.stack(active_history, dim=1)
         return {
@@ -1875,6 +2627,28 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "exit_logit_rows": torch.stack(exit_logit_rows, dim=1),
             "exit_probability_rows": torch.stack(exit_probability_rows, dim=1),
             "exit_candidate_rows": torch.stack(exit_candidate_rows, dim=1),
+            "controller_rows": controller_rows,
+            "operation_logits_rows": (
+                torch.stack(operation_logits_rows, dim=1)
+                if operation_logits_rows else None
+            ),
+            "operation_update_rows": (
+                torch.stack(operation_update_rows, dim=1)
+                if operation_update_rows else None
+            ),
+            "operation_exit_rows": (
+                torch.stack(operation_exit_rows, dim=1)
+                if operation_exit_rows else None
+            ),
+            "operation_candidate_prediction_rows": (
+                torch.stack(operation_candidate_prediction_rows, dim=1)
+                if operation_candidate_prediction_rows else None
+            ),
+            "operation_candidate_mask_rows": (
+                torch.stack(operation_candidate_mask_rows, dim=1)
+                if operation_candidate_mask_rows else None
+            ),
+            "operation_decision_rows": torch.stack(operation_decision_rows, dim=1),
             "executed_steps": active_stack.float().sum(dim=1),
             "unresolved_rows": unresolved_rows,
             "budget_exhausted_rows": budget_exhausted_rows,
@@ -1930,9 +2704,12 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             device=device,
             dtype=dtype,
         )
-        noisy, noisy_gate_mean = self._gate_noisy_tokens(
-            self.noisy_action_lift(noisy_physical), time
-        )
+        noisy_native = self.noisy_action_lift(noisy_physical)
+        if self.native_time_action_chart:
+            noisy_native = noisy_native + self.action_initializer.horizon_position.to(
+                device=device, dtype=dtype
+            )
+        noisy, noisy_gate_mean = self._gate_noisy_tokens(noisy_native, time)
         time_state = self.time_lift(self.time(time.to(dtype=dtype)))
         workspace_condition = self.workspace_condition(torch.cat([
             contracts["global_intent"],
@@ -2028,6 +2805,15 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         exit_logit_rows = refinement["exit_logit_rows"]
         exit_probability_rows = refinement["exit_probability_rows"]
         exit_candidate_rows = refinement["exit_candidate_rows"]
+        controller_rows = refinement["controller_rows"]
+        operation_logits_rows = refinement["operation_logits_rows"]
+        operation_update_rows = refinement["operation_update_rows"]
+        operation_exit_rows = refinement["operation_exit_rows"]
+        operation_candidate_prediction_rows = refinement[
+            "operation_candidate_prediction_rows"
+        ]
+        operation_candidate_mask_rows = refinement["operation_candidate_mask_rows"]
+        operation_decision_rows = refinement["operation_decision_rows"]
         probe_tensors = (
             response_abs_rows, response_rel_rows, response_arm_rows, response_gripper_rows,
             response_arm_null_rows, response_gripper_null_rows, pressure_abs_rows, pressure_rel_rows,
@@ -2036,11 +2822,14 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             selector_entropy_rows, selector_max_rows, selector_query_rows,
             selector_exploration_rows, exit_logit_rows, exit_probability_rows,
             exit_candidate_rows,
+            operation_decision_rows,
         )
         if not all(torch.is_tensor(value) for value in probe_tensors):
             raise TypeError("refinement returned invalid probe tensors")
         active_float = active_rows.float()
         active_denominator = active_float.sum().clamp_min(1.0)
+        operation_decision_valid = (operation_decision_rows >= 0) & active_rows.bool()
+        operation_decision_denominator = operation_decision_valid.float().sum().clamp_min(1.0)
         exit_candidate_float = exit_candidate_rows.float() * active_float
         exit_candidate_denominator = exit_candidate_float.sum().clamp_min(1.0)
         final_step_index = active_float.sum(dim=1).long().clamp_min(1) - 1
@@ -2107,6 +2896,41 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 return torch.zeros((), device=device, dtype=torch.float32)
             return torch.quantile(selected, float(quantile))
 
+        zero_chart_error = torch.zeros((), device=device, dtype=torch.float32)
+        arm_tangent_null_ratio = zero_chart_error
+        gripper_tangent_null_ratio = zero_chart_error
+        noisy_gripper_chart_null_ratio = zero_chart_error
+        with fp32_diagnostic(pred_velocity) as pred_velocity_fp32:
+            if self.response_codec.uses_arm_manifold:
+                arm_field = pred_velocity_fp32[..., : 2 * int(self.config.arm_dim)]
+                _, _, arm_null = self.response_codec.project_arm_tangent(arm_field)
+                arm_tangent_null_ratio = (
+                    arm_null.square().sum()
+                    / arm_field.square().sum().clamp_min(1e-8)
+                )
+            if self.response_codec.uses_parseval_gripper_field:
+                arm_span = 2 * int(self.config.arm_dim)
+                grip_field = pred_velocity_fp32[..., arm_span:]
+                grip_null = grip_field - self.response_codec.project_gripper_field(
+                    grip_field
+                )
+                gripper_tangent_null_ratio = (
+                    grip_null.square().sum()
+                    / grip_field.square().sum().clamp_min(1e-8)
+                )
+        if self.response_codec.uses_parseval_gripper_field:
+            with fp32_diagnostic(noisy_physical) as noisy_physical_fp32:
+                arm_span = 2 * int(self.config.arm_dim)
+                noisy_grip_field = noisy_physical_fp32[..., arm_span:]
+                noisy_grip_null = (
+                    noisy_grip_field
+                    - self.response_codec.project_gripper_field(noisy_grip_field)
+                )
+                noisy_gripper_chart_null_ratio = (
+                    noisy_grip_null.square().sum()
+                    / noisy_grip_field.square().sum().clamp_min(1e-8)
+                )
+
         result: dict[str, Tensor] = {
             "hierarchical_mmdit_output_contract_norm": output_contract_norm,
             "pred_velocity": pred_velocity,
@@ -2118,6 +2942,22 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "hierarchical_mmdit_condition_token_norm": torch.stack(condition_norm_rows).mean(),
             "hierarchical_mmdit_noisy_token_norm": noisy.detach().float().norm(dim=-1).mean(),
             "hierarchical_mmdit_noisy_gate_mean": noisy_gate_mean,
+            "hierarchical_mmdit_native_time_chart_active": torch.tensor(
+                float(self.native_time_action_chart), device=device
+            ),
+            "hierarchical_mmdit_native_time_chart_complete": torch.tensor(
+                float(
+                    self.response_codec.uses_arm_manifold
+                    and self.response_codec.uses_parseval_gripper_field
+                ),
+                device=device,
+            ),
+            "hierarchical_mmdit_native_time_position_alignment": torch.tensor(
+                float(self.native_time_action_chart), device=device
+            ),
+            "hierarchical_mmdit_velocity_arm_tangent_null_ratio": arm_tangent_null_ratio,
+            "hierarchical_mmdit_velocity_gripper_tangent_null_ratio": gripper_tangent_null_ratio,
+            "hierarchical_mmdit_noisy_gripper_chart_null_ratio": noisy_gripper_chart_null_ratio,
             "hierarchical_mmdit_step_state_norm": torch.stack(step_state_rows).mean(),
             "hierarchical_mmdit_refine_steps": torch.tensor(float(self.refine_steps), device=device),
             "hierarchical_mmdit_distinct_blocks": torch.tensor(
@@ -2129,6 +2969,22 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "hierarchical_mmdit_shared_core_count": torch.zeros((), device=device),
             "hierarchical_mmdit_operator_stage_count": torch.tensor(
                 float(self.operator_stage_count), device=device
+            ),
+            "hierarchical_mmdit_unified_controller": torch.tensor(
+                float(self.unified_controller is not None), device=device
+            ),
+            "hierarchical_mmdit_control_token_count": torch.tensor(
+                float(
+                    0 if self.unified_controller is None
+                    else self.unified_controller.control_count
+                ),
+                device=device,
+            ),
+            "hierarchical_mmdit_unified_operator_depth_owner": torch.tensor(
+                float(self.unified_controller is not None), device=device
+            ),
+            "hierarchical_mmdit_legacy_operator_depth_owner": torch.tensor(
+                float(self.unified_controller is None), device=device
             ),
             "hierarchical_mmdit_refine_block_count": torch.tensor(
                 float(self.refine_block_count), device=device
@@ -2144,6 +3000,22 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "hierarchical_mmdit_post_gate_sidecar": torch.ones((), device=device),
             "hierarchical_mmdit_shared_amplitude_owner": torch.ones((), device=device),
             "hierarchical_mmdit_duplicate_amplitude_owner": torch.zeros((), device=device),
+            "hierarchical_mmdit_unified_update_amplitude_owner": torch.zeros(
+                (), device=device
+            ),
+            "hierarchical_mmdit_host_update_amplitude_owner": torch.ones(
+                (), device=device
+            ),
+            "hierarchical_mmdit_unified_relative_update_keep_owner": torch.tensor(
+                float(self.unified_controller is not None), device=device
+            ),
+            "hierarchical_mmdit_structured_control_width": torch.tensor(
+                float(
+                    self.operator_stage_count
+                    * len(OwnedHierarchicalActionBlock._BRANCH_NAMES)
+                ),
+                device=device,
+            ),
             "hierarchical_mmdit_operator_geometry_identifiable": torch.ones((), device=device),
             "hierarchical_mmdit_operator_boundary_identity": torch.ones((), device=device),
             "hierarchical_mmdit_operator_nested_path": torch.ones((), device=device),
@@ -2231,13 +3103,31 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "hierarchical_mmdit_learned_execution_active": torch.tensor(
                 float(routing_mode == "learned"), device=device
             ),
+            **{
+                f"hierarchical_mmdit_operation_{name}_rate": (
+                    ((operation_decision_rows == index) & operation_decision_valid)
+                    .float().sum() / operation_decision_denominator
+                )
+                for index, name in enumerate(("stay", "advance", "exit"))
+            },
             "hierarchical_mmdit_single_consumption_owner": torch.ones((), device=device),
             "hierarchical_mmdit_serial_composition": torch.ones((), device=device),
             "hierarchical_mmdit_competitive_market": torch.zeros((), device=device),
             "owned_workspace_state_pre_dit": torch.ones((), device=device),
             "owned_workspace_trajectory_is_proposal": torch.ones((), device=device),
             "intent_noisy_input_present": torch.zeros((), device=device),
-            "owned_workspace_fixed_role_prior": torch.ones((), device=device),
+            "owned_workspace_fixed_role_prior": torch.tensor(
+                float(self.unified_controller is None), device=device
+            ),
+            "owned_workspace_unified_role_selector": torch.tensor(
+                float(self.unified_controller is not None), device=device
+            ),
+            "owned_workspace_controller_token_interface": torch.tensor(
+                float(self.workspace.controller_interface is not None), device=device
+            ),
+            "owned_workspace_controller_value_firewall": torch.tensor(
+                float(self.workspace.controller_interface is not None), device=device
+            ),
             "owned_workspace_role_count": torch.tensor(
                 float(len(self.workspace.memory_bank.ROLE_NAMES)), device=device
             ),
@@ -2254,6 +3144,23 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "refinement_probe_exit_candidates": exit_candidate_rows.detach(),
             **initializer_metrics,
         }
+        if (
+            torch.is_tensor(operation_logits_rows)
+            and torch.is_tensor(operation_update_rows)
+            and torch.is_tensor(operation_candidate_prediction_rows)
+            and torch.is_tensor(operation_candidate_mask_rows)
+        ):
+            result["hierarchical_mmdit_operation_logits"] = operation_logits_rows
+            result["hierarchical_mmdit_operation_update_logits"] = (
+                operation_update_rows
+            )
+            result["hierarchical_mmdit_operation_exit_logits"] = operation_exit_rows
+            result["hierarchical_mmdit_operation_candidate_predictions"] = (
+                operation_candidate_prediction_rows.detach()
+            )
+            result["hierarchical_mmdit_operation_candidate_mask"] = (
+                operation_candidate_mask_rows.detach()
+            )
         for time_bin in range(3):
             for label, quantile in (("p25", 0.25), ("p50", 0.50), ("p75", 0.75)):
                 result[
@@ -2288,9 +3195,11 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             shadow_stage_ids = shadow["stage_id_rows"]
             shadow_block_ids = shadow["block_id_rows"]
             shadow_active = shadow["active_rows"]
+            shadow_operation_decisions = shadow["operation_decision_rows"]
             if all(torch.is_tensor(value) for value in (
                 shadow_steps, shadow_unresolved, shadow_budget_exhausted,
                 shadow_stage_ids, shadow_block_ids, shadow_active,
+                shadow_operation_decisions,
             )):
                 result["hierarchical_mmdit_shadow_executed_steps"] = shadow_steps.float().mean()
                 result["hierarchical_mmdit_shadow_unresolved_rate"] = shadow_unresolved.float().mean()
@@ -2309,6 +3218,20 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 result["hierarchical_mmdit_shadow_final_block"] = (
                     final_shadow_block.float().mean()
                 )
+                shadow_decision_valid = (
+                    (shadow_operation_decisions >= 0) & shadow_active.bool()
+                )
+                shadow_decision_denominator = (
+                    shadow_decision_valid.float().sum().clamp_min(1.0)
+                )
+                for index, name in enumerate(("stay", "advance", "exit")):
+                    result[f"hierarchical_mmdit_shadow_operation_{name}_rate"] = (
+                        (
+                            (shadow_operation_decisions == index)
+                            & shadow_decision_valid
+                        ).float().sum()
+                        / shadow_decision_denominator
+                    )
                 shadow_denominator = shadow_active.float().sum().clamp_min(1.0)
                 for stage_index in range(self.operator_stage_count):
                     result[f"hierarchical_mmdit_shadow_stage_{stage_index}_usage"] = (
@@ -2338,6 +3261,10 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
         mmdit_mean = self._mean_metrics(mmdit_rows)
         for key, value in mmdit_mean.items():
             if not key.endswith("_rows"):
+                result[f"hierarchical_mmdit_{key}"] = value
+        if isinstance(controller_rows, list) and controller_rows:
+            controller_mean = self._mean_metrics(controller_rows)
+            for key, value in controller_mean.items():
                 result[f"hierarchical_mmdit_{key}"] = value
         depth_costs = [
             row[f"action_{branch}_depth_usage_cost"]
@@ -2376,7 +3303,10 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                     "operator_gain_rows",
                     "update_rms_rows",
                     "host_update_rms_rows",
+                    "contracted_rms_rows",
                     "base_gate_rows",
+                    "effective_gate_rows",
+                    "update_keep_rows",
                     "direction_change_rows",
                 ):
                     key = f"action_{branch}_{metric_name}"

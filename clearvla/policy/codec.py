@@ -8,6 +8,193 @@ import torch
 from torch import Tensor, nn
 
 
+def _orthonormal_dct_matrix(horizon: int) -> Tensor:
+    """Build the orthonormal DCT-II matrix used by FAST-style encoding."""
+    horizon = int(horizon)
+    if horizon < 1:
+        raise ValueError("DCT horizon must be positive")
+    time = torch.arange(horizon, dtype=torch.float64)[None, :]
+    frequency = torch.arange(horizon, dtype=torch.float64)[:, None]
+    matrix = torch.cos(
+        torch.pi / float(horizon) * (time + 0.5) * frequency
+    )
+    matrix[0] *= float(horizon) ** -0.5
+    if horizon > 1:
+        matrix[1:] *= (2.0 / float(horizon)) ** 0.5
+    return matrix.to(torch.float32)
+
+
+class TemporalDCT(nn.Module):
+    """Exact orthonormal DCT/IDCT over the action horizon.
+
+    FAST additionally quantizes and BPE-encodes coefficients for
+    autoregressive VLAs. Those operations deliberately do not belong in the
+    continuous flow-matching path.
+    """
+
+    def __init__(self, horizon: int) -> None:
+        super().__init__()
+        horizon = int(horizon)
+        self.horizon = horizon
+        self.register_buffer(
+            "matrix",
+            _orthonormal_dct_matrix(horizon),
+            persistent=True,
+        )
+
+    def _check_input(self, values: Tensor, name: str) -> None:
+        if values.ndim < 2 or int(values.shape[-2]) != self.horizon:
+            raise ValueError(
+                f"{name} must have a horizon dimension of {self.horizon}, "
+                f"got {tuple(values.shape)}"
+            )
+
+    @staticmethod
+    def _compute_dtype(values: Tensor) -> torch.dtype:
+        return torch.float64 if values.dtype == torch.float64 else torch.float32
+
+    def encode(self, values: Tensor) -> Tensor:
+        """Map ``[..., time, channels]`` to ``[..., frequency, channels]``."""
+        self._check_input(values, "values")
+        compute_dtype = self._compute_dtype(values)
+        with torch.autocast(device_type=values.device.type, enabled=False):
+            matrix = self.matrix.to(device=values.device, dtype=compute_dtype)
+            coefficients = torch.einsum(
+                "kt,...tc->...kc", matrix, values.to(dtype=compute_dtype)
+            )
+        return coefficients.to(dtype=values.dtype)
+
+    def decode(self, coefficients: Tensor) -> Tensor:
+        """Map ``[..., frequency, channels]`` back to native time."""
+        self._check_input(coefficients, "coefficients")
+        compute_dtype = self._compute_dtype(coefficients)
+        with torch.autocast(device_type=coefficients.device.type, enabled=False):
+            matrix = self.matrix.to(device=coefficients.device, dtype=compute_dtype)
+            values = torch.einsum(
+                "tk,...kc->...tc",
+                matrix.transpose(0, 1),
+                coefficients.to(dtype=compute_dtype),
+            )
+        return values.to(dtype=coefficients.dtype)
+
+    def forward(self, values: Tensor) -> Tensor:
+        return self.encode(values)
+
+    def low_frequency(self, coefficients: Tensor, keep: int) -> Tensor:
+        """Return a truncated copy; the source tensor is never modified."""
+        self._check_input(coefficients, "coefficients")
+        keep = int(keep)
+        if keep < 1 or keep > self.horizon:
+            raise ValueError(f"keep must be in [1, {self.horizon}], got {keep}")
+        if keep == self.horizon:
+            return coefficients.clone()
+        mask = torch.arange(self.horizon, device=coefficients.device) < keep
+        view_shape = [1] * (coefficients.ndim - 2) + [self.horizon, 1]
+        return coefficients * mask.view(*view_shape)
+
+    def frequency_energy(self, coefficients: Tensor) -> Tensor:
+        """Return mean squared coefficient energy for each frequency."""
+        self._check_input(coefficients, "coefficients")
+        reduce_dims = tuple(range(coefficients.ndim - 2)) + (coefficients.ndim - 1,)
+        return coefficients.float().square().mean(dim=reduce_dims)
+
+
+class ActionTemporalDCT(nn.Module):
+    """Shared time chart with separate arm/gripper analysis boundaries."""
+
+    def __init__(
+        self,
+        horizon: int,
+        *,
+        arm_dims: tuple[int, ...] = (0, 1, 2, 3, 4, 5),
+        gripper_index: int = -1,
+    ) -> None:
+        super().__init__()
+        self.temporal = TemporalDCT(horizon)
+        self.horizon = int(horizon)
+        self.arm_dims = tuple(int(index) for index in arm_dims)
+        self.gripper_index = int(gripper_index)
+
+    def _resolve_gripper(self, action_dim: int) -> int:
+        index = self.gripper_index
+        if index < 0:
+            index += int(action_dim)
+        if index < 0 or index >= int(action_dim):
+            raise ValueError(
+                f"gripper index {self.gripper_index} resolves outside action_dim={action_dim}"
+            )
+        return index
+
+    def _validate_groups(self, action_dim: int) -> int:
+        gripper = self._resolve_gripper(action_dim)
+        if len(set(self.arm_dims)) != len(self.arm_dims):
+            raise ValueError("arm_dims must not contain duplicates")
+        if any(index < 0 or index >= int(action_dim) for index in self.arm_dims):
+            raise ValueError(f"arm_dims={self.arm_dims} outside action_dim={action_dim}")
+        if gripper in self.arm_dims:
+            raise ValueError("gripper dimension must not also be listed in arm_dims")
+        return gripper
+
+    def encode(self, action: Tensor) -> Tensor:
+        if action.ndim < 3:
+            raise ValueError(f"action must have [.., time, channels], got {tuple(action.shape)}")
+        self._validate_groups(int(action.shape[-1]))
+        return self.temporal.encode(action)
+
+    def decode(self, coefficients: Tensor) -> Tensor:
+        if coefficients.ndim < 3:
+            raise ValueError(
+                f"coefficients must have [.., frequency, channels], got {tuple(coefficients.shape)}"
+            )
+        self._validate_groups(int(coefficients.shape[-1]))
+        return self.temporal.decode(coefficients)
+
+    def groups(self, values: Tensor) -> dict[str, Tensor]:
+        if values.ndim < 3:
+            raise ValueError(f"values must have [.., time, channels], got {tuple(values.shape)}")
+        gripper = self._validate_groups(int(values.shape[-1]))
+        return {
+            "arm": values[..., list(self.arm_dims)],
+            "gripper": values[..., [gripper]],
+        }
+
+    def group_frequency_energy(self, coefficients: Tensor) -> dict[str, Tensor]:
+        return {
+            name: self.temporal.frequency_energy(value)
+            for name, value in self.groups(coefficients).items()
+        }
+
+    def low_frequency(
+        self,
+        coefficients: Tensor,
+        *,
+        arm_keep: int | None = None,
+        gripper_keep: int | None = None,
+    ) -> Tensor:
+        """Truncate groups independently without changing the source tensor."""
+        if coefficients.ndim < 3:
+            raise ValueError(
+                f"coefficients must have [.., frequency, channels], got {tuple(coefficients.shape)}"
+            )
+        action_dim = int(coefficients.shape[-1])
+        gripper = self._validate_groups(action_dim)
+        for name, keep in (("arm", arm_keep), ("gripper", gripper_keep)):
+            if keep is not None and (int(keep) < 1 or int(keep) > self.horizon):
+                raise ValueError(f"{name}_keep must be in [1, {self.horizon}], got {keep}")
+        mask = torch.ones(
+            self.horizon,
+            action_dim,
+            device=coefficients.device,
+            dtype=coefficients.dtype,
+        )
+        if arm_keep is not None and int(arm_keep) < self.horizon:
+            mask[int(arm_keep):, list(self.arm_dims)] = 0
+        if gripper_keep is not None and int(gripper_keep) < self.horizon:
+            mask[int(gripper_keep):, gripper] = 0
+        view_shape = [1] * (coefficients.ndim - 2) + [self.horizon, action_dim]
+        return coefficients * mask.view(*view_shape)
+
+
 class PhysicalActionConfig(Protocol):
     action_horizon: int
     hidden_size: int
@@ -209,6 +396,14 @@ class PhysicalActionCodec(nn.Module):
             return self.gripper_frame.project(field)
         return field
 
+    def encode_gripper_tangent(self, native_velocity: Tensor) -> Tensor:
+        """Expand a native-time gripper velocity into the Parseval field."""
+        if self.gripper_frame is None:
+            raise RuntimeError(
+                "gripper tangent expansion requires gripper_field_mode=parseval_temporal"
+            )
+        return self.gripper_frame.analysis(native_velocity)
+
     def _arm_difference(self, arm: Tensor) -> Tensor:
         matrix = self.arm_difference_matrix.to(device=arm.device, dtype=torch.float32)
         # V70: keep the consistency-defining arithmetic out of bf16 autocast
@@ -216,6 +411,22 @@ class PhysicalActionCodec(nn.Module):
         with torch.autocast(device_type=arm.device.type, enabled=False):
             delta = torch.einsum("ts,bsd->btd", matrix, arm.float())
         return delta.to(dtype=arm.dtype)
+
+    def encode_arm_tangent(self, native_velocity: Tensor) -> Tensor:
+        """Expand native arm velocity into the [absolute, delta] tangent."""
+        if (
+            native_velocity.ndim != 3
+            or int(native_velocity.shape[1]) != int(self.config.action_horizon)
+            or int(native_velocity.shape[-1]) != self.arm_dim
+        ):
+            raise ValueError(
+                "native arm velocity must be "
+                f"[B,{int(self.config.action_horizon)},{self.arm_dim}], "
+                f"got {tuple(native_velocity.shape)}"
+            )
+        return torch.cat(
+            [native_velocity, self._arm_difference(native_velocity)], dim=-1
+        )
 
     def _sample_native_arm_noise(
         self,
@@ -487,6 +698,120 @@ class PhysicalActionTokenLift(nn.Module):
                 + self.grip_delta(grip_delta) + comp[:, 3, None]
                 + self.grip_extra(grip_extra) + comp[:, 4, None]
             )
+        return self.mix(x)
+
+
+class NativeTimePhysicalActionTokenLift(nn.Module):
+    """Lift physical flow state after restoring one-token/one-time semantics.
+
+    Linear manifold coordinates are synthesized before learned projection:
+    arm delta is omitted when it is determined by arm absolute state, and the
+    delayed Parseval gripper frame is mapped back to its native timeline. The
+    legacy independent coordinates remain available only when no exact chart
+    exists for them.
+    """
+
+    def __init__(self, config: PhysicalActionConfig) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        ad = int(config.arm_dim)
+        self.config = config
+        self.codec = PhysicalActionCodec(config)
+        self.arm_manifold = str(config.arm_flow_mode) == "manifold_native"
+        self.parseval_gripper = (
+            str(config.gripper_field_mode) == "parseval_temporal"
+        )
+        self.arm_native = nn.Linear(ad, h) if self.arm_manifold else None
+        self.arm_abs = None if self.arm_manifold else nn.Linear(ad, h)
+        self.arm_delta = None if self.arm_manifold else nn.Linear(ad, h)
+        if self.parseval_gripper:
+            self.grip_native = nn.Linear(1, h)
+            self.grip_value = None
+            self.grip_delta = None
+            self.grip_extra = None
+        else:
+            self.grip_native = None
+            self.grip_value = nn.Linear(1, h)
+            self.grip_delta = nn.Linear(1, h)
+            self.grip_extra = nn.Linear(
+                max(int(config.gripper_field_dim) - 2, 1), h
+            )
+        component_count = (
+            1
+            + int(not self.arm_manifold)
+            + (1 if self.parseval_gripper else 3)
+        )
+        self.component_type = nn.Parameter(
+            torch.randn(1, component_count, h) * 0.02
+        )
+        self.mix = nn.Sequential(
+            nn.LayerNorm(h),
+            nn.Linear(h, 2 * h),
+            nn.SiLU(),
+            nn.Linear(2 * h, h),
+        )
+
+    def forward(self, physical: Tensor) -> Tensor:
+        ad = int(self.config.arm_dim)
+        gf = int(self.config.gripper_field_dim)
+        if (
+            physical.ndim != 3
+            or int(physical.shape[1]) != int(self.config.action_horizon)
+            or int(physical.shape[-1]) != int(self.config.physical_action_dim)
+        ):
+            raise ValueError(
+                "native-time physical lift received an invalid flow tensor: "
+                f"{tuple(physical.shape)}"
+            )
+        arm_field = physical[..., : 2 * ad]
+        grip_field = physical[..., 2 * ad : 2 * ad + gf]
+        component = self.component_type.to(
+            device=physical.device, dtype=physical.dtype
+        )
+        index = 0
+        if self.arm_manifold:
+            if self.arm_native is None:
+                raise RuntimeError("native arm lift is not initialized")
+            # The state itself lives on an action-state-anchored affine
+            # manifold. Its absolute half is already the exact native chart;
+            # project_arm_tangent is reserved for zero-anchored velocities.
+            native_arm = arm_field[..., :ad]
+            x = self.arm_native(native_arm) + component[:, index, None]
+        else:
+            if self.arm_abs is None or self.arm_delta is None:
+                raise RuntimeError("legacy arm lift is not initialized")
+            arm_abs = arm_field[..., :ad]
+            arm_delta = arm_field[..., ad:]
+            x = self.arm_abs(arm_abs) + component[:, index, None]
+        index += 1
+        if self.arm_delta is not None:
+            x = x + self.arm_delta(arm_delta) + component[:, index, None]
+            index += 1
+        if self.parseval_gripper:
+            if self.grip_native is None:
+                raise RuntimeError("native gripper lift is not initialized")
+            native_grip = self.codec.decode_gripper_field(grip_field)
+            x = x + self.grip_native(native_grip) + component[:, index, None]
+        else:
+            if (
+                self.grip_value is None
+                or self.grip_delta is None
+                or self.grip_extra is None
+            ):
+                raise RuntimeError("legacy gripper lift is not initialized")
+            grip_extra = grip_field[..., 2:]
+            if int(grip_extra.shape[-1]) == 0:
+                grip_extra = torch.zeros(
+                    *grip_field.shape[:-1],
+                    1,
+                    device=physical.device,
+                    dtype=physical.dtype,
+                )
+            x = x + self.grip_value(grip_field[..., :1]) + component[:, index, None]
+            index += 1
+            x = x + self.grip_delta(grip_field[..., 1:2]) + component[:, index, None]
+            index += 1
+            x = x + self.grip_extra(grip_extra) + component[:, index, None]
         return self.mix(x)
 
 

@@ -24,14 +24,53 @@ class PolicyEvidenceConfig(Protocol):
     latent_cvae_ffn_expansion: float
     latent_cvae_causal_attention: int
     latent_cvae_stage_promote_scale_init: float
+    hierarchical_mmdit_unified_controller: int
+    hierarchical_mmdit_controller_heads: int
+    hierarchical_mmdit_controller_ffn_expansion: float
 
 
 @dataclass
 class PreparedEvidenceMemory:
+    tokens: Tensor
     key_bias: Tensor
     ranges: dict[str, tuple[int, int]]
+    role_ranges: dict[str, tuple[tuple[int, int], ...]]
     block_kv: tuple[tuple[Tensor, Tensor], ...]
     batch_size: int
+
+
+@dataclass
+class WorkspaceControlOverride:
+    """Read-only multi-token state supplied by the unified controller.
+
+    Workspace-owned interface attention converts this state into selector
+    controls.  The controller state itself never enters an evidence value
+    stream.
+    """
+
+    control_tokens: Tensor
+    control_addresses: Tensor | None = None
+
+
+@dataclass
+class WorkspaceControllerInterfaceOutput:
+    low_query_delta: Tensor
+    stage_query_delta: Tensor
+    promote_gate: Tensor
+    low_control_attention: Tensor
+    metrics: dict[str, Tensor]
+
+
+@dataclass
+class StagePromotionOutput:
+    next_content: Tensor
+    attention_weights: Tensor
+    projected: Tensor
+    normalized: Tensor
+    gated: Tensor
+    gate_rows: Tensor
+    retain: Tensor
+    residual_scale: Tensor
 
 
 class EvidenceMemoryBank(nn.Module):
@@ -146,9 +185,22 @@ class EvidenceMemoryBank(nn.Module):
             allow_empty=False,
         )
         assert memory is not None
+        role_ranges = {
+            role: tuple(
+                (start, stop)
+                for name, (start, stop) in ranges.items()
+                if self._source_role(name) == role
+            )
+            for role in self.ROLE_NAMES
+        }
+        role_ranges = {
+            role: value for role, value in role_ranges.items() if value
+        }
         return PreparedEvidenceMemory(
+            tokens=memory,
             key_bias=key_bias,
             ranges=ranges,
+            role_ranges=role_ranges,
             block_kv=tuple(block.project_memory(memory) for block in blocks),
             batch_size=batch_size,
         )
@@ -548,6 +600,242 @@ class HierarchicalWorkspaceManager(nn.Module):
             stage_output_strength,
             metrics,
         )
+
+
+class WorkspaceControllerInterface(nn.Module):
+    """Token-to-token selector bridge from controller state to workspace.
+
+    Workspace role/content tensors are queries only.  Values come exclusively
+    from controller state, so this interface can make retrieval and promotion
+    state-dependent without creating a stage/action -> evidence value bypass.
+    """
+
+    def __init__(self, config: PolicyEvidenceConfig, *, role_count: int) -> None:
+        super().__init__()
+        h = int(config.hidden_size)
+        heads = int(config.hierarchical_mmdit_controller_heads)
+        if h % heads:
+            raise ValueError(
+                "workspace controller interface hidden_size must be divisible by heads"
+            )
+        # Preserve the host model's dropout stream while the zero-initialized
+        # interface is behaviorally neutral.
+        dropout = 0.0
+        expansion = float(config.hierarchical_mmdit_controller_ffn_expansion)
+        self.hidden_size = h
+        self.role_count = int(role_count)
+        if self.role_count < 1:
+            raise ValueError("workspace controller interface needs semantic roles")
+        self.low_query_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.low_role_identity = nn.Parameter(
+            torch.randn(1, self.role_count, h) * 0.02
+        )
+        self.low_role_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.low_role_query = nn.Linear(h, h, bias=False)
+        self.stage_role_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_content_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.stage_role_query = nn.Linear(h, h, bias=False)
+        self.stage_content_query = nn.Linear(h, h, bias=False)
+        self.query_type = nn.Parameter(torch.randn(1, 2, h) * 0.02)
+        self.query_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.control_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.cross_attn = nn.MultiheadAttention(
+            h,
+            heads,
+            dropout=dropout,
+            bias=False,
+            batch_first=True,
+        )
+        self.self_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.self_attn = nn.MultiheadAttention(
+            h,
+            heads,
+            dropout=dropout,
+            bias=False,
+            batch_first=True,
+        )
+        self.ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.ffn = BiasFreeFFN(h, expansion)
+        self.final_norm = nn.LayerNorm(h, elementwise_affine=False)
+        self.drop = nn.Dropout(dropout)
+        self.low_query_out = nn.Linear(h, h, bias=False)
+        self.stage_query_out = nn.Linear(h, h, bias=False)
+        self.promote_out = nn.Linear(h, 1, bias=False)
+        nn.init.zeros_(self.low_query_out.weight)
+        nn.init.zeros_(self.stage_query_out.weight)
+        nn.init.zeros_(self.promote_out.weight)
+        promote = 0.10
+        self.register_buffer(
+            "promote_base_logit",
+            torch.tensor(math.log(promote / (1.0 - promote))),
+            persistent=True,
+        )
+
+    @staticmethod
+    def _attention_metrics(
+        weights: Tensor,
+        *,
+        prefix: str,
+    ) -> dict[str, Tensor]:
+        probability = weights.detach().float().mean(dim=1)
+        probability = probability / probability.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        entropy = -(
+            probability.clamp_min(1e-8) * probability.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        control_load = probability.mean(dim=1)
+        control_load = control_load / control_load.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        control_load_entropy = -(
+            control_load.clamp_min(1e-8) * control_load.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        slot_diversity = (
+            probability - probability.mean(dim=1, keepdim=True)
+        ).square().sum(dim=-1).sqrt()
+        return {
+            f"{prefix}_attention_entropy": entropy.mean(),
+            f"{prefix}_attention_max": probability.max(dim=-1).values.mean(),
+            f"{prefix}_effective_control_tokens": torch.exp(entropy).mean(),
+            f"{prefix}_slot_diversity": slot_diversity.mean(),
+            # ``prefix`` already identifies the control stream.  Do not add a
+            # second ``control`` segment; the old key made the runtime read a
+            # permanently missing metric and silently print zero.
+            f"{prefix}_load_effective_tokens": torch.exp(
+                control_load_entropy
+            ).mean(),
+        }
+
+    def forward(
+        self,
+        *,
+        control_tokens: Tensor,
+        control_addresses: Tensor | None = None,
+        low_query: Tensor,
+        low_role_ids: Tensor,
+        stage_role: Tensor,
+        stage_content: Tensor,
+    ) -> WorkspaceControllerInterfaceOutput:
+        if control_tokens.ndim != 3 or int(control_tokens.shape[-1]) != self.hidden_size:
+            raise ValueError("workspace controller tokens must be [B,C,H]")
+        batch = int(control_tokens.shape[0])
+        if control_addresses is None:
+            control_addresses = torch.zeros_like(control_tokens)
+        if tuple(control_addresses.shape) != tuple(control_tokens.shape):
+            raise ValueError("workspace controller addresses must match control tokens")
+        low_count = int(low_query.shape[1])
+        stage_count = int(stage_role.shape[1])
+        if int(control_tokens.shape[1]) < 1 or low_count < 1 or stage_count < 1:
+            raise ValueError(
+                "workspace controller interface requires control, low, and stage tokens"
+            )
+        for name, value, expected_count in (
+            ("low_query", low_query, low_count),
+            ("stage_role", stage_role, stage_count),
+            ("stage_content", stage_content, stage_count),
+        ):
+            if tuple(value.shape) != (batch, expected_count, self.hidden_size):
+                raise ValueError(
+                    f"workspace interface {name} has invalid shape {tuple(value.shape)}"
+                )
+        if tuple(low_role_ids.shape) != (low_count,):
+            raise ValueError("workspace interface low_role_ids must be [L]")
+        low_role_ids = low_role_ids.to(device=low_query.device, dtype=torch.long)
+        if low_role_ids.device.type == "cpu" and (
+            bool((low_role_ids < 0).any())
+            or bool((low_role_ids >= self.role_count).any())
+        ):
+            raise ValueError("workspace interface low_role_ids are out of range")
+        low_role = self.low_role_identity.to(
+            device=low_query.device, dtype=low_query.dtype
+        ).index_select(1, low_role_ids).expand(batch, -1, -1)
+        low = (
+            self.low_query_norm(low_query)
+            + self.low_role_query(self.low_role_norm(low_role))
+            + self.query_type[:, 0:1].to(device=low_query.device, dtype=low_query.dtype)
+        )
+        stage = (
+            self.stage_role_query(self.stage_role_norm(stage_role))
+            + self.stage_content_query(self.stage_content_norm(stage_content))
+            + self.query_type[:, 1:2].to(device=stage_role.device, dtype=stage_role.dtype)
+        )
+        query = torch.cat([low, stage], dim=1)
+        # Address is retrieval geometry only. It changes K, never V, so the
+        # controller can choose which memory slot to read without fabricating
+        # evidence content for the workspace.
+        control_key = self.control_norm(control_tokens + control_addresses)
+        control_value = self.control_norm(control_tokens)
+        cross, weights = self.cross_attn(
+            self.query_norm(query),
+            control_key,
+            control_value,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        # Do not add query here.  Every interface output must remain a function
+        # of controller values rather than a workspace-only shortcut.
+        state = cross
+        self_value = self.self_norm(state)
+        self_update, _ = self.self_attn(
+            self_value, self_value, self_value, need_weights=False
+        )
+        state = state + self.drop(self_update)
+        state = state + self.drop(self.ffn(self.ffn_norm(state)))
+        state = self.final_norm(state)
+        low_state, stage_state = state.split((low_count, stage_count), dim=1)
+        low_delta = self.low_query_out(low_state)
+        stage_delta = self.stage_query_out(stage_state)
+        promote_gate = torch.sigmoid(
+            self.promote_base_logit.to(device=state.device, dtype=state.dtype)
+            + self.promote_out(stage_state).squeeze(-1)
+        )
+
+        low_weights = weights[:, :, :low_count]
+        stage_weights = weights[:, :, low_count:]
+        low_probability = low_weights.detach().float().mean(dim=1)
+        low_probability = low_probability / low_probability.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        metrics = {
+            "workspace_interface_control_response_norm": cross.detach().float().norm(dim=-1).mean(),
+            "workspace_interface_state_norm": state.detach().float().norm(dim=-1).mean(),
+            "workspace_interface_state_slot_diversity": (
+                state.detach().float()
+                - state.detach().float().mean(dim=1, keepdim=True)
+            ).norm(dim=-1).mean(),
+            "workspace_interface_low_query_delta_norm": low_delta.detach().float().norm(dim=-1).mean(),
+            "workspace_interface_low_query_delta_ratio": (
+                low_delta.detach().float().norm(dim=-1)
+                / low_query.detach().float().norm(dim=-1).clamp_min(1e-8)
+            ).mean(),
+            "workspace_interface_stage_query_delta_norm": stage_delta.detach().float().norm(dim=-1).mean(),
+            "workspace_interface_stage_query_delta_ratio": (
+                stage_delta.detach().float().norm(dim=-1)
+                / (
+                    stage_role.detach().float().norm(dim=-1)
+                    + stage_content.detach().float().norm(dim=-1)
+                ).clamp_min(1e-8)
+            ).mean(),
+            "workspace_interface_promote_mean": promote_gate.detach().float().mean(),
+            "workspace_interface_promote_std": promote_gate.detach().float().std(
+                dim=1, unbiased=False
+            ).mean(),
+            "workspace_interface_control_token_count": torch.tensor(
+                float(control_tokens.shape[1]), device=state.device, dtype=torch.float32
+            ),
+            **self._attention_metrics(
+                low_weights, prefix="workspace_interface_low_control"
+            ),
+            **self._attention_metrics(
+                stage_weights, prefix="workspace_interface_stage_control"
+            ),
+        }
+        return WorkspaceControllerInterfaceOutput(
+            low_query_delta=low_delta,
+            stage_query_delta=stage_delta,
+            promote_gate=promote_gate,
+            low_control_attention=low_probability,
+            metrics=metrics,
+        )
+
+
 class HierarchicalEvidenceWorkspace(nn.Module):
     """Temporary low reads plus persistent, role-separated stage memory."""
 
@@ -695,6 +983,20 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         nn.init.zeros_(self.stage_content_out[-1].bias)
         nn.init.eye_(self.stage_role_out[-1].weight)
         nn.init.zeros_(self.stage_role_out[-1].bias)
+        self.controller_interface: WorkspaceControllerInterface | None = None
+        if int(getattr(config, "hierarchical_mmdit_unified_controller", 0)):
+            host_rng_state = torch.get_rng_state()
+            interface_generator = torch.Generator(device="cpu")
+            interface_generator.manual_seed(
+                (int(torch.initial_seed()) ^ 0x51A7E1F3) % (2**63 - 1)
+            )
+            try:
+                torch.set_rng_state(interface_generator.get_state())
+                self.controller_interface = WorkspaceControllerInterface(
+                    config, role_count=role_count
+                )
+            finally:
+                torch.set_rng_state(host_rng_state)
 
     def _split_heads(self, x: Tensor) -> Tensor:
         b, n, h = x.shape
@@ -774,16 +1076,13 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             content = content + self.stage_init(stage_contract)[:, None]
         return self.stage_norm(content)
 
-    def _low_selector_context(
+    def _low_selector_base(
         self,
         *,
         primary_cond: Tensor,
         read_contract: Tensor | None,
         step_state: Tensor,
-        manager_shift: Tensor,
-        stage_role: Tensor,
-        stage_content: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tensor:
         batch = int(primary_cond.shape[0])
         selector_seed = self.low_selector_seed.to(device=primary_cond.device, dtype=primary_cond.dtype).expand(batch, -1, -1)
         if self.contract_conditioning:
@@ -795,7 +1094,25 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             if self.condition_query is None:
                 raise RuntimeError("legacy condition query is not initialized")
             selector_seed = selector_seed + self.condition_query(primary_cond)[:, None]
-        selector_seed = selector_seed + step_state[:, None] + manager_shift[:, None]
+        return selector_seed + step_state[:, None]
+
+    def _low_selector_context(
+        self,
+        *,
+        selector_seed: Tensor,
+        manager_shift: Tensor,
+        stage_role: Tensor,
+        stage_content: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        if manager_shift.ndim == 2:
+            selector_seed = selector_seed + manager_shift[:, None]
+        elif tuple(manager_shift.shape) == tuple(selector_seed.shape):
+            selector_seed = selector_seed + manager_shift
+        else:
+            raise ValueError(
+                "hierarchical workspace manager shift must be [B,H] or [B,L,H], "
+                f"got {tuple(manager_shift.shape)}"
+            )
         q = self.low_stage_query(selector_seed)
         normalized_role = self.stage_role_selector_norm(stage_role)
         normalized_content = self.stage_content_selector_norm(stage_content)
@@ -825,7 +1142,8 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         primary_cond: Tensor,
         step_state: Tensor,
         promote_gate: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        controller_query_delta: Tensor | None = None,
+    ) -> StagePromotionOutput:
         normalized_role = self.stage_role_selector_norm(stage_role)
         normalized_content = self.stage_content_selector_norm(stage_content)
         q = (
@@ -833,6 +1151,12 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             + self.stage_content_query(normalized_content)
             + self.stage_condition_query(primary_cond + step_state)[:, None]
         )
+        if controller_query_delta is not None:
+            if tuple(controller_query_delta.shape) != tuple(q.shape):
+                raise ValueError(
+                    "workspace stage controller query has the wrong shape"
+                )
+            q = q + controller_query_delta.to(device=q.device, dtype=q.dtype)
         k = self.stage_low_key(low_tokens)
         v = self.stage_low_value(low_tokens)
         promoted, weights = self._attention(q, k, v)
@@ -841,7 +1165,17 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         # non-affine normalized evidence. Otherwise stage_promote_out can grow
         # around the scalar controller through the additive residual path.
         normalized_promoted = self.stage_input_norm(promoted)
-        gated_promoted = normalized_promoted * promote_gate[:, None, None].to(dtype=promoted.dtype)
+        if promote_gate.ndim == 1:
+            promote_scale_rows = promote_gate[:, None, None]
+        elif tuple(promote_gate.shape) == tuple(stage_content.shape[:2]):
+            promote_scale_rows = promote_gate[:, :, None]
+        else:
+            raise ValueError(
+                "hierarchical workspace promotion gate must be [B] or [B,S], "
+                f"got {tuple(promote_gate.shape)}"
+            )
+        promote_scale_rows = promote_scale_rows.to(dtype=promoted.dtype)
+        gated_promoted = normalized_promoted * promote_scale_rows
         gru_input = gated_promoted
         flat_input = gru_input.reshape(-1, self.hidden_size)
         flat_hidden = stage_content.reshape(-1, self.hidden_size)
@@ -849,14 +1183,15 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         recurrent = self.stage_gru(flat_input, flat_hidden).reshape_as(stage_content)
         promote_scale = torch.sigmoid(self.stage_promote_scale_logit).to(device=stage_content.device, dtype=stage_content.dtype)
         next_content = self.stage_norm(recurrent + promote_scale * gated_promoted)
-        return (
-            next_content,
-            weights,
-            promoted,
-            normalized_promoted,
-            gated_promoted,
-            retain,
-            promote_scale,
+        return StagePromotionOutput(
+            next_content=next_content,
+            attention_weights=weights,
+            projected=promoted,
+            normalized=normalized_promoted,
+            gated=gated_promoted,
+            gate_rows=promote_scale_rows,
+            retain=retain,
+            residual_scale=promote_scale,
         )
 
     @staticmethod
@@ -872,6 +1207,7 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         step_index: int,
         read_contract: Tensor | None = None,
         step_state_override: Tensor | None = None,
+        control_override: WorkspaceControlOverride | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
         batch = int(primary_cond.shape[0])
         device = primary_cond.device
@@ -894,25 +1230,110 @@ class HierarchicalEvidenceWorkspace(nn.Module):
                     f"{(batch, self.hidden_size)}, got {tuple(step_state_override.shape)}"
                 )
             step_state = step_state_override.to(device=device, dtype=dtype)
-        (
-            manager_shift,
-            role_bias,
-            promote_gate,
-            low_output_strength,
-            stage_output_strength,
-            manager_metrics,
-        ) = self.manager(
-            primary_cond=primary_cond,
-            step_embedding=step_state,
-            stage_role=stage_role,
-            stage_content=stage_content,
-            memory_bank=self.memory_bank,
-            ranges=prepared_evidence.ranges,
-        )
-        query_context, selector_weights, selector_role, selector_content = self._low_selector_context(
+        selector_base = self._low_selector_base(
             primary_cond=primary_cond,
             read_contract=read_contract,
             step_state=step_state,
+        )
+        stage_query_delta: Tensor | None = None
+        if control_override is None:
+            (
+                manager_shift,
+                role_bias,
+                promote_gate,
+                low_output_strength,
+                stage_output_strength,
+                manager_metrics,
+            ) = self.manager(
+                primary_cond=primary_cond,
+                step_embedding=step_state,
+                stage_role=stage_role,
+                stage_content=stage_content,
+                memory_bank=self.memory_bank,
+                ranges=prepared_evidence.ranges,
+            )
+        else:
+            if self.controller_interface is None:
+                raise RuntimeError(
+                    "workspace control tokens require a controller interface"
+                )
+            control_tokens = control_override.control_tokens.to(
+                device=device, dtype=dtype
+            )
+            control_addresses = (
+                torch.zeros_like(control_tokens)
+                if control_override.control_addresses is None
+                else control_override.control_addresses.to(device=device, dtype=dtype)
+            )
+            if (
+                control_tokens.ndim != 3
+                or int(control_tokens.shape[0]) != batch
+                or int(control_tokens.shape[-1]) != self.hidden_size
+                or tuple(control_addresses.shape) != tuple(control_tokens.shape)
+            ):
+                raise ValueError(
+                    "unified workspace control tokens must be [B,C,H]"
+                )
+            interface = self.controller_interface(
+                control_tokens=control_tokens,
+                control_addresses=control_addresses,
+                low_query=selector_base,
+                low_role_ids=self.low_slot_role_ids,
+                stage_role=stage_role,
+                stage_content=stage_content,
+            )
+            manager_shift = interface.low_query_delta
+            stage_query_delta = interface.stage_query_delta
+            promote_gate = interface.promote_gate
+            role_bias = torch.zeros(
+                batch,
+                int(prepared_evidence.tokens.shape[1]),
+                device=device,
+                dtype=torch.float32,
+            )
+            low_output_strength = torch.ones(batch, device=device, dtype=dtype)
+            stage_output_strength = torch.ones_like(low_output_strength)
+            manager_metrics = {
+                "hierarchical_manager_query_shift_norm": (
+                    manager_shift.detach().float().norm(dim=-1).mean()
+                ),
+                "hierarchical_manager_promote_gate": promote_gate.detach().float().mean(),
+                "hierarchical_manager_low_output_strength": torch.ones(
+                    (), device=device, dtype=torch.float32
+                ),
+                "hierarchical_manager_stage_output_strength": torch.ones(
+                    (), device=device, dtype=torch.float32
+                ),
+                "hierarchical_manager_fixed_output_prior": torch.ones(
+                    (), device=device, dtype=torch.float32
+                ),
+                "hierarchical_manager_fixed_role_prior": torch.zeros(
+                    (), device=device, dtype=torch.float32
+                ),
+                **interface.metrics,
+            }
+            for role_index, role in enumerate(self.memory_bank.ROLE_NAMES):
+                role_mask = self.low_slot_role_ids.to(device=device) == role_index
+                if not bool(role_mask.any()):
+                    continue
+                role_attention = interface.low_control_attention[:, role_mask]
+                role_entropy = -(
+                    role_attention.clamp_min(1e-8)
+                    * role_attention.clamp_min(1e-8).log()
+                ).sum(dim=-1)
+                manager_metrics[
+                    f"workspace_interface_role_{role}_control_entropy"
+                ] = role_entropy.mean()
+                manager_metrics[
+                    f"workspace_interface_role_{role}_effective_control_tokens"
+                ] = torch.exp(role_entropy).mean()
+                manager_metrics[
+                    f"workspace_interface_role_{role}_query_delta_norm"
+                ] = interface.low_query_delta[:, role_mask].detach().float().norm(
+                    dim=-1
+                ).mean()
+        query_context, selector_weights, selector_role, selector_content = self._low_selector_context(
+            selector_seed=selector_base,
             manager_shift=manager_shift,
             stage_role=stage_role,
             stage_content=stage_content,
@@ -948,22 +1369,16 @@ class HierarchicalEvidenceWorkspace(nn.Module):
         low = self.low_final_norm(low)
         low_for_action = low
 
-        (
-            next_stage_content,
-            promote_weights,
-            promoted,
-            normalized_promoted,
-            gated_promoted,
-            retain,
-            promote_scale,
-        ) = self._promote_stage(
+        promotion = self._promote_stage(
             low_tokens=low,
             stage_role=stage_role,
             stage_content=stage_content,
             primary_cond=primary_cond,
             step_state=step_state,
             promote_gate=promote_gate,
+            controller_query_delta=stage_query_delta,
         )
+        next_stage_content = promotion.next_content
         role_component = self.stage_role_out(stage_role)
         content_component = self.stage_content_out(next_stage_content)
         stage_for_action = role_component + content_component
@@ -976,7 +1391,7 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             for start, stop in prepared_evidence.ranges.values()
         ], dim=-1)
         selector_prob = selector_weights.detach().float().clamp_min(1e-8)
-        promote_prob = promote_weights.detach().float().clamp_min(1e-8)
+        promote_prob = promotion.attention_weights.detach().float().clamp_min(1e-8)
         zero = torch.zeros((), device=device, dtype=torch.float32)
         role_norm = role_component.detach().float().norm(dim=-1).mean()
         content_norm = content_component.detach().float().norm(dim=-1).mean()
@@ -1030,24 +1445,24 @@ class HierarchicalEvidenceWorkspace(nn.Module):
             "hierarchical_stage_update_norm": (
                 next_stage_content.detach().float() - stage_content.detach().float()
             ).norm(dim=-1).mean(),
-            "hierarchical_stage_retain_mean": retain.detach().float().mean(),
+            "hierarchical_stage_retain_mean": promotion.retain.detach().float().mean(),
             "hierarchical_stage_promote_attention_entropy": -(promote_prob * promote_prob.log()).sum(dim=-1).mean(),
             "hierarchical_stage_promote_attention_max": promote_prob.max(dim=-1).values.mean(),
-            "hierarchical_stage_promoted_norm": promoted.detach().float().norm(dim=-1).mean(),
+            "hierarchical_stage_promoted_norm": promotion.projected.detach().float().norm(dim=-1).mean(),
             "hierarchical_stage_promoted_projected_rms": (
-                promoted.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
+                promotion.projected.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
             ),
             "hierarchical_stage_promoted_normalized_rms": (
-                normalized_promoted.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
+                promotion.normalized.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
             ),
             "hierarchical_stage_promoted_realized_scale": (
-                gated_promoted.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
+                promotion.gated.detach().float().square().mean(dim=(1, 2)).sqrt().mean()
             ),
             "hierarchical_stage_promote_gate_scale_error": (
-                gated_promoted.detach().float().square().mean(dim=(1, 2)).sqrt()
-                - promote_gate.detach().float().abs()
+                promotion.gated.detach().float().square().mean(dim=-1).sqrt()
+                - promotion.gate_rows.detach().float().squeeze(-1).abs()
             ).abs().mean(),
-            "hierarchical_stage_promote_scale": promote_scale.detach().float(),
+            "hierarchical_stage_promote_scale": promotion.residual_scale.detach().float(),
         }
         metrics["workspace_group_effective_sources"] = torch.exp(metrics["workspace_group_attention_entropy"])
         metrics.update(manager_metrics)

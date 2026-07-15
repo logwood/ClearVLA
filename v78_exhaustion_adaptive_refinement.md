@@ -1,4 +1,4 @@
-# V76：Exhaustion-Driven Stage-Adaptive Refinement
+# V78（原编号 V76 提案）：Exhaustion-Driven Stage-Adaptive Refinement
 
 ## 1. 目标
 

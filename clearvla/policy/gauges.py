@@ -1,7 +1,25 @@
 """Pure diagnostic reductions shared by policy implementations."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import torch
 from torch import Tensor
+
+
+@contextmanager
+def fp32_diagnostic(value: Tensor) -> Iterator[Tensor]:
+    """Yield a detached FP32 tensor outside the active autocast region.
+
+    Diagnostic linear algebra must not inherit the model's AMP dtype or own a
+    gradient path. Keeping both rules here prevents local `.float()` calls from
+    being silently undone by autocast-enabled operations such as matmul.
+    """
+
+    with torch.no_grad(), torch.autocast(
+        device_type=value.device.type, enabled=False
+    ):
+        yield value.detach().to(dtype=torch.float32)
 
 
 def time_stratified_attention(

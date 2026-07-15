@@ -167,6 +167,31 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
         )
         self.workspace.stage_promote_out.load_state_dict(state)
 
+    def test_per_stage_promotion_gate_is_the_realized_scale_contract(self) -> None:
+        stage_content = self.workspace.init_stage(self.primary)
+        stage_role = self.workspace.stage_role.expand(self.batch, -1, -1)
+        promote_gate = torch.tensor([
+            [0.05, 0.10, 0.20],
+            [0.30, 0.15, 0.08],
+        ])
+        promotion = self.workspace._promote_stage(
+            low_tokens=torch.randn(
+                self.batch, self.workspace.low_count, self.config.hidden_size
+            ),
+            stage_role=stage_role,
+            stage_content=stage_content,
+            primary_cond=self.primary,
+            step_state=torch.randn_like(self.primary),
+            promote_gate=promote_gate,
+        )
+        torch.testing.assert_close(
+            promotion.gate_rows.squeeze(-1), promote_gate, atol=0.0, rtol=0.0
+        )
+        realized_scale = promotion.gated.float().square().mean(dim=-1).sqrt()
+        torch.testing.assert_close(
+            realized_scale, promote_gate, atol=2e-5, rtol=0.0
+        )
+
     def test_mmdit_condition_groups_have_length_fair_prior_mass(self) -> None:
         block = LatentCVAEMMDiTBlock(self.config)
         bias = block._hierarchical_key_bias(

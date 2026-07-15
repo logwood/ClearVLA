@@ -426,11 +426,21 @@ class V39PolicyConfig(V38PolicyConfig):
     hierarchical_mmdit_operator_rank: int = 32
     hierarchical_mmdit_operator_groups: int = 32
     hierarchical_mmdit_operator_depth_logit_init: float = 2.0
+    hierarchical_mmdit_exit_logit_init: float = -4.0
     hierarchical_mmdit_operator_contraction_warmup_steps: int = 200
     hierarchical_mmdit_operator_contraction_transition_steps: int = 1500
+    # V85: one recurrent, multi-token control plane for evidence retrieval,
+    # operator selection, stage promotion, and candidate operation policy. The
+    # recurrent slots are exchangeable latent state, not eight fixed roles.
+    hierarchical_mmdit_unified_controller: int = 0
+    hierarchical_mmdit_control_tokens: int = 8
+    hierarchical_mmdit_controller_depth: int = 2
+    hierarchical_mmdit_controller_heads: int = 8
+    hierarchical_mmdit_controller_ffn_expansion: float = 2.0
+    hierarchical_mmdit_operation_candidate_probes: int = 0
     # Training schedule and deployment routing are orthogonal controls. Random
-    # dwell changes block residence during training; shadow/adaptive exhaustion
-    # reads detached action response and stage pressure without a learned gate.
+    # dwell is a legacy schedule option; learned operation selection is driven
+    # by the unified controller's legal candidate policy.
     hierarchical_mmdit_schedule_mode: str = "fixed"
     hierarchical_mmdit_random_prefix_probability: float = 0.0
     hierarchical_mmdit_exhaustion_mode: str = "off"
@@ -438,8 +448,8 @@ class V39PolicyConfig(V38PolicyConfig):
     hierarchical_mmdit_stage_pressure_thresholds: tuple[float, float, float] = (0.0, 0.0, 0.0)
     hierarchical_mmdit_action_response_floor: float = 0.05
     hierarchical_mmdit_exhaustion_confirm_steps: int = 2
-    # V77 host-gate profile.  Contraction is a post-gate sidecar and must not
-    # introduce a second residual-amplitude owner.
+    # V77 host-gate profile. Contraction and controller keeps act on the
+    # completed gated operation; neither may replace the learned host gate.
     hierarchical_mmdit_residual_scale_init: float = 0.05
     hierarchical_mmdit_residual_scale_max: float = 0.20
     hierarchical_mmdit_architecture_version: str = "post_gate_contraction_sidecar_v11_oracle_router"
@@ -702,8 +712,35 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("operator contraction warmup steps must be non-negative")
         if int(self.hierarchical_mmdit_operator_contraction_transition_steps) < 1:
             raise ValueError("operator contraction transition steps must be positive")
+        if int(self.hierarchical_mmdit_unified_controller) not in (0, 1):
+            raise ValueError("hierarchical_mmdit_unified_controller must be 0 or 1")
+        if int(self.hierarchical_mmdit_control_tokens) < 1:
+            raise ValueError("hierarchical_mmdit_control_tokens must be positive")
+        if int(self.hierarchical_mmdit_controller_depth) < 1:
+            raise ValueError("hierarchical_mmdit_controller_depth must be positive")
+        if int(self.hierarchical_mmdit_controller_heads) < 1:
+            raise ValueError("hierarchical_mmdit_controller_heads must be positive")
+        if (
+            int(self.hierarchical_mmdit_unified_controller)
+            and int(self.hidden_size) % int(self.hierarchical_mmdit_controller_heads)
+        ):
+            raise ValueError("hidden_size must be divisible by controller_heads")
+        if float(self.hierarchical_mmdit_controller_ffn_expansion) < 1.0:
+            raise ValueError("controller_ffn_expansion must be >= 1")
+        if (
+            int(self.hierarchical_mmdit_unified_controller)
+            and str(self.final_action_decoder) != "hierarchical_mmdit_action"
+        ):
+            raise ValueError(
+                "hierarchical_mmdit_unified_controller requires "
+                "final_action_decoder=hierarchical_mmdit_action"
+            )
         if str(self.hierarchical_mmdit_schedule_mode) not in {"fixed", "random_dwell"}:
             raise ValueError("hierarchical_mmdit_schedule_mode must be fixed or random_dwell")
+        if int(self.hierarchical_mmdit_operation_candidate_probes) not in {0, 1}:
+            raise ValueError(
+                "hierarchical_mmdit_operation_candidate_probes must be 0 or 1"
+            )
         if not 0.0 <= float(self.hierarchical_mmdit_random_prefix_probability) <= 1.0:
             raise ValueError("hierarchical_mmdit_random_prefix_probability must be in [0,1]")
         if str(self.hierarchical_mmdit_exhaustion_mode) not in {
@@ -735,6 +772,14 @@ class V39PolicyConfig(V38PolicyConfig):
                 raise ValueError(
                     "shadow/adaptive exhaustion requires three calibrated positive stage-pressure thresholds"
                 )
+        if (
+            int(self.hierarchical_mmdit_unified_controller)
+            and str(self.hierarchical_mmdit_exhaustion_mode) in {"shadow", "adaptive"}
+        ):
+            raise ValueError(
+                "the unified controller does not use threshold-based shadow/adaptive exhaustion; "
+                "use off, learned_shadow, or learned"
+            )
         if float(self.hierarchical_mmdit_action_response_floor) <= 0.0:
             raise ValueError("hierarchical_mmdit_action_response_floor must be positive")
         if int(self.hierarchical_mmdit_exhaustion_confirm_steps) < 1:

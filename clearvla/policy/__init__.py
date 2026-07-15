@@ -5,13 +5,21 @@ ownership moves into this package.
 """
 
 from .codec import (
+    ActionTemporalDCT,
+    NativeTimePhysicalActionTokenLift,
     ParsevalGripperTemporalFrame,
     PhysicalActionCodec,
     PhysicalActionTokenLift,
     PhysicalVelocityHead,
+    TemporalDCT,
     TransitionAwarePhysicalVelocityHead,
 )
 from .config import V362PolicyConfig, V38PolicyConfig, V39PolicyConfig
+from .controller import (
+    ControllerMemory,
+    UnifiedControllerOutput,
+    UnifiedHierarchicalController,
+)
 from .decoder import (
     ActionOnlyPhysicalVelocityHead,
     ConditionNeutralActionInitializer,
@@ -25,6 +33,9 @@ from .evidence import (
     OwnedEvidenceMemoryBank,
     PreparedEvidenceMemory,
     SemanticEvidenceWorkspaceBlock,
+    WorkspaceControlOverride,
+    WorkspaceControllerInterface,
+    WorkspaceControllerInterfaceOutput,
 )
 from .intent import IndependentIntentFusion, IntentContractCompiler, PolicyConditionOrganizer
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
@@ -52,14 +63,20 @@ from .trunk import (
 from .system import V39PolicySystem
 
 __all__ = [
+    "ActionTemporalDCT",
+    "NativeTimePhysicalActionTokenLift",
     "ParsevalGripperTemporalFrame",
     "PhysicalActionCodec",
     "PhysicalActionTokenLift",
     "PhysicalVelocityHead",
+    "TemporalDCT",
     "TransitionAwarePhysicalVelocityHead",
     "V362PolicyConfig",
     "V38PolicyConfig",
     "V39PolicyConfig",
+    "UnifiedControllerOutput",
+    "ControllerMemory",
+    "UnifiedHierarchicalController",
     "ActionOnlyPhysicalVelocityHead",
     "ConditionNeutralActionInitializer",
     "HierarchicalMMDiTActionDecoder",
@@ -70,6 +87,9 @@ __all__ = [
     "OwnedEvidenceMemoryBank",
     "PreparedEvidenceMemory",
     "SemanticEvidenceWorkspaceBlock",
+    "WorkspaceControlOverride",
+    "WorkspaceControllerInterface",
+    "WorkspaceControllerInterfaceOutput",
     "IndependentIntentFusion",
     "IntentContractCompiler",
     "PolicyConditionOrganizer",

@@ -28,7 +28,7 @@ from clearvla.experiments.observed_state_lab.policy_v38 import (
     DenseVisualMemory,
 )
 from clearvla.policy import NestedLowRankContractionBank as ExportedNestedLowRankContractionBank
-from clearvla.policy.gauges import time_stratified_attention
+from clearvla.policy.gauges import fp32_diagnostic, time_stratified_attention
 from clearvla.policy.config import V39PolicyConfig as PackagedV39PolicyConfig
 from clearvla.policy.decoder import (
     HierarchicalMMDiTActionDecoder as PackagedHierarchicalMMDiTActionDecoder,
@@ -192,6 +192,17 @@ class PolicyPackageBoundaryTest(unittest.TestCase):
         self.assertEqual(list(expected), list(actual))
         for key in expected:
             torch.testing.assert_close(actual[key], expected[key], atol=0.0, rtol=0.0)
+
+    def test_fp32_diagnostic_owns_precision_and_gradient_boundary(self) -> None:
+        source = torch.randn(2, 4, 8, requires_grad=True)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            with fp32_diagnostic(source) as diagnostic:
+                gram = torch.matmul(diagnostic, diagnostic.transpose(-2, -1))
+        self.assertEqual(diagnostic.dtype, torch.float32)
+        self.assertEqual(gram.dtype, torch.float32)
+        self.assertFalse(diagnostic.requires_grad)
+        self.assertFalse(gram.requires_grad)
+        self.assertIsNone(source.grad)
 
 
 if __name__ == "__main__":

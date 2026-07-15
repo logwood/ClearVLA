@@ -31,6 +31,7 @@ from .policy_runtime_v36_3 import (
     gripper_event_labels,
     position_weights,
     semantic_physical_velocity_error,
+    _normalized_event_emphasis,
     is_deploy_eligible,
     mean_rows,
 )
@@ -41,6 +42,68 @@ POLICY_CHECKPOINT_SCHEMAS = frozenset({
     "clearvla-v39-policy-checkpoint-v1",
     "clearvla-v40-policy-checkpoint-v1",
 })
+
+
+def _operation_candidate_error(
+    system: V39PolicySystem,
+    residual: Tensor,
+    sample: dict[str, Tensor],
+    trainer: V39PolicyTrainerConfig,
+) -> Tensor:
+    """Task metric for candidate routing, including the gripper event budget."""
+    if residual.ndim != 5:
+        raise ValueError(
+            "operation candidate residual must be [B,S,C,T,P], "
+            f"got {tuple(residual.shape)}"
+        )
+    cfg = system.policy_config
+    batch, steps, candidates, horizon, physical_dim = residual.shape
+    ad = int(cfg.arm_dim)
+    gf = int(cfg.gripper_field_dim)
+    flat = residual.reshape(-1, horizon, physical_dim)
+    if system.codec.uses_arm_manifold:
+        arm_native, _, arm_null = system.codec.project_arm_tangent(flat[..., :2 * ad])
+        arm_error = (
+            arm_native.square()
+            + max(float(trainer.arm_manifold_null_weight), 0.0)
+            * 0.5 * (
+                arm_null[..., :ad].square() + arm_null[..., ad:2 * ad].square()
+            )
+        ).sum(dim=-1)
+    else:
+        arm_error = 0.5 * (
+            flat[..., :ad].square() + flat[..., ad:2 * ad].square()
+        ).sum(dim=-1)
+    grip_field = flat[..., 2 * ad:2 * ad + gf]
+    if system.codec.uses_parseval_gripper_field:
+        native = system.codec.decode_gripper_field(grip_field)
+        null = grip_field - system.codec.project_gripper_field(grip_field)
+        grip_error = native[..., 0].square() + null.square().sum(dim=-1)
+    else:
+        grip_error = grip_field.square().mean(dim=-1)
+    grip_error = grip_error.reshape(batch, steps, candidates, horizon)
+    labels = gripper_event_labels(
+        target_raw=sample["policy_action_raw"].to(device=residual.device),
+        current_raw=sample["state_raw"].to(device=residual.device),
+        gripper_index=cfg.gripper_index,
+        threshold=trainer.gripper_event_threshold,
+    )
+    event_mask = labels.ne(0).to(dtype=grip_error.dtype)
+    event_mask = event_mask[:, None, None].expand(
+        batch, steps, candidates, horizon
+    ).reshape(-1, horizon)
+    position_weight = position_weights(
+        cfg, trainer, residual.device
+    ).to(dtype=grip_error.dtype)
+    event_emphasis, _, _, _ = _normalized_event_emphasis(
+        event_mask,
+        position_weight,
+        max(float(trainer.gripper_fm_event_boost), 0.0),
+    )
+    grip_error = grip_error * event_emphasis.reshape(
+        batch, steps, candidates, horizon
+    )
+    return (arm_error.reshape(batch, steps, candidates, horizon) + grip_error) / float(ad + 1)
 
 
 @dataclass(frozen=True)
@@ -105,6 +168,7 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     # orthogonal sidecar bases and depth predictors use this rate.
     hierarchical_mmdit_contraction_lr_scale: float = 2.0
     hierarchical_mmdit_shared_base_lr_scale: float = 1.0
+    hierarchical_mmdit_controller_lr_scale: float = 1.0
     # Weak cost on the selected nested depth.  It begins only after the exact
     # identity warm-up and cannot change basis scale or residual amplitude.
     hierarchical_mmdit_depth_usage_loss_weight: float = 2e-4
@@ -113,6 +177,16 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     hierarchical_mmdit_oracle_route_loss_weight: float = 0.0
     hierarchical_mmdit_oracle_route_relative_tolerance: float = 0.0
     hierarchical_mmdit_oracle_route_warmup_steps: int = 200
+    # Candidate-operation supervision.  The target is the detached marginal
+    # improvement of each legal operation, not an absolute dwell value.
+    hierarchical_mmdit_operation_route_loss_weight: float = 0.0
+    hierarchical_mmdit_operation_route_temperature: float = 0.5
+    hierarchical_mmdit_operation_route_warmup_steps: int = 0
+    # Legacy names remain loadable for old experiment manifests, but are not
+    # consumed by the unified controller path.
+    hierarchical_mmdit_dwell_value_loss_weight: float = 0.0
+    hierarchical_mmdit_dwell_value_warmup_steps: int = 200
+    hierarchical_mmdit_dwell_compute_cost: float = 0.0
     # V42.1: train the deploy/inference prior path directly.  The posterior path
     # remains a weak auxiliary reconstruction target instead of being allowed to
     # carry the main policy loss by looking at the target chunk.
@@ -950,6 +1024,64 @@ def _oracle_exit_supervision(
     }
 
 
+def _dwell_value_targets(
+    *,
+    prefix_error: Tensor,
+    block_ids: Tensor,
+    active: Tensor,
+    compute_cost: float,
+) -> dict[str, Tensor]:
+    """Build post-update value targets for stay/advance/exit decisions.
+
+    The controller emits values before update ``k``, but the routing decision
+    is applied after that update.  Exit therefore owns prefix ``k + 1``;
+    continuing owns the best prefix reachable after at least one additional
+    update.  Keeping this coordinate explicit prevents an apparently healthy
+    dwell loss from supervising the controller one refinement step late.
+    """
+    if prefix_error.ndim != 2:
+        raise ValueError("prefix_error must be [B,K+1]")
+    if block_ids.ndim != 2 or active.ndim != 2:
+        raise ValueError("block_ids and active must be [B,K]")
+    if tuple(block_ids.shape) != tuple(active.shape):
+        raise ValueError("block_ids and active must have the same shape")
+    batch, step_count = block_ids.shape
+    if tuple(prefix_error.shape) != (batch, step_count + 1):
+        raise ValueError("prefix_error must contain one more prefix than decisions")
+
+    active = active.bool()
+    block_ids = block_ids.long()
+    cost = max(float(compute_cost), 0.0)
+    exit_target = prefix_error[:, 1:]
+    exit_valid = active
+    continue_target = torch.zeros_like(exit_target)
+    continue_action = torch.zeros_like(block_ids)
+    continue_valid = torch.zeros_like(active)
+    if step_count > 1:
+        continue_action[:, :-1] = (
+            block_ids[:, 1:] != block_ids[:, :-1]
+        ).long()
+        continue_valid[:, :-1] = active[:, :-1] & active[:, 1:]
+        for step_index in range(step_count - 1):
+            future_error = prefix_error[:, step_index + 2:]
+            additional_steps = torch.arange(
+                1,
+                int(future_error.shape[1]) + 1,
+                device=future_error.device,
+                dtype=future_error.dtype,
+            )
+            continue_target[:, step_index] = (
+                future_error + cost * additional_steps[None]
+            ).min(dim=1).values
+    return {
+        "continue_action": continue_action,
+        "continue_target": continue_target,
+        "continue_valid": continue_valid,
+        "exit_target": exit_target,
+        "exit_valid": exit_valid,
+    }
+
+
 def flow_losses(
     system: V39PolicySystem,
     sample: dict[str, Tensor],
@@ -1088,6 +1220,13 @@ def flow_losses(
     base_route_weight = max(
         float(trainer.hierarchical_mmdit_oracle_route_loss_weight), 0.0
     )
+    if base_route_weight > 0.0 and int(
+        getattr(system.policy_config, "hierarchical_mmdit_unified_controller", 0)
+    ):
+        raise ValueError(
+            "legacy oracle exit supervision is incompatible with the unified controller; "
+            "use hierarchical_mmdit_operation_route_loss_weight"
+        )
     if base_route_weight > 0.0 and str(
         system.policy_config.hierarchical_mmdit_schedule_mode
     ) != "fixed":
@@ -1156,6 +1295,153 @@ def flow_losses(
                 losses[f"hierarchical_mmdit_oracle_{name}"] = value.detach().float()
         if route_weight > 0.0:
             losses["loss"] = losses["loss"] + route_weight * route["loss"]
+
+    refinement_step_error_cache: Tensor | None = None
+    if torch.is_tensor(probe_predictions) and torch.is_tensor(target_velocity):
+        with torch.no_grad():
+            prefix_residual = (
+                probe_predictions.float()
+                - target_velocity.detach().float()[:, None]
+            )
+            prefix_horizon_error = semantic_physical_velocity_error(
+                system,
+                prefix_residual,
+                arm_null_weight=trainer.arm_manifold_null_weight,
+            )
+            prefix_position_weight = position_weights(
+                system.policy_config, trainer, prefix_horizon_error.device
+            ).to(dtype=prefix_horizon_error.dtype)
+            prefix_error = (
+                prefix_horizon_error * prefix_position_weight[None, None]
+            ).mean(dim=-1)
+            refinement_step_error_cache = prefix_error.detach()
+            prefix_gain = prefix_error[:, :-1] - prefix_error[:, 1:]
+            prefix_active = probe_active.float() if torch.is_tensor(probe_active) else torch.ones_like(prefix_gain)
+            prefix_denominator = prefix_active.sum().clamp_min(1.0)
+            losses["hierarchical_mmdit_prefix_error_initial"] = prefix_error[:, 0].mean()
+            losses["hierarchical_mmdit_prefix_error_final"] = prefix_error[:, -1].mean()
+            losses["hierarchical_mmdit_prefix_gain_mean"] = (
+                prefix_gain * prefix_active
+            ).sum() / prefix_denominator
+            losses["hierarchical_mmdit_prefix_gain_positive_fraction"] = (
+                (prefix_gain > 0.0).float() * prefix_active
+            ).sum() / prefix_denominator
+
+    operation_logits = output.get("hierarchical_mmdit_operation_logits")
+    operation_exit_logits = output.get("hierarchical_mmdit_operation_exit_logits")
+    operation_candidates = output.get(
+        "hierarchical_mmdit_operation_candidate_predictions"
+    )
+    operation_mask = output.get("hierarchical_mmdit_operation_candidate_mask")
+    operation_weight_base = max(
+        float(getattr(trainer, "hierarchical_mmdit_operation_route_loss_weight", 0.0)),
+        0.0,
+    )
+    operation_inputs = {
+        "operation_logits": operation_logits,
+        "operation_exit_logits": operation_exit_logits,
+        "operation_candidates": operation_candidates,
+        "operation_mask": operation_mask,
+        "target_velocity": target_velocity,
+    }
+    if operation_weight_base > 0.0:
+        missing = [
+            name for name, value in operation_inputs.items()
+            if not torch.is_tensor(value)
+        ]
+        if missing:
+            raise RuntimeError(
+                "operation route supervision is missing probes: " + ", ".join(missing)
+            )
+        temperature = max(
+            float(getattr(trainer, "hierarchical_mmdit_operation_route_temperature", 0.5)),
+            1e-3,
+        )
+        with torch.no_grad():
+            candidate_residual = (
+                operation_candidates.float()
+                - target_velocity.detach().float()[:, None, None]
+            )
+            candidate_error = _operation_candidate_error(
+                system, candidate_residual, sample, trainer
+            )
+            candidate_position_weight = position_weights(
+                system.policy_config, trainer, candidate_error.device
+            ).to(dtype=candidate_error.dtype)
+            candidate_error = (
+                candidate_error * candidate_position_weight[None, None, None]
+            ).mean(dim=-1)
+            candidate_gain = candidate_error[..., :1] - candidate_error
+            valid = operation_mask.bool()
+            target_logits = candidate_gain / temperature
+            target_logits = target_logits.masked_fill(
+                ~valid, torch.finfo(target_logits.dtype).min
+            )
+            target_probability = torch.softmax(target_logits, dim=-1)
+            active_candidate = valid.any(dim=-1)
+
+        predicted_logits = torch.cat(
+            [operation_exit_logits[..., None], operation_logits.float()], dim=-1
+        )
+        predicted_logits = predicted_logits.masked_fill(
+            ~operation_mask.bool(), torch.finfo(predicted_logits.dtype).min
+        )
+        predicted_log_probability = torch.log_softmax(predicted_logits, dim=-1)
+        route_loss_rows = -(
+            target_probability * predicted_log_probability
+        ).sum(dim=-1)
+        active_route = active_candidate.float()
+        active_route_denominator = active_route.sum().clamp_min(1.0)
+        route_loss = (
+            route_loss_rows * active_route
+        ).sum() / active_route_denominator
+        step_value = 0 if global_step is None else max(int(global_step), 0)
+        route_warmup = max(
+            int(getattr(trainer, "hierarchical_mmdit_operation_route_warmup_steps", 0)),
+            0,
+        )
+        route_weight = (
+            operation_weight_base
+            if system.training and step_value >= route_warmup
+            else 0.0
+        )
+        target_entropy = -(
+            target_probability.clamp_min(1e-8)
+            * target_probability.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        predicted_probability = predicted_log_probability.exp()
+        predicted_entropy = -(
+            predicted_probability.clamp_min(1e-8)
+            * predicted_log_probability
+        ).sum(dim=-1)
+        target_best = target_probability.argmax(dim=-1)
+        predicted_best = predicted_probability.argmax(dim=-1)
+        gain_max = candidate_gain.masked_fill(~valid, 0.0).amax(dim=-1)
+        gain_min = candidate_gain.masked_fill(
+            ~valid, torch.finfo(candidate_gain.dtype).max
+        ).amin(dim=-1)
+        gain_spread = gain_max - gain_min
+        losses["hierarchical_mmdit_operation_route_loss"] = route_loss.detach().float()
+        losses["hierarchical_mmdit_operation_route_weight"] = torch.as_tensor(
+            route_weight, device=operation_logits.device, dtype=torch.float32
+        )
+        losses["hierarchical_mmdit_operation_target_entropy"] = (
+            target_entropy * active_route
+        ).sum() / active_route_denominator
+        losses["hierarchical_mmdit_operation_predicted_entropy"] = (
+            predicted_entropy * active_route
+        ).sum() / active_route_denominator
+        losses["hierarchical_mmdit_operation_gain_spread"] = (
+            gain_spread * active_route
+        ).sum() / active_route_denominator
+        losses["hierarchical_mmdit_operation_decision_accuracy"] = (
+            (target_best == predicted_best).float() * active_route
+        ).sum() / active_route_denominator
+        losses["hierarchical_mmdit_operation_candidate_coverage"] = (
+            operation_mask.float().mean()
+        )
+        if route_weight > 0.0:
+            losses["loss"] = losses["loss"] + route_weight * route_loss
     # V70: stable-denominator replacements for the retired xratio gauge.
     # volume parity = noisy token norm vs workspace token norm (1.0 = parity;
     # after the noisy LayerNorm lands this pins to 1 by construction).
@@ -1468,12 +1754,19 @@ def flow_losses(
         probe_stage_ids, probe_block_ids, target_velocity,
     )):
         with torch.no_grad():
-            residual = probe_predictions.float() - target_velocity.detach().float()[:, None]
-            step_error = semantic_physical_velocity_error(
-                system,
-                residual,
-                arm_null_weight=trainer.arm_manifold_null_weight,
-            ).mean(dim=-1)
+            if (
+                torch.is_tensor(refinement_step_error_cache)
+                and tuple(refinement_step_error_cache.shape[:2])
+                == tuple(probe_predictions.shape[:2])
+            ):
+                step_error = refinement_step_error_cache
+            else:
+                residual = probe_predictions.float() - target_velocity.detach().float()[:, None]
+                step_error = semantic_physical_velocity_error(
+                    system,
+                    residual,
+                    arm_null_weight=trainer.arm_manifold_null_weight,
+                ).mean(dim=-1)
             marginal_gain = step_error[:, :-1] - step_error[:, 1:]
             active = probe_active.float()
             denominator = active.sum().clamp_min(1.0)
@@ -2337,13 +2630,18 @@ def _owned_serial_log_line(
     return (
         f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
         f"pflow={row['physical_flow']:.6f} "
-        f"pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
         f"pfn={row.get('physical_flow_native', 0.0):.6f} "
         f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} "
         f"gfmf={row.get('gripper_fm_field', 0.0):.5f} "
         f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} "
         f"anull={row.get('arm_fm_null_output_fraction', 0.0):.4f} "
         f"gnull={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
+        f"hmchart={row.get('hierarchical_mmdit_native_time_chart_active', 0.0):.0f}/"
+        f"{row.get('hierarchical_mmdit_native_time_chart_complete', 0.0):.0f}/"
+        f"{row.get('hierarchical_mmdit_native_time_position_alignment', 0.0):.0f} "
+        f"hmtan={row.get('hierarchical_mmdit_velocity_arm_tangent_null_ratio', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_velocity_gripper_tangent_null_ratio', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_noisy_gripper_chart_null_ratio', 0.0):.1e} "
         f"decode={row.get('decoded_action', 0.0):.6f} "
         f"rollout={row.get('rollout_dynamics', 0.0):.6f} "
         f"rvar={row.get('rollout_variance', 0.0):.4f} "
@@ -2386,12 +2684,14 @@ def _owned_serial_log_line(
         f"hmraw={row.get('hierarchical_mmdit_action_noisy_raw_depth_ratio', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_action_stage_raw_depth_ratio', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_action_low_raw_depth_ratio', 0.0):.2f} "
+        f"hmkeep={row.get('hierarchical_mmdit_action_self_update_keep', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_noisy_update_keep', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_update_keep', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_low_update_keep', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_action_ffn_update_keep', 0.0):.2f} "
         f"hmedepth={row.get('hierarchical_mmdit_action_noisy_effective_depth', 0.0):.1f}/"
         f"{row.get('hierarchical_mmdit_action_stage_effective_depth', 0.0):.1f}/"
         f"{row.get('hierarchical_mmdit_action_low_effective_depth', 0.0):.1f} "
-        f"hmcontract={row.get('hierarchical_mmdit_action_noisy_contraction_ratio', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_action_stage_contraction_ratio', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_action_low_contraction_ratio', 0.0):.3f} "
         f"hmhost={row.get('hierarchical_mmdit_action_noisy_host_update_rms', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_stage_host_update_rms', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_low_host_update_rms', 0.0):.3f} "
@@ -2410,12 +2710,56 @@ def _owned_serial_log_line(
         f"{row.get('hierarchical_mmdit_stage_selector_same_block_query_change', 0.0):.3f} "
         f"hmexit={row.get('hierarchical_mmdit_exit_probability', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_exit_candidate_rate', 0.0):.3f} "
-        f"hmoracle={row.get('hierarchical_mmdit_oracle_route_loss', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_oracle_route_weight', 0.0):.3f} "
-        f"hmodepth={row.get('hierarchical_mmdit_oracle_target_depth', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_oracle_predicted_depth', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_oracle_depth_accuracy', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_oracle_predicted_regret', 0.0):.4f} "
+        f"hmpfx={row.get('hierarchical_mmdit_prefix_error_initial', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_prefix_error_final', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_prefix_gain_mean', 0.0):+.4f}/"
+        f"{row.get('hierarchical_mmdit_prefix_gain_positive_fraction', 0.0):.2f} "
+        f"hmop={row.get('hierarchical_mmdit_operation_route_loss', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_route_weight', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_operation_target_entropy', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_operation_predicted_entropy', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_operation_gain_spread', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_decision_accuracy', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_operation_candidate_coverage', 0.0):.2f} "
+        f"hmctrl={row.get('hierarchical_mmdit_controller_state_effective_rank', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_state_pair_cosine', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_recurrent_change', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_operator_logit_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_exit_logit_rms', 0.0):.3f} "
+        f"hmcomp={row.get('hierarchical_mmdit_controller_competition_source_effective_slots', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_competition_source_owner_max', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_competition_slot_load_effective', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_competition_slot_load_max', 0.0):.2f} "
+        f"hmctl={row.get('hierarchical_mmdit_controller_operator_raw_update_mean', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_operator_raw_depth_mean', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_continue_keep_mean', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_update_depth_correlation', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_joint_suppression_mass', 0.0):.4f} "
+        f"hmwi={row.get('owned_workspace_interface_state_norm', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_state_slot_diversity', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_low_query_delta_ratio', 0.0):.3f}/"
+        f"{row.get('owned_workspace_interface_stage_query_delta_ratio', 0.0):.3f}/"
+        f"{row.get('owned_workspace_interface_promote_mean', 0.0):.3f}/"
+        f"{row.get('owned_workspace_interface_promote_std', 0.0):.3f} "
+        f"hmwic={row.get('owned_workspace_interface_low_control_effective_control_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_low_control_load_effective_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_low_control_slot_diversity', 0.0):.3f}/"
+        f"{row.get('owned_workspace_interface_stage_control_effective_control_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_stage_control_load_effective_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_stage_control_slot_diversity', 0.0):.3f} "
+        f"hmca={row.get('hierarchical_mmdit_controller_source_intent_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_flow_time_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_refine_time_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_action_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_evidence_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_stage_role_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_stage_content_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_source_feedback_attention', 0.0):.2f} "
+        f"hmce={row.get('hierarchical_mmdit_controller_evidence_role_geom_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_evidence_role_transition_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_evidence_role_event_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_evidence_role_state_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_evidence_role_layer_attention', 0.0):.2f} "
         f"hmstage={_format_hierarchical_stage_usage(row)} "
         f"hmblock={_format_hierarchical_block_usage(row)} "
         f"hmopgain={row.get('hierarchical_mmdit_action_noisy_operator_gain', 0.0):.3f}/"
@@ -2430,22 +2774,22 @@ def _owned_serial_log_line(
         f"hmbgain={row.get('hierarchical_mmdit_action_noisy_base_data_gain', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_action_stage_base_data_gain', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_action_low_base_data_gain', 0.0):.2f} "
-        f"hmbprm={row.get('hierarchical_mmdit_action_noisy_base_parameter_rms', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_action_stage_base_parameter_rms', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_action_low_base_parameter_rms', 0.0):.2f} "
         f"hmgate={row.get('hierarchical_mmdit_action_self_base_gate', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_noisy_base_gate', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_stage_base_gate', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_low_base_gate', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_ffn_base_gate', 0.0):.3f} "
+        f"hmegate={row.get('hierarchical_mmdit_action_self_effective_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_noisy_effective_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_stage_effective_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_low_effective_gate', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_action_ffn_effective_gate', 0.0):.3f} "
+        f"hmkerr={row.get('hierarchical_mmdit_action_noisy_keep_scale_error', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_action_stage_keep_scale_error', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_action_low_keep_scale_error', 0.0):.1e} "
         f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
         f"hmnrms={row.get('hierarchical_mmdit_action_pre_norm_rms', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_post_norm_rms', 0.0):.3f} "
-        f"hmbound={max(row.get(f'hierarchical_mmdit_action_{name}_boundary_identity_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-        f"hmnexp={max(row.get(f'hierarchical_mmdit_action_{name}_nonexpansive_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-        f"hmnest={max(row.get(f'hierarchical_mmdit_action_{name}_nested_order_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-        f"hmbasis={max(row.get(f'hierarchical_mmdit_action_{name}_basis_norm_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e}/"
-        f"{max(row.get(f'hierarchical_mmdit_action_{name}_basis_orthogonality_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
         f"hexh={row.get('hierarchical_mmdit_executed_steps', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_action_response_rel', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_stage_pressure_rel', 0.0):.3f}/"
@@ -2458,6 +2802,12 @@ def _owned_serial_log_line(
         f"{row.get('hierarchical_mmdit_early_exit_rate', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_block_advance_rate', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f} "
+        f"hmshadow={row.get('hierarchical_mmdit_shadow_executed_steps', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_shadow_step_saving', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_shadow_refine_error_ratio', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_shadow_operation_stay_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_shadow_operation_advance_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_shadow_operation_exit_rate', 0.0):.2f} "
         f"hmuresp={row.get('hierarchical_mmdit_action_response_arm', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_response_gripper', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_response_arm_null', 0.0):.3f}/"
@@ -2507,10 +2857,11 @@ def _owned_serial_log_line(
         f"{row.get('owned_hierarchical_stage_promoted_normalized_rms', 0.0):.3f}/"
         f"{row.get('owned_hierarchical_stage_promoted_realized_scale', 0.0):.3f} "
         f"ohgerr={row.get('owned_hierarchical_stage_promote_gate_scale_error', 0.0):.1e} "
-        f"ohmrole={row.get('owned_hierarchical_manager_role_entropy', 0.0):.3f} "
-        f"owned={row.get('owned_hierarchical_manager_fixed_output_prior', 0.0):.0f}/"
-        f"{row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f}/"
-        f"{row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
+        f"hmwireff={row.get('owned_workspace_interface_role_geom_effective_control_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_role_transition_effective_control_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_role_event_effective_control_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_role_state_effective_control_tokens', 0.0):.2f}/"
+        f"{row.get('owned_workspace_interface_role_layer_effective_control_tokens', 0.0):.2f} "
         f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
         f"hmvgrad={row.get('grad_hierarchical_mmdit_velocity_head', 0.0):.3e} "
         f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
@@ -2519,9 +2870,13 @@ def _owned_serial_log_line(
         f"hmbasegrad={row.get('grad_hierarchical_mmdit_shared_base', 0.0):.3e} "
         f"hmwgrad={row.get('grad_hierarchical_mmdit_base_projection', 0.0):.3e} "
         f"hmcopgrad={row.get('grad_hierarchical_mmdit_contractions', 0.0):.3e} "
-        f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e}/"
-        f"{row.get('grad_hierarchical_mmdit_contraction_depth', 0.0):.3e} "
+        f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e} "
         f"hmselgrad={row.get('grad_hierarchical_mmdit_stage_selector', 0.0):.3e} "
+        f"hmctrlgrad={row.get('grad_hierarchical_mmdit_unified_controller', 0.0):.3e} "
+        f"hmcg={row.get('grad_hierarchical_mmdit_controller_backbone', 0.0):.2e}/"
+        f"{row.get('grad_hierarchical_mmdit_controller_operator', 0.0):.2e}/"
+        f"{row.get('grad_hierarchical_mmdit_controller_exit', 0.0):.2e}/"
+        f"{row.get('grad_hierarchical_mmdit_controller_workspace_interface', 0.0):.2e} "
         f"hmexitgrad={row.get('grad_hierarchical_mmdit_exit_controller', 0.0):.3e}/"
         f"{row.get('grad_hierarchical_mmdit_exit_controller_post_clip', 0.0):.3e} "
         f"hmcmodgrad={row.get('grad_hierarchical_mmdit_content_modulation', 0.0):.3e} "
@@ -2673,6 +3028,13 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_hierarchical_mmdit_exit_controller"] = _parameter_grad_norm(
             decoder.exit_controller_parameters(), reference=reference,
         )
+        losses["grad_hierarchical_mmdit_unified_controller"] = _parameter_grad_norm(
+            decoder.unified_controller_parameters(), reference=reference,
+        )
+        for group_name, parameters in decoder.unified_controller_parameter_groups().items():
+            losses[
+                f"grad_hierarchical_mmdit_controller_{group_name}"
+            ] = _parameter_grad_norm(parameters, reference=reference)
         losses["grad_hierarchical_mmdit_content_modulation"] = _linear_row_grad_norm(
             (block.mod for block in blocks),
             start=0,
@@ -2795,13 +3157,16 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             return
         factor_params = list(decoder.factor_parameters())
         contraction_control_params = list(decoder.contraction_control_parameters())
+        controller_params = list(decoder.unified_controller_parameters())
         base_scale_params = list(decoder.scale_invariant_base_parameters())
         factor_ids = {id(parameter) for parameter in factor_params}
         contraction_control_ids = {id(parameter) for parameter in contraction_control_params}
+        controller_ids = {id(parameter) for parameter in controller_params}
         base_scale_ids = {id(parameter) for parameter in base_scale_params}
         owner_sets = (
             factor_ids,
             contraction_control_ids,
+            controller_ids,
             base_scale_ids,
         )
         if any(
@@ -2830,6 +3195,12 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
                 "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
                 "weight_decay": 0.0,
                 "name": f"{name}_contraction_depth_no_decay",
+            })
+        if controller_params:
+            groups.append({
+                "params": controller_params,
+                "lr": lr * float(trainer.hierarchical_mmdit_controller_lr_scale),
+                "name": f"{name}_unified_controller",
             })
         if base_scale_params:
             groups.append({
@@ -3088,6 +3459,10 @@ def train_v39_policy(
                 "hierarchical_mmdit_operator_groups",
                 "hierarchical_mmdit_operator_contraction_warmup_steps",
                 "hierarchical_mmdit_operator_contraction_transition_steps",
+                "hierarchical_mmdit_unified_controller",
+                "hierarchical_mmdit_control_tokens",
+                "hierarchical_mmdit_controller_depth",
+                "hierarchical_mmdit_controller_heads",
             ):
                 saved_value = int(saved_policy.get(field, getattr(system.policy_config, field)))
                 current_value = int(getattr(system.policy_config, field))
@@ -3103,6 +3478,7 @@ def train_v39_policy(
                 "hierarchical_mmdit_residual_scale_init",
                 "hierarchical_mmdit_residual_scale_max",
                 "hierarchical_mmdit_random_prefix_probability",
+                "hierarchical_mmdit_controller_ffn_expansion",
             ):
                 saved_value = float(saved_policy.get(field, getattr(system.policy_config, field)))
                 current_value = float(getattr(system.policy_config, field))
@@ -3371,6 +3747,12 @@ def train_v39_policy(
                     f"{row.get('gripper_fm_hold_emphasis_mean', 0.0):.2f} "
                     f"gfmn={row.get('gripper_fm_native', 0.0):.5f} gfmnull={row.get('gripper_fm_null', 0.0):.5f} "
                     f"gfmnrms={row.get('gripper_fm_null_rms', 0.0):.4f} gfmnf={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
+                    f"hmchart={row.get('hierarchical_mmdit_native_time_chart_active', 0.0):.0f}/"
+                    f"{row.get('hierarchical_mmdit_native_time_chart_complete', 0.0):.0f}/"
+                    f"{row.get('hierarchical_mmdit_native_time_position_alignment', 0.0):.0f} "
+                    f"hmtan={row.get('hierarchical_mmdit_velocity_arm_tangent_null_ratio', 0.0):.1e}/"
+                    f"{row.get('hierarchical_mmdit_velocity_gripper_tangent_null_ratio', 0.0):.1e}/"
+                    f"{row.get('hierarchical_mmdit_noisy_gripper_chart_null_ratio', 0.0):.1e} "
                     f"gfnehr={row.get('gripper_fm_null_event_hold_ratio', 0.0):.2f} "
                     f"gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
                     f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
@@ -3551,6 +3933,11 @@ def train_v39_policy(
                     f"hmraw={row.get('hierarchical_mmdit_action_noisy_raw_depth_ratio', 0.0):.2f}/"
                     f"{row.get('hierarchical_mmdit_action_stage_raw_depth_ratio', 0.0):.2f}/"
                     f"{row.get('hierarchical_mmdit_action_low_raw_depth_ratio', 0.0):.2f} "
+                    f"hmkeep={row.get('hierarchical_mmdit_action_self_update_keep', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_noisy_update_keep', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_update_keep', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_update_keep', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_action_ffn_update_keep', 0.0):.2f} "
                     f"hmedepth={row.get('hierarchical_mmdit_action_noisy_effective_depth', 0.0):.1f}/"
                     f"{row.get('hierarchical_mmdit_action_stage_effective_depth', 0.0):.1f}/"
                     f"{row.get('hierarchical_mmdit_action_low_effective_depth', 0.0):.1f} "
@@ -3575,6 +3962,15 @@ def train_v39_policy(
                     f"{row.get('hierarchical_mmdit_stage_selector_same_block_query_change', 0.0):.3f} "
                     f"hmexit={row.get('hierarchical_mmdit_exit_probability', 0.0):.3f}/"
                     f"{row.get('hierarchical_mmdit_exit_candidate_rate', 0.0):.3f} "
+                    f"hmcomp={row.get('hierarchical_mmdit_controller_competition_source_effective_slots', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_controller_competition_source_owner_max', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_controller_competition_slot_load_effective', 0.0):.2f}/"
+                    f"{row.get('hierarchical_mmdit_controller_competition_slot_load_max', 0.0):.2f} "
+                    f"hmctl={row.get('hierarchical_mmdit_controller_operator_raw_update_mean', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_controller_operator_raw_depth_mean', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_controller_continue_keep_mean', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_controller_update_depth_correlation', 0.0):+.2f}/"
+                    f"{row.get('hierarchical_mmdit_controller_joint_suppression_mass', 0.0):.4f} "
                     f"hmoracle={row.get('hierarchical_mmdit_oracle_route_loss', 0.0):.3f}/"
                     f"{row.get('hierarchical_mmdit_oracle_route_weight', 0.0):.3f} "
                     f"hmodepth={row.get('hierarchical_mmdit_oracle_target_depth', 0.0):.2f}/"
@@ -3603,6 +3999,14 @@ def train_v39_policy(
                     f"{row.get('hierarchical_mmdit_action_stage_base_gate', 0.0):.3f}/"
                     f"{row.get('hierarchical_mmdit_action_low_base_gate', 0.0):.3f}/"
                     f"{row.get('hierarchical_mmdit_action_ffn_base_gate', 0.0):.3f} "
+                    f"hmegate={row.get('hierarchical_mmdit_action_self_effective_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_noisy_effective_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_effective_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_low_effective_gate', 0.0):.3f}/"
+                    f"{row.get('hierarchical_mmdit_action_ffn_effective_gate', 0.0):.3f} "
+                    f"hmkerr={row.get('hierarchical_mmdit_action_noisy_keep_scale_error', 0.0):.1e}/"
+                    f"{row.get('hierarchical_mmdit_action_stage_keep_scale_error', 0.0):.1e}/"
+                    f"{row.get('hierarchical_mmdit_action_low_keep_scale_error', 0.0):.1e} "
                     f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
                     f"hmnrms={row.get('hierarchical_mmdit_action_pre_norm_rms', 0.0):.3f}/"
                     f"{row.get('hierarchical_mmdit_action_post_norm_rms', 0.0):.3f} "
@@ -3662,7 +4066,8 @@ def train_v39_policy(
                     f"ofixed={row.get('owned_hierarchical_manager_fixed_output_prior', 0.0):.0f} "
                     f"ofrole={row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f} "
                     f"ostrat={row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
-                    f"ohmrole={row.get('owned_hierarchical_manager_role_entropy', 0.0):.3f} "
+                    f"hmwieff={row.get('owned_workspace_interface_low_control_effective_control_tokens', 0.0):.2f}/"
+                    f"{row.get('owned_workspace_interface_stage_control_effective_control_tokens', 0.0):.2f} "
                     f"ohsupd={row.get('owned_hierarchical_stage_update_norm', 0.0):.3f} "
                     f"ohprom={row.get('owned_hierarchical_manager_promote_gate', 0.0):.3f} "
                     f"ohprms={row.get('owned_hierarchical_stage_promoted_projected_rms', 0.0):.3f}/"

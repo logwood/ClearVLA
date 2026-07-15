@@ -1,3 +1,5 @@
+> 命名台账: 本文件原名 do_before_v76.md。其实施产物即 v76a/v77 运行世代（B 系列+CR 系列）。代码注释中引用的 "do_before_v76 §N" 均指本文件章节。
+
 # CVAE 残余清算与确定性意图合同取代计划
 
 > 工作名称：**CVAE Replacement Program**
