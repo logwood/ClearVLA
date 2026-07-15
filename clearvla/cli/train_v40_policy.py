@@ -317,8 +317,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-hierarchical-workspace", type=int, default=0, help="V75: use temporary low evidence reads plus persistent role-separated stage memory.")
     parser.add_argument("--latent-cvae-stage-slots", type=int, default=6, help="Number of persistent stage-memory slots in the hierarchical workspace.")
     parser.add_argument("--latent-cvae-stage-promote-scale-init", type=float, default=0.05, help="Initial bounded residual scale for low-to-stage promotion.")
-    parser.add_argument("--hierarchical-mmdit-depth", type=int, default=3, help="Number of distinct action MMDiT blocks in the deterministic intent decoder.")
-    parser.add_argument("--hierarchical-mmdit-refine-steps", type=int, default=3, help="Fixed phase-1 refinement depth; adaptive depth is introduced separately in V76.")
+    parser.add_argument("--hierarchical-mmdit-depth", type=int, default=3, help="Number of distinct full-rank action MMDiT refinement blocks.")
+    parser.add_argument("--hierarchical-mmdit-refine-steps", type=int, default=3, help="Maximum recurrent refinement budget; fixed, randomized-dwell, and adaptive execution share this cap.")
     parser.add_argument("--hierarchical-mmdit-low-slots", type=int, default=25, help="Role-stratified low evidence slots; 25 gives five slots to each owned role.")
     parser.add_argument("--hierarchical-mmdit-stage-slots", type=int, default=6, help="Persistent stage-content slots; role identity remains a separate tensor.")
     parser.add_argument("--hierarchical-mmdit-ffn-expansion", type=float, default=2.0)
@@ -331,10 +331,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hierarchical-mmdit-noisy-gate-power", type=float, default=1.5)
     parser.add_argument("--hierarchical-mmdit-stage-promote-scale-init", type=float, default=0.05)
     parser.add_argument("--hierarchical-mmdit-output-init-std", type=float, default=1e-3)
-    parser.add_argument("--hierarchical-mmdit-residual-scale-max", type=float, default=0.20, help="Maximum absolute LayerScale for each serial action-refinement stage.")
+    parser.add_argument("--hierarchical-mmdit-operator-stages", type=int, default=6, help="Number of semantic stage-owned contraction paths, independent of refinement block count.")
+    parser.add_argument("--hierarchical-mmdit-operator-rank", type=int, default=32, help="Maximum number of ordered contraction directions per semantic stage.")
+    parser.add_argument("--hierarchical-mmdit-operator-groups", type=int, default=32, help="Number of ordered transparency groups; set equal to rank for channel-continuous depth.")
+    parser.add_argument("--hierarchical-mmdit-operator-depth-logit-init", type=float, default=2.0, help="Initial retained-depth logit after the exact identity warm-up.")
+    parser.add_argument("--hierarchical-mmdit-operator-contraction-warmup-steps", type=int, default=200, help="Steps for which contraction is pinned exactly to the original operation.")
+    parser.add_argument("--hierarchical-mmdit-operator-contraction-transition-steps", type=int, default=1500, help="Steps over which the learned nested contraction is introduced continuously.")
+    parser.add_argument("--hierarchical-mmdit-schedule-mode", choices=["fixed", "random_dwell"], default="fixed")
+    parser.add_argument("--hierarchical-mmdit-random-prefix-probability", type=float, default=0.0)
+    parser.add_argument(
+        "--hierarchical-mmdit-exhaustion-mode",
+        choices=["off", "shadow", "adaptive", "learned_shadow", "learned"],
+        default="off",
+    )
+    parser.add_argument("--hierarchical-mmdit-action-response-thresholds", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("T0", "T1", "T2"))
+    parser.add_argument("--hierarchical-mmdit-stage-pressure-thresholds", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("T0", "T1", "T2"))
+    parser.add_argument("--hierarchical-mmdit-action-response-floor", type=float, default=0.05)
+    parser.add_argument("--hierarchical-mmdit-exhaustion-confirm-steps", type=int, default=2)
+    parser.add_argument("--hierarchical-mmdit-residual-scale-init", type=float, default=0.05, help="Base value used to initialize the original V77 host-gate profile.")
+    parser.add_argument("--hierarchical-mmdit-residual-scale-max", type=float, default=0.20, help="Bound for the original V77 host LayerScale gates; the sidecar has no amplitude control.")
     parser.add_argument("--hierarchical-mmdit-output-contract", type=int, default=0, help="CR7 fallback: dedicated restricted contract for event/motion subheads only (zero-init injection; velocity head untouched).")
     parser.add_argument("--hierarchical-mmdit-noisy-market-bias", type=int, default=0, help="Compatibility flag for v76a checkpoints; the serial clean decoder has no condition-group market.")
-    parser.add_argument("--hierarchical-mmdit-noisy-gate-mode", type=int, default=0, help="0 = no noisy gate (honest codification: the outer multiplicative gate was cancelled by scale-invariant cond_norm in every arm); 1 = real post-norm value-domain gate inside the block.")
+    parser.add_argument("--hierarchical-mmdit-noisy-gate-mode", type=int, default=0, help="0 = no t-dependent noisy modulation; 1 = apply the t schedule inside noisy-branch low-rank channel amplitudes.")
     parser.add_argument("--latent-cvae-z-probe", type=int, default=0, help="CR0: eval-time z zero/shuffle intervention probes on the legacy decoder (two extra decodes per eval batch; diagnostic runs only).")
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
@@ -632,6 +650,20 @@ def main() -> None:
         hierarchical_mmdit_noisy_gate_power=args.hierarchical_mmdit_noisy_gate_power,
         hierarchical_mmdit_stage_promote_scale_init=args.hierarchical_mmdit_stage_promote_scale_init,
         hierarchical_mmdit_output_init_std=args.hierarchical_mmdit_output_init_std,
+        hierarchical_mmdit_operator_stages=args.hierarchical_mmdit_operator_stages,
+        hierarchical_mmdit_operator_rank=args.hierarchical_mmdit_operator_rank,
+        hierarchical_mmdit_operator_groups=args.hierarchical_mmdit_operator_groups,
+        hierarchical_mmdit_operator_depth_logit_init=args.hierarchical_mmdit_operator_depth_logit_init,
+        hierarchical_mmdit_operator_contraction_warmup_steps=args.hierarchical_mmdit_operator_contraction_warmup_steps,
+        hierarchical_mmdit_operator_contraction_transition_steps=args.hierarchical_mmdit_operator_contraction_transition_steps,
+        hierarchical_mmdit_schedule_mode=args.hierarchical_mmdit_schedule_mode,
+        hierarchical_mmdit_random_prefix_probability=args.hierarchical_mmdit_random_prefix_probability,
+        hierarchical_mmdit_exhaustion_mode=args.hierarchical_mmdit_exhaustion_mode,
+        hierarchical_mmdit_action_response_thresholds=tuple(args.hierarchical_mmdit_action_response_thresholds),
+        hierarchical_mmdit_stage_pressure_thresholds=tuple(args.hierarchical_mmdit_stage_pressure_thresholds),
+        hierarchical_mmdit_action_response_floor=args.hierarchical_mmdit_action_response_floor,
+        hierarchical_mmdit_exhaustion_confirm_steps=args.hierarchical_mmdit_exhaustion_confirm_steps,
+        hierarchical_mmdit_residual_scale_init=args.hierarchical_mmdit_residual_scale_init,
         hierarchical_mmdit_residual_scale_max=args.hierarchical_mmdit_residual_scale_max,
         hierarchical_mmdit_output_contract=args.hierarchical_mmdit_output_contract,
         hierarchical_mmdit_noisy_market_bias=args.hierarchical_mmdit_noisy_market_bias,
@@ -816,11 +848,40 @@ def main() -> None:
             "hierarchical_mmdit_serial_condition_composition": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_competitive_condition_market": False,
             "hierarchical_mmdit_identifiable_residual_gates": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_conditional_low_rank_operators": False,
+            "hierarchical_mmdit_stage_low_rank_adapters": False,
+            "hierarchical_mmdit_stage_nested_contraction": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_contraction_sidecar": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_post_gate_sidecar": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_shared_amplitude_owner": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_duplicate_amplitude_owner": False,
+            "hierarchical_mmdit_shared_full_rank_path": False,
+            "hierarchical_mmdit_distinct_full_rank_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_step_conditioned_full_rank": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_shared_base_scale_identifiable": False,
+            "hierarchical_mmdit_shared_base_bias_free": False,
+            "hierarchical_mmdit_scale_invariant_base_no_decay": False,
+            "hierarchical_mmdit_mandatory_operator_writeback": False,
+            "hierarchical_mmdit_block_state_normalized": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_factor_cache_per_forward": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_dynamic_orthogonal_baseline": str(args.final_action_decoder) == "hierarchical_mmdit_action",
             "hierarchical_mmdit_architecture_version": policy_config.hierarchical_mmdit_architecture_version,
-            "hierarchical_mmdit_residual_scale_max": float(args.hierarchical_mmdit_residual_scale_max),
+            "hierarchical_mmdit_operator_stages": int(args.hierarchical_mmdit_operator_stages),
+            "hierarchical_mmdit_operator_rank": int(args.hierarchical_mmdit_operator_rank),
+            "hierarchical_mmdit_operator_groups": int(args.hierarchical_mmdit_operator_groups),
+            "hierarchical_mmdit_operator_boundary_identity": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_nested_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_continuous_depth": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_nonexpansive": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_post_contraction_renorm": False,
+            "hierarchical_mmdit_schedule_mode": str(args.hierarchical_mmdit_schedule_mode),
+            "hierarchical_mmdit_exhaustion_mode": str(args.hierarchical_mmdit_exhaustion_mode),
             "hierarchical_mmdit_distinct_blocks": int(args.hierarchical_mmdit_depth),
-            "hierarchical_mmdit_fixed_refine_steps": int(args.hierarchical_mmdit_refine_steps),
+            "hierarchical_mmdit_full_rank_block_count": int(args.hierarchical_mmdit_depth),
+            "hierarchical_mmdit_shared_core_count": 0,
+            "hierarchical_mmdit_operator_stage_count": int(args.hierarchical_mmdit_operator_stages),
+            "hierarchical_mmdit_refine_block_count": int(args.hierarchical_mmdit_depth),
+            "hierarchical_mmdit_max_refine_steps": int(args.hierarchical_mmdit_refine_steps),
             "latent_cvae_mmdit_decoder": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_mmdit_no_direct_noisy_residual": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_mmdit_condition_update": bool(int(args.latent_cvae_mmdit_cond_update)),

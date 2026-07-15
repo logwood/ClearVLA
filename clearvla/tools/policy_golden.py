@@ -52,6 +52,12 @@ INTENT_SOURCE_NAMES = (
 VARIANT_ARCHITECTURES = {
     "v76": "serial_owned_v2",
     "v77": "serial_owned_rms_v3",
+    "v78": "conditional_low_rank_v4",
+    "v79": "shared_low_rank_adapter_v5",
+    "v80": "binary_channel_mask_v6",
+    "v81": "distinct_block_nested_contraction_v8",
+    "v82": "post_gate_contraction_sidecar_v10",
+    "v84": "post_gate_contraction_sidecar_v11_oracle_router",
 }
 CAPTURE_STAGES = ("construction", "boundaries", "train", "sample", "checkpoint")
 
@@ -466,6 +472,7 @@ def _filtered_dataclass(cls: type[Any], values: Mapping[str, Any]) -> Any:
 
 def _build_policy_config(policy: Any, spec: Mapping[str, Any], variant: str) -> Any:
     architecture = VARIANT_ARCHITECTURES[variant]
+    operator_stages = 4 if variant in {"v81", "v82"} else 6
     values = {
         "action_dim": int(spec["action_dim"]),
         "state_dim": int(spec["state_dim"]),
@@ -520,7 +527,7 @@ def _build_policy_config(policy: Any, spec: Mapping[str, Any], variant: str) -> 
         "hierarchical_mmdit_depth": 2,
         "hierarchical_mmdit_refine_steps": 2,
         "hierarchical_mmdit_low_slots": 5,
-        "hierarchical_mmdit_stage_slots": 3,
+        "hierarchical_mmdit_stage_slots": operator_stages,
         "hierarchical_mmdit_ffn_expansion": 2.0,
         "hierarchical_mmdit_layer_grad_scale": 0.0,
         "hierarchical_mmdit_source_grad_scale": 0.0,
@@ -529,6 +536,18 @@ def _build_policy_config(policy: Any, spec: Mapping[str, Any], variant: str) -> 
         "hierarchical_mmdit_output_init_std": 1e-3,
         "hierarchical_mmdit_residual_scale_max": 0.20,
         "hierarchical_mmdit_architecture_version": architecture,
+        "hierarchical_mmdit_operator_stages": operator_stages,
+        "hierarchical_mmdit_operator_rank": min(16, int(spec["hidden"])),
+        "hierarchical_mmdit_operator_groups": min(16, int(spec["hidden"])),
+        "hierarchical_mmdit_operator_depth_logit_init": 2.0,
+        "hierarchical_mmdit_operator_contraction_warmup_steps": 2,
+        "hierarchical_mmdit_operator_contraction_transition_steps": 4,
+        "hierarchical_mmdit_residual_scale_init": 0.05,
+        # Golden comparison must be deterministic. Random dwell and adaptive
+        # routing are covered by dedicated behavior tests and real-run probes.
+        "hierarchical_mmdit_schedule_mode": "fixed",
+        "hierarchical_mmdit_random_prefix_probability": 0.0,
+        "hierarchical_mmdit_exhaustion_mode": "off",
         "hierarchical_mmdit_output_contract": 0,
         "hierarchical_mmdit_noisy_gate_mode": 0,
     }
@@ -781,10 +800,15 @@ def _capture_boundaries(
         dtype=inputs["noisy_physical"].dtype,
     )
     stage = decoder.workspace.init_stage(contracts["stage_contract"])
-    step_state, _ = decoder._step_state(
-        0,
-        batch_size=int(inputs["noisy_physical"].shape[0]),
-        device=inputs["noisy_physical"].device,
+    batch_size = int(inputs["noisy_physical"].shape[0])
+    schedule, _, scheduled_steps = decoder._fixed_schedule(
+        device=inputs["noisy_physical"].device
+    )
+    block_index = schedule[0].expand(batch_size)
+    step_state = decoder._step_state(
+        block_index,
+        progress_fraction=1.0 if decoder.refine_steps <= 1 else 0.0,
+        remaining_fraction=float(scheduled_steps - 1) / float(max(decoder.refine_steps, 1)),
         dtype=inputs["noisy_physical"].dtype,
     )
     time_state = decoder.time_lift(decoder.time(inputs["time"]))

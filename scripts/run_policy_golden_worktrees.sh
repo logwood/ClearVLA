@@ -13,7 +13,7 @@ Examples:
   bash scripts/run_policy_golden_worktrees.sh \
     v76-owned-intent-mmdit-checkpoint my-refactor-tag v76 runs/golden/v76
 
-VARIANT is v76 or v77. Both refs are captured in isolated processes and
+VARIANT is v76, v77, v78, v79, v80, v81, v82, or v84. Both refs are captured in isolated processes and
 detached temporary worktrees. The script exits nonzero on any difference.
 Use a baseline that has already passed the v2 health capture; historical v1
 refs may be intentionally rejected for optimizer ownership or finite-value
@@ -32,10 +32,13 @@ VARIANT=$3
 OUTPUT_DIR=$4
 PYTHON_BIN=${5:-python}
 
-if [[ $VARIANT != "v76" && $VARIANT != "v77" ]]; then
-  echo "VARIANT must be v76 or v77" >&2
-  exit 2
-fi
+case $VARIANT in
+  v76|v77|v78|v79|v80|v81|v82|v84) ;;
+  *)
+    echo "VARIANT must be v76, v77, v78, v79, v80, v81, v82, or v84" >&2
+    exit 2
+    ;;
+esac
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 HARNESS=$REPO_ROOT/clearvla/tools/policy_golden.py
