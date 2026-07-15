@@ -4,11 +4,9 @@ import unittest
 
 import torch
 
-from clearvla.experiments.observed_state_lab.policy_v39 import (
-    HierarchicalEvidenceWorkspace,
-    LatentCVAEMMDiTBlock,
-    V39PolicyConfig,
-)
+from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.evidence import HierarchicalEvidenceWorkspace
+from clearvla.policy.legacy.cvae import LatentCVAEMMDiTBlock
 
 
 class HierarchicalWorkspaceTest(unittest.TestCase):

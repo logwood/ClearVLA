@@ -1,8 +1,9 @@
 # Policy Package Layout
 
-This branch moves implementation ownership without changing policy behavior.
-The experiment modules remain compatibility facades until Golden and real-data
-replay both pass.
+This package owns the current policy implementation without changing policy
+behavior. Golden and real-data replay have passed, so current V39/V40 runtime,
+evaluation, inspection, and training entry points import it directly. Experiment
+modules remain compatibility facades for historical callers and checkpoints.
 
 ## Current Ownership
 
@@ -31,10 +32,11 @@ probes, and oracle exit head inside these existing ownership boundaries; it
 does not move evidence values back into the decoder or experiment facade.
 
 `policy_v39.py` is now a compatibility facade only: it contains no class or
-function definitions. Runtime, evaluation, and CLI code intentionally continue
-to import that facade until dynamic Golden and real-data replay pass. The next
-refactor boundary is runtime/training; splitting the dense legacy CVAE file more
-finely is optional cleanup and not required to promote the current policy.
+function definitions. The historical Golden harness intentionally imports that
+facade so older source tags remain capturable, while current consumers import
+the packaged implementation. The next optional refactor boundary is
+runtime/training; splitting the dense legacy CVAE file more finely is cleanup
+and is not required for the current policy.
 
 ## Promotion Gates
 

@@ -11,13 +11,14 @@ from clearvla.experiments.classic_policy_lab.cli_common import add_data_args, lo
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.dynamic_world_lab.conditioning import build_dense_conditioner
 from clearvla.experiments.observed_state_lab.dataset import ObservedStateDatasetConfig, ObservedStateWindowDataset, PolicyWindowDataset
-from clearvla.experiments.observed_state_lab.policy_v39 import V39PolicyConfig, V39PolicySystem
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     POLICY_CHECKPOINT_SCHEMAS,
     V39PolicyTrainerConfig,
     evaluate_v39_policy,
 )
 from clearvla.experiments.observed_state_lab.world_runtime import jsonable
+from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.system import V39PolicySystem
 
 
 def parse_args() -> argparse.Namespace:

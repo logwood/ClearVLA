@@ -34,13 +34,14 @@ from clearvla.cli.inspect_v39_2_latents import (
     _write_json,
 )
 from clearvla.experiments.classic_policy_lab.cli_common import add_data_args, resolve_device
-from clearvla.experiments.observed_state_lab.policy_v39 import V39PolicyConfig, V39PolicySystem
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     V39PolicyTrainerConfig,
     gripper_event_labels,
     prepare_v39_policy_sample,
 )
 from clearvla.experiments.observed_state_lab.world_runtime import autocast_context, jsonable
+from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.system import V39PolicySystem
 
 
 V40_CHECKPOINT_SCHEMA = "clearvla-v40-policy-checkpoint-v1"

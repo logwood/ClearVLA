@@ -19,8 +19,8 @@ from torch.utils.data import DataLoader
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import RDT2Conditioner
 from clearvla.experiments.dynamic_world_lab.shared_runtime import encode_current_tokens, encode_target_tokens, gripper_transition_metrics
+from clearvla.policy.system import V39PolicySystem
 
-from .policy_v39 import V39PolicySystem
 from .policy_runtime_v36_3 import (
     V363PolicyTrainerConfig,
     arm_motion_labels,

@@ -8,17 +8,12 @@ import torch
 import torch.nn.functional as F
 
 from clearvla.policy.refinement import NestedLowRankContractionBank
-
-from clearvla.experiments.observed_state_lab.policy_v39 import (
-    HierarchicalMMDiTActionDecoder,
-    HierarchicalEvidenceWorkspace,
-    IntentContractCompiler,
-    LayeredV37StyleResidualActionFlowDenoiser,
-    OwnedEvidenceMemoryBank,
-    PolicyConditionOrganizer,
-    V39PolicyConfig,
-    V39PolicySystem,
-)
+from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.decoder import HierarchicalMMDiTActionDecoder
+from clearvla.policy.evidence import HierarchicalEvidenceWorkspace, OwnedEvidenceMemoryBank
+from clearvla.policy.intent import IntentContractCompiler, PolicyConditionOrganizer
+from clearvla.policy.legacy.residual import LayeredV37StyleResidualActionFlowDenoiser
+from clearvla.policy.system import V39PolicySystem
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     V39PolicyTrainerConfig,
     _accumulate_metric_tensors,

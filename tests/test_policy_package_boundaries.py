@@ -119,6 +119,28 @@ class PolicyPackageBoundaryTest(unittest.TestCase):
                     violations.append(f"{path.name}:{node.lineno}")
         self.assertEqual(violations, [])
 
+    def test_current_consumers_do_not_import_the_v39_facade(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        consumers = (
+            root / "clearvla" / "experiments" / "observed_state_lab" / "policy_runtime_v39.py",
+            root / "clearvla" / "cli" / "eval_v39_arm_motion_table.py",
+            root / "clearvla" / "cli" / "eval_v39_policy.py",
+            root / "clearvla" / "cli" / "inspect_v39_2_latents.py",
+            root / "clearvla" / "cli" / "inspect_v40_latents.py",
+            root / "clearvla" / "cli" / "train_v39_policy.py",
+            root / "clearvla" / "cli" / "train_v40_policy.py",
+        )
+        violations: list[str] = []
+        for path in consumers:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and (
+                    node.module == "clearvla.experiments.observed_state_lab.policy_v39"
+                    or (node.level > 0 and node.module == "policy_v39")
+                ):
+                    violations.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(violations, [])
+
     def test_packaged_policy_has_no_new_unresolved_global_references(self) -> None:
         root = Path(__file__).resolve().parents[1] / "clearvla" / "policy"
         builtins_set = set(dir(builtins))

@@ -34,7 +34,6 @@ from clearvla.experiments.observed_state_lab.dataset import (
     ObservedStateWindowDataset,
     PolicyWindowDataset,
 )
-from clearvla.experiments.observed_state_lab.policy_v39 import V39PolicyConfig, V39PolicySystem
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     POLICY_CHECKPOINT_SCHEMAS,
     V39PolicyTrainerConfig,
@@ -45,6 +44,8 @@ from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     rollout_delta_loss,
 )
 from clearvla.experiments.observed_state_lab.world_runtime import autocast_context, jsonable
+from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.system import V39PolicySystem
 
 
 def parse_args() -> argparse.Namespace:
