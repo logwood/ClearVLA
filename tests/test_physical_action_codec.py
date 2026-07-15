@@ -5,12 +5,30 @@ import unittest
 import torch
 
 from clearvla.experiments.observed_state_lab.policy_v36_2 import (
+    ParsevalGripperTemporalFrame,
     PhysicalActionCodec,
+    PhysicalActionTokenLift,
+    PhysicalVelocityHead,
     V362PolicyConfig,
 )
+from clearvla.policy.codec import (
+    ParsevalGripperTemporalFrame as PackagedParsevalGripperTemporalFrame,
+    PhysicalActionCodec as PackagedPhysicalActionCodec,
+    PhysicalActionTokenLift as PackagedPhysicalActionTokenLift,
+    PhysicalVelocityHead as PackagedPhysicalVelocityHead,
+    TransitionAwarePhysicalVelocityHead as PackagedTransitionAwarePhysicalVelocityHead,
+)
+from clearvla.experiments.observed_state_lab.policy_v36_3 import TransitionAwarePhysicalVelocityHead
 
 
 class PhysicalActionCodecManifoldTest(unittest.TestCase):
+    def test_legacy_import_is_packaged_class(self) -> None:
+        self.assertIs(ParsevalGripperTemporalFrame, PackagedParsevalGripperTemporalFrame)
+        self.assertIs(PhysicalActionCodec, PackagedPhysicalActionCodec)
+        self.assertIs(PhysicalActionTokenLift, PackagedPhysicalActionTokenLift)
+        self.assertIs(PhysicalVelocityHead, PackagedPhysicalVelocityHead)
+        self.assertIs(TransitionAwarePhysicalVelocityHead, PackagedTransitionAwarePhysicalVelocityHead)
+
     def setUp(self) -> None:
         self.config = V362PolicyConfig(
             arm_flow_mode="manifold_native",

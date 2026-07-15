@@ -9,11 +9,12 @@ or a second execution head.
 """
 
 from dataclasses import dataclass
-import math
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
+
+from clearvla.policy.primitives import TimeEmbedding
+from clearvla.policy.proposal import ProposalBlock, RejectableHistoryProposal
 
 from .world_model import BiasFreeFFN, V35WorldConfig, WorldEvidenceEncoder, sinusoidal_positions
 
@@ -49,62 +50,6 @@ class V35PolicyConfig:
     @property
     def gripper_index(self) -> int:
         return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.action_dim + self.gripper_dim_index
-
-
-class TimeEmbedding(nn.Module):
-    def __init__(self, hidden: int) -> None:
-        super().__init__()
-        self.hidden = hidden
-        self.net = nn.Sequential(nn.Linear(hidden, hidden * 4), nn.SiLU(), nn.Linear(hidden * 4, hidden))
-
-    def forward(self, t: Tensor) -> Tensor:
-        half = self.hidden // 2
-        freq = torch.exp(
-            -math.log(10000.0) * torch.arange(half, device=t.device, dtype=t.dtype) / max(half - 1, 1)
-        )
-        phase = t[:, None] * freq[None]
-        emb = torch.cat([torch.sin(phase), torch.cos(phase)], dim=-1)
-        if emb.shape[-1] < self.hidden:
-            emb = F.pad(emb, (0, self.hidden - emb.shape[-1]))
-        return self.net(emb)
-
-
-class ProposalBlock(nn.Module):
-    def __init__(self, hidden: int, heads: int, expansion: float) -> None:
-        super().__init__()
-        self.qn = nn.LayerNorm(hidden)
-        self.mn = nn.LayerNorm(hidden)
-        self.cross = nn.MultiheadAttention(hidden, heads, batch_first=True)
-        self.n2 = nn.LayerNorm(hidden)
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden, int(hidden * expansion)), nn.GELU(), nn.Linear(int(hidden * expansion), hidden)
-        )
-
-    def forward(self, query: Tensor, memory: Tensor) -> Tensor:
-        update, _ = self.cross(self.qn(query), self.mn(memory), self.mn(memory), need_weights=False)
-        query = query + update
-        return query + self.ffn(self.n2(query))
-
-
-class RejectableHistoryProposal(nn.Module):
-    def __init__(self, config: V35PolicyConfig) -> None:
-        super().__init__()
-        self.config = config
-        h = config.hidden_size
-        self.history_proj = nn.Linear(config.action_dim, h)
-        self.history_key = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
-        self.future_query = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
-        self.blocks = nn.ModuleList(
-            [ProposalBlock(h, config.num_heads, config.ffn_expansion) for _ in range(config.proposal_depth)]
-        )
-        self.action_head = nn.Linear(h, config.action_dim)
-
-    def forward(self, executed_history: Tensor) -> dict[str, Tensor]:
-        memory = self.history_proj(executed_history) + self.history_key
-        tokens = self.future_query.expand(executed_history.shape[0], -1, -1)
-        for block in self.blocks:
-            tokens = block(tokens, memory)
-        return {"tokens": tokens, "action": self.action_head(tokens)}
 
 
 class ExpertBlock(nn.Module):
