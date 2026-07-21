@@ -116,12 +116,25 @@ class LatentWorldConfig:
 
     def validate(self) -> None:
         dimensions = (
-            self.latent_dim, self.action_dim, self.state_dim, self.action_horizon,
-            self.history_length, self.num_cameras, self.patches_per_camera,
-            self.hidden_size, self.num_heads, self.context_tokens, self.dynamic_tokens,
-            self.descriptor_projection_dim, self.perceiver_depth, self.dynamics_depth,
-            self.dynamics_unique_blocks, self.state_decoder_depth, self.inverse_depth,
-            self.latent_stride, self.action_probe_depth,
+            self.latent_dim,
+            self.action_dim,
+            self.state_dim,
+            self.action_horizon,
+            self.history_length,
+            self.num_cameras,
+            self.patches_per_camera,
+            self.hidden_size,
+            self.num_heads,
+            self.context_tokens,
+            self.dynamic_tokens,
+            self.descriptor_projection_dim,
+            self.perceiver_depth,
+            self.dynamics_depth,
+            self.dynamics_unique_blocks,
+            self.state_decoder_depth,
+            self.inverse_depth,
+            self.latent_stride,
+            self.action_probe_depth,
         )
         if min(dimensions) <= 0:
             raise ValueError("all V34.1 dimensions/depths must be positive")
@@ -131,7 +144,10 @@ class LatentWorldConfig:
             raise ValueError("action_dim and state_dim must match")
         if self.root_tokens != 1:
             raise ValueError("V34.1 requires exactly one root token")
-        if tuple(sorted(set(self.future_offsets))) != self.future_offsets or not self.future_offsets:
+        if (
+            tuple(sorted(set(self.future_offsets))) != self.future_offsets
+            or not self.future_offsets
+        ):
             raise ValueError("future_offsets must be strictly increasing and non-empty")
         if max(self.future_offsets) > self.action_horizon:
             raise ValueError("future_offsets cannot exceed action_horizon")
@@ -143,13 +159,21 @@ class LatentWorldConfig:
             raise ValueError("action_horizon must be divisible by latent_stride")
         if any(int(offset) % self.latent_stride != 0 for offset in self.future_offsets):
             raise ValueError("future_offsets must lie on the dense latent grid")
-        index = self.gripper_dim_index if self.gripper_dim_index >= 0 else self.state_dim + self.gripper_dim_index
+        index = (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.state_dim + self.gripper_dim_index
+        )
         if not 0 <= index < self.state_dim:
             raise ValueError("gripper_dim_index outside state dimensions")
 
     @property
     def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.state_dim + self.gripper_dim_index
+        return (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.state_dim + self.gripper_dim_index
+        )
 
     @property
     def num_future(self) -> int:
@@ -174,7 +198,9 @@ class LatentWorldConfig:
 
     @property
     def descriptor_dim(self) -> int:
-        return (self.history_length - 1) * self.num_cameras * (2 * self.descriptor_projection_dim + 2)
+        return (
+            (self.history_length - 1) * self.num_cameras * (2 * self.descriptor_projection_dim + 2)
+        )
 
 
 class _PerceiverLayer(nn.Module):
@@ -249,9 +275,9 @@ class WorldPerceiver(nn.Module):
         self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
 
     def _slot_bias(self, batch: int) -> Tensor:
-        return torch.cat(
-            [self.root_query, self.scene_queries, self.dynamic_queries], dim=1
-        ).expand(batch, -1, -1)
+        return torch.cat([self.root_query, self.scene_queries, self.dynamic_queries], dim=1).expand(
+            batch, -1, -1
+        )
 
     def _evidence(self, visual_tokens: Tensor, state_history: Tensor) -> tuple[Tensor, Tensor]:
         cfg = self.config
@@ -289,9 +315,7 @@ class WorldPerceiver(nn.Module):
         batch = visual_tokens.shape[0]
         slots = self._slot_bias(batch)
         # The first read does not retain learned query content as a residual.
-        latent = self.layers[0].read(
-            torch.zeros_like(slots), slots, evidence_key, evidence_value
-        )
+        latent = self.layers[0].read(torch.zeros_like(slots), slots, evidence_key, evidence_value)
         latent = self.layers[0].self_block(latent, key_bias=slots)
         for layer in self.layers[1:]:
             latent = layer(latent, slots, evidence_key, evidence_value)
@@ -450,9 +474,9 @@ class _UniformJointAdaLNBlock(nn.Module):
 
         world_content = self.world_norm(world)
         raw_joint = self.world_factor(world_content) * self.action_factor(action_signal)
-        normalized_joint = self.normalized_world_factor(world_content) * self.normalized_action_factor(
-            self.action_norm(action_signal)
-        )
+        normalized_joint = self.normalized_world_factor(
+            world_content
+        ) * self.normalized_action_factor(self.action_norm(action_signal))
         joint = self.joint_strength * F.silu(
             self.joint_mix(torch.cat([raw_joint, normalized_joint], dim=-1))
         )
@@ -468,15 +492,19 @@ class _UniformJointAdaLNBlock(nn.Module):
         ffn_input = self._modulate(self.action_ffn_norm(world), shift_ffn, scale_ffn)
         world = world + torch.tanh(gate_ffn) * self.action_ffn(ffn_input)
 
-        return world, local_action, {
-            "adaln_gate_abs_mean": 0.5
-            * (torch.tanh(gate_attn).abs().mean() + torch.tanh(gate_ffn).abs().mean()),
-            "adaln_scale_abs_mean": 0.5 * (scale_attn.abs().mean() + scale_ffn.abs().mean()),
-            "adaln_shift_abs_mean": 0.5 * (shift_attn.abs().mean() + shift_ffn.abs().mean()),
-            "action_read_joint_rms": action_joint.float().square().mean().sqrt(),
-            "world_action_joint_rms": joint.float().square().mean().sqrt(),
-            "action_signal_rms": action_signal.float().square().mean().sqrt(),
-        }
+        return (
+            world,
+            local_action,
+            {
+                "adaln_gate_abs_mean": 0.5
+                * (torch.tanh(gate_attn).abs().mean() + torch.tanh(gate_ffn).abs().mean()),
+                "adaln_scale_abs_mean": 0.5 * (scale_attn.abs().mean() + scale_ffn.abs().mean()),
+                "adaln_shift_abs_mean": 0.5 * (shift_attn.abs().mean() + shift_ffn.abs().mean()),
+                "action_read_joint_rms": action_joint.float().square().mean().sqrt(),
+                "world_action_joint_rms": joint.float().square().mean().sqrt(),
+                "action_signal_rms": action_signal.float().square().mean().sqrt(),
+            },
+        )
 
 
 class LatentDynamicsHead(nn.Module):
@@ -509,14 +537,12 @@ class LatentDynamicsHead(nn.Module):
         slot = torch.cat([self.root_key, self.scene_key, self.dynamic_key], dim=1)
         return (slot + self.step_key[:, step_index]).expand(batch, -1, -1).to(dtype=dtype)
 
-    def _local_action(
-        self, effect_steps: Tensor, *, start: int, end: int
-    ) -> tuple[Tensor, Tensor]:
+    def _local_action(self, effect_steps: Tensor, *, start: int, end: int) -> tuple[Tensor, Tensor]:
         # Local values are consumed exactly once.  Past action can only alter
         # attention keys through a detached-length-preserving context summary.
         local = effect_steps[:, start:end]
-        local_key = self.action_time_key[:, start:end].to(dtype=local.dtype).expand(
-            local.shape[0], -1, -1
+        local_key = (
+            self.action_time_key[:, start:end].to(dtype=local.dtype).expand(local.shape[0], -1, -1)
         )
         if start > 0:
             history = effect_steps[:, :start].mean(dim=1, keepdim=True)
@@ -718,9 +744,14 @@ class LatentInverseDecoder(nn.Module):
         )[None, :, None]
         keys = (values + time).flatten(1, 2)
         values = values.flatten(1, 2)
-        queries = self.path_query.to(dtype=future_world.dtype).expand(current_world.shape[0], -1, -1)
+        queries = self.path_query.to(dtype=future_world.dtype).expand(
+            current_world.shape[0], -1, -1
+        )
         x, _ = self.cross(
-            self.query_norm(queries), self.key_norm(keys), self.value_norm(values), need_weights=False
+            self.query_norm(queries),
+            self.key_norm(keys),
+            self.value_norm(values),
+            need_weights=False,
         )
         for block in self.blocks:
             x = block(x)
@@ -778,7 +809,10 @@ class ActionOnlyDiagnosticProbe(nn.Module):
             persistent=True,
         )
         self.blocks = nn.ModuleList(
-            [_ZeroPreservingSelfBlock(h, config.num_heads) for _ in range(config.action_probe_depth)]
+            [
+                _ZeroPreservingSelfBlock(h, config.num_heads)
+                for _ in range(config.action_probe_depth)
+            ]
         )
         self.queries = nn.Parameter(torch.randn(1, config.num_future * 3, h) * 0.02)
         self.cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True)
@@ -790,7 +824,9 @@ class ActionOnlyDiagnosticProbe(nn.Module):
             x = block(x, key_bias=self.position.to(dtype=x.dtype), causal=True)
         q = self.queries.expand(action.shape[0], -1, -1)
         out, _ = self.cross(q, x + self.position.to(dtype=x.dtype), x, need_weights=False)
-        return self.head(out).reshape(action.shape[0], self.config.num_future, 3, self.config.hidden_size)
+        return self.head(out).reshape(
+            action.shape[0], self.config.num_future, 3, self.config.hidden_size
+        )
 
 
 class LatentWorldModel(nn.Module):
@@ -822,7 +858,9 @@ class LatentWorldModel(nn.Module):
 
         generator = torch.Generator(device="cpu")
         generator.manual_seed(config.descriptor_seed)
-        matrix = torch.randn(config.latent_dim, config.descriptor_projection_dim, generator=generator)
+        matrix = torch.randn(
+            config.latent_dim, config.descriptor_projection_dim, generator=generator
+        )
         q, _ = torch.linalg.qr(matrix, mode="reduced")
         self.register_buffer("descriptor_projection", q.float(), persistent=True)
 
@@ -844,7 +882,11 @@ class LatentWorldModel(nn.Module):
     def world_summary(self, world: Tensor) -> Tensor:
         split = self.split_world(world)
         return torch.stack(
-            [split["root"].mean(dim=-2), split["scene"].mean(dim=-2), split["dynamic"].mean(dim=-2)],
+            [
+                split["root"].mean(dim=-2),
+                split["scene"].mean(dim=-2),
+                split["dynamic"].mean(dim=-2),
+            ],
             dim=-2,
         )
 
@@ -858,7 +900,9 @@ class LatentWorldModel(nn.Module):
         mean = F.normalize(projected.mean(dim=-2), dim=-1)
         mean_energy = torch.log1p(energy.mean(dim=-1))[..., None]
         max_energy = torch.log1p(energy.max(dim=-1).values)[..., None]
-        return torch.cat([weighted, mean, mean_energy, max_energy], dim=-1).reshape(tokens.shape[0], -1)
+        return torch.cat([weighted, mean, mean_energy, max_energy], dim=-1).reshape(
+            tokens.shape[0], -1
+        )
 
     def fixed_view_descriptor(self, tokens: Tensor) -> Tensor:
         # [B,H,C,P,D] or [B,F,H,C,P,D]
@@ -902,7 +946,9 @@ class LatentWorldModel(nn.Module):
         self, target_initial: Tensor, target_future: Tensor, effect_steps: Tensor
     ) -> Tensor:
         cfg = self.config
-        target_by_offset = {int(offset): target_future[:, i] for i, offset in enumerate(cfg.future_offsets)}
+        target_by_offset = {
+            int(offset): target_future[:, i] for i, offset in enumerate(cfg.future_offsets)
+        }
         previous = target_initial
         rows: list[Tensor] = []
         start = 0
@@ -961,7 +1007,9 @@ class LatentWorldModel(nn.Module):
             ),
             "current_view_prediction": self.view_decoder(current_world),
             "pred_view_prediction": self.view_decoder(rollout["pred_world"]),
-            "current_view_target": self.fixed_view_descriptor(current_tokens).to(current_world.dtype),
+            "current_view_target": self.fixed_view_descriptor(current_tokens).to(
+                current_world.dtype
+            ),
             "future_view_target": self.fixed_view_descriptor(target_tokens).to(current_world.dtype),
             "pred_inverse_action": inverse_pred["action"],
             "pred_inverse_delta": inverse_pred["delta"],
@@ -1029,7 +1077,9 @@ class LatentWorldModel(nn.Module):
             "action_only_probe": self.action_only_probe,
             "representation_heads": self.local_motion_head,
         }
-        report = {name: sum(p.numel() for p in module.parameters()) for name, module in modules.items()}
+        report = {
+            name: sum(p.numel() for p in module.parameters()) for name, module in modules.items()
+        }
         report["total"] = sum(p.numel() for p in self.parameters())
         report["trainable"] = sum(p.numel() for p in self.parameters() if p.requires_grad)
         report["online_inference"] = (

@@ -57,10 +57,14 @@ class PatchTeacherConfig:
             if patch <= 0 or dim <= 0:
                 raise ValueError("tiny patch_size and token_dim must be positive")
             if h % patch or w % patch:
-                raise ValueError(f"tiny image_hw={self.image_hw} must be divisible by patch_size={patch}")
+                raise ValueError(
+                    f"tiny image_hw={self.image_hw} must be divisible by patch_size={patch}"
+                )
         elif self.backend == "dinov2_vits14":
             if h % 14 or w % 14:
-                raise ValueError(f"DINOv2 image_hw={self.image_hw} must be divisible by patch size 14")
+                raise ValueError(
+                    f"DINOv2 image_hw={self.image_hw} must be divisible by patch size 14"
+                )
             if self.patch_size not in {None, 14}:
                 raise ValueError("dinov2_vits14 patch_size is fixed at 14")
             if self.token_dim not in {None, 384}:
@@ -106,7 +110,9 @@ class PatchTeacherConfig:
             tiny_seed=int(data.get("tiny_seed", 17)),
             torch_hub_source=str(data.get("torch_hub_source", "github")),
             torch_hub_repo=str(data.get("torch_hub_repo", "facebookresearch/dinov2")),
-            local_repo_dir=None if data.get("local_repo_dir") is None else str(data["local_repo_dir"]),
+            local_repo_dir=None
+            if data.get("local_repo_dir") is None
+            else str(data["local_repo_dir"]),
             model_name=None if data.get("model_name") is None else str(data["model_name"]),
         )
         out.validate()
@@ -118,8 +124,12 @@ class _ImagePreprocessor(nn.Module):
         super().__init__()
         self.image_hw = (int(image_hw[0]), int(image_hw[1]))
         self.imagenet_normalize = bool(imagenet_normalize)
-        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
-        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer(
+            "mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False
+        )
+        self.register_buffer(
+            "std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False
+        )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         if images.ndim != 4 or images.shape[1] != 3:
@@ -159,7 +169,9 @@ class TinyPatchTeacher(nn.Module):
         # unfold projection. Formal experiments use the DINOv2 teacher.
         patch_elements = 3
         generator = torch.Generator().manual_seed(int(config.tiny_seed))
-        projection = torch.randn(patch_elements, self.token_dim, generator=generator) / (patch_elements ** 0.5)
+        projection = torch.randn(patch_elements, self.token_dim, generator=generator) / (
+            patch_elements**0.5
+        )
         self.register_buffer("projection", projection, persistent=True)
         self.preprocess = _ImagePreprocessor(config.image_hw, imagenet_normalize=False)
 
@@ -171,7 +183,9 @@ class TinyPatchTeacher(nn.Module):
         tokens = patches @ self.projection
         pooled = tokens.mean(dim=1)
         if tokens.shape[1] != self.patch_grid[0] * self.patch_grid[1]:
-            raise RuntimeError(f"unexpected tiny patch count={tokens.shape[1]} grid={self.patch_grid}")
+            raise RuntimeError(
+                f"unexpected tiny patch count={tokens.shape[1]} grid={self.patch_grid}"
+            )
         return tokens, pooled
 
 
@@ -223,12 +237,16 @@ class DinoV2ViTS14Teacher(nn.Module):
             raise RuntimeError(f"unexpected DINOv2 patch token shape={tuple(tokens.shape)}")
         expected = self.patch_grid[0] * self.patch_grid[1]
         if tokens.shape[1] != expected:
-            raise RuntimeError(f"unexpected DINOv2 patch count={tokens.shape[1]}, expected={expected}")
+            raise RuntimeError(
+                f"unexpected DINOv2 patch count={tokens.shape[1]}, expected={expected}"
+            )
         pooled = tokens.mean(dim=1)
         return tokens, pooled
 
 
-def build_patch_teacher(config: PatchTeacherConfig, *, device: torch.device | str = "cpu") -> PatchTeacherLike:
+def build_patch_teacher(
+    config: PatchTeacherConfig, *, device: torch.device | str = "cpu"
+) -> PatchTeacherLike:
     config.validate()
     if config.backend == "tiny_patch":
         teacher: nn.Module = TinyPatchTeacher(config)

@@ -57,8 +57,7 @@ def sample_future_latent_flow(
 
     if target_normalized.ndim != 5:
         raise ValueError(
-            "target_normalized must be [B,T,C,S,D], "
-            f"got {tuple(target_normalized.shape)}"
+            f"target_normalized must be [B,T,C,S,D], got {tuple(target_normalized.shape)}"
         )
     batch = target_normalized.shape[0]
     if time is None:
@@ -309,9 +308,7 @@ class FutureChangeEncoder(nn.Module):
         )
         self.query_norm = nn.LayerNorm(semantic_hidden_size)
         self.patch_norm = nn.LayerNorm(semantic_hidden_size)
-        self.query_attn = nn.MultiheadAttention(
-            semantic_hidden_size, heads, batch_first=True
-        )
+        self.query_attn = nn.MultiheadAttention(semantic_hidden_size, heads, batch_first=True)
         self.output_norm = nn.LayerNorm(semantic_hidden_size)
         self.output_proj = nn.Sequential(
             nn.Linear(semantic_hidden_size, semantic_hidden_size),
@@ -503,9 +500,7 @@ class CleanFutureLatentDynamics(nn.Module):
             raise ValueError("invalid gripper_dim_index for action semantics")
         self.action_summary_dim = 3 * self.action_dim + 4
         self.action_cross_scale = (
-            float(action_cross_scale)
-            if action_cross_scale > 0
-            else 1.0 / math.sqrt(float(depth))
+            float(action_cross_scale) if action_cross_scale > 0 else 1.0 / math.sqrt(float(depth))
         )
 
         action_prefix_mask = torch.zeros(
@@ -551,10 +546,12 @@ class CleanFutureLatentDynamics(nn.Module):
             nn.Linear(latent_dim, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size)
         )
         self.action_blocks = nn.ModuleList([_PureActionBlock(core) for _ in range(depth)])
-        self.future_blocks = nn.ModuleList([
-            _FutureResidualBlock(core, action_cross_scale=self.action_cross_scale)
-            for _ in range(depth)
-        ])
+        self.future_blocks = nn.ModuleList(
+            [
+                _FutureResidualBlock(core, action_cross_scale=self.action_cross_scale)
+                for _ in range(depth)
+            ]
+        )
         self.action_semantic_proj = nn.Sequential(
             nn.Linear(hidden_size, semantic_hidden_size),
             nn.SiLU(),
@@ -715,7 +712,10 @@ class CleanFutureLatentDynamics(nn.Module):
 
     def residual_target(self, current_compressed: Tensor, future_compressed: Tensor) -> Tensor:
         expected_current = (
-            current_compressed.shape[0], self.num_cameras, self.spatial_tokens, self.latent_dim
+            current_compressed.shape[0],
+            self.num_cameras,
+            self.spatial_tokens,
+            self.latent_dim,
         )
         if tuple(current_compressed.shape) != expected_current:
             raise ValueError("current compressed latent shape mismatch")
@@ -733,13 +733,21 @@ class CleanFutureLatentDynamics(nn.Module):
     def normalize_residual(self, residual: Tensor) -> Tensor:
         if not bool(self.residual_stats_ready.item()):
             raise RuntimeError("future residual statistics are not initialized")
-        mean = self.residual_mean.to(device=residual.device, dtype=residual.dtype)[None, :, :, None, :]
-        std = self.residual_std.to(device=residual.device, dtype=residual.dtype)[None, :, :, None, :]
+        mean = self.residual_mean.to(device=residual.device, dtype=residual.dtype)[
+            None, :, :, None, :
+        ]
+        std = self.residual_std.to(device=residual.device, dtype=residual.dtype)[
+            None, :, :, None, :
+        ]
         return (residual - mean) / std
 
     def denormalize_residual(self, normalized: Tensor) -> Tensor:
-        mean = self.residual_mean.to(device=normalized.device, dtype=normalized.dtype)[None, :, :, None, :]
-        std = self.residual_std.to(device=normalized.device, dtype=normalized.dtype)[None, :, :, None, :]
+        mean = self.residual_mean.to(device=normalized.device, dtype=normalized.dtype)[
+            None, :, :, None, :
+        ]
+        std = self.residual_std.to(device=normalized.device, dtype=normalized.dtype)[
+            None, :, :, None, :
+        ]
         return normalized * std + mean
 
     def motion_weights(self, residual_raw: Tensor) -> Tensor:
@@ -754,9 +762,7 @@ class CleanFutureLatentDynamics(nn.Module):
         hidden = self.current_proj(current_compressed)
         hidden = hidden + self.current_camera_embedding + self.current_spatial_embedding
         return (
-            hidden.reshape(
-                current_compressed.shape[0], self.total_current_tokens, self.hidden_size
-            )
+            hidden.reshape(current_compressed.shape[0], self.total_current_tokens, self.hidden_size)
             + self.current_type_embedding
         )
 
@@ -776,9 +782,7 @@ class CleanFutureLatentDynamics(nn.Module):
         boundary = torch.cat([past_last_action[:, None], action_chunk[:, :-1]], dim=1)
         temporal_delta = action_chunk - boundary
         state_relative = action_chunk - state[:, None]
-        action = self.action_proj(
-            torch.cat([action_chunk, temporal_delta, state_relative], dim=-1)
-        )
+        action = self.action_proj(torch.cat([action_chunk, temporal_delta, state_relative], dim=-1))
         return action + self.action_temporal_embedding + self.action_type_embedding
 
     def encode_action(
@@ -811,9 +815,7 @@ class CleanFutureLatentDynamics(nn.Module):
         past_last_action: Tensor,
         state: Tensor,
     ) -> Tensor:
-        return self.encode_action(
-            action_chunk, past_last_action=past_last_action, state=state
-        )[2]
+        return self.encode_action(action_chunk, past_last_action=past_last_action, state=state)[2]
 
     def encode_future_change(self, residual_normalized: Tensor) -> Tensor:
         return self.future_change_encoder(residual_normalized)
@@ -835,12 +837,8 @@ class CleanFutureLatentDynamics(nn.Module):
     def inverse_prediction(self, embedding: Tensor) -> Tensor:
         return self.inverse_action_head(embedding)
 
-    def current_only_action_prediction(
-        self, current_compressed: Tensor, state: Tensor
-    ) -> Tensor:
-        return self.current_action_baseline_head(
-            current_compressed.detach(), state.detach()
-        )
+    def current_only_action_prediction(self, current_compressed: Tensor, state: Tensor) -> Tensor:
+        return self.current_action_baseline_head(current_compressed.detach(), state.detach())
 
     def build_action_semantic_targets(
         self,
@@ -912,11 +910,19 @@ class CleanFutureLatentDynamics(nn.Module):
         velocity_pred, velocity_gt = prediction[..., a : 2 * a], target[..., a : 2 * a]
         path_pred, path_gt = prediction[..., 2 * a : 3 * a], target[..., 2 * a : 3 * a]
         arm_pred = torch.cat(
-            [endpoint_pred[..., arm_indices], velocity_pred[..., arm_indices], path_pred[..., arm_indices]],
+            [
+                endpoint_pred[..., arm_indices],
+                velocity_pred[..., arm_indices],
+                path_pred[..., arm_indices],
+            ],
             dim=-1,
         )
         arm_gt = torch.cat(
-            [endpoint_gt[..., arm_indices], velocity_gt[..., arm_indices], path_gt[..., arm_indices]],
+            [
+                endpoint_gt[..., arm_indices],
+                velocity_gt[..., arm_indices],
+                path_gt[..., arm_indices],
+            ],
             dim=-1,
         )
         arm_loss = F.smooth_l1_loss(arm_pred, arm_gt)
@@ -926,13 +932,11 @@ class CleanFutureLatentDynamics(nn.Module):
         gripper_final_gt = target[..., base]
         gripper_final_loss = F.smooth_l1_loss(gripper_final_pred, gripper_final_gt)
         gripper_final_rmse = (
-            gripper_final_pred.float() - gripper_final_gt.float()
-        ).square().mean().sqrt()
+            (gripper_final_pred.float() - gripper_final_gt.float()).square().mean().sqrt()
+        )
         transition_logit = prediction[..., base + 1]
         transition_gt = targets["transition"].to(dtype=prediction.dtype)
-        transition_loss = F.binary_cross_entropy_with_logits(
-            transition_logit, transition_gt
-        )
+        transition_loss = F.binary_cross_entropy_with_logits(transition_logit, transition_gt)
         positive = targets["transition"]
         timing_pred = prediction[..., base + 2].sigmoid()
         timing_gt = targets["transition_time"].to(dtype=prediction.dtype)
@@ -940,12 +944,8 @@ class CleanFutureLatentDynamics(nn.Module):
         direction_gt = targets["transition_direction"].to(dtype=prediction.dtype)
         if positive.any():
             timing_loss = F.smooth_l1_loss(timing_pred[positive], timing_gt[positive])
-            direction_loss = F.smooth_l1_loss(
-                direction_pred[positive], direction_gt[positive]
-            )
-            timing_mae = (
-                timing_pred[positive].float() - timing_gt[positive].float()
-            ).abs().mean()
+            direction_loss = F.smooth_l1_loss(direction_pred[positive], direction_gt[positive])
+            timing_mae = (timing_pred[positive].float() - timing_gt[positive].float()).abs().mean()
         else:
             timing_loss = prediction.new_zeros(())
             direction_loss = prediction.new_zeros(())
@@ -956,13 +956,7 @@ class CleanFutureLatentDynamics(nn.Module):
         fp = (pred_event & ~true_event).sum().float()
         fn = (~pred_event & true_event).sum().float()
         f1 = 2.0 * tp / (2.0 * tp + fp + fn).clamp_min(1.0)
-        total = (
-            arm_loss
-            + gripper_final_loss
-            + transition_loss
-            + timing_loss
-            + direction_loss
-        )
+        total = arm_loss + gripper_final_loss + transition_loss + timing_loss + direction_loss
         return total, {
             f"{prefix}_loss": total,
             f"{prefix}_arm_rmse": arm_rmse,
@@ -1083,14 +1077,16 @@ class CleanFutureLatentDynamics(nn.Module):
         if negative_action_embedding is not None:
             if negative_action_embedding.ndim != 4:
                 raise ValueError("negative_action_embedding must be [B,K,T,E]")
-            if negative_action_embedding.shape[0] != batch or negative_action_embedding.shape[2:] != action_embedding.shape[1:]:
+            if (
+                negative_action_embedding.shape[0] != batch
+                or negative_action_embedding.shape[2:] != action_embedding.shape[1:]
+            ):
                 raise ValueError("structured negatives must match [B,K,T,E]")
             negative = F.normalize(negative_action_embedding.float(), dim=-1)
             all_negative_cosine = torch.einsum("bkte,bte->bkt", negative, future)
             if negative_valid is None:
                 negative_valid = torch.ones(
-                    batch, negative.shape[1], prefixes,
-                    device=action.device, dtype=torch.bool
+                    batch, negative.shape[1], prefixes, device=action.device, dtype=torch.bool
                 )
             elif tuple(negative_valid.shape) == (batch, negative.shape[1]):
                 negative_valid = negative_valid.unsqueeze(-1).expand(-1, -1, prefixes)
@@ -1101,7 +1097,9 @@ class CleanFutureLatentDynamics(nn.Module):
             local_losses: list[Tensor] = []
             local_hardest_indices: list[Tensor] = []
             for prefix_idx in range(prefixes):
-                positive_logit = (action[:, prefix_idx] * future[:, prefix_idx]).sum(dim=-1, keepdim=True)
+                positive_logit = (action[:, prefix_idx] * future[:, prefix_idx]).sum(
+                    dim=-1, keepdim=True
+                )
                 prefix_negative_valid = negative_valid[:, :, prefix_idx]
                 negative_logits = all_negative_cosine[:, :, prefix_idx]
                 negative_logits = negative_logits.masked_fill(~prefix_negative_valid, -1e4)
@@ -1110,7 +1108,9 @@ class CleanFutureLatentDynamics(nn.Module):
                 row_loss = F.cross_entropy(logits, target, reduction="none")
                 weight = None if sample_weight is None else sample_weight[:, prefix_idx]
                 local_losses.append(CleanFutureLatentDynamics._weighted_mean(row_loss, weight))
-                valid_cosine = all_negative_cosine[:, :, prefix_idx].masked_fill(~prefix_negative_valid, -1.0)
+                valid_cosine = all_negative_cosine[:, :, prefix_idx].masked_fill(
+                    ~prefix_negative_valid, -1.0
+                )
                 values, indices = valid_cosine.max(dim=1)
                 structured_hardest[:, prefix_idx] = values
                 local_hardest_indices.append(indices.float().mean())
@@ -1222,11 +1222,15 @@ class CleanFutureLatentDynamics(nn.Module):
         prepared = self.modulation.prepare(
             torch.cat([time, self.task_embedding.expand_as(time)], dim=-1)
         )
-        action_mask = self.future_action_prefix_mask.to(device=future.device).unsqueeze(0).expand(
-            future.shape[0], -1, -1
+        action_mask = (
+            self.future_action_prefix_mask.to(device=future.device)
+            .unsqueeze(0)
+            .expand(future.shape[0], -1, -1)
         )
-        future_mask = self.future_temporal_mask.to(device=future.device).unsqueeze(0).expand(
-            future.shape[0], -1, -1
+        future_mask = (
+            self.future_temporal_mask.to(device=future.device)
+            .unsqueeze(0)
+            .expand(future.shape[0], -1, -1)
         )
         future_diagnostics: list[dict[str, Tensor]] = []
         for layer_idx, future_block in enumerate(self.future_blocks):
@@ -1253,17 +1257,22 @@ class CleanFutureLatentDynamics(nn.Module):
             "future_action_encoder_ffn_gate": velocity.new_tensor(1.0),
             "future_action_embedding_rms": action_embedding.square().mean().sqrt(),
             "future_action_prefix_hidden_rms": action_prefix_hidden.square().mean().sqrt(),
-            "future_action_direct_injection_rms": self.action_to_future(
-                action_prefix_hidden
-            ).square().mean().sqrt(),
+            "future_action_direct_injection_rms": self.action_to_future(action_prefix_hidden)
+            .square()
+            .mean()
+            .sqrt(),
         }
         for key in future_diagnostics[0]:
             diagnostics[key] = torch.stack([row[key] for row in future_diagnostics]).mean()
-        return velocity, diagnostics, {
-            "action_tokens": action,
-            "action_prefix_hidden": action_prefix_hidden,
-            "action_embedding": action_embedding,
-        }
+        return (
+            velocity,
+            diagnostics,
+            {
+                "action_tokens": action,
+                "action_prefix_hidden": action_prefix_hidden,
+                "action_embedding": action_embedding,
+            },
+        )
 
     def forward(self, **kwargs: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
         velocity, diagnostics, _ = self._forward_core(**kwargs)
@@ -1304,9 +1313,10 @@ class CleanFutureLatentDynamics(nn.Module):
         descriptor = torch.cat([state_descriptor, visual_descriptor], dim=-1)
         descriptor_distance = torch.cdist(descriptor, descriptor)
         action_distance = (
-            action_chunk.detach().float()[:, None]
-            - action_chunk.detach().float()[None, :]
-        ).square().mean(dim=(2, 3))
+            (action_chunk.detach().float()[:, None] - action_chunk.detach().float()[None, :])
+            .square()
+            .mean(dim=(2, 3))
+        )
         invalid = torch.eye(batch, dtype=torch.bool, device=action_chunk.device)
         invalid |= action_distance <= 1e-8
         descriptor_distance = descriptor_distance.masked_fill(invalid, float("inf"))
@@ -1350,9 +1360,7 @@ class CleanFutureLatentDynamics(nn.Module):
             raise ValueError("future velocity shape mismatch")
         error_channel = (predicted_velocity - flow.target_velocity).square()
         error_patch = error_channel.mean(dim=-1)
-        weighted_flow = self.weighted_mse(
-            predicted_velocity, flow.target_velocity, motion_weights
-        )
+        weighted_flow = self.weighted_mse(predicted_velocity, flow.target_velocity, motion_weights)
         unweighted_flow = error_channel.mean()
         remaining = 1.0 - flow.time.reshape(-1, 1, 1, 1, 1)
         residual_endpoint_normalized = flow.noisy + remaining * predicted_velocity
@@ -1361,9 +1369,11 @@ class CleanFutureLatentDynamics(nn.Module):
         absolute_error = future_endpoint - future_compressed
         endpoint_rmse = absolute_error.float().square().mean().sqrt()
         residual_error = residual_endpoint_normalized - flow.target_normalized
-        residual_r2 = 1.0 - residual_error.float().square().mean() / flow.target_normalized.float().var(
-            unbiased=False
-        ).clamp_min(1e-8)
+        residual_r2 = (
+            1.0
+            - residual_error.float().square().mean()
+            / flow.target_normalized.float().var(unbiased=False).clamp_min(1e-8)
+        )
         target_flat = flow.target_velocity.float().reshape(flow.target_velocity.shape[0], -1)
         pred_flat = predicted_velocity.float().reshape(predicted_velocity.shape[0], -1)
         cosine = F.cosine_similarity(pred_flat, target_flat, dim=1).mean()
@@ -1371,8 +1381,12 @@ class CleanFutureLatentDynamics(nn.Module):
         threshold = magnitude.median(dim=3, keepdim=True).values
         dynamic = magnitude >= threshold
         static = ~dynamic
-        dynamic_mse = error_patch.float()[dynamic].mean() if dynamic.any() else error_patch.new_zeros(())
-        static_mse = error_patch.float()[static].mean() if static.any() else error_patch.new_zeros(())
+        dynamic_mse = (
+            error_patch.float()[dynamic].mean() if dynamic.any() else error_patch.new_zeros(())
+        )
+        static_mse = (
+            error_patch.float()[static].mean() if static.any() else error_patch.new_zeros(())
+        )
         metrics: dict[str, Tensor] = {
             f"{prefix}_flow_mse": weighted_flow,
             f"{prefix}_flow_mse_unweighted": unweighted_flow,

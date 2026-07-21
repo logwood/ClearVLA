@@ -137,7 +137,7 @@ exec python -u -m clearvla.cli.train_v40_policy \
   --latent-cvae-transition-memory 1 \
   --latent-cvae-context-memory 0 \
   --latent-cvae-visual-memory 0 \
-  --latent-cvae-transition-detach 1 \
+  --latent-cvae-transition-detach "${LATENT_CVAE_TRANSITION_DETACH:-1}" \
   --latent-cvae-layer-detach 1 \
   --latent-cvae-layer-grad-scale 0.15 \
   --latent-cvae-condition-source-norm 0 \

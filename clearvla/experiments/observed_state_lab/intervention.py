@@ -73,19 +73,29 @@ class InterventionBranchDataset(Dataset):
             "state_raw": torch.from_numpy(state_raw),
             "action_state": torch.from_numpy(self.action_normalizer.encode(state_raw)),
             "history_state": torch.from_numpy(self.state_normalizer.encode(history_state_raw)),
-            "executed_action_history": torch.from_numpy(self.action_normalizer.encode(executed_raw)),
-            "target_history_state": torch.from_numpy(self.state_normalizer.encode(target_state_raw)),
-            "target_executed_action_history": torch.from_numpy(self.action_normalizer.encode(target_executed_raw)),
+            "executed_action_history": torch.from_numpy(
+                self.action_normalizer.encode(executed_raw)
+            ),
+            "target_history_state": torch.from_numpy(
+                self.state_normalizer.encode(target_state_raw)
+            ),
+            "target_executed_action_history": torch.from_numpy(
+                self.action_normalizer.encode(target_executed_raw)
+            ),
             "action": torch.from_numpy(self.action_normalizer.encode(action_raw)),
             "action_raw": torch.from_numpy(action_raw),
-            "policy_action": torch.from_numpy(self.action_normalizer.encode(action_raw[: self.policy_horizon])),
+            "policy_action": torch.from_numpy(
+                self.action_normalizer.encode(action_raw[: self.policy_horizon])
+            ),
             "policy_action_raw": torch.from_numpy(action_raw[: self.policy_horizon]),
             "future_state": torch.from_numpy(self.state_normalizer.encode(future_state_raw)),
             "future_state_raw": torch.from_numpy(future_state_raw),
             "segment_state": torch.from_numpy(self.state_normalizer.encode(segment_state_raw)),
             "segment_state_raw": torch.from_numpy(segment_state_raw),
             "history_keys": torch.from_numpy(d["history_keys"][index].astype(np.int64)),
-            "target_history_keys": torch.from_numpy(d["target_history_keys"][index].astype(np.int64)),
+            "target_history_keys": torch.from_numpy(
+                d["target_history_keys"][index].astype(np.int64)
+            ),
         }
 
 
@@ -94,7 +104,9 @@ def validate_intervention_groups(groups: np.ndarray) -> None:
     unique, counts = np.unique(groups, return_counts=True)
     bad = unique[counts < 2]
     if len(bad):
-        raise ValueError(f"every intervention group needs at least two branches; invalid={bad.tolist()}")
+        raise ValueError(
+            f"every intervention group needs at least two branches; invalid={bad.tolist()}"
+        )
 
 
 __all__ = ["InterventionBranchDataset", "validate_intervention_groups", "REQUIRED_FIELDS"]

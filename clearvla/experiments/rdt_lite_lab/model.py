@@ -37,7 +37,9 @@ def _sincos_2d(height: int, width: int, dim: int) -> torch.Tensor:
     return (row + col).reshape(height * width, dim)
 
 
-def _rdt_timestep_embedding(time: torch.Tensor, dim: int, *, max_period: int = 10000) -> torch.Tensor:
+def _rdt_timestep_embedding(
+    time: torch.Tensor, dim: int, *, max_period: int = 10000
+) -> torch.Tensor:
     if time.ndim != 1:
         raise ValueError("time must be [B]")
     half = dim // 2
@@ -53,7 +55,9 @@ def _rdt_timestep_embedding(time: torch.Tensor, dim: int, *, max_period: int = 1
     return emb[:, :dim].to(dtype=time.dtype)
 
 
-def _pi_time_embedding(time: torch.Tensor, dim: int, *, min_period: float = 4e-3, max_period: float = 4.0) -> torch.Tensor:
+def _pi_time_embedding(
+    time: torch.Tensor, dim: int, *, min_period: float = 4e-3, max_period: float = 4.0
+) -> torch.Tensor:
     if time.ndim != 1:
         raise ValueError("time must be [B]")
     half = dim // 2
@@ -82,18 +86,31 @@ class RMSNorm(nn.Module):
         self.eps = float(eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.float().square().mean(dim=-1, keepdim=True) + self.eps).to(dtype=x.dtype) * self.weight
+        return (
+            x
+            * torch.rsqrt(x.float().square().mean(dim=-1, keepdim=True) + self.eps).to(
+                dtype=x.dtype
+            )
+            * self.weight
+        )
 
 
 class HeadRMSNorm(nn.Module):
     """RMSNorm applied independently to each attention head."""
+
     def __init__(self, head_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(head_dim))
         self.eps = float(eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.float().square().mean(dim=-1, keepdim=True) + self.eps).to(dtype=x.dtype) * self.weight
+        return (
+            x
+            * torch.rsqrt(x.float().square().mean(dim=-1, keepdim=True) + self.eps).to(
+                dtype=x.dtype
+            )
+            * self.weight
+        )
 
 
 @dataclass(frozen=True)
@@ -182,10 +199,20 @@ class RDTLiteModelConfig:
 
     def validate(self) -> None:
         positive = (
-            self.state_dim, self.action_dim, self.chunk_len, self.obs_horizon,
-            self.state_history_len, self.patch_grid[0], self.patch_grid[1],
-            self.teacher_dim, self.hidden_size, self.depth, self.num_heads,
-            self.ffn_hidden, self.img_adaptor_depth, self.state_adaptor_depth,
+            self.state_dim,
+            self.action_dim,
+            self.chunk_len,
+            self.obs_horizon,
+            self.state_history_len,
+            self.patch_grid[0],
+            self.patch_grid[1],
+            self.teacher_dim,
+            self.hidden_size,
+            self.depth,
+            self.num_heads,
+            self.ffn_hidden,
+            self.img_adaptor_depth,
+            self.state_adaptor_depth,
             self.action_adaptor_depth,
         )
         if any(int(value) <= 0 for value in positive):
@@ -194,7 +221,9 @@ class RDTLiteModelConfig:
             raise ValueError("hidden_size must be divisible by num_heads")
         if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
             raise ValueError(f"invalid camera_names={self.camera_names}")
-        if not self.camera_order or any(camera not in self.camera_names for camera in self.camera_order):
+        if not self.camera_order or any(
+            camera not in self.camera_names for camera in self.camera_order
+        ):
             raise ValueError("camera_order must be a non-empty subset of camera_names")
         if self.conditioning_mode not in ("concat", "camera_alternate", "alternate"):
             raise ValueError(f"unsupported conditioning_mode={self.conditioning_mode!r}")
@@ -223,8 +252,12 @@ class RDTLiteModelConfig:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "RDTLiteModelConfig":
         payload = dict(data)
-        payload["camera_names"] = tuple(str(value) for value in payload.get("camera_names", ("top", "wrist")))
-        payload["camera_order"] = tuple(str(value) for value in payload.get("camera_order", payload["camera_names"]))
+        payload["camera_names"] = tuple(
+            str(value) for value in payload.get("camera_names", ("top", "wrist"))
+        )
+        payload["camera_order"] = tuple(
+            str(value) for value in payload.get("camera_order", payload["camera_names"])
+        )
         patch = payload.get("patch_grid", (16, 16))
         payload["patch_grid"] = (int(patch[0]), int(patch[1]))  # type: ignore[index]
         if "state_dim" not in payload:
@@ -254,8 +287,12 @@ class VisualDeltaAugmentor(nn.Module):
         nn.init.constant_(self.delta_gate.bias, config.delta_gate_bias)
         self.type_embed = nn.Parameter(torch.randn(dim) * 0.02)
 
-    def forward(self, delta_raw: torch.Tensor, *, camera_embed: torch.Tensor, patch_embed: torch.Tensor) -> torch.Tensor:
-        rms = torch.sqrt(delta_raw.float().square().mean(dim=-1, keepdim=True) + 1e-12).to(dtype=delta_raw.dtype)
+    def forward(
+        self, delta_raw: torch.Tensor, *, camera_embed: torch.Tensor, patch_embed: torch.Tensor
+    ) -> torch.Tensor:
+        rms = torch.sqrt(delta_raw.float().square().mean(dim=-1, keepdim=True) + 1e-12).to(
+            dtype=delta_raw.dtype
+        )
         direction = delta_raw / rms.clamp_min(1e-6)
         magnitude = torch.log1p(rms)
         delta = torch.sigmoid(self.delta_gate(magnitude)) * self.delta_proj(direction)
@@ -282,8 +319,14 @@ class VisualConditionAdaptor(nn.Module):
         self.mask_token = nn.Parameter(torch.randn(cameras, dim) * 0.02)
         self.observed_type = nn.Parameter(torch.randn(dim) * 0.02)
         self.out_norm = RMSNorm(dim)
-        self.delta_augmentor = VisualDeltaAugmentor(config) if config.include_visual_delta_tokens else None
-        self.register_buffer("patch_embed", _sincos_2d(config.patch_grid[0], config.patch_grid[1], dim), persistent=True)
+        self.delta_augmentor = (
+            VisualDeltaAugmentor(config) if config.include_visual_delta_tokens else None
+        )
+        self.register_buffer(
+            "patch_embed",
+            _sincos_2d(config.patch_grid[0], config.patch_grid[1], dim),
+            persistent=True,
+        )
 
     def _sample_keep(self, batch: int, *, device: torch.device) -> torch.Tensor:
         cameras = len(self.config.camera_names)
@@ -302,31 +345,49 @@ class VisualConditionAdaptor(nn.Module):
         cfg = self.config
         expected = (cfg.obs_horizon, len(cfg.camera_names), cfg.patch_count, cfg.teacher_dim)
         if visual_tokens.ndim != 5 or tuple(visual_tokens.shape[1:]) != expected:
-            raise ValueError(f"visual_tokens must be [B,{expected}], got {tuple(visual_tokens.shape)}")
+            raise ValueError(
+                f"visual_tokens must be [B,{expected}], got {tuple(visual_tokens.shape)}"
+            )
         batch = visual_tokens.shape[0]
         keep = self._sample_keep(batch, device=visual_tokens.device)
         observed = self.image_proj(self.input_norm(visual_tokens))
-        observed = torch.where(keep[:, None, :, None, None], observed, self.mask_token[None, None, :, None, :])
+        observed = torch.where(
+            keep[:, None, :, None, None], observed, self.mask_token[None, None, :, None, :]
+        )
         observed = observed + self.frame_embed[None, :, None, None, :]
         observed = observed + self.camera_embed[None, None, :, None, :]
         observed = observed + self.patch_embed[None, None, None, :, :]
         observed = observed + self.observed_type[None, None, None, None, :]
-        by_camera = [observed[:, :, camera].reshape(batch, -1, cfg.hidden_size) for camera in range(len(cfg.camera_names))]
+        by_camera = [
+            observed[:, :, camera].reshape(batch, -1, cfg.hidden_size)
+            for camera in range(len(cfg.camera_names))
+        ]
 
-        statistics = torch.zeros((batch, len(cfg.camera_names), 4), device=visual_tokens.device, dtype=visual_tokens.dtype)
+        statistics = torch.zeros(
+            (batch, len(cfg.camera_names), 4),
+            device=visual_tokens.device,
+            dtype=visual_tokens.dtype,
+        )
         if cfg.obs_horizon >= 2:
             delta_raw = visual_tokens[:, -1] - visual_tokens[:, -2]
             delta_raw = delta_raw * keep[:, :, None, None].to(dtype=delta_raw.dtype)
-            rms = torch.sqrt(delta_raw.float().square().mean(dim=-1) + 1e-12).to(dtype=visual_tokens.dtype)
+            rms = torch.sqrt(delta_raw.float().square().mean(dim=-1) + 1e-12).to(
+                dtype=visual_tokens.dtype
+            )
             topk = min(16, cfg.patch_count)
-            statistics = torch.stack([
-                rms.mean(dim=-1),
-                rms.max(dim=-1).values,
-                rms.topk(topk, dim=-1).values.mean(dim=-1),
-                torch.quantile(rms.float(), 0.90, dim=-1).to(dtype=visual_tokens.dtype),
-            ], dim=-1)
+            statistics = torch.stack(
+                [
+                    rms.mean(dim=-1),
+                    rms.max(dim=-1).values,
+                    rms.topk(topk, dim=-1).values.mean(dim=-1),
+                    torch.quantile(rms.float(), 0.90, dim=-1).to(dtype=visual_tokens.dtype),
+                ],
+                dim=-1,
+            )
             if self.delta_augmentor is not None:
-                delta = self.delta_augmentor(delta_raw, camera_embed=self.camera_embed, patch_embed=self.patch_embed)
+                delta = self.delta_augmentor(
+                    delta_raw, camera_embed=self.camera_embed, patch_embed=self.patch_embed
+                )
                 for camera in range(len(cfg.camera_names)):
                     by_camera[camera] = torch.cat([by_camera[camera], delta[:, camera]], dim=1)
 
@@ -339,7 +400,9 @@ class RDTDenoiseTimestepEmbedder(nn.Module):
     def __init__(self, hidden_size: int, frequency_dim: int = 256) -> None:
         super().__init__()
         self.frequency_dim = int(frequency_dim)
-        self.mlp = nn.Sequential(nn.Linear(frequency_dim, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_dim, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size)
+        )
 
     def forward(self, time: torch.Tensor) -> torch.Tensor:
         return self.mlp(_rdt_timestep_embedding(time, self.frequency_dim))
@@ -349,7 +412,9 @@ class PiFlowTimeEmbedder(nn.Module):
     def __init__(self, hidden_size: int) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
-        self.mlp = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size)
+        )
 
     def forward(self, time: torch.Tensor) -> torch.Tensor:
         return self.mlp(_pi_time_embedding(time, self.hidden_size))
@@ -384,6 +449,7 @@ class RDTLiteBlock(nn.Module):
 
 class SplitActionDecoder(nn.Module):
     """Separate arm and gripper projections so one channel cannot dominate."""
+
     def __init__(self, hidden_size: int, action_dim: int, *, output_init_std: float) -> None:
         super().__init__()
         if action_dim < 2:
@@ -428,14 +494,20 @@ class RDTLiteModel(nn.Module):
         self.visual_adaptor = VisualConditionAdaptor(config)
         self.state_adaptor = _mlp(config.state_dim, dim, depth=config.state_adaptor_depth)
         self.action_adaptor = _mlp(config.action_dim, dim, depth=config.action_adaptor_depth)
-        self.time_embedder = RDTDenoiseTimestepEmbedder(dim) if config.time_encoding == "rdt_discrete" else PiFlowTimeEmbedder(dim)
+        self.time_embedder = (
+            RDTDenoiseTimestepEmbedder(dim)
+            if config.time_encoding == "rdt_discrete"
+            else PiFlowTimeEmbedder(dim)
+        )
         self.frequency_embedder = RDTDenoiseTimestepEmbedder(dim)
         self.state_type = nn.Parameter(torch.randn(dim) * 0.02)
         self.action_type = nn.Parameter(torch.randn(dim) * 0.02)
         token_count = 2 + config.state_history_len + config.chunk_len
         self.register_buffer("trajectory_pos", _sincos_1d(token_count, dim)[None], persistent=True)
         self.blocks = nn.ModuleList([RDTLiteBlock(config) for _ in range(config.depth)])
-        self.decoder = SplitActionDecoder(dim, config.action_dim, output_init_std=config.decoder_output_init_std)
+        self.decoder = SplitActionDecoder(
+            dim, config.action_dim, output_init_std=config.decoder_output_init_std
+        )
         self._camera_index = {name: index for index, name in enumerate(config.camera_names)}
 
     def parameter_count(self) -> int:
@@ -451,7 +523,11 @@ class RDTLiteModel(nn.Module):
         visual = self.visual_adaptor(visual_tokens)
         memories: list[AttentionKV] = []
         for block, source in zip(self.blocks, self.camera_schedule(), strict=True):
-            condition = visual.concat_tokens if source == "concat" else visual.camera_tokens[self._camera_index[source]]
+            condition = (
+                visual.concat_tokens
+                if source == "concat"
+                else visual.camera_tokens[self._camera_index[source]]
+            )
             memories.append(block.prepare_memory(condition))
         return PreparedRDTLite(visual=visual, block_memories=tuple(memories))
 
@@ -484,12 +560,26 @@ class RDTLiteModel(nn.Module):
             "trajectory_token_norm": tokens.detach().float().norm(dim=-1).mean(),
             "prediction_norm": prediction.detach().float().norm(dim=-1).mean(),
             "camera_keep_rate": prepared.visual.camera_keep_mask.detach().float().mean(),
-            "delta_statistics_mean": prepared.visual.delta_statistics_by_camera.detach().float().mean(),
+            "delta_statistics_mean": prepared.visual.delta_statistics_by_camera.detach()
+            .float()
+            .mean(),
         }
         return RDTLiteOutput(prediction, diagnostics)
 
-    def forward(self, *, state_history: torch.Tensor, visual_tokens: torch.Tensor, noisy_actions: torch.Tensor, time: torch.Tensor) -> RDTLiteOutput:
-        return self.forward_prepared(state_history=state_history, noisy_actions=noisy_actions, time=time, prepared=self.prepare_visual(visual_tokens))
+    def forward(
+        self,
+        *,
+        state_history: torch.Tensor,
+        visual_tokens: torch.Tensor,
+        noisy_actions: torch.Tensor,
+        time: torch.Tensor,
+    ) -> RDTLiteOutput:
+        return self.forward_prepared(
+            state_history=state_history,
+            noisy_actions=noisy_actions,
+            time=time,
+            prepared=self.prepare_visual(visual_tokens),
+        )
 
     @torch.no_grad()
     def sample_actions_prepared(
@@ -510,14 +600,20 @@ class RDTLiteModel(nn.Module):
         shape = (batch, cfg.chunk_len, cfg.action_dim)
         state = initial_noise
         if state is None:
-            state = torch.randn(shape, device=state_history.device, dtype=state_history.dtype, generator=generator)
+            state = torch.randn(
+                shape, device=state_history.device, dtype=state_history.dtype, generator=generator
+            )
         if tuple(state.shape) != shape:
             raise ValueError(f"initial_noise must have shape={shape}")
         if objective == "pi_flow":
             dt = -1.0 / float(steps)
             for index in range(steps):
-                time = torch.full((batch,), 1.0 + index * dt, device=state.device, dtype=state.dtype)
-                velocity = self.forward_prepared(state_history=state_history, noisy_actions=state, time=time, prepared=prepared).prediction
+                time = torch.full(
+                    (batch,), 1.0 + index * dt, device=state.device, dtype=state.dtype
+                )
+                velocity = self.forward_prepared(
+                    state_history=state_history, noisy_actions=state, time=time, prepared=prepared
+                ).prediction
                 state = state + dt * velocity
             return state
         if objective == "rdt_denoise":
@@ -525,7 +621,9 @@ class RDTLiteModel(nn.Module):
             timesteps = schedule.inference_timesteps(steps, device=state.device)
             for index, timestep in enumerate(timesteps.tolist()):
                 time = torch.full((batch,), float(timestep), device=state.device, dtype=state.dtype)
-                pred_clean = self.forward_prepared(state_history=state_history, noisy_actions=state, time=time, prepared=prepared).prediction
+                pred_clean = self.forward_prepared(
+                    state_history=state_history, noisy_actions=state, time=time, prepared=prepared
+                ).prediction
                 prev = int(timesteps[index + 1]) if index + 1 < len(timesteps) else None
                 state = schedule.ddim_step(state, pred_clean, int(timestep), prev)
             return state

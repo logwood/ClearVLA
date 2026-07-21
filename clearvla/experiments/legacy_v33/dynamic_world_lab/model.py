@@ -55,7 +55,9 @@ class _SelfAttentionBlock(nn.Module):
             mask = torch.triu(
                 torch.ones(length, length, device=x.device, dtype=torch.bool), diagonal=1
             )
-        y, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x), attn_mask=mask, need_weights=False)
+        y, _ = self.attn(
+            self.norm1(x), self.norm1(x), self.norm1(x), attn_mask=mask, need_weights=False
+        )
         x = x + self.dropout(y)
         return x + self.dropout(self.ffn(self.norm2(x)))
 
@@ -77,7 +79,10 @@ class _QueryPool(nn.Module):
                 raise ValueError("query_bias must match expanded query shape")
             query = query + query_bias
         pooled, _ = self.attn(
-            self.query_norm(query), self.source_norm(source), self.source_norm(source), need_weights=False
+            self.query_norm(query),
+            self.source_norm(source),
+            self.source_norm(source),
+            need_weights=False,
         )
         return self.out_norm(pooled)
 
@@ -106,25 +111,30 @@ class DynamicPredictiveWorldConfig:
     descriptor_seed: int = 34033
 
     def validate(self) -> None:
-        if min(
-            self.latent_dim,
-            self.action_dim,
-            self.state_dim,
-            self.action_horizon,
-            self.history_length,
-            self.num_cameras,
-            self.patches_per_camera,
-            self.hidden_size,
-            self.num_heads,
-            self.context_tokens,
-            self.dynamic_tokens,
-            self.descriptor_projection_dim,
-        ) <= 0:
+        if (
+            min(
+                self.latent_dim,
+                self.action_dim,
+                self.state_dim,
+                self.action_horizon,
+                self.history_length,
+                self.num_cameras,
+                self.patches_per_camera,
+                self.hidden_size,
+                self.num_heads,
+                self.context_tokens,
+                self.dynamic_tokens,
+                self.descriptor_projection_dim,
+            )
+            <= 0
+        ):
             raise ValueError("dynamic-world dimensions must be positive")
         if self.hidden_size % self.num_heads != 0:
             raise ValueError("hidden_size must be divisible by num_heads")
         if self.action_dim != self.state_dim:
-            raise ValueError("action_dim and state_dim must match for state-relative action encoding")
+            raise ValueError(
+                "action_dim and state_dim must match for state-relative action encoding"
+            )
         if len(self.future_offsets) == 0:
             raise ValueError("future_offsets must be non-empty")
         if tuple(sorted(set(self.future_offsets))) != self.future_offsets:
@@ -133,13 +143,21 @@ class DynamicPredictiveWorldConfig:
             raise ValueError("future_offsets cannot exceed action_horizon")
         if self.input_mode not in {"full", "current-only", "action-only"}:
             raise ValueError(f"unsupported input_mode={self.input_mode!r}")
-        index = self.gripper_dim_index if self.gripper_dim_index >= 0 else self.state_dim + self.gripper_dim_index
+        index = (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.state_dim + self.gripper_dim_index
+        )
         if index < 0 or index >= self.state_dim:
             raise ValueError("gripper_dim_index outside state dimensions")
 
     @property
     def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.state_dim + self.gripper_dim_index
+        return (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.state_dim + self.gripper_dim_index
+        )
 
     @property
     def num_future(self) -> int:
@@ -150,9 +168,7 @@ class DynamicPredictiveWorldConfig:
         # For each adjacent history interval and camera: weighted projected
         # direction, mean projected direction, log-mean energy, log-max energy.
         return (
-            (self.history_length - 1)
-            * self.num_cameras
-            * (2 * self.descriptor_projection_dim + 2)
+            (self.history_length - 1) * self.num_cameras * (2 * self.descriptor_projection_dim + 2)
         )
 
 
@@ -164,17 +180,27 @@ class TemporalDynamicStateEncoder(nn.Module):
         config.validate()
         self.config = config
         h = config.hidden_size
-        self.input_proj = nn.Sequential(nn.LayerNorm(config.latent_dim), nn.Linear(config.latent_dim, h))
+        self.input_proj = nn.Sequential(
+            nn.LayerNorm(config.latent_dim), nn.Linear(config.latent_dim, h)
+        )
         self.context_pool = _QueryPool(h, config.num_heads, config.context_tokens, config.dropout)
         self.dynamic_pool = _QueryPool(h, config.num_heads, config.dynamic_tokens, config.dropout)
         self.context_blocks = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.encoder_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.encoder_depth)
+            ]
         )
         self.dynamic_blocks = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.encoder_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.encoder_depth)
+            ]
         )
         self.camera_embedding = nn.Parameter(torch.randn(1, 1, config.num_cameras, 1, h) * 0.02)
-        self.patch_embedding = nn.Parameter(torch.randn(1, 1, 1, config.patches_per_camera, h) * 0.02)
+        self.patch_embedding = nn.Parameter(
+            torch.randn(1, 1, 1, config.patches_per_camera, h) * 0.02
+        )
         self.history_embedding = nn.Parameter(torch.randn(1, config.history_length, 1, 1, h) * 0.02)
         self.interval_embedding = nn.Parameter(
             torch.randn(1, config.history_length - 1, 1, 1, h) * 0.02
@@ -194,7 +220,9 @@ class TemporalDynamicStateEncoder(nn.Module):
             cfg.latent_dim,
         )
         if tuple(tokens.shape) != expected:
-            raise ValueError(f"history tokens must have shape {expected}, got {tuple(tokens.shape)}")
+            raise ValueError(
+                f"history tokens must have shape {expected}, got {tuple(tokens.shape)}"
+            )
         x = self.input_proj(tokens)
         positioned = x + self.camera_embedding + self.patch_embedding + self.history_embedding
         current = positioned[:, -1].reshape(tokens.shape[0], -1, cfg.hidden_size)
@@ -205,7 +233,12 @@ class TemporalDynamicStateEncoder(nn.Module):
         # Differences carry motion; the final frame remains available separately
         # through context and is not itself a reconstruction target.
         diff = x[:, 1:] - x[:, :-1]
-        diff = diff + self.camera_embedding[:, :1] + self.patch_embedding[:, :1] + self.interval_embedding
+        diff = (
+            diff
+            + self.camera_embedding[:, :1]
+            + self.patch_embedding[:, :1]
+            + self.interval_embedding
+        )
         diff_source = diff.reshape(tokens.shape[0], -1, cfg.hidden_size)
         role_bias = self.role_embedding[self.role_ids].unsqueeze(0).expand(tokens.shape[0], -1, -1)
         dynamic = self.dynamic_pool(diff_source, query_bias=role_bias)
@@ -226,7 +259,10 @@ class ActionTrajectoryEncoder(nn.Module):
         )
         self.position_embedding = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
         self.blocks = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.action_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.action_depth)
+            ]
         )
         self.interval_queries = nn.Parameter(torch.randn(1, config.num_future, 1, h) * 0.02)
         self.interval_attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True)
@@ -248,10 +284,13 @@ class ActionTrajectoryEncoder(nn.Module):
         interval_tokens = []
         start = 0
         for interval_idx, end in enumerate(cfg.future_offsets):
-            segment = x[:, start:int(end)]
+            segment = x[:, start : int(end)]
             query = self.interval_queries[:, interval_idx].expand(action.shape[0], -1, -1)
             pooled, _ = self.interval_attn(
-                self.interval_norm(query), self.interval_norm(segment), self.interval_norm(segment), need_weights=False
+                self.interval_norm(query),
+                self.interval_norm(segment),
+                self.interval_norm(segment),
+                need_weights=False,
             )
             interval_tokens.append(pooled[:, 0])
             start = int(end)
@@ -280,18 +319,20 @@ class ClosedLoopTransition(nn.Module):
             h, config.num_heads, dropout=config.dropout, batch_first=True
         )
         self.dynamic_mask = nn.Sequential(nn.Linear(3 * h, h), nn.SiLU(), nn.Linear(h, 1))
-        self.dynamic_value = nn.Sequential(
-            nn.Linear(2 * h, 2 * h), nn.SiLU(), nn.Linear(2 * h, h)
-        )
+        self.dynamic_value = nn.Sequential(nn.Linear(2 * h, 2 * h), nn.SiLU(), nn.Linear(2 * h, h))
         self.scene_mask = nn.Sequential(nn.Linear(3 * h, h), nn.SiLU(), nn.Linear(h, 1))
-        self.scene_value = nn.Sequential(
-            nn.Linear(2 * h, 2 * h), nn.SiLU(), nn.Linear(2 * h, h)
-        )
+        self.scene_value = nn.Sequential(nn.Linear(2 * h, 2 * h), nn.SiLU(), nn.Linear(2 * h, h))
         self.dynamic_refine = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.predictor_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.predictor_depth)
+            ]
         )
         self.scene_refine = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.predictor_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.predictor_depth)
+            ]
         )
 
     def forward(
@@ -374,16 +415,16 @@ class DynamicPredictiveWorld(nn.Module):
         self.context_state_head = nn.Sequential(
             nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, config.state_dim)
         )
-        self.state_fusion = nn.Sequential(
-            nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU()
-        )
+        self.state_fusion = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU())
         self.state_path_head = nn.Sequential(
             nn.LayerNorm(h), nn.Linear(h, 2 * h), nn.SiLU(), nn.Linear(2 * h, config.state_dim)
         )
 
         generator = torch.Generator(device="cpu")
         generator.manual_seed(config.descriptor_seed)
-        matrix = torch.randn(config.latent_dim, config.descriptor_projection_dim, generator=generator)
+        matrix = torch.randn(
+            config.latent_dim, config.descriptor_projection_dim, generator=generator
+        )
         q, _ = torch.linalg.qr(matrix, mode="reduced")
         self.register_buffer("descriptor_projection", q.float(), persistent=True)
         self.representation_frozen = False
@@ -417,12 +458,16 @@ class DynamicPredictiveWorld(nn.Module):
             "descriptor_projection": self.descriptor_projection.detach().cpu(),
         }
 
-    def load_representation_state_dict(self, state: dict[str, object], *, freeze: bool = True) -> None:
+    def load_representation_state_dict(
+        self, state: dict[str, object], *, freeze: bool = True
+    ) -> None:
         self.online_encoder.load_state_dict(state["online_encoder"], strict=True)
         self.descriptor_head.load_state_dict(state["descriptor_head"], strict=True)
         self.local_motion_head.load_state_dict(state["local_motion_head"], strict=True)
         self.context_state_head.load_state_dict(state["context_state_head"], strict=True)
-        projection = torch.as_tensor(state["descriptor_projection"], dtype=self.descriptor_projection.dtype)
+        projection = torch.as_tensor(
+            state["descriptor_projection"], dtype=self.descriptor_projection.dtype
+        )
         if projection.shape != self.descriptor_projection.shape:
             raise ValueError("representation descriptor projection shape mismatch")
         self.descriptor_projection.copy_(projection.to(self.descriptor_projection.device))

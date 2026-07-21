@@ -58,6 +58,7 @@ VARIANT_ARCHITECTURES = {
     "v81": "distinct_block_nested_contraction_v8",
     "v82": "post_gate_contraction_sidecar_v10",
     "v84": "post_gate_contraction_sidecar_v11_oracle_router",
+    "v88": "post_gate_contraction_sidecar_v12_value_dwell",
 }
 CAPTURE_STAGES = ("construction", "boundaries", "train", "sample", "checkpoint")
 
@@ -151,8 +152,7 @@ def _configure_determinism(seed: int) -> None:
     hash_seed = os.environ.get("PYTHONHASHSEED")
     if hash_seed is None or hash_seed.lower() == "random":
         raise RuntimeError(
-            "capture requires PYTHONHASHSEED to be fixed before Python starts; "
-            "use PYTHONHASHSEED=0"
+            "capture requires PYTHONHASHSEED to be fixed before Python starts; use PYTHONHASHSEED=0"
         )
     try:
         int(hash_seed)
@@ -338,14 +338,56 @@ def create_fixture(path: Path, *, seed: int = DEFAULT_SEED) -> None:
     gripper = torch.tensor(
         [
             [
-                0.05, 0.05, 0.05, 0.05, 0.08, 0.18, 0.52, 0.75,
-                0.88, 0.92, 0.92, 0.92, 0.92, 0.92, 0.92, 0.88,
-                0.72, 0.50, 0.30, 0.15, 0.08, 0.08, 0.08, 0.08,
+                0.05,
+                0.05,
+                0.05,
+                0.05,
+                0.08,
+                0.18,
+                0.52,
+                0.75,
+                0.88,
+                0.92,
+                0.92,
+                0.92,
+                0.92,
+                0.92,
+                0.92,
+                0.88,
+                0.72,
+                0.50,
+                0.30,
+                0.15,
+                0.08,
+                0.08,
+                0.08,
+                0.08,
             ],
             [
-                0.88, 0.88, 0.88, 0.88, 0.84, 0.70, 0.35, 0.18,
-                0.08, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.10,
-                0.25, 0.45, 0.65, 0.78, 0.84, 0.84, 0.84, 0.84,
+                0.88,
+                0.88,
+                0.88,
+                0.88,
+                0.84,
+                0.70,
+                0.35,
+                0.18,
+                0.08,
+                0.06,
+                0.06,
+                0.06,
+                0.06,
+                0.06,
+                0.06,
+                0.10,
+                0.25,
+                0.45,
+                0.65,
+                0.78,
+                0.84,
+                0.84,
+                0.84,
+                0.84,
             ],
         ],
         dtype=torch.float32,
@@ -360,7 +402,9 @@ def create_fixture(path: Path, *, seed: int = DEFAULT_SEED) -> None:
     executed = action_state[:, None] + executed_alpha
     visual = _randn(g, b, vh, cams, patches, vd, scale=0.35)
     target_visual = visual[:, None].expand(-1, int(spec["target_future"]), -1, -1, -1, -1).clone()
-    future_offset = torch.linspace(0.03, 0.12, int(spec["target_future"]))[None, :, None, None, None, None]
+    future_offset = torch.linspace(0.03, 0.12, int(spec["target_future"]))[
+        None, :, None, None, None, None
+    ]
     target_visual = target_visual + future_offset * _randn(
         g, b, int(spec["target_future"]), vh, cams, patches, vd, scale=0.8
     )
@@ -368,14 +412,56 @@ def create_fixture(path: Path, *, seed: int = DEFAULT_SEED) -> None:
     sample_noise_native[..., -1] = torch.tensor(
         [
             [
-                -0.60, -0.50, -0.40, -0.25, -0.10, 0.05, 0.20, 0.40,
-                0.60, 0.50, 0.40, 0.25, 0.10, -0.05, -0.20, -0.40,
-                -0.55, -0.45, -0.30, -0.10, 0.10, 0.30, 0.20, -0.10,
+                -0.60,
+                -0.50,
+                -0.40,
+                -0.25,
+                -0.10,
+                0.05,
+                0.20,
+                0.40,
+                0.60,
+                0.50,
+                0.40,
+                0.25,
+                0.10,
+                -0.05,
+                -0.20,
+                -0.40,
+                -0.55,
+                -0.45,
+                -0.30,
+                -0.10,
+                0.10,
+                0.30,
+                0.20,
+                -0.10,
             ],
             [
-                0.50, 0.40, 0.30, 0.15, 0.00, -0.20, -0.40, -0.50,
-                -0.35, -0.15, 0.10, 0.30, 0.50, 0.45, 0.30, 0.10,
-                -0.10, -0.30, -0.50, -0.40, -0.20, 0.00, 0.25, 0.50,
+                0.50,
+                0.40,
+                0.30,
+                0.15,
+                0.00,
+                -0.20,
+                -0.40,
+                -0.50,
+                -0.35,
+                -0.15,
+                0.10,
+                0.30,
+                0.50,
+                0.45,
+                0.30,
+                0.10,
+                -0.10,
+                -0.30,
+                -0.50,
+                -0.40,
+                -0.20,
+                0.00,
+                0.25,
+                0.50,
             ],
         ],
         dtype=sample_noise_native.dtype,
@@ -551,6 +637,21 @@ def _build_policy_config(policy: Any, spec: Mapping[str, Any], variant: str) -> 
         "hierarchical_mmdit_output_contract": 0,
         "hierarchical_mmdit_noisy_gate_mode": 0,
     }
+    if variant == "v88":
+        values.update(
+            {
+                "hierarchical_mmdit_unified_controller": 1,
+                "hierarchical_mmdit_control_tokens": 8,
+                "hierarchical_mmdit_controller_depth": 2,
+                "hierarchical_mmdit_controller_heads": 4,
+                "hierarchical_mmdit_spectral_state": 1,
+                "hierarchical_mmdit_operation_candidate_probes": 1,
+                # Golden capture audits the V88 architecture without making a
+                # learned argmin part of the source-equivalence boundary.
+                "hierarchical_mmdit_dwell_mode": "shadow",
+                "hierarchical_mmdit_operation_value_warmup_steps": 200,
+            }
+        )
     config = _filtered_dataclass(policy.V39PolicyConfig, values)
     config.validate()
     actual = getattr(config, "hierarchical_mmdit_architecture_version", None)
@@ -600,7 +701,9 @@ def _git_metadata(source_root: Path) -> dict[str, Any]:
         ("describe", ["git", "-C", str(source_root), "describe", "--always", "--dirty", "--tags"]),
     ):
         try:
-            result[key] = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
+            result[key] = subprocess.check_output(
+                command, text=True, stderr=subprocess.DEVNULL
+            ).strip()
         except (OSError, subprocess.CalledProcessError):
             result[key] = "unavailable"
     return result
@@ -639,8 +742,7 @@ def _state_manifest(system: torch.nn.Module) -> list[dict[str, Any]]:
             "dtype": str(value.dtype),
             "kind": "parameter" if name in parameter_by_name else "buffer",
             "requires_grad": (
-                bool(parameter_by_name[name].requires_grad)
-                if name in parameter_by_name else None
+                bool(parameter_by_name[name].requires_grad) if name in parameter_by_name else None
             ),
         }
         for name, value in system.state_dict().items()
@@ -649,8 +751,7 @@ def _state_manifest(system: torch.nn.Module) -> list[dict[str, Any]]:
 
 def _module_manifest(system: torch.nn.Module) -> list[dict[str, str]]:
     return [
-        {"name": name, "class": type(module).__name__}
-        for name, module in system.named_modules()
+        {"name": name, "class": type(module).__name__} for name, module in system.named_modules()
     ]
 
 
@@ -693,9 +794,7 @@ def _fixture_boundary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "transition_memory": [tensors["boundary/transition_memory"]],
         "event_evidence": tensors["boundary/event_evidence"],
         "state_memory": [tensors["boundary/state_memory"]],
-        "intent_memory": {
-            name: tensors[f"boundary/intent/{name}"] for name in INTENT_SOURCE_NAMES
-        },
+        "intent_memory": {name: tensors[f"boundary/intent/{name}"] for name in INTENT_SOURCE_NAMES},
         "layer_contracts": [
             {key: tensors[f"boundary/layer/{index}/{key}"] for key in LAYER_KEYS}
             for index in range(depth)
@@ -715,24 +814,20 @@ def _capture_structure(
     trainer: Any,
     optimizer_groups: Sequence[Mapping[str, Any]],
 ) -> None:
-    assigned_ids = {
-        id(parameter)
-        for group in optimizer_groups
-        for parameter in group["params"]
-    }
+    assigned_ids = {id(parameter) for group in optimizer_groups for parameter in group["params"]}
     optimizer_manifest = _optimizer_manifest(system, optimizer_groups)
     unassigned_trainable = [
-        name for name, parameter in system.named_parameters()
+        name
+        for name, parameter in system.named_parameters()
         if parameter.requires_grad and id(parameter) not in assigned_ids
     ]
     assigned_frozen = [
-        name for name, parameter in system.named_parameters()
+        name
+        for name, parameter in system.named_parameters()
         if not parameter.requires_grad and id(parameter) in assigned_ids
     ]
     duplicate_assignments = [
-        name
-        for group in optimizer_manifest
-        for name in group["duplicate_names"]
+        name for group in optimizer_manifest for name in group["duplicate_names"]
     ]
     builder.add("structure/config", asdict(config))
     builder.add("structure/trainer", asdict(trainer))
@@ -752,8 +847,7 @@ def _capture_structure(
         )
     if assigned_frozen:
         raise RuntimeError(
-            "golden optimizer includes frozen parameters: "
-            + ", ".join(assigned_frozen[:8])
+            "golden optimizer includes frozen parameters: " + ", ".join(assigned_frozen[:8])
         )
     if duplicate_assignments:
         raise RuntimeError(
@@ -801,9 +895,7 @@ def _capture_boundaries(
     )
     stage = decoder.workspace.init_stage(contracts["stage_contract"])
     batch_size = int(inputs["noisy_physical"].shape[0])
-    schedule, _, scheduled_steps = decoder._fixed_schedule(
-        device=inputs["noisy_physical"].device
-    )
+    schedule, _, scheduled_steps = decoder._fixed_schedule(device=inputs["noisy_physical"].device)
     block_index = schedule[0].expand(batch_size)
     step_state = decoder._step_state(
         block_index,
@@ -862,9 +954,7 @@ def _loss_path(
     losses = runtime.flow_losses(
         system, sample, output, trainer, enable_future_loss=True, global_step=0
     )
-    aux = runtime.layer_contract_losses(
-        system, sample, output, trainer, enable_future_loss=True
-    )
+    aux = runtime.layer_contract_losses(system, sample, output, trainer, enable_future_loss=True)
     aux_scale = runtime._midcut_aux_scale(trainer, 1)
     total = losses["loss"] + float(aux_scale) * aux["layer_contract"]
     for key, value in aux.items():
@@ -875,9 +965,7 @@ def _loss_path(
         else:
             losses[key] = value
     losses["loss"] = total
-    losses["midcut_aux_scale"] = torch.as_tensor(
-        aux_scale, device=total.device, dtype=total.dtype
-    )
+    losses["midcut_aux_scale"] = torch.as_tensor(aux_scale, device=total.device, dtype=total.dtype)
     return losses
 
 
@@ -1015,32 +1103,24 @@ def _capture_checkpoint_protocol(
         name
         for name, value in target.items()
         if value.ndim > 0
-        and not name.startswith(("planner.layer_contract_heads.", "planner.latent_cvae_action_decoder."))
+        and not name.startswith(
+            ("planner.layer_contract_heads.", "planner.latent_cvae_action_decoder.")
+        )
     )
     original_shape = tuple(staged[shape_key].shape)
     mismatch_shape = (original_shape[0] + 1, *original_shape[1:])
     staged[shape_key] = torch.zeros(mismatch_shape, dtype=staged[shape_key].dtype)
 
-    staged, skipped_dirty = cli._filter_stage1_state_dict(
-        staged, reset_dirty_adapters=True
-    )
-    staged, skipped_parseval = cli._filter_parseval_replaced_state_dict(
-        staged, enabled=True
-    )
-    staged, skipped_v74 = cli._filter_v74_time_controller_state_dict(
-        staged, enabled=True
-    )
+    staged, skipped_dirty = cli._filter_stage1_state_dict(staged, reset_dirty_adapters=True)
+    staged, skipped_parseval = cli._filter_parseval_replaced_state_dict(staged, enabled=True)
+    staged, skipped_v74 = cli._filter_v74_time_controller_state_dict(staged, enabled=True)
     obsolete_prefixes = (
         "planner.latent_cvae_action_decoder.",
         "planner.hierarchical_mmdit_action_decoder.",
     )
-    skipped_obsolete = [
-        name for name in staged if name.startswith(obsolete_prefixes)
-    ]
+    skipped_obsolete = [name for name in staged if name.startswith(obsolete_prefixes)]
     staged = OrderedDict(
-        (name, value)
-        for name, value in staged.items()
-        if not name.startswith(obsolete_prefixes)
+        (name, value) for name, value in staged.items() if not name.startswith(obsolete_prefixes)
     )
     staged, skipped_shape = cli._filter_shape_mismatched_state_dict(staged, target)
 
@@ -1254,7 +1334,8 @@ def _drop_ignored(value: Any, path: str, ignored: Sequence[str]) -> Any:
         return [
             child
             for index, item in enumerate(value)
-            if (child := _drop_ignored(item, f"{path}/{index}" if path else str(index), ignored)) is not None
+            if (child := _drop_ignored(item, f"{path}/{index}" if path else str(index), ignored))
+            is not None
         ]
     return value
 
@@ -1347,20 +1428,22 @@ def compare(
             break
 
     baseline_keys = [
-        key for key in baseline_tensors
-        if not _matches_artifact_prefix(key, artifact_ignored)
+        key for key in baseline_tensors if not _matches_artifact_prefix(key, artifact_ignored)
     ]
     candidate_keys = [
-        key for key in candidate_tensors
-        if not _matches_artifact_prefix(key, artifact_ignored)
+        key for key in candidate_tensors if not _matches_artifact_prefix(key, artifact_ignored)
     ]
     if baseline_keys != candidate_keys:
         differences.append(
             {
                 "path": "tensor_keys",
                 "kind": "ordered_key_mismatch",
-                "baseline_only": [key for key in baseline_keys if key not in set(candidate_keys)][:20],
-                "candidate_only": [key for key in candidate_keys if key not in set(baseline_keys)][:20],
+                "baseline_only": [key for key in baseline_keys if key not in set(candidate_keys)][
+                    :20
+                ],
+                "candidate_only": [key for key in candidate_keys if key not in set(baseline_keys)][
+                    :20
+                ],
             }
         )
 
@@ -1454,7 +1537,9 @@ def _parser() -> argparse.ArgumentParser:
     fixture.add_argument("--output", type=Path, required=True)
     fixture.add_argument("--seed", type=int, default=DEFAULT_SEED)
 
-    capture_parser = subparsers.add_parser("capture", help="capture one source tree in this process")
+    capture_parser = subparsers.add_parser(
+        "capture", help="capture one source tree in this process"
+    )
     capture_parser.add_argument("--source-root", type=Path, required=True)
     capture_parser.add_argument("--fixture", type=Path, required=True)
     capture_parser.add_argument("--output", type=Path, required=True)

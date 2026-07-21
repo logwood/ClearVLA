@@ -36,12 +36,14 @@ from .dp_reference import DDPMScheduler
 # -----------------------------------------------------------------------------
 # Positional embeddings: equivalent to upstream models/rdt/blocks.py
 # -----------------------------------------------------------------------------
-def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: np.ndarray | Tensor | Sequence[int]) -> np.ndarray:
+def get_1d_sincos_pos_embed_from_grid(
+    embed_dim: int, pos: np.ndarray | Tensor | Sequence[int]
+) -> np.ndarray:
     if embed_dim % 2 != 0:
         raise ValueError(f"embed_dim must be even, got {embed_dim}")
     omega = np.arange(embed_dim // 2, dtype=np.float64)
     omega /= embed_dim / 2.0
-    omega = 1.0 / (10000 ** omega)
+    omega = 1.0 / (10000**omega)
     if isinstance(pos, Tensor):
         pos = pos.detach().cpu().numpy()
     if not isinstance(pos, np.ndarray):
@@ -130,7 +132,9 @@ class RMSNorm(nn.Module):
 class FeedForward(nn.Module):
     """Width-preserving MLP matching timm.models.vision_transformer.Mlp."""
 
-    def __init__(self, in_features: int, hidden_features: int | None = None, out_features: int | None = None) -> None:
+    def __init__(
+        self, in_features: int, hidden_features: int | None = None, out_features: int | None = None
+    ) -> None:
         super().__init__()
         hidden_features = int(hidden_features or in_features)
         out_features = int(out_features or in_features)
@@ -167,7 +171,11 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         batch, tokens, dim = x.shape
-        qkv = self.qkv(x).reshape(batch, tokens, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        qkv = (
+            self.qkv(x)
+            .reshape(batch, tokens, 3, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
         x = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
@@ -194,14 +202,24 @@ class CrossAttention(nn.Module):
         batch, tokens, dim = x.shape
         cond_tokens = cond.shape[1]
         q = self.q(x).reshape(batch, tokens, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        kv = self.kv(cond).reshape(batch, cond_tokens, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        kv = (
+            self.kv(cond)
+            .reshape(batch, cond_tokens, 2, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
         k, v = kv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
         attn_mask = None
         if mask is not None:
             if mask.shape != (batch, cond_tokens):
-                raise ValueError(f"condition mask shape {tuple(mask.shape)} != {(batch, cond_tokens)}")
-            attn_mask = mask.to(dtype=torch.bool).reshape(batch, 1, 1, cond_tokens).expand(-1, -1, tokens, -1)
+                raise ValueError(
+                    f"condition mask shape {tuple(mask.shape)} != {(batch, cond_tokens)}"
+                )
+            attn_mask = (
+                mask.to(dtype=torch.bool)
+                .reshape(batch, 1, 1, cond_tokens)
+                .expand(-1, -1, tokens, -1)
+            )
         x = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attn_mask)
         x = x.transpose(1, 2).reshape(batch, tokens, dim)
         return self.proj_drop(self.proj(x))
@@ -237,7 +255,9 @@ class TimestepEmbedder(nn.Module):
     def timestep_embedding(self, t: Tensor, dim: int, max_period: int = 10000) -> Tensor:
         half = dim // 2
         freqs = torch.exp(
-            -math.log(max_period) * torch.arange(0, half, dtype=torch.float32, device=t.device) / half
+            -math.log(max_period)
+            * torch.arange(0, half, dtype=torch.float32, device=t.device)
+            / half
         )
         args = t.reshape(-1, 1).float() * freqs.reshape(1, -1)
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -302,16 +322,20 @@ class RDTCore(nn.Module):
         self.apply(basic_init)
         x_pos_embed = get_multimodal_cond_pos_embed(
             self.hidden_size,
-            OrderedDict([
-                ("timestep", 1),
-                ("ctrl_freq", 1),
-                ("state", 1),
-                ("action", self.horizon),
-            ]),
+            OrderedDict(
+                [
+                    ("timestep", 1),
+                    ("ctrl_freq", 1),
+                    ("state", 1),
+                    ("action", self.horizon),
+                ]
+            ),
         )
         self.x_pos_embed.data.copy_(torch.from_numpy(x_pos_embed).float().unsqueeze(0))
         if self.lang_pos_embed_config is None:
-            lang = get_1d_sincos_pos_embed_from_grid(self.hidden_size, np.arange(self.max_lang_cond_len))
+            lang = get_1d_sincos_pos_embed_from_grid(
+                self.hidden_size, np.arange(self.max_lang_cond_len)
+            )
         else:
             lang = get_multimodal_cond_pos_embed(
                 self.hidden_size, OrderedDict(self.lang_pos_embed_config), embed_modality=False
@@ -349,11 +373,15 @@ class RDTCore(nn.Module):
         if x.shape[1] != self.x_pos_embed.shape[1]:
             raise ValueError(f"x token length {x.shape[1]} != expected {self.x_pos_embed.shape[1]}")
         if img_cond.shape[1] != self.img_cond_pos_embed.shape[1]:
-            raise ValueError(f"image token length {img_cond.shape[1]} != expected {self.img_cond_pos_embed.shape[1]}")
+            raise ValueError(
+                f"image token length {img_cond.shape[1]} != expected {self.img_cond_pos_embed.shape[1]}"
+            )
         if lang_cond.shape[1] > self.lang_cond_pos_embed.shape[1]:
             raise ValueError("language token sequence exceeds max_lang_cond_len")
         x = x + self.x_pos_embed.to(dtype=x.dtype)
-        lang_cond = lang_cond + self.lang_cond_pos_embed[:, : lang_cond.shape[1]].to(dtype=lang_cond.dtype)
+        lang_cond = lang_cond + self.lang_cond_pos_embed[:, : lang_cond.shape[1]].to(
+            dtype=lang_cond.dtype
+        )
         img_cond = img_cond + self.img_cond_pos_embed.to(dtype=img_cond.dtype)
         conditions = (lang_cond, img_cond)
         masks = (lang_mask, img_mask)
@@ -475,7 +503,9 @@ class RDTSmallReference(nn.Module):
             max_lang_cond_len=config.max_lang_cond_len,
             img_cond_len=config.img_cond_len,
             lang_pos_embed_config=[("lang", -config.max_lang_cond_len)],
-            img_pos_embed_config=[("image", (config.image_history, config.max_cameras, -config.patches_per_image))],
+            img_pos_embed_config=[
+                ("image", (config.image_history, config.max_cameras, -config.patches_per_image))
+            ],
         )
         self.lang_adaptor = ConditionAdapter(config.lang_token_dim, config.hidden_size, depth=2)
         self.img_adaptor = ConditionAdapter(config.img_token_dim, config.hidden_size, depth=2)
@@ -508,8 +538,14 @@ class RDTSmallReference(nn.Module):
             and cfg.prediction_type == "sample"
         )
 
-    def _adapt_conditions(self, lang_tokens: Tensor, img_tokens: Tensor, state_tokens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        return self.lang_adaptor(lang_tokens), self.img_adaptor(img_tokens), self.state_adaptor(state_tokens)
+    def _adapt_conditions(
+        self, lang_tokens: Tensor, img_tokens: Tensor, state_tokens: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        return (
+            self.lang_adaptor(lang_tokens),
+            self.img_adaptor(img_tokens),
+            self.state_adaptor(state_tokens),
+        )
 
     def _prepare_inputs(
         self,
@@ -523,11 +559,19 @@ class RDTSmallReference(nn.Module):
         if state.shape[1] != 1:
             raise ValueError("RDT uses only the latest proprioceptive state token")
         if actions.shape[1:] != (self.config.prediction_horizon, self.config.robot_dim):
-            raise ValueError(f"actions shape {tuple(actions.shape)} is incompatible with RDT horizon")
+            raise ValueError(
+                f"actions shape {tuple(actions.shape)} is incompatible with RDT horizon"
+            )
         state_unified = self.mapper.pack(state)
         action_unified = self.mapper.pack(actions)
         action_mask = self.mapper.batch_mask(state.shape[0], device=state.device, dtype=state.dtype)
-        return state_unified, action_unified, action_mask, self.lang_adaptor(lang_tokens), self.img_adaptor(img_tokens)
+        return (
+            state_unified,
+            action_unified,
+            action_mask,
+            self.lang_adaptor(lang_tokens),
+            self.img_adaptor(img_tokens),
+        )
 
     def compute_loss(
         self,
@@ -556,7 +600,9 @@ class RDTSmallReference(nn.Module):
         state_action = torch.cat([state_unified, noisy_action], dim=1)
         expanded_mask = action_mask.expand(-1, state_action.shape[1], -1)
         state_action = torch.cat([state_action, expanded_mask], dim=-1)
-        lang_cond, img_cond, state_action = self._adapt_conditions(lang_tokens, img_tokens, state_action)
+        lang_cond, img_cond, state_action = self._adapt_conditions(
+            lang_tokens, img_tokens, state_action
+        )
         pred = self.model(
             state_action,
             ctrl_freqs,
@@ -591,8 +637,17 @@ class RDTSmallReference(nn.Module):
         for timestep in self.scheduler.timesteps.to(state_traj.device):
             action_traj = self.state_adaptor(torch.cat([noisy_action, expanded_mask], dim=-1))
             state_action = torch.cat([state_traj, action_traj], dim=1)
-            pred = self.model(state_action, ctrl_freqs, timestep.reshape(1), lang_cond, img_cond, lang_mask=lang_mask)
-            noisy_action = self.scheduler.step(pred, timestep, noisy_action, deterministic=deterministic, generator=generator)
+            pred = self.model(
+                state_action,
+                ctrl_freqs,
+                timestep.reshape(1),
+                lang_cond,
+                img_cond,
+                lang_mask=lang_mask,
+            )
+            noisy_action = self.scheduler.step(
+                pred, timestep, noisy_action, deterministic=deterministic, generator=generator
+            )
         return noisy_action * expanded_mask
 
     def _sample_dpm_solver(
@@ -608,7 +663,9 @@ class RDTSmallReference(nn.Module):
         generator: torch.Generator | None,
     ) -> Tensor:
         try:
-            from diffusers.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+            from diffusers.schedulers.scheduling_dpmsolver_multistep import (
+                DPMSolverMultistepScheduler,
+            )
         except ImportError as exc:  # pragma: no cover - optional formal dependency
             raise RuntimeError(
                 "formal RDT sampling requires diffusers; install requirements_rdt_small.txt "
@@ -630,8 +687,17 @@ class RDTSmallReference(nn.Module):
         for timestep in scheduler.timesteps:
             action_traj = self.state_adaptor(torch.cat([noisy_action, expanded_mask], dim=-1))
             state_action = torch.cat([state_traj, action_traj], dim=1)
-            pred = self.model(state_action, ctrl_freqs, timestep.reshape(1), lang_cond, img_cond, lang_mask=lang_mask)
-            noisy_action = scheduler.step(pred, timestep, noisy_action).prev_sample.to(dtype=state_traj.dtype)
+            pred = self.model(
+                state_action,
+                ctrl_freqs,
+                timestep.reshape(1),
+                lang_cond,
+                img_cond,
+                lang_mask=lang_mask,
+            )
+            noisy_action = scheduler.step(pred, timestep, noisy_action).prev_sample.to(
+                dtype=state_traj.dtype
+            )
         return noisy_action * expanded_mask
 
     @torch.no_grad()
@@ -683,7 +749,9 @@ class RDTSmallReference(nn.Module):
             raise ValueError(f"unknown RDT sampler: {sampler}")
         return self.mapper.unpack(unified)
 
-    def load_upstream_state_dict(self, state_dict: dict[str, Tensor], *, strict: bool = True) -> None:
+    def load_upstream_state_dict(
+        self, state_dict: dict[str, Tensor], *, strict: bool = True
+    ) -> None:
         """Load released RDTRunner weights, accepting common wrapper prefixes."""
         cleaned: dict[str, Tensor] = {}
         for key, value in state_dict.items():
@@ -696,7 +764,9 @@ class RDTSmallReference(nn.Module):
             allowed_missing = {"mapper.indices", "mapper.mask"}
             real_missing = [key for key in missing if key not in allowed_missing]
             if real_missing or unexpected:
-                raise RuntimeError(f"upstream checkpoint mismatch: missing={real_missing}, unexpected={unexpected}")
+                raise RuntimeError(
+                    f"upstream checkpoint mismatch: missing={real_missing}, unexpected={unexpected}"
+                )
         else:
             self.load_state_dict(cleaned, strict=False)
 
@@ -718,10 +788,14 @@ class EmptyLanguageConditioner:
             if token.ndim == 1:
                 token = token.unsqueeze(0)
             if token.ndim != 2 or token.shape[-1] != token_dim:
-                raise ValueError(f"empty language embedding must be [L,{token_dim}], got {tuple(token.shape)}")
+                raise ValueError(
+                    f"empty language embedding must be [L,{token_dim}], got {tuple(token.shape)}"
+                )
         self.token = token.contiguous()
 
-    def batch(self, batch_size: int, *, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+    def batch(
+        self, batch_size: int, *, device: torch.device, dtype: torch.dtype
+    ) -> tuple[Tensor, Tensor]:
         tokens = self.token.to(device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
         mask = torch.ones(tokens.shape[:2], dtype=torch.bool, device=device)
         return tokens, mask
@@ -730,7 +804,9 @@ class EmptyLanguageConditioner:
 class DebugPatchVisionEncoder(nn.Module):
     """Deterministic shape-only image tokenizer. Not a formal RDT condition encoder."""
 
-    def __init__(self, *, token_dim: int, patch_grid: int, image_history: int, max_cameras: int) -> None:
+    def __init__(
+        self, *, token_dim: int, patch_grid: int, image_history: int, max_cameras: int
+    ) -> None:
         super().__init__()
         self.token_dim = int(token_dim)
         self.patch_grid = int(patch_grid)
@@ -746,14 +822,18 @@ class DebugPatchVisionEncoder(nn.Module):
         if history != self.image_history or cameras > self.max_cameras or channels != 3:
             raise ValueError("debug image condition shape mismatch")
         if cameras < self.max_cameras:
-            pad = images.new_full((batch, history, self.max_cameras - cameras, 3, height, width), 0.5)
+            pad = images.new_full(
+                (batch, history, self.max_cameras - cameras, 3, height, width), 0.5
+            )
             images = torch.cat([images, pad], dim=2)
         flat = images.reshape(batch * history * self.max_cameras, 3, height, width)
         pooled = F.adaptive_avg_pool2d(flat, (self.patch_grid, self.patch_grid))
         pooled = pooled.flatten(2).transpose(1, 2)
         repeat = math.ceil(self.token_dim / 3)
         tokens = pooled.repeat(1, 1, repeat)[..., : self.token_dim]
-        return tokens.reshape(batch, history * self.max_cameras * self.patches_per_image, self.token_dim)
+        return tokens.reshape(
+            batch, history * self.max_cameras * self.patches_per_image, self.token_dim
+        )
 
 
 class SiglipPatchVisionEncoder(nn.Module):
@@ -774,7 +854,9 @@ class SiglipPatchVisionEncoder(nn.Module):
             raise RuntimeError(
                 "formal RDT vision encoding requires transformers; install requirements_rdt_small.txt"
             ) from exc
-        self.model = SiglipVisionModel.from_pretrained(model_name_or_path, local_files_only=local_files_only)
+        self.model = SiglipVisionModel.from_pretrained(
+            model_name_or_path, local_files_only=local_files_only
+        )
         self.model.eval().requires_grad_(False)
         self.image_history = int(image_history)
         self.max_cameras = int(max_cameras)
@@ -800,7 +882,9 @@ class SiglipPatchVisionEncoder(nn.Module):
             raise ValueError("SigLIP image condition shape mismatch")
         if cameras < self.max_cameras:
             # Upstream pads absent views with a background image at image_mean.
-            pad = images.new_full((batch, history, self.max_cameras - cameras, 3, height, width), 0.5)
+            pad = images.new_full(
+                (batch, history, self.max_cameras - cameras, 3, height, width), 0.5
+            )
             images = torch.cat([images, pad], dim=2)
         flat = images.reshape(batch * history * self.max_cameras, 3, height, width)
         # Upstream RDT uses SigLIP with image_aspect_ratio="pad". Preserve
@@ -813,12 +897,18 @@ class SiglipPatchVisionEncoder(nn.Module):
             square[:, :, top : top + height, left : left + width] = flat
             flat = square
         # Inputs are cached as [0,1] RGB. SigLIP processor uses resize and mean/std 0.5.
-        flat = F.interpolate(flat, size=(self.image_size, self.image_size), mode="bicubic", align_corners=False)
+        flat = F.interpolate(
+            flat, size=(self.image_size, self.image_size), mode="bicubic", align_corners=False
+        )
         flat = (flat - 0.5) / 0.5
-        output = self.model(pixel_values=flat.to(device=self.device, dtype=self.dtype)).last_hidden_state
+        output = self.model(
+            pixel_values=flat.to(device=self.device, dtype=self.dtype)
+        ).last_hidden_state
         if output.shape[1:] != (self.patches_per_image, self.token_dim):
             raise ValueError(f"unexpected SigLIP output shape {tuple(output.shape)}")
-        return output.reshape(batch, history * self.max_cameras * self.patches_per_image, self.token_dim)
+        return output.reshape(
+            batch, history * self.max_cameras * self.patches_per_image, self.token_dim
+        )
 
 
 def load_policy_weights(path: Path) -> dict[str, Tensor]:

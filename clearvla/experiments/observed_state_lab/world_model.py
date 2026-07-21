@@ -20,10 +20,6 @@ from torch.utils.checkpoint import checkpoint as activation_checkpoint
 from clearvla.policy.primitives import BiasFreeFFN, sinusoidal_positions
 
 
-
-
-
-
 class ZeroPreservingSelfBlock(nn.Module):
     def __init__(self, hidden: int, heads: int, expansion: float = 4.0) -> None:
         super().__init__()
@@ -81,13 +77,31 @@ class V35WorldConfig:
 
     def validate(self) -> None:
         ints = (
-            self.latent_dim, self.action_dim, self.state_dim, self.world_horizon,
-            self.segment_length, self.history_length, self.executed_history_length,
-            self.num_cameras, self.patches_per_camera, self.hidden_size, self.num_heads,
-            self.world_tokens, self.global_tokens, self.interaction_tokens, self.motion_tokens,
-            self.evidence_read_depth, self.latent_mix_depth, self.action_depth,
-            self.transition_depth, self.transition_unique_blocks, self.inverse_depth, self.descriptor_projection_dim,
-            self.descriptor_regions, self.consequence_slots, self.consequence_feedback_depth,
+            self.latent_dim,
+            self.action_dim,
+            self.state_dim,
+            self.world_horizon,
+            self.segment_length,
+            self.history_length,
+            self.executed_history_length,
+            self.num_cameras,
+            self.patches_per_camera,
+            self.hidden_size,
+            self.num_heads,
+            self.world_tokens,
+            self.global_tokens,
+            self.interaction_tokens,
+            self.motion_tokens,
+            self.evidence_read_depth,
+            self.latent_mix_depth,
+            self.action_depth,
+            self.transition_depth,
+            self.transition_unique_blocks,
+            self.inverse_depth,
+            self.descriptor_projection_dim,
+            self.descriptor_regions,
+            self.consequence_slots,
+            self.consequence_feedback_depth,
         )
         if min(ints) <= 0:
             raise ValueError("all V35 dimensions must be positive")
@@ -111,7 +125,11 @@ class V35WorldConfig:
 
     @property
     def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.state_dim + self.gripper_dim_index
+        return (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.state_dim + self.gripper_dim_index
+        )
 
     @property
     def segment_offsets(self) -> tuple[int, ...]:
@@ -137,7 +155,11 @@ class V35WorldConfig:
     def role_slices(self) -> dict[str, slice]:
         g = self.global_tokens
         i = g + self.interaction_tokens
-        return {"global": slice(0, g), "interaction": slice(g, i), "motion": slice(i, self.world_tokens)}
+        return {
+            "global": slice(0, g),
+            "interaction": slice(g, i),
+            "motion": slice(i, self.world_tokens),
+        }
 
 
 class EvidenceReadLayer(nn.Module):
@@ -149,7 +171,9 @@ class EvidenceReadLayer(nn.Module):
         self.cross = nn.MultiheadAttention(hidden, heads, batch_first=True, bias=False)
         self.mix = ZeroPreservingSelfBlock(hidden, heads, expansion)
 
-    def read(self, latent: Tensor, slot_key: Tensor, evidence_key: Tensor, evidence_value: Tensor) -> Tensor:
+    def read(
+        self, latent: Tensor, slot_key: Tensor, evidence_key: Tensor, evidence_value: Tensor
+    ) -> Tensor:
         update, _ = self.cross(
             self.qn(latent) + slot_key,
             self.kn(evidence_key),
@@ -158,7 +182,9 @@ class EvidenceReadLayer(nn.Module):
         )
         return update
 
-    def forward(self, latent: Tensor, slot_key: Tensor, evidence_key: Tensor, evidence_value: Tensor) -> Tensor:
+    def forward(
+        self, latent: Tensor, slot_key: Tensor, evidence_key: Tensor, evidence_value: Tensor
+    ) -> Tensor:
         latent = latent + self.read(latent, slot_key, evidence_key, evidence_value)
         return self.mix(latent, key_bias=slot_key)
 
@@ -182,30 +208,42 @@ class WorldEvidenceEncoder(nn.Module):
         self.executed_norm = nn.LayerNorm(config.action_dim, elementwise_affine=False)
         self.executed_proj = nn.Linear(config.action_dim, h, bias=False)
 
-        self.visual_history_key = nn.Parameter(torch.randn(1, config.history_length, 1, 1, h) * 0.02)
+        self.visual_history_key = nn.Parameter(
+            torch.randn(1, config.history_length, 1, 1, h) * 0.02
+        )
         self.camera_key = nn.Parameter(torch.randn(1, 1, config.num_cameras, 1, h) * 0.02)
         self.patch_key = nn.Parameter(torch.randn(1, 1, 1, config.patches_per_camera, h) * 0.02)
         self.visual_type_key = nn.Parameter(torch.randn(1, 1, 1, 1, h) * 0.02)
         self.state_time_key = nn.Parameter(torch.randn(1, config.history_length, h) * 0.02)
         self.state_type_key = nn.Parameter(torch.randn(1, 1, h) * 0.02)
-        self.executed_time_key = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
+        self.executed_time_key = nn.Parameter(
+            torch.randn(1, config.executed_history_length, h) * 0.02
+        )
         self.executed_type_key = nn.Parameter(torch.randn(1, 1, h) * 0.02)
 
         self.global_slot = nn.Parameter(torch.randn(1, config.global_tokens, h) * 0.02)
         self.interaction_slot = nn.Parameter(torch.randn(1, config.interaction_tokens, h) * 0.02)
         self.motion_slot = nn.Parameter(torch.randn(1, config.motion_tokens, h) * 0.02)
         self.read_layers = nn.ModuleList(
-            [EvidenceReadLayer(h, config.num_heads, config.ffn_expansion) for _ in range(config.evidence_read_depth)]
+            [
+                EvidenceReadLayer(h, config.num_heads, config.ffn_expansion)
+                for _ in range(config.evidence_read_depth)
+            ]
         )
         self.mix_layers = nn.ModuleList(
-            [ZeroPreservingSelfBlock(h, config.num_heads, config.ffn_expansion) for _ in range(config.latent_mix_depth)]
+            [
+                ZeroPreservingSelfBlock(h, config.num_heads, config.ffn_expansion)
+                for _ in range(config.latent_mix_depth)
+            ]
         )
         self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
 
     def slot_key(self, batch: int, dtype: torch.dtype, device: torch.device) -> Tensor:
-        return torch.cat([self.global_slot, self.interaction_slot, self.motion_slot], dim=1).to(
-            device=device, dtype=dtype
-        ).expand(batch, -1, -1)
+        return (
+            torch.cat([self.global_slot, self.interaction_slot, self.motion_slot], dim=1)
+            .to(device=device, dtype=dtype)
+            .expand(batch, -1, -1)
+        )
 
     def evidence(
         self,
@@ -215,13 +253,17 @@ class WorldEvidenceEncoder(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         cfg = self.config
         if tuple(visual.shape[1:]) != (
-            cfg.history_length, cfg.num_cameras, cfg.patches_per_camera, cfg.latent_dim
+            cfg.history_length,
+            cfg.num_cameras,
+            cfg.patches_per_camera,
+            cfg.latent_dim,
         ):
             raise ValueError("visual evidence geometry mismatch")
         if tuple(state_history.shape[1:]) != (cfg.history_length, cfg.state_dim):
             raise ValueError("state history geometry mismatch")
         if tuple(executed_action_history.shape[1:]) != (
-            cfg.executed_history_length, cfg.action_dim
+            cfg.executed_history_length,
+            cfg.action_dim,
         ):
             raise ValueError("executed action history geometry mismatch")
 
@@ -246,7 +288,9 @@ class WorldEvidenceEncoder(nn.Module):
         ak = av + self.executed_time_key + self.executed_type_key
         return torch.cat([vk, sk, ak], dim=1), torch.cat([vv, sv, av], dim=1)
 
-    def forward(self, visual: Tensor, state_history: Tensor, executed_action_history: Tensor) -> Tensor:
+    def forward(
+        self, visual: Tensor, state_history: Tensor, executed_action_history: Tensor
+    ) -> Tensor:
         key, value = self.evidence(visual, state_history, executed_action_history)
         slots = self.slot_key(visual.shape[0], key.dtype, visual.device)
         latent = self.read_layers[0].read(torch.zeros_like(slots), slots, key, value)
@@ -269,10 +313,15 @@ class FutureActionTokenizer(nn.Module):
             nn.Linear(2 * h, h, bias=False),
         )
         self.register_buffer(
-            "position_key", sinusoidal_positions(range(1, config.world_horizon + 1), h)[None], persistent=True
+            "position_key",
+            sinusoidal_positions(range(1, config.world_horizon + 1), h)[None],
+            persistent=True,
         )
         self.blocks = nn.ModuleList(
-            [ZeroPreservingSelfBlock(h, config.num_heads, config.ffn_expansion) for _ in range(config.action_depth)]
+            [
+                ZeroPreservingSelfBlock(h, config.num_heads, config.ffn_expansion)
+                for _ in range(config.action_depth)
+            ]
         )
         self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
 
@@ -304,8 +353,6 @@ class FutureActionTokenizer(nn.Module):
         return {"actual_tokens": actual, "hold_tokens": hold_tokens, "hold_action": hold}
 
 
-
-
 class ConsequenceCrossAttention(nn.Module):
     """Small temporal cross-attention primitive used by consequence slots.
 
@@ -324,7 +371,9 @@ class ConsequenceCrossAttention(nn.Module):
         self.qn = nn.LayerNorm(hidden, elementwise_affine=False)
         self.mn = nn.LayerNorm(hidden, elementwise_affine=False)
 
-    def forward(self, query: Tensor, memory: Tensor, *, temperature: float = 1.0) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, query: Tensor, memory: Tensor, *, temperature: float = 1.0
+    ) -> tuple[Tensor, Tensor]:
         q = self.q(self.qn(query))
         m = self.mn(memory)
         k = self.k(m)
@@ -388,9 +437,12 @@ class ConsequenceFeedbackAnchorer(nn.Module):
         teacher_summary = teacher_world.detach().mean(dim=-2)
         delta_summary = (target_world.detach() - pred_world.detach()).mean(dim=-2)
         action_summary = action_summary.detach()
-        memory = self.memory_proj(torch.cat(
-            [target_summary, pred_summary, teacher_summary, delta_summary, action_summary], dim=-1
-        ))
+        memory = self.memory_proj(
+            torch.cat(
+                [target_summary, pred_summary, teacher_summary, delta_summary, action_summary],
+                dim=-1,
+            )
+        )
         memory = memory + self.segment_key.to(device=memory.device, dtype=memory.dtype)
         if risk_features is None:
             risk_features = memory.new_zeros(batch, cfg.num_segments, 4)
@@ -400,21 +452,33 @@ class ConsequenceFeedbackAnchorer(nn.Module):
         context, attention = self.first(query, memory, temperature=cfg.consequence_temperature)
         slots = query + context
         for layer in self.feedback:
-            update, attention = layer(slots, feedback_memory, temperature=cfg.consequence_temperature)
+            update, attention = layer(
+                slots, feedback_memory, temperature=cfg.consequence_temperature
+            )
             slots = slots + update + self.slot_mix(self.slot_norm(slots))
         entropy = -(attention.clamp_min(1e-8) * attention.clamp_min(1e-8).log()).sum(dim=-1)
         norm_entropy = entropy / math.log(max(cfg.num_segments, 2))
         overlap = attention @ attention.transpose(-1, -2)
         eye = torch.eye(attention.shape[1], device=attention.device, dtype=torch.bool)[None]
-        diversity = overlap.masked_select(~eye).mean() if attention.shape[1] > 1 else attention.new_zeros(())
+        diversity = (
+            overlap.masked_select(~eye).mean()
+            if attention.shape[1] > 1
+            else attention.new_zeros(())
+        )
         return {
             "attention": attention,
             "slots": slots,
             "entropy": norm_entropy.mean(),
             "diversity": diversity,
             "peak": attention.max(dim=-1).values.mean(),
-            "expected_start": (attention * torch.arange(cfg.num_segments, device=attention.device, dtype=attention.dtype)).sum(dim=-1).mean(),
+            "expected_start": (
+                attention
+                * torch.arange(cfg.num_segments, device=attention.device, dtype=attention.dtype)
+            )
+            .sum(dim=-1)
+            .mean(),
         }
+
 
 class SegmentJointBlock(nn.Module):
     def __init__(self, config: V35WorldConfig) -> None:
@@ -505,7 +569,9 @@ class SegmentJointBlock(nn.Module):
             self.action_norm(action_signal)
         )
         joint = self.joint_strength * F.silu(self.joint_mix(torch.cat([raw, normalized], dim=-1)))
-        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.typed_modulation(joint).chunk(6, dim=-1)
+        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.typed_modulation(joint).chunk(
+            6, dim=-1
+        )
 
         value = self.cond_norm(world)
         qk = value * (1 + scale_a) + shift_a + world_key
@@ -513,11 +579,16 @@ class SegmentJointBlock(nn.Module):
         world = world + torch.tanh(gate_a) * update
         ffn_in = self.cond_ffn_norm(world) * (1 + scale_f) + shift_f
         world = world + torch.tanh(gate_f) * self.cond_ffn(ffn_in)
-        return world, local_action, {
-            "adaln_gate_abs_mean": 0.5 * (torch.tanh(gate_a).abs().mean() + torch.tanh(gate_f).abs().mean()),
-            "world_action_joint_rms": joint.float().square().mean().sqrt(),
-            "action_signal_rms": action_signal.float().square().mean().sqrt(),
-        }
+        return (
+            world,
+            local_action,
+            {
+                "adaln_gate_abs_mean": 0.5
+                * (torch.tanh(gate_a).abs().mean() + torch.tanh(gate_f).abs().mean()),
+                "world_action_joint_rms": joint.float().square().mean().sqrt(),
+                "action_signal_rms": action_signal.float().square().mean().sqrt(),
+            },
+        )
 
 
 class SegmentRecurrentLatentDynamics(nn.Module):
@@ -527,13 +598,19 @@ class SegmentRecurrentLatentDynamics(nn.Module):
         h = config.hidden_size
         self.role_key = nn.Parameter(torch.randn(1, config.world_tokens, h) * 0.02)
         self.register_buffer(
-            "segment_key", sinusoidal_positions(config.segment_offsets, h)[None, :, None], persistent=True
+            "segment_key",
+            sinusoidal_positions(config.segment_offsets, h)[None, :, None],
+            persistent=True,
         )
         self.register_buffer(
-            "action_key", sinusoidal_positions(range(1, config.world_horizon + 1), h)[None], persistent=True
+            "action_key",
+            sinusoidal_positions(range(1, config.world_horizon + 1), h)[None],
+            persistent=True,
         )
         self.history_key_proj = nn.Linear(h, h, bias=False)
-        self.blocks = nn.ModuleList([SegmentJointBlock(config) for _ in range(config.transition_unique_blocks)])
+        self.blocks = nn.ModuleList(
+            [SegmentJointBlock(config) for _ in range(config.transition_unique_blocks)]
+        )
         self.out_norm = nn.LayerNorm(h, elementwise_affine=False)
 
     def segment_inputs(self, action_tokens: Tensor, segment_index: int) -> tuple[Tensor, Tensor]:
@@ -541,8 +618,10 @@ class SegmentRecurrentLatentDynamics(nn.Module):
         start = segment_index * cfg.segment_length
         end = start + cfg.segment_length
         local = action_tokens[:, start:end]
-        key = self.action_key[:, start:end].to(device=local.device, dtype=local.dtype).expand(
-            local.shape[0], -1, -1
+        key = (
+            self.action_key[:, start:end]
+            .to(device=local.device, dtype=local.dtype)
+            .expand(local.shape[0], -1, -1)
         )
         if start > 0:
             # Historical action is read-only context. It changes keys, never local values.
@@ -561,8 +640,10 @@ class SegmentRecurrentLatentDynamics(nn.Module):
         """
         local, action_key = self.segment_inputs(action_tokens, segment_index)
         world_key = (
-            self.role_key + self.segment_key[:, segment_index]
-        ).to(device=world.device, dtype=world.dtype).expand(world.shape[0], -1, -1)
+            (self.role_key + self.segment_key[:, segment_index])
+            .to(device=world.device, dtype=world.dtype)
+            .expand(world.shape[0], -1, -1)
+        )
         rows: dict[str, list[Tensor]] = {}
         for depth_index in range(self.config.transition_depth):
             block = self.blocks[depth_index % len(self.blocks)]
@@ -589,11 +670,11 @@ class SegmentRecurrentLatentDynamics(nn.Module):
             preserve_rng_state=bool(self.config.rollout_checkpoint_preserve_rng_state),
         )
 
-    def step(self, world: Tensor, action_tokens: Tensor, segment_index: int) -> tuple[Tensor, dict[str, Tensor]]:
+    def step(
+        self, world: Tensor, action_tokens: Tensor, segment_index: int
+    ) -> tuple[Tensor, dict[str, Tensor]]:
         use_checkpoint = (
-            bool(self.config.rollout_checkpoint)
-            and self.training
-            and torch.is_grad_enabled()
+            bool(self.config.rollout_checkpoint) and self.training and torch.is_grad_enabled()
         )
         if use_checkpoint:
             world, adaln_gate, joint_rms, signal_rms, world_rms = self._checkpointed_step_tensors(
@@ -644,17 +725,14 @@ class SegmentRecurrentLatentDynamics(nn.Module):
         dense = (
             torch.stack(worlds, dim=1)
             if worlds
-            else initial_world.new_empty(initial_world.shape[0], 0, cfg.world_tokens, cfg.hidden_size)
+            else initial_world.new_empty(
+                initial_world.shape[0], 0, cfg.world_tokens, cfg.hidden_size
+            )
         )
         return {
             "world": dense,
-            **{
-                name: torch.stack(values).mean()
-                for name, values in diagnostics.items()
-                if values
-            },
+            **{name: torch.stack(values).mean() for name, values in diagnostics.items() if values},
         }
-
 
     def segment_contexts(self, action_tokens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Return per-segment local action values/keys and world keys.
@@ -667,13 +745,19 @@ class SegmentRecurrentLatentDynamics(nn.Module):
         locals_, action_keys, world_keys = [], [], []
         for segment_index in range(cfg.num_segments):
             local, action_key = self.segment_inputs(action_tokens, segment_index)
-            world_key = (self.role_key + self.segment_key[:, segment_index]).to(
-                device=action_tokens.device, dtype=action_tokens.dtype
-            ).expand(action_tokens.shape[0], -1, -1)
+            world_key = (
+                (self.role_key + self.segment_key[:, segment_index])
+                .to(device=action_tokens.device, dtype=action_tokens.dtype)
+                .expand(action_tokens.shape[0], -1, -1)
+            )
             locals_.append(local)
             action_keys.append(action_key)
             world_keys.append(world_key)
-        return torch.stack(locals_, dim=1), torch.stack(action_keys, dim=1), torch.stack(world_keys, dim=1)
+        return (
+            torch.stack(locals_, dim=1),
+            torch.stack(action_keys, dim=1),
+            torch.stack(world_keys, dim=1),
+        )
 
     def _step_context_tensors(
         self, world: Tensor, local_action: Tensor, action_key: Tensor, world_key: Tensor
@@ -698,9 +782,7 @@ class SegmentRecurrentLatentDynamics(nn.Module):
         self, world: Tensor, local_action: Tensor, action_key: Tensor, world_key: Tensor
     ) -> tuple[Tensor, dict[str, Tensor]]:
         use_checkpoint = (
-            bool(self.config.rollout_checkpoint)
-            and self.training
-            and torch.is_grad_enabled()
+            bool(self.config.rollout_checkpoint) and self.training and torch.is_grad_enabled()
         )
         if use_checkpoint:
             world, adaln_gate, joint_rms, signal_rms, world_rms = activation_checkpoint(
@@ -723,11 +805,15 @@ class SegmentRecurrentLatentDynamics(nn.Module):
             "world_rms": world_rms.detach(),
         }
 
-    def rollout_pair(self, initial_world: Tensor, actual_tokens: Tensor, hold_tokens: Tensor) -> dict[str, Tensor]:
+    def rollout_pair(
+        self, initial_world: Tensor, actual_tokens: Tensor, hold_tokens: Tensor
+    ) -> dict[str, Tensor]:
         batch = initial_world.shape[0]
         world = torch.cat([initial_world, initial_world], dim=0)
         action = torch.cat([actual_tokens, hold_tokens], dim=0)
-        rollout = self.rollout_from_latent(world, action, start_segment=0, num_segments=self.config.num_segments)
+        rollout = self.rollout_from_latent(
+            world, action, start_segment=0, num_segments=self.config.num_segments
+        )
         dense = rollout["world"]
         actual, hold = dense[:batch], dense[batch:]
         diagnostics = {key: value for key, value in rollout.items() if key != "world"}
@@ -770,7 +856,10 @@ class SegmentInverseDecoder(nn.Module):
         self.mn = nn.LayerNorm(h, elementwise_affine=False)
         self.attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True, bias=False)
         self.blocks = nn.ModuleList(
-            [ZeroPreservingSelfBlock(h, config.num_heads, config.ffn_expansion) for _ in range(config.inverse_depth)]
+            [
+                ZeroPreservingSelfBlock(h, config.num_heads, config.ffn_expansion)
+                for _ in range(config.inverse_depth)
+            ]
         )
         self.action_head = nn.Linear(h, config.action_dim, bias=False)
         self.gripper_head = nn.Linear(h, 3, bias=False)
@@ -787,7 +876,9 @@ class SegmentInverseDecoder(nn.Module):
         x, _ = self.attn(self.qn(query), self.mn(flat), self.mn(flat), need_weights=False)
         for block in self.blocks:
             x = block(x)
-        action = self.action_head(x).reshape(*leading, self.config.segment_length, self.config.action_dim)
+        action = self.action_head(x).reshape(
+            *leading, self.config.segment_length, self.config.action_dim
+        )
         gripper = self.gripper_head(x).reshape(*leading, self.config.segment_length, 3)
         return {"action": action, "gripper_logits": gripper}
 
@@ -838,7 +929,9 @@ class ActionOnlyProbe(nn.Module):
         x = self.block(x, key_bias=self.position, causal=True)
         q = self.query.expand(action.shape[0], -1, -1)
         out, _ = self.cross(q, x + self.position, x, need_weights=False)
-        return self.head(out).reshape(action.shape[0], self.config.num_segments, 3, self.config.hidden_size)
+        return self.head(out).reshape(
+            action.shape[0], self.config.num_segments, 3, self.config.hidden_size
+        )
 
 
 class V35ObservedStateWorldModel(nn.Module):
@@ -860,7 +953,9 @@ class V35ObservedStateWorldModel(nn.Module):
 
         generator = torch.Generator(device="cpu")
         generator.manual_seed(config.descriptor_seed)
-        matrix = torch.randn(config.latent_dim, config.descriptor_projection_dim, generator=generator)
+        matrix = torch.randn(
+            config.latent_dim, config.descriptor_projection_dim, generator=generator
+        )
         q, _ = torch.linalg.qr(matrix, mode="reduced")
         self.register_buffer("descriptor_projection", q.float(), persistent=True)
 
@@ -874,7 +969,9 @@ class V35ObservedStateWorldModel(nn.Module):
 
     def world_summary(self, world: Tensor) -> Tensor:
         split = self.split_world(world)
-        return torch.stack([split[name].mean(dim=-2) for name in ("global", "interaction", "motion")], dim=-2)
+        return torch.stack(
+            [split[name].mean(dim=-2) for name in ("global", "interaction", "motion")], dim=-2
+        )
 
     def fixed_region_descriptor(self, tokens: Tensor) -> Tensor:
         """Global + four quadrant descriptors per frame/camera."""
@@ -884,7 +981,9 @@ class V35ObservedStateWorldModel(nn.Module):
         side = int(round(math.sqrt(patch_count)))
         if side * side != patch_count or cfg.descriptor_regions != 5:
             global_region = projected.mean(dim=-2, keepdim=True)
-            regions = global_region.expand(*projected.shape[:-2], cfg.descriptor_regions, projected.shape[-1])
+            regions = global_region.expand(
+                *projected.shape[:-2], cfg.descriptor_regions, projected.shape[-1]
+            )
         else:
             grid = projected.reshape(*projected.shape[:-2], side, side, projected.shape[-1])
             half = side // 2
@@ -897,7 +996,9 @@ class V35ObservedStateWorldModel(nn.Module):
             regions = torch.stack([projected.mean(dim=-2), *quads], dim=-2)
         return F.normalize(regions, dim=-1)
 
-    def encode_online(self, visual: Tensor, state_history: Tensor, executed_history: Tensor) -> Tensor:
+    def encode_online(
+        self, visual: Tensor, state_history: Tensor, executed_history: Tensor
+    ) -> Tensor:
         return self.online_encoder(visual, state_history, executed_history)
 
     @torch.no_grad()
@@ -921,9 +1022,9 @@ class V35ObservedStateWorldModel(nn.Module):
         flat_action = target_executed_history.reshape(
             -1, cfg.executed_history_length, cfg.action_dim
         )
-        future = self.target_encoder(flat_visual.float(), flat_state.float(), flat_action.float()).reshape(
-            target_visual.shape[0], cfg.num_segments, cfg.world_tokens, cfg.hidden_size
-        )
+        future = self.target_encoder(
+            flat_visual.float(), flat_state.float(), flat_action.float()
+        ).reshape(target_visual.shape[0], cfg.num_segments, cfg.world_tokens, cfg.hidden_size)
         return current, future
 
     @torch.no_grad()
@@ -932,12 +1033,16 @@ class V35ObservedStateWorldModel(nn.Module):
     ) -> Tensor:
         cfg = self.config
         return self.online_encoder(
-            target_visual.reshape(-1, cfg.history_length, cfg.num_cameras, cfg.patches_per_camera, cfg.latent_dim),
+            target_visual.reshape(
+                -1, cfg.history_length, cfg.num_cameras, cfg.patches_per_camera, cfg.latent_dim
+            ),
             target_state_history.reshape(-1, cfg.history_length, cfg.state_dim),
             target_executed_history.reshape(-1, cfg.executed_history_length, cfg.action_dim),
         ).reshape(target_visual.shape[0], cfg.num_segments, cfg.world_tokens, cfg.hidden_size)
 
-    def teacher_forced_rollout(self, target_initial: Tensor, target_future: Tensor, action_tokens: Tensor) -> Tensor:
+    def teacher_forced_rollout(
+        self, target_initial: Tensor, target_future: Tensor, action_tokens: Tensor
+    ) -> Tensor:
         previous = target_initial
         rows: list[Tensor] = []
         for index in range(self.config.num_segments):
@@ -985,19 +1090,29 @@ class V35ObservedStateWorldModel(nn.Module):
             if detach_start:
                 start_world = start_world.detach()
             rollout = self.dynamics.rollout_from_latent(
-                start_world, action_tokens, start_segment=start, num_segments=min(depth, cfg.num_segments - start)
+                start_world,
+                action_tokens,
+                start_segment=start,
+                num_segments=min(depth, cfg.num_segments - start),
             )["world"]
             horizon = rollout.shape[1]
             if horizon == 0:
                 continue
-            target = target_future[:, start:start + horizon]
+            target = target_future[:, start : start + horizon]
             if detach_target:
                 target = target.detach()
             pred_rows.append(rollout.reshape(-1, cfg.world_tokens, cfg.hidden_size))
             target_rows.append(target.reshape(-1, cfg.world_tokens, cfg.hidden_size))
             depth_ids = torch.arange(1, horizon + 1, device=target_future.device, dtype=torch.long)
             depth_rows.append(depth_ids[None].expand(target_future.shape[0], -1).reshape(-1))
-            start_rows.append(torch.full((target_future.shape[0] * horizon,), start, device=target_future.device, dtype=torch.long))
+            start_rows.append(
+                torch.full(
+                    (target_future.shape[0] * horizon,),
+                    start,
+                    device=target_future.device,
+                    dtype=torch.long,
+                )
+            )
         if not pred_rows:
             empty = target_future.new_empty(0, cfg.world_tokens, cfg.hidden_size)
             return {
@@ -1012,7 +1127,6 @@ class V35ObservedStateWorldModel(nn.Module):
             "overshoot_depth_index": torch.cat(depth_rows, dim=0),
             "overshoot_start_index": torch.cat(start_rows, dim=0),
         }
-
 
     def consequence_overshooting(
         self,
@@ -1043,7 +1157,9 @@ class V35ObservedStateWorldModel(nn.Module):
                 "overshoot_target": empty,
                 "overshoot_depth_index": target_future.new_empty(0, dtype=torch.long),
                 "overshoot_start_index": target_future.new_empty(0, dtype=torch.long),
-                "consequence_attention": target_future.new_empty(target_future.shape[0], 0, cfg.num_segments),
+                "consequence_attention": target_future.new_empty(
+                    target_future.shape[0], 0, cfg.num_segments
+                ),
                 "consequence_entropy": target_future.new_zeros(()),
                 "consequence_diversity": target_future.new_zeros(()),
                 "consequence_peak": target_future.new_zeros(()),
@@ -1058,7 +1174,9 @@ class V35ObservedStateWorldModel(nn.Module):
         )
         attention = anchor["attention"]
         if detach_start:
-            start_candidates = torch.cat([target_initial[:, None], target_future[:, :-1]], dim=1).detach()
+            start_candidates = torch.cat(
+                [target_initial[:, None], target_future[:, :-1]], dim=1
+            ).detach()
         else:
             start_candidates = torch.cat([target_initial[:, None], target_future[:, :-1]], dim=1)
         if detach_target:
@@ -1078,6 +1196,7 @@ class V35ObservedStateWorldModel(nn.Module):
             valid = (starts + depth_index) < cfg.num_segments
             weights = attention * valid.to(dtype=attention.dtype)[None, None, :]
             weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+
             def weighted_shift(values: Tensor) -> Tensor:
                 # values: [B, S, ...] indexed at segment start + depth_index.
                 shifted = values.new_zeros(values.shape)
@@ -1086,15 +1205,33 @@ class V35ObservedStateWorldModel(nn.Module):
                 else:
                     shifted[:, : cfg.num_segments - depth_index] = values[:, depth_index:]
                 return torch.einsum("bks,bs...->bk...", weights, shifted)
-            local = weighted_shift(local_segments).reshape(batch * slots, cfg.segment_length, cfg.hidden_size)
-            action_key = weighted_shift(action_keys).reshape(batch * slots, cfg.segment_length, cfg.hidden_size)
-            world_key = weighted_shift(world_keys).reshape(batch * slots, cfg.world_tokens, cfg.hidden_size)
-            target = weighted_shift(target_future_for_loss).reshape(batch * slots, cfg.world_tokens, cfg.hidden_size)
+
+            local = weighted_shift(local_segments).reshape(
+                batch * slots, cfg.segment_length, cfg.hidden_size
+            )
+            action_key = weighted_shift(action_keys).reshape(
+                batch * slots, cfg.segment_length, cfg.hidden_size
+            )
+            world_key = weighted_shift(world_keys).reshape(
+                batch * slots, cfg.world_tokens, cfg.hidden_size
+            )
+            target = weighted_shift(target_future_for_loss).reshape(
+                batch * slots, cfg.world_tokens, cfg.hidden_size
+            )
             world, _ = self.dynamics.step_with_context(world, local, action_key, world_key)
             pred_rows.append(world)
             target_rows.append(target)
-            depth_rows.append(torch.full((batch * slots,), depth_index + 1, device=target_future.device, dtype=torch.long))
-            start_rows.append((attention.detach() * starts.to(dtype=attention.dtype)[None, None]).sum(dim=-1).reshape(-1).to(torch.long))
+            depth_rows.append(
+                torch.full(
+                    (batch * slots,), depth_index + 1, device=target_future.device, dtype=torch.long
+                )
+            )
+            start_rows.append(
+                (attention.detach() * starts.to(dtype=attention.dtype)[None, None])
+                .sum(dim=-1)
+                .reshape(-1)
+                .to(torch.long)
+            )
         return {
             "overshoot_world": torch.cat(pred_rows, dim=0),
             "overshoot_target": torch.cat(target_rows, dim=0),
@@ -1139,7 +1276,9 @@ class V35ObservedStateWorldModel(nn.Module):
             target_initial, target, action_output["actual_tokens"]
         )
         previous_pred = torch.cat([current[:, None], rollout["pred_world"][:, :-1]], dim=1)
-        previous_target = torch.cat([current.detach()[:, None], online_future_target[:, :-1]], dim=1)
+        previous_target = torch.cat(
+            [current.detach()[:, None], online_future_target[:, :-1]], dim=1
+        )
         inverse_pred = self.inverse_decoder(previous_pred, rollout["pred_world"])
         inverse_target = self.inverse_decoder(previous_target, online_future_target)
         return {
@@ -1208,9 +1347,13 @@ class V35ObservedStateWorldModel(nn.Module):
     def update_ema(self, decay: float) -> None:
         if not 0 <= float(decay) < 1:
             raise ValueError("EMA decay must be in [0,1)")
-        for target, online in zip(self.target_encoder.parameters(), self.online_encoder.parameters(), strict=True):
+        for target, online in zip(
+            self.target_encoder.parameters(), self.online_encoder.parameters(), strict=True
+        ):
             target.mul_(float(decay)).add_(online.float(), alpha=1 - float(decay))
-        for target, online in zip(self.target_encoder.buffers(), self.online_encoder.buffers(), strict=True):
+        for target, online in zip(
+            self.target_encoder.buffers(), self.online_encoder.buffers(), strict=True
+        ):
             target.copy_(online.float())
 
     def parameter_report(self) -> dict[str, int]:
@@ -1225,10 +1368,17 @@ class V35ObservedStateWorldModel(nn.Module):
             "region_decoder": self.region_decoder,
             "action_only_probe": self.action_only_probe,
         }
-        out = {name: sum(p.numel() for p in module.parameters()) for name, module in modules.items()}
+        out = {
+            name: sum(p.numel() for p in module.parameters()) for name, module in modules.items()
+        }
         out["total"] = sum(p.numel() for p in self.parameters())
         out["trainable"] = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        out["online_inference"] = out["total"] - out["target_world_encoder"] - out["inverse_decoder"] - out["action_only_probe"]
+        out["online_inference"] = (
+            out["total"]
+            - out["target_world_encoder"]
+            - out["inverse_decoder"]
+            - out["action_only_probe"]
+        )
         return out
 
 

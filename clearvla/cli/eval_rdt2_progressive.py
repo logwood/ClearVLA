@@ -9,13 +9,32 @@ from clearvla.experiments.classic_policy_lab.legacy_guard import require_legacy_
 import torch
 
 from clearvla.cli.eval_rdt2_fm_reference import _build_conditioner
-from clearvla.experiments.classic_policy_lab.cli_common import add_data_args, load_data, make_loader, resolve_device, serializable
+from clearvla.experiments.classic_policy_lab.cli_common import (
+    add_data_args,
+    load_data,
+    make_loader,
+    resolve_device,
+    serializable,
+)
 from clearvla.experiments.classic_policy_lab.dataset import RDT2FMDatasetConfig, RDT2FMWindowDataset
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
-from clearvla.experiments.classic_policy_lab.rdt2_progressive import ProgressiveRDT2FM, ProgressiveRDT2FMConfig
-from clearvla.experiments.classic_policy_lab.rdt2_progressive_runtime import evaluate_progressive_rdt2_fm
+from clearvla.experiments.classic_policy_lab.rdt2_progressive import (
+    ProgressiveRDT2FM,
+    ProgressiveRDT2FMConfig,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_progressive_runtime import (
+    evaluate_progressive_rdt2_fm,
+)
 
-IMAGE_ABLATIONS = ["normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"]
+IMAGE_ABLATIONS = [
+    "normal",
+    "zero",
+    "mean",
+    "shuffle-batch",
+    "shuffle-episode",
+    "top-only",
+    "wrist-only",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +43,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--split", choices=["train", "val", "test"], default="val")
     p.add_argument("--inference-steps", type=int, default=None)
-    p.add_argument("--condition-mode", choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"], default=None)
+    p.add_argument(
+        "--condition-mode",
+        choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"],
+        default=None,
+    )
     p.add_argument("--instruction", default=None)
     p.add_argument("--dinov2-model", default=None)
     p.add_argument("--dinov2-local-files-only", action="store_true")
@@ -56,25 +79,74 @@ def main() -> None:
     model_config = ProgressiveRDT2FMConfig(**context["model"])
     data_config = RDT2FMDatasetConfig(**context["data"])
     episodes, train_ids, val_ids, test_ids, _, _, store, skipped = load_data(
-        args, min_length=data_config.prediction_horizon + 1, normalizer_mode=action_norm.mode,
-        action_normalizer=action_norm, state_normalizer=state_norm, splits=context["splits"],
+        args,
+        min_length=data_config.prediction_horizon + 1,
+        normalizer_mode=action_norm.mode,
+        action_normalizer=action_norm,
+        state_normalizer=state_norm,
+        splits=context["splits"],
     )
     ids = {"train": train_ids, "val": val_ids, "test": test_ids}[args.split]
     cameras = tuple(str(value) for value in context["args"]["cameras"])
     if tuple(args.cameras) != cameras:
-        raise ValueError(f"evaluation cameras must match checkpoint cameras: {tuple(args.cameras)} != {cameras}")
-    ds = RDT2FMWindowDataset(episodes, ids, image_store=store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    loader = make_loader(ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+        raise ValueError(
+            f"evaluation cameras must match checkpoint cameras: {tuple(args.cameras)} != {cameras}"
+        )
+    ds = RDT2FMWindowDataset(
+        episodes,
+        ids,
+        image_store=store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    loader = make_loader(
+        ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
     model = ProgressiveRDT2FM(model_config, dtype=dtype).to(device=device, dtype=dtype)
     model.load_state_dict(payload["model"])
     mode = args.condition_mode or context["conditioning"]["mode"]
-    conditioner = _build_conditioner(mode, context, args, model_config=model_config, episodes=episodes, cameras=cameras, device=device, dtype=dtype)
-    instruction = context["conditioning"].get("instruction", "") if args.instruction is None else args.instruction
+    conditioner = _build_conditioner(
+        mode,
+        context,
+        args,
+        model_config=model_config,
+        episodes=episodes,
+        cameras=cameras,
+        device=device,
+        dtype=dtype,
+    )
+    instruction = (
+        context["conditioning"].get("instruction", "")
+        if args.instruction is None
+        else args.instruction
+    )
     steps = int(args.inference_steps or model_config.num_inference_timesteps)
+
     def run(mode_name: str):
-        return evaluate_progressive_rdt2_fm(model, conditioner, loader, device=device, action_normalizer=action_norm, inference_steps=steps, max_batches=args.max_val_batches, instruction=instruction, image_ablation=mode_name)
+        return evaluate_progressive_rdt2_fm(
+            model,
+            conditioner,
+            loader,
+            device=device,
+            action_normalizer=action_norm,
+            inference_steps=steps,
+            max_batches=args.max_val_batches,
+            instruction=instruction,
+            image_ablation=mode_name,
+        )
+
     metrics = run(args.image_ablation)
-    report = {"schema": "clearvla-rdt2-progressive-eval-v1", "checkpoint": str(args.checkpoint), "split": args.split, "condition_mode": mode, "image_ablation": args.image_ablation, "metrics": metrics, "skipped": skipped}
+    report = {
+        "schema": "clearvla-rdt2-progressive-eval-v1",
+        "checkpoint": str(args.checkpoint),
+        "split": args.split,
+        "condition_mode": mode,
+        "image_ablation": args.image_ablation,
+        "metrics": metrics,
+        "skipped": skipped,
+    }
     if args.compare_image_ablations:
         modes = []
         for value in ["normal", *args.compare_image_ablations]:
@@ -84,7 +156,17 @@ def main() -> None:
         normal = rows["normal"]
         keys = ("full_mse", "arm_first_rmse", "fast_exit_arm_first_rmse", "prefix_exit_first4_rmse")
         report["ablation_metrics"] = rows
-        report["degradation_vs_normal"] = {value: {key: {"absolute": float(data[key] - normal[key]), "relative": float(data[key] / normal[key] - 1.0) if normal[key] else None} for key in keys} for value, data in rows.items() if value != "normal"}
+        report["degradation_vs_normal"] = {
+            value: {
+                key: {
+                    "absolute": float(data[key] - normal[key]),
+                    "relative": float(data[key] / normal[key] - 1.0) if normal[key] else None,
+                }
+                for key in keys
+            }
+            for value, data in rows.items()
+            if value != "normal"
+        }
     text = json.dumps(serializable(report), indent=2)
     print(text)
     if args.out_json is not None:

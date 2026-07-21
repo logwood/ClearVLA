@@ -96,39 +96,62 @@ def evaluate_vision_usage_model(
                 past=batch["past"],
                 prior=batch["prior"],
                 prepared_visual=prepared,
-                steps=integration_steps, source_trajectory=source, prepared_flow=flow_memory,
+                steps=integration_steps,
+                source_trajectory=source,
+                prepared_flow=flow_memory,
             )
         else:
             adaptive = model.integrate_adaptive_prepared(
                 past=batch["past"],
                 prior=batch["prior"],
                 prepared_visual=prepared,
-                solver=adaptive_solver, source_trajectory=source, prepared_flow=flow_memory,
+                solver=adaptive_solver,
+                source_trajectory=source,
+                prepared_flow=flow_memory,
             )
             pred = adaptive.prediction
             solver_steps.append(adaptive.solver_steps.cpu().numpy())
         prefix = model.fast_prefix_head(prepared.scene_tokens, source_tokens, source)
-        streaming_pred = model.streaming_tail_head.rollout(batch["past"], source, prepared.scene_tokens, prefix)
+        streaming_pred = model.streaming_tail_head.rollout(
+            batch["past"], source, prepared.scene_tokens, prefix
+        )
         # Auxiliary dynamics and correction demand reuse the same prepared
         # visual memory.  Validation must not encode the same observation twice.
         visual_delta, _, batch_demand_score, _ = model.predict_auxiliary_prepared(
-            past=batch["past"], prior=source, prepared_visual=prepared,
+            past=batch["past"],
+            prior=source,
+            prepared_visual=prepared,
         )
-        dyn_huber.append(float(torch.nn.functional.smooth_l1_loss(
-            visual_delta,
-            batch["future_visual_delta_tokens"],
-            beta=0.03,
-        ).cpu()))
+        dyn_huber.append(
+            float(
+                torch.nn.functional.smooth_l1_loss(
+                    visual_delta,
+                    batch["future_visual_delta_tokens"],
+                    beta=0.03,
+                ).cpu()
+            )
+        )
         zeros = torch.zeros((batch["past"].shape[0],), device=device, dtype=batch["past"].dtype)
         _, _, _, probe_base, probe_visual, probe_gate, _ = model.predict_velocity_prepared(
-            past=batch["past"], source=source, prepared_visual=prepared, action_state=source,
-            bridge_time=zeros, noise_level=zeros, prepared_flow=flow_memory,
+            past=batch["past"],
+            source=source,
+            prepared_visual=prepared,
+            action_state=source,
+            bridge_time=zeros,
+            noise_level=zeros,
+            prepared_flow=flow_memory,
         )
         probe_correction = probe_gate[:, :, None] * probe_visual
         field_gate.append(probe_gate.mean(dim=1).cpu().numpy())
-        field_base_norm.append(torch.linalg.vector_norm(probe_base, dim=-1).mean(dim=1).cpu().numpy())
-        field_visual_norm.append(torch.linalg.vector_norm(probe_visual, dim=-1).mean(dim=1).cpu().numpy())
-        field_correction_norm.append(torch.linalg.vector_norm(probe_correction, dim=-1).mean(dim=1).cpu().numpy())
+        field_base_norm.append(
+            torch.linalg.vector_norm(probe_base, dim=-1).mean(dim=1).cpu().numpy()
+        )
+        field_visual_norm.append(
+            torch.linalg.vector_norm(probe_visual, dim=-1).mean(dim=1).cpu().numpy()
+        )
+        field_correction_norm.append(
+            torch.linalg.vector_norm(probe_correction, dim=-1).mean(dim=1).cpu().numpy()
+        )
         visual_delta_magnitude.append(prepared.delta_magnitude_by_camera.cpu().numpy())
         rows["pred"].append(pred.cpu().numpy())
         rows["source_pred"].append(source.cpu().numpy())
@@ -145,11 +168,13 @@ def evaluate_vision_usage_model(
             event_target.append(batch["event_flag"].cpu().numpy())
         if include_timeline:
             batch_size = int(batch["past"].shape[0])
-            refs = dataset_refs[ref_offset:ref_offset + batch_size]
+            refs = dataset_refs[ref_offset : ref_offset + batch_size]
             if len(refs) != batch_size:
                 raise RuntimeError("timeline refs are not aligned with evaluation batches")
             score_np = batch_demand_score.cpu().numpy()
-            target_np = None if "demand_target" not in batch else batch["demand_target"].cpu().numpy()
+            target_np = (
+                None if "demand_target" not in batch else batch["demand_target"].cpu().numpy()
+            )
             event_np = None if "event_flag" not in batch else batch["event_flag"].cpu().numpy()
             step_np = None
             if adaptive_solver is not None:
@@ -160,20 +185,32 @@ def evaluate_vision_usage_model(
             correction_norm_np = field_correction_norm[-1]
             delta_magnitude_np = visual_delta_magnitude[-1]
             for local_index, ref in enumerate(refs):
-                timeline.append({
-                    "episode_idx": int(ref.episode_idx),
-                    "center": int(ref.center),
-                    "demand_score": float(score_np[local_index]),
-                    "demand_target": None if target_np is None else float(target_np[local_index]),
-                    "event_flag": None if event_np is None else bool(event_np[local_index] >= 0.5),
-                    "solver_steps": int(integration_steps) if step_np is None else int(step_np[local_index]),
-                    "fast_prefix_first_action_l2_norm": float(np.linalg.norm(prefix.cpu().numpy()[local_index, 0])),
-                    "visual_gate_mean": float(gate_np[local_index]),
-                    "history_base_velocity_norm": float(base_norm_np[local_index]),
-                    "visual_velocity_norm": float(visual_norm_np[local_index]),
-                    "applied_visual_correction_norm": float(correction_norm_np[local_index]),
-                    "visual_delta_magnitude_by_camera": [float(x) for x in delta_magnitude_np[local_index]],
-                })
+                timeline.append(
+                    {
+                        "episode_idx": int(ref.episode_idx),
+                        "center": int(ref.center),
+                        "demand_score": float(score_np[local_index]),
+                        "demand_target": None
+                        if target_np is None
+                        else float(target_np[local_index]),
+                        "event_flag": None
+                        if event_np is None
+                        else bool(event_np[local_index] >= 0.5),
+                        "solver_steps": int(integration_steps)
+                        if step_np is None
+                        else int(step_np[local_index]),
+                        "fast_prefix_first_action_l2_norm": float(
+                            np.linalg.norm(prefix.cpu().numpy()[local_index, 0])
+                        ),
+                        "visual_gate_mean": float(gate_np[local_index]),
+                        "history_base_velocity_norm": float(base_norm_np[local_index]),
+                        "visual_velocity_norm": float(visual_norm_np[local_index]),
+                        "applied_visual_correction_norm": float(correction_norm_np[local_index]),
+                        "visual_delta_magnitude_by_camera": [
+                            float(x) for x in delta_magnitude_np[local_index]
+                        ],
+                    }
+                )
             ref_offset += batch_size
     joined = {key: np.concatenate(value, axis=0) for key, value in rows.items()}
     metrics = compute_metrics(
@@ -184,7 +221,9 @@ def evaluate_vision_usage_model(
         normalizer=normalizer,
     )
     metrics["inference_mode"] = "adaptive" if adaptive_solver is not None else "fixed"
-    metrics["fixed_integration_steps"] = None if adaptive_solver is not None else int(integration_steps)
+    metrics["fixed_integration_steps"] = (
+        None if adaptive_solver is not None else int(integration_steps)
+    )
     metrics["latent_dynamics_huber"] = float(np.mean(dyn_huber)) if dyn_huber else float("nan")
     if field_gate:
         gate = np.concatenate(field_gate)
@@ -199,21 +238,40 @@ def evaluate_vision_usage_model(
     if visual_delta_magnitude:
         delta_magnitude = np.concatenate(visual_delta_magnitude, axis=0)
         metrics["visual_delta_magnitude_mean"] = float(delta_magnitude.mean())
-        metrics["visual_delta_magnitude_by_camera_mean"] = [float(x) for x in delta_magnitude.mean(axis=0)]
+        metrics["visual_delta_magnitude_by_camera_mean"] = [
+            float(x) for x in delta_magnitude.mean(axis=0)
+        ]
     source_metrics = compute_metrics(
-        pred_norm=joined["source_pred"], target_norm=joined["future"], prior_norm=joined["prior"],
-        past_norm=joined["past"], normalizer=normalizer,
+        pred_norm=joined["source_pred"],
+        target_norm=joined["future"],
+        prior_norm=joined["prior"],
+        past_norm=joined["past"],
+        normalizer=normalizer,
     )
     streaming_metrics = compute_metrics(
-        pred_norm=joined["streaming_pred"], target_norm=joined["future"], prior_norm=joined["prior"],
-        past_norm=joined["past"], normalizer=normalizer,
+        pred_norm=joined["streaming_pred"],
+        target_norm=joined["future"],
+        prior_norm=joined["prior"],
+        past_norm=joined["past"],
+        normalizer=normalizer,
     )
     stage_keys = (
-        "full_mse", "full_rmse", "full_mae", "normalized_mae",
-        "first_mse", "first_rmse", "first_mae",
-        "first4_mse", "first4_rmse", "first4_mae",
-        "delta_mse", "delta_rmse", "delta_mae",
-        "relative_mse_improvement_vs_prior", "per_dim_rmse", "per_dim_mae",
+        "full_mse",
+        "full_rmse",
+        "full_mae",
+        "normalized_mae",
+        "first_mse",
+        "first_rmse",
+        "first_mae",
+        "first4_mse",
+        "first4_rmse",
+        "first4_mae",
+        "delta_mse",
+        "delta_rmse",
+        "delta_mae",
+        "relative_mse_improvement_vs_prior",
+        "per_dim_rmse",
+        "per_dim_mae",
     )
     for key in stage_keys:
         if key in source_metrics:
@@ -229,7 +287,9 @@ def evaluate_vision_usage_model(
         past_norm=joined["past"],
         normalizer=normalizer,
     )
-    metrics["fast_prefix_mse_norm"] = float(np.mean(np.square(joined["prefix_pred"] - prefix_target)))
+    metrics["fast_prefix_mse_norm"] = float(
+        np.mean(np.square(joined["prefix_pred"] - prefix_target))
+    )
     metrics["fast_prefix_mse"] = float(prefix_metrics["full_mse"])
     metrics["fast_prefix_rmse"] = float(prefix_metrics["full_rmse"])
     metrics["fast_prefix_mae"] = float(prefix_metrics["full_mae"])
@@ -265,8 +325,12 @@ def evaluate_vision_usage_model(
         for label, mask in (("event", y >= 0.5), ("regular", y < 0.5)):
             if bool(mask.any()):
                 subset = _subset_metrics(
-                    pred=joined["pred"], future=joined["future"], prior=joined["prior"], past=joined["past"],
-                    mask=mask, normalizer=normalizer,
+                    pred=joined["pred"],
+                    future=joined["future"],
+                    prior=joined["prior"],
+                    past=joined["past"],
+                    mask=mask,
+                    normalizer=normalizer,
                 )
                 for key, value in subset.items():
                     metrics[f"{label}_{key}"] = value
@@ -296,12 +360,20 @@ def visual_dependency_report(metrics_by_mode: dict[str, dict[str, Any]]) -> dict
             for subset in ("event", "regular"):
                 key = f"{subset}_full_mse"
                 if key in mode_metrics and key in correct_metrics:
-                    report[f"{mode}_{subset}_gap"] = float(mode_metrics[key]) - float(correct_metrics[key])
+                    report[f"{mode}_{subset}_gap"] = float(mode_metrics[key]) - float(
+                        correct_metrics[key]
+                    )
             if "demand_score_mean" in mode_metrics and "demand_score_mean" in correct_metrics:
-                report[f"{mode}_demand_shift"] = float(mode_metrics["demand_score_mean"]) - float(correct_metrics["demand_score_mean"])
+                report[f"{mode}_demand_shift"] = float(mode_metrics["demand_score_mean"]) - float(
+                    correct_metrics["demand_score_mean"]
+                )
             if "mean_solver_steps" in mode_metrics and "mean_solver_steps" in correct_metrics:
-                report[f"{mode}_solver_steps_shift"] = float(mode_metrics["mean_solver_steps"]) - float(correct_metrics["mean_solver_steps"])
+                report[f"{mode}_solver_steps_shift"] = float(
+                    mode_metrics["mean_solver_steps"]
+                ) - float(correct_metrics["mean_solver_steps"])
             for field_key in ("visual_gate_mean", "applied_visual_correction_norm_mean"):
                 if field_key in mode_metrics and field_key in correct_metrics:
-                    report[f"{mode}_{field_key}_shift"] = float(mode_metrics[field_key]) - float(correct_metrics[field_key])
+                    report[f"{mode}_{field_key}_shift"] = float(mode_metrics[field_key]) - float(
+                        correct_metrics[field_key]
+                    )
     return report

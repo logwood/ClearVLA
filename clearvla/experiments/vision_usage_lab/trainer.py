@@ -65,14 +65,39 @@ class VisionUsageLabTrainerConfig:
             raise ValueError("learning rates must be positive")
         if self.weight_decay < 0 or self.grad_clip < 0:
             raise ValueError("weight_decay and grad_clip must be non-negative")
-        if min(self.log_every, self.rolling_window, self.integration_steps, self.parameter_finite_check_every,
-               self.optimizer_state_finite_check_every) <= 0:
+        if (
+            min(
+                self.log_every,
+                self.rolling_window,
+                self.integration_steps,
+                self.parameter_finite_check_every,
+                self.optimizer_state_finite_check_every,
+            )
+            <= 0
+        ):
             raise ValueError("logging, integration and finite-check intervals must be positive")
         self.adaptive_solver.validate()
 
 
 def _assert_finite_lab_output(output: VisionUsageLabOutput, *, prefix: str) -> None:
-    for name in ("velocity", "endpoint", "visual_delta_tokens", "event_logit", "demand_logit", "demand_score", "action_tokens", "learned_source", "fast_prefix", "streaming_actions", "streaming_teacher_forced_actions", "base_velocity", "visual_velocity", "visual_gate", "scene_tokens", "dense_visual_tokens"):
+    for name in (
+        "velocity",
+        "endpoint",
+        "visual_delta_tokens",
+        "event_logit",
+        "demand_logit",
+        "demand_score",
+        "action_tokens",
+        "learned_source",
+        "fast_prefix",
+        "streaming_actions",
+        "streaming_teacher_forced_actions",
+        "base_velocity",
+        "visual_velocity",
+        "visual_gate",
+        "scene_tokens",
+        "dense_visual_tokens",
+    ):
         value = getattr(output, name)
         if value is not None:
             assert_finite_tensor(value, name=f"{prefix}.{name}")
@@ -108,7 +133,9 @@ def _set_phase(model: VisionUsageLabModel, phase: str) -> None:
     }
     for parameter in model.parameters():
         parameter.requires_grad_(False)
-    enabled = ("representation",) if phase == "representation_pretrain" else ("representation", "action")
+    enabled = (
+        ("representation",) if phase == "representation_pretrain" else ("representation", "action")
+    )
     for group in enabled:
         for module in modules[group]:
             for parameter in module.parameters():
@@ -117,7 +144,9 @@ def _set_phase(model: VisionUsageLabModel, phase: str) -> None:
         model.action_pos.requires_grad_(True)
 
 
-def _optimizer(model: VisionUsageLabModel, config: VisionUsageLabTrainerConfig, phase: str) -> torch.optim.Optimizer:
+def _optimizer(
+    model: VisionUsageLabModel, config: VisionUsageLabTrainerConfig, phase: str
+) -> torch.optim.Optimizer:
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise ValueError(f"no trainable parameters for phase={phase}")
@@ -130,7 +159,7 @@ def _grad_norm(parameters: list[torch.nn.Parameter]) -> float:
     for parameter in parameters:
         if parameter.grad is not None:
             total += float(parameter.grad.detach().float().square().sum().cpu())
-    return total ** 0.5
+    return total**0.5
 
 
 def _module_grad_norm(module: torch.nn.Module) -> float:
@@ -172,17 +201,22 @@ def _save_checkpoint(
     history: list[dict[str, Any]],
     context: dict[str, Any],
 ) -> None:
-    _atomic_torch_save({
-        "schema": "clearvla-vision-usage-lab-v5",
-        "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
-        "optimizer_state_dict": optimizer.state_dict(),
-        "phase": phase,
-        "phase_epoch": int(phase_epoch),
-        "global_epoch": int(global_epoch),
-        "global_step": int(global_step),
-        "history": history,
-        "context": context,
-    }, path)
+    _atomic_torch_save(
+        {
+            "schema": "clearvla-vision-usage-lab-v5",
+            "model_state_dict": {
+                key: value.detach().cpu() for key, value in model.state_dict().items()
+            },
+            "optimizer_state_dict": optimizer.state_dict(),
+            "phase": phase,
+            "phase_epoch": int(phase_epoch),
+            "global_epoch": int(global_epoch),
+            "global_step": int(global_step),
+            "history": history,
+            "context": context,
+        },
+        path,
+    )
 
 
 def _eval_modes(
@@ -196,15 +230,23 @@ def _eval_modes(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
     metrics = {
         mode: evaluate_vision_usage_model(
-            model, loader, device=device, normalizer=normalizer, integration_steps=integration_steps,
+            model,
+            loader,
+            device=device,
+            normalizer=normalizer,
+            integration_steps=integration_steps,
         )
         for mode, loader in loaders.items()
     }
     adaptive_correct = None
     if adaptive_solver is not None:
         adaptive_correct = evaluate_vision_usage_model(
-            model, loaders["correct"], device=device, normalizer=normalizer,
-            integration_steps=integration_steps, adaptive_solver=adaptive_solver,
+            model,
+            loaders["correct"],
+            device=device,
+            normalizer=normalizer,
+            integration_steps=integration_steps,
+            adaptive_solver=adaptive_solver,
         )
     return metrics, visual_dependency_report(metrics), adaptive_correct
 
@@ -265,50 +307,85 @@ def train_vision_usage_lab(
                         bridge_batch = None
                         prepared = model.prepare_visual(batch["visual_tokens"])
                         correct = model.forward_prepared(
-                            past=batch["past"], prior=batch["prior"], prepared_visual=prepared,
-                            future_actions=batch["future"], compute_action=False, compute_auxiliary=True,
+                            past=batch["past"],
+                            prior=batch["prior"],
+                            prepared_visual=prepared,
+                            future_actions=batch["future"],
+                            compute_action=False,
+                            compute_auxiliary=True,
                         )
                         wrong = None
                         target_velocity = None
                         noise_mean = 0.0
                     else:
-                        learned_source, learned_source_tokens = model.predict_source(batch["past"], batch["prior"])
-                        bridge_batch = sample_action_bridge(learned_source.detach(), batch["future"], bridge)
+                        learned_source, learned_source_tokens = model.predict_source(
+                            batch["past"], batch["prior"]
+                        )
+                        bridge_batch = sample_action_bridge(
+                            learned_source.detach(), batch["future"], bridge
+                        )
                         prepared = model.prepare_visual(batch["visual_tokens"])
-                        flow_memory = model.prepare_flow_memory(past=batch["past"], prepared_visual=prepared)
+                        flow_memory = model.prepare_flow_memory(
+                            past=batch["past"], prepared_visual=prepared
+                        )
                         correct = model.forward_prepared(
-                            past=batch["past"], prior=batch["prior"], prepared_visual=prepared,
-                            action_state=bridge_batch.state, bridge_time=bridge_batch.time,
-                            noise_level=bridge_batch.noise_level, future_actions=batch["future"],
-                            source_trajectory=learned_source, source_tokens=learned_source_tokens,
-                            prepared_flow=flow_memory, compute_action=True, compute_auxiliary=True,
+                            past=batch["past"],
+                            prior=batch["prior"],
+                            prepared_visual=prepared,
+                            action_state=bridge_batch.state,
+                            bridge_time=bridge_batch.time,
+                            noise_level=bridge_batch.noise_level,
+                            future_actions=batch["future"],
+                            source_trajectory=learned_source,
+                            source_tokens=learned_source_tokens,
+                            prepared_flow=flow_memory,
+                            compute_action=True,
+                            compute_auxiliary=True,
                         )
                         if loss_config.consistency_weight > 0:
                             assert correct.velocity is not None
                             consistency_time = 0.5 * (bridge_batch.time + 1.0)
-                            consistency_state = bridge_batch.state + (
-                                consistency_time - bridge_batch.time
-                            )[:, None, None] * correct.velocity.detach()
+                            consistency_state = (
+                                bridge_batch.state
+                                + (consistency_time - bridge_batch.time)[:, None, None]
+                                * correct.velocity.detach()
+                            )
                             consistency_output = model.forward_prepared(
-                                past=batch["past"], prior=batch["prior"], prepared_visual=prepared,
-                                action_state=consistency_state, bridge_time=consistency_time,
-                                noise_level=bridge_batch.noise_level, source_trajectory=learned_source,
-                                source_tokens=learned_source_tokens, prepared_flow=flow_memory,
-                                compute_action=True, compute_auxiliary=False,
+                                past=batch["past"],
+                                prior=batch["prior"],
+                                prepared_visual=prepared,
+                                action_state=consistency_state,
+                                bridge_time=consistency_time,
+                                noise_level=bridge_batch.noise_level,
+                                source_trajectory=learned_source,
+                                source_tokens=learned_source_tokens,
+                                prepared_flow=flow_memory,
+                                compute_action=True,
+                                compute_auxiliary=False,
                                 compute_fast_paths=False,
                             )
                         wrong = None
                         if loss_config.ranking_weight > 0:
                             if "negative_visual_tokens" not in batch:
-                                raise ValueError("action_flow requires explicit negative_visual_tokens")
+                                raise ValueError(
+                                    "action_flow requires explicit negative_visual_tokens"
+                                )
                             wrong_prepared = model.prepare_visual(batch["negative_visual_tokens"])
-                            wrong_flow_memory = model.prepare_flow_memory(past=batch["past"], prepared_visual=wrong_prepared)
+                            wrong_flow_memory = model.prepare_flow_memory(
+                                past=batch["past"], prepared_visual=wrong_prepared
+                            )
                             wrong = model.forward_prepared(
-                                past=batch["past"], prior=batch["prior"], prepared_visual=wrong_prepared,
-                                action_state=bridge_batch.state, bridge_time=bridge_batch.time,
-                                noise_level=bridge_batch.noise_level, source_trajectory=learned_source,
-                                source_tokens=learned_source_tokens, prepared_flow=wrong_flow_memory,
-                                compute_action=True, compute_auxiliary=False,
+                                past=batch["past"],
+                                prior=batch["prior"],
+                                prepared_visual=wrong_prepared,
+                                action_state=bridge_batch.state,
+                                bridge_time=bridge_batch.time,
+                                noise_level=bridge_batch.noise_level,
+                                source_trajectory=learned_source,
+                                source_tokens=learned_source_tokens,
+                                prepared_flow=wrong_flow_memory,
+                                compute_action=True,
+                                compute_auxiliary=False,
                                 compute_fast_paths=False,
                             )
                         target_velocity = bridge_batch.target_velocity
@@ -335,14 +412,20 @@ def train_vision_usage_lab(
                     assert_finite_tensor(loss, name="loss")
                     marker = "backward"
                     loss.backward()
-                    named = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+                    named = [
+                        (name, parameter)
+                        for name, parameter in model.named_parameters()
+                        if parameter.requires_grad
+                    ]
                     parameters = [parameter for _, parameter in named]
                     assert_finite_gradients(named)
                     grad_groups_raw = _gradient_group_norms(model)
                     grad_raw = _grad_norm(parameters)
                     if trainer.grad_clip > 0:
                         returned_raw = torch.nn.utils.clip_grad_norm_(
-                            parameters, trainer.grad_clip, error_if_nonfinite=True,
+                            parameters,
+                            trainer.grad_clip,
+                            error_if_nonfinite=True,
                         )
                         grad_raw = float(returned_raw.detach().cpu())
                     grad_clipped = _grad_norm(parameters)
@@ -364,9 +447,15 @@ def train_vision_usage_lab(
                         error=exc,
                     )
                     _save_checkpoint(
-                        checkpoints / "failure.pt", model=model, optimizer=optimizer, phase=phase,
-                        phase_epoch=phase_epoch, global_epoch=global_epoch, global_step=global_step,
-                        history=history, context=context,
+                        checkpoints / "failure.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        phase=phase,
+                        phase_epoch=phase_epoch,
+                        global_epoch=global_epoch,
+                        global_step=global_step,
+                        history=history,
+                        context=context,
                     )
                     raise
                 detached = result.detached_floats()
@@ -405,13 +494,17 @@ def train_vision_usage_lab(
                         f"rolling{trainer.rolling_window}={np.mean(rolling):.6f} "
                         f"{detail} grad={values['grad_raw'][-1]:.3e}->{values['grad_clipped'][-1]:.3e} "
                         f"clip={values['clip_ratio'][-1]:.3f} ",
-                        end="", flush=True,
+                        end="",
+                        flush=True,
                     )
             print(flush=True)
             if phase == "representation_pretrain":
                 val_metrics = {
                     "correct": evaluate_vision_usage_model(
-                        model, val_loaders_by_mode["correct"], device=device, normalizer=normalizer,
+                        model,
+                        val_loaders_by_mode["correct"],
+                        device=device,
+                        normalizer=normalizer,
                         integration_steps=trainer.integration_steps,
                     )
                 }
@@ -419,7 +512,10 @@ def train_vision_usage_lab(
                 adaptive_correct = None
             else:
                 val_metrics, dependency, adaptive_correct = _eval_modes(
-                    model, val_loaders_by_mode, device=device, normalizer=normalizer,
+                    model,
+                    val_loaders_by_mode,
+                    device=device,
+                    normalizer=normalizer,
                     integration_steps=trainer.integration_steps,
                     adaptive_solver=trainer.adaptive_solver if trainer.adaptive_eval else None,
                 )
@@ -451,8 +547,16 @@ def train_vision_usage_lab(
                     flush=True,
                 )
             else:
-                adaptive_mse = float("nan") if adaptive_correct is None else float(adaptive_correct["full_mse"])
-                adaptive_steps = float("nan") if adaptive_correct is None else float(adaptive_correct["mean_solver_steps"])
+                adaptive_mse = (
+                    float("nan")
+                    if adaptive_correct is None
+                    else float(adaptive_correct["full_mse"])
+                )
+                adaptive_steps = (
+                    float("nan")
+                    if adaptive_correct is None
+                    else float(adaptive_correct["mean_solver_steps"])
+                )
                 print(
                     f"[vision-lab] phase={phase} epoch={phase_epoch:03d}/{epochs:03d} "
                     f"sec={record['seconds']:.2f} train={record['train_loss']:.6f} "
@@ -468,20 +572,43 @@ def train_vision_usage_lab(
                 )
             epoch_path = checkpoints / f"checkpoint_{global_epoch:04d}_{phase}.pt"
             _save_checkpoint(
-                epoch_path, model=model, optimizer=optimizer, phase=phase, phase_epoch=phase_epoch,
-                global_epoch=global_epoch, global_step=global_step, history=history, context=context,
+                epoch_path,
+                model=model,
+                optimizer=optimizer,
+                phase=phase,
+                phase_epoch=phase_epoch,
+                global_epoch=global_epoch,
+                global_step=global_step,
+                history=history,
+                context=context,
             )
             _save_checkpoint(
-                checkpoints / "latest.pt", model=model, optimizer=optimizer, phase=phase, phase_epoch=phase_epoch,
-                global_epoch=global_epoch, global_step=global_step, history=history, context=context,
+                checkpoints / "latest.pt",
+                model=model,
+                optimizer=optimizer,
+                phase=phase,
+                phase_epoch=phase_epoch,
+                global_epoch=global_epoch,
+                global_step=global_step,
+                history=history,
+                context=context,
             )
-            selection_mse = correct_mse if adaptive_correct is None else float(adaptive_correct["full_mse"])
+            selection_mse = (
+                correct_mse if adaptive_correct is None else float(adaptive_correct["full_mse"])
+            )
             if phase == "action_flow" and selection_mse < best_selection_mse:
                 best_selection_mse = selection_mse
                 best_path = checkpoints / "best.pt"
                 _save_checkpoint(
-                    best_path, model=model, optimizer=optimizer, phase=phase, phase_epoch=phase_epoch,
-                    global_epoch=global_epoch, global_step=global_step, history=history, context=context,
+                    best_path,
+                    model=model,
+                    optimizer=optimizer,
+                    phase=phase,
+                    phase_epoch=phase_epoch,
+                    global_epoch=global_epoch,
+                    global_step=global_step,
+                    history=history,
+                    context=context,
                 )
 
     summary = {
@@ -496,7 +623,9 @@ def train_vision_usage_lab(
         "context": context,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "vision_usage_lab_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out_dir / "vision_usage_lab_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     if best_path is not None:
         best_payload = torch.load(best_path, map_location="cpu", weights_only=False)
         export_state_dict = best_payload["model_state_dict"]
@@ -504,11 +633,14 @@ def train_vision_usage_lab(
     else:
         export_state_dict = {key: value.detach().cpu() for key, value in model.state_dict().items()}
         export_source = "final_model_without_action_flow_best"
-    _atomic_torch_save({
-        "schema": "clearvla-vision-usage-lab-export-v5",
-        "model_state_dict": export_state_dict,
-        "model_config": model.config.to_dict(),
-        "export_source": export_source,
-        "summary": summary,
-    }, out_dir / "vision_usage_lab.pt")
+    _atomic_torch_save(
+        {
+            "schema": "clearvla-vision-usage-lab-export-v5",
+            "model_state_dict": export_state_dict,
+            "model_config": model.config.to_dict(),
+            "export_source": export_source,
+            "summary": summary,
+        },
+        out_dir / "vision_usage_lab.pt",
+    )
     return summary

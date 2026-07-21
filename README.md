@@ -1,5 +1,17 @@
 # ClearVLA Current Policy Run
 
+## Current Layout
+
+当前 policy 主线已经迁移到 `clearvla/policy/`。当前 DCT/typed-reader 实验入口是
+`scripts/current_v87_spectral_controller.sh`；根目录下的 V53 命令保留为历史回放参考，
+不应被当作当前默认实验。
+
+性能审计与 reader/DCT 的保留边界见：
+`docs/performance/typed_reader_dct_performance_audit.md`。
+
+已完成阶段的设计文档已归档到 `history_design/archive/`，实验脚本仍按版本保留在
+`scripts/`，避免破坏历史复现实验。
+
 Current entry point:
 
 ```bash

@@ -237,9 +237,7 @@ def compute_representation_losses(
     target_descriptor = model.fixed_dynamic_descriptor(flat_tokens).to(
         device=flat_tokens.device, dtype=output["descriptor"].dtype
     )
-    descriptor = F.smooth_l1_loss(
-        output["descriptor"].float(), target_descriptor.float()
-    )
+    descriptor = F.smooth_l1_loss(output["descriptor"].float(), target_descriptor.float())
 
     local_motion_target = flat_states[:, -1] - flat_states[:, 0]
     local_motion_target_raw = flat_states_raw[:, -1] - flat_states_raw[:, 0]
@@ -252,9 +250,7 @@ def compute_representation_losses(
         boost=config.gripper_transition_boost,
     )
     context_state_target = flat_states[:, -1]
-    context_state = F.smooth_l1_loss(
-        output["context_state"].float(), context_state_target.float()
-    )
+    context_state = F.smooth_l1_loss(output["context_state"].float(), context_state_target.float())
 
     pred_descriptor_sequence = output["descriptor"].reshape(batch_size, window_count, -1)
     target_descriptor_sequence = target_descriptor.reshape(batch_size, window_count, -1)
@@ -267,16 +263,10 @@ def compute_representation_losses(
 
     dynamic_pooled = output["dynamic"].mean(dim=1)
     context_pooled = output["context"].mean(dim=1)
-    dynamic_variance, dynamic_std = _variance_loss(
-        dynamic_pooled, config.embedding_std_target
-    )
-    context_variance, context_std = _variance_loss(
-        context_pooled, config.embedding_std_target
-    )
+    dynamic_variance, dynamic_std = _variance_loss(dynamic_pooled, config.embedding_std_target)
+    context_variance, context_std = _variance_loss(context_pooled, config.embedding_std_target)
     variance = 0.5 * (dynamic_variance + context_variance)
-    covariance = 0.5 * (
-        _covariance_loss(dynamic_pooled) + _covariance_loss(context_pooled)
-    )
+    covariance = 0.5 * (_covariance_loss(dynamic_pooled) + _covariance_loss(context_pooled))
     token_diversity = _token_diversity_loss(output["dynamic"])
 
     total = (
@@ -319,10 +309,7 @@ def compute_representation_losses(
 def _mean_rows(rows: list[dict[str, float]]) -> dict[str, float]:
     if not rows:
         return {}
-    return {
-        key: float(np.mean([row[key] for row in rows]))
-        for key in rows[0]
-    }
+    return {key: float(np.mean([row[key] for row in rows])) for key in rows[0]}
 
 
 @torch.no_grad()
@@ -535,12 +522,12 @@ def train_dynamic_representation(
         )
         _save(out_dir / "checkpoints/latest.pt", payload)
 
-        descriptor_score = val_metrics["val_descriptor"] + 0.5 * val_metrics[
-            "val_temporal_increment"
-        ]
-        physical_score = val_metrics["val_local_motion_rmse"] + 0.5 * val_metrics[
-            "val_context_state_rmse"
-        ]
+        descriptor_score = (
+            val_metrics["val_descriptor"] + 0.5 * val_metrics["val_temporal_increment"]
+        )
+        physical_score = (
+            val_metrics["val_local_motion_rmse"] + 0.5 * val_metrics["val_context_state_rmse"]
+        )
         std_penalty = max(0.0, loss_config.embedding_std_target - val_metrics["val_dynamic_std"])
         representation_score = (
             descriptor_score

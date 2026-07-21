@@ -5,7 +5,12 @@ not imported into this active namespace.
 """
 
 from .dataset import DynamicWorldDatasetConfig, DynamicWorldWindowDataset, PairedDynamicWorldDataset
-from .latent_world_model import LatentDynamicsHead, LatentWorldConfig, LatentWorldModel, WorldPerceiver
+from .latent_world_model import (
+    LatentDynamicsHead,
+    LatentWorldConfig,
+    LatentWorldModel,
+    WorldPerceiver,
+)
 from .latent_world_objectives import LatentWorldLossConfig
 from .pairing import LocalPairTable
 

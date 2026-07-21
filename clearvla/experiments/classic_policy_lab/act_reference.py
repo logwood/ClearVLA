@@ -30,7 +30,9 @@ def _sinusoid_table(length: int, dim: int) -> torch.Tensor:
 class ImagePositionEmbeddingSine(nn.Module):
     """The normalized 2D sine encoding used by ACT's DETR backbone."""
 
-    def __init__(self, num_pos_feats: int, temperature: int = 10000, scale: float = 2 * math.pi) -> None:
+    def __init__(
+        self, num_pos_feats: int, temperature: int = 10000, scale: float = 2 * math.pi
+    ) -> None:
         super().__init__()
         self.num_pos_feats = int(num_pos_feats)
         self.temperature = int(temperature)
@@ -54,7 +56,9 @@ class ImagePositionEmbeddingSine(nn.Module):
 
 
 class PosEncoderLayer(nn.Module):
-    def __init__(self, dim: int, heads: int, ffn_dim: int, dropout: float, pre_norm: bool = False) -> None:
+    def __init__(
+        self, dim: int, heads: int, ffn_dim: int, dropout: float, pre_norm: bool = False
+    ) -> None:
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout)
         self.linear1 = nn.Linear(dim, ffn_dim)
@@ -70,7 +74,13 @@ class PosEncoderLayer(nn.Module):
     def _with_pos(x: Tensor, pos: Optional[Tensor]) -> Tensor:
         return x if pos is None else x + pos
 
-    def forward(self, src: Tensor, *, pos: Optional[Tensor] = None, key_padding_mask: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self,
+        src: Tensor,
+        *,
+        pos: Optional[Tensor] = None,
+        key_padding_mask: Optional[Tensor] = None,
+    ) -> Tensor:
         if self.pre_norm:
             normed = self.norm1(src)
             q = k = self._with_pos(normed, pos)
@@ -78,8 +88,12 @@ class PosEncoderLayer(nn.Module):
             normed = self.norm2(src)
             return src + self.dropout2(self.linear2(self.dropout(F.relu(self.linear1(normed)))))
         q = k = self._with_pos(src, pos)
-        src = self.norm1(src + self.dropout1(self.attn(q, k, src, key_padding_mask=key_padding_mask)[0]))
-        return self.norm2(src + self.dropout2(self.linear2(self.dropout(F.relu(self.linear1(src))))))
+        src = self.norm1(
+            src + self.dropout1(self.attn(q, k, src, key_padding_mask=key_padding_mask)[0])
+        )
+        return self.norm2(
+            src + self.dropout2(self.linear2(self.dropout(F.relu(self.linear1(src)))))
+        )
 
 
 class PosEncoder(nn.Module):
@@ -88,14 +102,22 @@ class PosEncoder(nn.Module):
         self.layers = _clones(layer, count)
         self.norm = norm
 
-    def forward(self, src: Tensor, *, pos: Optional[Tensor] = None, key_padding_mask: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self,
+        src: Tensor,
+        *,
+        pos: Optional[Tensor] = None,
+        key_padding_mask: Optional[Tensor] = None,
+    ) -> Tensor:
         for layer in self.layers:
             src = layer(src, pos=pos, key_padding_mask=key_padding_mask)
         return self.norm(src) if self.norm is not None else src
 
 
 class PosDecoderLayer(nn.Module):
-    def __init__(self, dim: int, heads: int, ffn_dim: int, dropout: float, pre_norm: bool = False) -> None:
+    def __init__(
+        self, dim: int, heads: int, ffn_dim: int, dropout: float, pre_norm: bool = False
+    ) -> None:
         super().__init__()
         self.self_attn = nn.MultiheadAttention(dim, heads, dropout=dropout)
         self.cross_attn = nn.MultiheadAttention(dim, heads, dropout=dropout)
@@ -114,19 +136,34 @@ class PosDecoderLayer(nn.Module):
     def _with_pos(x: Tensor, pos: Optional[Tensor]) -> Tensor:
         return x if pos is None else x + pos
 
-    def forward(self, tgt: Tensor, memory: Tensor, *, memory_pos: Tensor, query_pos: Tensor) -> Tensor:
+    def forward(
+        self, tgt: Tensor, memory: Tensor, *, memory_pos: Tensor, query_pos: Tensor
+    ) -> Tensor:
         if self.pre_norm:
             normed = self.norm1(tgt)
             q = k = self._with_pos(normed, query_pos)
             tgt = tgt + self.dropout1(self.self_attn(q, k, normed)[0])
             normed = self.norm2(tgt)
-            tgt = tgt + self.dropout2(self.cross_attn(self._with_pos(normed, query_pos), self._with_pos(memory, memory_pos), memory)[0])
+            tgt = tgt + self.dropout2(
+                self.cross_attn(
+                    self._with_pos(normed, query_pos), self._with_pos(memory, memory_pos), memory
+                )[0]
+            )
             normed = self.norm3(tgt)
             return tgt + self.dropout3(self.linear2(self.dropout(F.relu(self.linear1(normed)))))
         q = k = self._with_pos(tgt, query_pos)
         tgt = self.norm1(tgt + self.dropout1(self.self_attn(q, k, tgt)[0]))
-        tgt = self.norm2(tgt + self.dropout2(self.cross_attn(self._with_pos(tgt, query_pos), self._with_pos(memory, memory_pos), memory)[0]))
-        return self.norm3(tgt + self.dropout3(self.linear2(self.dropout(F.relu(self.linear1(tgt))))))
+        tgt = self.norm2(
+            tgt
+            + self.dropout2(
+                self.cross_attn(
+                    self._with_pos(tgt, query_pos), self._with_pos(memory, memory_pos), memory
+                )[0]
+            )
+        )
+        return self.norm3(
+            tgt + self.dropout3(self.linear2(self.dropout(F.relu(self.linear1(tgt)))))
+        )
 
 
 class PosDecoder(nn.Module):
@@ -135,7 +172,9 @@ class PosDecoder(nn.Module):
         self.layers = _clones(layer, count)
         self.norm = norm
 
-    def forward(self, tgt: Tensor, memory: Tensor, *, memory_pos: Tensor, query_pos: Tensor) -> Tensor:
+    def forward(
+        self, tgt: Tensor, memory: Tensor, *, memory_pos: Tensor, query_pos: Tensor
+    ) -> Tensor:
         outputs = []
         for layer in self.layers:
             tgt = layer(tgt, memory, memory_pos=memory_pos, query_pos=query_pos)
@@ -144,7 +183,16 @@ class PosDecoder(nn.Module):
 
 
 class ACTDETRTransformer(nn.Module):
-    def __init__(self, *, dim: int, heads: int, encoder_layers: int, decoder_layers: int, ffn_dim: int, dropout: float) -> None:
+    def __init__(
+        self,
+        *,
+        dim: int,
+        heads: int,
+        encoder_layers: int,
+        decoder_layers: int,
+        ffn_dim: int,
+        dropout: float,
+    ) -> None:
         super().__init__()
         encoder_layer = PosEncoderLayer(dim, heads, ffn_dim, dropout)
         decoder_layer = PosDecoderLayer(dim, heads, ffn_dim, dropout)
@@ -157,7 +205,15 @@ class ACTDETRTransformer(nn.Module):
             if parameter.dim() > 1:
                 nn.init.xavier_uniform_(parameter)
 
-    def forward(self, image_src: Tensor, image_pos: Tensor, query_embed: Tensor, latent: Tensor, qpos: Tensor, extra_pos: Tensor) -> Tensor:
+    def forward(
+        self,
+        image_src: Tensor,
+        image_pos: Tensor,
+        query_embed: Tensor,
+        latent: Tensor,
+        qpos: Tensor,
+        extra_pos: Tensor,
+    ) -> Tensor:
         batch, channels, height, width = image_src.shape
         src = image_src.flatten(2).permute(2, 0, 1)
         pos = image_pos.flatten(2).permute(2, 0, 1)
@@ -190,7 +246,9 @@ class ACTReferenceConfig:
     def to_dict(self) -> dict:
         out = asdict(self)
         out["camera_names"] = list(self.camera_names)
-        out["resnet18_weights"] = None if self.resnet18_weights is None else str(self.resnet18_weights)
+        out["resnet18_weights"] = (
+            None if self.resnet18_weights is None else str(self.resnet18_weights)
+        )
         return out
 
 
@@ -227,21 +285,35 @@ class ACTReference(nn.Module):
         self.encoder_action_proj = nn.Linear(config.action_dim, dim)
         self.encoder_joint_proj = nn.Linear(config.state_dim, dim)
         self.latent_proj = nn.Linear(dim, config.latent_dim * 2)
-        self.register_buffer("style_pos_table", _sinusoid_table(2 + config.chunk_len, dim), persistent=False)
+        self.register_buffer(
+            "style_pos_table", _sinusoid_table(2 + config.chunk_len, dim), persistent=False
+        )
         style_layer = PosEncoderLayer(dim, config.heads, config.ffn_dim, config.dropout)
         self.style_encoder = PosEncoder(style_layer, config.style_encoder_layers)
         self.latent_out_proj = nn.Linear(config.latent_dim, dim)
         self.additional_pos_embed = nn.Embedding(2, dim)
-        self.register_buffer("image_mean", torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 3, 1, 1), persistent=False)
-        self.register_buffer("image_std", torch.tensor([0.229, 0.224, 0.225]).reshape(1, 1, 3, 1, 1), persistent=False)
+        self.register_buffer(
+            "image_mean",
+            torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std",
+            torch.tensor([0.229, 0.224, 0.225]).reshape(1, 1, 3, 1, 1),
+            persistent=False,
+        )
 
     def parameter_count(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad)
 
-    def _latent(self, qpos: Tensor, actions: Tensor | None, is_pad: Tensor | None) -> tuple[Tensor, Tensor | None, Tensor | None]:
+    def _latent(
+        self, qpos: Tensor, actions: Tensor | None, is_pad: Tensor | None
+    ) -> tuple[Tensor, Tensor | None, Tensor | None]:
         batch = qpos.shape[0]
         if actions is None:
-            latent_sample = torch.zeros((batch, self.config.latent_dim), device=qpos.device, dtype=qpos.dtype)
+            latent_sample = torch.zeros(
+                (batch, self.config.latent_dim), device=qpos.device, dtype=qpos.dtype
+            )
             return self.latent_out_proj(latent_sample), None, None
         action_embed = self.encoder_action_proj(actions)
         qpos_embed = self.encoder_joint_proj(qpos).unsqueeze(1)
@@ -251,14 +323,22 @@ class ACTReference(nn.Module):
             raise ValueError("ACT training requires is_pad")
         prefix_pad = torch.zeros((batch, 2), dtype=torch.bool, device=qpos.device)
         key_padding_mask = torch.cat([prefix_pad, is_pad], dim=1)
-        pos = self.style_pos_table[:, :encoder_input.shape[0]].permute(1, 0, 2).repeat(1, batch, 1)
-        cls_output = self.style_encoder(encoder_input, pos=pos, key_padding_mask=key_padding_mask)[0]
+        pos = self.style_pos_table[:, : encoder_input.shape[0]].permute(1, 0, 2).repeat(1, batch, 1)
+        cls_output = self.style_encoder(encoder_input, pos=pos, key_padding_mask=key_padding_mask)[
+            0
+        ]
         latent_info = self.latent_proj(cls_output)
         mu, logvar = latent_info.chunk(2, dim=-1)
         latent_sample = mu + torch.exp(logvar / 2) * torch.randn_like(mu)
         return self.latent_out_proj(latent_sample), mu, logvar
 
-    def forward(self, qpos: Tensor, image: Tensor, actions: Tensor | None = None, is_pad: Tensor | None = None) -> dict[str, Tensor | None]:
+    def forward(
+        self,
+        qpos: Tensor,
+        image: Tensor,
+        actions: Tensor | None = None,
+        is_pad: Tensor | None = None,
+    ) -> dict[str, Tensor | None]:
         if image.ndim != 5 or image.shape[1] != len(self.config.camera_names):
             raise ValueError(f"ACT image must be [B,Cam,3,H,W], got {tuple(image.shape)}")
         image = (image - self.image_mean) / self.image_std
@@ -273,7 +353,14 @@ class ACTReference(nn.Module):
         image_src = torch.cat(features, dim=3)
         image_pos = torch.cat(positions, dim=3)
         qpos_token = self.input_proj_robot_state(qpos)
-        hs = self.transformer(image_src, image_pos, self.query_embed.weight, latent, qpos_token, self.additional_pos_embed.weight)
+        hs = self.transformer(
+            image_src,
+            image_pos,
+            self.query_embed.weight,
+            latent,
+            qpos_token,
+            self.additional_pos_embed.weight,
+        )
         decoded = hs[-1]
         return {
             "actions": self.action_head(decoded),
@@ -282,7 +369,9 @@ class ACTReference(nn.Module):
             "logvar": logvar,
         }
 
-    def compute_loss(self, qpos: Tensor, image: Tensor, actions: Tensor, is_pad: Tensor) -> dict[str, Tensor]:
+    def compute_loss(
+        self, qpos: Tensor, image: Tensor, actions: Tensor, is_pad: Tensor
+    ) -> dict[str, Tensor]:
         output = self(qpos, image, actions=actions, is_pad=is_pad)
         pred = output["actions"]
         mask = (~is_pad).unsqueeze(-1).to(pred.dtype)

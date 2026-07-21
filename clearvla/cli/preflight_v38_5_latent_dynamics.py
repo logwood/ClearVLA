@@ -23,7 +23,11 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from clearvla.experiments.observed_state_lab.policy_v38 import V38PolicyConfig, V38PolicySystem, TemporalWorldActionDiT
+from clearvla.experiments.observed_state_lab.policy_v38 import (
+    V38PolicyConfig,
+    V38PolicySystem,
+    TemporalWorldActionDiT,
+)
 
 
 def _small_config() -> V38PolicyConfig:
@@ -53,7 +57,9 @@ def _small_config() -> V38PolicyConfig:
     )
 
 
-def _random_batch(cfg: V38PolicyConfig, batch_size: int, device: torch.device) -> dict[str, torch.Tensor]:
+def _random_batch(
+    cfg: V38PolicyConfig, batch_size: int, device: torch.device
+) -> dict[str, torch.Tensor]:
     b = batch_size
     return {
         "visual": torch.randn(
@@ -74,7 +80,9 @@ def _random_batch(cfg: V38PolicyConfig, batch_size: int, device: torch.device) -
             device=device,
         ),
         "state_history": torch.randn(b, cfg.executed_history_length, cfg.state_dim, device=device),
-        "executed_history": torch.randn(b, cfg.executed_history_length, cfg.action_dim, device=device),
+        "executed_history": torch.randn(
+            b, cfg.executed_history_length, cfg.action_dim, device=device
+        ),
         "state": torch.randn(b, cfg.state_dim, device=device),
         "target_action": torch.randn(b, cfg.action_horizon, cfg.action_dim, device=device),
     }
@@ -97,7 +105,9 @@ def _action_conditioned_target_visual(
     """
     with torch.no_grad():
         w = model.planner.rollout_codec.target_proj.weight.detach()  # [H,D]
-        action_to_hidden = torch.randn(cfg.action_dim, cfg.hidden_size, device=visual.device) * scale
+        action_to_hidden = (
+            torch.randn(cfg.action_dim, cfg.hidden_size, device=visual.device) * scale
+        )
         action_summary = target_action.mean(dim=1)
         base = action_summary @ action_to_hidden  # [B,H]
         desired = []
@@ -154,14 +164,16 @@ def _residual_target(out: dict[str, torch.Tensor]) -> torch.Tensor:
     return target - base.detach()
 
 
-def _dyn_losses(out: dict[str, torch.Tensor], margin: float) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def _dyn_losses(
+    out: dict[str, torch.Tensor], margin: float
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     target = _residual_target(out)
     real = F.mse_loss(out["rollout_delta_pred"], target)
     hold = F.mse_loss(out["rollout_delta_pred_hold_action"], target)
     shuffle = F.mse_loss(out["rollout_delta_pred_shuffle_action"], target)
-    contrast = F.relu(torch.as_tensor(margin, device=real.device, dtype=real.dtype) + real - hold) + F.relu(
-        torch.as_tensor(margin, device=real.device, dtype=real.dtype) + real - shuffle
-    )
+    contrast = F.relu(
+        torch.as_tensor(margin, device=real.device, dtype=real.dtype) + real - hold
+    ) + F.relu(torch.as_tensor(margin, device=real.device, dtype=real.dtype) + real - shuffle)
     return real + contrast, {"real": real, "hold": hold, "shuffle": shuffle, "contrast": contrast}
 
 
@@ -196,7 +208,12 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
     # Static API contract: target future is not accepted by the internal policy forward.
     planner_sig = inspect.signature(TemporalWorldActionDiT.forward)
     system_sig = inspect.signature(V38PolicySystem._policy_forward)
-    forbidden_names = {"target_visual", "future_noisy_latent", "future_training_pack", "target_future"}
+    forbidden_names = {
+        "target_visual",
+        "future_noisy_latent",
+        "future_training_pack",
+        "target_future",
+    }
     planner_forbidden = sorted(set(planner_sig.parameters) & forbidden_names)
     system_forbidden = sorted(set(system_sig.parameters) & forbidden_names)
     report["checks"]["static_forward_signature"] = {
@@ -220,9 +237,17 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
     visual_grad_mean = float(batch["visual"].grad.abs().mean().detach().cpu())
     visual_grad_max = float(batch["visual"].grad.abs().max().detach().cpu())
     target_visual_grad = batch["target_visual"].grad
-    target_visual_grad_max = 0.0 if target_visual_grad is None else float(target_visual_grad.abs().max().detach().cpu())
-    real_hold_diff = float(F.mse_loss(out["rollout_delta_pred"], out["rollout_delta_pred_hold_action"]).detach().cpu())
-    real_shuffle_diff = float(F.mse_loss(out["rollout_delta_pred"], out["rollout_delta_pred_shuffle_action"]).detach().cpu())
+    target_visual_grad_max = (
+        0.0 if target_visual_grad is None else float(target_visual_grad.abs().max().detach().cpu())
+    )
+    real_hold_diff = float(
+        F.mse_loss(out["rollout_delta_pred"], out["rollout_delta_pred_hold_action"]).detach().cpu()
+    )
+    real_shuffle_diff = float(
+        F.mse_loss(out["rollout_delta_pred"], out["rollout_delta_pred_shuffle_action"])
+        .detach()
+        .cpu()
+    )
     report["checks"]["graph_dependency"] = {
         "ok": action_grad_max > args.min_action_grad and visual_grad_max > args.min_visual_grad,
         "rollout_loss": float(dyn_loss.detach().cpu()),
@@ -236,11 +261,15 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
     report["checks"]["target_future_no_input_leak"] = {
         "ok": target_visual_grad_max == 0.0,
         "target_visual_grad_max": target_visual_grad_max,
-        "future_conditioned_action_loss": float(out["future_conditioned_action_loss"].detach().cpu()),
+        "future_conditioned_action_loss": float(
+            out["future_conditioned_action_loss"].detach().cpu()
+        ),
     }
     alpha = out["rollout_alpha"][0, :, 0].detach().cpu().tolist()
     report["checks"]["tail_binding_alpha"] = {
-        "ok": alpha[0] == 0.0 and alpha[-1] == 1.0 and all(alpha[i] <= alpha[i + 1] for i in range(len(alpha) - 1)),
+        "ok": alpha[0] == 0.0
+        and alpha[-1] == 1.0
+        and all(alpha[i] <= alpha[i + 1] for i in range(len(alpha) - 1)),
         "alpha": alpha,
     }
 
@@ -252,7 +281,9 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=args.micro_lr, weight_decay=0.0)
     micro = _random_batch(cfg, args.batch_size, device)
-    micro["target_visual"] = _action_conditioned_target_visual(model, cfg, micro["visual"], micro["target_action"])
+    micro["target_visual"] = _action_conditioned_target_visual(
+        model, cfg, micro["visual"], micro["target_action"]
+    )
     history = []
     for step in range(args.micro_steps + 1):
         out = _forward(model, micro, make_counterfactuals=True)
@@ -276,7 +307,8 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
         opt.step()
     final = history[-1]
     report["checks"]["synthetic_counterfactual_microfit"] = {
-        "ok": final["delta_hold"] > args.min_micro_delta and final["delta_shuffle"] > args.min_micro_delta,
+        "ok": final["delta_hold"] > args.min_micro_delta
+        and final["delta_shuffle"] > args.min_micro_delta,
         "steps": args.micro_steps,
         "lr": args.micro_lr,
         "margin": args.margin,
@@ -305,7 +337,9 @@ def _flatten_floats(x: Any) -> list[float]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="V38.6 controlled residual latent dynamics preflight structural checks")
+    parser = argparse.ArgumentParser(
+        description="V38.6 controlled residual latent dynamics preflight structural checks"
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=4)

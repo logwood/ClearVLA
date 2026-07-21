@@ -35,12 +35,15 @@ class LabEventScoreConfig:
     gripper_index: int = -1
 
     def validate(self) -> None:
-        if any(value < 0 for value in (
-            self.prior_residual_weight,
-            self.motion_weight,
-            self.acceleration_weight,
-            self.gripper_weight,
-        )):
+        if any(
+            value < 0
+            for value in (
+                self.prior_residual_weight,
+                self.motion_weight,
+                self.acceleration_weight,
+                self.gripper_weight,
+            )
+        ):
             raise ValueError("event-score weights must be non-negative")
         if not 0.0 < self.event_quantile < 1.0:
             raise ValueError("event_quantile must be in (0,1)")
@@ -119,13 +122,17 @@ class VisionUsageLabDataset(Dataset):
             raise ValueError("chunk_len, past_len, obs_horizon, and stride must be positive")
         if not future_visual_horizons or any(int(x) <= 0 for x in future_visual_horizons):
             raise ValueError("future_visual_horizons must contain positive offsets")
-        if tuple(sorted(set(int(x) for x in future_visual_horizons))) != tuple(int(x) for x in future_visual_horizons):
+        if tuple(sorted(set(int(x) for x in future_visual_horizons))) != tuple(
+            int(x) for x in future_visual_horizons
+        ):
             raise ValueError("future_visual_horizons must be sorted and unique")
         if visual_shift <= 0 or negative_visual_min_shift <= 0:
             raise ValueError("visual shifts must be positive")
         self.episodes = episodes
         self.episode_ids = list(episode_ids)
-        self.visual_pool_episode_ids = list(self.episode_ids if visual_pool_episode_ids is None else visual_pool_episode_ids)
+        self.visual_pool_episode_ids = list(
+            self.episode_ids if visual_pool_episode_ids is None else visual_pool_episode_ids
+        )
         if not self.episode_ids:
             raise ValueError("episode_ids must be non-empty")
         if not self.visual_pool_episode_ids:
@@ -149,7 +156,11 @@ class VisionUsageLabDataset(Dataset):
         self.negative_visual_min_shift = int(negative_visual_min_shift)
         self.include_future_visual_delta = bool(include_future_visual_delta)
         if self.visual_mode == LabVisualMode.CROSS_EPISODE:
-            missing = [idx for idx in self.episode_ids if not any(pool_idx != idx for pool_idx in self.visual_pool_episode_ids)]
+            missing = [
+                idx
+                for idx in self.episode_ids
+                if not any(pool_idx != idx for pool_idx in self.visual_pool_episode_ids)
+            ]
             if missing:
                 raise ValueError(
                     "cross-episode visual counterfactual requires at least two episodes in visual_pool_episode_ids"
@@ -165,7 +176,9 @@ class VisionUsageLabDataset(Dataset):
                 raise ValueError(f"episode {episode.path} has no normalized actions")
             latent_store.validate_episode(episode)
 
-        max_visual_horizon = max(self.future_visual_horizons) if self.include_future_visual_delta else 0
+        max_visual_horizon = (
+            max(self.future_visual_horizons) if self.include_future_visual_delta else 0
+        )
         for episode_idx in self.episode_ids:
             episode = episodes[episode_idx]
             start = max(self.past_len, self.obs_horizon - 1)
@@ -206,13 +219,17 @@ class VisionUsageLabDataset(Dataset):
         target_episode_idx = candidates[(int(center) + int(episode_idx)) % len(candidates)]
         return self._indices_at(target_episode_idx, center)
 
-    def _shifted_indices(self, episode_idx: int, center: int, *, min_shift: int) -> tuple[int, np.ndarray]:
+    def _shifted_indices(
+        self, episode_idx: int, center: int, *, min_shift: int
+    ) -> tuple[int, np.ndarray]:
         episode = self.episodes[episode_idx]
         lower = self.obs_horizon - 1
         upper = episode.length - 1
         shift = max(int(min_shift), self.obs_horizon)
         candidates = [center + shift, center - shift, upper, lower]
-        candidates = [int(x) for x in candidates if lower <= int(x) <= upper and abs(int(x) - center) >= shift]
+        candidates = [
+            int(x) for x in candidates if lower <= int(x) <= upper and abs(int(x) - center) >= shift
+        ]
         if not candidates:
             raise ValueError(
                 f"episode {episode.path} is too short for a same-episode negative with min_shift={shift}"
@@ -239,10 +256,10 @@ class VisionUsageLabDataset(Dataset):
         assert episode.actions_norm is not None
         action = episode.actions_norm
         center = ref.center
-        past = np.asarray(action[center - self.past_len:center], dtype=np.float32)
-        future = np.asarray(action[center:center + self.chunk_len], dtype=np.float32)
+        past = np.asarray(action[center - self.past_len : center], dtype=np.float32)
+        future = np.asarray(action[center : center + self.chunk_len], dtype=np.float32)
         state_action = episode.states_norm if episode.states_norm is not None else action
-        past_state = np.asarray(state_action[center - self.past_len:center], dtype=np.float32)
+        past_state = np.asarray(state_action[center - self.past_len : center], dtype=np.float32)
         prior = make_prior_np(
             past[None],
             self.chunk_len,
@@ -253,7 +270,9 @@ class VisionUsageLabDataset(Dataset):
         )[0].astype(np.float32)
 
         input_episode_idx, input_indices = self._input_visual_indices(ref.episode_idx, center)
-        input_tokens = self.latent_store.load_tokens(self.episodes[input_episode_idx], input_indices)
+        input_tokens = self.latent_store.load_tokens(
+            self.episodes[input_episode_idx], input_indices
+        )
         if self.visual_mode == LabVisualMode.ZERO:
             input_tokens = np.zeros_like(input_tokens)
 
@@ -265,19 +284,31 @@ class VisionUsageLabDataset(Dataset):
             "visual_tokens": torch.from_numpy(input_tokens.copy()),
         }
         if self.include_future_visual_delta:
-            future_indices = np.asarray([center + h for h in self.future_visual_horizons], dtype=np.int64)
+            future_indices = np.asarray(
+                [center + h for h in self.future_visual_horizons], dtype=np.int64
+            )
             future_tokens = self.latent_store.load_tokens(episode, future_indices)
-            current_tokens = self.latent_store.load_tokens(episode, np.asarray([center], dtype=np.int64))[0]
+            current_tokens = self.latent_store.load_tokens(
+                episode, np.asarray([center], dtype=np.int64)
+            )[0]
             future_delta_tokens = future_tokens - current_tokens[None]
-            sample["future_visual_delta_tokens"] = torch.from_numpy(future_delta_tokens.astype(np.float32))
+            sample["future_visual_delta_tokens"] = torch.from_numpy(
+                future_delta_tokens.astype(np.float32)
+            )
         if self.include_negative_visual:
-            negative_episode_idx, negative_indices = self._negative_visual_indices(ref.episode_idx, center)
-            negative_tokens = self.latent_store.load_tokens(self.episodes[negative_episode_idx], negative_indices)
+            negative_episode_idx, negative_indices = self._negative_visual_indices(
+                ref.episode_idx, center
+            )
+            negative_tokens = self.latent_store.load_tokens(
+                self.episodes[negative_episode_idx], negative_indices
+            )
             sample["negative_visual_tokens"] = torch.from_numpy(negative_tokens.copy())
         if self.event_flag is not None:
             sample["event_flag"] = torch.tensor(float(self.event_flag[index]), dtype=torch.float32)
         if self.demand_target is not None:
-            sample["demand_target"] = torch.tensor(float(self.demand_target[index]), dtype=torch.float32)
+            sample["demand_target"] = torch.tensor(
+                float(self.demand_target[index]), dtype=torch.float32
+            )
         return sample
 
 
@@ -296,8 +327,8 @@ def compute_lab_event_scores(
         assert episode.actions_norm is not None
         action = episode.actions_norm
         center = ref.center
-        past = np.asarray(action[center - dataset.past_len:center], dtype=np.float32)
-        future = np.asarray(action[center:center + dataset.chunk_len], dtype=np.float32)
+        past = np.asarray(action[center - dataset.past_len : center], dtype=np.float32)
+        future = np.asarray(action[center : center + dataset.chunk_len], dtype=np.float32)
         prior = make_prior_np(
             past[None],
             dataset.chunk_len,
@@ -313,7 +344,11 @@ def compute_lab_event_scores(
         if future.shape[0] >= 3:
             accel = np.diff(np.diff(np.concatenate([past[-1:], future], axis=0), axis=0), axis=0)
             acceleration[index] = float(_rms(accel, axis=(0, 1)))
-        gi = config.gripper_index if config.gripper_index >= 0 else future.shape[1] + config.gripper_index
+        gi = (
+            config.gripper_index
+            if config.gripper_index >= 0
+            else future.shape[1] + config.gripper_index
+        )
         if 0 <= gi < future.shape[1]:
             values = np.concatenate([past[-1:, gi], future[:, gi]], axis=0)
             gripper[index] = float(np.max(np.abs(np.diff(values)))) if len(values) > 1 else 0.0

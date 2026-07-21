@@ -33,7 +33,15 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.distributions import LogisticNormal
 
-from .rdt2_fm_reference import Attention, FeedForward, FinalLayer, RDTBlock, RMSNorm, TimestepEmbedder, get_multimodal_pos_embed
+from .rdt2_fm_reference import (
+    Attention,
+    FeedForward,
+    FinalLayer,
+    RDTBlock,
+    RMSNorm,
+    TimestepEmbedder,
+    get_multimodal_pos_embed,
+)
 
 
 def _adapter(kind: str, in_features: int, out_features: int) -> nn.Module:
@@ -150,7 +158,9 @@ class ControlInterfaceRDT2FMConfig:
         if self.interface_num_heads % self.interface_num_kv_heads != 0:
             raise ValueError("interface_num_heads must be divisible by interface_num_kv_heads")
         if self.time_slots != 1:
-            raise ValueError("the controlled RDT2-FM dataset path currently exposes one synchronized image timestep")
+            raise ValueError(
+                "the controlled RDT2-FM dataset path currently exposes one synchronized image timestep"
+            )
 
     @property
     def head_dim(self) -> int:
@@ -207,7 +217,9 @@ class QueryReadoutBlock(nn.Module):
         self.memory_norm = RMSNorm(width, eps=config.norm_eps)
         self.cross_attn = InspectableCrossAttention(width, config.interface_num_heads)
         self.ffn_norm = RMSNorm(width, eps=config.norm_eps)
-        self.ffn = FeedForward(width, 4 * width, config.interface_multiple_of, config.ffn_dim_multiplier)
+        self.ffn = FeedForward(
+            width, 4 * width, config.interface_multiple_of, config.ffn_dim_multiplier
+        )
         self.scale = 1.0 / math.sqrt(max(depth, 1))
 
     def forward(
@@ -257,28 +269,42 @@ class SceneTaskCompiler(nn.Module):
         self.visual_in = _adapter(config.visual_adaptor, config.dense_token_dim, h)
         self.camera_embed = nn.Parameter(torch.randn(config.camera_count, h) * 0.02)
         self.time_embed = nn.Parameter(torch.randn(config.time_slots, h) * 0.02)
-        self.missing_embed = nn.Parameter(torch.randn(config.camera_count, config.slot_tokens, h) * 0.02)
-        self.slot_queries = nn.Parameter(torch.randn(config.camera_count, config.slot_tokens, h) * 0.02)
-        self.slot_blocks = nn.ModuleList([
-            QueryReadoutBlock(config, depth=config.slot_resampler_depth)
-            for _ in range(config.slot_resampler_depth)
-        ])
+        self.missing_embed = nn.Parameter(
+            torch.randn(config.camera_count, config.slot_tokens, h) * 0.02
+        )
+        self.slot_queries = nn.Parameter(
+            torch.randn(config.camera_count, config.slot_tokens, h) * 0.02
+        )
+        self.slot_blocks = nn.ModuleList(
+            [
+                QueryReadoutBlock(config, depth=config.slot_resampler_depth)
+                for _ in range(config.slot_resampler_depth)
+            ]
+        )
         self.default_task = nn.Parameter(torch.randn(1, config.default_task_tokens, h) * 0.02)
         self.scene_queries = nn.Parameter(torch.randn(1, config.scene_tokens, h) * 0.02)
-        self.scene_blocks = nn.ModuleList([
-            QueryReadoutBlock(config, depth=config.scene_fusion_depth)
-            for _ in range(config.scene_fusion_depth)
-        ])
+        self.scene_blocks = nn.ModuleList(
+            [
+                QueryReadoutBlock(config, depth=config.scene_fusion_depth)
+                for _ in range(config.scene_fusion_depth)
+            ]
+        )
         self.out_norm = RMSNorm(h, eps=config.norm_eps)
 
-    def _reshape_dense(self, dense_tokens: Tensor, attention_mask: Tensor | None) -> tuple[Tensor, Tensor]:
+    def _reshape_dense(
+        self, dense_tokens: Tensor, attention_mask: Tensor | None
+    ) -> tuple[Tensor, Tensor]:
         cfg = self.config
         if dense_tokens.ndim != 3 or dense_tokens.shape[-1] != cfg.dense_token_dim:
-            raise ValueError(f"dense_tokens must be [B,L,{cfg.dense_token_dim}], got {tuple(dense_tokens.shape)}")
+            raise ValueError(
+                f"dense_tokens must be [B,L,{cfg.dense_token_dim}], got {tuple(dense_tokens.shape)}"
+            )
         batch, length, _ = dense_tokens.shape
         slots = cfg.camera_count * cfg.time_slots
         if length % slots != 0:
-            raise ValueError(f"dense token length={length} is not divisible by camera_count*time_slots={slots}")
+            raise ValueError(
+                f"dense token length={length} is not divisible by camera_count*time_slots={slots}"
+            )
         patches = length // slots
         dense = dense_tokens.reshape(batch, slots, patches, cfg.dense_token_dim)
         if attention_mask is None:
@@ -305,10 +331,14 @@ class SceneTaskCompiler(nn.Module):
             # time_slots is intentionally fixed to one in the controlled branch.
             raise AssertionError("unexpected slot count")
         if camera_valid_mask is None:
-            camera_valid = torch.ones((batch, cfg.camera_count), dtype=torch.bool, device=dense.device)
+            camera_valid = torch.ones(
+                (batch, cfg.camera_count), dtype=torch.bool, device=dense.device
+            )
         else:
             if camera_valid_mask.shape != (batch, cfg.camera_count):
-                raise ValueError(f"camera_valid_mask must be [B,{cfg.camera_count}], got {tuple(camera_valid_mask.shape)}")
+                raise ValueError(
+                    f"camera_valid_mask must be [B,{cfg.camera_count}], got {tuple(camera_valid_mask.shape)}"
+                )
             camera_valid = camera_valid_mask.to(dtype=torch.bool)
         patch_mask = patch_mask & camera_valid.unsqueeze(-1)
 
@@ -331,8 +361,12 @@ class SceneTaskCompiler(nn.Module):
         query = query.reshape(batch * cfg.camera_count, cfg.slot_tokens, cfg.interface_hidden_size)
         slot_attention = None
         for block in self.slot_blocks:
-            query, slot_attention = block(query, flat_visual, memory_mask=safe_mask, return_attention=return_diagnostics)
-        slot_tokens = query.reshape(batch, cfg.camera_count, cfg.slot_tokens, cfg.interface_hidden_size)
+            query, slot_attention = block(
+                query, flat_visual, memory_mask=safe_mask, return_attention=return_diagnostics
+            )
+        slot_tokens = query.reshape(
+            batch, cfg.camera_count, cfg.slot_tokens, cfg.interface_hidden_size
+        )
         slot_tokens = torch.where(
             camera_valid.view(batch, cfg.camera_count, 1, 1),
             slot_tokens,
@@ -342,10 +376,18 @@ class SceneTaskCompiler(nn.Module):
         if task_tokens is None:
             task = self.default_task.expand(batch, -1, -1)
         else:
-            if task_tokens.ndim != 3 or task_tokens.shape[0] != batch or task_tokens.shape[-1] != cfg.interface_hidden_size:
-                raise ValueError(f"task_tokens must be [B,T,{cfg.interface_hidden_size}], got {tuple(task_tokens.shape)}")
+            if (
+                task_tokens.ndim != 3
+                or task_tokens.shape[0] != batch
+                or task_tokens.shape[-1] != cfg.interface_hidden_size
+            ):
+                raise ValueError(
+                    f"task_tokens must be [B,T,{cfg.interface_hidden_size}], got {tuple(task_tokens.shape)}"
+                )
             task = task_tokens
-        flattened_slots = slot_tokens.reshape(batch, cfg.camera_count * cfg.slot_tokens, cfg.interface_hidden_size)
+        flattened_slots = slot_tokens.reshape(
+            batch, cfg.camera_count * cfg.slot_tokens, cfg.interface_hidden_size
+        )
         fusion_memory = torch.cat([task, flattened_slots], dim=1)
         # Keep every camera slot visible to scene fusion.  Missing cameras are
         # represented by learned missing tokens rather than silently removed, so
@@ -358,11 +400,15 @@ class SceneTaskCompiler(nn.Module):
         scene = self.scene_queries.expand(batch, -1, -1)
         scene_attention = None
         for block in self.scene_blocks:
-            scene, scene_attention = block(scene, fusion_memory, memory_mask=fusion_mask, return_attention=return_diagnostics)
+            scene, scene_attention = block(
+                scene, fusion_memory, memory_mask=fusion_mask, return_attention=return_diagnostics
+            )
         scene = self.out_norm(scene)
 
         task_groups = torch.zeros((task.shape[1],), dtype=torch.long, device=scene.device)
-        camera_groups = torch.arange(1, cfg.camera_count + 1, device=scene.device).repeat_interleave(cfg.slot_tokens)
+        camera_groups = torch.arange(
+            1, cfg.camera_count + 1, device=scene.device
+        ).repeat_interleave(cfg.slot_tokens)
         group_ids = torch.cat([task_groups, camera_groups], dim=0)
         group_names = ("task", *tuple(f"camera_{index}" for index in range(cfg.camera_count)))
         diagnostics = None
@@ -378,7 +424,9 @@ class SceneTaskCompiler(nn.Module):
                 "camera_valid_fraction": camera_valid.float(),
             }
             if slot_attention is not None:
-                diagnostics["slot_attention_entropy"] = _entropy(slot_attention).mean(dim=1).reshape(batch, cfg.camera_count)
+                diagnostics["slot_attention_entropy"] = (
+                    _entropy(slot_attention).mean(dim=1).reshape(batch, cfg.camera_count)
+                )
         return SceneTaskMemory(
             tokens=scene,
             mask=torch.ones(scene.shape[:2], dtype=torch.bool, device=scene.device),
@@ -398,23 +446,36 @@ class ActionSummaryEncoder(nn.Module):
         width = config.interface_hidden_size
         self.action_in = _adapter("mlp2x_silu", config.action_dim, width)
         self.action_pos = nn.Parameter(torch.randn(1, config.prediction_horizon, width) * 0.02)
-        self.summary_queries = nn.Parameter(torch.randn(1, config.action_summary_tokens, width) * 0.02)
-        self.blocks = nn.ModuleList([
-            QueryReadoutBlock(config, depth=config.action_summary_depth)
-            for _ in range(config.action_summary_depth)
-        ])
+        self.summary_queries = nn.Parameter(
+            torch.randn(1, config.action_summary_tokens, width) * 0.02
+        )
+        self.blocks = nn.ModuleList(
+            [
+                QueryReadoutBlock(config, depth=config.action_summary_depth)
+                for _ in range(config.action_summary_depth)
+            ]
+        )
         self.out_norm = RMSNorm(width, eps=config.norm_eps)
         self.to(dtype=dtype)
 
-    def forward(self, noisy_action: Tensor, *, return_diagnostics: bool = False) -> tuple[Tensor, dict[str, Tensor] | None]:
+    def forward(
+        self, noisy_action: Tensor, *, return_diagnostics: bool = False
+    ) -> tuple[Tensor, dict[str, Tensor] | None]:
         cfg = self.config
-        if noisy_action.ndim != 3 or tuple(noisy_action.shape[1:]) != (cfg.prediction_horizon, cfg.action_dim):
-            raise ValueError(f"noisy_action must be [B,{cfg.prediction_horizon},{cfg.action_dim}], got {tuple(noisy_action.shape)}")
+        if noisy_action.ndim != 3 or tuple(noisy_action.shape[1:]) != (
+            cfg.prediction_horizon,
+            cfg.action_dim,
+        ):
+            raise ValueError(
+                f"noisy_action must be [B,{cfg.prediction_horizon},{cfg.action_dim}], got {tuple(noisy_action.shape)}"
+            )
         memory = self.action_in(noisy_action) + self.action_pos
         query = self.summary_queries.expand(noisy_action.shape[0], -1, -1)
         attention = None
         for block in self.blocks:
-            query, attention = block(query, memory, memory_mask=None, return_attention=return_diagnostics)
+            query, attention = block(
+                query, memory, memory_mask=None, return_attention=return_diagnostics
+            )
         query = self.out_norm(query)
         diagnostics = None
         if return_diagnostics and attention is not None:
@@ -434,10 +495,12 @@ class ControlReadout(nn.Module):
         self.time = TimestepEmbedder(h, dtype=dtype)
         self.summary = ActionSummaryEncoder(config, dtype=dtype)
         self.dynamic_bias = nn.Linear(3 * h, h)
-        self.blocks = nn.ModuleList([
-            QueryReadoutBlock(config, depth=config.control_readout_depth)
-            for _ in range(config.control_readout_depth)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                QueryReadoutBlock(config, depth=config.control_readout_depth)
+                for _ in range(config.control_readout_depth)
+            ]
+        )
         self.out_norm = RMSNorm(h, eps=config.norm_eps)
         self.to_motor = nn.Linear(h, config.hidden_size)
         self.to(dtype=dtype)
@@ -453,14 +516,18 @@ class ControlReadout(nn.Module):
     ) -> ControlMemory:
         cfg = self.config
         if state_tokens.ndim != 2 or state_tokens.shape[-1] != cfg.state_dim:
-            raise ValueError(f"state_tokens must be [B,{cfg.state_dim}], got {tuple(state_tokens.shape)}")
+            raise ValueError(
+                f"state_tokens must be [B,{cfg.state_dim}], got {tuple(state_tokens.shape)}"
+            )
         batch = state_tokens.shape[0]
         query = self.control_queries.expand(batch, -1, -1)
         summary_diag = None
         if cfg.interface_mode == "dynamic":
             if noisy_action is None or timesteps is None:
                 raise ValueError("dynamic control readout requires noisy_action and timesteps")
-            summary, summary_diag = self.summary(noisy_action, return_diagnostics=return_diagnostics)
+            summary, summary_diag = self.summary(
+                noisy_action, return_diagnostics=return_diagnostics
+            )
             time = self.time(timesteps)
             if time.shape[0] == 1:
                 time = time.expand(batch, -1)
@@ -469,7 +536,9 @@ class ControlReadout(nn.Module):
             query = query + bias.unsqueeze(1)
         attention = None
         for block in self.blocks:
-            query, attention = block(query, scene.tokens, memory_mask=scene.mask, return_attention=return_diagnostics)
+            query, attention = block(
+                query, scene.tokens, memory_mask=scene.mask, return_attention=return_diagnostics
+            )
         query = self.out_norm(query)
         diagnostics = None
         if return_diagnostics:
@@ -484,7 +553,9 @@ class ControlReadout(nn.Module):
                 effective = torch.bmm(attention, scene.source_attention)
                 masses = []
                 for group in range(len(scene.source_group_names)):
-                    masses.append(effective[..., scene.source_group_ids == group].sum(dim=-1).mean(dim=1))
+                    masses.append(
+                        effective[..., scene.source_group_ids == group].sum(dim=-1).mean(dim=1)
+                    )
                 diagnostics["effective_source_mass"] = torch.stack(masses, dim=1)
         return ControlMemory(tokens=self.to_motor(query), diagnostics=diagnostics)
 
@@ -511,8 +582,13 @@ class ControlConditionRDT(nn.Module):
         self.t_embedder = TimestepEmbedder(config.hidden_size, dtype=dtype)
         self.blocks = nn.ModuleList([RDTBlock(index, rdt_cfg) for index in range(config.depth)])
         self.final_layer = FinalLayer(config.action_dim, rdt_cfg)
-        self.register_tokens = nn.Parameter(torch.randn(1, config.num_register_tokens, config.hidden_size))
-        x_pos = get_multimodal_pos_embed(config.hidden_size, {"action": config.prediction_horizon, "register": config.num_register_tokens})
+        self.register_tokens = nn.Parameter(
+            torch.randn(1, config.num_register_tokens, config.hidden_size)
+        )
+        x_pos = get_multimodal_pos_embed(
+            config.hidden_size,
+            {"action": config.prediction_horizon, "register": config.num_register_tokens},
+        )
         state_pos = get_multimodal_pos_embed(config.hidden_size, {"state": 1})
         self.x_pos_emb = nn.Parameter(torch.from_numpy(x_pos).float().unsqueeze(0))
         self.state_pos_emb = nn.Parameter(torch.from_numpy(state_pos).float().unsqueeze(0))
@@ -524,6 +600,7 @@ class ControlConditionRDT(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+
         self.apply(basic)
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -536,25 +613,41 @@ class ControlConditionRDT(nn.Module):
         nn.init.zeros_(self.final_layer.ffn.fc2.bias)
         self.to(dtype=dtype)
 
-    def forward(self, *, action_tokens: Tensor, timesteps: Tensor, state_tokens: Tensor, control_tokens: Tensor) -> Tensor:
+    def forward(
+        self,
+        *,
+        action_tokens: Tensor,
+        timesteps: Tensor,
+        state_tokens: Tensor,
+        control_tokens: Tensor,
+    ) -> Tensor:
         if state_tokens.ndim != 3 or tuple(state_tokens.shape[1:]) != (1, self.config.hidden_size):
-            raise ValueError(f"adapted state_tokens must be [B,1,{self.config.hidden_size}], got {tuple(state_tokens.shape)}")
+            raise ValueError(
+                f"adapted state_tokens must be [B,1,{self.config.hidden_size}], got {tuple(state_tokens.shape)}"
+            )
         time = self.t_embedder(timesteps)
         if time.shape[0] == 1:
             time = time.expand(action_tokens.shape[0], -1)
         state = state_tokens + self.state_pos_emb
-        modulation = torch.cat([time.unsqueeze(1), state], dim=1).reshape(action_tokens.shape[0], 2 * self.hidden_size)
+        modulation = torch.cat([time.unsqueeze(1), state], dim=1).reshape(
+            action_tokens.shape[0], 2 * self.hidden_size
+        )
         registers = self.register_tokens.expand(action_tokens.shape[0], -1, -1)
         x = torch.cat([action_tokens, registers], dim=1) + self.x_pos_emb
         for block in self.blocks:
             x = block(x, modulation, c=control_tokens)
-        return self.final_layer(x, modulation)[:, :-self.num_register_tokens]
+        return self.final_layer(x, modulation)[:, : -self.num_register_tokens]
 
 
 class RDT2ControlInterface(nn.Module):
     """Reference motor core with a two-stage control-relevant condition interface."""
 
-    def __init__(self, config: ControlInterfaceRDT2FMConfig = ControlInterfaceRDT2FMConfig(), *, dtype: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self,
+        config: ControlInterfaceRDT2FMConfig = ControlInterfaceRDT2FMConfig(),
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         super().__init__()
         config.validate()
         self.config = config
@@ -569,7 +662,9 @@ class RDT2ControlInterface(nn.Module):
         self.to(dtype=dtype)
 
     def sample_timesteps(self, batch_size: int, device: torch.device) -> Tensor:
-        distribution = LogisticNormal(torch.tensor(0.0, device=device), torch.tensor(1.0, device=device))
+        distribution = LogisticNormal(
+            torch.tensor(0.0, device=device), torch.tensor(1.0, device=device)
+        )
         return distribution.sample((batch_size,))[:, 0]
 
     def prepare_scene(
@@ -612,7 +707,12 @@ class RDT2ControlInterface(nn.Module):
             )
         action = self.action_adaptor(noisy_action)
         state = self.state_adaptor(state_tokens).unsqueeze(1)
-        velocity = self.motor(action_tokens=action, timesteps=timesteps, state_tokens=state, control_tokens=control.tokens)
+        velocity = self.motor(
+            action_tokens=action,
+            timesteps=timesteps,
+            state_tokens=state,
+            control_tokens=control.tokens,
+        )
         diagnostics = None
         if return_diagnostics:
             diagnostics = {}
@@ -653,7 +753,12 @@ class RDT2ControlInterface(nn.Module):
         )
         action = self.action_adaptor(noisy)
         state = self.state_adaptor(state_tokens).unsqueeze(1)
-        velocity = self.motor(action_tokens=action, timesteps=timesteps, state_tokens=state, control_tokens=control.tokens)
+        velocity = self.motor(
+            action_tokens=action,
+            timesteps=timesteps,
+            state_tokens=state,
+            control_tokens=control.tokens,
+        )
         loss = F.mse_loss(velocity, action_gt - noise)
         return {
             "loss": loss,
@@ -678,7 +783,12 @@ class RDT2ControlInterface(nn.Module):
     ) -> Tensor | tuple[Tensor, dict[str, Any]]:
         batch = state_tokens.shape[0]
         if noisy_action is None:
-            noisy_action = torch.randn((batch, self.pred_horizon, self.action_dim), device=state_tokens.device, dtype=state_tokens.dtype, generator=generator)
+            noisy_action = torch.randn(
+                (batch, self.pred_horizon, self.action_dim),
+                device=state_tokens.device,
+                dtype=state_tokens.dtype,
+                generator=generator,
+            )
         steps = int(inference_steps or self.num_inference_timesteps)
         if steps <= 0:
             raise ValueError("inference_steps must be positive")

@@ -17,6 +17,7 @@ The mainline closure in report.json is the authoritative quarantine list for
 the do_before_v78 function ledger; the hand-traced ledger is its review
 baseline and every discrepancy must be investigated, not overwritten.
 """
+
 from __future__ import annotations
 
 import json
@@ -93,11 +94,13 @@ class CallGraphAuditor:
             }
         dead = {n: r for n, r in rows.items() if not any(r["owner_fired"].values())}
         frozen = {
-            n: r for n, r in rows.items()
+            n: r
+            for n, r in rows.items()
             if any(r["owner_fired"].values()) and not r["grad_received"]
         }
         sample_only = {
-            n: r for n, r in rows.items()
+            n: r
+            for n, r in rows.items()
             if not r["owner_fired"].get("train", False)
             and any(v for t, v in r["owner_fired"].items() if t != "train")
         }
@@ -109,9 +112,7 @@ class CallGraphAuditor:
             agg: dict[str, int] = {}
             for name, r in entries.items():
                 agg[self._prefix(name)] = agg.get(self._prefix(name), 0) + int(r["numel"])
-            return sorted(
-                ((k, v, v * 4 / 1e6) for k, v in agg.items()), key=lambda t: -t[1]
-            )[:20]
+            return sorted(((k, v, v * 4 / 1e6) for k, v in agg.items()), key=lambda t: -t[1])[:20]
 
         report = {
             "context": context_note,
@@ -144,16 +145,31 @@ class CallGraphAuditor:
         ]
         for key, value in report["totals"].items():
             lines.append(f"| {key} | {value} |")
-        lines += ["", "## 死重 top-20 前缀（构造了、任何相位都未开火）", "",
-                  "| 前缀 | 参数量 | MB |", "|---|---|---|"]
+        lines += [
+            "",
+            "## 死重 top-20 前缀（构造了、任何相位都未开火）",
+            "",
+            "| 前缀 | 参数量 | MB |",
+            "|---|---|---|",
+        ]
         for prefix, numel, mb in _prefix_table(dead):
             lines.append(f"| {prefix} | {numel} | {mb:.2f} |")
-        lines += ["", "## 开火但无梯度 top-20 前缀（冻结/纯仪表路径, 应与已知探针清单对账）",
-                  "", "| 前缀 | 参数量 | MB |", "|---|---|---|"]
+        lines += [
+            "",
+            "## 开火但无梯度 top-20 前缀（冻结/纯仪表路径, 应与已知探针清单对账）",
+            "",
+            "| 前缀 | 参数量 | MB |",
+            "|---|---|---|",
+        ]
         for prefix, numel, mb in _prefix_table(frozen):
             lines.append(f"| {prefix} | {numel} | {mb:.2f} |")
-        lines += ["", "## 仅采样相位开火 top-20 前缀", "",
-                  "| 前缀 | 参数量 | MB |", "|---|---|---|"]
+        lines += [
+            "",
+            "## 仅采样相位开火 top-20 前缀",
+            "",
+            "| 前缀 | 参数量 | MB |",
+            "|---|---|---|",
+        ]
         for prefix, numel, mb in _prefix_table(sample_only):
             lines.append(f"| {prefix} | {numel} | {mb:.2f} |")
         lines.append("")

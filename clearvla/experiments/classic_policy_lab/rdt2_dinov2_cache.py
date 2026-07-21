@@ -149,7 +149,9 @@ class DinoV2TokenStore:
         if meta.episode_stem != episode.stem:
             raise ValueError(f"DINO token stem mismatch: {meta.episode_stem!r} != {episode.stem!r}")
         if meta.num_frames != episode.length:
-            raise ValueError(f"DINO token frame count mismatch for {episode.stem}: {meta.num_frames} != {episode.length}")
+            raise ValueError(
+                f"DINO token frame count mismatch for {episode.stem}: {meta.num_frames} != {episode.length}"
+            )
         if meta.cameras != self.camera_names:
             raise ValueError(f"DINO token cameras mismatch: {meta.cameras} != {self.camera_names}")
         if meta.decoded_preprocessing != self.preprocessing.to_dict():
@@ -158,7 +160,9 @@ class DinoV2TokenStore:
                 f"requested={self.preprocessing.to_dict()}"
             )
         if self.dinov2_model is not None and meta.dinov2_model != self.dinov2_model:
-            raise ValueError(f"DINO model mismatch: cached={meta.dinov2_model!r}, requested={self.dinov2_model!r}")
+            raise ValueError(
+                f"DINO model mismatch: cached={meta.dinov2_model!r}, requested={self.dinov2_model!r}"
+            )
         expected_fingerprint = _source_fingerprint(episode.path)
         if meta.source_fingerprint != expected_fingerprint:
             raise ValueError(
@@ -171,7 +175,9 @@ class DinoV2TokenStore:
         array = np.load(path, mmap_mode="r")
         expected = (episode.length, len(self.camera_names), meta.tokens_per_camera, meta.token_dim)
         if tuple(array.shape) != expected or array.dtype != np.float16:
-            raise ValueError(f"invalid DINO token mmap {path}: shape={array.shape}, dtype={array.dtype}; expected={expected}, float16")
+            raise ValueError(
+                f"invalid DINO token mmap {path}: shape={array.shape}, dtype={array.dtype}; expected={expected}, float16"
+            )
         return meta
 
     def _array(self, episode_idx: int) -> np.ndarray:
@@ -179,7 +185,9 @@ class DinoV2TokenStore:
         if idx < 0 or idx >= len(self.episodes):
             raise IndexError(f"episode_idx={idx} outside [0,{len(self.episodes)})")
         if idx not in self._arrays:
-            self._arrays[idx] = np.load(_tokens_path(self.cache_dir, self.episodes[idx].stem), mmap_mode="r")
+            self._arrays[idx] = np.load(
+                _tokens_path(self.cache_dir, self.episodes[idx].stem), mmap_mode="r"
+            )
         return self._arrays[idx]
 
     def load_batch(self, sample_keys: Tensor | Sequence[Sequence[int]]) -> Tensor:
@@ -196,9 +204,14 @@ class DinoV2TokenStore:
             raise ValueError(f"sample_keys must be [B,2] episode/frame pairs, got {keys.shape}")
         n = int(keys.shape[0])
         if n == 0:
-            empty = np.empty((0, len(self.camera_names), self.tokens_per_camera, self.token_dim), dtype=np.float16)
+            empty = np.empty(
+                (0, len(self.camera_names), self.tokens_per_camera, self.token_dim),
+                dtype=np.float16,
+            )
             return torch.from_numpy(empty)
-        out = np.empty((n, len(self.camera_names), self.tokens_per_camera, self.token_dim), dtype=np.float16)
+        out = np.empty(
+            (n, len(self.camera_names), self.tokens_per_camera, self.token_dim), dtype=np.float16
+        )
         episode_ids = keys[:, 0].astype(np.int64, copy=False)
         frame_ids = keys[:, 1].astype(np.int64, copy=False)
         for episode_idx in np.unique(episode_ids):
@@ -207,7 +220,9 @@ class DinoV2TokenStore:
             frames = frame_ids[positions]
             if frames.size and (int(frames.min()) < 0 or int(frames.max()) >= array.shape[0]):
                 bad = int(frames[(frames < 0) | (frames >= array.shape[0])][0])
-                raise IndexError(f"frame_idx={bad} outside episode {episode_idx} length={array.shape[0]}")
+                raise IndexError(
+                    f"frame_idx={bad} outside episode {episode_idx} length={array.shape[0]}"
+                )
             out[positions] = np.asarray(array[frames], dtype=np.float16)
         return torch.from_numpy(np.ascontiguousarray(out))
 
@@ -221,7 +236,10 @@ def load_episode_token_meta(cache_dir: Path, episode_stem: str) -> DinoTokenEpis
 
 
 def episode_tokens_exist(cache_dir: Path, episode_stem: str) -> bool:
-    return _meta_path(Path(cache_dir), str(episode_stem)).exists() and _tokens_path(Path(cache_dir), str(episode_stem)).exists()
+    return (
+        _meta_path(Path(cache_dir), str(episode_stem)).exists()
+        and _tokens_path(Path(cache_dir), str(episode_stem)).exists()
+    )
 
 
 def save_episode_tokens(

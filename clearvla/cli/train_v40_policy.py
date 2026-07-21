@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from dataclasses import asdict
@@ -19,7 +20,10 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     resolve_device,
 )
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
-from clearvla.experiments.dynamic_world_lab.conditioning import build_dense_conditioner, infer_dense_geometry
+from clearvla.experiments.dynamic_world_lab.conditioning import (
+    build_dense_conditioner,
+    infer_dense_geometry,
+)
 from clearvla.experiments.observed_state_lab.dataset import (
     CachedTokenPolicyWindowDataset,
     ObservedStateDatasetConfig,
@@ -49,19 +53,39 @@ def _normalizer_fingerprint(normalizer: ArrayNormalizer) -> str:
     runs that share this fingerprint: the native metric is priced in
     normalizer coordinates, so refitting the normalizer silently re-scales it.
     """
-    import hashlib
-
     def _round(value: Any) -> Any:
         array = np.asarray(value)
         if array.dtype.kind in "fc":
             return np.round(array.astype(np.float64), 6).tolist()
         return array.tolist() if array.ndim else value
+
     payload = json.dumps(
         {key: _round(value) for key, value in sorted(normalizer.to_dict().items())},
         sort_keys=True,
         default=str,
     )
     return hashlib.md5(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _source_fingerprint() -> dict[str, str]:
+    """Hash the source surface that defines the current experiment contract."""
+
+    root = Path(__file__).resolve().parents[2]
+    relative_paths = (
+        "clearvla/cli/train_v40_policy.py",
+        "clearvla/experiments/observed_state_lab/policy_runtime_v39.py",
+        "clearvla/policy/config.py",
+        "clearvla/policy/controller.py",
+        "clearvla/policy/time_domain_mmdit.py",
+        "scripts/current_v94_latent_ownership_execution.sh",
+    )
+    result: dict[str, str] = {}
+    for relative in relative_paths:
+        path = root / relative
+        result[relative] = (
+            hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "missing"
+        )
+    return result
 
 
 def _legacy_payload(path: Path | None) -> dict[str, Any] | None:
@@ -106,10 +130,7 @@ def _filter_stage1_state_dict(
 ) -> tuple[dict[str, torch.Tensor], list[str]]:
     if not reset_dirty_adapters:
         return state, []
-    skipped = [
-        key for key in state
-        if key.startswith(_STAGE1_DIRTY_ADAPTER_PREFIXES)
-    ]
+    skipped = [key for key in state if key.startswith(_STAGE1_DIRTY_ADAPTER_PREFIXES)]
     if not skipped:
         return state, []
     skipped_set = set(skipped)
@@ -121,7 +142,8 @@ def _filter_shape_mismatched_state_dict(
     target: dict[str, torch.Tensor],
 ) -> tuple[dict[str, torch.Tensor], list[str]]:
     skipped = [
-        key for key, value in state.items()
+        key
+        for key, value in state.items()
         if key in target and tuple(value.shape) != tuple(target[key].shape)
     ]
     if not skipped:
@@ -159,19 +181,45 @@ def _filter_v74_time_controller_state_dict(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train V40 layer-role causal/latent temporal policy.")
+    parser = argparse.ArgumentParser(
+        description="Train V40 layer-role causal/latent temporal policy."
+    )
     add_data_args(parser, default_resize=(336, 336))
-    parser.add_argument("--legacy-context-checkpoint", type=Path, default=None, help="Optional migration source for splits/normalizers only; not a model dependency.")
+    parser.add_argument(
+        "--legacy-context-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional migration source for splits/normalizers only; not a model dependency.",
+    )
     parser.add_argument("--normalizer", choices=["zscore", "limits", "identity"], default="zscore")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--stage1-checkpoint", type=Path, default=None, help="Load a V39 contract-stage checkpoint as model initialization before policy-stage finetuning.")
-    parser.add_argument("--stage1-reset-dirty-adapters", type=int, default=0, help="Skip old layer adapter/consequence interface weights when migrating from a pre-fix stage1 checkpoint.")
-    parser.add_argument("--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache")
+    parser.add_argument(
+        "--stage1-checkpoint",
+        type=Path,
+        default=None,
+        help="Load a V39 contract-stage checkpoint as model initialization before policy-stage finetuning.",
+    )
+    parser.add_argument(
+        "--stage1-reset-dirty-adapters",
+        type=int,
+        default=0,
+        help="Skip old layer adapter/consequence interface weights when migrating from a pre-fix stage1 checkpoint.",
+    )
+    parser.add_argument(
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
+    )
     parser.add_argument("--dinov2-model", default="facebook/dinov2-base")
     parser.add_argument("--dinov2-local-files-only", action="store_true")
     parser.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
-    parser.add_argument("--prefetch-dinov2-tokens", action=argparse.BooleanOptionalAction, default=True, help="For dinov2-cache mode, load current and compact future DINO tokens in DataLoader workers instead of the main training loop.")
+    parser.add_argument(
+        "--prefetch-dinov2-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For dinov2-cache mode, load current and compact future DINO tokens in DataLoader workers instead of the main training loop.",
+    )
     parser.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
 
     parser.add_argument("--world-horizon", type=int, default=48)
@@ -185,29 +233,99 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--depth", type=int, default=8, help="shared temporal canvas depth")
-    parser.add_argument("--midcut-layer", type=int, default=3, help="Expose Z_mid after this many DiT blocks for the simple latent-contract heads.")
+    parser.add_argument(
+        "--midcut-layer",
+        type=int,
+        default=3,
+        help="Expose Z_mid after this many DiT blocks for the simple latent-contract heads.",
+    )
     parser.add_argument("--midcut-future-gain-init", type=float, default=0.10)
-    parser.add_argument("--layer-contract-adapters", type=int, default=1, help="V40: enable layer-role contract adapters after every DiT block.")
+    parser.add_argument(
+        "--layer-contract-adapters",
+        type=int,
+        default=1,
+        help="V40: enable layer-role contract adapters after every DiT block.",
+    )
     parser.add_argument("--layer-contract-adapter-dim", type=int, default=128)
     parser.add_argument("--layer-contract-grad-scale", type=float, default=1.0)
     parser.add_argument("--layer-contract-residual-scale", type=float, default=0.50)
-    parser.add_argument("--layer-shared-fm-probe", type=int, default=0, help="Deprecated in V40 by default; keep disabled so action_pred does not become a side branch.")
+    parser.add_argument(
+        "--layer-shared-fm-probe",
+        type=int,
+        default=0,
+        help="Deprecated in V40 by default; keep disabled so action_pred does not become a side branch.",
+    )
     parser.add_argument("--layer-fm-probe-hidden", type=int, default=256)
-    parser.add_argument("--layer-recurrent-consequence", type=int, default=1, help="V40: enable the layer-role causal/effect branch.")
+    parser.add_argument(
+        "--layer-recurrent-consequence",
+        type=int,
+        default=1,
+        help="V40: enable the layer-role causal/effect branch.",
+    )
     parser.add_argument("--layer-consequence-steps", type=int, default=6)
     parser.add_argument("--layer-consequence-hidden", type=int, default=256)
     parser.add_argument("--layer-consequence-delta-scale", type=float, default=1.0)
     parser.add_argument("--layer-consequence-initial-gain", type=float, default=0.10)
-    parser.add_argument("--layer-causal-feedback-depth", type=int, default=0, help="V40.1: optional inner interaction blocks; default 0 because the unified intervention head already encodes state-action jointly.")
-    parser.add_argument("--layer-causal-memory-tokens", type=int, default=4, help="V40.1: compact memory/context tokens for unified intervention latent.")
-    parser.add_argument("--layer-low-causal-weight", type=float, default=1.0, help="V40: causal gain at the shallowest layer.")
-    parser.add_argument("--layer-high-causal-weight", type=float, default=1.0, help="V40.1: retained as diagnostic; unified intervention head is not mixed with a separate latent head.")
-    parser.add_argument("--layer-low-latent-weight", type=float, default=1.0, help="V40.1: retained as diagnostic; unified intervention head is not mixed with a separate latent head.")
-    parser.add_argument("--layer-high-latent-weight", type=float, default=1.0, help="V40: latent gain at the deepest layer.")
-    parser.add_argument("--layer-causal-event-from-effect", type=int, default=1, help="V40: read event logits from causal effect tokens in layer contracts.")
-    parser.add_argument("--layer-state-counterfactual", type=int, default=0, help="Experimental non-strict state/frame shuffle diagnostic; disabled by default and excluded from the recommended training path.")
-    parser.add_argument("--action-consequence-self-condition", type=int, default=0, help="Use a no-grad deployable clean-action preview as the layer consequence action input.")
-    parser.add_argument("--layer-zero-base-diagnostic", type=int, default=1, help="Log consequence-output shift when layer rollout tokens are zeroed; diagnostic only, no loss.")
+    parser.add_argument(
+        "--layer-causal-feedback-depth",
+        type=int,
+        default=0,
+        help="V40.1: optional inner interaction blocks; default 0 because the unified intervention head already encodes state-action jointly.",
+    )
+    parser.add_argument(
+        "--layer-causal-memory-tokens",
+        type=int,
+        default=4,
+        help="V40.1: compact memory/context tokens for unified intervention latent.",
+    )
+    parser.add_argument(
+        "--layer-low-causal-weight",
+        type=float,
+        default=1.0,
+        help="V40: causal gain at the shallowest layer.",
+    )
+    parser.add_argument(
+        "--layer-high-causal-weight",
+        type=float,
+        default=1.0,
+        help="V40.1: retained as diagnostic; unified intervention head is not mixed with a separate latent head.",
+    )
+    parser.add_argument(
+        "--layer-low-latent-weight",
+        type=float,
+        default=1.0,
+        help="V40.1: retained as diagnostic; unified intervention head is not mixed with a separate latent head.",
+    )
+    parser.add_argument(
+        "--layer-high-latent-weight",
+        type=float,
+        default=1.0,
+        help="V40: latent gain at the deepest layer.",
+    )
+    parser.add_argument(
+        "--layer-causal-event-from-effect",
+        type=int,
+        default=1,
+        help="V40: read event logits from causal effect tokens in layer contracts.",
+    )
+    parser.add_argument(
+        "--layer-state-counterfactual",
+        type=int,
+        default=0,
+        help="Experimental non-strict state/frame shuffle diagnostic; disabled by default and excluded from the recommended training path.",
+    )
+    parser.add_argument(
+        "--action-consequence-self-condition",
+        type=int,
+        default=0,
+        help="Use a no-grad deployable clean-action preview as the layer consequence action input.",
+    )
+    parser.add_argument(
+        "--layer-zero-base-diagnostic",
+        type=int,
+        default=1,
+        help="Log consequence-output shift when layer rollout tokens are zeroed; diagnostic only, no loss.",
+    )
     parser.add_argument("--proposal-depth", type=int, default=2)
     parser.add_argument("--proposal-dropout", type=float, default=0.25)
     parser.add_argument("--dropout", type=float, default=0.05)
@@ -243,9 +361,39 @@ def parse_args() -> argparse.Namespace:
         default="legacy_independent",
     )
     parser.add_argument("--arm-noise-temporal-rho", type=float, default=0.0)
+    parser.add_argument(
+        "--arm-source-mode",
+        choices=("ar1", "boundary_multiscale"),
+        default="ar1",
+        help=(
+            "Native arm bridge source. boundary_multiscale is conditioned only "
+            "on action_state and mixes trace-normalized position/velocity/acceleration operators."
+        ),
+    )
+    parser.add_argument("--arm-source-scale", type=float, default=1.0)
+    parser.add_argument("--arm-source-innovation-weight", type=float, default=0.50)
+    parser.add_argument("--arm-source-velocity-weight", type=float, default=0.35)
+    parser.add_argument("--arm-source-acceleration-weight", type=float, default=0.15)
     parser.add_argument("--gripper-field-dim", type=int, default=12)
-    parser.add_argument("--gripper-field-mode", choices=("legacy_handcrafted", "parseval_temporal"), default="legacy_handcrafted")
-    parser.add_argument("--final-action-decoder", choices=["legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action", "hierarchical_mmdit_action"], default="legacy")
+    parser.add_argument(
+        "--gripper-field-mode",
+        choices=("legacy_handcrafted", "parseval_temporal"),
+        default="legacy_handcrafted",
+    )
+    parser.add_argument(
+        "--final-action-decoder",
+        choices=[
+            "legacy",
+            "residual_action_flow",
+            "layered_residual_action_flow",
+            "latent_main_action",
+            "latent_cvae_action",
+            "adaptive_recurrent_cvae_action",
+            "hierarchical_mmdit_action",
+            "evidence_latent_mmdit_action",
+        ],
+        default="legacy",
+    )
     parser.add_argument("--action-flow-residual-depth", type=int, default=2)
     parser.add_argument("--action-flow-residual-high-slots", type=int, default=4)
     parser.add_argument("--action-flow-residual-max-scale", type=float, default=0.20)
@@ -253,13 +401,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-flow-residual-context-memory", type=int, default=1)
     parser.add_argument("--action-flow-residual-transition-memory", type=int, default=1)
     parser.add_argument("--action-flow-residual-layer-memory", type=int, default=1)
-    parser.add_argument("--action-flow-residual-layer-pair-schedule", type=str, default="0:1,1:3,3:5,5:7")
+    parser.add_argument(
+        "--action-flow-residual-layer-pair-schedule", type=str, default="0:1,1:3,3:5,5:7"
+    )
     parser.add_argument("--action-flow-residual-layer-detach", type=int, default=1)
     parser.add_argument("--action-flow-residual-stage-router", type=int, default=1)
     parser.add_argument("--action-flow-residual-anchor-memory", type=int, default=1)
     parser.add_argument("--latent-action-decoder-depth", type=int, default=8)
     parser.add_argument("--latent-action-high-slots", type=int, default=4)
-    parser.add_argument("--latent-action-layer-schedule", type=str, default="0:1,1:2,2:3,3:4,4:5,5:6,6:7,7:7")
+    parser.add_argument(
+        "--latent-action-layer-schedule", type=str, default="0:1,1:2,2:3,3:4,4:5,5:6,6:7,7:7"
+    )
     parser.add_argument("--latent-action-visual-memory", type=int, default=0)
     parser.add_argument("--latent-action-context-memory", type=int, default=0)
     parser.add_argument("--latent-action-transition-memory", type=int, default=1)
@@ -278,50 +430,307 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-cvae-ffn-expansion", type=float, default=2.0)
     parser.add_argument("--latent-cvae-layer-memory", type=int, default=1)
     parser.add_argument("--latent-cvae-transition-memory", type=int, default=1)
-    parser.add_argument("--latent-cvae-transition-detach", type=int, default=1)
+    parser.add_argument("--latent-cvae-transition-detach", type=int, default=0)
     parser.add_argument("--latent-cvae-context-memory", type=int, default=0)
     parser.add_argument("--latent-cvae-visual-memory", type=int, default=0)
-    parser.add_argument("--latent-cvae-layer-detach", type=int, default=1)
-    parser.add_argument("--latent-cvae-layer-grad-scale", type=float, default=0.0)
-    parser.add_argument("--latent-cvae-condition-source-norm", type=int, default=1, help="Normalize each CVAE condition source before fusion.")
-    parser.add_argument("--latent-cvae-bounded-consequence-fusion", type=int, default=1, help="Fuse world and action-conditioned summaries separately so routing cannot bypass consequence scaling.")
-    parser.add_argument("--latent-cvae-consequence-scale-init", type=float, default=0.10, help="Initial strength of action-conditioned layer-contract summaries.")
-    parser.add_argument("--latent-cvae-consequence-scale-max", type=float, default=0.50, help="Upper bound for action-conditioned layer-contract summary strength.")
+    parser.add_argument("--latent-cvae-layer-detach", type=int, default=0)
+    parser.add_argument("--latent-cvae-layer-grad-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--latent-cvae-condition-source-norm",
+        type=int,
+        default=1,
+        help="Normalize each CVAE condition source before fusion.",
+    )
+    parser.add_argument(
+        "--latent-cvae-bounded-consequence-fusion",
+        type=int,
+        default=1,
+        help="Fuse world and action-conditioned summaries separately so routing cannot bypass consequence scaling.",
+    )
+    parser.add_argument(
+        "--latent-cvae-consequence-scale-init",
+        type=float,
+        default=0.10,
+        help="Initial strength of action-conditioned layer-contract summaries.",
+    )
+    parser.add_argument(
+        "--latent-cvae-consequence-scale-max",
+        type=float,
+        default=0.50,
+        help="Upper bound for action-conditioned layer-contract summary strength.",
+    )
     parser.add_argument("--latent-cvae-event-gripper-gate", type=int, default=1)
     parser.add_argument("--latent-cvae-inference-sample", type=int, default=0)
-    parser.add_argument("--latent-cvae-variational", type=int, default=1, help="CR1/B1: 0 bypasses posterior/KL/aux-decode training scaffold while keeping the deterministic prior-mean deploy mapping bit-identical.")
+    parser.add_argument(
+        "--latent-cvae-variational",
+        type=int,
+        default=1,
+        help="CR1/B1: 0 bypasses posterior/KL/aux-decode training scaffold while keeping the deterministic prior-mean deploy mapping bit-identical.",
+    )
     parser.add_argument("--latent-cvae-output-init-std", type=float, default=1e-3)
     parser.add_argument("--latent-cvae-mu-bound", type=float, default=1.5)
     parser.add_argument("--latent-cvae-min-std", type=float, default=0.5)
     parser.add_argument("--latent-cvae-causal-attention", type=int, default=1)
-    parser.add_argument("--latent-cvae-noisy-gate", type=int, default=0, help="t-gate the direct noisy-action branch of the CVAE decoder.")
+    parser.add_argument(
+        "--latent-cvae-noisy-gate",
+        type=int,
+        default=0,
+        help="t-gate the direct noisy-action branch of the CVAE decoder.",
+    )
     parser.add_argument("--latent-cvae-noisy-gate-min", type=float, default=0.05)
     parser.add_argument("--latent-cvae-noisy-gate-power", type=float, default=1.5)
-    parser.add_argument("--latent-cvae-layer-scan", type=int, default=0, help="Use a recurrent scan over ordered layer summaries as the CVAE condition.")
-    parser.add_argument("--latent-cvae-layer-scan-alpha", type=float, default=0.2, help="Residual weight for the flat lateral layer condition when layer scan is enabled.")
-    parser.add_argument("--latent-cvae-mmdit-decoder", type=int, default=0, help="Use the MMDiT-lite CVAE action-condition token decoder.")
+    parser.add_argument(
+        "--latent-cvae-layer-scan",
+        type=int,
+        default=0,
+        help="Use a recurrent scan over ordered layer summaries as the CVAE condition.",
+    )
+    parser.add_argument(
+        "--latent-cvae-layer-scan-alpha",
+        type=float,
+        default=0.2,
+        help="Residual weight for the flat lateral layer condition when layer scan is enabled.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-decoder",
+        type=int,
+        default=0,
+        help="Use the MMDiT-lite CVAE action-condition token decoder.",
+    )
     parser.add_argument("--latent-cvae-mmdit-depth", type=int, default=3)
-    parser.add_argument("--latent-cvae-mmdit-cond-update", type=int, default=0, help="Allow condition tokens to update inside the MMDiT-lite decoder.")
-    parser.add_argument("--latent-cvae-mmdit-noisy-causal", type=int, default=1, help="Mask future noisy-action condition tokens for action queries.")
-    parser.add_argument("--latent-cvae-mmdit-noisy-logit-gate", type=int, default=0, help="V70: LayerNorm noisy condition tokens and move the t-gate to an additive log g(t) attention-logit bias (closes the value-volume degree of freedom).")
-    parser.add_argument("--latent-cvae-progress-action-isolation", type=int, default=0, help="V72: cut the action->progress->workspace echo; the per-step progress update no longer receives the raw action summary (zeros fed, parameter shapes unchanged).")
-    parser.add_argument("--latent-cvae-horizon-tokens", type=int, default=24, help="Number of z-conditioned evidence workspace tokens supplied to MMDiT.")
-    parser.add_argument("--latent-cvae-workspace-noisy-query", type=int, default=0, help="Condition workspace evidence queries on the current noisy flow state.")
-    parser.add_argument("--latent-cvae-workspace-trajectory-source", type=int, default=1, help="Expose full-resolution trajectory canvas tokens as workspace values; set 0 for the x_t-echo ablation.")
-    parser.add_argument("--latent-cvae-workspace-global-sources", type=int, default=1, help="Expose scan/lateral global condition summaries as workspace values; set 0 to keep them only in cond/z.")
-    parser.add_argument("--latent-cvae-workspace-layer-source", type=int, default=1, help="Expose full layer_stack as a static workspace value; set 0 to force layer information through routed_layer/capsules.")
-    parser.add_argument("--latent-cvae-workspace-progress-value", type=int, default=1, help="Expose progress as a workspace value; set 0 to use progress only as workspace step/query state.")
-    parser.add_argument("--latent-cvae-workspace-time-state", type=int, default=0, help="Inject the existing z+time primary condition into workspace slots as explicit state.")
-    parser.add_argument("--latent-cvae-workspace-slot-time-state", type=int, default=1, help="Make workspace time-state slot-aware instead of broadcasting one identical z+time vector to every workspace token.")
-    parser.add_argument("--latent-cvae-workspace-slot-time-scale", type=float, default=0.10, help="Scale of the slot-specific component used by --latent-cvae-workspace-slot-time-state.")
-    parser.add_argument("--latent-cvae-workspace-controller", type=int, default=0, help="V74B: use the central workspace controller for role bias, capacity, and query modulation.")
-    parser.add_argument("--latent-cvae-hierarchical-workspace", type=int, default=0, help="V75: use temporary low evidence reads plus persistent role-separated stage memory.")
-    parser.add_argument("--latent-cvae-stage-slots", type=int, default=6, help="Number of persistent stage-memory slots in the hierarchical workspace.")
-    parser.add_argument("--latent-cvae-stage-promote-scale-init", type=float, default=0.05, help="Initial bounded residual scale for low-to-stage promotion.")
-    parser.add_argument("--hierarchical-mmdit-depth", type=int, default=3, help="Number of distinct full-rank action MMDiT refinement blocks.")
-    parser.add_argument("--hierarchical-mmdit-refine-steps", type=int, default=3, help="Maximum recurrent refinement budget; fixed, randomized-dwell, and adaptive execution share this cap.")
-    parser.add_argument("--hierarchical-mmdit-low-slots", type=int, default=25, help="Role-stratified low evidence slots; 25 gives five slots to each owned role.")
-    parser.add_argument("--hierarchical-mmdit-stage-slots", type=int, default=6, help="Persistent stage-content slots; role identity remains a separate tensor.")
+    parser.add_argument(
+        "--latent-cvae-mmdit-cond-update",
+        type=int,
+        default=0,
+        help="Allow condition tokens to update inside the MMDiT-lite decoder.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-causal",
+        type=int,
+        default=1,
+        help="Mask future noisy-action condition tokens for action queries.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-logit-gate",
+        type=int,
+        default=0,
+        help="V70: LayerNorm noisy condition tokens and move the t-gate to an additive log g(t) attention-logit bias (closes the value-volume degree of freedom).",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-residual-scale-max",
+        type=float,
+        default=0.25,
+        help="V91.1: shared residual budget for split evidence/noisy readers.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-source-route-delta-max",
+        type=float,
+        default=1.0,
+        help="Deprecated V91 two-source route bound; retained for launch-script compatibility.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-correction-min",
+        type=float,
+        default=0.05,
+        help="Minimum smooth noisy residual-correction budget.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-correction-max",
+        type=float,
+        default=0.75,
+        help="Maximum smooth noisy residual-correction budget.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-correction-power",
+        type=float,
+        default=1.5,
+        help="Flow-time exponent for the noisy residual-correction prior.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-correction-logit-delta",
+        type=float,
+        default=1.0,
+        help="Maximum controller displacement of correction budget in logit space.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-controller-modulation-scale",
+        type=float,
+        default=0.25,
+        help="Bound on controller modulation of noisy-reader query selection.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-evidence-scale",
+        type=float,
+        default=1.0,
+        help="Diagnostic source ablation scale for evidence reader; keep at 1 for training.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-noisy-scale",
+        type=float,
+        default=1.0,
+        help="Diagnostic source ablation scale for noisy reader; keep at 1 for training.",
+    )
+    parser.add_argument("--latent-cvae-mmdit-operator-capacity", type=int, default=0)
+    parser.add_argument("--latent-cvae-mmdit-operator-rank", type=int, default=32)
+    parser.add_argument("--latent-cvae-mmdit-operator-groups", type=int, default=32)
+    parser.add_argument(
+        "--latent-cvae-mmdit-operator-depth-logit-init", type=float, default=4.0
+    )
+    parser.add_argument("--latent-cvae-mmdit-execution-controller", type=int, default=0)
+    parser.add_argument(
+        "--latent-cvae-mmdit-dynamic-block-route",
+        type=int,
+        default=0,
+        help="Allow the native controller to choose any remaining host block or terminal identity.",
+    )
+    parser.add_argument("--latent-cvae-mmdit-control-tokens", type=int, default=8)
+    parser.add_argument("--latent-cvae-mmdit-controller-depth", type=int, default=2)
+    parser.add_argument("--latent-cvae-mmdit-controller-heads", type=int, default=8)
+    parser.add_argument(
+        "--latent-cvae-mmdit-controller-ffn-expansion", type=float, default=2.0
+    )
+    parser.add_argument("--latent-cvae-mmdit-max-dwell", type=int, default=2)
+    parser.add_argument(
+        "--latent-cvae-mmdit-dwell-mode",
+        choices=("fixed", "random", "learned_shadow", "learned"),
+        default="fixed",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-execution-soft-temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for the attached learned-training execution mixture.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-identity-candidate",
+        type=int,
+        default=1,
+        help="Expose terminal identity as a real execution candidate.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-terminal-prior-weight",
+        type=float,
+        default=0.25,
+        help="Relative softmax prior for the high-consequence terminal candidate.",
+    )
+    parser.add_argument(
+        "--latent-cvae-mmdit-execution-eval-policy",
+        choices=("soft", "hard", "neutral"),
+        default="soft",
+        help="Evaluation execution contract; hard/neutral are explicit ablations.",
+    )
+    parser.add_argument("--latent-cvae-mmdit-execution-warmup-steps", type=int, default=200)
+    parser.add_argument(
+        "--latent-cvae-mmdit-execution-transition-steps", type=int, default=1000
+    )
+    parser.add_argument(
+        "--latent-cvae-progress-action-isolation",
+        type=int,
+        default=0,
+        help="V72: cut the action->progress->workspace echo; the per-step progress update no longer receives the raw action summary (zeros fed, parameter shapes unchanged).",
+    )
+    parser.add_argument(
+        "--latent-cvae-horizon-tokens",
+        type=int,
+        default=24,
+        help="Number of z-conditioned evidence workspace tokens supplied to MMDiT.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-noisy-query",
+        type=int,
+        default=0,
+        help="Condition workspace evidence queries on the current noisy flow state.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-trajectory-source",
+        type=int,
+        default=1,
+        help="Expose full-resolution trajectory canvas tokens as workspace values; set 0 for the x_t-echo ablation.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-global-sources",
+        type=int,
+        default=1,
+        help="Expose scan/lateral global condition summaries as workspace values; set 0 to keep them only in cond/z.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-layer-source",
+        type=int,
+        default=1,
+        help="Expose full layer_stack as a static workspace value; set 0 to force layer information through routed_layer/capsules.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-progress-value",
+        type=int,
+        default=1,
+        help="Expose progress as a workspace value; set 0 to use progress only as workspace step/query state.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-time-state",
+        type=int,
+        default=0,
+        help="Inject the existing z+time primary condition into workspace slots as explicit state.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-slot-time-state",
+        type=int,
+        default=1,
+        help="Make workspace time-state slot-aware instead of broadcasting one identical z+time vector to every workspace token.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-slot-time-scale",
+        type=float,
+        default=0.10,
+        help="Scale of the slot-specific component used by --latent-cvae-workspace-slot-time-state.",
+    )
+    parser.add_argument(
+        "--latent-cvae-workspace-controller",
+        type=int,
+        default=0,
+        help="V74B: use the central workspace controller for role bias, capacity, and query modulation.",
+    )
+    parser.add_argument(
+        "--latent-cvae-hierarchical-workspace",
+        type=int,
+        default=0,
+        help="V75: use temporary low evidence reads plus persistent role-separated stage memory.",
+    )
+    parser.add_argument(
+        "--latent-cvae-stage-slots",
+        type=int,
+        default=6,
+        help="Number of persistent stage-memory slots in the hierarchical workspace.",
+    )
+    parser.add_argument(
+        "--latent-cvae-stage-promote-scale-init",
+        type=float,
+        default=0.05,
+        help="Initial bounded residual scale for low-to-stage promotion.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-depth",
+        type=int,
+        default=3,
+        help="Number of distinct full-rank action MMDiT refinement blocks.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-refine-steps",
+        type=int,
+        default=3,
+        help="Maximum recurrent refinement budget; fixed, randomized-dwell, and adaptive execution share this cap.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-low-slots",
+        type=int,
+        default=25,
+        help="Role-stratified low evidence slots; 25 gives five slots to each owned role.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-stage-slots",
+        type=int,
+        default=6,
+        help="Persistent stage-content slots; role identity remains a separate tensor.",
+    )
     parser.add_argument("--hierarchical-mmdit-ffn-expansion", type=float, default=2.0)
     parser.add_argument("--hierarchical-mmdit-layer-grad-scale", type=float, default=0.0)
     parser.add_argument("--hierarchical-mmdit-source-grad-scale", type=float, default=0.0)
@@ -332,39 +741,169 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hierarchical-mmdit-noisy-gate-power", type=float, default=1.5)
     parser.add_argument("--hierarchical-mmdit-stage-promote-scale-init", type=float, default=0.05)
     parser.add_argument("--hierarchical-mmdit-output-init-std", type=float, default=1e-3)
-    parser.add_argument("--hierarchical-mmdit-operator-stages", type=int, default=6, help="Number of semantic stage-owned contraction paths, independent of refinement block count.")
-    parser.add_argument("--hierarchical-mmdit-operator-rank", type=int, default=32, help="Maximum number of ordered contraction directions per semantic stage.")
-    parser.add_argument("--hierarchical-mmdit-operator-groups", type=int, default=32, help="Number of ordered transparency groups; set equal to rank for channel-continuous depth.")
-    parser.add_argument("--hierarchical-mmdit-operator-depth-logit-init", type=float, default=2.0, help="Initial retained-depth logit after the exact identity warm-up.")
-    parser.add_argument("--hierarchical-mmdit-exit-logit-init", type=float, default=-4.0, help="Initial exit logit; negative keeps the controller on the continue path before evidence supports early exit.")
-    parser.add_argument("--hierarchical-mmdit-operator-contraction-warmup-steps", type=int, default=200, help="Steps for which contraction is pinned exactly to the original operation.")
-    parser.add_argument("--hierarchical-mmdit-operator-contraction-transition-steps", type=int, default=1500, help="Steps over which the learned nested contraction is introduced continuously.")
-    parser.add_argument("--hierarchical-mmdit-unified-controller", type=int, default=0, help="Use the recurrent multi-token controller for retrieval, promotion, operator selection, and compute value.")
-    parser.add_argument("--hierarchical-mmdit-control-tokens", type=int, default=8, help="Number of exchangeable recurrent controller state tokens.")
+    parser.add_argument(
+        "--hierarchical-mmdit-operator-stages",
+        type=int,
+        default=6,
+        help="Number of semantic stage-owned contraction paths, independent of refinement block count.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-operator-rank",
+        type=int,
+        default=32,
+        help="Maximum number of ordered contraction directions per semantic stage.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-operator-groups",
+        type=int,
+        default=32,
+        help="Number of ordered transparency groups; set equal to rank for channel-continuous depth.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-operator-depth-logit-init",
+        type=float,
+        default=2.0,
+        help="Initial retained-depth logit after the exact identity warm-up.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-exit-logit-init",
+        type=float,
+        default=-4.0,
+        help="Initial exit logit; negative keeps the controller on the continue path before evidence supports early exit.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-operator-contraction-warmup-steps",
+        type=int,
+        default=200,
+        help="Steps for which contraction is pinned exactly to the original operation.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-operator-contraction-transition-steps",
+        type=int,
+        default=1500,
+        help="Steps over which the learned nested contraction is introduced continuously.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-unified-controller",
+        type=int,
+        default=0,
+        help="Use the recurrent multi-token controller for retrieval, promotion, operator selection, and compute value.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-control-tokens",
+        type=int,
+        default=8,
+        help="Number of exchangeable recurrent controller state tokens.",
+    )
     parser.add_argument("--hierarchical-mmdit-controller-depth", type=int, default=2)
     parser.add_argument("--hierarchical-mmdit-controller-heads", type=int, default=8)
     parser.add_argument("--hierarchical-mmdit-controller-ffn-expansion", type=float, default=2.0)
-    parser.add_argument("--hierarchical-mmdit-operation-candidate-probes", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--hierarchical-mmdit-spectral-state", type=int, choices=[0, 1], default=0)
+    parser.add_argument(
+        "--hierarchical-mmdit-spectral-arm-start-fraction", type=float, default=0.16
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-spectral-gripper-start-fraction", type=float, default=0.33
+    )
+    parser.add_argument("--hierarchical-mmdit-spectral-temperature", type=float, default=1.5)
+    parser.add_argument("--hierarchical-mmdit-spectral-schedule-power", type=float, default=1.0)
+    parser.add_argument(
+        "--hierarchical-mmdit-spectral-controller-shift-limit", type=float, default=2.0
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-spectral-competition-loss-weight", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-spectral-competition-warmup-steps", type=int, default=200
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-operation-candidate-probes", type=int, choices=[0, 1], default=0
+    )
     parser.add_argument("--hierarchical-mmdit-operation-route-loss-weight", type=float, default=0.0)
     parser.add_argument("--hierarchical-mmdit-operation-route-temperature", type=float, default=0.5)
     parser.add_argument("--hierarchical-mmdit-operation-route-warmup-steps", type=int, default=0)
-    parser.add_argument("--hierarchical-mmdit-schedule-mode", choices=["fixed", "random_dwell"], default="fixed")
+    parser.add_argument("--hierarchical-mmdit-operation-value-loss-weight", type=float, default=0.0)
+    parser.add_argument("--hierarchical-mmdit-operation-value-huber-delta", type=float, default=0.1)
+    parser.add_argument(
+        "--hierarchical-mmdit-operation-value-reliability-scale", type=float, default=0.0
+    )
+    parser.add_argument("--hierarchical-mmdit-operation-value-warmup-steps", type=int, default=200)
+    parser.add_argument(
+        "--hierarchical-mmdit-dwell-mode",
+        choices=["fixed", "shadow", "learned"],
+        default="fixed",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-execution-contract",
+        choices=["legacy_stage_keep", "typed_block_budget"],
+        default="legacy_stage_keep",
+        help=(
+            "Execution ownership contract. typed_block_budget routes dwell over "
+            "real MMDiT blocks, keeps host LayerScale as the only residual "
+            "amplitude owner, and uses the controller only for compute depth."
+        ),
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-schedule-mode", choices=["fixed", "random_dwell"], default="fixed"
+    )
     parser.add_argument("--hierarchical-mmdit-random-prefix-probability", type=float, default=0.0)
     parser.add_argument(
         "--hierarchical-mmdit-exhaustion-mode",
         choices=["off", "shadow", "adaptive", "learned_shadow", "learned"],
         default="off",
     )
-    parser.add_argument("--hierarchical-mmdit-action-response-thresholds", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("T0", "T1", "T2"))
-    parser.add_argument("--hierarchical-mmdit-stage-pressure-thresholds", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("T0", "T1", "T2"))
+    parser.add_argument(
+        "--hierarchical-mmdit-action-response-thresholds",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        metavar=("T0", "T1", "T2"),
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-stage-pressure-thresholds",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        metavar=("T0", "T1", "T2"),
+    )
     parser.add_argument("--hierarchical-mmdit-action-response-floor", type=float, default=0.05)
     parser.add_argument("--hierarchical-mmdit-exhaustion-confirm-steps", type=int, default=2)
-    parser.add_argument("--hierarchical-mmdit-residual-scale-init", type=float, default=0.05, help="Base value used to initialize the original V77 host-gate profile.")
-    parser.add_argument("--hierarchical-mmdit-residual-scale-max", type=float, default=0.20, help="Bound for the original V77 host LayerScale gates; the sidecar has no amplitude control.")
-    parser.add_argument("--hierarchical-mmdit-output-contract", type=int, default=0, help="CR7 fallback: dedicated restricted contract for event/motion subheads only (zero-init injection; velocity head untouched).")
-    parser.add_argument("--hierarchical-mmdit-noisy-market-bias", type=int, default=0, help="Compatibility flag for v76a checkpoints; the serial clean decoder has no condition-group market.")
-    parser.add_argument("--hierarchical-mmdit-noisy-gate-mode", type=int, default=0, help="0 = no t-dependent noisy modulation; 1 = apply the t schedule inside noisy-branch low-rank channel amplitudes.")
-    parser.add_argument("--latent-cvae-z-probe", type=int, default=0, help="CR0: eval-time z zero/shuffle intervention probes on the legacy decoder (two extra decodes per eval batch; diagnostic runs only).")
+    parser.add_argument(
+        "--hierarchical-mmdit-residual-scale-init",
+        type=float,
+        default=0.05,
+        help="Base value used to initialize the original V77 host-gate profile.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-residual-scale-max",
+        type=float,
+        default=0.20,
+        help="Bound for the original V77 host LayerScale gates; the sidecar has no amplitude control.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-output-contract",
+        type=int,
+        default=0,
+        help="CR7 fallback: dedicated restricted contract for event/motion subheads only (zero-init injection; velocity head untouched).",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-noisy-market-bias",
+        type=int,
+        default=0,
+        help="Compatibility flag for v76a checkpoints; the serial clean decoder has no condition-group market.",
+    )
+    parser.add_argument(
+        "--hierarchical-mmdit-noisy-gate-mode",
+        type=int,
+        default=0,
+        help="0 = no t-dependent noisy modulation; 1 = apply the t schedule inside noisy-branch low-rank channel amplitudes.",
+    )
+    parser.add_argument(
+        "--latent-cvae-z-probe",
+        type=int,
+        default=0,
+        help="CR0: eval-time z zero/shuffle intervention probes on the legacy decoder (two extra decodes per eval batch; diagnostic runs only).",
+    )
     parser.add_argument("--adaptive-cvae-refine-steps", type=int, default=3)
     parser.add_argument("--adaptive-cvae-progress-memory", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-steps", type=int, default=6)
@@ -375,7 +914,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-cvae-prefix-detach", type=int, default=1)
     parser.add_argument("--adaptive-cvae-progress-z-injection", type=int, default=1)
     parser.add_argument("--adaptive-cvae-route-query-bias", type=int, default=1)
-    parser.add_argument("--adaptive-cvae-route-time-query", type=int, default=0, help="V74B: add the existing z+time primary condition to route queries only.")
+    parser.add_argument(
+        "--adaptive-cvae-route-time-query",
+        type=int,
+        default=0,
+        help="V74B: add the existing z+time primary condition to route queries only.",
+    )
     parser.add_argument("--adaptive-cvae-token-semantic-adapter", type=int, default=1)
     parser.add_argument("--adaptive-cvae-output-adapter", type=int, default=0)
     parser.add_argument("--adaptive-cvae-context-dropout", type=float, default=0.05)
@@ -427,12 +971,18 @@ def parse_args() -> argparse.Namespace:
         "hierarchical_mmdit_operation_route_loss_weight",
         "hierarchical_mmdit_operation_route_temperature",
         "hierarchical_mmdit_operation_route_warmup_steps",
+        "hierarchical_mmdit_operation_value_loss_weight",
+        "hierarchical_mmdit_operation_value_huber_delta",
+        "hierarchical_mmdit_operation_value_reliability_scale",
+        "latent_cvae_mmdit_dwell_mode",
     }
     for field in V39PolicyTrainerConfig.__dataclass_fields__:
         if field in explicitly_registered_trainer_fields:
             continue
         value = getattr(defaults, field)
-        parser.add_argument("--" + field.replace("_", "-"), dest=field, type=type(value), default=value)
+        parser.add_argument(
+            "--" + field.replace("_", "-"), dest=field, type=type(value), default=value
+        )
     # The V40 entry point is specifically the multi-layer intervention-latent
     # experiment; inheriting V39's midcut default silently skips that branch.
     parser.set_defaults(contract_mode="layer_adapter")
@@ -441,7 +991,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if args.torch_num_threads > 0:
         torch.set_num_threads(args.torch_num_threads)
     device = resolve_device(args.device)
@@ -465,14 +1017,20 @@ def main() -> None:
         return_images=args.condition_mode != "dinov2-cache",
     )
     dataset_config.validate()
-    min_length = dataset_config.world_horizon + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets)) + 2
-    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = load_data(
-        args,
-        min_length=min_length,
-        normalizer_mode=(action_norm.mode if action_norm is not None else args.normalizer),
-        action_normalizer=action_norm,
-        state_normalizer=state_norm,
-        splits=legacy_splits,
+    min_length = (
+        dataset_config.world_horizon
+        + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets))
+        + 2
+    )
+    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = (
+        load_data(
+            args,
+            min_length=min_length,
+            normalizer_mode=(action_norm.mode if action_norm is not None else args.normalizer),
+            action_normalizer=action_norm,
+            state_normalizer=state_norm,
+            splits=legacy_splits,
+        )
     )
     bases = {
         name: ObservedStateWindowDataset(
@@ -499,16 +1057,36 @@ def main() -> None:
         device=device,
         dtype=dtype,
     )
-    use_token_prefetch = bool(args.prefetch_dinov2_tokens and args.condition_mode == "dinov2-cache" and hasattr(conditioner, "store"))
+    use_token_prefetch = bool(
+        args.prefetch_dinov2_tokens
+        and args.condition_mode == "dinov2-cache"
+        and hasattr(conditioner, "store")
+    )
     if use_token_prefetch:
         token_store = conditioner.store  # type: ignore[attr-defined]
-        train_dataset = CachedTokenPolicyWindowDataset(bases["train"], token_store=token_store, future_anchors=int(args.future_anchors))
-        val_dataset = CachedTokenPolicyWindowDataset(bases["val"], token_store=token_store, future_anchors=int(args.future_anchors))
+        train_dataset = CachedTokenPolicyWindowDataset(
+            bases["train"], token_store=token_store, future_anchors=int(args.future_anchors)
+        )
+        val_dataset = CachedTokenPolicyWindowDataset(
+            bases["val"], token_store=token_store, future_anchors=int(args.future_anchors)
+        )
     else:
         train_dataset = PolicyWindowDataset(bases["train"])
         val_dataset = PolicyWindowDataset(bases["val"])
-    train_loader = make_loader(train_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device)
-    val_loader = make_loader(val_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+    train_loader = make_loader(
+        train_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=True,
+        device=device,
+    )
+    val_loader = make_loader(
+        val_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=False,
+        device=device,
+    )
     if patches is None:
         probe_sample = bases["train"][0]
         latent_dim, patches = infer_dense_geometry(conditioner, probe_sample, camera_names=cameras)
@@ -541,6 +1119,11 @@ def main() -> None:
         physical_decode_delta_blend=args.physical_decode_delta_blend,
         arm_flow_mode=args.arm_flow_mode,
         arm_noise_temporal_rho=args.arm_noise_temporal_rho,
+        arm_source_mode=args.arm_source_mode,
+        arm_source_scale=args.arm_source_scale,
+        arm_source_innovation_weight=args.arm_source_innovation_weight,
+        arm_source_velocity_weight=args.arm_source_velocity_weight,
+        arm_source_acceleration_weight=args.arm_source_acceleration_weight,
         gripper_field_dim=args.gripper_field_dim,
         gripper_field_mode=args.gripper_field_mode,
         visual_token_dim=int(latent_dim),
@@ -645,6 +1228,51 @@ def main() -> None:
         latent_cvae_mmdit_cond_update=args.latent_cvae_mmdit_cond_update,
         latent_cvae_mmdit_noisy_causal=args.latent_cvae_mmdit_noisy_causal,
         latent_cvae_mmdit_noisy_logit_gate=args.latent_cvae_mmdit_noisy_logit_gate,
+        latent_cvae_mmdit_residual_scale_max=args.latent_cvae_mmdit_residual_scale_max,
+        latent_cvae_mmdit_source_route_delta_max=args.latent_cvae_mmdit_source_route_delta_max,
+        latent_cvae_mmdit_noisy_correction_min=args.latent_cvae_mmdit_noisy_correction_min,
+        latent_cvae_mmdit_noisy_correction_max=args.latent_cvae_mmdit_noisy_correction_max,
+        latent_cvae_mmdit_noisy_correction_power=args.latent_cvae_mmdit_noisy_correction_power,
+        latent_cvae_mmdit_noisy_correction_logit_delta=(
+            args.latent_cvae_mmdit_noisy_correction_logit_delta
+        ),
+        latent_cvae_mmdit_controller_modulation_scale=(
+            args.latent_cvae_mmdit_controller_modulation_scale
+        ),
+        latent_cvae_mmdit_evidence_scale=args.latent_cvae_mmdit_evidence_scale,
+        latent_cvae_mmdit_noisy_scale=args.latent_cvae_mmdit_noisy_scale,
+        latent_cvae_mmdit_operator_capacity=args.latent_cvae_mmdit_operator_capacity,
+        latent_cvae_mmdit_operator_rank=args.latent_cvae_mmdit_operator_rank,
+        latent_cvae_mmdit_operator_groups=args.latent_cvae_mmdit_operator_groups,
+        latent_cvae_mmdit_operator_depth_logit_init=(
+            args.latent_cvae_mmdit_operator_depth_logit_init
+        ),
+        latent_cvae_mmdit_execution_controller=args.latent_cvae_mmdit_execution_controller,
+        latent_cvae_mmdit_dynamic_block_route=args.latent_cvae_mmdit_dynamic_block_route,
+        latent_cvae_mmdit_control_tokens=args.latent_cvae_mmdit_control_tokens,
+        latent_cvae_mmdit_controller_depth=args.latent_cvae_mmdit_controller_depth,
+        latent_cvae_mmdit_controller_heads=args.latent_cvae_mmdit_controller_heads,
+        latent_cvae_mmdit_controller_ffn_expansion=(
+            args.latent_cvae_mmdit_controller_ffn_expansion
+        ),
+        latent_cvae_mmdit_max_dwell=args.latent_cvae_mmdit_max_dwell,
+        latent_cvae_mmdit_dwell_mode=args.latent_cvae_mmdit_dwell_mode,
+        latent_cvae_mmdit_execution_soft_temperature=(
+            args.latent_cvae_mmdit_execution_soft_temperature
+        ),
+        latent_cvae_mmdit_identity_candidate=args.latent_cvae_mmdit_identity_candidate,
+        latent_cvae_mmdit_terminal_prior_weight=(
+            args.latent_cvae_mmdit_terminal_prior_weight
+        ),
+        latent_cvae_mmdit_execution_eval_policy=(
+            args.latent_cvae_mmdit_execution_eval_policy
+        ),
+        latent_cvae_mmdit_execution_warmup_steps=(
+            args.latent_cvae_mmdit_execution_warmup_steps
+        ),
+        latent_cvae_mmdit_execution_transition_steps=(
+            args.latent_cvae_mmdit_execution_transition_steps
+        ),
         latent_cvae_progress_action_isolation=args.latent_cvae_progress_action_isolation,
         latent_cvae_horizon_tokens=args.latent_cvae_horizon_tokens,
         latent_cvae_workspace_noisy_query=args.latent_cvae_workspace_noisy_query,
@@ -685,12 +1313,27 @@ def main() -> None:
         hierarchical_mmdit_controller_depth=args.hierarchical_mmdit_controller_depth,
         hierarchical_mmdit_controller_heads=args.hierarchical_mmdit_controller_heads,
         hierarchical_mmdit_controller_ffn_expansion=args.hierarchical_mmdit_controller_ffn_expansion,
+        hierarchical_mmdit_spectral_state=args.hierarchical_mmdit_spectral_state,
+        hierarchical_mmdit_spectral_arm_start_fraction=args.hierarchical_mmdit_spectral_arm_start_fraction,
+        hierarchical_mmdit_spectral_gripper_start_fraction=args.hierarchical_mmdit_spectral_gripper_start_fraction,
+        hierarchical_mmdit_spectral_temperature=args.hierarchical_mmdit_spectral_temperature,
+        hierarchical_mmdit_spectral_schedule_power=args.hierarchical_mmdit_spectral_schedule_power,
+        hierarchical_mmdit_spectral_controller_shift_limit=args.hierarchical_mmdit_spectral_controller_shift_limit,
+        hierarchical_mmdit_spectral_competition_loss_weight=args.hierarchical_mmdit_spectral_competition_loss_weight,
+        hierarchical_mmdit_spectral_competition_warmup_steps=args.hierarchical_mmdit_spectral_competition_warmup_steps,
         hierarchical_mmdit_operation_candidate_probes=args.hierarchical_mmdit_operation_candidate_probes,
+        hierarchical_mmdit_operation_value_warmup_steps=args.hierarchical_mmdit_operation_value_warmup_steps,
+        hierarchical_mmdit_dwell_mode=args.hierarchical_mmdit_dwell_mode,
+        hierarchical_mmdit_execution_contract=args.hierarchical_mmdit_execution_contract,
         hierarchical_mmdit_schedule_mode=args.hierarchical_mmdit_schedule_mode,
         hierarchical_mmdit_random_prefix_probability=args.hierarchical_mmdit_random_prefix_probability,
         hierarchical_mmdit_exhaustion_mode=args.hierarchical_mmdit_exhaustion_mode,
-        hierarchical_mmdit_action_response_thresholds=tuple(args.hierarchical_mmdit_action_response_thresholds),
-        hierarchical_mmdit_stage_pressure_thresholds=tuple(args.hierarchical_mmdit_stage_pressure_thresholds),
+        hierarchical_mmdit_action_response_thresholds=tuple(
+            args.hierarchical_mmdit_action_response_thresholds
+        ),
+        hierarchical_mmdit_stage_pressure_thresholds=tuple(
+            args.hierarchical_mmdit_stage_pressure_thresholds
+        ),
         hierarchical_mmdit_action_response_floor=args.hierarchical_mmdit_action_response_floor,
         hierarchical_mmdit_exhaustion_confirm_steps=args.hierarchical_mmdit_exhaustion_confirm_steps,
         hierarchical_mmdit_residual_scale_init=args.hierarchical_mmdit_residual_scale_init,
@@ -790,7 +1433,10 @@ def main() -> None:
                 f"{skipped_v74_time_keys[:8]} count={len(skipped_v74_time_keys)}",
                 flush=True,
             )
-        if str(args.final_action_decoder) == "hierarchical_mmdit_action":
+        if str(args.final_action_decoder) in {
+            "hierarchical_mmdit_action",
+            "evidence_latent_mmdit_action",
+        }:
             # A stage1 checkpoint supplies the trunk/contracts only.  Both the
             # historical CVAE tower and the short-lived competitive clean
             # decoder have incompatible ownership semantics and must start
@@ -799,13 +1445,15 @@ def main() -> None:
             obsolete_prefixes = (
                 "planner.latent_cvae_action_decoder.",
                 "planner.hierarchical_mmdit_action_decoder.",
+                "planner.evidence_latent_mmdit_action_decoder.",
             )
             skipped_obsolete_decoder = [
                 key for key in stage_state if key.startswith(obsolete_prefixes)
             ]
             if skipped_obsolete_decoder:
                 stage_state = {
-                    key: value for key, value in stage_state.items()
+                    key: value
+                    for key, value in stage_state.items()
                     if not key.startswith(obsolete_prefixes)
                 }
                 print(
@@ -813,7 +1461,9 @@ def main() -> None:
                     f"{skipped_obsolete_decoder[:8]} count={len(skipped_obsolete_decoder)}",
                     flush=True,
                 )
-        stage_state, skipped_shape_keys = _filter_shape_mismatched_state_dict(stage_state, system.state_dict())
+        stage_state, skipped_shape_keys = _filter_shape_mismatched_state_dict(
+            stage_state, system.state_dict()
+        )
         if skipped_shape_keys:
             print(
                 f"[v39-init] skipped shape-mismatched stage1 keys: "
@@ -824,13 +1474,23 @@ def main() -> None:
         if unexpected:
             raise ValueError(f"unexpected keys while loading --stage1-checkpoint: {unexpected[:8]}")
         if missing:
-            print(f"[v39-init] missing keys from stage1 checkpoint: {missing[:8]} count={len(missing)}", flush=True)
-    trainer = V39PolicyTrainerConfig(**{name: getattr(args, name) for name in V39PolicyTrainerConfig.__dataclass_fields__})
+            print(
+                f"[v39-init] missing keys from stage1 checkpoint: {missing[:8]} count={len(missing)}",
+                flush=True,
+            )
+    trainer = V39PolicyTrainerConfig(
+        **{name: getattr(args, name) for name in V39PolicyTrainerConfig.__dataclass_fields__}
+    )
     context = {
         "schema": "clearvla-v40-1-unified-intervention-latent-context-v1",
+        "source_fingerprint": _source_fingerprint(),
         "args": vars(args),
-        "legacy_context_checkpoint": None if args.legacy_context_checkpoint is None else str(args.legacy_context_checkpoint),
-        "stage1_checkpoint": None if args.stage1_checkpoint is None else str(args.stage1_checkpoint),
+        "legacy_context_checkpoint": None
+        if args.legacy_context_checkpoint is None
+        else str(args.legacy_context_checkpoint),
+        "stage1_checkpoint": None
+        if args.stage1_checkpoint is None
+        else str(args.stage1_checkpoint),
         "splits": {"train": train_ids, "val": val_ids, "test": test_ids},
         "dataset": asdict(dataset_config),
         "visual_geometry": visual_geometry,
@@ -849,28 +1509,69 @@ def main() -> None:
             "final_action_decoder": str(args.final_action_decoder),
             "gripper_field_mode": str(args.gripper_field_mode),
             "gripper_field_dim": int(args.gripper_field_dim),
-            "gripper_parseval_shared_native_noise": str(args.gripper_field_mode) == "parseval_temporal",
-            "gripper_parseval_all_channels_decode": str(args.gripper_field_mode) == "parseval_temporal",
+            "gripper_parseval_shared_native_noise": str(args.gripper_field_mode)
+            == "parseval_temporal",
+            "gripper_parseval_all_channels_decode": str(args.gripper_field_mode)
+            == "parseval_temporal",
             "arm_flow_mode": str(args.arm_flow_mode),
             "arm_noise_temporal_rho": float(args.arm_noise_temporal_rho),
+            "arm_source_mode": str(args.arm_source_mode),
+            "arm_source_scale": float(args.arm_source_scale),
+            "arm_source_scale_active": str(args.arm_source_mode) == "boundary_multiscale",
+            "arm_source_component_weights": {
+                "innovation": float(args.arm_source_innovation_weight),
+                "velocity": float(args.arm_source_velocity_weight),
+                "acceleration": float(args.arm_source_acceleration_weight),
+            },
+            "arm_source_condition_inputs": ["action_state"],
+            "arm_source_target_conditioned": False,
+            "arm_source_controller_conditioned": False,
+            "arm_source_single_rng_draw": True,
             "action_normalizer_fingerprint": _normalizer_fingerprint(action_norm),
             "arm_manifold_native_noise": str(args.arm_flow_mode) == "manifold_native",
             "arm_manifold_projected_sampling": str(args.arm_flow_mode) == "manifold_native",
-            "residual_action_flow_safe_start": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
-            "residual_action_flow_uses_v37_high_action_event_tokens": str(args.final_action_decoder) in {"residual_action_flow", "layered_residual_action_flow"},
-            "layered_residual_action_flow_layer_pair_injection": str(args.final_action_decoder) == "layered_residual_action_flow",
+            "residual_action_flow_safe_start": str(args.final_action_decoder)
+            in {"residual_action_flow", "layered_residual_action_flow"},
+            "residual_action_flow_uses_v37_high_action_event_tokens": str(args.final_action_decoder)
+            in {"residual_action_flow", "layered_residual_action_flow"},
+            "layered_residual_action_flow_layer_pair_injection": str(args.final_action_decoder)
+            == "layered_residual_action_flow",
             "latent_main_action_decoder": str(args.final_action_decoder) == "latent_main_action",
-            "latent_main_action_single_final_path": str(args.final_action_decoder) == "latent_main_action",
-            "latent_main_action_every_layer_summary_injected": str(args.final_action_decoder) == "latent_main_action",
-            "latent_main_action_no_legacy_velocity_base": str(args.final_action_decoder) == "latent_main_action",
-            "latent_main_action_horizon_dependent_depth": bool(int(args.latent_action_temporal_depth)) and str(args.final_action_decoder) == "latent_main_action",
-            "latent_cvae_action_decoder": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
-            "latent_cvae_single_final_path": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
-            "latent_cvae_no_legacy_velocity_base": str(args.final_action_decoder) in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
-            "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder) == "adaptive_recurrent_cvae_action",
-            "hierarchical_mmdit_action_decoder": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "latent_main_action_single_final_path": str(args.final_action_decoder)
+            == "latent_main_action",
+            "latent_main_action_every_layer_summary_injected": str(args.final_action_decoder)
+            == "latent_main_action",
+            "latent_main_action_no_legacy_velocity_base": str(args.final_action_decoder)
+            == "latent_main_action",
+            "latent_main_action_horizon_dependent_depth": bool(
+                int(args.latent_action_temporal_depth)
+            )
+            and str(args.final_action_decoder) == "latent_main_action",
+            "latent_cvae_action_decoder": str(args.final_action_decoder)
+            in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
+            "latent_cvae_single_final_path": str(args.final_action_decoder)
+            in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
+            "latent_cvae_no_legacy_velocity_base": str(args.final_action_decoder)
+            in {"latent_cvae_action", "adaptive_recurrent_cvae_action"},
+            "adaptive_recurrent_cvae_action_decoder": str(args.final_action_decoder)
+            == "adaptive_recurrent_cvae_action",
+            "hierarchical_mmdit_action_decoder": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "evidence_latent_mmdit_action_decoder": str(args.final_action_decoder)
+            == "evidence_latent_mmdit_action",
+            "evidence_latent_mmdit_native_time": str(args.final_action_decoder)
+            == "evidence_latent_mmdit_action",
+            "evidence_latent_mmdit_no_posterior": str(args.final_action_decoder)
+            == "evidence_latent_mmdit_action",
+            "evidence_latent_mmdit_no_dct": str(args.final_action_decoder)
+            == "evidence_latent_mmdit_action",
+            "evidence_latent_mmdit_read_only_evidence": str(args.final_action_decoder)
+            == "evidence_latent_mmdit_action",
+            "evidence_latent_mmdit_distinct_blocks": str(args.final_action_decoder)
+            == "evidence_latent_mmdit_action",
             "hierarchical_mmdit_native_time_input_chart": (
                 str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and not bool(int(args.hierarchical_mmdit_spectral_state))
                 and (
                     str(args.arm_flow_mode) == "manifold_native"
                     or str(args.gripper_field_mode) == "parseval_temporal"
@@ -878,6 +1579,7 @@ def main() -> None:
             ),
             "hierarchical_mmdit_native_time_tangent_output": (
                 str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and not bool(int(args.hierarchical_mmdit_spectral_state))
                 and (
                     str(args.arm_flow_mode) == "manifold_native"
                     or str(args.gripper_field_mode) == "parseval_temporal"
@@ -885,6 +1587,7 @@ def main() -> None:
             ),
             "hierarchical_mmdit_native_time_position_alignment": (
                 str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and not bool(int(args.hierarchical_mmdit_spectral_state))
                 and (
                     str(args.arm_flow_mode) == "manifold_native"
                     or str(args.gripper_field_mode) == "parseval_temporal"
@@ -892,12 +1595,16 @@ def main() -> None:
             ),
             "hierarchical_mmdit_field_coordinates_outside_token_network": (
                 str(args.final_action_decoder) == "hierarchical_mmdit_action"
+                and not bool(int(args.hierarchical_mmdit_spectral_state))
                 and str(args.arm_flow_mode) == "manifold_native"
                 and str(args.gripper_field_mode) == "parseval_temporal"
             ),
-            "hierarchical_mmdit_deterministic_intent_contracts": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_no_target_or_posterior_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_owned_five_role_evidence": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_deterministic_intent_contracts": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_no_target_or_posterior_path": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_owned_five_role_evidence": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_fixed_role_prior": (
                 str(args.final_action_decoder) == "hierarchical_mmdit_action"
                 and not bool(int(args.hierarchical_mmdit_unified_controller))
@@ -914,51 +1621,121 @@ def main() -> None:
                 str(args.final_action_decoder) == "hierarchical_mmdit_action"
                 and bool(int(args.hierarchical_mmdit_unified_controller))
             ),
-            "hierarchical_mmdit_manager_selector_only": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_mmdit_owns_final_consumption": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_serial_condition_composition": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_manager_selector_only": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_mmdit_owns_final_consumption": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_serial_condition_composition": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_competitive_condition_market": False,
-            "hierarchical_mmdit_identifiable_residual_gates": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_identifiable_residual_gates": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_conditional_low_rank_operators": False,
             "hierarchical_mmdit_stage_low_rank_adapters": False,
-            "hierarchical_mmdit_stage_nested_contraction": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_contraction_sidecar": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_post_gate_sidecar": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_shared_amplitude_owner": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_stage_nested_contraction": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_contraction_sidecar": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_post_gate_sidecar": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_shared_amplitude_owner": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_duplicate_amplitude_owner": False,
-            "hierarchical_mmdit_host_update_amplitude_owner": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_host_update_amplitude_owner": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_unified_update_amplitude_owner": False,
-            "hierarchical_mmdit_unified_relative_update_keep_owner": bool(
-                int(args.hierarchical_mmdit_unified_controller)
-            ),
+            "hierarchical_mmdit_unified_relative_update_keep_owner": False,
             "hierarchical_mmdit_shared_full_rank_path": False,
-            "hierarchical_mmdit_distinct_full_rank_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_step_conditioned_full_rank": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_distinct_full_rank_path": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_step_conditioned_full_rank": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_shared_base_scale_identifiable": False,
             "hierarchical_mmdit_shared_base_bias_free": False,
             "hierarchical_mmdit_scale_invariant_base_no_decay": False,
             "hierarchical_mmdit_mandatory_operator_writeback": False,
-            "hierarchical_mmdit_block_state_normalized": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_factor_cache_per_forward": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_dynamic_orthogonal_baseline": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_block_state_normalized": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_factor_cache_per_forward": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_dynamic_orthogonal_baseline": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_architecture_version": policy_config.hierarchical_mmdit_architecture_version,
             "hierarchical_mmdit_operator_stages": int(args.hierarchical_mmdit_operator_stages),
             "hierarchical_mmdit_operator_rank": int(args.hierarchical_mmdit_operator_rank),
             "hierarchical_mmdit_operator_groups": int(args.hierarchical_mmdit_operator_groups),
-            "hierarchical_mmdit_operator_boundary_identity": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_operator_nested_path": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_operator_continuous_depth": str(args.final_action_decoder) == "hierarchical_mmdit_action",
-            "hierarchical_mmdit_operator_nonexpansive": str(args.final_action_decoder) == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_boundary_identity": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_nested_path": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_continuous_depth": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
+            "hierarchical_mmdit_operator_nonexpansive": str(args.final_action_decoder)
+            == "hierarchical_mmdit_action",
             "hierarchical_mmdit_operator_post_contraction_renorm": False,
-            "hierarchical_mmdit_unified_controller": bool(int(args.hierarchical_mmdit_unified_controller)),
-            "hierarchical_mmdit_unified_operator_depth_owner": bool(int(args.hierarchical_mmdit_unified_controller)),
+            "hierarchical_mmdit_unified_controller": bool(
+                int(args.hierarchical_mmdit_unified_controller)
+            ),
+            "hierarchical_mmdit_unified_operator_depth_owner": bool(
+                int(args.hierarchical_mmdit_unified_controller)
+            ),
             "hierarchical_mmdit_control_tokens": int(args.hierarchical_mmdit_control_tokens),
             "hierarchical_mmdit_operation_candidate_probes": bool(
                 int(args.hierarchical_mmdit_operation_candidate_probes)
             ),
+            "hierarchical_mmdit_operation_value_warmup_steps": int(
+                args.hierarchical_mmdit_operation_value_warmup_steps
+            ),
+            "hierarchical_mmdit_dwell_mode": str(args.hierarchical_mmdit_dwell_mode),
+            "hierarchical_mmdit_execution_contract": str(
+                args.hierarchical_mmdit_execution_contract
+            ),
+            "hierarchical_mmdit_controller_owns_residual_amplitude": (
+                str(args.hierarchical_mmdit_execution_contract) == "legacy_stage_keep"
+            ),
+            "hierarchical_mmdit_value_candidates_are_blocks": (
+                str(args.hierarchical_mmdit_execution_contract) == "typed_block_budget"
+            ),
             "hierarchical_mmdit_controller_depth": int(args.hierarchical_mmdit_controller_depth),
             "hierarchical_mmdit_controller_heads": int(args.hierarchical_mmdit_controller_heads),
-            "hierarchical_mmdit_controller_ffn_expansion": float(args.hierarchical_mmdit_controller_ffn_expansion),
+            "hierarchical_mmdit_controller_ffn_expansion": float(
+                args.hierarchical_mmdit_controller_ffn_expansion
+            ),
+            "hierarchical_mmdit_spectral_state": bool(int(args.hierarchical_mmdit_spectral_state)),
+            "hierarchical_mmdit_spectral_bridge": bool(int(args.hierarchical_mmdit_spectral_state)),
+            "hierarchical_mmdit_spectral_velocity_target": bool(
+                int(args.hierarchical_mmdit_spectral_state)
+            ),
+            "hierarchical_mmdit_spectral_integrator": bool(
+                int(args.hierarchical_mmdit_spectral_state)
+            ),
+            "hierarchical_mmdit_spectral_tangent_head": bool(
+                int(args.hierarchical_mmdit_spectral_state)
+            ),
+            "hierarchical_mmdit_spectral_physical_view_only": bool(
+                int(args.hierarchical_mmdit_spectral_state)
+            ),
+            "hierarchical_mmdit_spectral_arm_start_fraction": float(
+                args.hierarchical_mmdit_spectral_arm_start_fraction
+            ),
+            "hierarchical_mmdit_spectral_gripper_start_fraction": float(
+                args.hierarchical_mmdit_spectral_gripper_start_fraction
+            ),
+            "hierarchical_mmdit_spectral_temperature": float(
+                args.hierarchical_mmdit_spectral_temperature
+            ),
+            "hierarchical_mmdit_spectral_schedule_power": float(
+                args.hierarchical_mmdit_spectral_schedule_power
+            ),
+            "hierarchical_mmdit_spectral_controller_shift_limit": float(
+                args.hierarchical_mmdit_spectral_controller_shift_limit
+            ),
+            "hierarchical_mmdit_spectral_competition_loss_weight": float(
+                args.hierarchical_mmdit_spectral_competition_loss_weight
+            ),
+            "hierarchical_mmdit_spectral_competition_warmup_steps": int(
+                args.hierarchical_mmdit_spectral_competition_warmup_steps
+            ),
             "hierarchical_mmdit_schedule_mode": str(args.hierarchical_mmdit_schedule_mode),
             "hierarchical_mmdit_exhaustion_mode": str(args.hierarchical_mmdit_exhaustion_mode),
             "hierarchical_mmdit_distinct_blocks": int(args.hierarchical_mmdit_depth),
@@ -973,23 +1750,46 @@ def main() -> None:
             "latent_cvae_mmdit_noisy_causal": bool(int(args.latent_cvae_mmdit_noisy_causal)),
             "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
             "latent_cvae_workspace_noisy_query": bool(int(args.latent_cvae_workspace_noisy_query)),
-            "latent_cvae_workspace_trajectory_source": bool(int(args.latent_cvae_workspace_trajectory_source)),
-            "latent_cvae_workspace_global_sources": bool(int(args.latent_cvae_workspace_global_sources)),
-            "latent_cvae_workspace_layer_source": bool(int(args.latent_cvae_workspace_layer_source)),
-            "latent_cvae_workspace_progress_value": bool(int(args.latent_cvae_workspace_progress_value)),
+            "latent_cvae_workspace_trajectory_source": bool(
+                int(args.latent_cvae_workspace_trajectory_source)
+            ),
+            "latent_cvae_workspace_global_sources": bool(
+                int(args.latent_cvae_workspace_global_sources)
+            ),
+            "latent_cvae_workspace_layer_source": bool(
+                int(args.latent_cvae_workspace_layer_source)
+            ),
+            "latent_cvae_workspace_progress_value": bool(
+                int(args.latent_cvae_workspace_progress_value)
+            ),
             "latent_cvae_workspace_time_state": bool(int(args.latent_cvae_workspace_time_state)),
-            "latent_cvae_workspace_slot_time_state": bool(int(args.latent_cvae_workspace_slot_time_state)),
-            "latent_cvae_workspace_slot_time_scale": float(args.latent_cvae_workspace_slot_time_scale),
+            "latent_cvae_workspace_slot_time_state": bool(
+                int(args.latent_cvae_workspace_slot_time_state)
+            ),
+            "latent_cvae_workspace_slot_time_scale": float(
+                args.latent_cvae_workspace_slot_time_scale
+            ),
             "latent_cvae_workspace_controller": bool(int(args.latent_cvae_workspace_controller)),
-            "latent_cvae_hierarchical_workspace": bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_hierarchical_workspace": bool(
+                int(args.latent_cvae_hierarchical_workspace)
+            ),
             "latent_cvae_stage_slots": int(args.latent_cvae_stage_slots),
-            "latent_cvae_stage_promote_scale_init": float(args.latent_cvae_stage_promote_scale_init),
+            "latent_cvae_stage_promote_scale_init": float(
+                args.latent_cvae_stage_promote_scale_init
+            ),
             "latent_cvae_z_primary_denoising": bool(int(args.latent_cvae_mmdit_decoder)),
             "latent_cvae_typed_evidence_workspace": bool(int(args.latent_cvae_mmdit_decoder)),
-            "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder)) and not bool(int(args.latent_cvae_hierarchical_workspace)),
-            "latent_cvae_workspace_no_action_feedback": bool(int(args.latent_cvae_hierarchical_workspace)),
-            "latent_cvae_stage_to_low_selector_only": bool(int(args.latent_cvae_hierarchical_workspace)),
-            "latent_cvae_stage_role_content_separated": bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_single_workspace_action_write": bool(int(args.latent_cvae_mmdit_decoder))
+            and not bool(int(args.latent_cvae_hierarchical_workspace)),
+            "latent_cvae_workspace_no_action_feedback": bool(
+                int(args.latent_cvae_hierarchical_workspace)
+            ),
+            "latent_cvae_stage_to_low_selector_only": bool(
+                int(args.latent_cvae_hierarchical_workspace)
+            ),
+            "latent_cvae_stage_role_content_separated": bool(
+                int(args.latent_cvae_hierarchical_workspace)
+            ),
             "adaptive_cvae_refine_steps": int(args.adaptive_cvae_refine_steps),
             "adaptive_cvae_progress_memory": int(args.adaptive_cvae_progress_memory),
             "adaptive_cvae_progress_steps": int(args.adaptive_cvae_progress_steps),
@@ -1004,13 +1804,17 @@ def main() -> None:
             "adaptive_cvae_token_semantic_adapter": int(args.adaptive_cvae_token_semantic_adapter),
             "adaptive_cvae_output_adapter": int(args.adaptive_cvae_output_adapter),
             "adaptive_cvae_context_dropout": float(args.adaptive_cvae_context_dropout),
-            "adaptive_cvae_route_entropy_floor_ratio": float(args.adaptive_cvae_route_entropy_floor_ratio),
+            "adaptive_cvae_route_entropy_floor_ratio": float(
+                args.adaptive_cvae_route_entropy_floor_ratio
+            ),
             "adaptive_cvae_function_adapters": int(args.adaptive_cvae_function_adapters),
             "adaptive_cvae_function_rank": int(args.adaptive_cvae_function_rank),
             "adaptive_cvae_progress_role_dim": int(args.adaptive_cvae_progress_role_dim),
             "adaptive_cvae_route_topk": int(args.adaptive_cvae_route_topk),
             "adaptive_cvae_route_sparsemax": int(args.adaptive_cvae_route_sparsemax),
-            "adaptive_cvae_route_adaptive_temperature": int(args.adaptive_cvae_route_adaptive_temperature),
+            "adaptive_cvae_route_adaptive_temperature": int(
+                args.adaptive_cvae_route_adaptive_temperature
+            ),
             "adaptive_cvae_route_min_temperature": float(args.adaptive_cvae_route_min_temperature),
             "adaptive_cvae_route_max_temperature": float(args.adaptive_cvae_route_max_temperature),
             "adaptive_cvae_role_query": int(args.adaptive_cvae_role_query),
@@ -1021,16 +1825,26 @@ def main() -> None:
             "adaptive_cvae_output_scale": float(args.adaptive_cvae_output_scale),
             "adaptive_cvae_context_capsules": int(args.adaptive_cvae_context_capsules),
             "adaptive_cvae_context_capsule_count": int(args.adaptive_cvae_context_capsule_count),
-            "adaptive_cvae_direct_condition_residual": int(args.adaptive_cvae_direct_condition_residual),
+            "adaptive_cvae_direct_condition_residual": int(
+                args.adaptive_cvae_direct_condition_residual
+            ),
             "adaptive_cvae_condition_strength": int(args.adaptive_cvae_condition_strength),
-            "adaptive_cvae_condition_strength_min": float(args.adaptive_cvae_condition_strength_min),
-            "adaptive_cvae_condition_strength_max": float(args.adaptive_cvae_condition_strength_max),
-            "adaptive_cvae_condition_strength_init": float(args.adaptive_cvae_condition_strength_init),
+            "adaptive_cvae_condition_strength_min": float(
+                args.adaptive_cvae_condition_strength_min
+            ),
+            "adaptive_cvae_condition_strength_max": float(
+                args.adaptive_cvae_condition_strength_max
+            ),
+            "adaptive_cvae_condition_strength_init": float(
+                args.adaptive_cvae_condition_strength_init
+            ),
             "adaptive_cvae_micro_control": int(args.adaptive_cvae_micro_control),
             "adaptive_cvae_micro_refine_block": int(args.adaptive_cvae_micro_refine_block),
             "adaptive_cvae_micro_supervision": int(args.adaptive_cvae_micro_supervision),
             "adaptive_cvae_micro_heun": int(args.adaptive_cvae_micro_heun),
-            "adaptive_cvae_micro_monotonic_progress": int(args.adaptive_cvae_micro_monotonic_progress),
+            "adaptive_cvae_micro_monotonic_progress": int(
+                args.adaptive_cvae_micro_monotonic_progress
+            ),
             "adaptive_cvae_micro_min_step": float(args.adaptive_cvae_micro_min_step),
             "adaptive_cvae_micro_max_step": float(args.adaptive_cvae_micro_max_step),
             "adaptive_cvae_micro_step_init": float(args.adaptive_cvae_micro_step_init),
@@ -1039,8 +1853,12 @@ def main() -> None:
             "adaptive_cvae_micro_kd_max": float(args.adaptive_cvae_micro_kd_max),
             "adaptive_cvae_micro_kd_init": float(args.adaptive_cvae_micro_kd_init),
             "adaptive_cvae_micro_update_scale": float(args.adaptive_cvae_micro_update_scale),
-            "adaptive_cvae_micro_refine_block_scale": float(args.adaptive_cvae_micro_refine_block_scale),
-            "adaptive_cvae_micro_progress_distance_scale": float(args.adaptive_cvae_micro_progress_distance_scale),
+            "adaptive_cvae_micro_refine_block_scale": float(
+                args.adaptive_cvae_micro_refine_block_scale
+            ),
+            "adaptive_cvae_micro_progress_distance_scale": float(
+                args.adaptive_cvae_micro_progress_distance_scale
+            ),
             "latent_cvae_z_dim": int(args.latent_cvae_z_dim),
             "latent_cvae_decoder_depth": int(args.latent_cvae_decoder_depth),
             "latent_cvae_layer_memory": int(args.latent_cvae_layer_memory),
@@ -1057,24 +1875,65 @@ def main() -> None:
             "latent_cvae_noisy_gate_power": float(args.latent_cvae_noisy_gate_power),
             "latent_cvae_layer_scan": int(args.latent_cvae_layer_scan),
             "latent_cvae_layer_scan_alpha": float(args.latent_cvae_layer_scan_alpha),
-            "latent_cvae_mmdit_decoder": int(args.latent_cvae_mmdit_decoder),
             "latent_cvae_mmdit_depth": int(args.latent_cvae_mmdit_depth),
             "latent_cvae_mmdit_cond_update": int(args.latent_cvae_mmdit_cond_update),
-            "latent_cvae_mmdit_noisy_causal": int(args.latent_cvae_mmdit_noisy_causal),
-            "latent_cvae_horizon_tokens": int(args.latent_cvae_horizon_tokens),
-            "latent_cvae_workspace_noisy_query": int(args.latent_cvae_workspace_noisy_query),
-            "latent_cvae_workspace_trajectory_source": int(args.latent_cvae_workspace_trajectory_source),
-            "latent_cvae_workspace_global_sources": int(args.latent_cvae_workspace_global_sources),
-            "latent_cvae_workspace_layer_source": int(args.latent_cvae_workspace_layer_source),
-            "latent_cvae_workspace_progress_value": int(args.latent_cvae_workspace_progress_value),
-            "latent_cvae_workspace_time_state": int(args.latent_cvae_workspace_time_state),
-            "latent_cvae_workspace_slot_time_state": int(args.latent_cvae_workspace_slot_time_state),
-            "latent_cvae_workspace_slot_time_scale": float(args.latent_cvae_workspace_slot_time_scale),
-            "latent_cvae_workspace_controller": int(args.latent_cvae_workspace_controller),
-            "latent_cvae_hierarchical_workspace": int(args.latent_cvae_hierarchical_workspace),
-            "latent_cvae_stage_slots": int(args.latent_cvae_stage_slots),
-            "latent_cvae_stage_promote_scale_init": float(args.latent_cvae_stage_promote_scale_init),
-            "adaptive_cvae_route_time_query": int(args.adaptive_cvae_route_time_query),
+            "latent_cvae_mmdit_residual_scale_max": float(
+                args.latent_cvae_mmdit_residual_scale_max
+            ),
+            "latent_cvae_mmdit_noisy_correction_min": float(
+                args.latent_cvae_mmdit_noisy_correction_min
+            ),
+            "latent_cvae_mmdit_noisy_correction_max": float(
+                args.latent_cvae_mmdit_noisy_correction_max
+            ),
+            "latent_cvae_mmdit_noisy_correction_power": float(
+                args.latent_cvae_mmdit_noisy_correction_power
+            ),
+            "latent_cvae_mmdit_noisy_correction_logit_delta": float(
+                args.latent_cvae_mmdit_noisy_correction_logit_delta
+            ),
+            "latent_cvae_mmdit_controller_modulation_scale": float(
+                args.latent_cvae_mmdit_controller_modulation_scale
+            ),
+            "latent_cvae_mmdit_operator_capacity": int(
+                args.latent_cvae_mmdit_operator_capacity
+            ),
+            "latent_cvae_mmdit_operator_rank": int(args.latent_cvae_mmdit_operator_rank),
+            "latent_cvae_mmdit_operator_groups": int(args.latent_cvae_mmdit_operator_groups),
+            "latent_cvae_mmdit_operator_depth_logit_init": float(
+                args.latent_cvae_mmdit_operator_depth_logit_init
+            ),
+            "latent_cvae_mmdit_execution_controller": int(
+                args.latent_cvae_mmdit_execution_controller
+            ),
+            "latent_cvae_mmdit_dynamic_block_route": int(
+                args.latent_cvae_mmdit_dynamic_block_route
+            ),
+            "latent_cvae_mmdit_control_tokens": int(args.latent_cvae_mmdit_control_tokens),
+            "latent_cvae_mmdit_controller_depth": int(
+                args.latent_cvae_mmdit_controller_depth
+            ),
+            "latent_cvae_mmdit_controller_heads": int(args.latent_cvae_mmdit_controller_heads),
+            "latent_cvae_mmdit_controller_ffn_expansion": float(
+                args.latent_cvae_mmdit_controller_ffn_expansion
+            ),
+            "latent_cvae_mmdit_max_dwell": int(args.latent_cvae_mmdit_max_dwell),
+            "latent_cvae_mmdit_dwell_mode": str(args.latent_cvae_mmdit_dwell_mode),
+            "latent_cvae_mmdit_identity_candidate": int(
+                args.latent_cvae_mmdit_identity_candidate
+            ),
+            "latent_cvae_mmdit_terminal_prior_weight": float(
+                args.latent_cvae_mmdit_terminal_prior_weight
+            ),
+            "latent_cvae_mmdit_execution_eval_policy": str(
+                args.latent_cvae_mmdit_execution_eval_policy
+            ),
+            "latent_cvae_mmdit_execution_warmup_steps": int(
+                args.latent_cvae_mmdit_execution_warmup_steps
+            ),
+            "latent_cvae_mmdit_execution_transition_steps": int(
+                args.latent_cvae_mmdit_execution_transition_steps
+            ),
             "latent_action_decoder_depth": int(args.latent_action_decoder_depth),
             "latent_action_layer_schedule": str(args.latent_action_layer_schedule),
             "latent_action_visual_memory": int(args.latent_action_visual_memory),
@@ -1088,7 +1947,9 @@ def main() -> None:
             "latent_action_mid_depth": int(args.latent_action_mid_depth),
             "action_flow_residual_depth": int(args.action_flow_residual_depth),
             "action_flow_residual_max_scale": float(args.action_flow_residual_max_scale),
-            "action_flow_residual_layer_pair_schedule": str(args.action_flow_residual_layer_pair_schedule),
+            "action_flow_residual_layer_pair_schedule": str(
+                args.action_flow_residual_layer_pair_schedule
+            ),
             "action_flow_residual_layer_detach": bool(args.action_flow_residual_layer_detach),
             "action_flow_residual_stage_router": bool(args.action_flow_residual_stage_router),
             "midcut_layer": int(args.midcut_layer),

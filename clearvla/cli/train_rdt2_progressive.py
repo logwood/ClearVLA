@@ -19,13 +19,20 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     serializable,
 )
 from clearvla.experiments.classic_policy_lab.dataset import RDT2FMDatasetConfig, RDT2FMWindowDataset
-from clearvla.experiments.classic_policy_lab.rdt2_progressive import ProgressiveRDT2FM, ProgressiveRDT2FMConfig
-from clearvla.experiments.classic_policy_lab.rdt2_progressive_runtime import train_progressive_rdt2_fm
+from clearvla.experiments.classic_policy_lab.rdt2_progressive import (
+    ProgressiveRDT2FM,
+    ProgressiveRDT2FMConfig,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_progressive_runtime import (
+    train_progressive_rdt2_fm,
+)
 from clearvla.experiments.classic_policy_lab.trainer import RDTTrainerConfig
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train the v19 history-anchored progressive RDT2-FM policy")
+    p = argparse.ArgumentParser(
+        description="Train the v19 history-anchored progressive RDT2-FM policy"
+    )
     add_data_args(p, default_resize=(224, 224))
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--prediction-horizon", type=int, default=24)
@@ -36,7 +43,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--zero-state", action="store_true")
     p.add_argument("--normalizer", choices=["identity", "limits", "zscore"], default="zscore")
 
-    p.add_argument("--model-size", choices=["small", "medium", "official", "custom"], default="medium")
+    p.add_argument(
+        "--model-size", choices=["small", "medium", "official", "custom"], default="medium"
+    )
     p.add_argument("--hidden-size", type=int, default=None)
     p.add_argument("--depth", type=int, default=None)
     p.add_argument("--heads", type=int, default=None)
@@ -46,13 +55,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--norm-eps", type=float, default=1e-5)
     p.add_argument("--inference-steps", type=int, default=5)
     p.add_argument("--no-flash-attn", action="store_true")
-    p.add_argument("--base-checkpoint", type=Path, default=None, help="Optional v18 ClearVLA checkpoint or released RDT2-FM state dict; only shape-compatible tensors transfer")
+    p.add_argument(
+        "--base-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional v18 ClearVLA checkpoint or released RDT2-FM state dict; only shape-compatible tensors transfer",
+    )
 
-    p.add_argument("--condition-mode", choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"], default="dinov2-cache")
+    p.add_argument(
+        "--condition-mode",
+        choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"],
+        default="dinov2-cache",
+    )
     p.add_argument("--instruction", default="")
     p.add_argument("--debug-cond-tokens", type=int, default=8)
     p.add_argument("--debug-dense-token-dim", type=int, default=32)
-    p.add_argument("--dense-condition-adaptor", choices=["none", "linear", "mlp2x_silu"], default="mlp2x_silu")
+    p.add_argument(
+        "--dense-condition-adaptor", choices=["none", "linear", "mlp2x_silu"], default="mlp2x_silu"
+    )
     p.add_argument("--dinov2-model", default="facebook/dinov2-base")
     p.add_argument("--dinov2-local-files-only", action="store_true")
     p.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
@@ -88,7 +108,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta2", type=float, default=0.999)
     p.add_argument("--adam-eps", type=float, default=1e-8)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant")
+    p.add_argument(
+        "--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant"
+    )
     p.add_argument("--warmup-steps", type=int, default=0)
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=10)
@@ -102,10 +124,34 @@ def parse_args() -> argparse.Namespace:
 def _resolve_progressive_shape(args: argparse.Namespace) -> None:
     _resolve_model_shape(args)
     defaults = {
-        "small": {"history_hidden_size": 64, "fast_exit_layer": 2, "prefix_exit_layer": 4, "visual_start_layer": 2, "modulation_rank": 64},
-        "medium": {"history_hidden_size": 128, "fast_exit_layer": 2, "prefix_exit_layer": 4, "visual_start_layer": 2, "modulation_rank": 128},
-        "official": {"history_hidden_size": 256, "fast_exit_layer": 4, "prefix_exit_layer": 8, "visual_start_layer": 4, "modulation_rank": 256},
-        "custom": {"history_hidden_size": 64, "fast_exit_layer": max(1, args.depth // 3), "prefix_exit_layer": max(1, 2 * args.depth // 3), "visual_start_layer": max(1, args.depth // 3), "modulation_rank": max(16, args.hidden_size // 4)},
+        "small": {
+            "history_hidden_size": 64,
+            "fast_exit_layer": 2,
+            "prefix_exit_layer": 4,
+            "visual_start_layer": 2,
+            "modulation_rank": 64,
+        },
+        "medium": {
+            "history_hidden_size": 128,
+            "fast_exit_layer": 2,
+            "prefix_exit_layer": 4,
+            "visual_start_layer": 2,
+            "modulation_rank": 128,
+        },
+        "official": {
+            "history_hidden_size": 256,
+            "fast_exit_layer": 4,
+            "prefix_exit_layer": 8,
+            "visual_start_layer": 4,
+            "modulation_rank": 256,
+        },
+        "custom": {
+            "history_hidden_size": 64,
+            "fast_exit_layer": max(1, args.depth // 3),
+            "prefix_exit_layer": max(1, 2 * args.depth // 3),
+            "visual_start_layer": max(1, args.depth // 3),
+            "modulation_rank": max(16, args.hidden_size // 4),
+        },
     }[args.model_size]
     for name, value in defaults.items():
         if getattr(args, name) is None:
@@ -118,13 +164,23 @@ def main() -> None:
     _resolve_progressive_shape(args)
     if args.torch_num_threads > 0:
         torch.set_num_threads(args.torch_num_threads)
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     from clearvla.experiments.classic_policy_lab.cli_common import resolve_device
+
     device = resolve_device(args.device)
     dtype = _dtype(args.dtype, device)
-    min_length = args.prediction_horizon + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset)) + 1
-    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
-    action_dim = int(episodes[0].actions_raw.shape[1]); state_dim = int(episodes[0].states_raw.shape[1])
+    min_length = (
+        args.prediction_horizon
+        + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset))
+        + 1
+    )
+    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = (
+        load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
+    )
+    action_dim = int(episodes[0].actions_raw.shape[1])
+    state_dim = int(episodes[0].states_raw.shape[1])
     cameras = tuple(str(value) for value in args.cameras)
     data_config = RDT2FMDatasetConfig(
         prediction_horizon=args.prediction_horizon,
@@ -134,39 +190,100 @@ def main() -> None:
         stride=args.stride,
         zero_state=args.zero_state,
     )
-    train_ds = RDT2FMWindowDataset(episodes, train_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    val_ds = RDT2FMWindowDataset(episodes, val_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    train_loader = make_loader(train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device)
-    val_loader = make_loader(val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
-    conditioner = _build_conditioner(args, episodes=episodes, cameras=cameras, device=device, dtype=dtype, depth=args.depth, kv_heads=args.kv_heads, head_dim=args.hidden_size // args.heads)
-    dense_dim = int(getattr(conditioner, "token_dim")) if hasattr(conditioner, "token_dim") else None
-    adaptor = None if dense_dim is None or args.dense_condition_adaptor == "none" else args.dense_condition_adaptor
+    train_ds = RDT2FMWindowDataset(
+        episodes,
+        train_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    val_ds = RDT2FMWindowDataset(
+        episodes,
+        val_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    train_loader = make_loader(
+        train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device
+    )
+    val_loader = make_loader(
+        val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
+    conditioner = _build_conditioner(
+        args,
+        episodes=episodes,
+        cameras=cameras,
+        device=device,
+        dtype=dtype,
+        depth=args.depth,
+        kv_heads=args.kv_heads,
+        head_dim=args.hidden_size // args.heads,
+    )
+    dense_dim = (
+        int(getattr(conditioner, "token_dim")) if hasattr(conditioner, "token_dim") else None
+    )
+    adaptor = (
+        None
+        if dense_dim is None or args.dense_condition_adaptor == "none"
+        else args.dense_condition_adaptor
+    )
     if dense_dim is not None and adaptor is None and dense_dim != args.hidden_size:
-        raise ValueError("dense condition tokens require an adaptor when token width differs from hidden size")
+        raise ValueError(
+            "dense condition tokens require an adaptor when token width differs from hidden size"
+        )
     config = ProgressiveRDT2FMConfig(
-        action_dim=action_dim, state_dim=state_dim, prediction_horizon=args.prediction_horizon,
-        hidden_size=args.hidden_size, depth=args.depth, num_heads=args.heads, num_kv_heads=args.kv_heads,
-        num_register_tokens=args.register_tokens, norm_eps=args.norm_eps, multiple_of=args.multiple_of,
-        use_flash_attn=not args.no_flash_attn, num_inference_timesteps=args.inference_steps,
-        lang_adaptor=adaptor, lang_token_dim=dense_dim,
-        history_hidden_size=args.history_hidden_size, history_layers=args.history_layers,
-        prior_residual_scale=args.prior_residual_scale, history_noise_std=args.history_noise_std,
-        fast_exit_layer=args.fast_exit_layer, prefix_exit_layer=args.prefix_exit_layer,
-        prefix_length=args.prefix_length, visual_start_layer=args.visual_start_layer,
+        action_dim=action_dim,
+        state_dim=state_dim,
+        prediction_horizon=args.prediction_horizon,
+        hidden_size=args.hidden_size,
+        depth=args.depth,
+        num_heads=args.heads,
+        num_kv_heads=args.kv_heads,
+        num_register_tokens=args.register_tokens,
+        norm_eps=args.norm_eps,
+        multiple_of=args.multiple_of,
+        use_flash_attn=not args.no_flash_attn,
+        num_inference_timesteps=args.inference_steps,
+        lang_adaptor=adaptor,
+        lang_token_dim=dense_dim,
+        history_hidden_size=args.history_hidden_size,
+        history_layers=args.history_layers,
+        prior_residual_scale=args.prior_residual_scale,
+        history_noise_std=args.history_noise_std,
+        fast_exit_layer=args.fast_exit_layer,
+        prefix_exit_layer=args.prefix_exit_layer,
+        prefix_length=args.prefix_length,
+        visual_start_layer=args.visual_start_layer,
         modulation_rank=args.modulation_rank,
-        first_position_weight=args.first_position_weight, first4_position_weight=args.first4_position_weight,
-        first8_position_weight=args.first8_position_weight, tail_position_weight=args.tail_position_weight,
-        prior_loss_weight=args.prior_loss_weight, fast_exit_loss_weight=args.fast_exit_loss_weight,
-        prefix_exit_loss_weight=args.prefix_exit_loss_weight, full_flow_loss_weight=args.full_flow_loss_weight,
+        first_position_weight=args.first_position_weight,
+        first4_position_weight=args.first4_position_weight,
+        first8_position_weight=args.first8_position_weight,
+        tail_position_weight=args.tail_position_weight,
+        prior_loss_weight=args.prior_loss_weight,
+        fast_exit_loss_weight=args.fast_exit_loss_weight,
+        prefix_exit_loss_weight=args.prefix_exit_loss_weight,
+        full_flow_loss_weight=args.full_flow_loss_weight,
     )
     model = ProgressiveRDT2FM(config, dtype=dtype).to(device=device, dtype=dtype)
     load_report = None
     if args.base_checkpoint is not None:
         load_report = model.load_compatible_reference_state_dict(args.base_checkpoint)
     trainer = RDTTrainerConfig(
-        epochs=1 if args.dry_run else args.epochs, lr=args.lr, weight_decay=args.weight_decay,
-        beta1=args.beta1, beta2=args.beta2, eps=args.adam_eps, grad_clip=args.grad_clip,
-        scheduler=args.scheduler, warmup_steps=args.warmup_steps, min_lr_ratio=args.min_lr_ratio,
+        epochs=1 if args.dry_run else args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        beta1=args.beta1,
+        beta2=args.beta2,
+        eps=args.adam_eps,
+        grad_clip=args.grad_clip,
+        scheduler=args.scheduler,
+        warmup_steps=args.warmup_steps,
+        min_lr_ratio=args.min_lr_ratio,
         log_every=1 if args.dry_run else args.log_every,
         max_train_batches=1 if args.dry_run else args.max_train_batches,
         max_val_batches=1 if args.dry_run else args.max_val_batches,
@@ -180,16 +297,29 @@ def main() -> None:
         "data": serializable(vars(data_config)),
         "model": model.config_dict(),
         "trainer": serializable(vars(trainer)),
-        "conditioning": {"mode": args.condition_mode, "dense_token_dim": dense_dim, "instruction": args.instruction},
+        "conditioning": {
+            "mode": args.condition_mode,
+            "dense_token_dim": dense_dim,
+            "instruction": args.instruction,
+        },
         "base_load": load_report,
         "parameters": model.parameter_count(),
-        "train_windows": len(train_ds), "val_windows": len(val_ds),
+        "train_windows": len(train_ds),
+        "val_windows": len(val_ds),
     }
     print_context(context)
     train_progressive_rdt2_fm(
-        model=model, conditioner=conditioner, train_loader=train_loader, val_loader=val_loader,
-        device=device, out_dir=args.out_dir, trainer=trainer, action_normalizer=action_norm,
-        state_normalizer=state_norm, context=context, inference_steps=args.inference_steps,
+        model=model,
+        conditioner=conditioner,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        out_dir=args.out_dir,
+        trainer=trainer,
+        action_normalizer=action_norm,
+        state_normalizer=state_norm,
+        context=context,
+        inference_steps=args.inference_steps,
         instruction=args.instruction,
     )
     if args.dry_run:

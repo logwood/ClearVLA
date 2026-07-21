@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import builtins
 from dataclasses import is_dataclass
+import math
 from pathlib import Path
 import symtable
 import unittest
@@ -28,7 +29,11 @@ from clearvla.experiments.observed_state_lab.policy_v38 import (
     DenseVisualMemory,
 )
 from clearvla.policy import NestedLowRankContractionBank as ExportedNestedLowRankContractionBank
-from clearvla.policy.gauges import fp32_diagnostic, time_stratified_attention
+from clearvla.policy.gauges import (
+    fp32_diagnostic,
+    masked_categorical_entropy,
+    time_stratified_attention,
+)
 from clearvla.policy.config import V39PolicyConfig as PackagedV39PolicyConfig
 from clearvla.policy.decoder import (
     HierarchicalMMDiTActionDecoder as PackagedHierarchicalMMDiTActionDecoder,
@@ -53,7 +58,9 @@ from clearvla.policy.trunk_primitives import (
     ControlledResidualLatentDynamics as PackagedControlledResidualLatentDynamics,
     DenseVisualMemory as PackagedDenseVisualMemory,
 )
-from clearvla.policy.trunk import TemporalMidcutWorldActionDiT as PackagedTemporalMidcutWorldActionDiT
+from clearvla.policy.trunk import (
+    TemporalMidcutWorldActionDiT as PackagedTemporalMidcutWorldActionDiT,
+)
 from clearvla.policy.system import V39PolicySystem as PackagedV39PolicySystem
 
 
@@ -87,7 +94,9 @@ class PolicyPackageBoundaryTest(unittest.TestCase):
             AdaptiveRecurrentCVAEActionDecoder,
             PackagedAdaptiveRecurrentCVAEActionDecoder,
         )
-        self.assertIs(HierarchicalLatentMainActionDecoder, PackagedHierarchicalLatentMainActionDecoder)
+        self.assertIs(
+            HierarchicalLatentMainActionDecoder, PackagedHierarchicalLatentMainActionDecoder
+        )
         self.assertIs(LatentCVAEActionDecoder, PackagedLatentCVAEActionDecoder)
         self.assertIs(LayeredV37StyleResidualActionFlowDenoiser, PackagedLayeredResidualDecoder)
         self.assertIs(SemanticEvidenceWorkspace, PackagedSemanticEvidenceWorkspace)
@@ -186,7 +195,11 @@ class PolicyPackageBoundaryTest(unittest.TestCase):
         low = noisy.square()
         stage = workspace.square()
         expected = LatentCVAEActionDecoder._time_stratified_attention(
-            time, noisy, workspace, low, stage,
+            time,
+            noisy,
+            workspace,
+            low,
+            stage,
         )
         actual = time_stratified_attention(time, noisy, workspace, low, stage)
         self.assertEqual(list(expected), list(actual))
@@ -203,6 +216,30 @@ class PolicyPackageBoundaryTest(unittest.TestCase):
         self.assertFalse(diagnostic.requires_grad)
         self.assertFalse(gram.requires_grad)
         self.assertIsNone(source.grad)
+
+    def test_masked_entropy_ignores_invalid_logits_and_empty_rows(self) -> None:
+        logits = torch.tensor(
+            [
+                [0.0, 0.0, torch.finfo(torch.float32).min],
+                [3.0, -2.0, 7.0],
+                [1.0, 2.0, 3.0],
+            ]
+        )
+        valid = torch.tensor(
+            [
+                [True, True, False],
+                [True, False, False],
+                [False, False, False],
+            ]
+        )
+        entropy = masked_categorical_entropy(logits, valid)
+        self.assertTrue(bool(torch.isfinite(entropy).all()))
+        torch.testing.assert_close(
+            entropy,
+            torch.tensor([math.log(2.0), 0.0, 0.0]),
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
 
 if __name__ == "__main__":

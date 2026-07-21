@@ -17,7 +17,10 @@ from torch.utils.data import DataLoader
 
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import RDT2Conditioner
-from clearvla.experiments.dynamic_world_lab.shared_runtime import encode_current_tokens, gripper_transition_metrics
+from clearvla.experiments.dynamic_world_lab.shared_runtime import (
+    encode_current_tokens,
+    gripper_transition_metrics,
+)
 
 from .policy_v36_3 import V363PolicySystem
 from .world_runtime import autocast_context, grad_norm, jsonable, scheduler
@@ -79,15 +82,31 @@ def prepare_v363_policy_sample(
     dtype: torch.dtype,
 ) -> dict[str, Tensor]:
     visual = encode_current_tokens(
-        sample, conditioner=conditioner, model_config=system.world_config,
-        camera_names=camera_names, device=device, dtype=dtype,
+        sample,
+        conditioner=conditioner,
+        model_config=system.world_config,
+        camera_names=camera_names,
+        device=device,
+        dtype=dtype,
     )
     keys = (
-        "state", "state_raw", "action_state", "history_state", "executed_action_history",
-        "executed_action_history_raw", "policy_action", "policy_action_raw",
+        "state",
+        "state_raw",
+        "action_state",
+        "history_state",
+        "executed_action_history",
+        "executed_action_history_raw",
+        "policy_action",
+        "policy_action_raw",
     )
     out = {key: sample[key].to(device=device, non_blocking=True) for key in keys}
-    for key in ("state", "action_state", "history_state", "executed_action_history", "policy_action"):
+    for key in (
+        "state",
+        "action_state",
+        "history_state",
+        "executed_action_history",
+        "policy_action",
+    ):
         out[key] = out[key].float()
     compute_dtype = dtype if device.type == "cuda" else torch.float32
     out["visual"] = visual.to(dtype=compute_dtype)
@@ -102,7 +121,9 @@ def position_weights(config, trainer: V363PolicyTrainerConfig, device: torch.dev
     return weight / weight.mean()
 
 
-def gripper_event_labels(*, target_raw: Tensor, current_raw: Tensor, gripper_index: int, threshold: float) -> Tensor:
+def gripper_event_labels(
+    *, target_raw: Tensor, current_raw: Tensor, gripper_index: int, threshold: float
+) -> Tensor:
     target_g = target_raw[..., gripper_index].float()
     current_g = current_raw[..., gripper_index].float().reshape(-1, 1)
     boundary = torch.cat([current_g, target_g[:, :-1]], dim=1)
@@ -121,7 +142,9 @@ def _focal_cross_entropy(logits: Tensor, labels: Tensor, weights: Tensor, gamma:
     return (ce * weights).mean()
 
 
-def event_head_metrics(logits_rows: list[np.ndarray], target_rows: list[np.ndarray]) -> dict[str, float]:
+def event_head_metrics(
+    logits_rows: list[np.ndarray], target_rows: list[np.ndarray]
+) -> dict[str, float]:
     if not logits_rows:
         return {}
     logits = np.concatenate(logits_rows, axis=0)
@@ -136,13 +159,15 @@ def event_head_metrics(logits_rows: list[np.ndarray], target_rows: list[np.ndarr
     precision = tp / max(tp + fp, 1.0)
     recall = tp / max(tp + fn, 1.0)
     f1 = 2.0 * precision * recall / max(precision + recall, 1e-8)
-    out.update({
-        "event_head_precision": float(precision),
-        "event_head_recall": float(recall),
-        "event_head_f1": float(f1),
-        "event_head_pred_events": float(pos_pred.sum()),
-        "event_head_target_events": float(pos_target.sum()),
-    })
+    out.update(
+        {
+            "event_head_precision": float(precision),
+            "event_head_recall": float(recall),
+            "event_head_f1": float(f1),
+            "event_head_pred_events": float(pos_pred.sum()),
+            "event_head_target_events": float(pos_target.sum()),
+        }
+    )
     for label, name in ((1, "open"), (2, "close")):
         p = pred == label
         t = target == label
@@ -158,7 +183,9 @@ def event_head_metrics(logits_rows: list[np.ndarray], target_rows: list[np.ndarr
     return out
 
 
-def arm_motion_labels(system: V363PolicySystem, target_action: Tensor, action_state: Tensor, threshold: float) -> Tensor:
+def arm_motion_labels(
+    system: V363PolicySystem, target_action: Tensor, action_state: Tensor, threshold: float
+) -> Tensor:
     physical = system.codec.encode(target_action, action_state)
     parts = system.codec.split_physical(physical)
     norm = parts["arm_delta"].float().norm(dim=-1)
@@ -176,21 +203,19 @@ def semantic_physical_velocity_error(
     ad = int(cfg.arm_dim)
     gf = int(cfg.gripper_field_dim)
     if residual.ndim < 3 or int(residual.shape[-1]) != int(cfg.physical_action_dim):
-        raise ValueError(f"physical residual must end in [T,{cfg.physical_action_dim}], got {tuple(residual.shape)}")
+        raise ValueError(
+            f"physical residual must end in [T,{cfg.physical_action_dim}], got {tuple(residual.shape)}"
+        )
     horizon = int(residual.shape[-2])
     flat = residual.reshape(-1, horizon, int(cfg.physical_action_dim))
     if system.codec.uses_arm_manifold:
         arm_native, _, arm_null = system.codec.project_arm_tangent(flat[..., : 2 * ad])
-        arm_null_per_dim = 0.5 * (
-            arm_null[..., :ad].square() + arm_null[..., ad : 2 * ad].square()
+        arm_null_per_dim = 0.5 * (arm_null[..., :ad].square() + arm_null[..., ad : 2 * ad].square())
+        arm_error = (arm_native.square() + max(float(arm_null_weight), 0.0) * arm_null_per_dim).sum(
+            dim=-1
         )
-        arm_error = (
-            arm_native.square() + max(float(arm_null_weight), 0.0) * arm_null_per_dim
-        ).sum(dim=-1)
     else:
-        arm_error = 0.5 * (
-            flat[..., :ad].square() + flat[..., ad : 2 * ad].square()
-        ).sum(dim=-1)
+        arm_error = 0.5 * (flat[..., :ad].square() + flat[..., ad : 2 * ad].square()).sum(dim=-1)
     gripper_field = flat[..., 2 * ad : 2 * ad + gf]
     if system.codec.uses_parseval_gripper_field:
         native = system.codec.decode_gripper_field(gripper_field)
@@ -220,7 +245,9 @@ def _normalized_event_emphasis(
     raw = 1.0 + max(float(boost), 0.0) * mask
     # Normalize in the same horizon metric used by flow matching. Every sample
     # keeps exactly one native gripper dimension of aggregate loss mass.
-    normalizer = (raw * horizon_weight).sum(dim=1, keepdim=True) / horizon_weight.sum().clamp_min(1e-8)
+    normalizer = (raw * horizon_weight).sum(dim=1, keepdim=True) / horizon_weight.sum().clamp_min(
+        1e-8
+    )
     emphasis = raw / normalizer.detach().clamp_min(1e-8)
     weighted = emphasis * horizon_weight
     event_mass = (weighted * mask).sum() / weighted.sum().clamp_min(1e-8)
@@ -264,8 +291,7 @@ def flow_losses(
         )
         arm_native_component = arm_native_residual.square()
         arm_null_component = 0.5 * (
-            arm_null_residual[..., :ad].square()
-            + arm_null_residual[..., ad : 2 * ad].square()
+            arm_null_residual[..., :ad].square() + arm_null_residual[..., ad : 2 * ad].square()
         )
         arm_null_weight = max(float(trainer.arm_manifold_null_weight), 0.0)
         arm_native_error = arm_native_component + arm_null_weight * arm_null_component
@@ -280,8 +306,8 @@ def flow_losses(
                 source_arm, sample["action_state"].to(device=device)
             )
             arm_noise_projection_error = (
-                source_arm.float() - projected_source_arm.float()
-            ).square().mean()
+                (source_arm.float() - projected_source_arm.float()).square().mean()
+            )
             arm_noise_abs_std = source_arm[..., :ad].float().std(unbiased=False)
             arm_noise_delta_std = source_arm[..., ad : 2 * ad].float().std(unbiased=False)
         else:
@@ -318,17 +344,23 @@ def flow_losses(
         gripper_delta_component = (native_residual - previous_native)[..., 0].square()
         target_field = output["target_physical_velocity"][..., 2 * ad : 2 * ad + gf]
         target_projection_error = (
-            target_field - system.codec.project_gripper_field(target_field)
-        ).float().square().mean()
+            (target_field - system.codec.project_gripper_field(target_field))
+            .float()
+            .square()
+            .mean()
+        )
         target_native = system.codec.decode_gripper_field(target_field)
-        target_energy_ratio = target_field.float().square().sum() / target_native.float().square().sum().clamp_min(1e-8)
+        target_energy_ratio = (
+            target_field.float().square().sum()
+            / target_native.float().square().sum().clamp_min(1e-8)
+        )
     else:
         grip_channel_weight = torch.ones((gf,), device=device, dtype=velocity_error.dtype)
         grip_channel_weight[0] = max(float(trainer.gripper_fm_value_weight), 0.0)
         grip_channel_weight[1] = max(float(trainer.gripper_fm_delta_weight), 0.0)
-        gripper_native_error = (
-            grip_field * grip_channel_weight[None, None]
-        ).sum(dim=-1) / grip_channel_weight.sum().clamp_min(1e-6)
+        gripper_native_error = (grip_field * grip_channel_weight[None, None]).sum(
+            dim=-1
+        ) / grip_channel_weight.sum().clamp_min(1e-6)
         gripper_native_component = velocity_error[..., 2 * ad]
         gripper_delta_component = velocity_error[..., 2 * ad + 1]
         gripper_null_component = torch.zeros_like(gripper_native_component)
@@ -337,10 +369,12 @@ def flow_losses(
     gripper_native_error_raw = gripper_native_error
     transition_mask = (labels != 0).to(dtype=velocity_error.dtype, device=device)
     event_boost = max(float(trainer.gripper_fm_event_boost), 0.0)
-    event_emphasis, event_loss_mass, event_weight_mean, hold_weight_mean = _normalized_event_emphasis(
-        transition_mask,
-        weight,
-        event_boost,
+    event_emphasis, event_loss_mass, event_weight_mean, hold_weight_mean = (
+        _normalized_event_emphasis(
+            transition_mask,
+            weight,
+            event_boost,
+        )
     )
     gripper_native_error = gripper_native_error_raw * event_emphasis
     physical_error = (arm_native_error.sum(dim=-1) + gripper_native_error) / float(ad + 1)
@@ -349,15 +383,15 @@ def flow_losses(
     )
     flow_weight = weight.to(dtype=physical_error.dtype)[None]
     flow = (physical_error * flow_weight).mean()
-    uniform_flow = (uniform_physical_error * weight.to(dtype=uniform_physical_error.dtype)[None]).mean()
+    uniform_flow = (
+        uniform_physical_error * weight.to(dtype=uniform_physical_error.dtype)[None]
+    ).mean()
     # Cross-version anchor metric. Always derive it from the same orthogonal arm
     # tangent projection and native gripper synthesis, including legacy runs
     # whose optimization objective still lives in independent physical fields.
     # It excludes null components and event emphasis. Comparisons also require
     # an identical action_normalizer_fingerprint.
-    anchor_arm_native, _, _ = system.codec.project_arm_tangent(
-        velocity_residual[..., : 2 * ad]
-    )
+    anchor_arm_native, _, _ = system.codec.project_arm_tangent(velocity_residual[..., : 2 * ad])
     anchor_gripper_native = system.codec.decode_gripper_field(
         velocity_residual[..., 2 * ad : 2 * ad + gf]
     )[..., 0]
@@ -376,15 +410,13 @@ def flow_losses(
     # "null vs remaining error", never as health gauges.  The stable gauges
     # are the RMS (native units, comparable to data delta std and to the
     # fp32 hygiene floor) and the output-energy fraction (scale-free).
-    arm_null_ratio = arm_null_flow / (
-        arm_native_flow + arm_null_flow
-    ).detach().clamp_min(1e-6)
+    arm_null_ratio = arm_null_flow / (arm_native_flow + arm_null_flow).detach().clamp_min(1e-6)
     arm_null_rms = arm_null_component.detach().float().mean().clamp_min(0.0).sqrt()
     pred_arm = output["pred_physical_velocity"][..., : 2 * ad].detach().float()
-    pred_arm_energy = 0.5 * (
-        pred_arm[..., :ad].square() + pred_arm[..., ad:].square()
-    ).mean()
-    arm_null_output_fraction = arm_null_component.detach().float().mean() / pred_arm_energy.clamp_min(1e-8)
+    pred_arm_energy = 0.5 * (pred_arm[..., :ad].square() + pred_arm[..., ad:].square()).mean()
+    arm_null_output_fraction = (
+        arm_null_component.detach().float().mean() / pred_arm_energy.clamp_min(1e-8)
+    )
     gripper_field_flow = (gripper_native_error * flow_weight).mean()
     # V70: relative-difficulty ratio.  Both channels are first normalized by
     # their own target energy so a fast-collapsing arm residual no longer
@@ -394,15 +426,17 @@ def flow_losses(
         target_v[..., :ad].square() + target_v[..., ad : 2 * ad].square()
     ).mean().clamp_min(1e-8)
     if system.codec.uses_parseval_gripper_field:
-        target_grip_energy = system.codec.decode_gripper_field(
-            target_v[..., 2 * ad : 2 * ad + gf]
-        )[..., 0].square().mean().clamp_min(1e-8)
+        target_grip_energy = (
+            system.codec.decode_gripper_field(target_v[..., 2 * ad : 2 * ad + gf])[..., 0]
+            .square()
+            .mean()
+            .clamp_min(1e-8)
+        )
     else:
         target_grip_energy = target_v[..., 2 * ad].square().mean().clamp_min(1e-8)
-    gripper_arm_flow_ratio = (
-        (gripper_field_flow / target_grip_energy)
-        / (arm_flow_per_dim / target_arm_energy).detach().clamp_min(1e-6)
-    )
+    gripper_arm_flow_ratio = (gripper_field_flow / target_grip_energy) / (
+        arm_flow_per_dim / target_arm_energy
+    ).detach().clamp_min(1e-6)
     grip_value_flow = (gripper_native_component * flow_weight).mean()
     grip_delta_flow = (gripper_delta_component * flow_weight).mean()
     gripper_null_flow = (gripper_null_component * flow_weight).mean()
@@ -412,34 +446,54 @@ def flow_losses(
     grip_null_rms = gripper_null_component.detach().float().mean().clamp_min(0.0).sqrt()
     pred_grip_field = output["pred_physical_velocity"][..., 2 * ad : 2 * ad + gf].detach().float()
     pred_grip_energy = pred_grip_field.square().sum(dim=-1).mean()
-    grip_null_output_fraction = gripper_null_component.detach().float().mean() / pred_grip_energy.clamp_min(1e-8)
+    grip_null_output_fraction = (
+        gripper_null_component.detach().float().mean() / pred_grip_energy.clamp_min(1e-8)
+    )
     # V70 (H4 test): decompose gripper null energy by event vs hold steps.
     # If null concentrates at event steps it is a timing-uncertainty signature
     # (informative), not waste -- read it, don't suppress it.
     event_step_mask = transition_mask.to(dtype=torch.float32)
     hold_step_mask = 1.0 - event_step_mask
     grip_null_event_rms = (
-        (gripper_null_component.detach().float() * event_step_mask).sum()
-        / event_step_mask.sum().clamp_min(1.0)
-    ).clamp_min(0.0).sqrt()
+        (
+            (gripper_null_component.detach().float() * event_step_mask).sum()
+            / event_step_mask.sum().clamp_min(1.0)
+        )
+        .clamp_min(0.0)
+        .sqrt()
+    )
     grip_null_hold_rms = (
-        (gripper_null_component.detach().float() * hold_step_mask).sum()
-        / hold_step_mask.sum().clamp_min(1.0)
-    ).clamp_min(0.0).sqrt()
+        (
+            (gripper_null_component.detach().float() * hold_step_mask).sum()
+            / hold_step_mask.sum().clamp_min(1.0)
+        )
+        .clamp_min(0.0)
+        .sqrt()
+    )
     grip_null_event_hold_ratio = grip_null_event_rms / grip_null_hold_rms.clamp_min(1e-8)
-    event_denom = (transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
+    event_denom = (
+        (transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
+    )
     hold_mask_for_flow = (1.0 - transition_mask).to(dtype=physical_error.dtype)
-    hold_denom = (hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
+    hold_denom = (
+        (hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum().clamp_min(1.0)
+    )
     # Keep event/hold diagnostics in the native unweighted metric so runs with
     # different emphasis settings remain directly comparable.
-    gripper_event_flow = (gripper_native_error_raw * transition_mask * weight.to(dtype=physical_error.dtype)[None]).sum() / event_denom
-    gripper_hold_flow = (gripper_native_error_raw * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]).sum() / hold_denom
+    gripper_event_flow = (
+        gripper_native_error_raw * transition_mask * weight.to(dtype=physical_error.dtype)[None]
+    ).sum() / event_denom
+    gripper_hold_flow = (
+        gripper_native_error_raw * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]
+    ).sum() / hold_denom
     proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
 
     flat_labels = labels.reshape(-1)
     flat_logits = output["event_logits"].reshape(-1, 3)
     event_weights = torch.ones_like(flat_labels, dtype=flat_logits.dtype)
-    event_weights = event_weights + (flat_labels != 0).to(flat_logits.dtype) * float(trainer.event_positive_weight)
+    event_weights = event_weights + (flat_labels != 0).to(flat_logits.dtype) * float(
+        trainer.event_positive_weight
+    )
     event = _focal_cross_entropy(flat_logits, flat_labels, event_weights, trainer.event_focal_gamma)
 
     motion_target = arm_motion_labels(
@@ -448,22 +502,39 @@ def flow_losses(
         sample["action_state"].to(device=device),
         trainer.arm_motion_threshold,
     )
-    motion = F.binary_cross_entropy_with_logits(output["motion_logits"].float(), motion_target.float())
+    motion = F.binary_cross_entropy_with_logits(
+        output["motion_logits"].float(), motion_target.float()
+    )
 
     transition_mask = transition_mask.to(output["pred_action_estimate"].dtype)
     grip_idx = cfg.gripper_index
     pred_g = output["pred_action_estimate"][..., grip_idx]
     target_g = sample["policy_action"].to(device=device)[..., grip_idx]
-    transition_l1 = (F.smooth_l1_loss(pred_g, target_g, reduction="none") * (1.0 + transition_mask * 8.0)).mean()
+    transition_l1 = (
+        F.smooth_l1_loss(pred_g, target_g, reduction="none") * (1.0 + transition_mask * 8.0)
+    ).mean()
 
-    pred_boundary = torch.cat([sample["action_state"].to(device=device)[:, None], output["pred_action_estimate"][:, :-1]], dim=1)
-    target_boundary = torch.cat([sample["action_state"].to(device=device)[:, None], sample["policy_action"].to(device=device)[:, :-1]], dim=1)
+    pred_boundary = torch.cat(
+        [sample["action_state"].to(device=device)[:, None], output["pred_action_estimate"][:, :-1]],
+        dim=1,
+    )
+    target_boundary = torch.cat(
+        [
+            sample["action_state"].to(device=device)[:, None],
+            sample["policy_action"].to(device=device)[:, :-1],
+        ],
+        dim=1,
+    )
     pred_delta = output["pred_action_estimate"] - pred_boundary
     target_delta = sample["policy_action"].to(device=device) - target_boundary
     smooth_delta = F.smooth_l1_loss(pred_delta, target_delta)
-    decoded_action = F.smooth_l1_loss(output["pred_action_estimate"], sample["policy_action"].to(device=device))
+    decoded_action = F.smooth_l1_loss(
+        output["pred_action_estimate"], sample["policy_action"].to(device=device)
+    )
     physical_delta_consistency = system.codec.delta_consistency_loss(
-        output["clean_physical_estimate"], sample["action_state"].to(device=device), output["pred_action_estimate"]
+        output["clean_physical_estimate"],
+        sample["action_state"].to(device=device),
+        output["pred_action_estimate"],
     )
 
     # V36.3 latent-coupling losses.  These losses supervise the existing final
@@ -475,7 +546,7 @@ def flow_losses(
 
     pred_delta_g = pred_delta[..., grip_idx]
     target_delta_g = target_delta[..., grip_idx].detach()
-    target_event = (labels != 0)
+    target_event = labels != 0
     target_sign = torch.zeros_like(pred_delta_g)
     target_sign = torch.where(labels == 2, torch.ones_like(target_sign), target_sign)
     target_sign = torch.where(labels == 1, -torch.ones_like(target_sign), target_sign)
@@ -484,7 +555,8 @@ def flow_losses(
     # Same-latent readout/action closure: event readout and final decoded
     # gripper delta must agree in sign on true transitions.
     event_delta_consistency = (
-        F.softplus(-(signed_event * pred_delta_g.float() * target_sign.float())) * target_event.float()
+        F.softplus(-(signed_event * pred_delta_g.float() * target_sign.float()))
+        * target_event.float()
     ).sum() / target_event.float().sum().clamp(min=1.0)
     # Prevent the smooth channel from swallowing target transitions.  The target
     # magnitude is adaptive because training actions are normalized while event
@@ -597,18 +669,42 @@ def mean_rows(rows: list[dict[str, float]]) -> dict[str, float]:
 
 def normalize_world_ablation_mode(mode: str) -> str:
     normalized = str(mode).replace("-", "_").lower()
-    aliases = {"": "normal", "none": "normal", "normal": "normal", "zero": "zero", "shuffle": "shuffle", "batch_mean": "batch_mean", "noise": "noise"}
+    aliases = {
+        "": "normal",
+        "none": "normal",
+        "normal": "normal",
+        "zero": "zero",
+        "shuffle": "shuffle",
+        "batch_mean": "batch_mean",
+        "noise": "noise",
+    }
     if normalized not in aliases:
         raise ValueError(f"unknown world ablation mode: {mode}")
     return aliases[normalized]
 
 
-def world_ablation_deltas(metrics_by_mode: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+def world_ablation_deltas(
+    metrics_by_mode: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
     if "normal" not in metrics_by_mode:
         return {}
     normal = metrics_by_mode["normal"]
-    rmse_keys = ("full_rmse", "first_rmse", "first4_rmse", "first8_rmse", "tail_rmse", "arm_full_rmse", "gripper_full_rmse")
-    f_keys = ("gripper_precision", "gripper_recall", "gripper_f1", "gripper_close_f1", "gripper_open_f1")
+    rmse_keys = (
+        "full_rmse",
+        "first_rmse",
+        "first4_rmse",
+        "first8_rmse",
+        "tail_rmse",
+        "arm_full_rmse",
+        "gripper_full_rmse",
+    )
+    f_keys = (
+        "gripper_precision",
+        "gripper_recall",
+        "gripper_f1",
+        "gripper_close_f1",
+        "gripper_open_f1",
+    )
     misc_keys = ("gripper_timing_mae_steps", "gripper_event_ratio", "proposal_utility_mse_gain")
     out: dict[str, dict[str, float]] = {}
     for mode, metrics in metrics_by_mode.items():
@@ -657,7 +753,14 @@ def evaluate_v363_policy(
     for batch_index, batch in enumerate(loader, start=1):
         if max_batches and batch_index > max_batches:
             break
-        sample = prepare_v363_policy_sample(batch, conditioner=conditioner, system=system, camera_names=camera_names, device=device, dtype=dtype)
+        sample = prepare_v363_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+        )
         generator = torch.Generator(device=device)
         generator.manual_seed(36236 + batch_index)
         noise = system.codec.sample_noise(
@@ -669,23 +772,38 @@ def evaluate_v363_policy(
         with autocast_context(device, dtype):
             ablation_seed = int(world_ablation_seed_base) + int(batch_index)
             pred_pack = system.sample(
-                sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
-                steps=trainer.eval_inference_steps, noise=noise, use_proposal=True, return_event_logits=True,
-                world_ablation=world_ablation, world_ablation_seed=ablation_seed,
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                steps=trainer.eval_inference_steps,
+                noise=noise,
+                use_proposal=True,
+                return_event_logits=True,
+                world_ablation=world_ablation,
+                world_ablation_seed=ablation_seed,
             )
             assert isinstance(pred_pack, dict)
             no_proposal = system.sample(
-                sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
-                steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
-                world_ablation=world_ablation, world_ablation_seed=ablation_seed,
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                steps=trainer.eval_inference_steps,
+                noise=noise,
+                use_proposal=False,
+                world_ablation=world_ablation,
+                world_ablation_seed=ablation_seed,
             )
         pred_rows.append(decode(action_normalizer, pred_pack["action"]))
         no_proposal_rows.append(decode(action_normalizer, no_proposal))
         target_rows.append(sample["policy_action_raw"].cpu().numpy())
         current_rows.append(sample["state_raw"].cpu().numpy())
         labels = gripper_event_labels(
-            target_raw=sample["policy_action_raw"], current_raw=sample["state_raw"],
-            gripper_index=system.policy_config.gripper_index, threshold=trainer.gripper_event_threshold,
+            target_raw=sample["policy_action_raw"],
+            current_raw=sample["state_raw"],
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
         )
         event_logits_rows.append(pred_pack["event_logits"].detach().float().cpu().numpy())
         event_target_rows.append(labels.cpu().numpy())
@@ -700,25 +818,38 @@ def evaluate_v363_policy(
         "first_rmse": float(np.sqrt(squared[:, 0].mean())),
         "first4_rmse": float(np.sqrt(squared[:, :4].mean())),
         "first8_rmse": float(np.sqrt(squared[:, :8].mean())),
-        "tail_rmse": float(np.sqrt(squared[:, 8:].mean())) if squared.shape[1] > 8 else float("nan"),
+        "tail_rmse": float(np.sqrt(squared[:, 8:].mean()))
+        if squared.shape[1] > 8
+        else float("nan"),
         "arm_full_rmse": float(np.sqrt(squared[..., :-1].mean())),
         "gripper_full_rmse": float(np.sqrt(squared[..., -1].mean())),
         "proposal_utility_mse_gain": float(((no_proposal - target) ** 2).mean() - squared.mean()),
     }
-    metrics.update(gripper_transition_metrics(
-        pred, target, current, gripper_index=system.policy_config.gripper_index,
-        threshold=trainer.gripper_event_threshold, tolerance=2,
-    ))
+    metrics.update(
+        gripper_transition_metrics(
+            pred,
+            target,
+            current,
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
+            tolerance=2,
+        )
+    )
     metrics.update(event_head_metrics(event_logits_rows, event_target_rows))
     metrics["tail_first_ratio"] = float(metrics["tail_rmse"] / max(metrics["first_rmse"], 1e-8))
-    metrics["gripper_event_ratio"] = float(metrics.get("gripper_pred_events", 0.0) / max(metrics.get("gripper_target_events", 0.0), 1.0))
+    metrics["gripper_event_ratio"] = float(
+        metrics.get("gripper_pred_events", 0.0)
+        / max(metrics.get("gripper_target_events", 0.0), 1.0)
+    )
     metrics["world_ablation"] = world_ablation
     return metrics
 
 
 def rng_state() -> dict[str, Any]:
     return {
-        "python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
         "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }
 
@@ -726,7 +857,9 @@ def rng_state() -> dict[str, Any]:
 def restore_rng(state: dict[str, Any] | None) -> None:
     if not state:
         return
-    random.setstate(state["python"]); np.random.set_state(state["numpy"]); torch.set_rng_state(state["torch"])
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
     if torch.cuda.is_available() and state.get("cuda") is not None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
@@ -756,7 +889,8 @@ def is_deploy_eligible(metrics: dict[str, float], trainer: V363PolicyTrainerConf
     return (
         float(metrics.get("gripper_recall", 0.0)) >= float(trainer.deploy_min_recall)
         and float(trainer.deploy_min_event_ratio) <= ratio <= float(trainer.deploy_max_event_ratio)
-        and float(metrics.get("tail_first_ratio", 999.0)) <= float(trainer.deploy_max_tail_first_ratio)
+        and float(metrics.get("tail_first_ratio", 999.0))
+        <= float(trainer.deploy_max_tail_first_ratio)
     )
 
 
@@ -777,7 +911,8 @@ def train_v363_policy(
     resume: Path | None = None,
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = out_dir / "checkpoints"; ckpt_dir.mkdir(exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(exist_ok=True)
     system.to(device=device, dtype=torch.float32)
     optimizer = torch.optim.AdamW(
         [
@@ -785,38 +920,69 @@ def train_v363_policy(
             {"params": system.decoder.parameters(), "lr": trainer.lr},
             {"params": system.proposal.parameters(), "lr": trainer.proposal_lr},
         ],
-        weight_decay=trainer.weight_decay, betas=(trainer.beta1, trainer.beta2), eps=trainer.eps,
+        weight_decay=trainer.weight_decay,
+        betas=(trainer.beta1, trainer.beta2),
+        eps=trainer.eps,
     )
     steps_per_epoch = trainer.max_train_batches or len(train_loader)
-    schedule = scheduler(optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio)
+    schedule = scheduler(
+        optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio
+    )
     start_epoch, global_step = 1, 0
     history: list[dict[str, Any]] = []
-    best = {"full_mse": float("inf"), "gripper_f1": -float("inf"), "gripper_recall": -float("inf"), "balanced": float("inf"), "deploy_full_rmse": float("inf")}
+    best = {
+        "full_mse": float("inf"),
+        "gripper_f1": -float("inf"),
+        "gripper_recall": -float("inf"),
+        "balanced": float("inf"),
+        "deploy_full_rmse": float("inf"),
+    }
     if resume is not None:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
         if payload.get("schema") != "clearvla-v36-3-policy-checkpoint-v1":
             raise ValueError("resume checkpoint is not V36.3 policy")
         system.load_state_dict(payload["model"], strict=True)
-        optimizer.load_state_dict(payload["optimizer"]); schedule.load_state_dict(payload["scheduler"])
-        start_epoch = int(payload["epoch"]) + 1; global_step = int(payload["global_step"])
-        history = list(payload.get("history", [])); best.update(payload.get("best", {})); restore_rng(payload.get("rng"))
+        optimizer.load_state_dict(payload["optimizer"])
+        schedule.load_state_dict(payload["scheduler"])
+        start_epoch = int(payload["epoch"]) + 1
+        global_step = int(payload["global_step"])
+        history = list(payload.get("history", []))
+        best.update(payload.get("best", {}))
+        restore_rng(payload.get("rng"))
 
     for epoch in range(start_epoch, trainer.epochs + 1):
-        system.train(); rows = []
+        system.train()
+        rows = []
         for batch_index, batch in enumerate(train_loader, start=1):
             if trainer.max_train_batches and batch_index > trainer.max_train_batches:
                 break
-            sample = prepare_v363_policy_sample(batch, conditioner=conditioner, system=system, camera_names=camera_names, device=device, dtype=dtype)
+            sample = prepare_v363_policy_sample(
+                batch,
+                conditioner=conditioner,
+                system=system,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
+            )
             optimizer.zero_grad(set_to_none=True)
             with autocast_context(device, dtype):
-                output = system.flow_training_forward(sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"], sample["policy_action"])
+                output = system.flow_training_forward(
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    sample["policy_action"],
+                )
                 losses = flow_losses(system, sample, output, trainer)
             losses["loss"].float().backward()
             grad = grad_norm(system.parameters())
             torch.nn.utils.clip_grad_norm_(system.parameters(), trainer.grad_clip)
-            optimizer.step(); schedule.step(); global_step += 1
+            optimizer.step()
+            schedule.step()
+            global_step += 1
             row = {key: float(value.detach().float().cpu()) for key, value in losses.items()}
-            row["grad"] = grad; rows.append(row)
+            row["grad"] = grad
+            rows.append(row)
             if trainer.log_every and batch_index % trainer.log_every == 0:
                 print(
                     f"[v36.3-transition-latent] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
@@ -826,12 +992,27 @@ def train_v363_policy(
                     flush=True,
                 )
         train_metrics = mean_rows(rows)
-        val_metrics = evaluate_v363_policy(system=system, loader=val_loader, conditioner=conditioner, device=device, dtype=dtype, camera_names=camera_names, action_normalizer=action_normalizer, trainer=trainer, max_batches=trainer.max_val_batches)
+        val_metrics = evaluate_v363_policy(
+            system=system,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            action_normalizer=action_normalizer,
+            trainer=trainer,
+            max_batches=trainer.max_val_batches,
+        )
         score = balanced_score(val_metrics, trainer)
         deploy_eligible = is_deploy_eligible(val_metrics, trainer)
         val_metrics["balanced_score"] = score
         val_metrics["deploy_eligible"] = float(deploy_eligible)
-        record = {"epoch": epoch, "global_step": global_step, "train": train_metrics, "val": val_metrics}
+        record = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "train": train_metrics,
+            "val": val_metrics,
+        }
         history.append(record)
         with (out_dir / "v36_3_policy_epochs.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(jsonable(record), separators=(",", ":")) + "\n")
@@ -840,26 +1021,49 @@ def train_v363_policy(
         recall = float(val_metrics.get("gripper_recall", 0.0))
         save = []
         if full < best["full_mse"]:
-            best["full_mse"] = full; save.append("best_full.pt")
+            best["full_mse"] = full
+            save.append("best_full.pt")
         if f1 > best["gripper_f1"]:
-            best["gripper_f1"] = f1; save.append("best_gripper_f1.pt")
+            best["gripper_f1"] = f1
+            save.append("best_gripper_f1.pt")
         if recall > best["gripper_recall"]:
-            best["gripper_recall"] = recall; save.append("best_gripper_recall.pt")
+            best["gripper_recall"] = recall
+            save.append("best_gripper_recall.pt")
         if score < best["balanced"]:
-            best["balanced"] = score; save.append("best_balanced.pt")
+            best["balanced"] = score
+            save.append("best_balanced.pt")
         if deploy_eligible and float(val_metrics["full_rmse"]) < best["deploy_full_rmse"]:
-            best["deploy_full_rmse"] = float(val_metrics["full_rmse"]); save.append("best_deploy.pt")
+            best["deploy_full_rmse"] = float(val_metrics["full_rmse"])
+            save.append("best_deploy.pt")
         payload = {
-            "schema": "clearvla-v36-3-policy-checkpoint-v1", "epoch": epoch, "global_step": global_step,
-            "model": system.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": schedule.state_dict(),
-            "world_config": asdict(system.world_config), "policy_config": asdict(system.policy_config),
-            "trainer_config": asdict(trainer), "action_normalizer": action_normalizer.to_dict(), "state_normalizer": state_normalizer.to_dict(),
-            "context": context, "history": history, "best": best, "rng": rng_state(),
+            "schema": "clearvla-v36-3-policy-checkpoint-v1",
+            "epoch": epoch,
+            "global_step": global_step,
+            "model": system.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": schedule.state_dict(),
+            "world_config": asdict(system.world_config),
+            "policy_config": asdict(system.policy_config),
+            "trainer_config": asdict(trainer),
+            "action_normalizer": action_normalizer.to_dict(),
+            "state_normalizer": state_normalizer.to_dict(),
+            "context": context,
+            "history": history,
+            "best": best,
+            "rng": rng_state(),
         }
         for name in save:
             torch.save(payload, ckpt_dir / name)
         torch.save(payload, ckpt_dir / "latest.pt")
-        (out_dir / "v36_3_policy_summary.json").write_text(json.dumps(jsonable({"schema": "clearvla-v36-3-policy-summary-v1", "best": best, "latest": record}), indent=2), encoding="utf-8")
+        (out_dir / "v36_3_policy_summary.json").write_text(
+            json.dumps(
+                jsonable(
+                    {"schema": "clearvla-v36-3-policy-summary-v1", "best": best, "latest": record}
+                ),
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         print(json.dumps(jsonable(record), separators=(",", ":")), flush=True)
     return {"history": history, "best": best}
 

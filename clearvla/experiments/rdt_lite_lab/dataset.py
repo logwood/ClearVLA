@@ -50,7 +50,12 @@ class RDTLiteDatasetConfig:
     visual_shift: int = 8
 
     def validate(self) -> None:
-        if min(self.chunk_len, self.past_len, self.state_history_len, self.obs_horizon, self.stride) <= 0:
+        if (
+            min(
+                self.chunk_len, self.past_len, self.state_history_len, self.obs_horizon, self.stride
+            )
+            <= 0
+        ):
             raise ValueError("lengths and stride must be positive")
         if self.visual_shift <= 0:
             raise ValueError("visual_shift must be positive")
@@ -86,7 +91,9 @@ class RDTLiteDataset(Dataset):
             raise ValueError("episode_ids must be non-empty")
         self.episodes = episodes
         self.episode_ids = list(episode_ids)
-        self.visual_pool_episode_ids = list(self.episode_ids if visual_pool_episode_ids is None else visual_pool_episode_ids)
+        self.visual_pool_episode_ids = list(
+            self.episode_ids if visual_pool_episode_ids is None else visual_pool_episode_ids
+        )
         if not self.visual_pool_episode_ids:
             raise ValueError("visual_pool_episode_ids must be non-empty")
         self.latent_store = latent_store
@@ -102,7 +109,11 @@ class RDTLiteDataset(Dataset):
             raise IndexError("episode id outside episodes list")
         for index in sorted(all_ids):
             episode = episodes[index]
-            if episode.actions_norm is None or episode.states_norm is None or episode.states_raw is None:
+            if (
+                episode.actions_norm is None
+                or episode.states_norm is None
+                or episode.states_raw is None
+            ):
                 raise ValueError(f"episode {episode.path} is not normalized for RDT-lite")
             latent_store.validate_episode(episode)
         for episode_idx in self.episode_ids:
@@ -173,15 +184,23 @@ class RDTLiteDataset(Dataset):
         upper = episode.length - 1
         shift = max(int(self.config.visual_shift), self.config.obs_horizon)
         candidates = [center + shift, center - shift, upper, lower]
-        candidates = [value for value in candidates if lower <= value <= upper and abs(value - center) >= shift]
+        candidates = [
+            value
+            for value in candidates
+            if lower <= value <= upper and abs(value - center) >= shift
+        ]
         if not candidates:
             # Short synthetic episodes and tiny debugging subsets may not offer
             # the requested minimum shift.  Use the furthest distinct valid
             # frame rather than failing validation entirely.
             candidates = [value for value in (lower, upper) if value != center]
         if not candidates:
-            raise ValueError(f"episode {episode.path} does not contain a distinct shifted visual frame")
-        return self._visual_indices_at(episode_idx, max(candidates, key=lambda value: abs(value - center)))
+            raise ValueError(
+                f"episode {episode.path} does not contain a distinct shifted visual frame"
+            )
+        return self._visual_indices_at(
+            episode_idx, max(candidates, key=lambda value: abs(value - center))
+        )
 
     def _resolve_visual(self, episode_idx: int, visual_center: int) -> tuple[int, np.ndarray]:
         if self.visual_mode == LabVisualMode.SAME_EPISODE_SHIFT:
@@ -201,9 +220,15 @@ class RDTLiteDataset(Dataset):
         state_center = ref.center + cfg.state_offset
         visual_center = ref.center + cfg.image_offset
 
-        past = np.asarray(episode.actions_norm[action_center - cfg.past_len : action_center], dtype=np.float32)
-        future_abs = np.asarray(episode.actions_norm[action_center : action_center + cfg.chunk_len], dtype=np.float32)
-        future_raw = np.asarray(episode.actions_raw[action_center : action_center + cfg.chunk_len], dtype=np.float32)
+        past = np.asarray(
+            episode.actions_norm[action_center - cfg.past_len : action_center], dtype=np.float32
+        )
+        future_abs = np.asarray(
+            episode.actions_norm[action_center : action_center + cfg.chunk_len], dtype=np.float32
+        )
+        future_raw = np.asarray(
+            episode.actions_raw[action_center : action_center + cfg.chunk_len], dtype=np.float32
+        )
         current_state_raw = np.asarray(episode.states_raw[state_center], dtype=np.float32)
         state_history = np.asarray(
             episode.states_norm[state_center - cfg.state_history_len + 1 : state_center + 1],
@@ -271,7 +296,11 @@ def compute_rdt_lite_event_scores(
         if future.shape[0] >= 3:
             accel = np.diff(np.diff(np.concatenate([past[-1:], future], axis=0), axis=0), axis=0)
             acceleration[index] = float(_rms(accel, axis=(0, 1)))
-        gi = config.gripper_index if config.gripper_index >= 0 else future.shape[1] + config.gripper_index
+        gi = (
+            config.gripper_index
+            if config.gripper_index >= 0
+            else future.shape[1] + config.gripper_index
+        )
         if 0 <= gi < future.shape[1]:
             values = np.concatenate([past[-1:, gi], future[:, gi]], axis=0)
             gripper[index] = float(np.max(np.abs(np.diff(values)))) if len(values) > 1 else 0.0

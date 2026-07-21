@@ -55,13 +55,16 @@ class LatentWorldLossConfig:
         for name, value in asdict(self).items():
             if name.endswith("_weight") and float(value) < 0:
                 raise ValueError(f"{name} must be non-negative")
-        if min(
-            self.action_utility_margin,
-            self.swap_margin,
-            self.embedding_std_target,
-            self.near_hold_action_distance,
-            self.gripper_transition_threshold,
-        ) < 0:
+        if (
+            min(
+                self.action_utility_margin,
+                self.swap_margin,
+                self.embedding_std_target,
+                self.near_hold_action_distance,
+                self.gripper_transition_threshold,
+            )
+            < 0
+        ):
             raise ValueError("loss margins/thresholds must be non-negative")
         if self.gripper_transition_radius < 0:
             raise ValueError("gripper_transition_radius must be non-negative")
@@ -77,8 +80,12 @@ def _component_error(
 ) -> Tensor:
     pred_split = model.split_world(pred)
     target_split = model.split_world(target)
-    root = F.smooth_l1_loss(pred_split["root"].float(), target_split["root"].float(), reduction="none")
-    scene = F.smooth_l1_loss(pred_split["scene"].float(), target_split["scene"].float(), reduction="none")
+    root = F.smooth_l1_loss(
+        pred_split["root"].float(), target_split["root"].float(), reduction="none"
+    )
+    scene = F.smooth_l1_loss(
+        pred_split["scene"].float(), target_split["scene"].float(), reduction="none"
+    )
     dynamic = F.smooth_l1_loss(
         pred_split["dynamic"].float(), target_split["dynamic"].float(), reduction="none"
     )
@@ -86,7 +93,9 @@ def _component_error(
         root = root.mean(dim=(-1, -2))
         scene = scene.mean(dim=(-1, -2))
         dynamic = dynamic.mean(dim=(-1, -2))
-        return config.root_predictive_weight * root + config.scene_predictive_weight * scene + dynamic
+        return (
+            config.root_predictive_weight * root + config.scene_predictive_weight * scene + dynamic
+        )
     return (
         config.root_predictive_weight * root.mean()
         + config.scene_predictive_weight * scene.mean()
@@ -104,7 +113,9 @@ def _legacy_error(
 ) -> Tensor:
     pred_split = model.split_world(pred)
     target_split = model.split_world(target)
-    scene = F.smooth_l1_loss(pred_split["scene"].float(), target_split["scene"].float(), reduction="none")
+    scene = F.smooth_l1_loss(
+        pred_split["scene"].float(), target_split["scene"].float(), reduction="none"
+    )
     dynamic = F.smooth_l1_loss(
         pred_split["dynamic"].float(), target_split["dynamic"].float(), reduction="none"
     )
@@ -195,7 +206,9 @@ def _gripper_classes(action_raw: Tensor, state_raw: Tensor, index: int, threshol
     return classes
 
 
-def _inverse_losses(prefix: str, output: dict[str, Tensor], relative: Tensor, delta: Tensor, classes: Tensor):
+def _inverse_losses(
+    prefix: str, output: dict[str, Tensor], relative: Tensor, delta: Tensor, classes: Tensor
+):
     action = F.smooth_l1_loss(output[f"{prefix}_inverse_action"].float(), relative.float())
     action_delta = F.smooth_l1_loss(output[f"{prefix}_inverse_delta"].float(), delta.float())
     logits = output[f"{prefix}_inverse_gripper_logits"].float()
@@ -226,9 +239,7 @@ def compute_latent_world_losses(
     hold_predictive = _component_error(model, hold, target, config=config)
     legacy_full = _legacy_error(model, pred, target, scene_weight=config.scene_predictive_weight)
     legacy_hold = _legacy_error(model, hold, target, scene_weight=config.scene_predictive_weight)
-    teacher_forced = _component_error(
-        model, output["teacher_forced_world"], target, config=config
-    )
+    teacher_forced = _component_error(model, output["teacher_forced_world"], target, config=config)
 
     pred_sequence = torch.cat([output["initial_world"][:, None], pred], dim=1)
     target_sequence = torch.cat([target_initial[:, None], target], dim=1)
@@ -250,8 +261,8 @@ def compute_latent_world_losses(
     full_per = full_per_step.mean(dim=1)
     hold_per = hold_per_step.mean(dim=1)
     action_distance = (
-        primary["action"] - output["hold_action"]
-    ).float().square().mean(dim=(1, 2)).sqrt()
+        (primary["action"] - output["hold_action"]).float().square().mean(dim=(1, 2)).sqrt()
+    )
     event = _transition_mask(
         primary["future_state_raw"],
         primary["state_raw"],
@@ -353,8 +364,12 @@ def compute_latent_world_losses(
         valid = pair_valid.bool().reshape(-1)
         pair_fraction = valid.float().mean()
         predicted_transition = output["pred_world"] - output["initial_world"][:, None]
-        pair_predicted_transition = pair_output["pred_world"] - pair_output["initial_world"][:, None]
-        target_transition = output["target_world"].detach() - output["target_initial_world"].detach()[:, None]
+        pair_predicted_transition = (
+            pair_output["pred_world"] - pair_output["initial_world"][:, None]
+        )
+        target_transition = (
+            output["target_world"].detach() - output["target_initial_world"].detach()[:, None]
+        )
         pair_target_transition = (
             pair_output["target_world"].detach()
             - pair_output["target_initial_world"].detach()[:, None]
@@ -480,7 +495,11 @@ def compute_latent_world_losses(
         "target_world_rms": target.float().square().mean().sqrt(),
         "hold_world_rms": hold.float().square().mean().sqrt(),
         "action_effect_rms": pred_effect.float().square().mean().sqrt(),
-        "dense_action_effect_rms": output["dense_action_world_effect"].float().square().mean().sqrt(),
+        "dense_action_effect_rms": output["dense_action_world_effect"]
+        .float()
+        .square()
+        .mean()
+        .sqrt(),
     }
     for step, offset in enumerate(model.config.future_offsets):
         result[f"world_predictive_t{offset}"] = full_per_step[:, step].mean()

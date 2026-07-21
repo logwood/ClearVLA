@@ -150,7 +150,10 @@ class ObservedStateWindowDataset(Dataset):
         )
         future_state = np.asarray(
             episode.states_raw[
-                ref.center + cfg.state_offset + 1 : ref.center + cfg.state_offset + cfg.world_horizon + 1
+                ref.center + cfg.state_offset + 1 : ref.center
+                + cfg.state_offset
+                + cfg.world_horizon
+                + 1
             ],
             dtype=np.float32,
         )
@@ -184,7 +187,8 @@ class ObservedStateWindowDataset(Dataset):
             [center + cfg.state_offset + int(x) for x in cfg.history_offsets], dtype=np.int64
         )
         executed_indices = np.asarray(
-            [center + cfg.action_offset + int(x) for x in cfg.executed_action_offsets], dtype=np.int64
+            [center + cfg.action_offset + int(x) for x in cfg.executed_action_offsets],
+            dtype=np.int64,
         )
         history_state_raw = np.asarray(episode.states_raw[history_state_indices], dtype=np.float32)
         executed_action_raw = np.asarray(episode.actions_raw[executed_indices], dtype=np.float32)
@@ -279,8 +283,6 @@ class ObservedStateWindowDataset(Dataset):
         return sample
 
 
-
-
 class CurrentEvidenceViewDataset(Dataset):
     """Cheap current-only view for pair/support indexing."""
 
@@ -293,9 +295,21 @@ class CurrentEvidenceViewDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = self.base[int(index)]
         keep = {
-            "sample_index", "episode_idx", "state", "state_raw", "action_state", "history_state",
-            "executed_action_history", "action", "action_raw", "future_state", "future_state_raw",
-            "segment_state", "segment_state_raw", "history_keys", "history_obs_image",
+            "sample_index",
+            "episode_idx",
+            "state",
+            "state_raw",
+            "action_state",
+            "history_state",
+            "executed_action_history",
+            "action",
+            "action_raw",
+            "future_state",
+            "future_state_raw",
+            "segment_state",
+            "segment_state_raw",
+            "history_keys",
+            "history_obs_image",
         }
         return {key: value for key, value in sample.items() if key in keep}
 
@@ -310,10 +324,23 @@ class PolicyWindowDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = self.base[int(index)]
         keys = {
-            "sample_index", "episode_idx", "center", "state", "state_raw", "action_state",
-            "history_state", "executed_action_history", "executed_action_history_raw",
-            "policy_action", "policy_action_raw", "history_keys", "history_obs_image",
-            "target_history_keys", "target_history_obs_image", "target_history_state", "target_history_state_raw",
+            "sample_index",
+            "episode_idx",
+            "center",
+            "state",
+            "state_raw",
+            "action_state",
+            "history_state",
+            "executed_action_history",
+            "executed_action_history_raw",
+            "policy_action",
+            "policy_action_raw",
+            "history_keys",
+            "history_obs_image",
+            "target_history_keys",
+            "target_history_obs_image",
+            "target_history_state",
+            "target_history_state_raw",
         }
         return {key: value for key, value in sample.items() if key in keys}
 
@@ -332,7 +359,9 @@ class CachedTokenPolicyWindowDataset(PolicyWindowDataset):
     future-flow objective.
     """
 
-    def __init__(self, base: ObservedStateWindowDataset, *, token_store, future_anchors: int) -> None:
+    def __init__(
+        self, base: ObservedStateWindowDataset, *, token_store, future_anchors: int
+    ) -> None:
         super().__init__(base)
         self.token_store = token_store
         self.future_anchors = int(future_anchors)
@@ -354,7 +383,9 @@ class CachedTokenPolicyWindowDataset(PolicyWindowDataset):
             target_keys = sample["target_history_keys"]
             anchors = min(self.future_anchors, int(target_keys.shape[0]))
             compact_keys = target_keys[:anchors, -1, :]
-            sample["target_future_dinov2_tokens"] = self.token_store.load_batch(compact_keys).reshape(
+            sample["target_future_dinov2_tokens"] = self.token_store.load_batch(
+                compact_keys
+            ).reshape(
                 anchors,
                 len(self.base.camera_names),
                 self.token_store.tokens_per_camera,

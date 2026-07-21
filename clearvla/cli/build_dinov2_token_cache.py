@@ -20,7 +20,9 @@ from clearvla.vision.preprocessing import PreprocessConfig, parse_hw
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Encode decoded RGB caches once into strict mmap-backed DINOv2 patch-token caches")
+    p = argparse.ArgumentParser(
+        description="Encode decoded RGB caches once into strict mmap-backed DINOv2 patch-token caches"
+    )
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--glob", default="*.hdf5")
     p.add_argument("--decoded-image-cache-dir", type=Path, required=True)
@@ -59,7 +61,9 @@ def main() -> None:
         raise RuntimeError("--dtype bf16 requires CUDA; use --dtype fp32 on CPU")
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     cameras = tuple(str(x) for x in args.cameras)
-    preprocessing = PreprocessConfig(resize_hw=parse_hw(args.cache_resize), crop_hw=parse_hw(args.cache_crop))
+    preprocessing = PreprocessConfig(
+        resize_hw=parse_hw(args.cache_resize), crop_hw=parse_hw(args.cache_crop)
+    )
     episodes, skipped = load_episodes(
         args.data_root,
         args.glob,
@@ -71,10 +75,14 @@ def main() -> None:
     )
     if args.max_episodes:
         episodes = episodes[: args.max_episodes]
-    image_store = DecodedImageStore(args.decoded_image_cache_dir, camera_names=cameras, preprocessing=preprocessing)
+    image_store = DecodedImageStore(
+        args.decoded_image_cache_dir, camera_names=cameras, preprocessing=preprocessing
+    )
     for episode in episodes:
         image_store.validate_episode(episode)
-    conditioner = DinoV2DenseConditioner(args.dinov2_model, local_files_only=args.dinov2_local_files_only)
+    conditioner = DinoV2DenseConditioner(
+        args.dinov2_model, local_files_only=args.dinov2_local_files_only
+    )
     conditioner = conditioner.to(device=device, dtype=dtype).eval()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -82,23 +90,35 @@ def main() -> None:
         if episode_tokens_exist(args.out_dir, episode.stem) and not args.rebuild:
             meta = load_episode_token_meta(args.out_dir, episode.stem)
             rows.append(meta.to_dict())
-            print(f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} stem={episode.stem} status=reuse", flush=True)
+            print(
+                f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} stem={episode.stem} status=reuse",
+                flush=True,
+            )
             continue
         token_batches = []
         for start in range(0, episode.length, args.batch_size):
             end = min(episode.length, start + args.batch_size)
             indices = np.arange(start, end, dtype=np.int64)
             frames = image_store.load_window(episode, indices)
-            images = torch.stack([frames[camera] for camera in cameras], dim=1).to(torch.float32) / 255.0
+            images = (
+                torch.stack([frames[camera] for camera in cameras], dim=1).to(torch.float32) / 255.0
+            )
             images = images.to(device=device, non_blocking=True)
             with torch.no_grad():
                 dense = conditioner.encode(images, camera_names=cameras).dense_tokens
             if dense is None:
                 raise AssertionError("DINOv2 conditioner did not return dense tokens")
             if dense.shape[1] % len(cameras) != 0:
-                raise ValueError(f"flattened token count={dense.shape[1]} is not divisible by cameras={len(cameras)}")
+                raise ValueError(
+                    f"flattened token count={dense.shape[1]} is not divisible by cameras={len(cameras)}"
+                )
             patches = dense.shape[1] // len(cameras)
-            token_batches.append(dense.reshape(end - start, len(cameras), patches, dense.shape[2]).float().cpu().numpy())
+            token_batches.append(
+                dense.reshape(end - start, len(cameras), patches, dense.shape[2])
+                .float()
+                .cpu()
+                .numpy()
+            )
         tokens = np.concatenate(token_batches, axis=0)
         meta = save_episode_tokens(
             cache_dir=args.out_dir,
@@ -110,7 +130,10 @@ def main() -> None:
             rebuild=args.rebuild,
         )
         rows.append(meta.to_dict())
-        print(f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} stem={episode.stem} shape={tokens.shape}", flush=True)
+        print(
+            f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} stem={episode.stem} shape={tokens.shape}",
+            flush=True,
+        )
     # Re-open strictly before reporting success.
     store = DinoV2TokenStore(
         args.out_dir,

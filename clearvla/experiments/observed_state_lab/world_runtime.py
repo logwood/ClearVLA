@@ -88,15 +88,33 @@ def prepare_v35_sample(
         dtype=dtype,
     )
     keys = (
-        "state", "state_raw", "history_state", "executed_action_history",
-        "target_history_state", "target_executed_action_history", "action", "action_raw",
-        "action_state", "future_state", "future_state_raw", "segment_state", "segment_state_raw",
-        "sample_index", "episode_idx",
+        "state",
+        "state_raw",
+        "history_state",
+        "executed_action_history",
+        "target_history_state",
+        "target_executed_action_history",
+        "action",
+        "action_raw",
+        "action_state",
+        "future_state",
+        "future_state_raw",
+        "segment_state",
+        "segment_state_raw",
+        "sample_index",
+        "episode_idx",
     )
     out = {key: sample[key].to(device=device, non_blocking=True) for key in keys}
     for key in (
-        "state", "history_state", "executed_action_history", "target_history_state",
-        "target_executed_action_history", "action", "action_state", "future_state", "segment_state",
+        "state",
+        "history_state",
+        "executed_action_history",
+        "target_history_state",
+        "target_executed_action_history",
+        "action",
+        "action_state",
+        "future_state",
+        "segment_state",
     ):
         out[key] = out[key].to(torch.float32)
     compute_dtype = dtype if device.type == "cuda" else torch.float32
@@ -118,7 +136,9 @@ def forward_v35(model: V35ObservedStateWorldModel, sample: dict[str, Tensor]) ->
     )
 
 
-def forward_v35_pair_minimal(model: V35ObservedStateWorldModel, sample: dict[str, Tensor]) -> dict[str, Tensor]:
+def forward_v35_pair_minimal(
+    model: V35ObservedStateWorldModel, sample: dict[str, Tensor]
+) -> dict[str, Tensor]:
     return model.forward_pair(
         sample["current_visual"],
         sample["target_visual"],
@@ -131,7 +151,9 @@ def forward_v35_pair_minimal(model: V35ObservedStateWorldModel, sample: dict[str
     )
 
 
-def masked_evidence(sample: dict[str, Tensor], trainer: V35WorldTrainerConfig) -> tuple[Tensor, Tensor, Tensor]:
+def masked_evidence(
+    sample: dict[str, Tensor], trainer: V35WorldTrainerConfig
+) -> tuple[Tensor, Tensor, Tensor]:
     visual = sample["current_visual"].clone()
     state = sample["history_state"].clone()
     executed = sample["executed_action_history"].clone()
@@ -179,16 +201,16 @@ def mean_rows(rows: list[dict[str, float]]) -> dict[str, float]:
     return {key: float(np.mean([row[key] for row in rows])) for key in sorted(keys)}
 
 
-
 def cuda_memory_metrics(device: torch.device) -> dict[str, float]:
     if device.type != "cuda":
         return {}
     return {
-        "cuda_allocated_mb": float(torch.cuda.memory_allocated(device) / (1024 ** 2)),
-        "cuda_reserved_mb": float(torch.cuda.memory_reserved(device) / (1024 ** 2)),
-        "cuda_peak_allocated_mb": float(torch.cuda.max_memory_allocated(device) / (1024 ** 2)),
-        "cuda_peak_reserved_mb": float(torch.cuda.max_memory_reserved(device) / (1024 ** 2)),
+        "cuda_allocated_mb": float(torch.cuda.memory_allocated(device) / (1024**2)),
+        "cuda_reserved_mb": float(torch.cuda.memory_reserved(device) / (1024**2)),
+        "cuda_peak_allocated_mb": float(torch.cuda.max_memory_allocated(device) / (1024**2)),
+        "cuda_peak_reserved_mb": float(torch.cuda.max_memory_reserved(device) / (1024**2)),
     }
+
 
 def grad_norm(parameters: Iterable[Tensor]) -> float:
     total = 0.0
@@ -225,7 +247,9 @@ def decode(normalizer: ArrayNormalizer, value: Tensor) -> np.ndarray:
     return normalizer.decode(value.detach().float().cpu().numpy())
 
 
-def interpolate_segment_states(current: np.ndarray, endpoints: np.ndarray, segment_length: int) -> np.ndarray:
+def interpolate_segment_states(
+    current: np.ndarray, endpoints: np.ndarray, segment_length: int
+) -> np.ndarray:
     rows = []
     previous = current
     for index in range(endpoints.shape[1]):
@@ -259,9 +283,15 @@ def evaluate_v35_world(
     inverse_action, action_target = [], []
     full_error, hold_error, event_mask = [], [], []
     ablations: dict[str, list[np.ndarray]] = {
-        name: [] for name in (
-            "no_perception", "visual_only", "proprio_only", "top_only", "wrist_only",
-            "shuffled_action", "zero_world_effect"
+        name: []
+        for name in (
+            "no_perception",
+            "visual_only",
+            "proprio_only",
+            "top_only",
+            "wrist_only",
+            "shuffled_action",
+            "zero_world_effect",
         )
     }
 
@@ -270,8 +300,12 @@ def evaluate_v35_world(
             break
         primary_raw = batch["primary"] if "primary" in batch else batch
         sample = prepare_v35_sample(
-            primary_raw, conditioner=conditioner, model=model, camera_names=camera_names,
-            device=device, dtype=dtype,
+            primary_raw,
+            conditioner=conditioner,
+            model=model,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
         )
         with autocast_context(device, dtype):
             output = forward_v35(model, sample)
@@ -280,18 +314,29 @@ def evaluate_v35_world(
             swapped = None
             if "pair" in batch:
                 pair = prepare_v35_sample(
-                    batch["pair"], conditioner=conditioner, model=model, camera_names=camera_names,
-                    device=device, dtype=dtype,
+                    batch["pair"],
+                    conditioner=conditioner,
+                    model=model,
+                    camera_names=camera_names,
+                    device=device,
+                    dtype=dtype,
                 )
                 pair_output = forward_v35_pair_minimal(model, pair)
                 pair_valid = batch["pair_valid"].to(device=device)
                 pair_tokens = model.action_tokenizer(pair["action"], sample["action_state"])
                 swapped = model.dynamics.rollout_pair(
-                    output["initial_world"], pair_tokens["actual_tokens"], pair_tokens["hold_tokens"]
+                    output["initial_world"],
+                    pair_tokens["actual_tokens"],
+                    pair_tokens["hold_tokens"],
                 )
             losses = compute_v35_world_losses(
-                model, sample, output, config=loss_config,
-                pair_output=pair_output, pair_valid=pair_valid, swapped_output=swapped,
+                model,
+                sample,
+                output,
+                config=loss_config,
+                pair_output=pair_output,
+                pair_valid=pair_valid,
+                swapped_output=swapped,
             )
         rows.append({key: float(value.detach().float().cpu()) for key, value in losses.items()})
 
@@ -301,26 +346,46 @@ def evaluate_v35_world(
         pred_endpoint.append(pred_endpoint_raw)
         target_endpoint.append(target_endpoint_raw)
         current_state.append(current_raw)
-        pred_path.append(interpolate_segment_states(current_raw, pred_endpoint_raw, model.config.segment_length))
+        pred_path.append(
+            interpolate_segment_states(current_raw, pred_endpoint_raw, model.config.segment_length)
+        )
         target_path.append(sample["future_state_raw"].cpu().numpy())
-        inverse_action.append(decode(action_normalizer, output["pred_inverse_action"]).reshape(-1, model.config.world_horizon, model.config.action_dim))
+        inverse_action.append(
+            decode(action_normalizer, output["pred_inverse_action"]).reshape(
+                -1, model.config.world_horizon, model.config.action_dim
+            )
+        )
         action_target.append(sample["action_raw"].cpu().numpy())
 
         full = legacy_error(
-            model, output["pred_world"], output["target_world"],
-            global_weight=loss_config.legacy_global_weight, reduction="none"
+            model,
+            output["pred_world"],
+            output["target_world"],
+            global_weight=loss_config.legacy_global_weight,
+            reduction="none",
         ).mean(dim=1)
         hold = legacy_error(
-            model, output["hold_world"], output["target_world"],
-            global_weight=loss_config.legacy_global_weight, reduction="none"
+            model,
+            output["hold_world"],
+            output["target_world"],
+            global_weight=loss_config.legacy_global_weight,
+            reduction="none",
         ).mean(dim=1)
         full_error.append(full.float().cpu().numpy())
         hold_error.append(hold.float().cpu().numpy())
         gripper = sample["action_raw"][..., model.config.gripper_index]
-        boundary = torch.cat([sample["state_raw"][:, None, model.config.gripper_index], gripper[:, :-1]], dim=1)
-        event_mask.append(((gripper - boundary).abs() >= loss_config.gripper_transition_threshold).any(dim=1).cpu().numpy())
+        boundary = torch.cat(
+            [sample["state_raw"][:, None, model.config.gripper_index], gripper[:, :-1]], dim=1
+        )
+        event_mask.append(
+            ((gripper - boundary).abs() >= loss_config.gripper_transition_threshold)
+            .any(dim=1)
+            .cpu()
+            .numpy()
+        )
 
         if batch_index <= ablation_batches:
+
             def world_from(visual: Tensor, state: Tensor, executed: Tensor) -> Tensor:
                 return model.encode_online(visual, state, executed)
 
@@ -332,21 +397,32 @@ def evaluate_v35_world(
             worlds = {
                 "no_perception": world_from(zero_visual, zero_state, zero_executed),
                 "visual_only": world_from(sample["current_visual"], zero_state, zero_executed),
-                "proprio_only": world_from(zero_visual, sample["history_state"], sample["executed_action_history"]),
+                "proprio_only": world_from(
+                    zero_visual, sample["history_state"], sample["executed_action_history"]
+                ),
             }
             if model.config.num_cameras >= 2:
-                top = sample["current_visual"].clone(); top[:, :, 1:] = 0
-                wrist = sample["current_visual"].clone(); wrist[:, :, :1] = 0
-                worlds["top_only"] = world_from(top, sample["history_state"], sample["executed_action_history"])
-                worlds["wrist_only"] = world_from(wrist, sample["history_state"], sample["executed_action_history"])
+                top = sample["current_visual"].clone()
+                top[:, :, 1:] = 0
+                wrist = sample["current_visual"].clone()
+                wrist[:, :, :1] = 0
+                worlds["top_only"] = world_from(
+                    top, sample["history_state"], sample["executed_action_history"]
+                )
+                worlds["wrist_only"] = world_from(
+                    wrist, sample["history_state"], sample["executed_action_history"]
+                )
             else:
                 worlds["top_only"] = worlds["visual_only"]
                 worlds["wrist_only"] = worlds["visual_only"]
             for name, world in worlds.items():
                 roll = model.dynamics.rollout_pair(world, actual_tokens, hold_tokens)
                 err = legacy_error(
-                    model, roll["pred_world"], output["target_world"],
-                    global_weight=loss_config.legacy_global_weight, reduction="none"
+                    model,
+                    roll["pred_world"],
+                    output["target_world"],
+                    global_weight=loss_config.legacy_global_weight,
+                    reduction="none",
                 ).mean(dim=1)
                 ablations[name].append(err.float().cpu().numpy())
             permutation = torch.arange(sample["action"].shape[0] - 1, -1, -1, device=device)
@@ -354,16 +430,23 @@ def evaluate_v35_world(
                 sample["action"][permutation], sample["action_state"]
             )
             shuffled = model.dynamics.rollout_pair(
-                output["initial_world"], shuffled_tokens["actual_tokens"], shuffled_tokens["hold_tokens"]
+                output["initial_world"],
+                shuffled_tokens["actual_tokens"],
+                shuffled_tokens["hold_tokens"],
             )
             shuffled_err = legacy_error(
-                model, shuffled["pred_world"], output["target_world"],
-                global_weight=loss_config.legacy_global_weight, reduction="none"
+                model,
+                shuffled["pred_world"],
+                output["target_world"],
+                global_weight=loss_config.legacy_global_weight,
+                reduction="none",
             ).mean(dim=1)
             ablations["shuffled_action"].append(shuffled_err.float().cpu().numpy())
             zero_world = torch.zeros_like(output["initial_world"])
             zero_roll = model.dynamics.rollout_pair(zero_world, actual_tokens, hold_tokens)
-            zero_effect = zero_roll["action_world_effect"].float().square().mean(dim=(1, 2, 3)).sqrt()
+            zero_effect = (
+                zero_roll["action_world_effect"].float().square().mean(dim=(1, 2, 3)).sqrt()
+            )
             ablations["zero_world_effect"].append(zero_effect.cpu().numpy())
 
     metrics = {f"val_{key}": value for key, value in mean_rows(rows).items()}
@@ -378,36 +461,60 @@ def evaluate_v35_world(
     hold_np = np.concatenate(hold_error)
     event_np = np.concatenate(event_mask).astype(bool)
 
-    metrics.update({
-        "segment_state_rmse": float(np.sqrt(np.mean((pred_endpoint_np - target_endpoint_np) ** 2))),
-        "segment_arm_rmse": float(np.sqrt(np.mean((pred_endpoint_np[..., :-1] - target_endpoint_np[..., :-1]) ** 2))),
-        "segment_gripper_rmse": float(np.sqrt(np.mean((pred_endpoint_np[..., -1] - target_endpoint_np[..., -1]) ** 2))),
-        "interpolated_state_path_rmse": float(np.sqrt(np.mean((pred_path_np - target_path_np) ** 2))),
-        "inverse_action_rmse": float(np.sqrt(np.mean((inverse_np - action_np) ** 2))),
-        "full_predictive": float(full_np.mean()),
-        "hold_predictive": float(hold_np.mean()),
-        "full_vs_hold_gain": float((hold_np - full_np).mean()),
-        "full_vs_hold_relative_gain": float(((hold_np - full_np) / np.maximum(hold_np, 1e-8)).mean()),
-        "event_full_vs_hold_gain": float((hold_np[event_np] - full_np[event_np]).mean()) if event_np.any() else float("nan"),
-        "non_event_full_vs_hold_gain": float((hold_np[~event_np] - full_np[~event_np]).mean()) if (~event_np).any() else float("nan"),
-    })
-    metrics.update(gripper_transition_metrics(
-        inverse_np, action_np, current_np,
-        gripper_index=model.config.gripper_index,
-        threshold=loss_config.gripper_transition_threshold,
-        tolerance=2,
-    ))
-    for name, values in ablations.items():
-        metrics[f"{name}_predictive" if name != "zero_world_effect" else "zero_world_effect_rms"] = (
-            float(np.concatenate(values).mean()) if values else float("nan")
+    metrics.update(
+        {
+            "segment_state_rmse": float(
+                np.sqrt(np.mean((pred_endpoint_np - target_endpoint_np) ** 2))
+            ),
+            "segment_arm_rmse": float(
+                np.sqrt(np.mean((pred_endpoint_np[..., :-1] - target_endpoint_np[..., :-1]) ** 2))
+            ),
+            "segment_gripper_rmse": float(
+                np.sqrt(np.mean((pred_endpoint_np[..., -1] - target_endpoint_np[..., -1]) ** 2))
+            ),
+            "interpolated_state_path_rmse": float(
+                np.sqrt(np.mean((pred_path_np - target_path_np) ** 2))
+            ),
+            "inverse_action_rmse": float(np.sqrt(np.mean((inverse_np - action_np) ** 2))),
+            "full_predictive": float(full_np.mean()),
+            "hold_predictive": float(hold_np.mean()),
+            "full_vs_hold_gain": float((hold_np - full_np).mean()),
+            "full_vs_hold_relative_gain": float(
+                ((hold_np - full_np) / np.maximum(hold_np, 1e-8)).mean()
+            ),
+            "event_full_vs_hold_gain": float((hold_np[event_np] - full_np[event_np]).mean())
+            if event_np.any()
+            else float("nan"),
+            "non_event_full_vs_hold_gain": float((hold_np[~event_np] - full_np[~event_np]).mean())
+            if (~event_np).any()
+            else float("nan"),
+        }
+    )
+    metrics.update(
+        gripper_transition_metrics(
+            inverse_np,
+            action_np,
+            current_np,
+            gripper_index=model.config.gripper_index,
+            threshold=loss_config.gripper_transition_threshold,
+            tolerance=2,
         )
+    )
+    for name, values in ablations.items():
+        metrics[
+            f"{name}_predictive" if name != "zero_world_effect" else "zero_world_effect_rms"
+        ] = float(np.concatenate(values).mean()) if values else float("nan")
     if math.isfinite(metrics.get("shuffled_action_predictive", float("nan"))):
-        metrics["shuffled_action_gap"] = float(metrics["shuffled_action_predictive"] - metrics["full_predictive"])
+        metrics["shuffled_action_gap"] = float(
+            metrics["shuffled_action_predictive"] - metrics["full_predictive"]
+        )
     else:
         metrics["shuffled_action_gap"] = float("nan")
     metrics["hold_action_gap"] = float(metrics["hold_predictive"] - metrics["full_predictive"])
     metrics["teacher_self_gap"] = float(metrics.get("val_teacher_self_gap", float("nan")))
-    metrics["overshoot_active"] = float(loss_config.overshoot_weight > 0 and loss_config.overshoot_depth > 0)
+    metrics["overshoot_active"] = float(
+        loss_config.overshoot_weight > 0 and loss_config.overshoot_depth > 0
+    )
     return metrics
 
 
@@ -430,7 +537,9 @@ def restore_rng(state: dict[str, Any] | None) -> None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
-def eligible(metrics: dict[str, float], best_predictive: float, trainer: V35WorldTrainerConfig) -> bool:
+def eligible(
+    metrics: dict[str, float], best_predictive: float, trainer: V35WorldTrainerConfig
+) -> bool:
     full = float(metrics.get("full_predictive", float("inf")))
     hold = float(metrics.get("hold_predictive", float("inf")))
     std = float(metrics.get("val_embedding_std", 0.0))
@@ -471,11 +580,25 @@ def train_v35_world(
     model.to(device=device, dtype=torch.float32)
     groups = [
         {"params": model.online_encoder.parameters(), "lr": trainer.encoder_lr},
-        {"params": list(model.action_tokenizer.parameters()) + list(model.dynamics.parameters()) + list(model.consequence_anchorer.parameters()), "lr": trainer.dynamics_lr},
-        {"params": list(model.state_decoder.parameters()) + list(model.inverse_decoder.parameters()) + list(model.region_decoder.parameters()) + list(model.action_only_probe.parameters()), "lr": trainer.auxiliary_lr},
+        {
+            "params": list(model.action_tokenizer.parameters())
+            + list(model.dynamics.parameters())
+            + list(model.consequence_anchorer.parameters()),
+            "lr": trainer.dynamics_lr,
+        },
+        {
+            "params": list(model.state_decoder.parameters())
+            + list(model.inverse_decoder.parameters())
+            + list(model.region_decoder.parameters())
+            + list(model.action_only_probe.parameters()),
+            "lr": trainer.auxiliary_lr,
+        },
     ]
     optimizer = torch.optim.AdamW(
-        groups, weight_decay=trainer.weight_decay, betas=(trainer.beta1, trainer.beta2), eps=trainer.eps
+        groups,
+        weight_decay=trainer.weight_decay,
+        betas=(trainer.beta1, trainer.beta2),
+        eps=trainer.eps,
     )
     steps_per_epoch = trainer.max_train_batches or len(train_loader)
     total_steps = max(steps_per_epoch * trainer.epochs, 1)
@@ -506,8 +629,12 @@ def train_v35_world(
                 break
             raw = batch["primary"] if "primary" in batch else batch
             sample = prepare_v35_sample(
-                raw, conditioner=conditioner, model=model, camera_names=camera_names,
-                device=device, dtype=dtype,
+                raw,
+                conditioner=conditioner,
+                model=model,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             pair = None
             pair_valid = None
@@ -517,8 +644,12 @@ def train_v35_world(
             )
             if need_pair_branch and "pair" in batch:
                 pair = prepare_v35_sample(
-                    batch["pair"], conditioner=conditioner, model=model, camera_names=camera_names,
-                    device=device, dtype=dtype,
+                    batch["pair"],
+                    conditioner=conditioner,
+                    model=model,
+                    camera_names=camera_names,
+                    device=device,
+                    dtype=dtype,
                 )
                 pair_valid = batch["pair_valid"].to(device=device)
             optimizer.zero_grad(set_to_none=True)
@@ -543,9 +674,16 @@ def train_v35_world(
                             pair_action["hold_tokens"],
                         )
                 losses = compute_v35_world_losses(
-                    model, sample, output, config=loss_config,
-                    masked_world=masked_world, pair_output=pair_output, pair_valid=pair_valid,
-                    swapped_output=swapped, stability_scale=stability_scale, action_scale=action_scale,
+                    model,
+                    sample,
+                    output,
+                    config=loss_config,
+                    masked_world=masked_world,
+                    pair_output=pair_output,
+                    pair_valid=pair_valid,
+                    swapped_output=swapped,
+                    stability_scale=stability_scale,
+                    action_scale=action_scale,
                 )
             losses["loss"].float().backward()
             grad = grad_norm(model.parameters())
@@ -570,16 +708,35 @@ def train_v35_world(
                 )
 
         train_metrics = mean_rows(train_rows)
-        for memory_key in ("cuda_peak_allocated_mb", "cuda_peak_reserved_mb", "cuda_allocated_mb", "cuda_reserved_mb"):
+        for memory_key in (
+            "cuda_peak_allocated_mb",
+            "cuda_peak_reserved_mb",
+            "cuda_allocated_mb",
+            "cuda_reserved_mb",
+        ):
             if train_rows and memory_key in train_rows[0]:
-                train_metrics["max_" + memory_key] = max(float(row[memory_key]) for row in train_rows)
+                train_metrics["max_" + memory_key] = max(
+                    float(row[memory_key]) for row in train_rows
+                )
         val_metrics = evaluate_v35_world(
-            model=model, loader=val_loader, conditioner=conditioner, device=device, dtype=dtype,
-            camera_names=camera_names, loss_config=loss_config,
-            state_normalizer=state_normalizer, action_normalizer=action_normalizer,
-            max_batches=trainer.max_val_batches, ablation_batches=trainer.eval_ablation_batches,
+            model=model,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            loss_config=loss_config,
+            state_normalizer=state_normalizer,
+            action_normalizer=action_normalizer,
+            max_batches=trainer.max_val_batches,
+            ablation_batches=trainer.eval_ablation_batches,
         )
-        record = {"epoch": epoch, "global_step": global_step, "train": train_metrics, "val": val_metrics}
+        record = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "train": train_metrics,
+            "val": val_metrics,
+        }
         history.append(record)
         append_jsonl(out_dir / "v35_world_epochs.jsonl", record)
 
@@ -636,6 +793,10 @@ def train_v35_world(
 
 
 __all__ = [
-    "V35WorldTrainerConfig", "prepare_v35_sample", "forward_v35", "evaluate_v35_world",
-    "train_v35_world", "jsonable",
+    "V35WorldTrainerConfig",
+    "prepare_v35_sample",
+    "forward_v35",
+    "evaluate_v35_world",
+    "train_v35_world",
+    "jsonable",
 ]

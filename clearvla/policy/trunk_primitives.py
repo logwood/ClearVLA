@@ -63,7 +63,9 @@ class HorizonRoleEmbedding(nn.Module):
         h = self.execution.shape[-1]
         role = torch.empty(1, self.config.action_horizon, h, device=device, dtype=dtype)
         role[:, : self.config.first_execution_steps] = self.execution.to(device=device, dtype=dtype)
-        role[:, self.config.first_execution_steps : self.config.mid_execution_steps] = self.mid.to(device=device, dtype=dtype)
+        role[:, self.config.first_execution_steps : self.config.mid_execution_steps] = self.mid.to(
+            device=device, dtype=dtype
+        )
         role[:, self.config.mid_execution_steps :] = self.tail.to(device=device, dtype=dtype)
         return role.expand(batch, -1, -1)
 
@@ -77,7 +79,9 @@ class DenseVisualMemory(nn.Module):
         h = config.hidden_size
         d = config.visual_token_dim
         self.proj = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, h))
-        self.history_type = nn.Parameter(torch.randn(1, config.visual_history_length, 1, 1, h) * 0.02)
+        self.history_type = nn.Parameter(
+            torch.randn(1, config.visual_history_length, 1, 1, h) * 0.02
+        )
         self.camera_type = nn.Parameter(torch.randn(1, 1, config.num_cameras, 1, h) * 0.02)
         self.patch_type = nn.Parameter(torch.randn(1, 1, 1, config.patches_per_camera, h) * 0.02)
         self.out_norm = nn.LayerNorm(h)
@@ -88,9 +92,16 @@ class DenseVisualMemory(nn.Module):
         if visual.ndim != 5:
             raise ValueError(f"visual must be [B,H,C,P,D], got {tuple(visual.shape)}")
         b, hist, cams, patches, dim = visual.shape
-        expected = (cfg.visual_history_length, cfg.num_cameras, cfg.patches_per_camera, cfg.visual_token_dim)
+        expected = (
+            cfg.visual_history_length,
+            cfg.num_cameras,
+            cfg.patches_per_camera,
+            cfg.visual_token_dim,
+        )
         if (hist, cams, patches, dim) != expected:
-            raise ValueError(f"V38 visual geometry mismatch: got {(hist, cams, patches, dim)}, expected {expected}")
+            raise ValueError(
+                f"V38 visual geometry mismatch: got {(hist, cams, patches, dim)}, expected {expected}"
+            )
         x = self.proj(visual)
         x = x + self.history_type.to(device=x.device, dtype=x.dtype)
         x = x + self.camera_type.to(device=x.device, dtype=x.dtype)
@@ -129,7 +140,9 @@ class RolloutTargetCodec(nn.Module):
         if side * side == p:
             x = tokens.reshape(b * f * c, side, side, d).permute(0, 3, 1, 2).float()
             x = F.adaptive_avg_pool2d(x, (cfg.future_grid_size, cfg.future_grid_size))
-            x = x.permute(0, 2, 3, 1).reshape(b, f, c * cfg.future_grid_size * cfg.future_grid_size, d)
+            x = x.permute(0, 2, 3, 1).reshape(
+                b, f, c * cfg.future_grid_size * cfg.future_grid_size, d
+            )
         else:
             g2 = cfg.future_grid_size * cfg.future_grid_size
             idx = torch.linspace(0, p, steps=g2 + 1, device=tokens.device).long()
@@ -150,21 +163,29 @@ class RolloutTargetCodec(nn.Module):
     def rollout_init(self, visual: Tensor) -> Tensor:
         cfg = self.config
         current = self.current_grid(visual)
-        current_h = self.init_proj(current.to(device=next(self.parameters()).device, dtype=next(self.parameters()).dtype))
-        return current_h[:, None].expand(-1, cfg.future_anchors, -1, -1).reshape(
-            visual.shape[0], cfg.future_token_count, cfg.hidden_size
+        current_h = self.init_proj(
+            current.to(device=next(self.parameters()).device, dtype=next(self.parameters()).dtype)
+        )
+        return (
+            current_h[:, None]
+            .expand(-1, cfg.future_anchors, -1, -1)
+            .reshape(visual.shape[0], cfg.future_token_count, cfg.hidden_size)
         )
 
     @torch.no_grad()
     def target_effect(self, visual: Tensor, target_visual: Tensor) -> Tensor:
         cfg = self.config
         if target_visual.ndim != 6:
-            raise ValueError(f"target_visual must be [B,F,H,C,P,D], got {tuple(target_visual.shape)}")
+            raise ValueError(
+                f"target_visual must be [B,F,H,C,P,D], got {tuple(target_visual.shape)}"
+            )
         future = target_visual[:, : cfg.future_anchors, -1]
         current = visual[:, -1][:, None].expand(-1, cfg.future_anchors, -1, -1, -1)
         residual = future.float() - current.float()
         pooled = self.spatial_pool_tokens(residual)  # [B,K,C*G*G,D]
-        target = self.target_proj(pooled.to(device=next(self.parameters()).device, dtype=next(self.parameters()).dtype))
+        target = self.target_proj(
+            pooled.to(device=next(self.parameters()).device, dtype=next(self.parameters()).dtype)
+        )
         return target.reshape(visual.shape[0], cfg.future_token_count, cfg.hidden_size).detach()
 
 
@@ -190,18 +211,31 @@ class UnifiedCanvasSeed(nn.Module):
         self.proposal_proj = nn.Identity()
         self.noisy_physical_lift = PhysicalActionTokenLift(config)
         self.horizon_role = HorizonRoleEmbedding(config)
-        self.action_basis_embed = nn.Parameter(torch.randn(1, 1, config.action_basis_tokens, h) * 0.02)
+        self.action_basis_embed = nn.Parameter(
+            torch.randn(1, 1, config.action_basis_tokens, h) * 0.02
+        )
         self.role_embed = nn.Parameter(torch.randn(8, h) * 0.02)
         self.role_drop = nn.Dropout(config.role_dropout)
         self.task_token = nn.Parameter(torch.randn(1, 1, h) * 0.02)
         self.rollout_anchor_type = nn.Parameter(torch.randn(1, config.future_anchors, 1, h) * 0.02)
-        self.rollout_grid_type = nn.Parameter(torch.randn(1, 1, config.num_cameras * config.future_grid_size * config.future_grid_size, h) * 0.02)
+        self.rollout_grid_type = nn.Parameter(
+            torch.randn(
+                1, 1, config.num_cameras * config.future_grid_size * config.future_grid_size, h
+            )
+            * 0.02
+        )
         self.registers = nn.Parameter(torch.randn(1, config.canvas_registers, h) * 0.02)
         self.proposal_type = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
         self.executed_type = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
-        self.state_history_type = nn.Parameter(torch.randn(1, config.visual_history_length, h) * 0.02)
+        self.state_history_type = nn.Parameter(
+            torch.randn(1, config.visual_history_length, h) * 0.02
+        )
         self.drop = nn.Dropout(config.canvas_dropout)
-        self.register_buffer("horizon_position", sinusoidal_positions(range(1, config.action_horizon + 1), h)[None], persistent=True)
+        self.register_buffer(
+            "horizon_position",
+            sinusoidal_positions(range(1, config.action_horizon + 1), h)[None],
+            persistent=True,
+        )
 
     def forward(
         self,
@@ -219,28 +253,56 @@ class UnifiedCanvasSeed(nn.Module):
         device = noisy_physical.device
         dtype = noisy_physical.dtype
         role = self.role_drop(self.role_embed.to(device=device, dtype=dtype))
-        task = self.task_token.expand(b, -1, -1).to(device=device, dtype=dtype) + role[self.ROLE_TASK]
+        task = (
+            self.task_token.expand(b, -1, -1).to(device=device, dtype=dtype) + role[self.ROLE_TASK]
+        )
         state_tok = self.state_proj(state)[:, None] + role[self.ROLE_STATE]
-        hist = self.state_history_proj(state_history) + self.state_history_type.to(device=device, dtype=dtype) + role[self.ROLE_STATE_HISTORY]
-        executed = self.executed_proj(executed_history) + self.executed_type.to(device=device, dtype=dtype) + role[self.ROLE_EXECUTED]
-        proposal = self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type.to(device=device, dtype=dtype) + role[self.ROLE_PROPOSAL]
+        hist = (
+            self.state_history_proj(state_history)
+            + self.state_history_type.to(device=device, dtype=dtype)
+            + role[self.ROLE_STATE_HISTORY]
+        )
+        executed = (
+            self.executed_proj(executed_history)
+            + self.executed_type.to(device=device, dtype=dtype)
+            + role[self.ROLE_EXECUTED]
+        )
+        proposal = (
+            self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None]
+            + self.proposal_type.to(device=device, dtype=dtype)
+            + role[self.ROLE_PROPOSAL]
+        )
         noisy_base = (
             self.noisy_physical_lift(noisy_physical)
             + self.horizon_position.to(device=device, dtype=dtype)
             + self.horizon_role(b, device=device, dtype=dtype)
             + role[self.ROLE_NOISY_ACTION]
         )
-        noisy = (noisy_base[:, :, None, :] + self.action_basis_embed.to(device=device, dtype=dtype)).reshape(
-            b, cfg.action_horizon * cfg.action_basis_tokens, cfg.hidden_size
-        )
+        noisy = (
+            noisy_base[:, :, None, :] + self.action_basis_embed.to(device=device, dtype=dtype)
+        ).reshape(b, cfg.action_horizon * cfg.action_basis_tokens, cfg.hidden_size)
         if rollout_init.shape != (b, cfg.future_token_count, cfg.hidden_size):
-            raise ValueError(f"rollout_init must be [B,{cfg.future_token_count},{cfg.hidden_size}], got {tuple(rollout_init.shape)}")
+            raise ValueError(
+                f"rollout_init must be [B,{cfg.future_token_count},{cfg.hidden_size}], got {tuple(rollout_init.shape)}"
+            )
         rollout = rollout_init.to(device=device, dtype=dtype).reshape(
-            b, cfg.future_anchors, cfg.num_cameras * cfg.future_grid_size * cfg.future_grid_size, cfg.hidden_size
+            b,
+            cfg.future_anchors,
+            cfg.num_cameras * cfg.future_grid_size * cfg.future_grid_size,
+            cfg.hidden_size,
         )
-        rollout = rollout + self.rollout_anchor_type.to(device=device, dtype=dtype) + self.rollout_grid_type.to(device=device, dtype=dtype)
-        rollout = rollout.reshape(b, cfg.future_token_count, cfg.hidden_size) + role[self.ROLE_ROLLOUT]
-        registers = self.registers.expand(b, -1, -1).to(device=device, dtype=dtype) + role[self.ROLE_REGISTER]
+        rollout = (
+            rollout
+            + self.rollout_anchor_type.to(device=device, dtype=dtype)
+            + self.rollout_grid_type.to(device=device, dtype=dtype)
+        )
+        rollout = (
+            rollout.reshape(b, cfg.future_token_count, cfg.hidden_size) + role[self.ROLE_ROLLOUT]
+        )
+        registers = (
+            self.registers.expand(b, -1, -1).to(device=device, dtype=dtype)
+            + role[self.ROLE_REGISTER]
+        )
         parts = [task, state_tok, hist, executed, proposal, noisy, rollout, registers]
         starts = []
         offset = 0
@@ -253,7 +315,9 @@ class UnifiedCanvasSeed(nn.Module):
             "state_history": slice(starts[2], starts[2] + cfg.visual_history_length),
             "executed": slice(starts[3], starts[3] + cfg.executed_history_length),
             "proposal": slice(starts[4], starts[4] + cfg.action_horizon),
-            "trajectory": slice(starts[5], starts[5] + cfg.action_horizon * cfg.action_basis_tokens),
+            "trajectory": slice(
+                starts[5], starts[5] + cfg.action_horizon * cfg.action_basis_tokens
+            ),
             "rollout": slice(starts[6], starts[6] + cfg.future_token_count),
             "registers": slice(starts[7], starts[7] + cfg.canvas_registers),
         }
@@ -267,13 +331,19 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         super().__init__()
         h = config.hidden_size
         self.n1 = nn.LayerNorm(h, elementwise_affine=False)
-        self.self_attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.self_attn = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n2 = nn.LayerNorm(h, elementwise_affine=False)
         self.mem_norm = nn.LayerNorm(h)
-        self.cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n_dyn_q = nn.LayerNorm(h, elementwise_affine=False)
         self.n_dyn_kv = nn.LayerNorm(h)
-        self.rollout_cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.rollout_cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n3 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, config.ffn_expansion)
         self.drop = nn.Dropout(config.dropout)
@@ -288,8 +358,12 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
     def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
         return x * (1 + scale[:, None]) + shift[:, None]
 
-    def forward(self, canvas: Tensor, visual_memory: Tensor, mod_embed: Tensor, slices: dict[str, slice]) -> tuple[Tensor, dict[str, Tensor]]:
-        sa_s, sa_c, sa_g, ca_s, ca_c, ca_g, dy_s, dy_c, dy_g, ff_s, ff_c, ff_g = self.mod(mod_embed).chunk(12, dim=-1)
+    def forward(
+        self, canvas: Tensor, visual_memory: Tensor, mod_embed: Tensor, slices: dict[str, slice]
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        sa_s, sa_c, sa_g, ca_s, ca_c, ca_g, dy_s, dy_c, dy_g, ff_s, ff_c, ff_g = self.mod(
+            mod_embed
+        ).chunk(12, dim=-1)
         value = self.n1(canvas)
         qk = self.modulate(value, sa_s, sa_c)
         update, _ = self.self_attn(qk, qk, value, need_weights=False)
@@ -303,7 +377,10 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         canvas = canvas + g_ca[:, None] * self.drop(update)
 
         rollout = canvas[:, slices["rollout"]]
-        kv_parts = [canvas[:, slices[name]] for name in ("state", "state_history", "executed", "proposal", "trajectory")]
+        kv_parts = [
+            canvas[:, slices[name]]
+            for name in ("state", "state_history", "executed", "proposal", "trajectory")
+        ]
         kv = self.n_dyn_kv(torch.cat(kv_parts, dim=1))
         q = self.modulate(self.n_dyn_q(rollout), dy_s, dy_c)
         update, _ = self.rollout_cross(q, kv, kv, need_weights=False)
@@ -339,13 +416,19 @@ class CanvasPhysicalVelocityHead(nn.Module):
     def pooled(self, trajectory_tokens: Tensor) -> Tensor:
         cfg = self.config
         b = trajectory_tokens.shape[0]
-        return trajectory_tokens.reshape(b, cfg.action_horizon, cfg.action_basis_tokens, cfg.hidden_size).mean(dim=2)
+        return trajectory_tokens.reshape(
+            b, cfg.action_horizon, cfg.action_basis_tokens, cfg.hidden_size
+        ).mean(dim=2)
 
     def forward(self, trajectory_tokens: Tensor) -> Tensor:
         cfg = self.config
         b = trajectory_tokens.shape[0]
-        grouped = trajectory_tokens.reshape(b, cfg.action_horizon, cfg.action_basis_tokens, cfg.hidden_size)
-        return self.net(grouped.reshape(b, cfg.action_horizon, cfg.action_basis_tokens * cfg.hidden_size))
+        grouped = trajectory_tokens.reshape(
+            b, cfg.action_horizon, cfg.action_basis_tokens, cfg.hidden_size
+        )
+        return self.net(
+            grouped.reshape(b, cfg.action_horizon, cfg.action_basis_tokens * cfg.hidden_size)
+        )
 
 
 class RolloutActionResidualHead(nn.Module):
@@ -357,8 +440,15 @@ class RolloutActionResidualHead(nn.Module):
         h = config.hidden_size
         self.query_norm = nn.LayerNorm(h)
         self.rollout_norm = nn.LayerNorm(h)
-        self.cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
-        self.net = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 2 * h), nn.SiLU(), nn.Linear(2 * h, config.physical_action_dim))
+        self.cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
+        self.net = nn.Sequential(
+            nn.LayerNorm(h),
+            nn.Linear(h, 2 * h),
+            nn.SiLU(),
+            nn.Linear(2 * h, config.physical_action_dim),
+        )
         nn.init.normal_(self.net[-1].weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.net[-1].bias)
         alpha = torch.zeros(config.action_horizon, dtype=torch.float32)
@@ -417,14 +507,22 @@ class ControlledResidualLatentDynamics(nn.Module):
             nn.SiLU(),
             nn.Linear(2 * h, r * h),
         )
-        self.action_queries = nn.Parameter(torch.randn(1, int(config.latent_action_tokens), h) * 0.02)
-        self.neutral_queries = nn.Parameter(torch.randn(1, int(config.neutral_action_tokens), h) * 0.02)
+        self.action_queries = nn.Parameter(
+            torch.randn(1, int(config.latent_action_tokens), h) * 0.02
+        )
+        self.neutral_queries = nn.Parameter(
+            torch.randn(1, int(config.neutral_action_tokens), h) * 0.02
+        )
         self.neutral_bias = nn.Parameter(torch.zeros(1, 1, h))
         self.action_kv_norm = nn.LayerNorm(h)
-        self.action_cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.action_cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.rollout_query_norm = nn.LayerNorm(h)
         self.action_latent_norm = nn.LayerNorm(h)
-        self.coeff_cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.coeff_cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         # Direct trajectory summary keeps the coefficient path from being a
         # purely second-order product of tiny random attention features.  It is
         # still a network path, not a rule: coefficients are generated from the
@@ -485,11 +583,17 @@ class ControlledResidualLatentDynamics(nn.Module):
         """
         b, n, h = rollout_base.shape
         if neutral:
-            queries = self.neutral_queries.expand(b, -1, -1).to(device=rollout_base.device, dtype=rollout_base.dtype)
+            queries = self.neutral_queries.expand(b, -1, -1).to(
+                device=rollout_base.device, dtype=rollout_base.dtype
+            )
             kv = self.action_kv_norm(context_kv)
-            direct = self.neutral_bias.to(device=rollout_base.device, dtype=rollout_base.dtype).expand(b, n, -1)
+            direct = self.neutral_bias.to(
+                device=rollout_base.device, dtype=rollout_base.dtype
+            ).expand(b, n, -1)
         else:
-            queries = self.action_queries.expand(b, -1, -1).to(device=rollout_base.device, dtype=rollout_base.dtype)
+            queries = self.action_queries.expand(b, -1, -1).to(
+                device=rollout_base.device, dtype=rollout_base.dtype
+            )
             if action_tokens is None:
                 kv_source = context_kv
                 action_source = context_kv
@@ -497,7 +601,9 @@ class ControlledResidualLatentDynamics(nn.Module):
                 kv_source = torch.cat([context_kv, action_tokens], dim=1)
                 action_source = action_tokens
             kv = self.action_kv_norm(kv_source)
-            direct_action = self.direct_action_mlp(self.direct_action_norm(action_source).mean(dim=1))
+            direct_action = self.direct_action_mlp(
+                self.direct_action_norm(action_source).mean(dim=1)
+            )
             direct = direct_action[:, None, :].expand(-1, n, -1)
 
         latent_action, _ = self.action_cross(queries, kv, kv, need_weights=False)
@@ -518,7 +624,9 @@ class ControlledResidualLatentDynamics(nn.Module):
         cfg = self.config
         b, n, h = rollout_base.shape
         if n != cfg.future_token_count or h != cfg.hidden_size:
-            raise ValueError(f"rollout_base must be [B,{cfg.future_token_count},{cfg.hidden_size}], got {tuple(rollout_base.shape)}")
+            raise ValueError(
+                f"rollout_base must be [B,{cfg.future_token_count},{cfg.hidden_size}], got {tuple(rollout_base.shape)}"
+            )
         transition = rollout_base if transition_tokens is None else transition_tokens
         if transition.shape != rollout_base.shape:
             raise ValueError(
@@ -532,11 +640,21 @@ class ControlledResidualLatentDynamics(nn.Module):
         # V39 can keep a fixed, identifiable origin while still using the full
         # deep rollout canvas to construct action-conditioned directions.
         basis = self.basis_head(transition).reshape(b, n, cfg.controlled_delta_rank, h)
-        coeff_action, latent_action, _ = self._coeff(transition, context_kv, action_tokens=action_tokens, neutral=False)
-        coeff_neutral, latent_neutral, _ = self._coeff(transition, context_kv, action_tokens=None, neutral=True)
+        coeff_action, latent_action, _ = self._coeff(
+            transition, context_kv, action_tokens=action_tokens, neutral=False
+        )
+        coeff_neutral, latent_neutral, _ = self._coeff(
+            transition, context_kv, action_tokens=None, neutral=True
+        )
         coeff_delta = coeff_action - coeff_neutral
-        controlled_delta = torch.einsum("bnr,bnrh->bnh", coeff_delta, basis) / float(cfg.controlled_delta_rank) ** 0.5
-        controlled_delta = self.delta_drop(controlled_delta * self.delta_gain.to(device=controlled_delta.device, dtype=controlled_delta.dtype))
+        controlled_delta = (
+            torch.einsum("bnr,bnrh->bnh", coeff_delta, basis)
+            / float(cfg.controlled_delta_rank) ** 0.5
+        )
+        controlled_delta = self.delta_drop(
+            controlled_delta
+            * self.delta_gain.to(device=controlled_delta.device, dtype=controlled_delta.dtype)
+        )
         pred_effect = base_effect + controlled_delta
         base_norm = base_effect.detach().float().norm(dim=-1).mean()
         delta_norm = controlled_delta.detach().float().norm(dim=-1).mean()
@@ -563,6 +681,8 @@ class ControlledResidualLatentDynamics(nn.Module):
             "rollout_delta_norm": delta_norm,
             "rollout_base_norm": base_norm,
             "rollout_decomposition_expansion_ratio": expansion_ratio,
-            "rollout_base_is_fixed_zero": base_norm.new_tensor(float(self.base_mode == "fixed_zero")),
+            "rollout_base_is_fixed_zero": base_norm.new_tensor(
+                float(self.base_mode == "fixed_zero")
+            ),
             "rollout_delta_gain": self.delta_gain.detach().float().abs(),
         }

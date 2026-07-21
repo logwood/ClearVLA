@@ -20,8 +20,15 @@ from clearvla.experiments.vision_usage_lab.dataset import (
 )
 from clearvla.experiments.vision_usage_lab.flow import ActionBridgeConfig, sample_action_bridge
 from clearvla.experiments.vision_usage_lab.latent_cache import VisionLatentCacheStore
-from clearvla.experiments.vision_usage_lab.losses import VisionUsageLabLossConfig, vision_usage_lab_loss
-from clearvla.experiments.vision_usage_lab.model import AdaptiveSolverConfig, VisionUsageLabModel, VisionUsageLabModelConfig
+from clearvla.experiments.vision_usage_lab.losses import (
+    VisionUsageLabLossConfig,
+    vision_usage_lab_loss,
+)
+from clearvla.experiments.vision_usage_lab.model import (
+    AdaptiveSolverConfig,
+    VisionUsageLabModel,
+    VisionUsageLabModelConfig,
+)
 from clearvla.experiments.vision_usage_lab.trainer import (
     LAB_PHASES,
     LabPhaseEpochs,
@@ -41,7 +48,9 @@ def _serializable(value: Any) -> Any:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train the structured visual-latent vision-usage laboratory")
+    p = argparse.ArgumentParser(
+        description="Train the structured visual-latent vision-usage laboratory"
+    )
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--glob", default="*.hdf5")
     p.add_argument("--latent-cache-dir", type=Path, required=True)
@@ -57,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--obs-horizon", type=int, default=2)
     p.add_argument("--future-visual-horizons", type=int, nargs="+", default=(1, 4, 8))
     p.add_argument("--stride", type=int, default=1)
-    p.add_argument("--prior", choices=["hold", "velocity", "ema_velocity", "blend"], default="blend")
+    p.add_argument(
+        "--prior", choices=["hold", "velocity", "ema_velocity", "blend"], default="blend"
+    )
     p.add_argument("--prior-beta", type=float, default=0.5)
     p.add_argument("--velocity-mode", choices=["last", "mean", "ema"], default="ema")
     p.add_argument("--ema-decay", type=float, default=0.75)
@@ -139,8 +150,16 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _loader(dataset: VisionUsageLabDataset, *, batch_size: int, workers: int, device: torch.device) -> DataLoader:
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=device.type == "cuda")
+def _loader(
+    dataset: VisionUsageLabDataset, *, batch_size: int, workers: int, device: torch.device
+) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=device.type == "cuda",
+    )
 
 
 def main() -> None:
@@ -153,7 +172,9 @@ def main() -> None:
     device = resolve_device(args.device)
     cameras = tuple(str(x) for x in args.cameras)
     future_horizons = tuple(sorted(set(int(x) for x in args.future_visual_horizons)))
-    min_length = max(args.past_len, args.obs_horizon - 1) + max(args.chunk_len, max(future_horizons) + 1)
+    min_length = max(args.past_len, args.obs_horizon - 1) + max(
+        args.chunk_len, max(future_horizons) + 1
+    )
     episodes, skipped, train_ids, val_ids, test_ids, normalizer = load_and_normalize_episodes(
         data_root=args.data_root,
         pattern=args.glob,
@@ -189,14 +210,23 @@ def main() -> None:
         visual_mode=LabVisualMode.CORRECT,
         **dataset_kwargs,
     )
-    train_scores = compute_lab_event_scores(train_ds, LabEventScoreConfig(event_quantile=args.event_quantile))
+    train_scores = compute_lab_event_scores(
+        train_ds, LabEventScoreConfig(event_quantile=args.event_quantile)
+    )
     train_ds.attach_event_scores(train_scores)
     sampler = TrajectoryBlockBatchSampler(
         train_ds.refs,
         train_scores.is_event,
-        TrajectoryBlockSamplerConfig(block_size=args.batch_size, event_fraction=args.event_fraction, seed=args.seed),
+        TrajectoryBlockSamplerConfig(
+            block_size=args.batch_size, event_fraction=args.event_fraction, seed=args.seed
+        ),
     )
-    train_loader = DataLoader(train_ds, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=device.type == "cuda")
+    train_loader = DataLoader(
+        train_ds,
+        batch_sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
 
     # Validation corruption sources must remain distinct even when the validation
     # split contains only one episode.  Sources are visual counterfactuals only;
@@ -210,9 +240,14 @@ def main() -> None:
             visual_mode=mode,
             **dataset_kwargs,
         )
-        ds.attach_event_scores(compute_lab_event_scores(ds, LabEventScoreConfig(event_quantile=args.event_quantile)))
+        ds.attach_event_scores(
+            compute_lab_event_scores(ds, LabEventScoreConfig(event_quantile=args.event_quantile))
+        )
         val_datasets[mode.value] = ds
-    val_loaders = {mode: _loader(ds, batch_size=args.batch_size, workers=args.num_workers, device=device) for mode, ds in val_datasets.items()}
+    val_loaders = {
+        mode: _loader(ds, batch_size=args.batch_size, workers=args.num_workers, device=device)
+        for mode, ds in val_datasets.items()
+    }
 
     model_cfg = VisionUsageLabModelConfig(
         action_dim=int(episodes[0].actions_raw.shape[1]),
@@ -321,64 +356,101 @@ def main() -> None:
     print("latent_cache:", context["latent_cache"])
     print("model:", model_cfg.to_dict())
     print("model_parameters:", parameters)
-    print("event_windows:", context["event_windows"], "regular_windows:", context["regular_windows"])
+    print(
+        "event_windows:", context["event_windows"], "regular_windows:", context["regular_windows"]
+    )
 
     if args.dry_run:
         raw = next(iter(train_loader))
         batch = {key: value.to(device) for key, value in raw.items()}
         aux = model(
-            past=batch["past"], prior=batch["prior"], visual_tokens=batch["visual_tokens"],
-            future_actions=batch["future"], compute_action=False, compute_auxiliary=True,
+            past=batch["past"],
+            prior=batch["prior"],
+            visual_tokens=batch["visual_tokens"],
+            future_actions=batch["future"],
+            compute_action=False,
+            compute_auxiliary=True,
         )
         learned_source, learned_source_tokens = model.predict_source(batch["past"], batch["prior"])
         bridge = sample_action_bridge(learned_source.detach(), batch["future"], bridge_cfg)
         output = model(
-            past=batch["past"], prior=batch["prior"], visual_tokens=batch["visual_tokens"],
-            action_state=bridge.state, bridge_time=bridge.time, noise_level=bridge.noise_level,
-            future_actions=batch["future"], source_trajectory=learned_source, compute_action=True, compute_auxiliary=True,
+            past=batch["past"],
+            prior=batch["prior"],
+            visual_tokens=batch["visual_tokens"],
+            action_state=bridge.state,
+            bridge_time=bridge.time,
+            noise_level=bridge.noise_level,
+            future_actions=batch["future"],
+            source_trajectory=learned_source,
+            compute_action=True,
+            compute_auxiliary=True,
         )
         wrong = model(
-            past=batch["past"], prior=batch["prior"], visual_tokens=batch["negative_visual_tokens"],
-            action_state=bridge.state, bridge_time=bridge.time, noise_level=bridge.noise_level,
-            source_trajectory=learned_source, compute_action=True, compute_auxiliary=False,
+            past=batch["past"],
+            prior=batch["prior"],
+            visual_tokens=batch["negative_visual_tokens"],
+            action_state=bridge.state,
+            bridge_time=bridge.time,
+            noise_level=bridge.noise_level,
+            source_trajectory=learned_source,
+            compute_action=True,
+            compute_auxiliary=False,
         )
         result = vision_usage_lab_loss(
-            correct=output, wrong=wrong, target_actions=batch["future"], target_velocity=bridge.target_velocity,
-            target_visual_delta_tokens=batch["future_visual_delta_tokens"], event_flag=batch["event_flag"],
-            demand_target=batch["demand_target"], config=loss_cfg, phase="action_flow",
+            correct=output,
+            wrong=wrong,
+            target_actions=batch["future"],
+            target_velocity=bridge.target_velocity,
+            target_visual_delta_tokens=batch["future_visual_delta_tokens"],
+            event_flag=batch["event_flag"],
+            demand_target=batch["demand_target"],
+            config=loss_cfg,
+            phase="action_flow",
         )
         result.total.backward()
         adaptive = model.integrate_adaptive(
-            past=batch["past"], prior=batch["prior"], visual_tokens=batch["visual_tokens"],
+            past=batch["past"],
+            prior=batch["prior"],
+            visual_tokens=batch["visual_tokens"],
             solver=adaptive_solver,
         )
         if (
-            aux.visual_delta_tokens is None or aux.demand_score is None
-            or output.velocity is None or output.visual_delta_tokens is None or output.demand_score is None
+            aux.visual_delta_tokens is None
+            or aux.demand_score is None
+            or output.velocity is None
+            or output.visual_delta_tokens is None
+            or output.demand_score is None
         ):
             raise RuntimeError("dry-run model output is incomplete")
-        print("dry_run_shapes:", {
-            "past": tuple(batch["past"].shape),
-            "prior": tuple(batch["prior"].shape),
-            "visual_tokens": tuple(batch["visual_tokens"].shape),
-            "negative_visual_tokens": tuple(batch["negative_visual_tokens"].shape),
-            "future_visual_delta_tokens": tuple(batch["future_visual_delta_tokens"].shape),
-            "demand_target": tuple(batch["demand_target"].shape),
-            "learned_source": tuple(output.learned_source.shape),
-            "fast_prefix": tuple(output.fast_prefix.shape),
-            "streaming_actions": None if output.streaming_actions is None else tuple(output.streaming_actions.shape),
-            "velocity": tuple(output.velocity.shape),
-            "visual_delta_tokens": tuple(output.visual_delta_tokens.shape),
-            "demand_score": tuple(output.demand_score.shape),
-            "adaptive_prediction": tuple(adaptive.prediction.shape),
-            "adaptive_solver_steps": tuple(adaptive.solver_steps.shape),
-        })
+        print(
+            "dry_run_shapes:",
+            {
+                "past": tuple(batch["past"].shape),
+                "prior": tuple(batch["prior"].shape),
+                "visual_tokens": tuple(batch["visual_tokens"].shape),
+                "negative_visual_tokens": tuple(batch["negative_visual_tokens"].shape),
+                "future_visual_delta_tokens": tuple(batch["future_visual_delta_tokens"].shape),
+                "demand_target": tuple(batch["demand_target"].shape),
+                "learned_source": tuple(output.learned_source.shape),
+                "fast_prefix": tuple(output.fast_prefix.shape),
+                "streaming_actions": None
+                if output.streaming_actions is None
+                else tuple(output.streaming_actions.shape),
+                "velocity": tuple(output.velocity.shape),
+                "visual_delta_tokens": tuple(output.visual_delta_tokens.shape),
+                "demand_score": tuple(output.demand_score.shape),
+                "adaptive_prediction": tuple(adaptive.prediction.shape),
+                "adaptive_solver_steps": tuple(adaptive.solver_steps.shape),
+            },
+        )
         print("dry_run_loss:", result.detached_floats())
         print("dry-run passed")
         return
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "train_context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
+    (args.out_dir / "train_context.json").write_text(
+        json.dumps(context, indent=2), encoding="utf-8"
+    )
     summary = train_vision_usage_lab(
         model=model,
         train_loaders_by_phase={phase: train_loader for phase in LAB_PHASES},
@@ -391,11 +463,16 @@ def main() -> None:
         loss_config=loss_cfg,
         context=context,
     )
-    print(json.dumps({
-        "best_selection_full_mse": summary["best_selection_full_mse"],
-        "best_selection_mode": summary["best_selection_mode"],
-        "summary": str(args.out_dir / "vision_usage_lab_summary.json"),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "best_selection_full_mse": summary["best_selection_full_mse"],
+                "best_selection_mode": summary["best_selection_mode"],
+                "summary": str(args.out_dir / "vision_usage_lab_summary.json"),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

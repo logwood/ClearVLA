@@ -50,10 +50,9 @@ class PolicyConditionOrganizer(nn.Module):
         h = int(config.hidden_size)
         self.hidden_size = h
         self.depth = int(config.depth)
-        self.layer_key_proj = nn.ModuleList([
-            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-            for _ in self._LAYER_KEYS
-        ])
+        self.layer_key_proj = nn.ModuleList(
+            [nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)) for _ in self._LAYER_KEYS]
+        )
         self.layer_key_embed = nn.Parameter(torch.randn(1, len(self._LAYER_KEYS), h) * 0.02)
         self.world_key_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
         self.consequence_key_gate = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
@@ -65,10 +64,12 @@ class PolicyConditionOrganizer(nn.Module):
         consequence_init = float(config.hierarchical_mmdit_consequence_scale_init)
         ratio = min(max(consequence_init / consequence_max, 1e-4), 1.0 - 1e-4)
         self.consequence_scale_logit = nn.Parameter(torch.tensor(math.log(ratio / (1.0 - ratio))))
-        self.layer_proj = nn.ModuleList([
-            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
-            for _ in range(self.depth)
-        ])
+        self.layer_proj = nn.ModuleList(
+            [
+                nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
+                for _ in range(self.depth)
+            ]
+        )
         self.layer_embed = nn.Parameter(torch.randn(1, self.depth, h) * 0.02)
         self.layer_scan = nn.GRUCell(h, h)
         self.layer_scan_init = nn.Parameter(torch.zeros(1, h))
@@ -82,13 +83,15 @@ class PolicyConditionOrganizer(nn.Module):
         self.transition_token_proj = token_projector()
         self.state_token_proj = token_projector()
         self.event_token_proj = token_projector(3)
-        self.intent_token_proj = nn.ModuleDict({
-            name: token_projector() for name in self._INTENT_SOURCE_NAMES
-        })
+        self.intent_token_proj = nn.ModuleDict(
+            {name: token_projector() for name in self._INTENT_SOURCE_NAMES}
+        )
         self.intent_source_embed = nn.Parameter(
             torch.randn(1, len(self._INTENT_SOURCE_NAMES), h) * 0.02
         )
-        self.geom_summary_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
+        self.geom_summary_proj = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h)
+        )
         self.global_summary_proj = nn.Sequential(
             nn.LayerNorm(len(self._INTENT_SOURCE_NAMES) * h),
             nn.Linear(len(self._INTENT_SOURCE_NAMES) * h, h),
@@ -116,7 +119,11 @@ class PolicyConditionOrganizer(nn.Module):
         parts: list[Tensor] = []
         grad_scale = float(self.config.hierarchical_mmdit_source_grad_scale)
         for value in self._groups(memory):
-            if not isinstance(value, Tensor) or value.ndim != 3 or int(value.shape[-1]) != int(input_dim):
+            if (
+                not isinstance(value, Tensor)
+                or value.ndim != 3
+                or int(value.shape[-1]) != int(input_dim)
+            ):
                 raise ValueError(
                     f"owned evidence memory must be [B,N,{input_dim}], got "
                     f"{type(value).__name__}{'' if not isinstance(value, Tensor) else tuple(value.shape)}"
@@ -158,14 +165,16 @@ class PolicyConditionOrganizer(nn.Module):
             projected = self.intent_token_proj[name](
                 source.to(device=reference.device, dtype=reference.dtype)
             )
-            projected = projected + self.intent_source_embed[:, index:index + 1].to(
+            projected = projected + self.intent_source_embed[:, index : index + 1].to(
                 device=reference.device, dtype=reference.dtype
             )
             summary_parts.append(projected.mean(dim=1))
             counts[name] = int(projected.shape[1])
         return torch.cat(summary_parts, dim=-1), counts
 
-    def _layer_summary(self, entry: dict[str, Tensor], layer_index: int) -> tuple[Tensor, Tensor, Tensor]:
+    def _layer_summary(
+        self, entry: dict[str, Tensor], layer_index: int
+    ) -> tuple[Tensor, Tensor, Tensor]:
         world: list[Tensor] = []
         consequence: list[Tensor] = []
         grad_scale = float(self.config.hierarchical_mmdit_layer_grad_scale)
@@ -173,11 +182,17 @@ class PolicyConditionOrganizer(nn.Module):
             if key in self._DISALLOWED_LAYER_KEYS:
                 continue
             value = entry.get(key)
-            if not isinstance(value, Tensor) or value.ndim != 3 or int(value.shape[-1]) != self.hidden_size:
+            if (
+                not isinstance(value, Tensor)
+                or value.ndim != 3
+                or int(value.shape[-1]) != self.hidden_size
+            ):
                 continue
             pooled = _scaled_contract_view(value, grad_scale).mean(dim=1)
             typed = self.layer_key_proj[key_index](pooled)
-            typed = typed + self.layer_key_embed[:, key_index].to(device=typed.device, dtype=typed.dtype)
+            typed = typed + self.layer_key_embed[:, key_index].to(
+                device=typed.device, dtype=typed.dtype
+            )
             (world if key in self._WORLD_KEYS else consequence).append(typed)
         if not world:
             raise RuntimeError(f"layer contract {layer_index} has no world-summary source")
@@ -216,7 +231,9 @@ class PolicyConditionOrganizer(nn.Module):
                 f"hierarchical MMDiT requires {self.depth} ordered layer contracts, got {len(layer_contracts)}"
             )
         if trajectory_tokens.ndim != 3 or int(trajectory_tokens.shape[-1]) != self.hidden_size:
-            raise ValueError(f"trajectory_tokens must be [B,T,H], got {tuple(trajectory_tokens.shape)}")
+            raise ValueError(
+                f"trajectory_tokens must be [B,T,H], got {tuple(trajectory_tokens.shape)}"
+            )
         reference = trajectory_tokens
         trajectory_evidence = self._project_memory(
             trajectory_workspace_tokens,
@@ -280,16 +297,18 @@ class PolicyConditionOrganizer(nn.Module):
         scan = self.layer_stack_norm(scan)
 
         trajectory_summary = self.trajectory_token_proj(
-            _scaled_contract_view(trajectory_tokens, float(self.config.hierarchical_mmdit_source_grad_scale))
+            _scaled_contract_view(
+                trajectory_tokens, float(self.config.hierarchical_mmdit_source_grad_scale)
+            )
         ).mean(dim=1)
         geom_summary = self.geom_summary_proj(trajectory_summary)
         global_summary = self.global_summary_proj(intent_summary_input)
         transition_summary = self.transition_summary_proj(transition_evidence.mean(dim=1))
         event_summary = self.event_summary_proj(event_tokens.mean(dim=1))
         state_summary = self.state_summary_proj(state_tokens.mean(dim=1))
-        consequence_scale = float(self.config.hierarchical_mmdit_consequence_scale_max) * torch.sigmoid(
-            self.consequence_scale_logit
-        )
+        consequence_scale = float(
+            self.config.hierarchical_mmdit_consequence_scale_max
+        ) * torch.sigmoid(self.consequence_scale_logit)
         evidence_sources = {
             "layer": layer_stack,
             "trajectory": trajectory_evidence,
@@ -302,11 +321,18 @@ class PolicyConditionOrganizer(nn.Module):
             "intent_layer_stack_norm": layer_stack.detach().float().norm(dim=-1).mean(),
             "intent_layer_scan_norm": scan.detach().float().norm(dim=-1).mean(),
             "intent_layer_world_norm": torch.stack(world_rows).detach().float().norm(dim=-1).mean(),
-            "intent_layer_consequence_norm": torch.stack(consequence_rows).detach().float().norm(dim=-1).mean(),
+            "intent_layer_consequence_norm": torch.stack(consequence_rows)
+            .detach()
+            .float()
+            .norm(dim=-1)
+            .mean(),
             "intent_consequence_scale": consequence_scale.detach().float(),
             "intent_geom_summary_norm": geom_summary.detach().float().norm(dim=-1).mean(),
             "intent_global_summary_norm": global_summary.detach().float().norm(dim=-1).mean(),
-            "intent_transition_summary_norm": transition_summary.detach().float().norm(dim=-1).mean(),
+            "intent_transition_summary_norm": transition_summary.detach()
+            .float()
+            .norm(dim=-1)
+            .mean(),
             "intent_event_summary_norm": event_summary.detach().float().norm(dim=-1).mean(),
             "intent_state_summary_norm": state_summary.detach().float().norm(dim=-1).mean(),
         }
@@ -347,7 +373,9 @@ class IndependentIntentFusion(nn.Module):
 
     def forward(self, *sources: Tensor) -> Tensor:
         if len(sources) != self.source_count:
-            raise ValueError(f"intent fusion expected {self.source_count} sources, got {len(sources)}")
+            raise ValueError(
+                f"intent fusion expected {self.source_count} sources, got {len(sources)}"
+            )
         return self.out_norm(self.net(torch.cat(list(sources), dim=-1)))
 
 

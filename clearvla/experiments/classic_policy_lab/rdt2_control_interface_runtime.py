@@ -83,10 +83,15 @@ def _merge_interface_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any] |
             keys.update(row["flow_steps"][step].keys())
         merged: dict[str, Any] = {"step": step}
         for key in sorted(keys):
-            values = [row["flow_steps"][step][key] for row in rows if key in row["flow_steps"][step]]
+            values = [
+                row["flow_steps"][step][key] for row in rows if key in row["flow_steps"][step]
+            ]
             if not values:
                 continue
-            arrays = [_tensor_mean(value) if torch.is_tensor(value) else np.asarray(value) for value in values]
+            arrays = [
+                _tensor_mean(value) if torch.is_tensor(value) else np.asarray(value)
+                for value in values
+            ]
             merged[key] = np.stack(arrays, axis=0).mean(axis=0).tolist()
         merged_steps.append(merged)
     return {
@@ -117,7 +122,15 @@ def evaluate_control_interface_rdt2_fm(
     collect_diagnostics: bool = False,
     diagnostic_batches: int = 8,
 ) -> dict[str, Any]:
-    allowed = {"normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"}
+    allowed = {
+        "normal",
+        "zero",
+        "mean",
+        "shuffle-batch",
+        "shuffle-episode",
+        "top-only",
+        "wrist-only",
+    }
     if image_ablation not in allowed:
         raise ValueError(f"unsupported image_ablation={image_ablation!r}")
     model.eval()
@@ -143,8 +156,12 @@ def evaluate_control_interface_rdt2_fm(
         sample_keys = torch.stack([batch["episode_idx"], batch["image_index"]], dim=1)
         conditioner_ablation = image_ablation
         if image_ablation == "shuffle-episode":
-            sample_keys = loader.dataset.cross_episode_keys(sample_keys, seed=batch_index + eval_seed)
-            images = loader.dataset.load_images_for_keys(sample_keys).to(device=device, non_blocking=True)
+            sample_keys = loader.dataset.cross_episode_keys(
+                sample_keys, seed=batch_index + eval_seed
+            )
+            images = loader.dataset.load_images_for_keys(sample_keys).to(
+                device=device, non_blocking=True
+            )
             conditioner_ablation = "normal"
         condition = conditioner.encode(
             images,
@@ -154,9 +171,13 @@ def evaluate_control_interface_rdt2_fm(
             camera_names=camera_names,
         ).to(device=device, dtype=dtype)
         dense, mask = _condition_dense(condition)
-        loss = model.compute_loss(state_tokens=state, action_gt=action, dense_tokens=dense, attention_mask=mask)
+        loss = model.compute_loss(
+            state_tokens=state, action_gt=action, dense_tokens=dense, attention_mask=mask
+        )
         losses.append({key: float(value.detach().float().cpu()) for key, value in loss.items()})
-        need_diagnostics = collect_diagnostics and len(diagnostic_rows) < max(int(diagnostic_batches), 0)
+        need_diagnostics = collect_diagnostics and len(diagnostic_rows) < max(
+            int(diagnostic_batches), 0
+        )
         _timer_sync(device)
         started = time.perf_counter()
         result = model.predict_action(
@@ -184,12 +205,20 @@ def evaluate_control_interface_rdt2_fm(
     target = _concat(target_rows)
     prior = _concat(prior_rows)
     past = _concat(past_rows)
-    metrics = compute_metrics(pred_norm=pred, target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    metrics.update({
-        "inference_steps": int(inference_steps),
-        "image_ablation": str(image_ablation),
-        "latency_full_chunk_ms": float(np.mean(latencies)),
-    })
+    metrics = compute_metrics(
+        pred_norm=pred,
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    metrics.update(
+        {
+            "inference_steps": int(inference_steps),
+            "image_ablation": str(image_ablation),
+            "latency_full_chunk_ms": float(np.mean(latencies)),
+        }
+    )
     if losses:
         for key in losses[0]:
             metrics[f"val_{key}"] = float(np.mean([row[key] for row in losses]))
@@ -225,7 +254,11 @@ def train_control_interface_rdt2_fm(
         eps=trainer.eps,
         weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     scheduler = _rdt_scheduler(
         optimizer,
         scheduler=trainer.scheduler,
@@ -260,7 +293,9 @@ def train_control_interface_rdt2_fm(
                 ).to(device=device, dtype=dtype)
             dense, mask = _condition_dense(condition)
             optimizer.zero_grad(set_to_none=True)
-            losses = model.compute_loss(state_tokens=state, action_gt=action, dense_tokens=dense, attention_mask=mask)
+            losses = model.compute_loss(
+                state_tokens=state, action_gt=action, dense_tokens=dense, attention_mask=mask
+            )
             losses["loss"].backward()
             if trainer.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.grad_clip)
@@ -281,7 +316,9 @@ def train_control_interface_rdt2_fm(
         record: dict[str, Any] = {
             "epoch": epoch,
             "seconds": time.perf_counter() - started,
-            "train": {key: float(np.mean([row[key] for row in batch_rows])) for key in batch_rows[0]},
+            "train": {
+                key: float(np.mean([row[key] for row in batch_rows])) for key in batch_rows[0]
+            },
         }
         if epoch % trainer.eval_every == 0:
             metrics = evaluate_control_interface_rdt2_fm(
@@ -318,7 +355,9 @@ def train_control_interface_rdt2_fm(
                 best_full = float(metrics["full_mse"])
                 _save(out_dir / "best_full.pt", payload)
         history.append(record)
-        (out_dir / "history.json").write_text(json.dumps(_jsonable(history), indent=2), encoding="utf-8")
+        (out_dir / "history.json").write_text(
+            json.dumps(_jsonable(history), indent=2), encoding="utf-8"
+        )
     return {"history": history, "best_full_mse": best_full}
 
 

@@ -11,7 +11,9 @@ from clearvla.experiments.observed_state_lab.policy_v36_2 import V362PolicySyste
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Static bottleneck audit for V36.2 physical-action-flow policy.")
+    parser = argparse.ArgumentParser(
+        description="Static bottleneck audit for V36.2 physical-action-flow policy."
+    )
     parser.add_argument("--action-dim", type=int, default=7)
     parser.add_argument("--state-dim", type=int, default=7)
     parser.add_argument("--horizon", type=int, default=24)
@@ -47,7 +49,9 @@ def main() -> None:
         world_tokens=args.world_tokens,
         global_tokens=max(1, args.world_tokens // 4),
         interaction_tokens=max(1, args.world_tokens // 2),
-        motion_tokens=args.world_tokens - max(1, args.world_tokens // 4) - max(1, args.world_tokens // 2),
+        motion_tokens=args.world_tokens
+        - max(1, args.world_tokens // 4)
+        - max(1, args.world_tokens // 2),
     )
     system = V362PolicySystem(world, policy, WorldEvidenceEncoder(world))
     report = {

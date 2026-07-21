@@ -24,7 +24,7 @@ def _camera_stack(frames: dict[str, torch.Tensor], camera_names: tuple[str, ...]
 
 def _hold_prior(raw_actions: np.ndarray, center: int, horizon: int) -> np.ndarray:
     index = max(0, min(int(center) - 1, len(raw_actions) - 1))
-    return np.repeat(raw_actions[index:index + 1], horizon, axis=0).astype(np.float32)
+    return np.repeat(raw_actions[index : index + 1], horizon, axis=0).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -68,9 +68,18 @@ class ACTWindowDataset(Dataset):
         for episode_idx in self.episode_ids:
             episode = episodes[episode_idx]
             image_store.validate_episode(episode)
-            low = max(-config.state_offset, -config.image_offset, -config.action_offset, 1 - config.action_offset)
+            low = max(
+                -config.state_offset,
+                -config.image_offset,
+                -config.action_offset,
+                1 - config.action_offset,
+            )
             if config.include_tail_padding:
-                high = min(episode.length - 1 - config.state_offset, episode.length - 1 - config.image_offset, episode.length - 1 - config.action_offset)
+                high = min(
+                    episode.length - 1 - config.state_offset,
+                    episode.length - 1 - config.image_offset,
+                    episode.length - 1 - config.action_offset,
+                )
             else:
                 high = min(
                     episode.length - 1 - config.state_offset,
@@ -96,7 +105,7 @@ class ACTWindowDataset(Dataset):
         available = max(0, min(cfg.chunk_len, episode.length - action_start))
         action_raw = np.zeros((cfg.chunk_len, episode.actions_raw.shape[1]), dtype=np.float32)
         if available:
-            action_raw[:available] = episode.actions_raw[action_start:action_start + available]
+            action_raw[:available] = episode.actions_raw[action_start : action_start + available]
         is_pad = np.zeros((cfg.chunk_len,), dtype=bool)
         is_pad[available:] = True
         frames = self.image_store.load_window(episode, np.asarray([image_index], dtype=np.int64))
@@ -169,11 +178,19 @@ class DPWindowDataset(Dataset):
         for episode_idx in episode_ids:
             episode = episodes[episode_idx]
             image_store.validate_episode(episode)
-            low = max(config.obs_horizon - 1 - config.state_offset, config.obs_horizon - 1 - config.image_offset, config.obs_horizon - 1 - config.action_offset)
+            low = max(
+                config.obs_horizon - 1 - config.state_offset,
+                config.obs_horizon - 1 - config.image_offset,
+                config.obs_horizon - 1 - config.action_offset,
+            )
             high = min(
                 episode.length - 1 - config.state_offset,
                 episode.length - 1 - config.image_offset,
-                episode.length - config.prediction_horizon + config.obs_horizon - 1 - config.action_offset,
+                episode.length
+                - config.prediction_horizon
+                + config.obs_horizon
+                - 1
+                - config.action_offset,
             )
             for center in range(int(low), int(high) + 1, config.stride):
                 self.refs.append(WindowRef(episode_idx, center))
@@ -190,19 +207,31 @@ class DPWindowDataset(Dataset):
         obs_start_state = ref.center + cfg.state_offset - cfg.obs_horizon + 1
         obs_start_image = ref.center + cfg.image_offset - cfg.obs_horizon + 1
         trajectory_start = ref.center + cfg.action_offset - cfg.obs_horizon + 1
-        state_raw = np.asarray(episode.states_raw[obs_start_state:obs_start_state + cfg.obs_horizon], dtype=np.float32)
-        action_raw = np.asarray(episode.actions_raw[trajectory_start:trajectory_start + cfg.prediction_horizon], dtype=np.float32)
-        image_indices = np.arange(obs_start_image, obs_start_image + cfg.obs_horizon, dtype=np.int64)
+        state_raw = np.asarray(
+            episode.states_raw[obs_start_state : obs_start_state + cfg.obs_horizon],
+            dtype=np.float32,
+        )
+        action_raw = np.asarray(
+            episode.actions_raw[trajectory_start : trajectory_start + cfg.prediction_horizon],
+            dtype=np.float32,
+        )
+        image_indices = np.arange(
+            obs_start_image, obs_start_image + cfg.obs_horizon, dtype=np.int64
+        )
         frames = self.image_store.load_window(episode, image_indices)
         images = _camera_stack(frames, self.camera_names).to(torch.float32) / 255.0
         exec_start = cfg.obs_horizon - 1
-        exec_raw = action_raw[exec_start:exec_start + cfg.action_steps]
+        exec_raw = action_raw[exec_start : exec_start + cfg.action_steps]
         past_start = max(0, ref.center + cfg.action_offset - cfg.action_steps)
-        past_raw = np.asarray(episode.actions_raw[past_start:ref.center + cfg.action_offset], dtype=np.float32)
+        past_raw = np.asarray(
+            episode.actions_raw[past_start : ref.center + cfg.action_offset], dtype=np.float32
+        )
         if len(past_raw) < cfg.action_steps:
             pad = np.repeat(episode.actions_raw[:1], cfg.action_steps - len(past_raw), axis=0)
             past_raw = np.concatenate([pad, past_raw], axis=0)
-        prior_raw = _hold_prior(episode.actions_raw, ref.center + cfg.action_offset, cfg.action_steps)
+        prior_raw = _hold_prior(
+            episode.actions_raw, ref.center + cfg.action_offset, cfg.action_steps
+        )
         return {
             "obs_state": torch.from_numpy(self.state_normalizer.encode(state_raw)),
             "obs_image": images,
@@ -453,12 +482,18 @@ class RDT2FMWindowDataset(Dataset):
                 raise IndexError(f"episode_idx={episode_idx} outside available episodes")
             episode = self.episodes[int(episode_idx)]
             if int(image_index) < 0 or int(image_index) >= episode.length:
-                raise IndexError(f"image_index={image_index} outside episode length={episode.length}")
-            frames = self.image_store.load_window(episode, np.asarray([int(image_index)], dtype=np.int64))
+                raise IndexError(
+                    f"image_index={image_index} outside episode length={episode.length}"
+                )
+            frames = self.image_store.load_window(
+                episode, np.asarray([int(image_index)], dtype=np.int64)
+            )
             rows.append(_camera_stack(frames, self.camera_names)[0].to(torch.float32) / 255.0)
         return torch.stack(rows, dim=0)
 
-    def cross_episode_keys(self, sample_keys: torch.Tensor | np.ndarray, *, seed: int = 0) -> torch.Tensor:
+    def cross_episode_keys(
+        self, sample_keys: torch.Tensor | np.ndarray, *, seed: int = 0
+    ) -> torch.Tensor:
         """Select deterministic observations from another validation episode.
 
         This preserves approximate temporal position while breaking the visual
@@ -487,7 +522,11 @@ class RDT2FMWindowDataset(Dataset):
             target_episode = self.episodes[target_idx]
             # Retain normalized phase instead of silently clipping late frames.
             source_episode = self.episodes[int(episode_idx)]
-            phase = 0.0 if source_episode.length <= 1 else float(image_index) / float(source_episode.length - 1)
+            phase = (
+                0.0
+                if source_episode.length <= 1
+                else float(image_index) / float(source_episode.length - 1)
+            )
             target_frame = int(round(phase * max(target_episode.length - 1, 0)))
             rows.append([target_idx, target_frame])
         return torch.tensor(rows, dtype=torch.long)

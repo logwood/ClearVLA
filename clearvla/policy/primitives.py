@@ -40,12 +40,16 @@ class TimeEmbedding(nn.Module):
     def __init__(self, hidden: int) -> None:
         super().__init__()
         self.hidden = hidden
-        self.net = nn.Sequential(nn.Linear(hidden, hidden * 4), nn.SiLU(), nn.Linear(hidden * 4, hidden))
+        self.net = nn.Sequential(
+            nn.Linear(hidden, hidden * 4), nn.SiLU(), nn.Linear(hidden * 4, hidden)
+        )
 
     def forward(self, t: Tensor) -> Tensor:
         half = self.hidden // 2
         freq = torch.exp(
-            -math.log(10000.0) * torch.arange(half, device=t.device, dtype=t.dtype) / max(half - 1, 1)
+            -math.log(10000.0)
+            * torch.arange(half, device=t.device, dtype=t.dtype)
+            / max(half - 1, 1)
         )
         phase = t[:, None] * freq[None]
         emb = torch.cat([torch.sin(phase), torch.cos(phase)], dim=-1)

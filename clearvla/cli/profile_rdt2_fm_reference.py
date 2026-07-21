@@ -4,11 +4,16 @@ import argparse
 import json
 from pathlib import Path
 
-from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import RDT2FMReferenceConfig, estimate_rdt2_fm_parameter_count
+from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import (
+    RDT2FMReferenceConfig,
+    estimate_rdt2_fm_parameter_count,
+)
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Profile the released RDT2-FM action-expert tensor contract without allocating the full model")
+    p = argparse.ArgumentParser(
+        description="Profile the released RDT2-FM action-expert tensor contract without allocating the full model"
+    )
     p.add_argument("--out-json", type=Path, default=None)
     return p.parse_args()
 
@@ -24,7 +29,11 @@ def main() -> None:
         "bf16_raw_mib": estimate_rdt2_fm_parameter_count(cfg) * 2 / 1024 / 1024,
         "config": cfg.__dict__,
         "active_condition_path": "RDT2-VQ per-layer KV cache",
-        "flow_matching": {"objective": "velocity MSE", "inference_steps": cfg.num_inference_timesteps, "solver": "first-order Euler"},
+        "flow_matching": {
+            "objective": "velocity MSE",
+            "inference_steps": cfg.num_inference_timesteps,
+            "solver": "first-order Euler",
+        },
     }
     text = json.dumps(report, indent=2)
     print(text)

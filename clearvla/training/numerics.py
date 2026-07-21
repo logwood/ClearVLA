@@ -7,7 +7,6 @@ from typing import Any, Iterable, Mapping
 import torch
 
 
-
 def tensor_summary(value: torch.Tensor) -> dict[str, Any]:
     detached = value.detach()
     summary: dict[str, Any] = {
@@ -20,25 +19,29 @@ def tensor_summary(value: torch.Tensor) -> dict[str, Any]:
         summary.update({"finite_ratio": 1.0, "min": None, "max": None, "mean": None, "std": None})
         return summary
     if not (detached.is_floating_point() or detached.is_complex()):
-        summary.update({
-            "finite_ratio": 1.0,
-            "min": int(detached.min().cpu()),
-            "max": int(detached.max().cpu()),
-            "mean": float(detached.float().mean().cpu()),
-            "std": float(detached.float().std(unbiased=False).cpu()),
-        })
+        summary.update(
+            {
+                "finite_ratio": 1.0,
+                "min": int(detached.min().cpu()),
+                "max": int(detached.max().cpu()),
+                "mean": float(detached.float().mean().cpu()),
+                "std": float(detached.float().std(unbiased=False).cpu()),
+            }
+        )
         return summary
     finite = torch.isfinite(detached)
     finite_ratio = float(finite.float().mean().cpu())
     summary["finite_ratio"] = finite_ratio
     if bool(finite.any()):
         finite_values = detached[finite].float()
-        summary.update({
-            "min": float(finite_values.min().cpu()),
-            "max": float(finite_values.max().cpu()),
-            "mean": float(finite_values.mean().cpu()),
-            "std": float(finite_values.std(unbiased=False).cpu()),
-        })
+        summary.update(
+            {
+                "min": float(finite_values.min().cpu()),
+                "max": float(finite_values.max().cpu()),
+                "mean": float(finite_values.mean().cpu()),
+                "std": float(finite_values.std(unbiased=False).cpu()),
+            }
+        )
     else:
         summary.update({"min": None, "max": None, "mean": None, "std": None})
     return summary
@@ -56,13 +59,17 @@ def assert_finite_batch(batch: Mapping[str, torch.Tensor]) -> None:
         assert_finite_tensor(value, name=f"batch.{key}")
 
 
-def assert_finite_gradients(parameters: Iterable[torch.nn.Parameter] | Iterable[tuple[str, torch.nn.Parameter]]) -> None:
+def assert_finite_gradients(
+    parameters: Iterable[torch.nn.Parameter] | Iterable[tuple[str, torch.nn.Parameter]],
+) -> None:
     for name, parameter in _named_parameters(parameters):
         if parameter.grad is not None:
             assert_finite_tensor(parameter.grad, name=f"gradient.{name}")
 
 
-def assert_finite_parameters(parameters: Iterable[torch.nn.Parameter] | Iterable[tuple[str, torch.nn.Parameter]]) -> None:
+def assert_finite_parameters(
+    parameters: Iterable[torch.nn.Parameter] | Iterable[tuple[str, torch.nn.Parameter]],
+) -> None:
     for name, parameter in _named_parameters(parameters):
         assert_finite_tensor(parameter, name=f"parameter.{name}")
 
@@ -73,7 +80,9 @@ def assert_finite_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
             state = optimizer.state.get(parameter, {})
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
-                    assert_finite_tensor(value, name=f"optimizer.group{group_idx}.param{param_idx}.{key}")
+                    assert_finite_tensor(
+                        value, name=f"optimizer.group{group_idx}.param{param_idx}.{key}"
+                    )
 
 
 def _named_parameters(

@@ -19,12 +19,18 @@ class FrozenBatchNorm2d(nn.Module):
         self.register_buffer("running_mean", torch.zeros(num_features))
         self.register_buffer("running_var", torch.ones(num_features))
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
         state_dict.pop(prefix + "num_batches_tracked", None)
         super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs,
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -105,9 +111,15 @@ class ResNet18(nn.Module):
                 nn.Conv2d(self.inplanes, planes, 1, stride=stride, bias=False),
                 norm_layer(planes),
             )
-        layers = [BasicBlock(self.inplanes, planes, stride=stride, downsample=downsample, norm_layer=norm_layer)]
+        layers = [
+            BasicBlock(
+                self.inplanes, planes, stride=stride, downsample=downsample, norm_layer=norm_layer
+            )
+        ]
         self.inplanes = planes
-        layers.extend(BasicBlock(self.inplanes, planes, norm_layer=norm_layer) for _ in range(1, blocks))
+        layers.extend(
+            BasicBlock(self.inplanes, planes, norm_layer=norm_layer) for _ in range(1, blocks)
+        )
         return nn.Sequential(*layers)
 
     def _reset_parameters(self) -> None:
@@ -146,14 +158,16 @@ def load_resnet18_weights(model: ResNet18, path: Path | None) -> tuple[list[str]
         key = str(key)
         for prefix in ("module.", "model.", "backbone."):
             if key.startswith(prefix):
-                key = key[len(prefix):]
+                key = key[len(prefix) :]
         cleaned[key] = value
     incompatible = model.load_state_dict(cleaned, strict=False)
     # fc weights are allowed to be absent because policy encoders discard them.
     missing = [key for key in incompatible.missing_keys if not key.startswith("fc.")]
     unexpected = [key for key in incompatible.unexpected_keys if not key.startswith("fc.")]
     if missing or unexpected:
-        raise RuntimeError(f"Incompatible ResNet-18 weights: missing={missing}, unexpected={unexpected}")
+        raise RuntimeError(
+            f"Incompatible ResNet-18 weights: missing={missing}, unexpected={unexpected}"
+        )
     return list(incompatible.missing_keys), list(incompatible.unexpected_keys)
 
 

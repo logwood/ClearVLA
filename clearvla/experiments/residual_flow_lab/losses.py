@@ -60,7 +60,9 @@ def _smooth_l1_per_sample(pred: torch.Tensor, target: torch.Tensor, beta: float)
     return value.reshape(value.shape[0], -1).mean(dim=1)
 
 
-def source_pretrain_loss(learned_source: torch.Tensor, target_actions: torch.Tensor, *, huber_beta: float = 0.03) -> torch.Tensor:
+def source_pretrain_loss(
+    learned_source: torch.Tensor, target_actions: torch.Tensor, *, huber_beta: float = 0.03
+) -> torch.Tensor:
     """History-only source objective used before residual-flow training."""
     return _smooth_l1_per_sample(learned_source, target_actions, huber_beta).mean()
 
@@ -77,7 +79,9 @@ def action_composite_per_sample(
     count = min(4, pred.shape[1])
     first4 = _smooth_l1_per_sample(pred[:, :count], target[:, :count], config.huber_beta)
     if pred.shape[1] >= 2:
-        velocity = _smooth_l1_per_sample(pred[:, 1:] - pred[:, :-1], target[:, 1:] - target[:, :-1], config.huber_beta)
+        velocity = _smooth_l1_per_sample(
+            pred[:, 1:] - pred[:, :-1], target[:, 1:] - target[:, :-1], config.huber_beta
+        )
     else:
         velocity = torch.zeros_like(full)
     total = (
@@ -103,14 +107,20 @@ def residual_flow_loss(
     wrong: ResidualFlowLabOutput | None = None,
 ) -> ResidualFlowLossResult:
     config.validate()
-    flow = _smooth_l1_per_sample(correct.residual_velocity, target_velocity, config.huber_beta).mean()
-    action_per_sample, parts = action_composite_per_sample(correct.endpoint_actions, target_actions, config)
+    flow = _smooth_l1_per_sample(
+        correct.residual_velocity, target_velocity, config.huber_beta
+    ).mean()
+    action_per_sample, parts = action_composite_per_sample(
+        correct.endpoint_actions, target_actions, config
+    )
     action = action_per_sample.mean()
     zero = torch.zeros((), device=flow.device, dtype=flow.dtype)
     wrong_action = zero
     ranking = zero
     if wrong is not None and config.ranking_weight > 0:
-        wrong_per_sample, _ = action_composite_per_sample(wrong.endpoint_actions, target_actions, config)
+        wrong_per_sample, _ = action_composite_per_sample(
+            wrong.endpoint_actions, target_actions, config
+        )
         wrong_action = wrong_per_sample.mean()
         ranking = F.relu(config.ranking_margin + action_per_sample - wrong_per_sample).mean()
     total = config.flow_weight * flow + action + config.ranking_weight * ranking

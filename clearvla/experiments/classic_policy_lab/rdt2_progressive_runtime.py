@@ -75,7 +75,15 @@ def evaluate_progressive_rdt2_fm(
     instruction: str = "",
     image_ablation: str = "normal",
 ) -> dict[str, Any]:
-    allowed = {"normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"}
+    allowed = {
+        "normal",
+        "zero",
+        "mean",
+        "shuffle-batch",
+        "shuffle-episode",
+        "top-only",
+        "wrist-only",
+    }
     if image_ablation not in allowed:
         raise ValueError(f"unsupported image_ablation={image_ablation!r}")
     model.eval()
@@ -104,7 +112,9 @@ def evaluate_progressive_rdt2_fm(
         conditioner_ablation = image_ablation
         if image_ablation == "shuffle-episode":
             sample_keys = loader.dataset.cross_episode_keys(sample_keys, seed=batch_index)
-            images = loader.dataset.load_images_for_keys(sample_keys).to(device=device, non_blocking=True)
+            images = loader.dataset.load_images_for_keys(sample_keys).to(
+                device=device, non_blocking=True
+            )
             conditioner_ablation = "normal"
         condition = conditioner.encode(
             images,
@@ -122,7 +132,8 @@ def evaluate_progressive_rdt2_fm(
             **kwargs,
         )
         losses.append({key: float(value.detach().float().cpu()) for key, value in loss.items()})
-        _timer_sync(device); start = time.perf_counter()
+        _timer_sync(device)
+        start = time.perf_counter()
         fast = model.predict_first_action(
             state_tokens=state,
             past_actions=past,
@@ -130,8 +141,10 @@ def evaluate_progressive_rdt2_fm(
             steps=inference_steps,
             **kwargs,
         )
-        _timer_sync(device); latency["fast_ms"].append((time.perf_counter() - start) * 1000)
-        _timer_sync(device); start = time.perf_counter()
+        _timer_sync(device)
+        latency["fast_ms"].append((time.perf_counter() - start) * 1000)
+        _timer_sync(device)
+        start = time.perf_counter()
         prefix = model.predict_prefix_action(
             state_tokens=state,
             past_actions=past,
@@ -139,8 +152,10 @@ def evaluate_progressive_rdt2_fm(
             steps=inference_steps,
             **kwargs,
         )
-        _timer_sync(device); latency["prefix_ms"].append((time.perf_counter() - start) * 1000)
-        _timer_sync(device); start = time.perf_counter()
+        _timer_sync(device)
+        latency["prefix_ms"].append((time.perf_counter() - start) * 1000)
+        _timer_sync(device)
+        start = time.perf_counter()
         full = model.predict_action(
             state_tokens=state,
             past_actions=past,
@@ -148,10 +163,15 @@ def evaluate_progressive_rdt2_fm(
             steps=inference_steps,
             **kwargs,
         )
-        _timer_sync(device); latency["full_ms"].append((time.perf_counter() - start) * 1000)
-        learned_prior, _ = model.predict_prior(state_tokens=state, past_actions=past, physical_prior=hold)
-        fast_chunk = learned_prior.clone(); fast_chunk[:, 0] = fast
-        prefix_chunk = learned_prior.clone(); prefix_chunk[:, : prefix.shape[1]] = prefix
+        _timer_sync(device)
+        latency["full_ms"].append((time.perf_counter() - start) * 1000)
+        learned_prior, _ = model.predict_prior(
+            state_tokens=state, past_actions=past, physical_prior=hold
+        )
+        fast_chunk = learned_prior.clone()
+        fast_chunk[:, 0] = fast
+        prefix_chunk = learned_prior.clone()
+        prefix_chunk[:, : prefix.shape[1]] = prefix
         full_rows.append(full.float().cpu().numpy())
         fast_rows.append(fast_chunk.float().cpu().numpy())
         prefix_rows.append(prefix_chunk.float().cpu().numpy())
@@ -163,23 +183,53 @@ def evaluate_progressive_rdt2_fm(
     target = _concat(target_rows)
     prior = _concat(hold_rows)
     past = _concat(past_rows)
-    metrics = compute_metrics(pred_norm=pred, target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    learned_metrics = compute_metrics(pred_norm=_concat(learned_prior_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    fast_metrics = compute_metrics(pred_norm=_concat(fast_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    prefix_metrics = compute_metrics(pred_norm=_concat(prefix_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    metrics.update({
-        "inference_steps": int(inference_steps),
-        "image_ablation": str(image_ablation),
-        "learned_prior_full_mse": learned_metrics["full_mse"],
-        "learned_prior_arm_first_rmse": learned_metrics.get("arm_first_rmse", learned_metrics["first_rmse"]),
-        "fast_exit_arm_first_rmse": fast_metrics.get("arm_first_rmse", fast_metrics["first_rmse"]),
-        "fast_exit_first_rmse": fast_metrics["first_rmse"],
-        "prefix_exit_first4_rmse": prefix_metrics["first4_rmse"],
-        "prefix_exit_first8_rmse": prefix_metrics["first8_rmse"],
-        "latency_fast_ms": float(np.mean(latency["fast_ms"])),
-        "latency_prefix_ms": float(np.mean(latency["prefix_ms"])),
-        "latency_full_ms": float(np.mean(latency["full_ms"])),
-    })
+    metrics = compute_metrics(
+        pred_norm=pred,
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    learned_metrics = compute_metrics(
+        pred_norm=_concat(learned_prior_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    fast_metrics = compute_metrics(
+        pred_norm=_concat(fast_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    prefix_metrics = compute_metrics(
+        pred_norm=_concat(prefix_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    metrics.update(
+        {
+            "inference_steps": int(inference_steps),
+            "image_ablation": str(image_ablation),
+            "learned_prior_full_mse": learned_metrics["full_mse"],
+            "learned_prior_arm_first_rmse": learned_metrics.get(
+                "arm_first_rmse", learned_metrics["first_rmse"]
+            ),
+            "fast_exit_arm_first_rmse": fast_metrics.get(
+                "arm_first_rmse", fast_metrics["first_rmse"]
+            ),
+            "fast_exit_first_rmse": fast_metrics["first_rmse"],
+            "prefix_exit_first4_rmse": prefix_metrics["first4_rmse"],
+            "prefix_exit_first8_rmse": prefix_metrics["first8_rmse"],
+            "latency_fast_ms": float(np.mean(latency["fast_ms"])),
+            "latency_prefix_ms": float(np.mean(latency["prefix_ms"])),
+            "latency_full_ms": float(np.mean(latency["full_ms"])),
+        }
+    )
     for key in losses[0]:
         metrics[f"val_{key}"] = float(np.mean([row[key] for row in losses]))
     return metrics
@@ -208,7 +258,11 @@ def train_progressive_rdt2_fm(
         eps=trainer.eps,
         weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     scheduler = _rdt_scheduler(
         optimizer,
         scheduler=trainer.scheduler,
@@ -242,7 +296,9 @@ def train_progressive_rdt2_fm(
                     [instruction] * state.shape[0],
                     sample_keys=sample_keys,
                     image_ablation="normal",
-                    camera_names=tuple(getattr(train_loader.dataset, "camera_names", ("top", "wrist"))),
+                    camera_names=tuple(
+                        getattr(train_loader.dataset, "camera_names", ("top", "wrist"))
+                    ),
                 ).to(device=device, dtype=dtype)
             optimizer.zero_grad(set_to_none=True)
             loss = model.compute_loss(
@@ -255,12 +311,14 @@ def train_progressive_rdt2_fm(
             loss["loss"].backward()
             grad = _grad_norm(model.parameters())
             torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.grad_clip)
-            optimizer.step(); scheduler.step(); global_step += 1
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
             row = {key: float(value.detach().float().cpu()) for key, value in loss.items()}
             row["grad"] = grad
             rows.append(row)
             if batch_index % trainer.log_every == 0:
-                latest = rows[-trainer.log_every:]
+                latest = rows[-trainer.log_every :]
                 avg = {key: float(np.mean([item[key] for item in latest])) for key in latest[0]}
                 print(
                     f"[rdt2-progressive] epoch={epoch:03d}/{trainer.epochs:03d} batch={batch_index:04d} "
@@ -328,7 +386,9 @@ def train_progressive_rdt2_fm(
         "history": history,
         "context": context,
     }
-    (out_dir / "rdt2_progressive_summary.json").write_text(json.dumps(_jsonable(summary), indent=2), encoding="utf-8")
+    (out_dir / "rdt2_progressive_summary.json").write_text(
+        json.dumps(_jsonable(summary), indent=2), encoding="utf-8"
+    )
     return summary
 
 

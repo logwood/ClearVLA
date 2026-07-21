@@ -8,6 +8,7 @@ from PIL import Image
 
 try:
     import cv2
+
     cv2.setNumThreads(0)
 except Exception:  # optional dependency
     cv2 = None
@@ -67,7 +68,7 @@ def _center_crop(img: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
         raise ValueError(f"Crop {(crop_h, crop_w)} exceeds image shape={(h, w)}")
     y0 = (h - crop_h) // 2
     x0 = (w - crop_w) // 2
-    return img[y0:y0 + crop_h, x0:x0 + crop_w]
+    return img[y0 : y0 + crop_h, x0 : x0 + crop_w]
 
 
 def apply_preprocess(img: np.ndarray, config: PreprocessConfig) -> np.ndarray:

@@ -26,7 +26,9 @@ class ProposalBlock(nn.Module):
         self.cross = nn.MultiheadAttention(hidden, heads, batch_first=True)
         self.n2 = nn.LayerNorm(hidden)
         self.ffn = nn.Sequential(
-            nn.Linear(hidden, int(hidden * expansion)), nn.GELU(), nn.Linear(int(hidden * expansion), hidden)
+            nn.Linear(hidden, int(hidden * expansion)),
+            nn.GELU(),
+            nn.Linear(int(hidden * expansion), hidden),
         )
 
     def forward(self, query: Tensor, memory: Tensor) -> Tensor:
@@ -44,7 +46,10 @@ class RejectableHistoryProposal(nn.Module):
         self.history_key = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
         self.future_query = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
         self.blocks = nn.ModuleList(
-            [ProposalBlock(h, config.num_heads, config.ffn_expansion) for _ in range(config.proposal_depth)]
+            [
+                ProposalBlock(h, config.num_heads, config.ffn_expansion)
+                for _ in range(config.proposal_depth)
+            ]
         )
         self.action_head = nn.Linear(h, config.action_dim)
 

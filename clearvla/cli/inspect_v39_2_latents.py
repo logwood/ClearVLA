@@ -54,14 +54,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache")
+    parser.add_argument(
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
+    )
     parser.add_argument("--dinov2-model", default="facebook/dinov2-base")
     parser.add_argument("--dinov2-local-files-only", action="store_true")
     parser.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
     parser.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
     parser.add_argument("--max-batches", type=int, default=20)
     parser.add_argument("--pca-max-points", type=int, default=1200)
-    parser.add_argument("--mode", choices=["contract"], default="contract", help="contract = flow-matching contract inspection; it is teacher-forced by design.")
+    parser.add_argument(
+        "--mode",
+        choices=["contract"],
+        default="contract",
+        help="contract = flow-matching contract inspection; it is teacher-forced by design.",
+    )
     parser.add_argument("--make-plots", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-vectors", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--plot-prefix", default="latent")
@@ -148,8 +157,10 @@ def _write_json(path: Path, obj: Any) -> None:
 def _maybe_import_matplotlib():
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
         return plt
     except Exception as exc:  # pragma: no cover - environment dependent
         print(f"[latent-inspect] matplotlib unavailable; skipping plots: {exc}", flush=True)
@@ -188,7 +199,9 @@ def _plot_counterfactual_lines(plt, rows: list[dict[str, Any]], out_path: Path) 
     plt.close(fig)
 
 
-def _plot_pca_scatter(plt, coords: np.ndarray, values: np.ndarray, title: str, out_path: Path, *, value_name: str) -> None:
+def _plot_pca_scatter(
+    plt, coords: np.ndarray, values: np.ndarray, title: str, out_path: Path, *, value_name: str
+) -> None:
     fig = plt.figure(figsize=(6.0, 5.2))
     ax = fig.add_subplot(111)
     sc = ax.scatter(coords[:, 0], coords[:, 1], c=values, s=12, alpha=0.75)
@@ -227,7 +240,9 @@ class _Geometry:
         self.latent_dim = int(row["latent_dim"])
 
 
-def _build_loader_and_conditioner(args: argparse.Namespace, payload: dict[str, Any], device: torch.device, dtype: torch.dtype):
+def _build_loader_and_conditioner(
+    args: argparse.Namespace, payload: dict[str, Any], device: torch.device, dtype: torch.dtype
+):
     context = payload["context"]
     cameras = tuple(str(x) for x in args.cameras)
     dataset_config = ObservedStateDatasetConfig(**context["dataset"])
@@ -237,7 +252,11 @@ def _build_loader_and_conditioner(args: argparse.Namespace, payload: dict[str, A
     geometry = _Geometry(visual_geometry)
     action_norm = ArrayNormalizer.from_dict(payload["action_normalizer"])
     state_norm = ArrayNormalizer.from_dict(payload["state_normalizer"])
-    min_length = dataset_config.world_horizon + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets)) + 2
+    min_length = (
+        dataset_config.world_horizon
+        + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets))
+        + 2
+    )
     episodes, train_ids, val_ids, test_ids, _, _, image_store, skipped = load_data(
         args,
         min_length=min_length,
@@ -247,7 +266,9 @@ def _build_loader_and_conditioner(args: argparse.Namespace, payload: dict[str, A
         splits=context["splits"],
     )
     split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}[args.split]
-    effective = ObservedStateDatasetConfig(**{**context["dataset"], "return_images": args.condition_mode != "dinov2-cache"})
+    effective = ObservedStateDatasetConfig(
+        **{**context["dataset"], "return_images": args.condition_mode != "dinov2-cache"}
+    )
     dataset = PolicyWindowDataset(
         ObservedStateWindowDataset(
             episodes,
@@ -259,7 +280,9 @@ def _build_loader_and_conditioner(args: argparse.Namespace, payload: dict[str, A
             config=effective,
         )
     )
-    loader = make_loader(dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+    loader = make_loader(
+        dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
     conditioner, latent_dim, patches = build_dense_conditioner(
         mode=args.condition_mode,
         episodes=episodes,
@@ -273,7 +296,9 @@ def _build_loader_and_conditioner(args: argparse.Namespace, payload: dict[str, A
         device=device,
         dtype=dtype,
     )
-    if latent_dim != geometry.latent_dim or (patches is not None and patches != geometry.patches_per_camera):
+    if latent_dim != geometry.latent_dim or (
+        patches is not None and patches != geometry.patches_per_camera
+    ):
         raise ValueError("conditioner geometry does not match checkpoint")
     return loader, conditioner, cameras, action_norm, state_norm, skipped
 
@@ -284,7 +309,9 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if payload.get("schema") not in POLICY_CHECKPOINT_SCHEMAS:
         raise ValueError("--checkpoint must be a V39/V40 policy checkpoint")
-    loader, conditioner, cameras, action_norm, state_norm, skipped = _build_loader_and_conditioner(args, payload, device, dtype)
+    loader, conditioner, cameras, action_norm, state_norm, skipped = _build_loader_and_conditioner(
+        args, payload, device, dtype
+    )
     del action_norm, state_norm
     policy_config = V39PolicyConfig(**payload["policy_config"])
     trainer = V39PolicyTrainerConfig(**payload["trainer_config"])
@@ -301,8 +328,14 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
     layer_count = int(policy_config.depth)
     for i in range(layer_count):
         by_layer[i] = {
-            "z": [], "effect": [], "delta": [], "target": [], "hold_effect": [], "shuffle_effect": [],
-            "event_logits": [], "action_estimate": [],
+            "z": [],
+            "effect": [],
+            "delta": [],
+            "target": [],
+            "hold_effect": [],
+            "shuffle_effect": [],
+            "event_logits": [],
+            "action_estimate": [],
         }
 
     with torch.no_grad():
@@ -319,7 +352,9 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                 include_target_visual=True,
             )
             with autocast_context(device, dtype):
-                target_pack = system.build_rollout_target_pack(sample["visual"], sample["target_visual"])
+                target_pack = system.build_rollout_target_pack(
+                    sample["visual"], sample["target_visual"]
+                )
                 out = system.flow_training_forward(
                     sample["visual"],
                     sample["history_state"],
@@ -346,7 +381,9 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
             target_vec_rows.append(target_vec)
             layers = out.get("layer_contracts")
             if not isinstance(layers, list) or not layers:
-                raise ValueError("checkpoint/model did not return layer_contracts; enable V39.2 layer adapters")
+                raise ValueError(
+                    "checkpoint/model did not return layer_contracts; enable V39.2 layer adapters"
+                )
             for i, entry in enumerate(layers):
                 effect = _flatten_tokens(entry["rollout_effect_pred"]).detach().cpu().numpy()
                 delta = _flatten_tokens(entry["rollout_delta_pred"]).detach().cpu().numpy()
@@ -356,22 +393,46 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                 by_layer[i]["delta"].append(delta)
                 by_layer[i]["target"].append(target_vec)
                 if "rollout_effect_pred_hold_action" in entry:
-                    by_layer[i]["hold_effect"].append(_flatten_tokens(entry["rollout_effect_pred_hold_action"]).detach().cpu().numpy())
+                    by_layer[i]["hold_effect"].append(
+                        _flatten_tokens(entry["rollout_effect_pred_hold_action"])
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
                 if "rollout_effect_pred_shuffle_action" in entry:
-                    by_layer[i]["shuffle_effect"].append(_flatten_tokens(entry["rollout_effect_pred_shuffle_action"]).detach().cpu().numpy())
+                    by_layer[i]["shuffle_effect"].append(
+                        _flatten_tokens(entry["rollout_effect_pred_shuffle_action"])
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
                 if "event_logits" in entry:
-                    by_layer[i]["event_logits"].append(entry["event_logits"].detach().float().cpu().numpy())
+                    by_layer[i]["event_logits"].append(
+                        entry["event_logits"].detach().float().cpu().numpy()
+                    )
                 if "pred_action_estimate" in entry:
-                    by_layer[i]["action_estimate"].append(entry["pred_action_estimate"].detach().float().cpu().numpy())
+                    by_layer[i]["action_estimate"].append(
+                        entry["pred_action_estimate"].detach().float().cpu().numpy()
+                    )
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     labels_np = {
-        "action_norm": np.concatenate(action_norm_rows) if action_norm_rows else np.zeros((0,), dtype=np.float32),
-        "gripper_event_any": np.concatenate(gripper_any_rows) if gripper_any_rows else np.zeros((0,), dtype=np.float32),
-        "gripper_close_any": np.concatenate(gripper_close_rows) if gripper_close_rows else np.zeros((0,), dtype=np.float32),
+        "action_norm": np.concatenate(action_norm_rows)
+        if action_norm_rows
+        else np.zeros((0,), dtype=np.float32),
+        "gripper_event_any": np.concatenate(gripper_any_rows)
+        if gripper_any_rows
+        else np.zeros((0,), dtype=np.float32),
+        "gripper_close_any": np.concatenate(gripper_close_rows)
+        if gripper_close_rows
+        else np.zeros((0,), dtype=np.float32),
     }
-    target_all = np.concatenate(target_vec_rows) if target_vec_rows else np.zeros((0, int(policy_config.hidden_size)), dtype=np.float32)
+    target_all = (
+        np.concatenate(target_vec_rows)
+        if target_vec_rows
+        else np.zeros((0, int(policy_config.hidden_size)), dtype=np.float32)
+    )
 
     layer_rows: list[dict[str, Any]] = []
     counter_rows: list[dict[str, Any]] = []
@@ -380,7 +441,11 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
     for i in range(layer_count):
         data = by_layer[i]
         effect = np.concatenate(data["effect"]) if data["effect"] else np.zeros_like(target_all)
-        delta = np.concatenate(data["delta"]) if data["delta"] else np.zeros((target_all.shape[0], int(policy_config.hidden_size)), dtype=np.float32)
+        delta = (
+            np.concatenate(data["delta"])
+            if data["delta"]
+            else np.zeros((target_all.shape[0], int(policy_config.hidden_size)), dtype=np.float32)
+        )
         z = np.concatenate(data["z"]) if data["z"] else np.concatenate([effect, delta], axis=1)
         target = np.concatenate(data["target"]) if data["target"] else target_all
         real_dist = _effect_distance_np(effect, target)
@@ -397,7 +462,17 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
             "layer": i,
             "n": int(effect.shape[0]),
             "latent_mse": float(np.mean((effect - target) ** 2)) if effect.size else float("nan"),
-            "latent_cosine": float(np.mean(np.sum(effect * target, axis=1) / (np.maximum(np.linalg.norm(effect, axis=1), 1e-8) * np.maximum(np.linalg.norm(target, axis=1), 1e-8)))) if effect.size else float("nan"),
+            "latent_cosine": float(
+                np.mean(
+                    np.sum(effect * target, axis=1)
+                    / (
+                        np.maximum(np.linalg.norm(effect, axis=1), 1e-8)
+                        * np.maximum(np.linalg.norm(target, axis=1), 1e-8)
+                    )
+                )
+            )
+            if effect.size
+            else float("nan"),
             "pred_std_norm": pred_std,
             "target_std_norm": target_std,
             "std_ratio": _safe_ratio(pred_std, target_std),
@@ -411,16 +486,45 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
             "real_distance": float(real_dist.mean()) if real_dist.size else float("nan"),
             "hold_distance": float(hold_dist.mean()) if hold_dist.size else float("nan"),
             "shuffle_distance": float(shuf_dist.mean()) if shuf_dist.size else float("nan"),
-            "d_hold": float(hold_dist.mean() - real_dist.mean()) if real_dist.size else float("nan"),
-            "d_shuffle": float(shuf_dist.mean() - real_dist.mean()) if real_dist.size else float("nan"),
-            "effect_change_hold": float(np.mean((hold - effect) ** 2)) if effect.size else float("nan"),
-            "effect_change_shuffle": float(np.mean((shuf - effect) ** 2)) if effect.size else float("nan"),
+            "d_hold": float(hold_dist.mean() - real_dist.mean())
+            if real_dist.size
+            else float("nan"),
+            "d_shuffle": float(shuf_dist.mean() - real_dist.mean())
+            if real_dist.size
+            else float("nan"),
+            "effect_change_hold": float(np.mean((hold - effect) ** 2))
+            if effect.size
+            else float("nan"),
+            "effect_change_shuffle": float(np.mean((shuf - effect) ** 2))
+            if effect.size
+            else float("nan"),
         }
         layer_rows.append(row)
-        counter_rows.append({k: row[k] for k in ("layer", "real_distance", "hold_distance", "shuffle_distance", "d_hold", "d_shuffle", "effect_change_hold", "effect_change_shuffle")})
+        counter_rows.append(
+            {
+                k: row[k]
+                for k in (
+                    "layer",
+                    "real_distance",
+                    "hold_distance",
+                    "shuffle_distance",
+                    "d_hold",
+                    "d_shuffle",
+                    "effect_change_hold",
+                    "effect_change_shuffle",
+                )
+            }
+        )
         idx = _sample_indices(z.shape[0], int(args.pca_max_points), seed=1000 + i)
         coords, explained = _pca_2d(z[idx])
-        pca_rows.append({"layer": i, "points": int(idx.shape[0]), "pc1_explained": float(explained[0]) if explained.shape[0] > 0 else 0.0, "pc2_explained": float(explained[1]) if explained.shape[0] > 1 else 0.0})
+        pca_rows.append(
+            {
+                "layer": i,
+                "points": int(idx.shape[0]),
+                "pc1_explained": float(explained[0]) if explained.shape[0] > 0 else 0.0,
+                "pc2_explained": float(explained[1]) if explained.shape[0] > 1 else 0.0,
+            }
+        )
         vector_dump[f"layer{i}_z"] = z.astype(np.float32)
         vector_dump[f"layer{i}_effect"] = effect.astype(np.float32)
         vector_dump[f"layer{i}_delta"] = delta.astype(np.float32)
@@ -442,9 +546,18 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
         "trainer_config": payload["trainer_config"],
     }
     _write_json(out_dir / "metadata.json", metadata)
-    _write_json(out_dir / "latent_probe_table.json", {"schema": "clearvla-v39-2-latent-probe-table-v1", "rows": layer_rows})
-    _write_json(out_dir / "latent_counterfactual_by_layer.json", {"schema": "clearvla-v39-2-latent-counterfactual-v1", "rows": counter_rows})
-    _write_json(out_dir / "latent_pca_explained_by_layer.json", {"schema": "clearvla-v39-2-latent-pca-v1", "rows": pca_rows})
+    _write_json(
+        out_dir / "latent_probe_table.json",
+        {"schema": "clearvla-v39-2-latent-probe-table-v1", "rows": layer_rows},
+    )
+    _write_json(
+        out_dir / "latent_counterfactual_by_layer.json",
+        {"schema": "clearvla-v39-2-latent-counterfactual-v1", "rows": counter_rows},
+    )
+    _write_json(
+        out_dir / "latent_pca_explained_by_layer.json",
+        {"schema": "clearvla-v39-2-latent-pca-v1", "rows": pca_rows},
+    )
     _save_csv(out_dir / "latent_probe_table.csv", layer_rows)
     _save_csv(out_dir / "latent_counterfactual_by_layer.csv", counter_rows)
     _save_csv(out_dir / "latent_pca_explained_by_layer.csv", pca_rows)
@@ -454,8 +567,12 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
     if args.make_plots:
         plt = _maybe_import_matplotlib()
         if plt is not None:
-            _plot_layer_metric_lines(plt, layer_rows, out_dir / f"{args.plot_prefix}_layer_metrics.png")
-            _plot_counterfactual_lines(plt, counter_rows, out_dir / f"{args.plot_prefix}_counterfactual_distances.png")
+            _plot_layer_metric_lines(
+                plt, layer_rows, out_dir / f"{args.plot_prefix}_layer_metrics.png"
+            )
+            _plot_counterfactual_lines(
+                plt, counter_rows, out_dir / f"{args.plot_prefix}_counterfactual_distances.png"
+            )
             for i in range(layer_count):
                 coords = vector_dump[f"layer{i}_pca_coords"]
                 idx = vector_dump[f"layer{i}_pca_indices"]
@@ -483,8 +600,14 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "clearvla-v39-2-latent-inspect-summary-v1",
         "out_dir": str(out_dir),
         "metadata": metadata,
-        "best_by_latent_mse": min(layer_rows, key=lambda r: float(r["latent_mse"])) if layer_rows else None,
-        "best_by_std_ratio_closest_to_one": min(layer_rows, key=lambda r: abs(float(r["std_ratio"]) - 1.0)) if layer_rows else None,
+        "best_by_latent_mse": min(layer_rows, key=lambda r: float(r["latent_mse"]))
+        if layer_rows
+        else None,
+        "best_by_std_ratio_closest_to_one": min(
+            layer_rows, key=lambda r: abs(float(r["std_ratio"]) - 1.0)
+        )
+        if layer_rows
+        else None,
         "rows": layer_rows,
     }
     _write_json(out_dir / "summary.json", summary)
@@ -508,7 +631,13 @@ def _write_html_index(out_dir: Path, *, layer_count: int, prefix: str) -> None:
         lines.append(f"<img src='{prefix}_pca_layer{i}_action_norm.png'>")
         lines.append(f"<img src='{prefix}_pca_layer{i}_gripper_event.png'>")
     lines.append("<h2>Data files</h2><ul>")
-    for name in ("summary.json", "latent_probe_table.csv", "latent_counterfactual_by_layer.csv", "latent_pca_explained_by_layer.csv", "latent_vectors.npz"):
+    for name in (
+        "summary.json",
+        "latent_probe_table.csv",
+        "latent_counterfactual_by_layer.csv",
+        "latent_pca_explained_by_layer.csv",
+        "latent_vectors.npz",
+    ):
         lines.append(f"<li><code>{name}</code></li>")
     lines.append("</ul>")
     (out_dir / "index.html").write_text("\n".join(lines), encoding="utf-8")

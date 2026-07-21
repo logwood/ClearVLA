@@ -85,9 +85,12 @@ def _transition_mask(
     boundary = torch.cat([current_state_raw[:, None, gripper_index], gripper[:, :-1]], dim=1)
     event = (gripper - boundary).abs() >= float(threshold)
     if radius > 0:
-        event = F.max_pool1d(
-            event.float()[:, None], kernel_size=2 * radius + 1, stride=1, padding=radius
-        )[:, 0] > 0
+        event = (
+            F.max_pool1d(
+                event.float()[:, None], kernel_size=2 * radius + 1, stride=1, padding=radius
+            )[:, 0]
+            > 0
+        )
     return event
 
 
@@ -133,12 +136,12 @@ def _world_error_per_sample(
     *,
     scene_weight: float,
 ) -> Tensor:
-    dynamic = F.smooth_l1_loss(
-        pred_dynamic.float(), target_dynamic.float(), reduction="none"
-    ).mean(dim=(-1, -2, -3))
-    scene = F.smooth_l1_loss(
-        pred_scene.float(), target_scene.float(), reduction="none"
-    ).mean(dim=(-1, -2, -3))
+    dynamic = F.smooth_l1_loss(pred_dynamic.float(), target_dynamic.float(), reduction="none").mean(
+        dim=(-1, -2, -3)
+    )
+    scene = F.smooth_l1_loss(pred_scene.float(), target_scene.float(), reduction="none").mean(
+        dim=(-1, -2, -3)
+    )
     return dynamic + float(scene_weight) * scene
 
 
@@ -180,7 +183,9 @@ def compute_controllable_world_losses(
     world_predictive = predictive + config.scene_predictive_weight * scene_predictive
     prior_predictive = F.smooth_l1_loss(prior_dynamic.float(), target_dynamic.float())
     prior_scene_predictive = F.smooth_l1_loss(prior_scene.float(), target_scene.float())
-    prior_world_predictive = prior_predictive + config.scene_predictive_weight * prior_scene_predictive
+    prior_world_predictive = (
+        prior_predictive + config.scene_predictive_weight * prior_scene_predictive
+    )
     direction = _cosine_loss(pred_dynamic, target_dynamic)
     amplitude = _amplitude_loss(pred_dynamic, target_dynamic)
 
@@ -267,9 +272,7 @@ def compute_controllable_world_losses(
         ],
         dim=-1,
     )
-    residual_cosine_by_step = F.cosine_similarity(
-        residual_vector, target_residual_vector, dim=-1
-    )
+    residual_cosine_by_step = F.cosine_similarity(residual_vector, target_residual_vector, dim=-1)
     residual_cosine = residual_cosine_by_step.mean()
     residual_direction = 1.0 - residual_cosine
 
@@ -288,7 +291,9 @@ def compute_controllable_world_losses(
         scene_weight=config.scene_predictive_weight,
     )
     residual_strength = target_residual_vector.square().mean(dim=-1).sqrt().mean(dim=1)
-    informative = (residual_strength >= float(config.informative_residual_threshold)) | event.any(dim=1)
+    informative = (residual_strength >= float(config.informative_residual_threshold)) | event.any(
+        dim=1
+    )
     necessity_per = F.relu(float(config.necessity_margin) + full_error_per - prior_error_per)
     necessity = _masked_mean(necessity_per, informative)
     full_vs_prior_gain = (prior_error_per - full_error_per).mean()
@@ -298,9 +303,7 @@ def compute_controllable_world_losses(
     boundary = torch.cat([action_state[:, None], primary["action"][:, :-1]], dim=1)
     action_delta = primary["action"] - boundary
     relative_action = primary["action"] - action_state[:, None]
-    inverse_action = F.smooth_l1_loss(
-        output["inverse_action"].float(), relative_action.float()
-    )
+    inverse_action = F.smooth_l1_loss(output["inverse_action"].float(), relative_action.float())
     inverse_delta = F.smooth_l1_loss(output["inverse_delta"].float(), action_delta.float())
     gripper_class = _gripper_classes(
         primary["action_raw"],
@@ -312,8 +315,8 @@ def compute_controllable_world_losses(
         output["inverse_gripper_logits"].float().reshape(-1, 3), gripper_class.reshape(-1)
     )
     inverse_gripper_accuracy = (
-        output["inverse_gripper_logits"].argmax(dim=-1) == gripper_class
-    ).float().mean()
+        (output["inverse_gripper_logits"].argmax(dim=-1) == gripper_class).float().mean()
+    )
 
     current_anchor = F.smooth_l1_loss(
         torch.cat([output["initial_scene"], output["initial_dynamic"]], dim=1).float(),
@@ -368,9 +371,9 @@ def compute_controllable_world_losses(
             ],
             dim=-1,
         )
-        local_per = F.smooth_l1_loss(
-            pred_effect, target_effect, reduction="none"
-        ).mean(dim=(-1, -2))
+        local_per = F.smooth_l1_loss(pred_effect, target_effect, reduction="none").mean(
+            dim=(-1, -2)
+        )
         local_effect = _masked_mean(local_per, valid)
         effect_cosine_per = F.cosine_similarity(pred_effect, target_effect, dim=-1).mean(dim=1)
         local_effect_cosine = _masked_mean(effect_cosine_per, valid)
@@ -445,8 +448,14 @@ def compute_controllable_world_losses(
     by_step: dict[str, Tensor] = {}
     for index, offset in enumerate(model.config.future_offsets):
         full_step = dynamic_by_step[index] + config.scene_predictive_weight * scene_by_step[index]
-        prior_step = prior_dynamic_by_step[index] + config.scene_predictive_weight * prior_scene_by_step[index]
-        teacher_step = teacher_dynamic_by_step[index] + config.scene_predictive_weight * teacher_scene_by_step[index]
+        prior_step = (
+            prior_dynamic_by_step[index]
+            + config.scene_predictive_weight * prior_scene_by_step[index]
+        )
+        teacher_step = (
+            teacher_dynamic_by_step[index]
+            + config.scene_predictive_weight * teacher_scene_by_step[index]
+        )
         by_step[f"world_predictive_t{offset}"] = full_step
         by_step[f"prior_world_predictive_t{offset}"] = prior_step
         by_step[f"full_vs_prior_gain_t{offset}"] = prior_step - full_step
@@ -463,13 +472,11 @@ def compute_controllable_world_losses(
     adaln_gate = output.get("action_effect_gate_abs_mean", zero_diag).float().mean()
     adaln_scale = output.get("action_effect_scale_abs_mean", zero_diag).float().mean()
     adaln_shift = output.get("action_effect_shift_abs_mean", zero_diag).float().mean()
-    action_read_gate = output.get(
-        "action_effect_action_read_gate_abs_mean", zero_diag
-    ).float().mean()
+    action_read_gate = (
+        output.get("action_effect_action_read_gate_abs_mean", zero_diag).float().mean()
+    )
     joint_rms = output.get("action_effect_joint_rms", zero_diag).float().mean()
-    action_signal_rms = output.get(
-        "action_effect_action_signal_rms", zero_diag
-    ).float().mean()
+    action_signal_rms = output.get("action_effect_action_signal_rms", zero_diag).float().mean()
     return {
         "loss": total,
         "prior_loss": prior_total,

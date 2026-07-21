@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import inspect
 import unittest
+from dataclasses import replace
 
 import torch
 import torch.nn.functional as F
 
-from clearvla.policy.refinement import NestedLowRankContractionBank
+from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
+    V39PolicyTrainerConfig,
+    _accumulate_metric_tensors,
+    _dwell_value_targets,
+    _optimizer_groups,
+    _oracle_exit_supervision,
+    _sync_loss_row,
+)
+from clearvla.policy.codec import DCTFlowCodec
 from clearvla.policy.config import V39PolicyConfig
 from clearvla.policy.controller import UnifiedHierarchicalController
 from clearvla.policy.decoder import HierarchicalMMDiTActionDecoder
@@ -16,17 +24,14 @@ from clearvla.policy.evidence import (
     OwnedEvidenceMemoryBank,
     WorkspaceControllerInterface,
 )
+from clearvla.policy.gauges import (
+    deterministic_module_probe,
+    masked_candidate_center,
+)
 from clearvla.policy.intent import IntentContractCompiler, PolicyConditionOrganizer
 from clearvla.policy.legacy.residual import LayeredV37StyleResidualActionFlowDenoiser
+from clearvla.policy.refinement import NestedLowRankContractionBank
 from clearvla.policy.system import V39PolicySystem
-from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
-    V39PolicyTrainerConfig,
-    _accumulate_metric_tensors,
-    _dwell_value_targets,
-    _oracle_exit_supervision,
-    _optimizer_groups,
-    _sync_loss_row,
-)
 
 
 class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
@@ -69,34 +74,38 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             _accumulate_metric_tensors({}, losses)
 
     def test_dwell_targets_use_post_update_decision_coordinates(self) -> None:
-        prefix_error = torch.tensor([
-            [1.00, 0.70, 0.45, 0.40, 0.38],
-            [1.00, 0.80, 0.60, 0.60, 0.60],
-        ])
+        prefix_error = torch.tensor(
+            [
+                [1.00, 0.70, 0.45, 0.40, 0.38],
+                [1.00, 0.80, 0.60, 0.60, 0.60],
+            ]
+        )
         block_ids = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]])
-        active = torch.tensor([
-            [True, True, True, True],
-            [True, True, False, False],
-        ])
+        active = torch.tensor(
+            [
+                [True, True, True, True],
+                [True, True, False, False],
+            ]
+        )
         targets = _dwell_value_targets(
             prefix_error=prefix_error,
             block_ids=block_ids,
             active=active,
             compute_cost=0.01,
         )
-        torch.testing.assert_close(
-            targets["exit_target"], prefix_error[:, 1:]
-        )
+        torch.testing.assert_close(targets["exit_target"], prefix_error[:, 1:])
         torch.testing.assert_close(
             targets["continue_action"],
             torch.tensor([[0, 1, 0, 0], [1, 0, 0, 0]]),
         )
         torch.testing.assert_close(
             targets["continue_valid"],
-            torch.tensor([
-                [True, True, True, False],
-                [True, False, False, False],
-            ]),
+            torch.tensor(
+                [
+                    [True, True, True, False],
+                    [True, False, False, False],
+                ]
+            ),
         )
         torch.testing.assert_close(
             targets["continue_target"][0, :3],
@@ -111,9 +120,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             hierarchical_mmdit_controller_depth=2,
             hierarchical_mmdit_controller_heads=4,
         )
-        controller = UnifiedHierarchicalController(
-            cfg, operator_branch_count=5
-        ).eval()
+        controller = UnifiedHierarchicalController(cfg, operator_branch_count=5).eval()
         h = cfg.hidden_size
         output = controller(
             previous_state=None,
@@ -132,9 +139,28 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             feedback=torch.randn(self.batch, 10),
         )
         self.assertEqual(tuple(output.state.shape), (self.batch, 5, h))
+        self.assertEqual(tuple(output.global_state.shape), (self.batch, 1, h))
+        self.assertEqual(tuple(output.private_state.shape), (self.batch, 5, h))
+        self.assertEqual(tuple(output.memory.global_content.shape), (self.batch, 1, h))
+        self.assertEqual(tuple(output.memory.private_content.shape), (self.batch, 5, h))
+        torch.testing.assert_close(
+            output.private_state.mean(dim=1),
+            torch.zeros(self.batch, h),
+            atol=1e-5,
+            rtol=0.0,
+        )
+        torch.testing.assert_close(
+            output.memory.content,
+            torch.cat([output.global_state, output.private_state], dim=1),
+        )
         self.assertEqual(
-            tuple(output.operator_logits.shape),
-            (self.batch, cfg.hierarchical_mmdit_operator_stages),
+            tuple(output.operation_value_field.shape),
+            (
+                self.batch,
+                cfg.hierarchical_mmdit_operator_stages,
+                cfg.action_horizon,
+                2,
+            ),
         )
         self.assertEqual(
             tuple(output.operator_depth_logits.shape),
@@ -144,9 +170,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             tuple(output.operator_update_logits.shape),
             (self.batch, cfg.hierarchical_mmdit_operator_stages, 5),
         )
-        self.assertEqual(tuple(output.exit_logit.shape), (self.batch,))
         torch.testing.assert_close(
-            output.operator_logits, torch.zeros_like(output.operator_logits)
+            output.operation_value_field,
+            torch.zeros_like(output.operation_value_field),
         )
         torch.testing.assert_close(
             output.operator_depth_logits,
@@ -162,27 +188,261 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 cfg.hierarchical_mmdit_operator_depth_logit_init,
             ),
         )
-        torch.testing.assert_close(
-            output.exit_logit,
-            torch.full_like(
-                output.exit_logit,
-                cfg.hierarchical_mmdit_exit_logit_init,
-            ),
+        self.assertGreater(
+            float(output.metrics["controller_state_direction_participation"]),
+            1.0,
         )
         self.assertGreater(
-            float(output.metrics["controller_state_effective_rank"]), 1.0
+            float(output.metrics["controller_state_centered_energy_ratio"]),
+            0.0,
         )
         self.assertGreaterEqual(
-            float(output.metrics[
-                "controller_competition_source_effective_slots"
-            ]),
+            float(output.metrics["controller_competition_source_effective_slots"]),
             1.0,
         )
         self.assertLessEqual(
-            float(output.metrics[
-                "controller_competition_source_effective_slots"
-            ]),
+            float(output.metrics["controller_competition_source_effective_slots"]),
             float(cfg.hierarchical_mmdit_control_tokens),
+        )
+
+    def test_action_and_feedback_are_selector_only_controller_sources(self) -> None:
+        cfg = replace(
+            self.config,
+            hierarchical_mmdit_unified_controller=1,
+            hierarchical_mmdit_execution_contract="typed_block_budget",
+        )
+        controller = UnifiedHierarchicalController(cfg, operator_branch_count=5)
+        h = cfg.hidden_size
+        action = torch.randn(self.batch, cfg.action_horizon, h)
+        feedback = torch.randn(self.batch, 10)
+        action_value, action_key = controller._typed_source(action, 3)
+        feedback_value, feedback_key = controller._typed_source(
+            feedback[..., None].expand(-1, -1, h), 7
+        )
+        torch.testing.assert_close(action_value, torch.zeros_like(action_value))
+        torch.testing.assert_close(feedback_value, torch.zeros_like(feedback_value))
+        self.assertEqual(tuple(action_key.shape), tuple(action.shape))
+        self.assertEqual(
+            tuple(feedback_key.shape),
+            tuple(feedback[..., None].expand(-1, -1, h).shape),
+        )
+        self.assertGreater(float(action_key.abs().sum()), 0.0)
+        self.assertGreater(float(feedback_key.abs().sum()), 0.0)
+
+    def test_typed_block_budget_has_one_central_budget_without_update_gate(self) -> None:
+        cfg = replace(
+            self.config,
+            hierarchical_mmdit_unified_controller=1,
+            hierarchical_mmdit_execution_contract="typed_block_budget",
+            hierarchical_mmdit_control_tokens=5,
+            hierarchical_mmdit_controller_depth=2,
+            hierarchical_mmdit_controller_heads=4,
+        )
+        controller = UnifiedHierarchicalController(cfg, operator_branch_count=5).eval()
+        h = cfg.hidden_size
+        output = controller(
+            previous_state=None,
+            global_intent=torch.randn(self.batch, h),
+            flow_time=torch.randn(self.batch, h),
+            refine_time=torch.randn(self.batch, h),
+            action_tokens=torch.randn(self.batch, cfg.action_horizon, h),
+            evidence_tokens=torch.randn(self.batch, 13, h),
+            evidence_ranges={"geom": (0, 5), "event": (5, 13)},
+            evidence_role_ranges={
+                "geom": ((0, 5),),
+                "event": ((5, 13),),
+            },
+            stage_role=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            stage_content=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            feedback=torch.randn(self.batch, 10),
+        )
+        expected = (self.batch, cfg.hierarchical_mmdit_depth, 5)
+        self.assertEqual(tuple(output.operator_depth_logits.shape), expected)
+        self.assertEqual(tuple(output.operator_update_logits.shape), expected)
+        self.assertEqual(
+            tuple(output.operation_value_field.shape),
+            (
+                self.batch,
+                cfg.hierarchical_mmdit_depth,
+                cfg.action_horizon,
+                2,
+            ),
+        )
+        self.assertEqual(controller.operator_head.out_features, 5)
+        self.assertEqual(output.execution.operation_axis, "block")
+        self.assertEqual(output.execution.residual_amplitude_owner, "host_block")
+        self.assertIsNone(output.execution.branch_update_keep_logits)
+        torch.testing.assert_close(
+            output.operator_update_logits,
+            torch.full_like(output.operator_update_logits, 20.0),
+        )
+        self.assertEqual(float(output.metrics["controller_host_amplitude_owned"]), 1.0)
+
+        decoder = HierarchicalMMDiTActionDecoder(cfg)
+        self.assertEqual(decoder.control_operation_count, cfg.hierarchical_mmdit_depth)
+        for block, bank in zip(decoder.blocks, decoder.operator_contractions, strict=True):
+            self.assertEqual(block.operator_stage_count, 1)
+            for contraction in bank.values():
+                self.assertEqual(contraction.stage_count, 1)
+
+        raw_depth, update_keep, selected_depth = decoder._controller_operator_controls(
+            output,
+            operation_index=torch.tensor([0, 1]),
+            operation_candidates=torch.tensor([[0], [1]]),
+        )
+        self.assertIsNone(update_keep)
+        self.assertEqual(tuple(raw_depth.shape), (self.batch, 1, 5))
+        self.assertEqual(tuple(selected_depth.shape), (self.batch, 5))
+
+        value = torch.zeros(
+            self.batch,
+            cfg.hierarchical_mmdit_depth,
+            cfg.action_horizon,
+            2,
+        )
+        value[0, 1] = -10.0
+        value[1, 0] = -100.0  # backward block is not a legal operation
+        selected_block, selected_operation, *_ = decoder._select_unified_operation(
+            current_block=torch.tensor([0, 1]),
+            operation_value_field=value,
+            controller_state=torch.randn(
+                self.batch,
+                cfg.hierarchical_mmdit_control_tokens,
+                cfg.hidden_size,
+            ),
+            step_index=1,
+        )
+        torch.testing.assert_close(selected_block, torch.tensor([1, 1]))
+        torch.testing.assert_close(selected_operation, torch.tensor([1, 1]))
+
+    def test_typed_block_budget_requires_unified_controller(self) -> None:
+        with self.assertRaisesRegex(ValueError, "typed_block_budget requires"):
+            replace(
+                self.config,
+                hierarchical_mmdit_execution_contract="typed_block_budget",
+            ).validate()
+
+    def test_candidate_centering_rejects_common_mode_value_shortcuts(self) -> None:
+        values = torch.randn(2, 3, 4, 5, 2)
+        valid = torch.tensor(
+            [
+                [[True, True, False, True]] * 3,
+                [[True, False, True, True]] * 3,
+            ]
+        )
+        common = torch.randn(2, 3, 1, 5, 2)
+        centered, mean = masked_candidate_center(values, valid, candidate_dim=2)
+        shifted, shifted_mean = masked_candidate_center(values + common, valid, candidate_dim=2)
+        torch.testing.assert_close(centered, shifted)
+        torch.testing.assert_close(shifted_mean, mean + common)
+
+    def test_deterministic_probe_restores_rng_and_training_modes(self) -> None:
+        module = torch.nn.Sequential(
+            torch.nn.Linear(4, 4),
+            torch.nn.Dropout(0.75),
+        ).train()
+        torch.manual_seed(91)
+        rng_before = torch.random.get_rng_state().clone()
+        with deterministic_module_probe(module):
+            self.assertFalse(module.training)
+            self.assertFalse(module[1].training)
+            first = module(torch.ones(8, 4))
+            second = module(torch.ones(8, 4))
+            torch.testing.assert_close(first, second)
+        torch.testing.assert_close(torch.random.get_rng_state(), rng_before)
+        self.assertTrue(module.training)
+        self.assertTrue(module[1].training)
+
+    def test_operation_value_loss_keeps_external_sources_read_only(self) -> None:
+        cfg = replace(
+            self.config,
+            hierarchical_mmdit_unified_controller=1,
+            hierarchical_mmdit_controller_heads=4,
+        )
+        controller = UnifiedHierarchicalController(cfg, operator_branch_count=5).train()
+        with torch.no_grad():
+            controller.operation_value_head.weight.normal_(std=0.01)
+        h = cfg.hidden_size
+        inputs = {
+            "global_intent": torch.randn(self.batch, h, requires_grad=True),
+            "flow_time": torch.randn(self.batch, h, requires_grad=True),
+            "refine_time": torch.randn(self.batch, h, requires_grad=True),
+            "action_tokens": torch.randn(self.batch, cfg.action_horizon, h, requires_grad=True),
+            "evidence_tokens": torch.randn(self.batch, 13, h, requires_grad=True),
+            "stage_role": torch.randn(
+                self.batch,
+                cfg.hierarchical_mmdit_stage_slots,
+                h,
+                requires_grad=True,
+            ),
+            "stage_content": torch.randn(
+                self.batch,
+                cfg.hierarchical_mmdit_stage_slots,
+                h,
+                requires_grad=True,
+            ),
+            "feedback": torch.randn(self.batch, 10, requires_grad=True),
+            "committed_spectral_aperture": torch.rand(
+                self.batch, cfg.action_horizon, 2, requires_grad=True
+            ),
+        }
+        output = controller(
+            previous_state=None,
+            evidence_ranges={"geom": (0, 5), "event": (5, 13)},
+            evidence_role_ranges={
+                "geom": ((0, 5),),
+                "event": ((5, 13),),
+            },
+            current_block=torch.tensor([0, 1]),
+            **inputs,
+        )
+        output.operation_value_field.square().mean().backward()
+        self.assertTrue(all(value.grad is None for value in inputs.values()))
+
+        groups = controller.parameter_groups()
+
+        def grad_energy(parameters: tuple[torch.nn.Parameter, ...]) -> float:
+            return float(
+                sum(
+                    parameter.grad.detach().float().square().sum()
+                    for parameter in parameters
+                    if parameter.grad is not None
+                )
+            )
+
+        self.assertGreater(grad_energy(groups["value_reader"]), 0.0)
+        self.assertEqual(grad_energy(groups["operator_controls"]), 0.0)
+        # Value supervision may train the controller-owned operator state, but
+        # it must not reach the external evidence/action/time inputs above.
+        self.assertGreater(grad_energy(groups["backbone"]), 0.0)
+        with torch.no_grad():
+            shifted_inputs = dict(inputs)
+            shifted_inputs["committed_spectral_aperture"] = (
+                inputs["committed_spectral_aperture"] + 0.5
+            )
+            shifted = controller(
+                previous_state=None,
+                evidence_ranges={"geom": (0, 5), "event": (5, 13)},
+                evidence_role_ranges={
+                    "geom": ((0, 5),),
+                    "event": ((5, 13),),
+                },
+                current_block=torch.tensor([0, 1]),
+                **shifted_inputs,
+            )
+        self.assertFalse(
+            torch.allclose(
+                output.operation_value_field,
+                shifted.operation_value_field,
+            )
+        )
+        self.assertGreater(
+            float(output.metrics["controller_operation_value_memory_context_rms"]),
+            0.0,
+        )
+        self.assertGreater(
+            float(output.metrics["controller_operation_value_action_context_rms"]),
+            0.0,
         )
         self.assertGreaterEqual(
             float(output.metrics["controller_competition_slot_load_effective"]),
@@ -192,6 +452,32 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             float(output.metrics["controller_competition_slot_load_effective"]),
             float(cfg.hierarchical_mmdit_control_tokens),
         )
+        self.assertGreater(
+            float(output.metrics["controller_operator_representation_diversity"]),
+            0.0,
+        )
+        self.assertGreater(
+            float(output.metrics["controller_reader_operator_attention_diversity"]),
+            0.0,
+        )
+        self.assertGreater(
+            float(output.metrics["controller_reader_family_attention_diversity"]),
+            0.0,
+        )
+        for reader_name in ("operator",):
+            self.assertLess(
+                float(output.metrics[f"controller_reader_{reader_name}_mass_error"]),
+                1e-5,
+            )
+            for source_name in ("intent", "action", "evidence", "feedback"):
+                self.assertGreater(
+                    float(
+                        output.metrics[
+                            f"controller_reader_{reader_name}_source_{source_name}_attention"
+                        ]
+                    ),
+                    0.0,
+                )
 
         block = controller.blocks[0]
         query = torch.randn(self.batch, 5, h)
@@ -214,6 +500,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             atol=1e-6,
             rtol=1e-6,
         )
+
         recurrent = controller(
             previous_state=output.state,
             global_intent=torch.randn(self.batch, h),
@@ -244,18 +531,10 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         interface = WorkspaceControllerInterface(cfg, role_count=5).eval()
         interface_output = interface(
             control_tokens=recurrent.state,
-            low_query=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_low_slots, h
-            ),
-            low_role_ids=torch.arange(
-                cfg.hierarchical_mmdit_low_slots
-            ) % 5,
-            stage_role=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_stage_slots, h
-            ),
-            stage_content=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_stage_slots, h
-            ),
+            low_query=torch.randn(self.batch, cfg.hierarchical_mmdit_low_slots, h),
+            low_role_ids=torch.arange(cfg.hierarchical_mmdit_low_slots) % 5,
+            stage_role=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            stage_content=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
         )
         self.assertEqual(
             tuple(interface_output.low_query_delta.shape),
@@ -290,39 +569,29 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             0.0,
         )
         self.assertGreaterEqual(
-            float(interface_output.metrics[
-                "workspace_interface_low_control_load_effective_tokens"
-            ]),
+            float(
+                interface_output.metrics["workspace_interface_low_control_load_effective_tokens"]
+            ),
             1.0,
         )
         self.assertLessEqual(
-            float(interface_output.metrics[
-                "workspace_interface_low_control_load_effective_tokens"
-            ]),
+            float(
+                interface_output.metrics["workspace_interface_low_control_load_effective_tokens"]
+            ),
             float(cfg.hierarchical_mmdit_control_tokens) + 1e-5,
         )
         self.assertGreaterEqual(
-            float(interface_output.metrics[
-                "workspace_interface_stage_control_slot_diversity"
-            ]),
+            float(interface_output.metrics["workspace_interface_stage_control_slot_diversity"]),
             0.0,
         )
         with torch.no_grad():
             interface.low_query_out.weight.copy_(torch.eye(h))
         zero_control_output = interface(
             control_tokens=torch.zeros_like(recurrent.state),
-            low_query=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_low_slots, h
-            ),
-            low_role_ids=torch.arange(
-                cfg.hierarchical_mmdit_low_slots
-            ) % 5,
-            stage_role=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_stage_slots, h
-            ),
-            stage_content=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_stage_slots, h
-            ),
+            low_query=torch.randn(self.batch, cfg.hierarchical_mmdit_low_slots, h),
+            low_role_ids=torch.arange(cfg.hierarchical_mmdit_low_slots) % 5,
+            stage_role=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            stage_content=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
         )
         torch.testing.assert_close(
             zero_control_output.low_query_delta,
@@ -332,20 +601,32 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         live_control_output = interface(
             control_tokens=recurrent.state,
-            low_query=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_low_slots, h
-            ),
-            low_role_ids=torch.arange(
-                cfg.hierarchical_mmdit_low_slots
-            ) % 5,
-            stage_role=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_stage_slots, h
-            ),
-            stage_content=torch.randn(
-                self.batch, cfg.hierarchical_mmdit_stage_slots, h
-            ),
+            low_query=torch.randn(self.batch, cfg.hierarchical_mmdit_low_slots, h),
+            low_role_ids=torch.arange(cfg.hierarchical_mmdit_low_slots) % 5,
+            stage_role=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            stage_content=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
         )
         self.assertGreater(float(live_control_output.low_query_delta.norm()), 0.0)
+
+    def test_workspace_interface_preserves_typed_global_private_memory(self) -> None:
+        interface = WorkspaceControllerInterface(self.config, role_count=5).eval()
+        h = self.config.hidden_size
+        global_token = torch.randn(self.batch, 1, h)
+        private_tokens = torch.randn(self.batch, 5, h)
+        output = interface(
+            global_token=global_token,
+            private_tokens=private_tokens,
+            global_address=torch.randn_like(global_token),
+            private_addresses=torch.randn_like(private_tokens),
+            low_query=torch.randn(self.batch, 4, h),
+            low_role_ids=torch.tensor([0, 1, 2, 3]),
+            stage_role=torch.randn(self.batch, 3, h),
+            stage_content=torch.randn(self.batch, 3, h),
+        )
+        self.assertEqual(tuple(output.low_query_delta.shape), (self.batch, 4, h))
+        self.assertEqual(tuple(output.stage_query_delta.shape), (self.batch, 3, h))
+        self.assertIn("workspace_interface_global_attention", output.metrics)
+        self.assertIn("workspace_interface_private_attention", output.metrics)
 
     def test_unified_controller_is_scoped_to_hierarchical_mmdit(self) -> None:
         with self.assertRaisesRegex(
@@ -358,6 +639,59 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 hierarchical_mmdit_unified_controller=1,
             )
 
+    def test_spectral_reader_uses_shared_memory_and_outputs_frequencies_directly(self) -> None:
+        cfg = replace(
+            self.config,
+            hierarchical_mmdit_unified_controller=1,
+            hierarchical_mmdit_control_tokens=5,
+            hierarchical_mmdit_controller_heads=4,
+            hierarchical_mmdit_spectral_state=1,
+        )
+        controller = UnifiedHierarchicalController(cfg, operator_branch_count=5).eval()
+        h = cfg.hidden_size
+        output = controller(
+            previous_state=None,
+            global_intent=torch.randn(self.batch, h),
+            flow_time=torch.randn(self.batch, h),
+            refine_time=torch.randn(self.batch, h),
+            action_tokens=torch.randn(self.batch, cfg.action_horizon, h),
+            evidence_tokens=torch.randn(self.batch, 13, h),
+            evidence_ranges={"geom": (0, 5), "event": (5, 13)},
+            evidence_role_ranges={"geom": ((0, 5),), "event": ((5, 13),)},
+            stage_role=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            stage_content=torch.randn(self.batch, cfg.hierarchical_mmdit_stage_slots, h),
+            feedback=torch.randn(self.batch, 10),
+        )
+        self.assertEqual(
+            tuple(output.spectral_ownership.shape),
+            (self.batch, 5, cfg.action_horizon),
+        )
+        torch.testing.assert_close(
+            output.spectral_ownership.sum(dim=1),
+            torch.ones(self.batch, cfg.action_horizon),
+        )
+        self.assertTrue(bool(torch.isfinite(output.spectral_competition_loss)))
+        self.assertEqual(
+            tuple(output.spectral_shift.shape),
+            (self.batch, cfg.action_horizon, 2),
+        )
+        torch.testing.assert_close(
+            output.spectral_shift,
+            torch.zeros_like(output.spectral_shift),
+        )
+        self.assertGreater(
+            float(output.metrics["controller_reader_spectral_memory_attention"]),
+            0.0,
+        )
+        self.assertLess(
+            float(output.metrics["controller_reader_spectral_mass_error"]),
+            1e-5,
+        )
+        self.assertGreater(
+            float(output.metrics["controller_reader_spectral_attention_local_change"]),
+            0.0,
+        )
+
     def test_unified_controller_starts_at_the_legacy_forward_boundary(self) -> None:
         cfg = self.config
         unified_cfg = replace(
@@ -366,7 +700,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             hierarchical_mmdit_control_tokens=5,
             hierarchical_mmdit_controller_heads=4,
             hierarchical_mmdit_operation_candidate_probes=1,
-            hierarchical_mmdit_exhaustion_mode="learned_shadow",
+            hierarchical_mmdit_dwell_mode="shadow",
+            hierarchical_mmdit_exhaustion_mode="off",
         )
         torch.manual_seed(29)
         baseline = HierarchicalMMDiTActionDecoder(cfg).eval()
@@ -378,19 +713,18 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             torch.testing.assert_close(value, unified_state[name], atol=0.0, rtol=0.0)
 
         h = cfg.hidden_size
-        layer_contracts = [{
-            key: torch.randn(self.batch, 3, h)
-            for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
-        } for _ in range(cfg.depth)]
+        layer_contracts = [
+            {
+                key: torch.randn(self.batch, 3, h)
+                for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+            }
+            for _ in range(cfg.depth)
+        ]
         inputs = {
-            "noisy_physical": torch.randn(
-                self.batch, cfg.action_horizon, cfg.physical_action_dim
-            ),
+            "noisy_physical": torch.randn(self.batch, cfg.action_horizon, cfg.physical_action_dim),
             "time": torch.rand(self.batch),
             "trajectory_tokens": torch.randn(self.batch, cfg.action_horizon, h),
-            "trajectory_workspace_tokens": torch.randn(
-                self.batch, cfg.action_horizon, h
-            ),
+            "trajectory_workspace_tokens": torch.randn(self.batch, cfg.action_horizon, h),
             "rollout_tokens": torch.randn(self.batch, 8, h),
             "transition_memory": [torch.randn(self.batch, 6, h)],
             "event_evidence": torch.randn(self.batch, cfg.action_horizon, 3),
@@ -411,8 +745,14 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             rtol=0.0,
         )
         self.assertEqual(
-            tuple(unified_output["hierarchical_mmdit_operation_logits"].shape),
-            (self.batch, cfg.hierarchical_mmdit_refine_steps, cfg.hierarchical_mmdit_operator_stages),
+            tuple(unified_output["hierarchical_mmdit_operation_value_field"].shape),
+            (
+                self.batch,
+                cfg.hierarchical_mmdit_refine_steps,
+                cfg.hierarchical_mmdit_operator_stages,
+                cfg.action_horizon,
+                2,
+            ),
         )
         self.assertEqual(
             tuple(unified_output["hierarchical_mmdit_operation_update_logits"].shape),
@@ -425,11 +765,17 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         self.assertEqual(
             tuple(unified_output["hierarchical_mmdit_operation_candidate_mask"].shape),
-            (self.batch, cfg.hierarchical_mmdit_refine_steps, cfg.hierarchical_mmdit_operator_stages + 1),
+            (
+                self.batch,
+                cfg.hierarchical_mmdit_refine_steps,
+                cfg.hierarchical_mmdit_operator_stages + 1,
+            ),
         )
         self.assertEqual(
-            float(unified_output["hierarchical_mmdit_unified_controller"]), 1.0
+            unified_output["hierarchical_mmdit_operation_candidate_predictions"].dtype,
+            torch.float32,
         )
+        self.assertEqual(float(unified_output["hierarchical_mmdit_unified_controller"]), 1.0)
         self.assertEqual(
             float(unified_output["hierarchical_mmdit_host_update_amplitude_owner"]),
             1.0,
@@ -440,17 +786,19 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         self.assertEqual(
             float(unified_output["hierarchical_mmdit_unified_relative_update_keep_owner"]),
+            0.0,
+        )
+        torch.testing.assert_close(
+            unified_output["hierarchical_mmdit_operation_value_field"],
+            torch.zeros_like(unified_output["hierarchical_mmdit_operation_value_field"]),
+        )
+        self.assertEqual(
+            float(unified_output["hierarchical_mmdit_value_dwell_shadow_active"]),
             1.0,
         )
         self.assertEqual(
-            float(unified_output["hierarchical_mmdit_shadow_executed_steps"]),
-            float(cfg.hierarchical_mmdit_refine_steps),
-        )
-        torch.testing.assert_close(
-            unified_output["refinement_shadow_probe_pred_velocity"],
-            unified_output["refinement_probe_pred_velocity"],
-            atol=0.0,
-            rtol=0.0,
+            float(unified_output["hierarchical_mmdit_operation_fixed_path_agreement"]),
+            1.0,
         )
         baseline.train()
         unified.train()
@@ -484,7 +832,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             "transition_summary": torch.randn(self.batch, h),
             "event_summary": torch.randn(self.batch, h),
         }
-        dynamic_b = {key: value + 10.0 * torch.randn_like(value) for key, value in dynamic_a.items()}
+        dynamic_b = {
+            key: value + 10.0 * torch.randn_like(value) for key, value in dynamic_a.items()
+        }
         output_a = compiler(**stable, **dynamic_a)
         output_b = compiler(**stable, **dynamic_b)
         torch.testing.assert_close(output_a["global_intent"], output_b["global_intent"])
@@ -564,10 +914,12 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         decoder.set_operator_contraction_training_step(10_000)
         layer_contracts = []
         for _ in range(cfg.depth):
-            layer_contracts.append({
-                key: torch.randn(self.batch, 3, h)
-                for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
-            })
+            layer_contracts.append(
+                {
+                    key: torch.randn(self.batch, 3, h)
+                    for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+                }
+            )
         noisy = torch.randn(self.batch, cfg.action_horizon, cfg.physical_action_dim)
         output = decoder(
             noisy_physical=noisy,
@@ -598,7 +950,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         self.assertEqual(float(output["hierarchical_mmdit_competitive_market"]), 0.0)
         self.assertEqual(
             cfg.hierarchical_mmdit_architecture_version,
-            "post_gate_contraction_sidecar_v11_oracle_router",
+            "post_gate_contraction_sidecar_v12_value_dwell",
         )
         self.assertFalse(hasattr(decoder, "shared_block"))
         self.assertNotIn("noisy_market_bias", dict(decoder.named_parameters()))
@@ -616,6 +968,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             float(output["hierarchical_mmdit_operator_stage_count"]),
             float(cfg.hierarchical_mmdit_operator_stages),
         )
+
         self.assertEqual(
             float(output["hierarchical_mmdit_refine_block_count"]),
             float(cfg.hierarchical_mmdit_depth),
@@ -727,7 +1080,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 atol=1e-6,
                 rtol=0.0,
             )
-            self.assertGreater(float(output[f"hierarchical_mmdit_action_{branch}_basis_raw_norm"]), 0.0)
+            self.assertGreater(
+                float(output[f"hierarchical_mmdit_action_{branch}_basis_raw_norm"]), 0.0
+            )
         for stage_index in range(cfg.hierarchical_mmdit_operator_stages):
             for branch in ("self", "noisy", "stage", "low", "ffn"):
                 self.assertIn(
@@ -747,27 +1102,35 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             abs(float(output["hierarchical_mmdit_action_branch_weighted_cosine"])), 1.0
         )
         torch.testing.assert_close(
-            output["owned_hierarchical_manager_low_output_strength"], torch.ones(()), atol=1e-6, rtol=0.0
+            output["owned_hierarchical_manager_low_output_strength"],
+            torch.ones(()),
+            atol=1e-6,
+            rtol=0.0,
         )
         torch.testing.assert_close(
-            output["owned_hierarchical_manager_stage_output_strength"], torch.ones(()), atol=1e-6, rtol=0.0
+            output["owned_hierarchical_manager_stage_output_strength"],
+            torch.ones(()),
+            atol=1e-6,
+            rtol=0.0,
         )
         loss = output["pred_velocity"].square().mean()
-        loss = loss + output["event_logits"].square().mean() + output["motion_logits"].square().mean()
+        loss = (
+            loss + output["event_logits"].square().mean() + output["motion_logits"].square().mean()
+        )
         loss.backward()
 
         def grad_norm(module: torch.nn.Module) -> float:
-            return float(sum(
-                parameter.grad.detach().float().square().sum()
-                for parameter in module.parameters()
-                if parameter.grad is not None
-            ).sqrt())
+            return float(
+                sum(
+                    parameter.grad.detach().float().square().sum()
+                    for parameter in module.parameters()
+                    if parameter.grad is not None
+                ).sqrt()
+            )
 
         self.assertGreater(grad_norm(decoder.intent_compiler), 0.0)
         self.assertGreater(grad_norm(decoder.workspace), 0.0)
-        for block, contractions in zip(
-            decoder.blocks, decoder.operator_contractions, strict=True
-        ):
+        for block, contractions in zip(decoder.blocks, decoder.operator_contractions, strict=True):
             self.assertGreater(grad_norm(block), 0.0)
             self.assertGreater(grad_norm(contractions), 0.0)
             self.assertGreater(grad_norm(block.self_out), 0.0)
@@ -776,7 +1139,12 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             self.assertGreater(grad_norm(block.low_kv), 0.0)
         self.assertEqual(
             tuple(output["refinement_probe_pred_velocity"].shape),
-            (self.batch, cfg.hierarchical_mmdit_refine_steps + 1, cfg.action_horizon, cfg.physical_action_dim),
+            (
+                self.batch,
+                cfg.hierarchical_mmdit_refine_steps + 1,
+                cfg.action_horizon,
+                cfg.physical_action_dim,
+            ),
         )
         self.assertEqual(
             tuple(output["refinement_probe_block_ids"].shape),
@@ -814,6 +1182,41 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                     self.assertTrue(bool(torch.isfinite(output[key])))
                     self.assertGreaterEqual(float(output[key]), 0.0)
 
+    def test_minimal_eval_output_preserves_decoder_predictions(self) -> None:
+        cfg = self.config
+        h = cfg.hidden_size
+        decoder = HierarchicalMMDiTActionDecoder(cfg).eval()
+        inputs = {
+            "noisy_physical": torch.randn(self.batch, cfg.action_horizon, cfg.physical_action_dim),
+            "time": torch.rand(self.batch),
+            "trajectory_tokens": torch.randn(self.batch, cfg.action_horizon, h),
+            "trajectory_workspace_tokens": torch.randn(self.batch, cfg.action_horizon, h),
+            "rollout_tokens": torch.randn(self.batch, 8, h),
+            "transition_memory": [torch.randn(self.batch, 6, h)],
+            "event_evidence": torch.randn(self.batch, cfg.action_horizon, 3),
+            "state_memory": [torch.randn(self.batch, 2, h)],
+            "intent_memory": {
+                name: torch.randn(self.batch, 2, h)
+                for name in PolicyConditionOrganizer._INTENT_SOURCE_NAMES
+            },
+            "layer_contracts": [
+                {
+                    key: torch.randn(self.batch, 3, h)
+                    for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+                }
+                for _ in range(cfg.depth)
+            ],
+        }
+        with torch.no_grad():
+            full = decoder(**inputs)
+            minimal = decoder(**inputs, collect_diagnostics=False)
+        self.assertEqual(
+            set(minimal),
+            {"pred_velocity", "event_logits", "motion_logits"},
+        )
+        for key in minimal:
+            torch.testing.assert_close(minimal[key], full[key], atol=0.0, rtol=0.0)
+
     def test_exhaustion_thresholds_use_the_same_three_time_bins_as_diagnostics(self) -> None:
         decoder = HierarchicalMMDiTActionDecoder(self.config)
         actual = decoder._threshold_rows(
@@ -832,8 +1235,10 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             update = torch.zeros(1, 1, 5)
             update[..., index] = 1.0
             updates.append(update)
-        _, _, cancellation, baseline, excess, weighted_cosine = block._branch_geometry(tuple(updates))
-        expected = torch.tensor(1.0 - 1.0 / (5.0 ** 0.5))
+        _, _, cancellation, baseline, excess, weighted_cosine = block._branch_geometry(
+            tuple(updates)
+        )
+        expected = torch.tensor(1.0 - 1.0 / (5.0**0.5))
         torch.testing.assert_close(cancellation, expected, atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(baseline, expected, atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(excess, torch.zeros(()), atol=1e-6, rtol=0.0)
@@ -842,7 +1247,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         unequal = tuple(update * float(index + 1) for index, update in enumerate(updates))
         _, _, cancellation, baseline, excess, weighted_cosine = block._branch_geometry(unequal)
         expected_unequal = 1.0 - (sum(float(i * i) for i in range(1, 6)) ** 0.5) / 15.0
-        torch.testing.assert_close(cancellation, torch.tensor(expected_unequal), atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(
+            cancellation, torch.tensor(expected_unequal), atol=1e-6, rtol=1e-6
+        )
         torch.testing.assert_close(baseline, torch.tensor(expected_unequal), atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(excess, torch.zeros(()), atol=1e-6, rtol=0.0)
         torch.testing.assert_close(weighted_cosine, torch.zeros(()), atol=1e-6, rtol=0.0)
@@ -875,9 +1282,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         # Compute the V77 path independently.  Calling the block helper here
         # would let an accidental boundary rewrite make the test self-fulfilling.
         projected = block.noisy_out(projection_input)
-        denominator = projected.float().square().mean(
-            dim=(1, 2), keepdim=True
-        ).add(1e-6).sqrt()
+        denominator = projected.float().square().mean(dim=(1, 2), keepdim=True).add(1e-6).sqrt()
         expected_direction = (projected.float() / denominator).to(projected.dtype)
         torch.testing.assert_close(
             update,
@@ -900,12 +1305,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         inputs = {
             "action": torch.randn(self.batch, self.config.action_horizon, h),
             "noisy_tokens": torch.randn(self.batch, self.config.action_horizon, h),
-            "stage_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
-            "low_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_low_slots, h
-            ),
+            "stage_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
+            "low_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h),
             "shared_cond": torch.randn(self.batch, h),
             "operator_cond": torch.randn(self.batch, h),
             "contractions": decoder.operator_contractions[0],
@@ -922,9 +1323,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             reference, _ = block(**inputs)
             identity_keep, _ = block(
                 **inputs,
-                branch_update_keeps=torch.ones(
-                    self.batch, len(block._BRANCH_NAMES)
-                ),
+                branch_update_keeps=torch.ones(self.batch, len(block._BRANCH_NAMES)),
             )
         torch.testing.assert_close(identity_keep, reference, atol=0.0, rtol=0.0)
 
@@ -938,14 +1337,12 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 **inputs,
                 branch_update_keeps=update_keeps.detach(),
             )
-            block.mod.bias[2 * h:] += 0.1
+            block.mod.bias[2 * h :] += 0.1
             after_host_change, after_metrics = block(
                 **inputs,
                 branch_update_keeps=update_keeps.detach(),
             )
-        self.assertGreater(
-            float((after_host_change - before_host_change).abs().max()), 0.0
-        )
+        self.assertGreater(float((after_host_change - before_host_change).abs().max()), 0.0)
         self.assertGreater(
             abs(
                 float(after_metrics["action_noisy_base_gate"])
@@ -965,21 +1362,15 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         (live * torch.randn_like(live)).mean().backward()
         self.assertGreater(float(update_keeps.grad.abs().sum()), 0.0)
         self.assertIsNotNone(block.mod.bias.grad)
-        self.assertGreater(
-            float(block.mod.bias.grad[2 * h:].abs().sum()), 0.0
-        )
-        self.assertGreater(
-            float(block.mod.weight.grad[2 * h:].abs().sum()), 0.0
-        )
+        self.assertGreater(float(block.mod.bias.grad[2 * h :].abs().sum()), 0.0)
+        self.assertGreater(float(block.mod.weight.grad[2 * h :].abs().sum()), 0.0)
 
     def test_relative_update_keep_is_after_host_gate_and_contraction(self) -> None:
         decoder = HierarchicalMMDiTActionDecoder(self.config).eval()
         decoder.set_operator_contraction_training_step(10_000)
         block = decoder.blocks[0]
         h = self.config.hidden_size
-        projection_input = torch.randn(
-            self.batch, self.config.action_horizon, h
-        )
+        projection_input = torch.randn(self.batch, self.config.action_horizon, h)
         operator_cond = torch.randn(self.batch, h)
         stage_index = torch.zeros(self.batch, dtype=torch.long)
         base_gate = torch.tensor([0.03, 0.07])
@@ -1030,9 +1421,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         decoder = HierarchicalMMDiTActionDecoder(self.config).eval()
         block = decoder.blocks[0]
         h = self.config.hidden_size
-        actual_input = torch.randn(
-            self.batch, self.config.action_horizon, h, requires_grad=True
-        )
+        actual_input = torch.randn(self.batch, self.config.action_horizon, h, requires_grad=True)
         reference_input = actual_input.detach().clone().requires_grad_(True)
         reference_projection = torch.nn.Linear(h, h)
         reference_projection.load_state_dict(block.noisy_out.state_dict())
@@ -1053,19 +1442,15 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             update_keep=actual_keep,
         )
         projected = reference_projection(reference_input)
-        denominator = projected.float().square().mean(
-            dim=(1, 2), keepdim=True
-        ).add(1e-6).sqrt()
-        reference = reference_gate[:, None, None] * (
-            projected.float() / denominator
-        ).to(projected.dtype)
+        denominator = projected.float().square().mean(dim=(1, 2), keepdim=True).add(1e-6).sqrt()
+        reference = reference_gate[:, None, None] * (projected.float() / denominator).to(
+            projected.dtype
+        )
         torch.testing.assert_close(actual, reference, atol=0.0, rtol=0.0)
 
         (actual * probe).sum().backward()
         (reference * probe).sum().backward()
-        torch.testing.assert_close(
-            actual_input.grad, reference_input.grad, atol=0.0, rtol=0.0
-        )
+        torch.testing.assert_close(actual_input.grad, reference_input.grad, atol=0.0, rtol=0.0)
         torch.testing.assert_close(
             block.noisy_out.weight.grad,
             reference_projection.weight.grad,
@@ -1078,9 +1463,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             atol=0.0,
             rtol=0.0,
         )
-        torch.testing.assert_close(
-            actual_gate.grad, reference_gate.grad, atol=0.0, rtol=0.0
-        )
+        torch.testing.assert_close(actual_gate.grad, reference_gate.grad, atol=0.0, rtol=0.0)
         self.assertIsNotNone(actual_keep.grad)
         self.assertGreater(float(actual_keep.grad.abs().sum()), 0.0)
         for parameter in decoder.operator_contractions[0]["noisy"].parameters():
@@ -1090,7 +1473,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
     def test_detached_velocity_prediction_remains_outside_the_objective(self) -> None:
         decoder = HierarchicalMMDiTActionDecoder(self.config).train()
         action = torch.randn(
-            self.batch, self.config.action_horizon, self.config.hidden_size,
+            self.batch,
+            self.config.action_horizon,
+            self.config.hidden_size,
             requires_grad=True,
         )
         prediction = decoder._detached_velocity_prediction(action)
@@ -1100,10 +1485,12 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         main_prediction.square().mean().backward()
         self.assertIsNotNone(action.grad)
         self.assertGreater(float(action.grad.norm()), 0.0)
-        self.assertTrue(all(
-            layer.weight.grad is not None and float(layer.weight.grad.norm()) > 0.0
-            for layer in decoder.velocity_head.output_layers()
-        ))
+        self.assertTrue(
+            all(
+                layer.weight.grad is not None and float(layer.weight.grad.norm()) > 0.0
+                for layer in decoder.velocity_head.output_layers()
+            )
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA AMP regression requires CUDA")
     def test_detached_velocity_prediction_preserves_amp_head_gradients(self) -> None:
@@ -1123,10 +1510,12 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             loss = (main_prediction.float() - target.float()).square().mean()
         self.assertFalse(prediction.requires_grad)
         loss.backward()
-        self.assertTrue(all(
-            layer.weight.grad is not None and float(layer.weight.grad.float().norm()) > 0.0
-            for layer in decoder.velocity_head.output_layers()
-        ))
+        self.assertTrue(
+            all(
+                layer.weight.grad is not None and float(layer.weight.grad.float().norm()) > 0.0
+                for layer in decoder.velocity_head.output_layers()
+            )
+        )
 
     def test_contraction_changes_direction_without_owning_residual_amplitude(self) -> None:
         decoder = HierarchicalMMDiTActionDecoder(self.config).eval()
@@ -1140,9 +1529,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         base_gate = torch.full((self.batch,), 0.05)
         _, metrics = block._compose_update(
             branch="noisy",
-            projection_input=torch.randn(
-                self.batch, self.config.action_horizon, h
-            ),
+            projection_input=torch.randn(self.batch, self.config.action_horizon, h),
             base_projection=block.noisy_out,
             contraction=contraction,
             contraction_progress=decoder.contraction_progress,
@@ -1168,12 +1555,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         output, _ = block(
             torch.randn(self.batch, self.config.action_horizon, h),
             noisy_tokens=torch.randn(self.batch, self.config.action_horizon, h),
-            stage_tokens=torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
-            low_tokens=torch.randn(
-                self.batch, self.config.hierarchical_mmdit_low_slots, h
-            ),
+            stage_tokens=torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
+            low_tokens=torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h),
             shared_cond=torch.randn(self.batch, h),
             operator_cond=torch.randn(self.batch, h),
             contractions=decoder.operator_contractions[0],
@@ -1182,9 +1565,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         (output * torch.randn_like(output)).mean().backward()
         self.assertGreater(float(block.noisy_out.weight.grad.abs().sum()), 0.0)
-        self.assertGreater(
-            float(block.mod.weight.grad[2 * h :].abs().sum()), 0.0
-        )
+        self.assertGreater(float(block.mod.weight.grad[2 * h :].abs().sum()), 0.0)
         for parameter in decoder.operator_contractions[0].parameters():
             if parameter.grad is not None:
                 self.assertEqual(float(parameter.grad.abs().sum()), 0.0)
@@ -1194,12 +1575,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         output, _ = block(
             torch.randn(self.batch, self.config.action_horizon, h),
             noisy_tokens=torch.randn(self.batch, self.config.action_horizon, h),
-            stage_tokens=torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
-            low_tokens=torch.randn(
-                self.batch, self.config.hierarchical_mmdit_low_slots, h
-            ),
+            stage_tokens=torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
+            low_tokens=torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h),
             shared_cond=torch.randn(self.batch, h),
             operator_cond=torch.randn(self.batch, h),
             contractions=decoder.operator_contractions[0],
@@ -1207,29 +1584,31 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             stage_index=torch.zeros(self.batch, dtype=torch.long),
         )
         (output * torch.randn_like(output)).mean().backward()
+        self.assertGreater(float(block.mod.weight.grad[2 * h :].abs().sum()), 0.0)
         self.assertGreater(
-            float(block.mod.weight.grad[2 * h :].abs().sum()), 0.0
+            float(
+                sum(
+                    parameter.grad.detach().float().square().sum()
+                    for parameter in decoder.operator_contractions[0].parameters()
+                    if parameter.grad is not None
+                ).sqrt()
+            ),
+            0.0,
         )
-        self.assertGreater(float(sum(
-            parameter.grad.detach().float().square().sum()
-            for parameter in decoder.operator_contractions[0].parameters()
-            if parameter.grad is not None
-        ).sqrt()), 0.0)
 
     def test_contraction_sidecars_do_not_own_base_block_parameters(self) -> None:
         decoder = HierarchicalMMDiTActionDecoder(self.config)
-        self.assertFalse(any(
-            name.startswith("blocks.") and ".contractions." in name
-            for name, _ in decoder.named_parameters()
-        ))
-        self.assertTrue(any(
-            name.startswith("operator_contractions.")
-            for name, _ in decoder.named_parameters()
-        ))
+        self.assertFalse(
+            any(
+                name.startswith("blocks.") and ".contractions." in name
+                for name, _ in decoder.named_parameters()
+            )
+        )
+        self.assertTrue(
+            any(name.startswith("operator_contractions.") for name, _ in decoder.named_parameters())
+        )
         self.assertTrue(all(hasattr(block, "mod") for block in decoder.blocks))
-        self.assertTrue(all(
-            not hasattr(block, "residual_mod") for block in decoder.blocks
-        ))
+        self.assertTrue(all(not hasattr(block, "residual_mod") for block in decoder.blocks))
 
     def test_sidecar_capacity_does_not_reinitialize_v77_host(self) -> None:
         small = replace(
@@ -1267,9 +1646,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         }
         self.assertEqual(small_state.keys(), large_state.keys())
         for key in small_state:
-            torch.testing.assert_close(
-                small_state[key], large_state[key], atol=0.0, rtol=0.0
-            )
+            torch.testing.assert_close(small_state[key], large_state[key], atol=0.0, rtol=0.0)
 
     def test_boundary_stage_selection_cannot_change_owned_block_forward(self) -> None:
         decoder = HierarchicalMMDiTActionDecoder(self.config).eval()
@@ -1278,12 +1655,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         inputs = {
             "action": torch.randn(self.batch, self.config.action_horizon, h),
             "noisy_tokens": torch.randn(self.batch, self.config.action_horizon, h),
-            "stage_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
-            "low_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_low_slots, h
-            ),
+            "stage_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
+            "low_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h),
             "shared_cond": torch.randn(self.batch, h),
             "operator_cond": torch.randn(self.batch, h),
             "contractions": decoder.operator_contractions[0],
@@ -1344,6 +1717,49 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         self.assertLessEqual(float(metrics["nonexpansive_violation"]), 2e-6)
         self.assertEqual(float(metrics["nested_order_violation"]), 0.0)
+
+    def test_binary_controller_capacity_removes_whole_nested_groups(self) -> None:
+        writer = NestedLowRankContractionBank(
+            hidden_size=16,
+            condition_size=16,
+            stage_count=1,
+            rank=8,
+            group_count=4,
+            depth_logit_init=2.0,
+        ).eval()
+        base = torch.randn(4, 4, 16)
+        condition = torch.randn(4, 16)
+        stage = torch.zeros(4, dtype=torch.long)
+        depths = torch.tensor([1.0, 0.75, 0.50, 0.0])
+        output, metrics = writer(
+            base,
+            condition,
+            stage,
+            contraction_progress=1.0,
+            depth_ratio_override=depths,
+            binary_group_selection=True,
+        )
+        torch.testing.assert_close(output[0], base[0], atol=0.0, rtol=0.0)
+        torch.testing.assert_close(
+            metrics["effective_depth_rows"],
+            torch.tensor([8.0, 6.0, 4.0, 0.0]),
+            atol=0.0,
+            rtol=0.0,
+        )
+        # A fractional depth inside the same group interval has identical
+        # forward behavior; the soft path is only a backward signal.
+        same_base = base[0:1].expand(2, -1, -1).clone()
+        same_condition = condition[0:1].expand(2, -1).clone()
+        same_stage = stage[0:1].expand(2).clone()
+        same_group, _ = writer(
+            same_base,
+            same_condition,
+            same_stage,
+            contraction_progress=1.0,
+            depth_ratio_override=torch.tensor([0.26, 0.27]),
+            binary_group_selection=True,
+        )
+        torch.testing.assert_close(same_group[0], same_group[1], atol=0.0, rtol=0.0)
 
     def test_controller_raw_depth_override_keeps_the_identity_boundary(self) -> None:
         writer = NestedLowRankContractionBank(
@@ -1523,7 +1939,10 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         cfg.validate()
         decoder = HierarchicalMMDiTActionDecoder(cfg)
         self.assertEqual(
-            [decoder._fixed_stage_candidates(i, device=torch.device("cpu")).tolist() for i in range(3)],
+            [
+                decoder._fixed_stage_candidates(i, device=torch.device("cpu")).tolist()
+                for i in range(3)
+            ],
             [[0], [1], [2, 3]],
         )
         torch.testing.assert_close(
@@ -1535,9 +1954,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         decoder = HierarchicalMMDiTActionDecoder(self.config)
         self.assertEqual(decoder.set_operator_contraction_training_step(199), 0.0)
         self.assertEqual(float(decoder.contraction_progress), 0.0)
-        self.assertAlmostEqual(
-            decoder.set_operator_contraction_training_step(950), 0.5
-        )
+        self.assertAlmostEqual(decoder.set_operator_contraction_training_step(950), 0.5)
         self.assertEqual(float(decoder.contraction_progress), 0.5)
         restored = HierarchicalMMDiTActionDecoder(self.config)
         restored.load_state_dict(decoder.state_dict())
@@ -1570,12 +1987,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         inputs = {
             "action": torch.randn(self.batch, self.config.action_horizon, h),
             "noisy_tokens": torch.randn(self.batch, self.config.action_horizon, h),
-            "stage_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
-            "low_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_low_slots, h
-            ),
+            "stage_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
+            "low_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h),
             "shared_cond": torch.randn(self.batch, h),
             "operator_cond": torch.randn(self.batch, h),
             "contractions": decoder.operator_contractions[0],
@@ -1593,19 +2006,13 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         decoder = HierarchicalMMDiTActionDecoder(self.config).eval()
         block = decoder.blocks[0]
         with torch.no_grad():
-            block.mod.weight[: 2 * self.config.hidden_size].normal_(
-                mean=0.0, std=0.05
-            )
+            block.mod.weight[: 2 * self.config.hidden_size].normal_(mean=0.0, std=0.05)
         h = self.config.hidden_size
         common = {
             "action": torch.randn(self.batch, self.config.action_horizon, h),
             "noisy_tokens": torch.randn(self.batch, self.config.action_horizon, h),
-            "stage_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
-            "low_tokens": torch.randn(
-                self.batch, self.config.hierarchical_mmdit_low_slots, h
-            ),
+            "stage_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
+            "low_tokens": torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h),
             "operator_cond": torch.randn(self.batch, h),
             "contractions": decoder.operator_contractions[0],
             "contraction_progress": decoder.contraction_progress,
@@ -1655,9 +2062,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         condition = torch.randn(2, 16)
         selected = torch.zeros(2, dtype=torch.long)
         writer.eval()
-        expected, _ = writer(
-            base, condition, selected, depth_ratio_override=0.5
-        )
+        expected, _ = writer(base, condition, selected, depth_ratio_override=0.5)
         writer.train()
         actual, _ = writer(
             base,
@@ -1679,7 +2084,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         cfg.validate()
         decoder = HierarchicalMMDiTActionDecoder(cfg)
         for _ in range(32):
-            schedule, active, active_count = decoder._random_dwell_schedule(device=torch.device("cpu"))
+            schedule, active, active_count = decoder._random_dwell_schedule(
+                device=torch.device("cpu")
+            )
             self.assertEqual(active_count, int(active.sum()))
             self.assertGreaterEqual(active_count, cfg.hierarchical_mmdit_depth)
             self.assertLessEqual(active_count, cfg.hierarchical_mmdit_refine_steps)
@@ -1697,9 +2104,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         h = self.config.hidden_size
         selected, candidates, probabilities, _, _, _, _ = decoder._select_adaptive_stages(
             block_index=torch.tensor([0, 1]),
-            stage_content=torch.randn(
-                self.batch, self.config.hierarchical_mmdit_stage_slots, h
-            ),
+            stage_content=torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h),
             global_intent=torch.randn(self.batch, h),
             time_state=torch.randn(self.batch, h),
             step_state=torch.randn(self.batch, h),
@@ -1766,9 +2171,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         global_intent = torch.randn(self.batch, h, requires_grad=True)
         time_state = torch.randn(self.batch, h, requires_grad=True)
         step_state = torch.randn(self.batch, h, requires_grad=True)
-        action = torch.randn(
-            self.batch, self.config.action_horizon, h, requires_grad=True
-        )
+        action = torch.randn(self.batch, self.config.action_horizon, h, requires_grad=True)
         control_state = torch.randn(self.batch, 4, requires_grad=True)
         _, _, probabilities, _, _, _, _ = decoder._select_owned_stage(
             block_index=0,
@@ -1781,7 +2184,12 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         probabilities.square().sum().backward()
         for value in (
-            stage_content, global_intent, time_state, step_state, action, control_state,
+            stage_content,
+            global_intent,
+            time_state,
+            step_state,
+            action,
+            control_state,
         ):
             self.assertIsNone(value.grad)
         selector_grad = sum(
@@ -1796,9 +2204,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         h = self.config.hidden_size
         inputs = {
             "block_index": 0,
-            "stage_content": torch.randn(
-                64, self.config.hierarchical_mmdit_operator_stages, h
-            ),
+            "stage_content": torch.randn(64, self.config.hierarchical_mmdit_operator_stages, h),
             "global_intent": torch.randn(64, h),
             "time_state": torch.randn(64, h),
             "step_state": torch.randn(64, h),
@@ -1814,9 +2220,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         warmup = self.config.hierarchical_mmdit_operator_contraction_warmup_steps
         transition = self.config.hierarchical_mmdit_operator_contraction_transition_steps
         decoder.set_operator_contraction_training_step(warmup + transition // 2)
-        selected, _, probabilities, _, _, _, exploration = decoder._select_owned_stage(
-            **inputs
-        )
+        selected, _, probabilities, _, _, _, exploration = decoder._select_owned_stage(**inputs)
         self.assertEqual(set(selected.tolist()), {0, 1})
         torch.testing.assert_close(
             exploration,
@@ -1828,9 +2232,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
 
         decoder.set_operator_contraction_training_step(warmup + transition)
         *_, learned_exploration = decoder._select_owned_stage(**inputs)
-        torch.testing.assert_close(
-            learned_exploration, torch.zeros_like(learned_exploration)
-        )
+        torch.testing.assert_close(learned_exploration, torch.zeros_like(learned_exploration))
 
     def test_oracle_exit_supervision_uses_earliest_near_best_boundary(self) -> None:
         exit_logits = torch.tensor(
@@ -1863,9 +2265,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         cfg.validate()
 
     def test_oracle_exit_depth_counts_block_boundaries_not_refine_steps(self) -> None:
-        exit_logits = torch.tensor([
-            [-10.0, -10.0, -10.0, 10.0, -10.0, -10.0]
-        ], requires_grad=True)
+        exit_logits = torch.tensor([[-10.0, -10.0, -10.0, 10.0, -10.0, -10.0]], requires_grad=True)
         candidate_error = torch.tensor([[9.0, 0.8, 9.0, 0.2, 9.0, 0.3]])
         candidate_mask = torch.tensor([[False, True, False, True, False, True]])
         result = _oracle_exit_supervision(
@@ -1885,22 +2285,17 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             "global_intent": torch.randn(self.batch, h, requires_grad=True),
             "time_state": torch.randn(self.batch, h, requires_grad=True),
             "step_state": torch.randn(self.batch, h, requires_grad=True),
-            "action": torch.randn(
-                self.batch, self.config.action_horizon, h, requires_grad=True
-            ),
+            "action": torch.randn(self.batch, self.config.action_horizon, h, requires_grad=True),
             "control_state": torch.randn(self.batch, 4, requires_grad=True),
         }
         query = decoder._controller_query(**inputs)
         logits = decoder._exit_logit(query)
-        F.binary_cross_entropy_with_logits(
-            logits, torch.ones_like(logits)
-        ).backward()
+        F.binary_cross_entropy_with_logits(logits, torch.ones_like(logits)).backward()
         for value in inputs.values():
             self.assertIsNone(value.grad)
-        self.assertTrue(all(
-            parameter.grad is None
-            for parameter in decoder.stage_selector_parameters()
-        ))
+        self.assertTrue(
+            all(parameter.grad is None for parameter in decoder.stage_selector_parameters())
+        )
         exit_grad = sum(
             parameter.grad.detach().float().square().sum()
             for parameter in decoder.exit_controller_parameters()
@@ -1913,12 +2308,8 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         h = self.config.hidden_size
         action = torch.randn(self.batch, self.config.action_horizon, h)
         noisy = torch.randn_like(action)
-        stage = torch.randn(
-            self.batch, self.config.hierarchical_mmdit_stage_slots, h
-        )
-        low = torch.randn(
-            self.batch, self.config.hierarchical_mmdit_low_slots, h
-        )
+        stage = torch.randn(self.batch, self.config.hierarchical_mmdit_stage_slots, h)
+        low = torch.randn(self.batch, self.config.hierarchical_mmdit_low_slots, h)
         shared = torch.randn(self.batch, h)
         operator = torch.randn(self.batch, h)
         block_index = torch.tensor([1, 0])
@@ -1980,15 +2371,16 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         cfg.validate()
         h = cfg.hidden_size
         decoder = HierarchicalMMDiTActionDecoder(cfg).eval()
-        layer_contracts = [{
-            key: torch.randn(self.batch, 3, h)
-            for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
-        } for _ in range(cfg.depth)]
+        layer_contracts = [
+            {
+                key: torch.randn(self.batch, 3, h)
+                for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+            }
+            for _ in range(cfg.depth)
+        ]
         with torch.no_grad():
             output = decoder(
-                noisy_physical=torch.randn(
-                    self.batch, cfg.action_horizon, cfg.physical_action_dim
-                ),
+                noisy_physical=torch.randn(self.batch, cfg.action_horizon, cfg.physical_action_dim),
                 time=torch.rand(self.batch),
                 trajectory_tokens=torch.randn(self.batch, cfg.action_horizon, h),
                 trajectory_workspace_tokens=torch.randn(self.batch, cfg.action_horizon, h),
@@ -2009,37 +2401,41 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         self.assertEqual(float(output["hierarchical_mmdit_shadow_budget_exhausted_rate"]), 0.0)
         self.assertEqual(
             tuple(output["refinement_shadow_probe_pred_velocity"].shape),
-            (self.batch, cfg.hierarchical_mmdit_refine_steps + 1, cfg.action_horizon, cfg.physical_action_dim),
+            (
+                self.batch,
+                cfg.hierarchical_mmdit_refine_steps + 1,
+                cfg.action_horizon,
+                cfg.physical_action_dim,
+            ),
         )
 
-    def test_unified_learned_shadow_uses_operation_exit_without_changing_main_path(self) -> None:
+    def test_unified_value_dwell_zero_reader_uses_fixed_tie_path_without_exit(self) -> None:
         cfg = replace(
             self._config(),
             hierarchical_mmdit_refine_steps=4,
             hierarchical_mmdit_unified_controller=1,
             hierarchical_mmdit_controller_heads=4,
-            hierarchical_mmdit_exhaustion_mode="learned_shadow",
+            hierarchical_mmdit_operation_candidate_probes=1,
+            hierarchical_mmdit_dwell_mode="learned",
+            hierarchical_mmdit_exhaustion_mode="off",
         )
         cfg.validate()
         h = cfg.hidden_size
         decoder = HierarchicalMMDiTActionDecoder(cfg).eval()
         assert decoder.unified_controller is not None
-        with torch.no_grad():
-            decoder.unified_controller.exit_head.bias.fill_(1.0)
-        layer_contracts = [{
-            key: torch.randn(self.batch, 3, h)
-            for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
-        } for _ in range(cfg.depth)]
+        layer_contracts = [
+            {
+                key: torch.randn(self.batch, 3, h)
+                for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+            }
+            for _ in range(cfg.depth)
+        ]
         with torch.no_grad():
             output = decoder(
-                noisy_physical=torch.randn(
-                    self.batch, cfg.action_horizon, cfg.physical_action_dim
-                ),
+                noisy_physical=torch.randn(self.batch, cfg.action_horizon, cfg.physical_action_dim),
                 time=torch.rand(self.batch),
                 trajectory_tokens=torch.randn(self.batch, cfg.action_horizon, h),
-                trajectory_workspace_tokens=torch.randn(
-                    self.batch, cfg.action_horizon, h
-                ),
+                trajectory_workspace_tokens=torch.randn(self.batch, cfg.action_horizon, h),
                 rollout_tokens=torch.randn(self.batch, 8, h),
                 transition_memory=[torch.randn(self.batch, 6, h)],
                 event_evidence=torch.randn(self.batch, cfg.action_horizon, 3),
@@ -2051,9 +2447,132 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 layer_contracts=layer_contracts,
             )
         self.assertEqual(float(output["hierarchical_mmdit_executed_steps"]), 4.0)
-        self.assertEqual(float(output["hierarchical_mmdit_shadow_executed_steps"]), 0.0)
-        self.assertEqual(float(output["hierarchical_mmdit_shadow_early_exit_rate"]), 1.0)
-        self.assertEqual(float(output["hierarchical_mmdit_shadow_operation_exit_rate"]), 0.0)
+        torch.testing.assert_close(
+            output["refinement_probe_block_ids"],
+            torch.tensor([[0, 0, 1, 1]]).expand(self.batch, -1),
+        )
+        self.assertEqual(
+            float(output["hierarchical_mmdit_operation_fixed_path_agreement"]),
+            1.0,
+        )
+        self.assertEqual(float(output["hierarchical_mmdit_operation_stay_rate"]), 0.75)
+        self.assertEqual(float(output["hierarchical_mmdit_operation_advance_rate"]), 0.25)
+        self.assertNotIn("hierarchical_mmdit_exit_logits", output)
+        self.assertNotIn("hierarchical_mmdit_operation_exit_rate", output)
+
+    def test_unified_value_dwell_cannot_move_backward_or_skip_a_block(self) -> None:
+        cfg = replace(
+            self._config(),
+            hierarchical_mmdit_depth=3,
+            hierarchical_mmdit_refine_steps=3,
+            hierarchical_mmdit_stage_slots=6,
+            hierarchical_mmdit_operator_stages=6,
+            hierarchical_mmdit_unified_controller=1,
+            hierarchical_mmdit_controller_heads=4,
+            hierarchical_mmdit_operation_candidate_probes=1,
+            hierarchical_mmdit_dwell_mode="learned",
+        )
+        decoder = HierarchicalMMDiTActionDecoder(cfg).eval()
+        value = torch.zeros(3, 6, cfg.action_horizon, 2)
+        value[0, 4] = -100.0  # block 2 is illegal from block 0
+        value[0, 2] = -10.0  # block 1 is the furthest legal move
+        value[1, 0] = -100.0  # backward block is illegal
+        value[1, 4] = -10.0  # one-step advance to block 2
+        value[2, 0] = -100.0  # last block cannot move backward
+        value[2, 5] = -10.0
+        selected_block, selected_stage, *_ = decoder._select_unified_operation(
+            current_block=torch.tensor([0, 1, 2]),
+            operation_value_field=value,
+            controller_state=torch.randn(3, cfg.hierarchical_mmdit_control_tokens, cfg.hidden_size),
+            step_index=2,
+        )
+        torch.testing.assert_close(selected_block, torch.tensor([1, 2, 2]))
+        torch.testing.assert_close(selected_stage, torch.tensor([2, 4, 5]))
+
+    def test_spectral_decoder_round_trips_to_physical_flow_and_time_events(self) -> None:
+        cfg = replace(
+            self._config(),
+            hierarchical_mmdit_unified_controller=1,
+            hierarchical_mmdit_controller_heads=4,
+            hierarchical_mmdit_spectral_state=1,
+            arm_flow_mode="manifold_native",
+            gripper_field_mode="parseval_temporal",
+        )
+        cfg.validate()
+        h = cfg.hidden_size
+        decoder = HierarchicalMMDiTActionDecoder(cfg).eval()
+        assert decoder.unified_controller is not None
+        with torch.no_grad():
+            decoder.unified_controller.frequency_shift_head.bias.fill_(0.5)
+        layer_contracts = [
+            {
+                key: torch.randn(self.batch, 3, h)
+                for key in LayeredV37StyleResidualActionFlowDenoiser._LAYER_KEYS
+            }
+            for _ in range(cfg.depth)
+        ]
+        with torch.no_grad():
+            output = decoder(
+                noisy_physical=torch.randn(self.batch, cfg.action_horizon, cfg.physical_action_dim),
+                time=torch.rand(self.batch),
+                trajectory_tokens=torch.randn(self.batch, cfg.action_horizon, h),
+                trajectory_workspace_tokens=torch.randn(self.batch, cfg.action_horizon, h),
+                rollout_tokens=torch.randn(self.batch, 8, h),
+                transition_memory=[torch.randn(self.batch, 6, h)],
+                event_evidence=torch.randn(self.batch, cfg.action_horizon, 3),
+                state_memory=[torch.randn(self.batch, 2, h)],
+                intent_memory={
+                    name: torch.randn(self.batch, 2, h)
+                    for name in PolicyConditionOrganizer._INTENT_SOURCE_NAMES
+                },
+                layer_contracts=layer_contracts,
+            )
+        self.assertEqual(
+            tuple(output["pred_velocity"].shape),
+            (self.batch, cfg.action_horizon, cfg.physical_action_dim),
+        )
+        self.assertEqual(
+            tuple(output["pred_velocity_coefficients"].shape),
+            (self.batch, cfg.action_horizon, cfg.physical_action_dim),
+        )
+        self.assertEqual(
+            tuple(output["event_logits"].shape),
+            (self.batch, cfg.action_horizon, 3),
+        )
+        flow_codec = DCTFlowCodec(cfg).eval()
+        torch.testing.assert_close(
+            flow_codec.decode_coefficients(output["pred_velocity_coefficients"]),
+            output["pred_velocity"],
+            atol=3e-5,
+            rtol=3e-5,
+        )
+        torch.testing.assert_close(
+            flow_codec.project_tangent(output["pred_velocity_coefficients"]),
+            output["pred_velocity_coefficients"],
+            atol=3e-5,
+            rtol=3e-5,
+        )
+        self.assertIsNotNone(decoder.spectral_aperture)
+        assert decoder.spectral_aperture is not None
+        early_aperture = decoder.spectral_aperture(torch.zeros(self.batch))
+        masked_coefficients = decoder.velocity_head(
+            torch.randn(self.batch, cfg.action_horizon, h),
+            coefficient_mask=early_aperture["coefficient_mask"],
+        )
+        torch.testing.assert_close(
+            flow_codec.project_tangent(masked_coefficients),
+            masked_coefficients,
+            atol=3e-5,
+            rtol=3e-5,
+        )
+        self.assertTrue(bool(torch.isfinite(output["pred_velocity"]).all()))
+        self.assertTrue(
+            bool(torch.isfinite(output["hierarchical_mmdit_spectral_competition_loss"]))
+        )
+        self.assertGreater(
+            float(output["hierarchical_mmdit_spectral_final_controller_shift_rms"]),
+            0.0,
+        )
 
     def test_optimizer_keeps_full_rank_blocks_regular_and_contraction_specialized(self) -> None:
         system = V39PolicySystem(self._config())
@@ -2103,9 +2622,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             )
         mod_owner = owner_by_parameter[id(decoder.blocks[0].mod.weight)]
         self.assertIs(mod_owner, regular_owner)
-        self.assertFalse(any(
-            str(group["name"]).endswith("residual_control") for group in groups
-        ))
+        self.assertFalse(any(str(group["name"]).endswith("residual_control") for group in groups))
 
     def test_unified_controller_has_one_ordinary_lr_owner(self) -> None:
         cfg = replace(
@@ -2118,9 +2635,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         trainer = V39PolicyTrainerConfig(training_stage="policy")
         groups = _optimizer_groups(system, trainer)
         owner_by_parameter = {
-            id(parameter): group
-            for group in groups
-            for parameter in group["params"]
+            id(parameter): group for group in groups for parameter in group["params"]
         }
         decoder = system.planner.hierarchical_mmdit_action_decoder
         assert decoder is not None and decoder.unified_controller is not None
@@ -2139,9 +2654,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 * trainer.latent_cvae_action_decoder_lr_scale
                 * trainer.hierarchical_mmdit_controller_lr_scale,
             )
-        ordinary_lr = (
-            trainer.lr * trainer.latent_cvae_action_decoder_lr_scale
-        )
+        ordinary_lr = trainer.lr * trainer.latent_cvae_action_decoder_lr_scale
         for block in decoder.blocks:
             for parameter in (block.mod.weight, block.mod.bias):
                 owner = owner_by_parameter[id(parameter)]
@@ -2155,7 +2668,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             decoder.operator_condition,
         ):
             self.assertTrue(all(not parameter.requires_grad for parameter in module.parameters()))
-            self.assertTrue(all(id(parameter) not in owner_by_parameter for parameter in module.parameters()))
+            self.assertTrue(
+                all(id(parameter) not in owner_by_parameter for parameter in module.parameters())
+            )
         for bank in decoder.operator_contractions:
             for contraction in bank.values():
                 for parameter in (contraction.depth_weight, contraction.depth_bias):

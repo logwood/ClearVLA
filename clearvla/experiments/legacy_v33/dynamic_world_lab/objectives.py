@@ -62,14 +62,20 @@ def _amplitude_loss(pred: Tensor, target: Tensor) -> Tensor:
 
 
 def _transition_mask(
-    target_state_raw: Tensor, current_state_raw: Tensor, gripper_index: int, threshold: float, radius: int
+    target_state_raw: Tensor,
+    current_state_raw: Tensor,
+    gripper_index: int,
+    threshold: float,
+    radius: int,
 ) -> Tensor:
     gripper = target_state_raw[..., gripper_index]
     boundary = torch.cat([current_state_raw[:, None, gripper_index], gripper[:, :-1]], dim=1)
     event = (gripper - boundary).abs() >= float(threshold)
     if radius > 0:
         event_f = event.float()[:, None]
-        event = F.max_pool1d(event_f, kernel_size=2 * radius + 1, stride=1, padding=radius)[:, 0] > 0
+        event = (
+            F.max_pool1d(event_f, kernel_size=2 * radius + 1, stride=1, padding=radius)[:, 0] > 0
+        )
     return event
 
 
@@ -133,9 +139,7 @@ def compute_dynamic_world_losses(
     target_initial_scene = output["target_initial_scene"].detach()
     pred_scene_delta = pred_scene - initial_scene[:, None]
     target_scene_delta = target_scene - target_initial_scene[:, None]
-    scene_predictive = F.smooth_l1_loss(
-        pred_scene_delta.float(), target_scene_delta.float()
-    )
+    scene_predictive = F.smooth_l1_loss(pred_scene_delta.float(), target_scene_delta.float())
 
     target_initial = output["target_initial_dynamic"].detach()
     pred_sequence = torch.cat([output["initial_dynamic"][:, None], pred], dim=1)
@@ -151,9 +155,7 @@ def compute_dynamic_world_losses(
         (target_scene_sequence[:, 1:] - target_scene_sequence[:, :-1]).float(),
     )
 
-    teacher_forced = F.smooth_l1_loss(
-        output["teacher_forced_dynamic"].float(), target.float()
-    )
+    teacher_forced = F.smooth_l1_loss(output["teacher_forced_dynamic"].float(), target.float())
     scene_teacher_forced = F.smooth_l1_loss(
         (output["teacher_forced_scene"] - target_initial_scene[:, None]).float(),
         target_scene_delta.float(),
@@ -194,7 +196,8 @@ def compute_dynamic_world_losses(
     )
 
     variance, embedding_std = _variance_regularization(
-        output["initial_dynamic"], online_future_dynamic,
+        output["initial_dynamic"],
+        online_future_dynamic,
         target_std=config.embedding_std_target,
     )
     if model.representation_frozen and config.variance_weight > 0:
@@ -218,9 +221,7 @@ def compute_dynamic_world_losses(
             pred_effect.float(), target_effect.float(), reduction="none"
         ).mean(dim=(-1, -2, -3))
 
-        pair_pred_scene_delta = (
-            pair_output["pred_scene"] - pair_output["initial_scene"][:, None]
-        )
+        pair_pred_scene_delta = pair_output["pred_scene"] - pair_output["initial_scene"][:, None]
         pair_target_scene_delta = (
             pair_output["target_scene"].detach()
             - pair_output["target_initial_scene"].detach()[:, None]
@@ -270,8 +271,12 @@ def compute_dynamic_world_losses(
             swapped_scene_error = F.smooth_l1_loss(
                 swapped_scene_delta.float(), target_scene_delta.float(), reduction="none"
             ).mean(dim=(-1, -2, -3))
-            correct_error = correct_dynamic_error + config.scene_predictive_weight * correct_scene_error
-            swapped_error = swapped_dynamic_error + config.scene_predictive_weight * swapped_scene_error
+            correct_error = (
+                correct_dynamic_error + config.scene_predictive_weight * correct_scene_error
+            )
+            swapped_error = (
+                swapped_dynamic_error + config.scene_predictive_weight * swapped_scene_error
+            )
             regret = swapped_error - correct_error
             swap_regret = _masked_mean(regret, valid)
             swap_correct_fraction = _masked_mean((regret > 0).float(), valid)
@@ -312,12 +317,10 @@ def compute_dynamic_world_losses(
         reduction="none",
     ).mean(dim=(0, 2, 3))
     world_predictive_by_step = (
-        dynamic_predictive_by_step
-        + config.scene_predictive_weight * scene_predictive_by_step
+        dynamic_predictive_by_step + config.scene_predictive_weight * scene_predictive_by_step
     )
     world_teacher_by_step = (
-        dynamic_teacher_by_step
-        + config.scene_predictive_weight * scene_teacher_by_step
+        dynamic_teacher_by_step + config.scene_predictive_weight * scene_teacher_by_step
     )
     by_step_metrics: dict[str, Tensor] = {}
     for index, offset in enumerate(model.config.future_offsets):
@@ -326,9 +329,9 @@ def compute_dynamic_world_losses(
         by_step_metrics[f"closed_loop_gap_t{offset}"] = (
             world_predictive_by_step[index] - world_teacher_by_step[index]
         )
-        by_step_metrics[f"closed_loop_ratio_t{offset}"] = (
-            world_predictive_by_step[index] / world_teacher_by_step[index].clamp_min(1e-8)
-        )
+        by_step_metrics[f"closed_loop_ratio_t{offset}"] = world_predictive_by_step[
+            index
+        ] / world_teacher_by_step[index].clamp_min(1e-8)
         by_step_metrics[f"pred_dynamic_rms_t{offset}"] = (
             pred[:, index].float().square().mean().sqrt()
         )

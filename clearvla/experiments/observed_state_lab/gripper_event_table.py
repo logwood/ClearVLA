@@ -90,7 +90,9 @@ class _TimeAccumulator:
         row[f"{scope}_count"] = row.get(f"{scope}_count", 0.0) + 1.0
         for key, value in values.items():
             row[f"{scope}_{key}_sum"] = row.get(f"{scope}_{key}_sum", 0.0) + float(value)
-            row[f"{scope}_{key}_sumsq"] = row.get(f"{scope}_{key}_sumsq", 0.0) + float(value) * float(value)
+            row[f"{scope}_{key}_sumsq"] = row.get(f"{scope}_{key}_sumsq", 0.0) + float(
+                value
+            ) * float(value)
 
     def finalize(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -151,20 +153,29 @@ def collect_window_predictions_for_episode(
             if not bool(mask.any()):
                 continue
             sample = prepare_v36_policy_sample(
-                batch, conditioner=conditioner, system=system, camera_names=camera_names,
-                device=device, dtype=dtype,
+                batch,
+                conditioner=conditioner,
+                system=system,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             generator = torch.Generator(device=device)
             generator.manual_seed(36036 + batch_index)
             if bool(getattr(getattr(system, "codec", None), "uses_arm_manifold", False)):
                 noise = system.codec.sample_noise(
-                    sample["policy_action"].shape[0], generator=generator, device=device,
-                    dtype=sample["visual"].dtype, action_state=sample["action_state"],
+                    sample["policy_action"].shape[0],
+                    generator=generator,
+                    device=device,
+                    dtype=sample["visual"].dtype,
+                    action_state=sample["action_state"],
                 )
             else:
                 noise = torch.randn(
-                    sample["policy_action"].shape, generator=generator,
-                    device=device, dtype=sample["visual"].dtype,
+                    sample["policy_action"].shape,
+                    generator=generator,
+                    device=device,
+                    dtype=sample["visual"].dtype,
                 )
             with autocast_context(device, dtype):
                 sample_kwargs = {
@@ -176,8 +187,11 @@ def collect_window_predictions_for_episode(
                 if sample_supports_action_state:
                     sample_kwargs["action_state"] = sample["action_state"]
                 pred_pack = system.sample(
-                    sample["visual"], sample["history_state"], sample["executed_action_history"],
-                    sample["state"], **sample_kwargs,
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    **sample_kwargs,
                 )
             assert isinstance(pred_pack, dict)
             pred_raw = decode(action_normalizer, pred_pack["action"])
@@ -187,10 +201,17 @@ def collect_window_predictions_for_episode(
             sample_indices = batch["sample_index"].detach().cpu().numpy().astype(np.int64)
             logits = pred_pack["event_logits"].detach().float().cpu().numpy()
             probs = softmax_np(logits, axis=-1)
-            labels = gripper_event_labels(
-                target_raw=sample["policy_action_raw"], current_raw=sample["state_raw"],
-                gripper_index=gidx, threshold=config.event_threshold,
-            ).detach().cpu().numpy()
+            labels = (
+                gripper_event_labels(
+                    target_raw=sample["policy_action_raw"],
+                    current_raw=sample["state_raw"],
+                    gripper_index=gidx,
+                    threshold=config.event_threshold,
+                )
+                .detach()
+                .cpu()
+                .numpy()
+            )
             if resolved_gidx is None:
                 resolved_gidx = pred_raw.shape[-1] + gidx
             gi = int(resolved_gidx)
@@ -213,7 +234,9 @@ def collect_window_predictions_for_episode(
                     "current_gripper": float(current_g[row_i]),
                     "target_events": [EVENT_NAMES[int(x)] for x in labels[row_i].tolist()],
                     "pred_events": [EVENT_NAMES[int(x)] for x in pred_label[row_i].tolist()],
-                    "event_head_events": [EVENT_NAMES[int(x)] for x in logits[row_i].argmax(axis=-1).tolist()],
+                    "event_head_events": [
+                        EVENT_NAMES[int(x)] for x in logits[row_i].argmax(axis=-1).tolist()
+                    ],
                     "target_gripper": [float(x) for x in target_g[row_i].tolist()],
                     "pred_gripper": [float(x) for x in pred_g[row_i].tolist()],
                     "target_delta": [float(x) for x in target_delta[row_i].tolist()],
@@ -261,7 +284,11 @@ def find_target_event_segments(
             rate = signed_event_rate(row, direction, "all_target")
             # Fallback for old row names after finalize: target_close_event_rate_mean etc.
             if rate == 0.0:
-                key = "all_target_close_event_rate_mean" if direction > 0 else "all_target_open_event_rate_mean"
+                key = (
+                    "all_target_close_event_rate_mean"
+                    if direction > 0
+                    else "all_target_open_event_rate_mean"
+                )
                 rate = float(row.get(key, 0.0))
             if rate >= float(event_rate_min):
                 active.append(row)
@@ -277,6 +304,7 @@ def find_target_event_segments(
 def _segment_from_rows(rows: Sequence[dict[str, Any]], direction: int, name: str) -> dict[str, Any]:
     def signed_target_delta(row: dict[str, Any]) -> float:
         return float(direction) * float(row.get("all_target_delta_mean", 0.0))
+
     peak = max(rows, key=signed_target_delta)
     return {
         "event_type": name,
@@ -287,7 +315,12 @@ def _segment_from_rows(rows: Sequence[dict[str, Any]], direction: int, name: str
         "span_len": int(int(rows[-1]["abs_t"]) - int(rows[0]["abs_t"]) + 1),
         "target_peak_delta": float(peak.get("all_target_delta_mean", 0.0)),
         "target_event_rate_at_peak": float(
-            peak.get("all_target_close_event_rate_mean" if direction > 0 else "all_target_open_event_rate_mean", 0.0)
+            peak.get(
+                "all_target_close_event_rate_mean"
+                if direction > 0
+                else "all_target_open_event_rate_mean",
+                0.0,
+            )
         ),
     }
 
@@ -310,12 +343,16 @@ def build_event_centered_table(
                 continue
             key = (event_type, rel)
             grouped.setdefault(key, []).append(row)
-            numeric_keys.update(k for k, v in row.items() if isinstance(v, (int, float)) and k != "abs_t")
+            numeric_keys.update(
+                k for k, v in row.items() if isinstance(v, (int, float)) and k != "abs_t"
+            )
     out: list[dict[str, Any]] = []
     for (event_type, rel), rows in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
         record: dict[str, Any] = {"event_type": event_type, "rel_t": rel, "n_events": len(rows)}
         for key in sorted(numeric_keys):
-            vals = [float(row[key]) for row in rows if key in row and isinstance(row[key], (int, float))]
+            vals = [
+                float(row[key]) for row in rows if key in row and isinstance(row[key], (int, float))
+            ]
             if vals:
                 record[key] = float(np.mean(vals))
         out.append(record)
@@ -333,7 +370,11 @@ def _peak_for_event(
     tolerance: int,
 ) -> dict[str, Any]:
     delta_key = f"{scope}_pred_delta_mean"
-    head_key = f"{scope}_event_head_close_prob_mean" if direction > 0 else f"{scope}_event_head_open_prob_mean"
+    head_key = (
+        f"{scope}_event_head_close_prob_mean"
+        if direction > 0
+        else f"{scope}_event_head_open_prob_mean"
+    )
     pred_g_key = f"{scope}_pred_g_mean"
     pred_closed_key = f"{scope}_pred_closed_rate_mean"
     best_delta = -float("inf")
@@ -347,20 +388,34 @@ def _peak_for_event(
         if delta_key in row:
             score = float(direction) * float(row[delta_key])
             if score > best_delta:
-                best_delta = score; best_delta_rel = rel
+                best_delta = score
+                best_delta_rel = rel
         if head_key in row:
             score = float(row[head_key])
             if score > best_head:
-                best_head = score; best_head_rel = rel
+                best_head = score
+                best_head_rel = rel
     if best_delta == -float("inf"):
         best_delta = float("nan")
     if best_head == -float("inf"):
         best_head = float("nan")
     row_before = by_time.get(int(event_t - 1))
     row_after = by_time.get(int(event_t + 1))
-    hit = bool(best_delta_rel is not None and best_delta >= float(event_threshold) and abs(best_delta_rel) <= int(tolerance))
-    early = bool(best_delta_rel is not None and best_delta >= float(event_threshold) and best_delta_rel < -int(tolerance))
-    late = bool(best_delta_rel is not None and best_delta >= float(event_threshold) and best_delta_rel > int(tolerance))
+    hit = bool(
+        best_delta_rel is not None
+        and best_delta >= float(event_threshold)
+        and abs(best_delta_rel) <= int(tolerance)
+    )
+    early = bool(
+        best_delta_rel is not None
+        and best_delta >= float(event_threshold)
+        and best_delta_rel < -int(tolerance)
+    )
+    late = bool(
+        best_delta_rel is not None
+        and best_delta >= float(event_threshold)
+        and best_delta_rel > int(tolerance)
+    )
     miss = bool(best_delta_rel is None or best_delta < float(event_threshold))
     return {
         f"{scope}_pred_peak_signed_delta": float(best_delta),
@@ -371,10 +426,18 @@ def _peak_for_event(
         f"{scope}_delta_early": int(early),
         f"{scope}_delta_late": int(late),
         f"{scope}_delta_miss": int(miss),
-        f"{scope}_pred_g_before": float(row_before.get(pred_g_key, float("nan"))) if row_before else float("nan"),
-        f"{scope}_pred_g_after": float(row_after.get(pred_g_key, float("nan"))) if row_after else float("nan"),
-        f"{scope}_pred_closed_before_rate": float(row_before.get(pred_closed_key, float("nan"))) if row_before else float("nan"),
-        f"{scope}_pred_closed_after_rate": float(row_after.get(pred_closed_key, float("nan"))) if row_after else float("nan"),
+        f"{scope}_pred_g_before": float(row_before.get(pred_g_key, float("nan")))
+        if row_before
+        else float("nan"),
+        f"{scope}_pred_g_after": float(row_after.get(pred_g_key, float("nan")))
+        if row_after
+        else float("nan"),
+        f"{scope}_pred_closed_before_rate": float(row_before.get(pred_closed_key, float("nan")))
+        if row_before
+        else float("nan"),
+        f"{scope}_pred_closed_after_rate": float(row_after.get(pred_closed_key, float("nan")))
+        if row_after
+        else float("nan"),
     }
 
 
@@ -395,15 +458,26 @@ def build_per_event_table(
         record: dict[str, Any] = {
             "event_id": event_id,
             **event,
-            "target_g_before": float(by_time.get(event_t - 1, {}).get("all_target_g_mean", float("nan"))),
+            "target_g_before": float(
+                by_time.get(event_t - 1, {}).get("all_target_g_mean", float("nan"))
+            ),
             "target_g_at": float(row.get("all_target_g_mean", float("nan"))),
-            "target_g_after": float(by_time.get(event_t + 1, {}).get("all_target_g_mean", float("nan"))),
+            "target_g_after": float(
+                by_time.get(event_t + 1, {}).get("all_target_g_mean", float("nan"))
+            ),
         }
         for scope in ("all", "first"):
-            record.update(_peak_for_event(
-                by_time, event_t, direction, event_window=event_window, scope=scope,
-                event_threshold=event_threshold, tolerance=tolerance,
-            ))
+            record.update(
+                _peak_for_event(
+                    by_time,
+                    event_t,
+                    direction,
+                    event_window=event_window,
+                    scope=scope,
+                    event_threshold=event_threshold,
+                    tolerance=tolerance,
+                )
+            )
         out.append(record)
     return out
 
@@ -413,16 +487,27 @@ def write_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     keys: list[str] = []
     seen: set[str] = set()
     preferred = [
-        "episode_idx", "event_id", "event_type", "direction", "event_t", "abs_t", "rel_t",
-        "span_start", "span_end", "span_len", "n_events",
+        "episode_idx",
+        "event_id",
+        "event_type",
+        "direction",
+        "event_t",
+        "abs_t",
+        "rel_t",
+        "span_start",
+        "span_end",
+        "span_len",
+        "n_events",
     ]
     for key in preferred:
         if any(key in row for row in rows) and key not in seen:
-            keys.append(key); seen.add(key)
+            keys.append(key)
+            seen.add(key)
     for row in rows:
         for key in row.keys():
             if key not in seen:
-                keys.append(key); seen.add(key)
+                keys.append(key)
+                seen.add(key)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore")
         writer.writeheader()
@@ -444,7 +529,9 @@ def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
-            handle.write(json.dumps(jsonable(row), ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.write(
+                json.dumps(jsonable(row), ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
 
 
 def write_gripper_tables(
@@ -457,8 +544,11 @@ def write_gripper_tables(
     events = find_target_event_segments(episode_rows, event_rate_min=config.target_event_rate_min)
     centered = build_event_centered_table(episode_rows, events, event_window=config.event_window)
     per_event = build_per_event_table(
-        episode_rows, events, event_window=config.event_window,
-        event_threshold=config.event_threshold, tolerance=config.tolerance,
+        episode_rows,
+        events,
+        event_window=config.event_window,
+        event_threshold=config.event_threshold,
+        tolerance=config.tolerance,
     )
     paths = {
         "episode_time_csv": str(out_prefix.with_suffix(".episode_time.csv")),
@@ -483,5 +573,7 @@ def write_gripper_tables(
         "paths": paths,
     }
     Path(paths["meta_json"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(paths["meta_json"]).write_text(json.dumps(jsonable(summary), indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(paths["meta_json"]).write_text(
+        json.dumps(jsonable(summary), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return summary

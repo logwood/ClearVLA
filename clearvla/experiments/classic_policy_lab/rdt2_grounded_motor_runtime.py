@@ -77,7 +77,15 @@ def evaluate_grounded_motor_rdt2_fm(
     image_ablation: str = "normal",
     eval_seed: int = 0,
 ) -> dict[str, Any]:
-    allowed = {"normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"}
+    allowed = {
+        "normal",
+        "zero",
+        "mean",
+        "shuffle-batch",
+        "shuffle-episode",
+        "top-only",
+        "wrist-only",
+    }
     if image_ablation not in allowed:
         raise ValueError(f"unsupported image_ablation={image_ablation!r}")
     model.eval()
@@ -105,8 +113,12 @@ def evaluate_grounded_motor_rdt2_fm(
         sample_keys = torch.stack([batch["episode_idx"], batch["image_index"]], dim=1)
         conditioner_ablation = image_ablation
         if image_ablation == "shuffle-episode":
-            sample_keys = loader.dataset.cross_episode_keys(sample_keys, seed=batch_index + eval_seed)
-            images = loader.dataset.load_images_for_keys(sample_keys).to(device=device, non_blocking=True)
+            sample_keys = loader.dataset.cross_episode_keys(
+                sample_keys, seed=batch_index + eval_seed
+            )
+            images = loader.dataset.load_images_for_keys(sample_keys).to(
+                device=device, non_blocking=True
+            )
             conditioner_ablation = "normal"
         condition = conditioner.encode(
             images,
@@ -161,16 +173,30 @@ def evaluate_grounded_motor_rdt2_fm(
     target = _concat(target_rows)
     prior = _concat(prior_rows)
     past = _concat(past_rows)
-    metrics = compute_metrics(pred_norm=pred, target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    fast_metrics = compute_metrics(pred_norm=_concat(first_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    metrics.update({
-        "inference_steps": int(inference_steps),
-        "image_ablation": str(image_ablation),
-        "native_first_rmse": fast_metrics["first_rmse"],
-        "native_first_arm_rmse": fast_metrics.get("arm_first_rmse", fast_metrics["first_rmse"]),
-        "latency_native_first_ms": float(np.mean(fast_ms)),
-        "latency_full_chunk_ms": float(np.mean(full_ms)),
-    })
+    metrics = compute_metrics(
+        pred_norm=pred,
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    fast_metrics = compute_metrics(
+        pred_norm=_concat(first_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    metrics.update(
+        {
+            "inference_steps": int(inference_steps),
+            "image_ablation": str(image_ablation),
+            "native_first_rmse": fast_metrics["first_rmse"],
+            "native_first_arm_rmse": fast_metrics.get("arm_first_rmse", fast_metrics["first_rmse"]),
+            "latency_native_first_ms": float(np.mean(fast_ms)),
+            "latency_full_chunk_ms": float(np.mean(full_ms)),
+        }
+    )
     if losses:
         for key in losses[0]:
             metrics[f"val_{key}"] = float(np.mean([row[key] for row in losses]))
@@ -201,7 +227,11 @@ def train_grounded_motor_rdt2_fm(
         eps=trainer.eps,
         weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     scheduler = _rdt_scheduler(
         optimizer,
         scheduler=trainer.scheduler,
@@ -269,7 +299,9 @@ def train_grounded_motor_rdt2_fm(
         record: dict[str, Any] = {
             "epoch": epoch,
             "seconds": time.perf_counter() - started,
-            "train": {key: float(np.mean([row[key] for row in batch_rows])) for key in batch_rows[0]},
+            "train": {
+                key: float(np.mean([row[key] for row in batch_rows])) for key in batch_rows[0]
+            },
         }
         if epoch % trainer.eval_every == 0:
             metrics = evaluate_grounded_motor_rdt2_fm(
@@ -309,8 +341,14 @@ def train_grounded_motor_rdt2_fm(
                 best_first = float(metrics["native_first_arm_rmse"])
                 _save(out_dir / "best_first.pt", payload)
         history.append(record)
-        (out_dir / "history.json").write_text(json.dumps(_jsonable(history), indent=2), encoding="utf-8")
-    return {"history": history, "best_full_mse": best_full, "best_native_first_arm_rmse": best_first}
+        (out_dir / "history.json").write_text(
+            json.dumps(_jsonable(history), indent=2), encoding="utf-8"
+        )
+    return {
+        "history": history,
+        "best_full_mse": best_full,
+        "best_native_first_arm_rmse": best_first,
+    }
 
 
 __all__ = ["evaluate_grounded_motor_rdt2_fm", "train_grounded_motor_rdt2_fm"]

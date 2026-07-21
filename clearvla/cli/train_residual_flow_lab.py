@@ -14,9 +14,21 @@ from clearvla.cli.common import load_and_normalize_episodes, resolve_device
 from clearvla.data.samplers import TrajectoryBlockBatchSampler, TrajectoryBlockSamplerConfig
 from clearvla.experiments.residual_flow_lab.flow import ResidualBridgeConfig, sample_residual_bridge
 from clearvla.experiments.residual_flow_lab.losses import ResidualFlowLossConfig, residual_flow_loss
-from clearvla.experiments.residual_flow_lab.model import ResidualFlowLabModel, ResidualFlowLabModelConfig
-from clearvla.experiments.residual_flow_lab.trainer import LabPhaseEpochs, ResidualFlowTrainerConfig, train_residual_flow_lab
-from clearvla.experiments.vision_usage_lab.dataset import LabEventScoreConfig, LabVisualMode, VisionUsageLabDataset, compute_lab_event_scores
+from clearvla.experiments.residual_flow_lab.model import (
+    ResidualFlowLabModel,
+    ResidualFlowLabModelConfig,
+)
+from clearvla.experiments.residual_flow_lab.trainer import (
+    LabPhaseEpochs,
+    ResidualFlowTrainerConfig,
+    train_residual_flow_lab,
+)
+from clearvla.experiments.vision_usage_lab.dataset import (
+    LabEventScoreConfig,
+    LabVisualMode,
+    VisionUsageLabDataset,
+    compute_lab_event_scores,
+)
 from clearvla.experiments.vision_usage_lab.latent_cache import VisionLatentCacheStore
 
 
@@ -31,12 +43,19 @@ def _serializable(value: Any) -> Any:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train history-anchored residual flow with direct action supervision")
+    p = argparse.ArgumentParser(
+        description="Train history-anchored residual flow with direct action supervision"
+    )
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--glob", default="*.hdf5")
     p.add_argument("--latent-cache-dir", type=Path, required=True)
     p.add_argument("--out-dir", type=Path, required=True)
-    p.add_argument("--source-checkpoint", type=Path, default=None, help="Optional v11/v12 checkpoint providing history_source.* weights")
+    p.add_argument(
+        "--source-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional v11/v12 checkpoint providing history_source.* weights",
+    )
     p.add_argument("--cameras", nargs="+", default=["top", "wrist"])
     p.add_argument("--action-key", default="action")
     p.add_argument("--top-key", default="observations/images/cam_high")
@@ -46,7 +65,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--past-len", type=int, default=25)
     p.add_argument("--obs-horizon", type=int, default=2)
     p.add_argument("--stride", type=int, default=1)
-    p.add_argument("--prior", choices=["hold", "velocity", "ema_velocity", "blend"], default="blend")
+    p.add_argument(
+        "--prior", choices=["hold", "velocity", "ema_velocity", "blend"], default="blend"
+    )
     p.add_argument("--prior-beta", type=float, default=0.5)
     p.add_argument("--velocity-mode", choices=["last", "mean", "ema"], default="ema")
     p.add_argument("--ema-decay", type=float, default=0.75)
@@ -111,14 +132,26 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _loader(dataset: VisionUsageLabDataset, *, batch_size: int, workers: int, device: torch.device) -> DataLoader:
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=device.type == "cuda")
+def _loader(
+    dataset: VisionUsageLabDataset, *, batch_size: int, workers: int, device: torch.device
+) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=device.type == "cuda",
+    )
 
 
 def _load_source_checkpoint(model: ResidualFlowLabModel, checkpoint: Path) -> None:
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state = payload.get("model_state_dict", payload)
-    source_state = {key.removeprefix("history_source."): value for key, value in state.items() if key.startswith("history_source.")}
+    source_state = {
+        key.removeprefix("history_source."): value
+        for key, value in state.items()
+        if key.startswith("history_source.")
+    }
     if not source_state:
         raise ValueError(f"checkpoint {checkpoint} does not contain history_source.* weights")
     missing, unexpected = model.history_source.load_state_dict(source_state, strict=False)
@@ -172,14 +205,23 @@ def main() -> None:
         visual_mode=LabVisualMode.CORRECT,
         **dataset_kwargs,
     )
-    train_scores = compute_lab_event_scores(train_ds, LabEventScoreConfig(event_quantile=args.event_quantile))
+    train_scores = compute_lab_event_scores(
+        train_ds, LabEventScoreConfig(event_quantile=args.event_quantile)
+    )
     train_ds.attach_event_scores(train_scores)
     sampler = TrajectoryBlockBatchSampler(
         train_ds.refs,
         train_scores.is_event,
-        TrajectoryBlockSamplerConfig(block_size=args.batch_size, event_fraction=args.event_fraction, seed=args.seed),
+        TrajectoryBlockSamplerConfig(
+            block_size=args.batch_size, event_fraction=args.event_fraction, seed=args.seed
+        ),
     )
-    train_loader = DataLoader(train_ds, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=device.type == "cuda")
+    train_loader = DataLoader(
+        train_ds,
+        batch_sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
 
     val_visual_pool = val_ids if len(val_ids) > 1 else list(range(len(episodes)))
     val_datasets: dict[str, VisionUsageLabDataset] = {}
@@ -190,9 +232,14 @@ def main() -> None:
             visual_mode=mode,
             **dataset_kwargs,
         )
-        ds.attach_event_scores(compute_lab_event_scores(ds, LabEventScoreConfig(event_quantile=args.event_quantile)))
+        ds.attach_event_scores(
+            compute_lab_event_scores(ds, LabEventScoreConfig(event_quantile=args.event_quantile))
+        )
         val_datasets[mode.value] = ds
-    val_loaders = {mode: _loader(ds, batch_size=args.batch_size, workers=args.num_workers, device=device) for mode, ds in val_datasets.items()}
+    val_loaders = {
+        mode: _loader(ds, batch_size=args.batch_size, workers=args.num_workers, device=device)
+        for mode, ds in val_datasets.items()
+    }
 
     model_config = ResidualFlowLabModelConfig(
         action_dim=int(episodes[0].actions_raw.shape[1]),
@@ -222,7 +269,9 @@ def main() -> None:
         _load_source_checkpoint(model, args.source_checkpoint)
 
     trainer = ResidualFlowTrainerConfig(
-        phase_epochs=LabPhaseEpochs(source_pretrain=args.source_epochs, residual_flow=args.residual_flow_epochs),
+        phase_epochs=LabPhaseEpochs(
+            source_pretrain=args.source_epochs, residual_flow=args.residual_flow_epochs
+        ),
         source_lr=args.source_lr,
         flow_lr=args.flow_lr,
         weight_decay=args.weight_decay,
@@ -280,7 +329,9 @@ def main() -> None:
     print("model:", model_config.to_dict())
     print("model_parameters:", parameters)
     print("camera_schedule:", model.camera_schedule)
-    print("event_windows:", context["event_windows"], "regular_windows:", context["regular_windows"])
+    print(
+        "event_windows:", context["event_windows"], "regular_windows:", context["regular_windows"]
+    )
 
     if args.dry_run:
         raw = next(iter(train_loader))
@@ -290,38 +341,60 @@ def main() -> None:
         residual_bridge = sample_residual_bridge(source, batch["future"], bridge)
         prepared = model.prepare_visual(batch["visual_tokens"])
         output = model.predict_residual_velocity_prepared(
-            past=batch["past"], learned_source=source, prepared_visual=prepared,
-            residual_state=residual_bridge.residual_state, bridge_time=residual_bridge.time,
-            step_size=residual_bridge.step_size_hint, noise_level=residual_bridge.noise_level,
+            past=batch["past"],
+            learned_source=source,
+            prepared_visual=prepared,
+            residual_state=residual_bridge.residual_state,
+            bridge_time=residual_bridge.time,
+            step_size=residual_bridge.step_size_hint,
+            noise_level=residual_bridge.noise_level,
         )
         wrong = None
         if args.ranking_weight > 0:
             wrong_prepared = model.prepare_visual(batch["negative_visual_tokens"])
             wrong = model.predict_residual_velocity_prepared(
-                past=batch["past"], learned_source=source, prepared_visual=wrong_prepared,
-                residual_state=residual_bridge.residual_state, bridge_time=residual_bridge.time,
-                step_size=residual_bridge.step_size_hint, noise_level=residual_bridge.noise_level,
+                past=batch["past"],
+                learned_source=source,
+                prepared_visual=wrong_prepared,
+                residual_state=residual_bridge.residual_state,
+                bridge_time=residual_bridge.time,
+                step_size=residual_bridge.step_size_hint,
+                noise_level=residual_bridge.noise_level,
             )
         loss = residual_flow_loss(
-            correct=output, wrong=wrong, target_actions=batch["future"], target_velocity=residual_bridge.target_velocity, config=loss_config,
+            correct=output,
+            wrong=wrong,
+            target_actions=batch["future"],
+            target_velocity=residual_bridge.target_velocity,
+            config=loss_config,
         )
         loss.total.backward()
-        pred = model.integrate(past=batch["past"], prior=batch["prior"], visual_tokens=batch["visual_tokens"], steps=args.integration_steps)
-        print("dry_run_shapes:", {
-            "past": tuple(batch["past"].shape),
-            "prior": tuple(batch["prior"].shape),
-            "visual_tokens": tuple(batch["visual_tokens"].shape),
-            "source": tuple(source.shape),
-            "residual_state": tuple(residual_bridge.residual_state.shape),
-            "endpoint_actions": tuple(output.endpoint_actions.shape),
-            "prediction": tuple(pred.shape),
-        })
+        pred = model.integrate(
+            past=batch["past"],
+            prior=batch["prior"],
+            visual_tokens=batch["visual_tokens"],
+            steps=args.integration_steps,
+        )
+        print(
+            "dry_run_shapes:",
+            {
+                "past": tuple(batch["past"].shape),
+                "prior": tuple(batch["prior"].shape),
+                "visual_tokens": tuple(batch["visual_tokens"].shape),
+                "source": tuple(source.shape),
+                "residual_state": tuple(residual_bridge.residual_state.shape),
+                "endpoint_actions": tuple(output.endpoint_actions.shape),
+                "prediction": tuple(pred.shape),
+            },
+        )
         print("dry_run_loss:", loss.detached_floats())
         print("dry-run passed")
         return
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "train_context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
+    (args.out_dir / "train_context.json").write_text(
+        json.dumps(context, indent=2), encoding="utf-8"
+    )
     summary = train_residual_flow_lab(
         model=model,
         train_loader=train_loader,
@@ -334,7 +407,15 @@ def main() -> None:
         loss_config=loss_config,
         context=context,
     )
-    print(json.dumps({"best_full_mse": summary["best_full_mse"], "summary": str(args.out_dir / "residual_flow_lab_summary.json")}, indent=2))
+    print(
+        json.dumps(
+            {
+                "best_full_mse": summary["best_full_mse"],
+                "summary": str(args.out_dir / "residual_flow_lab_summary.json"),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

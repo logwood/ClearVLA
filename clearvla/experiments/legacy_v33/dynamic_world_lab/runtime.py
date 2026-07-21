@@ -129,9 +129,7 @@ def encode_current_tokens(
         condition = conditioner.encode(flat_images, camera_names=camera_names)
     else:
         keys = sample["history_keys"].reshape(batch * history, 2)
-        dummy = torch.zeros(
-            batch * history, model_config.num_cameras, 3, 1, 1, dtype=torch.float32
-        )
+        dummy = torch.zeros(batch * history, model_config.num_cameras, 3, 1, 1, dtype=torch.float32)
         condition = conditioner.encode(dummy, sample_keys=keys, camera_names=camera_names)
     if condition.dense_tokens is None:
         raise ValueError("dynamic world requires dense DINO tokens, not KV conditions")
@@ -166,13 +164,23 @@ def encode_target_tokens(
         condition = conditioner.encode(dummy, sample_keys=target_keys, camera_names=camera_names)
     if condition.dense_tokens is None:
         raise ValueError("dynamic world requires dense DINO tokens, not KV conditions")
-    return _reshape_dense_tokens(
-        condition.dense_tokens,
-        batch=batch * future, history=history, config=model_config,
-    ).reshape(
-        batch, future, history, model_config.num_cameras,
-        model_config.patches_per_camera, model_config.latent_dim,
-    ).to(device=device, dtype=dtype)
+    return (
+        _reshape_dense_tokens(
+            condition.dense_tokens,
+            batch=batch * future,
+            history=history,
+            config=model_config,
+        )
+        .reshape(
+            batch,
+            future,
+            history,
+            model_config.num_cameras,
+            model_config.patches_per_camera,
+            model_config.latent_dim,
+        )
+        .to(device=device, dtype=dtype)
+    )
 
 
 @torch.no_grad()
@@ -189,13 +197,21 @@ def encode_sample_tokens(
     history = model_config.history_length
     future = model_config.num_future
     current = encode_current_tokens(
-        sample, conditioner=conditioner, model_config=model_config,
-        camera_names=camera_names, device=device, dtype=dtype,
+        sample,
+        conditioner=conditioner,
+        model_config=model_config,
+        camera_names=camera_names,
+        device=device,
+        dtype=dtype,
     )
 
     target = encode_target_tokens(
-        sample, conditioner=conditioner, model_config=model_config,
-        camera_names=camera_names, device=device, dtype=dtype,
+        sample,
+        conditioner=conditioner,
+        model_config=model_config,
+        camera_names=camera_names,
+        device=device,
+        dtype=dtype,
     )
     return current, target
 
@@ -226,7 +242,9 @@ def prepare_sample(
         ),
         "state_raw": sample["state_raw"].to(device=device, dtype=torch.float32, non_blocking=True),
         "action": sample["action"].to(device=device, dtype=dtype, non_blocking=True),
-        "action_raw": sample["action_raw"].to(device=device, dtype=torch.float32, non_blocking=True),
+        "action_raw": sample["action_raw"].to(
+            device=device, dtype=torch.float32, non_blocking=True
+        ),
         "future_state": sample["future_state"].to(device=device, dtype=dtype, non_blocking=True),
         "future_state_raw": sample["future_state_raw"].to(
             device=device, dtype=torch.float32, non_blocking=True
@@ -236,7 +254,9 @@ def prepare_sample(
     }
 
 
-def _forward_prepared(model: DynamicPredictiveWorld, sample: dict[str, Tensor], *, mode: str | None = None):
+def _forward_prepared(
+    model: DynamicPredictiveWorld, sample: dict[str, Tensor], *, mode: str | None = None
+):
     return model(
         sample["current_tokens"],
         sample["target_tokens"],
@@ -299,8 +319,7 @@ def gripper_transition_metrics(
             # minimizes total timing error second.  A nearest-first greedy rule
             # can lose valid matches for shifted event runs.
             dp: list[list[tuple[int, float, tuple[float, ...]]]] = [
-                [(0, 0.0, ()) for _ in range(len(target_idx) + 1)]
-                for _ in range(len(pred_idx) + 1)
+                [(0, 0.0, ()) for _ in range(len(target_idx) + 1)] for _ in range(len(pred_idx) + 1)
             ]
 
             def better(
@@ -397,12 +416,20 @@ def evaluate_dynamic_world(
         if max_batches and batch_index > max_batches:
             break
         primary = prepare_sample(
-            batch["primary"], conditioner=conditioner, model_config=model.config,
-            camera_names=camera_names, device=device, dtype=dtype,
+            batch["primary"],
+            conditioner=conditioner,
+            model_config=model.config,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
         )
         pair = prepare_sample(
-            batch["pair"], conditioner=conditioner, model_config=model.config,
-            camera_names=camera_names, device=device, dtype=dtype,
+            batch["pair"],
+            conditioner=conditioner,
+            model_config=model.config,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
         )
         valid = batch["pair_valid"].to(device=device)
         output = _forward_prepared(model, primary)
@@ -417,8 +444,14 @@ def evaluate_dynamic_world(
             primary["state"],
         )
         losses = compute_dynamic_world_losses(
-            model, primary, output, config=loss_config,
-            pair=pair, pair_output=pair_output, pair_valid=valid, swapped_output=swapped,
+            model,
+            primary,
+            output,
+            config=loss_config,
+            pair=pair,
+            pair_output=pair_output,
+            pair_valid=valid,
+            swapped_output=swapped,
         )
         rows.append({key: float(value.detach().float().cpu()) for key, value in losses.items()})
         pred_raw = _decode_state(state_normalizer, output["pred_state_path"])
@@ -432,21 +465,23 @@ def evaluate_dynamic_world(
             reduction="none",
         ).mean(dim=(-1, -2, -3))
         pred_scene_delta = output["pred_scene"] - output["initial_scene"][:, None]
-        target_scene_delta = (
-            output["target_scene"] - output["target_initial_scene"][:, None]
-        )
+        target_scene_delta = output["target_scene"] - output["target_initial_scene"][:, None]
         scene_error = F.smooth_l1_loss(
             pred_scene_delta.float(), target_scene_delta.float(), reduction="none"
         ).mean(dim=(-1, -2, -3))
         per_sample_error = (
-            dynamic_error + loss_config.scene_predictive_weight * scene_error
-        ).cpu().numpy()
+            (dynamic_error + loss_config.scene_predictive_weight * scene_error).cpu().numpy()
+        )
         error_rows.append(per_sample_error)
         support_rows.append(batch["support_distance"].cpu().numpy())
         if "support" in batch:
             support = prepare_sample(
-                batch["support"], conditioner=conditioner, model_config=model.config,
-                camera_names=camera_names, device=device, dtype=dtype,
+                batch["support"],
+                conditioner=conditioner,
+                model_config=model.config,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             (
                 support_initial_scene,
@@ -458,12 +493,10 @@ def evaluate_dynamic_world(
             knn_dynamic = F.smooth_l1_loss(
                 support_target_dynamic.float(), output["target_dynamic"].float()
             )
-            knn_scene = F.smooth_l1_loss(
-                support_scene_delta.float(), target_scene_delta.float()
+            knn_scene = F.smooth_l1_loss(support_scene_delta.float(), target_scene_delta.float())
+            knn_rows.append(
+                float((knn_dynamic + loss_config.scene_predictive_weight * knn_scene).cpu())
             )
-            knn_rows.append(float(
-                (knn_dynamic + loss_config.scene_predictive_weight * knn_scene).cpu()
-            ))
 
         if batch_index <= ablation_batches:
             current_only = _forward_prepared(model, primary, mode="current-only")
@@ -523,8 +556,7 @@ def evaluate_dynamic_world(
     )
     metrics["knn_predictive"] = float(np.mean(knn_rows)) if knn_rows else float("nan")
     metrics["full_vs_knn_gain"] = (
-        metrics["knn_predictive"] - metrics["val_world_predictive"]
-        if knn_rows else float("nan")
+        metrics["knn_predictive"] - metrics["val_world_predictive"] if knn_rows else float("nan")
     )
 
     support = np.concatenate(support_rows)
@@ -597,7 +629,11 @@ def train_dynamic_world(
         eps=trainer.eps,
         weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     scheduler = _scheduler(
         optimizer,
         total_steps=trainer.epochs * steps_per_epoch,
@@ -622,12 +658,20 @@ def train_dynamic_world(
             if trainer.max_train_batches and batch_index > trainer.max_train_batches:
                 break
             primary = prepare_sample(
-                batch["primary"], conditioner=conditioner, model_config=model.config,
-                camera_names=camera_names, device=device, dtype=dtype,
+                batch["primary"],
+                conditioner=conditioner,
+                model_config=model.config,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             pair = prepare_sample(
-                batch["pair"], conditioner=conditioner, model_config=model.config,
-                camera_names=camera_names, device=device, dtype=dtype,
+                batch["pair"],
+                conditioner=conditioner,
+                model_config=model.config,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             valid = batch["pair_valid"].to(device=device)
             optimizer.zero_grad(set_to_none=True)
@@ -643,8 +687,14 @@ def train_dynamic_world(
                 primary["state"],
             )
             losses = compute_dynamic_world_losses(
-                model, primary, output, config=loss_config,
-                pair=pair, pair_output=pair_output, pair_valid=valid, swapped_output=swapped,
+                model,
+                primary,
+                output,
+                config=loss_config,
+                pair=pair,
+                pair_output=pair_output,
+                pair_valid=valid,
+                swapped_output=swapped,
             )
             losses["loss"].backward()
             raw_grad = _grad_norm(parameters)
@@ -695,9 +745,7 @@ def train_dynamic_world(
         }
         history.append(record)
         _append_jsonl(epoch_path, record)
-        far_gap = val_metrics[
-            f"val_closed_loop_gap_t{model.config.future_offsets[-1]}"
-        ]
+        far_gap = val_metrics[f"val_closed_loop_gap_t{model.config.future_offsets[-1]}"]
         print(
             "[dynamic-world] "
             f"epoch={epoch:03d}/{trainer.epochs:03d} sec={record['seconds']:.1f} "
@@ -732,9 +780,7 @@ def train_dynamic_world(
         _save(out_dir / "checkpoints/latest.pt", payload)
 
         predictive = val_metrics["val_world_predictive"]
-        closed_loop_score = predictive + max(
-            0.0, val_metrics["val_max_closed_loop_gap"]
-        )
+        closed_loop_score = predictive + max(0.0, val_metrics["val_max_closed_loop_gap"])
         action_score = val_metrics["val_swap_regret"] + val_metrics["val_local_effect_cosine"]
         balanced = (
             predictive

@@ -33,7 +33,6 @@ class ArrayNormalizer:
             mode="zscore",
         )
 
-
     @classmethod
     def fit_identity(cls, arrays: list[np.ndarray]) -> "ArrayNormalizer":
         """Keep raw physical units while recording statistics for evaluation."""
@@ -67,7 +66,15 @@ class ArrayNormalizer:
         scale = (2.0 / safe_range).astype(np.float32)
         offset = (-1.0 - scale * minimum).astype(np.float32)
         offset[ignore] = -minimum[ignore]
-        return cls(offset=offset, scale=scale, mean=mean, std=std, minimum=minimum, maximum=maximum, mode="limits")
+        return cls(
+            offset=offset,
+            scale=scale,
+            mean=mean,
+            std=std,
+            minimum=minimum,
+            maximum=maximum,
+            mode="limits",
+        )
 
     def encode(self, value: np.ndarray) -> np.ndarray:
         array = np.asarray(value, dtype=np.float32)

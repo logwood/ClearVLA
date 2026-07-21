@@ -30,11 +30,22 @@ def _subset_metrics(
         normalizer=codecs.action_normalizer,
     )
     keys = (
-        "full_mse", "full_rmse", "full_mae", "normalized_mae",
-        "first_mse", "first_rmse", "first_mae",
-        "first4_mse", "first4_rmse", "first4_mae",
-        "arm_full_rmse", "arm_first_rmse", "arm_first4_rmse",
-        "gripper_full_rmse", "gripper_first_rmse", "gripper_first4_rmse",
+        "full_mse",
+        "full_rmse",
+        "full_mae",
+        "normalized_mae",
+        "first_mse",
+        "first_rmse",
+        "first_mae",
+        "first4_mse",
+        "first4_rmse",
+        "first4_mae",
+        "arm_full_rmse",
+        "arm_first_rmse",
+        "arm_first4_rmse",
+        "gripper_full_rmse",
+        "gripper_first_rmse",
+        "gripper_first4_rmse",
     )
     return {key: float(rows[key]) for key in keys if key in rows}
 
@@ -61,7 +72,9 @@ def evaluate_rdt_lite_model(
         batch = {key: value.to(device, non_blocking=True) for key, value in raw.items()}
         prepared = model.prepare_visual(batch["visual_tokens"])
         shape = (batch["state_history"].shape[0], model.config.chunk_len, model.config.action_dim)
-        noise = torch.randn(shape, device=device, dtype=batch["state_history"].dtype, generator=generator)
+        noise = torch.randn(
+            shape, device=device, dtype=batch["state_history"].dtype, generator=generator
+        )
         pred_code = model.sample_actions_prepared(
             objective=objective,
             state_history=batch["state_history"],
@@ -71,10 +84,20 @@ def evaluate_rdt_lite_model(
             initial_noise=noise,
         )
         if objective == "rdt_denoise":
-            probe_time = torch.full((shape[0],), float((diffusion_schedule.train_timesteps if diffusion_schedule else 1000) - 1), device=device, dtype=batch["state_history"].dtype)
+            probe_time = torch.full(
+                (shape[0],),
+                float((diffusion_schedule.train_timesteps if diffusion_schedule else 1000) - 1),
+                device=device,
+                dtype=batch["state_history"].dtype,
+            )
         else:
             probe_time = torch.ones((shape[0],), device=device, dtype=batch["state_history"].dtype)
-        probe = model.forward_prepared(state_history=batch["state_history"], noisy_actions=noise, time=probe_time, prepared=prepared)
+        probe = model.forward_prepared(
+            state_history=batch["state_history"],
+            noisy_actions=noise,
+            time=probe_time,
+            prepared=prepared,
+        )
         for key, value in probe.diagnostics.items():
             diagnostics[key].append(float(value.detach().cpu()))
 

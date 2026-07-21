@@ -135,13 +135,18 @@ class DynamicWorldWindowDataset(Dataset):
 
     def _history_indices(self, center: int) -> np.ndarray:
         base = center + self.config.image_offset
-        return np.asarray([base + int(offset) for offset in self.config.history_offsets], dtype=np.int64)
+        return np.asarray(
+            [base + int(offset) for offset in self.config.history_offsets], dtype=np.int64
+        )
 
     def _target_indices(self, center: int) -> np.ndarray:
         base = center + self.config.image_offset
         return np.asarray(
             [
-                [base + int(future) + int(history) for history in self.config.target_history_offsets]
+                [
+                    base + int(future) + int(history)
+                    for history in self.config.target_history_offsets
+                ]
                 for future in self.config.future_offsets
             ],
             dtype=np.int64,
@@ -162,7 +167,12 @@ class DynamicWorldWindowDataset(Dataset):
         boundary = np.concatenate([state_raw[None], action_raw[:-1]], axis=0)
         velocity = action_raw - boundary
         summary = np.concatenate(
-            [sampled.reshape(-1), velocity.mean(axis=0), velocity.std(axis=0), action_raw[-1] - state_raw],
+            [
+                sampled.reshape(-1),
+                velocity.mean(axis=0),
+                velocity.std(axis=0),
+                action_raw[-1] - state_raw,
+            ],
             axis=0,
         ).astype(np.float32)
         return {
@@ -172,7 +182,10 @@ class DynamicWorldWindowDataset(Dataset):
             "state_raw": state_raw,
             "action_summary": summary,
             "history_keys": np.stack(
-                [np.full(len(self.config.history_offsets), ref.episode_idx), self._history_indices(ref.center)],
+                [
+                    np.full(len(self.config.history_offsets), ref.episode_idx),
+                    self._history_indices(ref.center),
+                ],
                 axis=1,
             ).astype(np.int64),
         }
@@ -219,10 +232,7 @@ class DynamicWorldWindowDataset(Dataset):
             [np.full(len(history_indices), ref.episode_idx), history_indices], axis=1
         ).astype(np.int64)
         target_keys = np.stack(
-            [
-                np.stack([np.full(len(row), ref.episode_idx), row], axis=1)
-                for row in target_indices
-            ],
+            [np.stack([np.full(len(row), ref.episode_idx), row], axis=1) for row in target_indices],
             axis=0,
         ).astype(np.int64)
 
@@ -249,10 +259,14 @@ class DynamicWorldWindowDataset(Dataset):
         }
         if cfg.return_images:
             history_frames = self.image_store.load_window(episode, history_indices)
-            history_images = _camera_stack(history_frames, self.camera_names).to(torch.float32) / 255.0
+            history_images = (
+                _camera_stack(history_frames, self.camera_names).to(torch.float32) / 255.0
+            )
             flat_target = target_indices.reshape(-1)
             target_frames = self.image_store.load_window(episode, flat_target)
-            target_images = _camera_stack(target_frames, self.camera_names).to(torch.float32) / 255.0
+            target_images = (
+                _camera_stack(target_frames, self.camera_names).to(torch.float32) / 255.0
+            )
             target_images = target_images.reshape(
                 len(cfg.future_offsets), len(cfg.target_history_offsets), *target_images.shape[1:]
             )
@@ -330,10 +344,18 @@ class PairedDynamicWorldDataset(Dataset):
             "primary": self.base[int(index)],
             "pair": self.base[pair_idx],
             "pair_valid": torch.tensor(bool(self.pair_valid[int(index)]), dtype=torch.bool),
-            "pair_distance": torch.tensor(float(self.pair_distance[int(index)]), dtype=torch.float32),
-            "action_distance": torch.tensor(float(self.action_distance[int(index)]), dtype=torch.float32),
-            "future_distance": torch.tensor(float(self.future_distance[int(index)]), dtype=torch.float32),
-            "support_distance": torch.tensor(float(self.support_distance[int(index)]), dtype=torch.float32),
+            "pair_distance": torch.tensor(
+                float(self.pair_distance[int(index)]), dtype=torch.float32
+            ),
+            "action_distance": torch.tensor(
+                float(self.action_distance[int(index)]), dtype=torch.float32
+            ),
+            "future_distance": torch.tensor(
+                float(self.future_distance[int(index)]), dtype=torch.float32
+            ),
+            "support_distance": torch.tensor(
+                float(self.support_distance[int(index)]), dtype=torch.float32
+            ),
         }
         if self.support_base is not None and self.support_index is not None:
             support_idx = int(self.support_index[int(index)])
@@ -350,6 +372,7 @@ __all__ = [
     "DynamicWorldWindowDataset",
     "PairedDynamicWorldDataset",
 ]
+
 
 class CurrentHistoryViewDataset(Dataset):
     """Lightweight view used only while constructing local-pair descriptors.

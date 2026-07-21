@@ -20,10 +20,19 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     serializable,
 )
 from clearvla.experiments.classic_policy_lab.dataset import RDT2FMDatasetConfig, RDT2FMWindowDataset
-from clearvla.experiments.classic_policy_lab.rdt2_conditioning import CachedDinoV2DenseConditioner, DebugDenseConditioner, DinoV2DenseConditioner
+from clearvla.experiments.classic_policy_lab.rdt2_conditioning import (
+    CachedDinoV2DenseConditioner,
+    DebugDenseConditioner,
+    DinoV2DenseConditioner,
+)
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import DinoV2TokenStore
-from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor import GroundedMotorRDT2FM, GroundedMotorRDT2FMConfig
-from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor_runtime import train_grounded_motor_rdt2_fm
+from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor import (
+    GroundedMotorRDT2FM,
+    GroundedMotorRDT2FMConfig,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor_runtime import (
+    train_grounded_motor_rdt2_fm,
+)
 from clearvla.experiments.classic_policy_lab.trainer import RDTTrainerConfig
 
 
@@ -68,7 +77,9 @@ PRESETS: dict[str, dict[str, int]] = {
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train the v20 one-time-grounded shallow motor RDT2-FM policy")
+    p = argparse.ArgumentParser(
+        description="Train the v20 one-time-grounded shallow motor RDT2-FM policy"
+    )
     add_data_args(p, default_resize=(224, 224))
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--prediction-horizon", type=int, default=24)
@@ -90,7 +101,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--inference-steps", type=int, default=5)
     p.add_argument("--no-flash-attn", action="store_true")
 
-    p.add_argument("--condition-mode", choices=["debug-dense", "dinov2", "dinov2-cache"], default="dinov2-cache")
+    p.add_argument(
+        "--condition-mode",
+        choices=["debug-dense", "dinov2", "dinov2-cache"],
+        default="dinov2-cache",
+    )
     p.add_argument("--instruction", default="")
     p.add_argument("--debug-cond-tokens", type=int, default=8)
     p.add_argument("--debug-dense-token-dim", type=int, default=32)
@@ -119,7 +134,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta2", type=float, default=0.999)
     p.add_argument("--adam-eps", type=float, default=1e-8)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant")
+    p.add_argument(
+        "--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant"
+    )
     p.add_argument("--warmup-steps", type=int, default=0)
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=10)
@@ -133,8 +150,16 @@ def parse_args() -> argparse.Namespace:
 
 def _resolve_shape(args: argparse.Namespace) -> None:
     names = (
-        "hidden_size", "first_depth", "tail_depth", "heads", "kv_heads", "multiple_of",
-        "grounding_depth", "grounding_queries", "history_hidden_size", "motion_tokens",
+        "hidden_size",
+        "first_depth",
+        "tail_depth",
+        "heads",
+        "kv_heads",
+        "multiple_of",
+        "grounding_depth",
+        "grounding_queries",
+        "history_hidden_size",
+        "motion_tokens",
     )
     if args.model_size == "custom":
         missing = [name for name in names if getattr(args, name) is None]
@@ -158,11 +183,18 @@ def _dtype(name: str, device: torch.device) -> torch.dtype:
     return torch.float32
 
 
-def _build_dense_conditioner(args: argparse.Namespace, *, episodes, cameras: tuple[str, ...], device: torch.device):
+def _build_dense_conditioner(
+    args: argparse.Namespace, *, episodes, cameras: tuple[str, ...], device: torch.device
+):
     if args.condition_mode == "debug-dense":
-        return DebugDenseConditioner(token_dim=args.debug_dense_token_dim, tokens_per_camera=max(1, args.debug_cond_tokens // max(len(cameras), 1))).to(device)
+        return DebugDenseConditioner(
+            token_dim=args.debug_dense_token_dim,
+            tokens_per_camera=max(1, args.debug_cond_tokens // max(len(cameras), 1)),
+        ).to(device)
     if args.condition_mode == "dinov2":
-        return DinoV2DenseConditioner(args.dinov2_model, local_files_only=args.dinov2_local_files_only).to(device)
+        return DinoV2DenseConditioner(
+            args.dinov2_model, local_files_only=args.dinov2_local_files_only
+        ).to(device)
     if args.dinov2_token_cache_dir is None:
         raise ValueError("--condition-mode dinov2-cache requires --dinov2-token-cache-dir")
     store = DinoV2TokenStore(
@@ -181,11 +213,19 @@ def main() -> None:
     _resolve_shape(args)
     if args.torch_num_threads > 0:
         torch.set_num_threads(args.torch_num_threads)
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     device = resolve_device(args.device)
     dtype = _dtype(args.dtype, device)
-    min_length = args.prediction_horizon + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset)) + 1
-    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
+    min_length = (
+        args.prediction_horizon
+        + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset))
+        + 1
+    )
+    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = (
+        load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
+    )
     action_dim = int(episodes[0].actions_raw.shape[1])
     state_dim = int(episodes[0].states_raw.shape[1])
     cameras = tuple(str(value) for value in args.cameras)
@@ -197,10 +237,30 @@ def main() -> None:
         stride=args.stride,
         zero_state=args.zero_state,
     )
-    train_ds = RDT2FMWindowDataset(episodes, train_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    val_ds = RDT2FMWindowDataset(episodes, val_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    train_loader = make_loader(train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device)
-    val_loader = make_loader(val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+    train_ds = RDT2FMWindowDataset(
+        episodes,
+        train_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    val_ds = RDT2FMWindowDataset(
+        episodes,
+        val_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    train_loader = make_loader(
+        train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device
+    )
+    val_loader = make_loader(
+        val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
     conditioner = _build_dense_conditioner(args, episodes=episodes, cameras=cameras, device=device)
     dense_dim = int(conditioner.token_dim)
     model_config = GroundedMotorRDT2FMConfig(
@@ -259,32 +319,38 @@ def main() -> None:
             "mode": args.condition_mode,
             "dense_token_dim": dense_dim,
             "instruction": args.instruction,
-            "dinov2_token_cache_dir": None if args.dinov2_token_cache_dir is None else str(args.dinov2_token_cache_dir),
+            "dinov2_token_cache_dir": None
+            if args.dinov2_token_cache_dir is None
+            else str(args.dinov2_token_cache_dir),
         },
         "parameters": model.parameter_count(),
         "train_windows": len(train_ds),
         "val_windows": len(val_ds),
     }
-    print_context({
-        "model": "GroundedMotorRDT2FM",
-        "model_size": args.model_size,
-        "parameters": model.parameter_count(),
-        "train_windows": len(train_ds),
-        "val_windows": len(val_ds),
-        "cameras": cameras,
-        "action_dim": action_dim,
-        "state_dim": state_dim,
-        "prediction_horizon": args.prediction_horizon,
-        "condition_mode": args.condition_mode,
-        "dense_token_dim": dense_dim,
-        "first_depth": args.first_depth,
-        "tail_depth": args.tail_depth,
-        "grounding_depth": args.grounding_depth,
-        "grounding_queries": args.grounding_queries,
-        "controlled_difference": "one-time semantic visual grounding + explicit motion history + native first-action token stage + shallow tail motor stage",
-    })
+    print_context(
+        {
+            "model": "GroundedMotorRDT2FM",
+            "model_size": args.model_size,
+            "parameters": model.parameter_count(),
+            "train_windows": len(train_ds),
+            "val_windows": len(val_ds),
+            "cameras": cameras,
+            "action_dim": action_dim,
+            "state_dim": state_dim,
+            "prediction_horizon": args.prediction_horizon,
+            "condition_mode": args.condition_mode,
+            "dense_token_dim": dense_dim,
+            "first_depth": args.first_depth,
+            "tail_depth": args.tail_depth,
+            "grounding_depth": args.grounding_depth,
+            "grounding_queries": args.grounding_queries,
+            "controlled_difference": "one-time semantic visual grounding + explicit motion history + native first-action token stage + shallow tail motor stage",
+        }
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "train_context.json").write_text(json.dumps(serializable(context), indent=2), encoding="utf-8")
+    (args.out_dir / "train_context.json").write_text(
+        json.dumps(serializable(context), indent=2), encoding="utf-8"
+    )
     train_grounded_motor_rdt2_fm(
         model=model,
         conditioner=conditioner,

@@ -9,7 +9,10 @@ import torch
 
 from clearvla.cli.common import resolve_device
 from clearvla.experiments.rdt_lite_lab.model import RDTLiteModel, RDTLiteModelConfig
-from clearvla.experiments.rdt_lite_lab.schedule import CosineDiffusionSchedule, DiffusionScheduleConfig
+from clearvla.experiments.rdt_lite_lab.schedule import (
+    CosineDiffusionSchedule,
+    DiffusionScheduleConfig,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +31,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=6)
     p.add_argument("--num-heads", type=int, default=8)
     p.add_argument("--ffn-hidden", type=int, default=384)
-    p.add_argument("--conditioning-mode", choices=["concat", "camera_alternate", "alternate"], default="concat")
+    p.add_argument(
+        "--conditioning-mode", choices=["concat", "camera_alternate", "alternate"], default="concat"
+    )
     p.add_argument("--include-visual-delta-tokens", action="store_true")
     p.add_argument("--decoder-output-init-std", type=float, default=1e-3)
     p.add_argument("--control-frequency-hz", type=float, default=30.0)
@@ -79,8 +84,17 @@ def main() -> None:
     )
     model = RDTLiteModel(config).to(device).eval()
     sampling_steps = int(args.sampling_steps or (5 if args.objective == "rdt_denoise" else 10))
-    state_history = torch.randn(args.batch_size, args.state_history_len, args.state_dim, device=device)
-    visual = torch.randn(args.batch_size, args.obs_horizon, len(cameras), config.patch_count, args.teacher_dim, device=device)
+    state_history = torch.randn(
+        args.batch_size, args.state_history_len, args.state_dim, device=device
+    )
+    visual = torch.randn(
+        args.batch_size,
+        args.obs_horizon,
+        len(cameras),
+        config.patch_count,
+        args.teacher_dim,
+        device=device,
+    )
     schedule = CosineDiffusionSchedule(DiffusionScheduleConfig())
     breakdown = OrderedDict(
         visual_adaptor=_module_parameters(model.visual_adaptor),
@@ -93,27 +107,44 @@ def main() -> None:
     )
     with torch.inference_mode():
         for _ in range(args.warmup):
-            model.sample_actions(objective=args.objective, state_history=state_history, visual_tokens=visual, steps=sampling_steps, diffusion_schedule=schedule)  # type: ignore[arg-type]
+            model.sample_actions(
+                objective=args.objective,
+                state_history=state_history,
+                visual_tokens=visual,
+                steps=sampling_steps,
+                diffusion_schedule=schedule,
+            )  # type: ignore[arg-type]
         _sync(device)
         durations: list[float] = []
         for _ in range(args.repeats):
             started = time.perf_counter()
-            model.sample_actions(objective=args.objective, state_history=state_history, visual_tokens=visual, steps=sampling_steps, diffusion_schedule=schedule)  # type: ignore[arg-type]
+            model.sample_actions(
+                objective=args.objective,
+                state_history=state_history,
+                visual_tokens=visual,
+                steps=sampling_steps,
+                diffusion_schedule=schedule,
+            )  # type: ignore[arg-type]
             _sync(device)
             durations.append(time.perf_counter() - started)
-    print(json.dumps({
-        "schema": "clearvla-rdt-lite-profile-v13.1",
-        "device": str(device),
-        "objective": args.objective,
-        "sampling_steps": sampling_steps,
-        "config": config.to_dict(),
-        "camera_schedule": model.camera_schedule(),
-        "parameter_count": model.parameter_count(),
-        "parameter_breakdown": breakdown,
-        "latency_ms_mean": 1000.0 * sum(durations) / len(durations),
-        "latency_ms_min": 1000.0 * min(durations),
-        "latency_ms_max": 1000.0 * max(durations),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "schema": "clearvla-rdt-lite-profile-v13.1",
+                "device": str(device),
+                "objective": args.objective,
+                "sampling_steps": sampling_steps,
+                "config": config.to_dict(),
+                "camera_schedule": model.camera_schedule(),
+                "parameter_count": model.parameter_count(),
+                "parameter_breakdown": breakdown,
+                "latency_ms_mean": 1000.0 * sum(durations) / len(durations),
+                "latency_ms_min": 1000.0 * min(durations),
+                "latency_ms_max": 1000.0 * max(durations),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

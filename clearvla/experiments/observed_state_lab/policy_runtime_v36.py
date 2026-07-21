@@ -17,7 +17,10 @@ from torch.utils.data import DataLoader
 
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import RDT2Conditioner
-from clearvla.experiments.dynamic_world_lab.shared_runtime import encode_current_tokens, gripper_transition_metrics
+from clearvla.experiments.dynamic_world_lab.shared_runtime import (
+    encode_current_tokens,
+    gripper_transition_metrics,
+)
 
 from .policy_v36 import V36PolicySystem
 from .world_runtime import autocast_context, grad_norm, jsonable, scheduler
@@ -67,15 +70,31 @@ def prepare_v36_policy_sample(
     dtype: torch.dtype,
 ) -> dict[str, Tensor]:
     visual = encode_current_tokens(
-        sample, conditioner=conditioner, model_config=system.world_config,
-        camera_names=camera_names, device=device, dtype=dtype,
+        sample,
+        conditioner=conditioner,
+        model_config=system.world_config,
+        camera_names=camera_names,
+        device=device,
+        dtype=dtype,
     )
     keys = (
-        "state", "state_raw", "action_state", "history_state", "executed_action_history",
-        "executed_action_history_raw", "policy_action", "policy_action_raw",
+        "state",
+        "state_raw",
+        "action_state",
+        "history_state",
+        "executed_action_history",
+        "executed_action_history_raw",
+        "policy_action",
+        "policy_action_raw",
     )
     out = {key: sample[key].to(device=device, non_blocking=True) for key in keys}
-    for key in ("state", "action_state", "history_state", "executed_action_history", "policy_action"):
+    for key in (
+        "state",
+        "action_state",
+        "history_state",
+        "executed_action_history",
+        "policy_action",
+    ):
         out[key] = out[key].float()
     compute_dtype = dtype if device.type == "cuda" else torch.float32
     out["visual"] = visual.to(dtype=compute_dtype)
@@ -108,7 +127,9 @@ def gripper_event_labels(
     return labels
 
 
-def event_head_metrics(logits_rows: list[np.ndarray], target_rows: list[np.ndarray]) -> dict[str, float]:
+def event_head_metrics(
+    logits_rows: list[np.ndarray], target_rows: list[np.ndarray]
+) -> dict[str, float]:
     if not logits_rows:
         return {}
     logits = np.concatenate(logits_rows, axis=0)
@@ -123,13 +144,15 @@ def event_head_metrics(logits_rows: list[np.ndarray], target_rows: list[np.ndarr
     precision = tp / max(tp + fp, 1.0)
     recall = tp / max(tp + fn, 1.0)
     f1 = 2.0 * precision * recall / max(precision + recall, 1e-8)
-    out.update({
-        "event_head_precision": float(precision),
-        "event_head_recall": float(recall),
-        "event_head_f1": float(f1),
-        "event_head_pred_events": float(pos_pred.sum()),
-        "event_head_target_events": float(pos_target.sum()),
-    })
+    out.update(
+        {
+            "event_head_precision": float(precision),
+            "event_head_recall": float(recall),
+            "event_head_f1": float(f1),
+            "event_head_pred_events": float(pos_pred.sum()),
+            "event_head_target_events": float(pos_target.sum()),
+        }
+    )
     for label, name in ((1, "open"), (2, "close")):
         p = pred == label
         t = target == label
@@ -180,17 +203,30 @@ def flow_losses(
     flat_labels = labels.reshape(-1)
     flat_logits = output["event_logits"].reshape(-1, 3)
     event_weights = torch.ones_like(flat_labels, dtype=flat_logits.dtype)
-    event_weights = event_weights + (flat_labels != 0).to(flat_logits.dtype) * float(trainer.event_positive_weight)
+    event_weights = event_weights + (flat_labels != 0).to(flat_logits.dtype) * float(
+        trainer.event_positive_weight
+    )
     event = _focal_cross_entropy(flat_logits, flat_labels, event_weights, trainer.event_focal_gamma)
 
     transition_mask = (labels != 0).to(output["pred_action_estimate"].dtype)
     grip_idx = cfg.gripper_index
     pred_g = output["pred_action_estimate"][..., grip_idx]
     target_g = sample["policy_action"].to(device=device)[..., grip_idx]
-    transition_l1 = (F.smooth_l1_loss(pred_g, target_g, reduction="none") * (1.0 + transition_mask * 8.0)).mean()
+    transition_l1 = (
+        F.smooth_l1_loss(pred_g, target_g, reduction="none") * (1.0 + transition_mask * 8.0)
+    ).mean()
 
-    pred_boundary = torch.cat([sample["action_state"].to(device=device)[:, None], output["pred_action_estimate"][:, :-1]], dim=1)
-    target_boundary = torch.cat([sample["action_state"].to(device=device)[:, None], sample["policy_action"].to(device=device)[:, :-1]], dim=1)
+    pred_boundary = torch.cat(
+        [sample["action_state"].to(device=device)[:, None], output["pred_action_estimate"][:, :-1]],
+        dim=1,
+    )
+    target_boundary = torch.cat(
+        [
+            sample["action_state"].to(device=device)[:, None],
+            sample["policy_action"].to(device=device)[:, :-1],
+        ],
+        dim=1,
+    )
     pred_delta = output["pred_action_estimate"] - pred_boundary
     target_delta = sample["policy_action"].to(device=device) - target_boundary
     smooth_delta = F.smooth_l1_loss(pred_delta, target_delta)
@@ -203,8 +239,8 @@ def flow_losses(
         + trainer.smooth_delta_weight * smooth_delta
     )
     pred_event = output["event_logits"].argmax(dim=-1)
-    pos_target = (labels != 0)
-    pos_pred = (pred_event != 0)
+    pos_target = labels != 0
+    pos_pred = pred_event != 0
     tp = (pos_pred & pos_target).sum().to(torch.float32)
     fp = (pos_pred & ~pos_target).sum().to(torch.float32)
     fn = (~pos_pred & pos_target).sum().to(torch.float32)
@@ -257,30 +293,51 @@ def evaluate_v36_policy(
         if max_batches and batch_index > max_batches:
             break
         sample = prepare_v36_policy_sample(
-            batch, conditioner=conditioner, system=system, camera_names=camera_names,
-            device=device, dtype=dtype,
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
         )
         generator = torch.Generator(device=device)
         generator.manual_seed(36036 + batch_index)
-        noise = torch.randn(sample["policy_action"].shape, generator=generator, device=device, dtype=sample["visual"].dtype)
+        noise = torch.randn(
+            sample["policy_action"].shape,
+            generator=generator,
+            device=device,
+            dtype=sample["visual"].dtype,
+        )
         with autocast_context(device, dtype):
             pred_pack = system.sample(
-                sample["visual"], sample["history_state"], sample["executed_action_history"],
-                sample["state"], steps=trainer.eval_inference_steps, noise=noise, use_proposal=True,
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                steps=trainer.eval_inference_steps,
+                noise=noise,
+                use_proposal=True,
                 return_event_logits=True,
             )
             assert isinstance(pred_pack, dict)
             no_proposal = system.sample(
-                sample["visual"], sample["history_state"], sample["executed_action_history"],
-                sample["state"], steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                steps=trainer.eval_inference_steps,
+                noise=noise,
+                use_proposal=False,
             )
         pred_rows.append(decode(action_normalizer, pred_pack["action"]))
         no_proposal_rows.append(decode(action_normalizer, no_proposal))
         target_rows.append(sample["policy_action_raw"].cpu().numpy())
         current_rows.append(sample["state_raw"].cpu().numpy())
         labels = gripper_event_labels(
-            target_raw=sample["policy_action_raw"], current_raw=sample["state_raw"],
-            gripper_index=system.policy_config.gripper_index, threshold=trainer.gripper_event_threshold,
+            target_raw=sample["policy_action_raw"],
+            current_raw=sample["state_raw"],
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
         )
         event_logits_rows.append(pred_pack["event_logits"].detach().float().cpu().numpy())
         event_target_rows.append(labels.cpu().numpy())
@@ -295,26 +352,37 @@ def evaluate_v36_policy(
         "first_rmse": float(np.sqrt(squared[:, 0].mean())),
         "first4_rmse": float(np.sqrt(squared[:, :4].mean())),
         "first8_rmse": float(np.sqrt(squared[:, :8].mean())),
-        "tail_rmse": float(np.sqrt(squared[:, 8:].mean())) if squared.shape[1] > 8 else float("nan"),
+        "tail_rmse": float(np.sqrt(squared[:, 8:].mean()))
+        if squared.shape[1] > 8
+        else float("nan"),
         "arm_full_rmse": float(np.sqrt(squared[..., :-1].mean())),
         "gripper_full_rmse": float(np.sqrt(squared[..., -1].mean())),
         "proposal_utility_mse_gain": float(((no_proposal - target) ** 2).mean() - squared.mean()),
     }
-    metrics.update(gripper_transition_metrics(
-        pred, target, current, gripper_index=system.policy_config.gripper_index,
-        threshold=trainer.gripper_event_threshold, tolerance=2,
-    ))
+    metrics.update(
+        gripper_transition_metrics(
+            pred,
+            target,
+            current,
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
+            tolerance=2,
+        )
+    )
     metrics.update(event_head_metrics(event_logits_rows, event_target_rows))
     metrics["tail_first_ratio"] = float(metrics["tail_rmse"] / max(metrics["first_rmse"], 1e-8))
     metrics["gripper_event_ratio"] = float(
-        metrics.get("gripper_pred_events", 0.0) / max(metrics.get("gripper_target_events", 0.0), 1.0)
+        metrics.get("gripper_pred_events", 0.0)
+        / max(metrics.get("gripper_target_events", 0.0), 1.0)
     )
     return metrics
 
 
 def rng_state() -> dict[str, Any]:
     return {
-        "python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
         "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }
 
@@ -322,7 +390,9 @@ def rng_state() -> dict[str, Any]:
 def restore_rng(state: dict[str, Any] | None) -> None:
     if not state:
         return
-    random.setstate(state["python"]); np.random.set_state(state["numpy"]); torch.set_rng_state(state["torch"])
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
     if torch.cuda.is_available() and state.get("cuda") is not None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
@@ -352,7 +422,8 @@ def is_deploy_eligible(metrics: dict[str, float], trainer: V36PolicyTrainerConfi
     return (
         float(metrics.get("gripper_recall", 0.0)) >= float(trainer.deploy_min_recall)
         and float(trainer.deploy_min_event_ratio) <= ratio <= float(trainer.deploy_max_event_ratio)
-        and float(metrics.get("tail_first_ratio", 999.0)) <= float(trainer.deploy_max_tail_first_ratio)
+        and float(metrics.get("tail_first_ratio", 999.0))
+        <= float(trainer.deploy_max_tail_first_ratio)
     )
 
 
@@ -373,7 +444,8 @@ def train_v36_policy(
     resume: Path | None = None,
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = out_dir / "checkpoints"; ckpt_dir.mkdir(exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(exist_ok=True)
     system.to(device=device, dtype=torch.float32)
     optimizer = torch.optim.AdamW(
         [
@@ -381,10 +453,14 @@ def train_v36_policy(
             {"params": system.decoder.parameters(), "lr": trainer.lr},
             {"params": system.proposal.parameters(), "lr": trainer.proposal_lr},
         ],
-        weight_decay=trainer.weight_decay, betas=(trainer.beta1, trainer.beta2), eps=trainer.eps,
+        weight_decay=trainer.weight_decay,
+        betas=(trainer.beta1, trainer.beta2),
+        eps=trainer.eps,
     )
     steps_per_epoch = trainer.max_train_batches or len(train_loader)
-    schedule = scheduler(optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio)
+    schedule = scheduler(
+        optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio
+    )
     start_epoch, global_step = 1, 0
     history: list[dict[str, Any]] = []
     best = {
@@ -399,32 +475,47 @@ def train_v36_policy(
         if payload.get("schema") != "clearvla-v36-policy-checkpoint-v1":
             raise ValueError("resume checkpoint is not V36 policy")
         system.load_state_dict(payload["model"], strict=True)
-        optimizer.load_state_dict(payload["optimizer"]); schedule.load_state_dict(payload["scheduler"])
-        start_epoch = int(payload["epoch"]) + 1; global_step = int(payload["global_step"])
-        history = list(payload.get("history", [])); best.update(payload.get("best", {})); restore_rng(payload.get("rng"))
+        optimizer.load_state_dict(payload["optimizer"])
+        schedule.load_state_dict(payload["scheduler"])
+        start_epoch = int(payload["epoch"]) + 1
+        global_step = int(payload["global_step"])
+        history = list(payload.get("history", []))
+        best.update(payload.get("best", {}))
+        restore_rng(payload.get("rng"))
 
     for epoch in range(start_epoch, trainer.epochs + 1):
-        system.train(); rows = []
+        system.train()
+        rows = []
         for batch_index, batch in enumerate(train_loader, start=1):
             if trainer.max_train_batches and batch_index > trainer.max_train_batches:
                 break
             sample = prepare_v36_policy_sample(
-                batch, conditioner=conditioner, system=system, camera_names=camera_names,
-                device=device, dtype=dtype,
+                batch,
+                conditioner=conditioner,
+                system=system,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             optimizer.zero_grad(set_to_none=True)
             with autocast_context(device, dtype):
                 output = system.flow_training_forward(
-                    sample["visual"], sample["history_state"], sample["executed_action_history"],
-                    sample["state"], sample["policy_action"],
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    sample["policy_action"],
                 )
                 losses = flow_losses(system, sample, output, trainer)
             losses["loss"].float().backward()
             grad = grad_norm(system.parameters())
             torch.nn.utils.clip_grad_norm_(system.parameters(), trainer.grad_clip)
-            optimizer.step(); schedule.step(); global_step += 1
+            optimizer.step()
+            schedule.step()
+            global_step += 1
             row = {key: float(value.detach().float().cpu()) for key, value in losses.items()}
-            row["grad"] = grad; rows.append(row)
+            row["grad"] = grad
+            rows.append(row)
             if trainer.log_every and batch_index % trainer.log_every == 0:
                 print(
                     f"[v36-policy] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
@@ -435,15 +526,26 @@ def train_v36_policy(
                 )
         train_metrics = mean_rows(rows)
         val_metrics = evaluate_v36_policy(
-            system=system, loader=val_loader, conditioner=conditioner, device=device, dtype=dtype,
-            camera_names=camera_names, action_normalizer=action_normalizer, trainer=trainer,
+            system=system,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            action_normalizer=action_normalizer,
+            trainer=trainer,
             max_batches=trainer.max_val_batches,
         )
         score = balanced_score(val_metrics, trainer)
         deploy_eligible = is_deploy_eligible(val_metrics, trainer)
         val_metrics["balanced_score"] = score
         val_metrics["deploy_eligible"] = float(deploy_eligible)
-        record = {"epoch": epoch, "global_step": global_step, "train": train_metrics, "val": val_metrics}
+        record = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "train": train_metrics,
+            "val": val_metrics,
+        }
         history.append(record)
         with (out_dir / "v36_policy_epochs.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(jsonable(record), separators=(",", ":")) + "\n")
@@ -452,28 +554,47 @@ def train_v36_policy(
         recall = float(val_metrics.get("gripper_recall", 0.0))
         save = []
         if full < best["full_mse"]:
-            best["full_mse"] = full; save.append("best_full.pt")
+            best["full_mse"] = full
+            save.append("best_full.pt")
         if f1 > best["gripper_f1"]:
-            best["gripper_f1"] = f1; save.append("best_gripper_f1.pt")
+            best["gripper_f1"] = f1
+            save.append("best_gripper_f1.pt")
         if recall > best["gripper_recall"]:
-            best["gripper_recall"] = recall; save.append("best_gripper_recall.pt")
+            best["gripper_recall"] = recall
+            save.append("best_gripper_recall.pt")
         if score < best["balanced"]:
-            best["balanced"] = score; save.append("best_balanced.pt")
+            best["balanced"] = score
+            save.append("best_balanced.pt")
         if deploy_eligible and float(val_metrics["full_rmse"]) < best["deploy_full_rmse"]:
-            best["deploy_full_rmse"] = float(val_metrics["full_rmse"]); save.append("best_deploy.pt")
+            best["deploy_full_rmse"] = float(val_metrics["full_rmse"])
+            save.append("best_deploy.pt")
         payload = {
-            "schema": "clearvla-v36-policy-checkpoint-v1", "epoch": epoch, "global_step": global_step,
-            "model": system.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": schedule.state_dict(),
-            "world_config": asdict(system.world_config), "policy_config": asdict(system.policy_config),
-            "trainer_config": asdict(trainer), "action_normalizer": action_normalizer.to_dict(),
-            "state_normalizer": state_normalizer.to_dict(), "context": context, "history": history,
-            "best": best, "rng": rng_state(),
+            "schema": "clearvla-v36-policy-checkpoint-v1",
+            "epoch": epoch,
+            "global_step": global_step,
+            "model": system.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": schedule.state_dict(),
+            "world_config": asdict(system.world_config),
+            "policy_config": asdict(system.policy_config),
+            "trainer_config": asdict(trainer),
+            "action_normalizer": action_normalizer.to_dict(),
+            "state_normalizer": state_normalizer.to_dict(),
+            "context": context,
+            "history": history,
+            "best": best,
+            "rng": rng_state(),
         }
         for name in save:
             torch.save(payload, ckpt_dir / name)
         torch.save(payload, ckpt_dir / "latest.pt")
         (out_dir / "v36_policy_summary.json").write_text(
-            json.dumps(jsonable({"schema": "clearvla-v36-policy-summary-v1", "best": best, "latest": record}), indent=2),
+            json.dumps(
+                jsonable(
+                    {"schema": "clearvla-v36-policy-summary-v1", "best": best, "latest": record}
+                ),
+                indent=2,
+            ),
             encoding="utf-8",
         )
         print(json.dumps(jsonable(record), separators=(",", ":")), flush=True)

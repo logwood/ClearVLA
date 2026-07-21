@@ -51,7 +51,9 @@ def default_alicia_urdf_path(variant: str = "gripper_50mm") -> Path:
     """
     here = Path(__file__).resolve()
     clearvla_root = here.parents[2]
-    return clearvla_root / "assets" / "robots" / "alicia_d" / "v5_6" / f"Alicia_D_v5_6_{variant}.urdf"
+    return (
+        clearvla_root / "assets" / "robots" / "alicia_d" / "v5_6" / f"Alicia_D_v5_6_{variant}.urdf"
+    )
 
 
 def _parse_vec(text: str | None, default: Sequence[float]) -> np.ndarray:
@@ -86,11 +88,14 @@ def axis_angle_matrix(axis: np.ndarray, angle: float) -> np.ndarray:
     x, y, z = axis / norm
     c, s = math.cos(float(angle)), math.sin(float(angle))
     C = 1.0 - c
-    return np.array([
-        [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
-        [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
-        [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
+            [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
+            [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
+        ],
+        dtype=np.float64,
+    )
 
 
 def rotation_angle(R: np.ndarray) -> float:
@@ -102,7 +107,8 @@ def rotation_angle(R: np.ndarray) -> float:
 def vector_cosine(a: np.ndarray, b: np.ndarray, eps: float = 1e-9) -> float:
     a = np.asarray(a, dtype=np.float64).reshape(-1)
     b = np.asarray(b, dtype=np.float64).reshape(-1)
-    na = float(np.linalg.norm(a)); nb = float(np.linalg.norm(b))
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
     if na < eps and nb < eps:
         return 1.0
     if na < eps or nb < eps:
@@ -113,7 +119,9 @@ def vector_cosine(a: np.ndarray, b: np.ndarray, eps: float = 1e-9) -> float:
 class URDFFKChain:
     """Forward-kinematics chain parsed from a URDF file."""
 
-    def __init__(self, urdf_path: str | Path, *, base_link: str = "base_link", end_link: str = "tool0") -> None:
+    def __init__(
+        self, urdf_path: str | Path, *, base_link: str = "base_link", end_link: str = "tool0"
+    ) -> None:
         self.urdf_path = Path(urdf_path)
         if not self.urdf_path.exists():
             raise FileNotFoundError(f"URDF not found: {self.urdf_path}")
@@ -130,19 +138,25 @@ class URDFFKChain:
     def forward(self, q: Sequence[float] | np.ndarray) -> np.ndarray:
         q_arr = np.asarray(q, dtype=np.float64).reshape(-1)
         if q_arr.shape[0] != self.dof:
-            raise ValueError(f"expected q with {self.dof} active joints {self.active_joint_names}, got shape {q_arr.shape}")
+            raise ValueError(
+                f"expected q with {self.dof} active joints {self.active_joint_names}, got shape {q_arr.shape}"
+            )
         T = np.eye(4, dtype=np.float64)
         q_i = 0
         for joint in self.chain:
             T = T @ _origin_matrix(joint.xyz, joint.rpy)
             if joint.joint_type in {"revolute", "continuous"}:
-                R = axis_angle_matrix(joint.axis, float(q_arr[q_i])); q_i += 1
-                M = np.eye(4, dtype=np.float64); M[:3, :3] = R
+                R = axis_angle_matrix(joint.axis, float(q_arr[q_i]))
+                q_i += 1
+                M = np.eye(4, dtype=np.float64)
+                M[:3, :3] = R
                 T = T @ M
             elif joint.joint_type == "prismatic":
                 axis = joint.axis.astype(np.float64)
                 axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
-                M = np.eye(4, dtype=np.float64); M[:3, 3] = axis * float(q_arr[q_i]); q_i += 1
+                M = np.eye(4, dtype=np.float64)
+                M[:3, 3] = axis * float(q_arr[q_i])
+                q_i += 1
                 T = T @ M
             elif joint.joint_type == "fixed":
                 pass
@@ -179,15 +193,23 @@ def parse_urdf_joints(path: str | Path) -> list[URDFJoint]:
             continue
         origin_el = elem.find("origin")
         axis_el = elem.find("axis")
-        joints.append(URDFJoint(
-            name=name,
-            joint_type=joint_type,
-            parent=parent_el.attrib["link"],
-            child=child_el.attrib["link"],
-            xyz=_parse_vec(origin_el.attrib.get("xyz") if origin_el is not None else None, (0.0, 0.0, 0.0)),
-            rpy=_parse_vec(origin_el.attrib.get("rpy") if origin_el is not None else None, (0.0, 0.0, 0.0)),
-            axis=_parse_vec(axis_el.attrib.get("xyz") if axis_el is not None else None, (0.0, 0.0, 0.0)),
-        ))
+        joints.append(
+            URDFJoint(
+                name=name,
+                joint_type=joint_type,
+                parent=parent_el.attrib["link"],
+                child=child_el.attrib["link"],
+                xyz=_parse_vec(
+                    origin_el.attrib.get("xyz") if origin_el is not None else None, (0.0, 0.0, 0.0)
+                ),
+                rpy=_parse_vec(
+                    origin_el.attrib.get("rpy") if origin_el is not None else None, (0.0, 0.0, 0.0)
+                ),
+                axis=_parse_vec(
+                    axis_el.attrib.get("xyz") if axis_el is not None else None, (0.0, 0.0, 0.0)
+                ),
+            )
+        )
     return joints
 
 

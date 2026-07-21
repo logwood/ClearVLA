@@ -30,7 +30,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from clearvla.experiments.residual_flow_lab.flow import ResidualBridgeConfig, endpoint_from_velocity, sample_residual_bridge
+from clearvla.experiments.residual_flow_lab.flow import (
+    ResidualBridgeConfig,
+    endpoint_from_velocity,
+    sample_residual_bridge,
+)
 from .rdt2_future_latent import CleanFutureLatentDynamics, sample_future_latent_flow
 from .rdt2_fm_reference import (
     Attention,
@@ -45,7 +49,9 @@ from collections import OrderedDict
 
 def _weighted_mse(pred: Tensor, target: Tensor, weights: Tensor) -> Tensor:
     if pred.shape != target.shape:
-        raise ValueError(f"pred and target must share shape, got {tuple(pred.shape)} vs {tuple(target.shape)}")
+        raise ValueError(
+            f"pred and target must share shape, got {tuple(pred.shape)} vs {tuple(target.shape)}"
+        )
     if weights.ndim != 1 or weights.shape[0] != pred.shape[1]:
         raise ValueError(f"weights must be [H={pred.shape[1]}], got {tuple(weights.shape)}")
     return ((pred - target).square() * weights.reshape(1, -1, 1)).mean()
@@ -77,21 +83,17 @@ def _conservative_relative_consequence_terms(
     prevents policy optimization from exploiting an imperfect world model.
     """
 
-    if not (
-        policy_error.shape == demo_error.shape == zero_error.shape == teacher_error.shape
-    ):
+    if not (policy_error.shape == demo_error.shape == zero_error.shape == teacher_error.shape):
         raise ValueError("closed-loop per-sample errors must share shape")
     if relative_margin < 0 or teacher_weight < 0 or regret_cap <= 0 or teacher_cap <= 0:
         raise ValueError("closed-loop relative settings are invalid")
     scale = _relative_error_scale(demo_error, zero_error)
     policy_minus_demo = policy_error - demo_error.detach()
     relative_regret = policy_minus_demo / scale
-    relative_hinge = F.relu(relative_regret - float(relative_margin)).clamp_max(
-        float(regret_cap)
+    relative_hinge = F.relu(relative_regret - float(relative_margin)).clamp_max(float(regret_cap))
+    teacher_relative = (teacher_error / zero_error.detach().clamp_min(1e-6)).clamp_max(
+        float(teacher_cap)
     )
-    teacher_relative = (
-        teacher_error / zero_error.detach().clamp_min(1e-6)
-    ).clamp_max(float(teacher_cap))
     conservative = relative_hinge + float(teacher_weight) * teacher_relative
     return {
         "scale": scale,
@@ -123,21 +125,15 @@ def _relative_world_confidence(
     scale = _relative_error_scale(demo_error, zero_error)
     dependency_gap = corrupted_error - demo_error
     dependency_relative_gap = dependency_gap / scale
-    dependency_confidence = (
-        dependency_relative_gap.detach() / float(dependency_margin)
-    ).clamp(0.0, 1.0)
-    world_relative_skill = (
-        (zero_error.detach() - demo_error.detach())
-        / zero_error.detach().clamp_min(1e-6)
-    ).clamp(0.0, 1.0)
-    world_skill_confidence = (
-        world_relative_skill / float(world_skill_margin)
-    ).clamp(0.0, 1.0)
-    joint_confidence = dependency_confidence * world_skill_confidence
-    joint_confidence = (
-        float(confidence_floor)
-        + (1.0 - float(confidence_floor)) * joint_confidence
+    dependency_confidence = (dependency_relative_gap.detach() / float(dependency_margin)).clamp(
+        0.0, 1.0
     )
+    world_relative_skill = (
+        (zero_error.detach() - demo_error.detach()) / zero_error.detach().clamp_min(1e-6)
+    ).clamp(0.0, 1.0)
+    world_skill_confidence = (world_relative_skill / float(world_skill_margin)).clamp(0.0, 1.0)
+    joint_confidence = dependency_confidence * world_skill_confidence
+    joint_confidence = float(confidence_floor) + (1.0 - float(confidence_floor)) * joint_confidence
     return {
         "dependency_gap": dependency_gap,
         "dependency_relative_gap": dependency_relative_gap,
@@ -153,7 +149,9 @@ def _resolve_gripper_index(action_dim: int, gripper_dim_index: int) -> int:
     if index < 0:
         index += int(action_dim)
     if not (0 <= index < int(action_dim)):
-        raise ValueError(f"gripper_dim_index={gripper_dim_index} is invalid for action_dim={action_dim}")
+        raise ValueError(
+            f"gripper_dim_index={gripper_dim_index} is invalid for action_dim={action_dim}"
+        )
     return index
 
 
@@ -174,7 +172,9 @@ def _gripper_transition_mask(
         raise ValueError(f"openness_gt must be [B,H], got {tuple(openness_gt.shape)}")
     if threshold < 0 or radius < 0:
         raise ValueError("gripper transition threshold and radius must be non-negative")
-    if past_last_openness is not None and tuple(past_last_openness.shape) != (openness_gt.shape[0],):
+    if past_last_openness is not None and tuple(past_last_openness.shape) != (
+        openness_gt.shape[0],
+    ):
         raise ValueError(f"past_last_openness must be [B], got {tuple(past_last_openness.shape)}")
     mask = torch.zeros_like(openness_gt, dtype=torch.bool)
     if past_last_openness is not None:
@@ -193,18 +193,24 @@ def _gripper_transition_mask(
 
 def _mean_weighted(values: Tensor, weights: Tensor) -> Tensor:
     if values.ndim != 2 or weights.ndim != 1 or values.shape[1] != weights.shape[0]:
-        raise ValueError(f"expected values [B,H] and weights [H], got {tuple(values.shape)} and {tuple(weights.shape)}")
+        raise ValueError(
+            f"expected values [B,H] and weights [H], got {tuple(values.shape)} and {tuple(weights.shape)}"
+        )
     expanded = weights.reshape(1, -1).to(device=values.device, dtype=values.dtype).expand_as(values)
     return (values * expanded).sum() / expanded.sum().clamp_min(1.0)
 
 
-def _arm_weighted_mse(pred: Tensor, target: Tensor, weights: Tensor, *, gripper_dim_index: int) -> Tensor:
+def _arm_weighted_mse(
+    pred: Tensor, target: Tensor, weights: Tensor, *, gripper_dim_index: int
+) -> Tensor:
     if pred.shape != target.shape:
-        raise ValueError(f"pred and target must share [B,H,D], got {tuple(pred.shape)} and {tuple(target.shape)}")
+        raise ValueError(
+            f"pred and target must share [B,H,D], got {tuple(pred.shape)} and {tuple(target.shape)}"
+        )
     if weights.ndim != 1 or weights.shape[0] != pred.shape[1]:
         raise ValueError(f"weights must be [H={pred.shape[1]}], got {tuple(weights.shape)}")
     error = (pred - target).square()
-    arm_parts = [error[..., :gripper_dim_index], error[..., gripper_dim_index + 1:]]
+    arm_parts = [error[..., :gripper_dim_index], error[..., gripper_dim_index + 1 :]]
     arm_error = torch.cat([part for part in arm_parts if part.shape[-1]], dim=-1)
     if arm_error.shape[-1] == 0:
         return error.new_zeros(())
@@ -231,12 +237,19 @@ def _bounded_gripper_loss(
     """
 
     if predicted_openness.shape != target_openness.shape or predicted_openness.ndim != 2:
-        raise ValueError(f"predicted and target openness must share [B,H], got {tuple(predicted_openness.shape)} and {tuple(target_openness.shape)}")
+        raise ValueError(
+            f"predicted and target openness must share [B,H], got {tuple(predicted_openness.shape)} and {tuple(target_openness.shape)}"
+        )
     if tuple(past_last_openness.shape) != (target_openness.shape[0],):
         raise ValueError(f"past_last_openness must be [B], got {tuple(past_last_openness.shape)}")
     if weights.ndim != 1 or weights.shape[0] != target_openness.shape[1]:
-        raise ValueError(f"weights must be [H={target_openness.shape[1]}], got {tuple(weights.shape)}")
-    if min(transition_boost, transition_aux_weight, transition_threshold, smooth_weight) < 0 or transition_radius < 0:
+        raise ValueError(
+            f"weights must be [H={target_openness.shape[1]}], got {tuple(weights.shape)}"
+        )
+    if (
+        min(transition_boost, transition_aux_weight, transition_threshold, smooth_weight) < 0
+        or transition_radius < 0
+    ):
         raise ValueError("bounded gripper loss settings must be non-negative")
     if not torch.all((predicted_openness >= 0) & (predicted_openness <= 1)):
         raise ValueError("predicted gripper openness must stay in [0, 1]")
@@ -249,7 +262,11 @@ def _bounded_gripper_loss(
         radius=transition_radius,
         past_last_openness=past_last_openness,
     )
-    base = weights.reshape(1, -1).to(device=state_error.device, dtype=state_error.dtype).expand_as(state_error)
+    base = (
+        weights.reshape(1, -1)
+        .to(device=state_error.device, dtype=state_error.dtype)
+        .expand_as(state_error)
+    )
     weighted = base * (1.0 + float(transition_boost) * mask.to(dtype=state_error.dtype))
     state_loss = (state_error * weighted).sum() / weighted.sum().clamp_min(1.0)
     transition_loss = state_error[mask].mean() if mask.any() else state_error.new_zeros(())
@@ -259,7 +276,11 @@ def _bounded_gripper_loss(
         pred_with_boundary[:, 1:] - pred_with_boundary[:, :-1],
         target_with_boundary[:, 1:] - target_with_boundary[:, :-1],
     )
-    loss = state_loss + float(transition_aux_weight) * transition_loss + float(smooth_weight) * delta_loss
+    loss = (
+        state_loss
+        + float(transition_aux_weight) * transition_loss
+        + float(smooth_weight) * delta_loss
+    )
     return {
         "loss": loss,
         "state_smooth_l1": state_loss,
@@ -285,7 +306,8 @@ class ArmOnlyProjection(nn.Module):
         return self.action_dim
 
     def zero_init(self) -> None:
-        nn.init.zeros_(self.arm.weight); nn.init.zeros_(self.arm.bias)
+        nn.init.zeros_(self.arm.weight)
+        nn.init.zeros_(self.arm.bias)
 
     def forward(self, x: Tensor) -> Tensor:
         arm = self.arm(x)
@@ -311,13 +333,18 @@ class BoundedContinuousGripperHead(nn.Module):
         self.norm = RMSNorm(hidden_size, eps=norm_eps)
         self.fc1 = nn.Linear(hidden_size, 2 * hidden_size)
         self.fc2 = nn.Linear(2 * hidden_size, 1)
-        nn.init.zeros_(self.fc2.weight); nn.init.zeros_(self.fc2.bias)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x: Tensor, base_openness: Tensor) -> Tensor:
         if x.ndim != 3 or tuple(base_openness.shape) != tuple(x.shape[:2]):
-            raise ValueError(f"expected x [B,H,D] and base_openness [B,H], got {tuple(x.shape)} and {tuple(base_openness.shape)}")
+            raise ValueError(
+                f"expected x [B,H,D] and base_openness [B,H], got {tuple(x.shape)} and {tuple(base_openness.shape)}"
+            )
         base = base_openness.clamp(0.0, 1.0)
-        delta = torch.tanh(self.fc2(F.silu(self.fc1(self.norm(x)))).squeeze(-1)) * self.residual_scale
+        delta = (
+            torch.tanh(self.fc2(F.silu(self.fc1(self.norm(x)))).squeeze(-1)) * self.residual_scale
+        )
         # Consume only the available distance to the corresponding bound. This
         # preserves the current value at initialization and supports every
         # continuous openness inside the calibrated interval.
@@ -340,8 +367,10 @@ class SplitActionProjection(nn.Module):
         return self.action_dim
 
     def zero_init(self) -> None:
-        nn.init.zeros_(self.arm.weight); nn.init.zeros_(self.arm.bias)
-        nn.init.zeros_(self.gripper.weight); nn.init.zeros_(self.gripper.bias)
+        nn.init.zeros_(self.arm.weight)
+        nn.init.zeros_(self.arm.bias)
+        nn.init.zeros_(self.gripper.weight)
+        nn.init.zeros_(self.gripper.bias)
 
     def forward(self, x: Tensor) -> Tensor:
         arm = self.arm(x)
@@ -351,12 +380,16 @@ class SplitActionProjection(nn.Module):
 
 
 class MainlineFinalLayer(nn.Module):
-    def __init__(self, action_dim: int, gripper_dim_index: int, *, hidden_size: int, norm_eps: float) -> None:
+    def __init__(
+        self, action_dim: int, gripper_dim_index: int, *, hidden_size: int, norm_eps: float
+    ) -> None:
         super().__init__()
         self.ffn_norm = RMSNorm(hidden_size, eps=norm_eps)
         self.fc1 = nn.Linear(hidden_size, 4 * hidden_size)
         self.fc2 = ArmOnlyProjection(4 * hidden_size, action_dim, gripper_dim_index)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(2 * hidden_size, 2 * hidden_size, bias=True))
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(2 * hidden_size, 2 * hidden_size, bias=True)
+        )
 
     def forward(self, x: Tensor, t: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(t).chunk(2, dim=1)
@@ -428,14 +461,21 @@ def _horizon_weights(
     device: torch.device | None = None,
 ) -> Tensor:
     if mode == "prefix":
-        return _prefix_weights(horizon, first=first, first4=first4, first8=first8, tail=tail, device=device)
+        return _prefix_weights(
+            horizon, first=first, first4=first4, first8=first8, tail=tail, device=device
+        )
     if mode == "uniform":
         if horizon <= 0:
             raise ValueError("horizon must be positive")
         return torch.ones((horizon,), device=device)
     if mode == "chunk-balanced":
         return _chunk_execution_weights(
-            horizon, first4=chunk_first4, middle=chunk_middle, late=chunk_late, tail=chunk_tail, device=device
+            horizon,
+            first4=chunk_first4,
+            middle=chunk_middle,
+            late=chunk_late,
+            tail=chunk_tail,
+            device=device,
         )
     raise ValueError(f"unknown horizon weight mode: {mode}")
 
@@ -456,11 +496,15 @@ def _arm_delta_matching_loss(
     """
 
     if pred_actions.shape != target_actions.shape or pred_actions.ndim != 3:
-        raise ValueError(f"pred and target actions must share [B,H,D], got {tuple(pred_actions.shape)} and {tuple(target_actions.shape)}")
+        raise ValueError(
+            f"pred and target actions must share [B,H,D], got {tuple(pred_actions.shape)} and {tuple(target_actions.shape)}"
+        )
     if tuple(past_last_action.shape) != (target_actions.shape[0], target_actions.shape[2]):
         raise ValueError(f"past_last_action must be [B,D], got {tuple(past_last_action.shape)}")
     if weights.ndim != 1 or weights.shape[0] != target_actions.shape[1]:
-        raise ValueError(f"weights must be [H={target_actions.shape[1]}], got {tuple(weights.shape)}")
+        raise ValueError(
+            f"weights must be [H={target_actions.shape[1]}], got {tuple(weights.shape)}"
+        )
     pred_with_boundary = torch.cat([past_last_action.unsqueeze(1), pred_actions], dim=1)
     target_with_boundary = torch.cat([past_last_action.unsqueeze(1), target_actions], dim=1)
     delta_error = F.smooth_l1_loss(
@@ -468,7 +512,7 @@ def _arm_delta_matching_loss(
         target_with_boundary[:, 1:] - target_with_boundary[:, :-1],
         reduction="none",
     )
-    arm_parts = [delta_error[..., :gripper_dim_index], delta_error[..., gripper_dim_index + 1:]]
+    arm_parts = [delta_error[..., :gripper_dim_index], delta_error[..., gripper_dim_index + 1 :]]
     arm_error = torch.cat([part for part in arm_parts if part.shape[-1]], dim=-1)
     if arm_error.shape[-1] == 0:
         return delta_error.new_zeros(())
@@ -508,11 +552,13 @@ def _masked_arm_endpoint_loss(
     gripper_dim_index: int,
 ) -> Tensor:
     if pred_actions.shape != target_actions.shape or pred_actions.ndim != 3:
-        raise ValueError(f"pred and target actions must share [B,H,D], got {tuple(pred_actions.shape)} and {tuple(target_actions.shape)}")
+        raise ValueError(
+            f"pred and target actions must share [B,H,D], got {tuple(pred_actions.shape)} and {tuple(target_actions.shape)}"
+        )
     if tuple(mask.shape) != tuple(target_actions.shape[:2]):
         raise ValueError(f"mask must be [B,H], got {tuple(mask.shape)}")
     error = F.smooth_l1_loss(pred_actions, target_actions, reduction="none")
-    arm_parts = [error[..., :gripper_dim_index], error[..., gripper_dim_index + 1:]]
+    arm_parts = [error[..., :gripper_dim_index], error[..., gripper_dim_index + 1 :]]
     arm_error = torch.cat([part for part in arm_parts if part.shape[-1]], dim=-1)
     if arm_error.shape[-1] == 0 or not mask.any():
         return error.new_zeros(())
@@ -729,7 +775,9 @@ class MainlineRDT2FMConfig:
         if self.visual_corrector not in {"none", "query-latent"}:
             raise ValueError("visual_corrector must be 'none' or 'query-latent'")
         if self.visual_corrector == "query-latent" and self.visual_corrector_cameras != 2:
-            raise ValueError("query-latent visual corrector currently requires exactly two cameras: top and wrist")
+            raise ValueError(
+                "query-latent visual corrector currently requires exactly two cameras: top and wrist"
+            )
         if self.visual_query_hidden_size % self.visual_query_heads != 0:
             raise ValueError("visual_query_hidden_size must be divisible by visual_query_heads")
         if self.visual_latent_max_scale < 0:
@@ -740,17 +788,24 @@ class MainlineRDT2FMConfig:
             raise ValueError("future_latent_variant must be none, world-only, or closed-loop")
         if self.future_latent_variant != "none":
             if self.future_latent_dim is None or self.future_latent_dim <= 0:
-                raise ValueError("future_latent_dim must be positive when future latent dynamics is enabled")
-            if not self.future_latent_offsets or any(int(offset) <= 0 for offset in self.future_latent_offsets):
+                raise ValueError(
+                    "future_latent_dim must be positive when future latent dynamics is enabled"
+                )
+            if not self.future_latent_offsets or any(
+                int(offset) <= 0 for offset in self.future_latent_offsets
+            ):
                 raise ValueError("future_latent_offsets must be non-empty positive integers")
             if tuple(sorted(set(self.future_latent_offsets))) != tuple(self.future_latent_offsets):
                 raise ValueError("future_latent_offsets must be strictly increasing and unique")
             if max(self.future_latent_offsets) > self.prediction_horizon:
                 raise ValueError("future_latent_offsets cannot exceed prediction_horizon")
             dims = (
-                self.future_latent_num_cameras, self.future_latent_grid_size,
-                self.future_latent_hidden_size, self.future_latent_depth,
-                self.future_latent_heads, self.future_latent_kv_heads,
+                self.future_latent_num_cameras,
+                self.future_latent_grid_size,
+                self.future_latent_hidden_size,
+                self.future_latent_depth,
+                self.future_latent_heads,
+                self.future_latent_kv_heads,
                 self.future_latent_modulation_rank,
                 self.future_action_semantic_dim,
                 self.future_action_semantic_hidden_size,
@@ -762,19 +817,26 @@ class MainlineRDT2FMConfig:
             if min(dims) <= 0:
                 raise ValueError("future latent dimensions must be positive")
             if self.future_latent_hidden_size % self.future_latent_heads != 0:
-                raise ValueError("future_latent_hidden_size must be divisible by future_latent_heads")
+                raise ValueError(
+                    "future_latent_hidden_size must be divisible by future_latent_heads"
+                )
             if self.future_latent_heads % self.future_latent_kv_heads != 0:
                 raise ValueError("future_latent_heads must be divisible by future_latent_kv_heads")
             if self.future_action_semantic_hidden_size % self.future_action_semantic_heads != 0:
-                raise ValueError("future_action_semantic_hidden_size must be divisible by semantic heads")
+                raise ValueError(
+                    "future_action_semantic_hidden_size must be divisible by semantic heads"
+                )
             if self.future_action_semantic_heads % self.future_action_semantic_kv_heads != 0:
                 raise ValueError("future semantic heads must be divisible by semantic kv heads")
             if self.action_dim != self.state_dim:
                 raise ValueError("action-semantic world model requires action_dim == state_dim")
             nonnegative = (
-                self.future_world_loss_weight, self.future_endpoint_loss_weight,
-                self.future_motion_weight, self.future_dependency_loss_weight,
-                self.future_align_loss_weight, self.future_inverse_loss_weight,
+                self.future_world_loss_weight,
+                self.future_endpoint_loss_weight,
+                self.future_motion_weight,
+                self.future_dependency_loss_weight,
+                self.future_align_loss_weight,
+                self.future_inverse_loss_weight,
                 self.future_current_action_baseline_loss_weight,
                 self.future_action_reconstruction_loss_weight,
                 self.future_embedding_variance_loss_weight,
@@ -783,21 +845,28 @@ class MainlineRDT2FMConfig:
                 self.future_contrastive_transition_boost,
                 self.future_contrastive_duplicate_threshold,
                 self.future_embedding_std_target,
-                self.future_pred_align_loss_weight, self.future_cycle_loss_weight,
-                self.future_align_margin, self.future_semantic_confidence_margin,
+                self.future_pred_align_loss_weight,
+                self.future_cycle_loss_weight,
+                self.future_align_margin,
+                self.future_semantic_confidence_margin,
                 self.future_inverse_transition_threshold,
-                self.future_semantic_warmup_steps, self.future_semantic_ramp_steps,
+                self.future_semantic_warmup_steps,
+                self.future_semantic_ramp_steps,
                 self.future_action_cross_scale,
-                self.future_dependency_relative_margin, self.future_action_time_power,
-                self.future_action_time_floor, self.future_policy_bridge_time_power,
-                self.future_policy_bridge_time_floor, self.future_consistency_confidence_floor,
+                self.future_dependency_relative_margin,
+                self.future_action_time_power,
+                self.future_action_time_floor,
+                self.future_policy_bridge_time_power,
+                self.future_policy_bridge_time_floor,
+                self.future_consistency_confidence_floor,
                 self.future_consistency_relative_margin,
                 self.future_consistency_regret_cap,
                 self.future_consistency_teacher_weight,
                 self.future_consistency_teacher_cap,
                 self.future_consistency_world_skill_margin,
                 self.future_consistency_loss_weight,
-                self.future_consistency_warmup_steps, self.future_consistency_ramp_steps,
+                self.future_consistency_warmup_steps,
+                self.future_consistency_ramp_steps,
             )
             if (
                 min(nonnegative) < 0
@@ -819,22 +888,51 @@ class MainlineRDT2FMConfig:
                 raise ValueError("future_latent_stat_eps must be positive")
         if self.horizon_weight_mode not in {"prefix", "uniform", "chunk-balanced"}:
             raise ValueError("horizon_weight_mode must be 'prefix', 'uniform', or 'chunk-balanced'")
-        if min(
-            self.first_position_weight, self.first4_position_weight, self.first8_position_weight, self.tail_position_weight,
-            self.chunk_first4_position_weight, self.chunk_middle_position_weight, self.chunk_late_position_weight, self.chunk_tail_position_weight,
-            self.prior_loss_weight, self.fast_exit_loss_weight, self.prefix_exit_loss_weight, self.full_flow_loss_weight,
-        ) <= 0:
+        if (
+            min(
+                self.first_position_weight,
+                self.first4_position_weight,
+                self.first8_position_weight,
+                self.tail_position_weight,
+                self.chunk_first4_position_weight,
+                self.chunk_middle_position_weight,
+                self.chunk_late_position_weight,
+                self.chunk_tail_position_weight,
+                self.prior_loss_weight,
+                self.fast_exit_loss_weight,
+                self.prefix_exit_loss_weight,
+                self.full_flow_loss_weight,
+            )
+            <= 0
+        ):
             raise ValueError("horizon and branch weights must be positive")
-        if self.arm_delta_loss_weight < 0 or self.align_phase_loss_weight < 0 or self.align_phase_pre_steps < 0:
+        if (
+            self.arm_delta_loss_weight < 0
+            or self.align_phase_loss_weight < 0
+            or self.align_phase_pre_steps < 0
+        ):
             raise ValueError("chunk-execution auxiliary loss settings must be non-negative")
         _resolve_gripper_index(self.action_dim, self.gripper_dim_index)
         if self.gripper_output_mode != "bounded-continuous":
             raise ValueError("active mainline requires gripper_output_mode='bounded-continuous'")
-        if self.gripper_open_raw == self.gripper_close_raw or self.gripper_open_normalized == self.gripper_close_normalized:
+        if (
+            self.gripper_open_raw == self.gripper_close_raw
+            or self.gripper_open_normalized == self.gripper_close_normalized
+        ):
             raise ValueError("gripper open and close calibration endpoints must be distinct")
         if min(self.arm_flow_loss_weight, self.gripper_state_loss_weight) <= 0:
             raise ValueError("arm_flow_loss_weight and gripper_state_loss_weight must be positive")
-        if min(self.gripper_openness_residual_scale, self.gripper_transition_boost, self.gripper_transition_aux_weight, self.gripper_transition_threshold, self.gripper_smooth_weight) < 0 or self.gripper_transition_radius < 0:
+        if (
+            min(
+                self.gripper_openness_residual_scale,
+                self.gripper_transition_boost,
+                self.gripper_transition_aux_weight,
+                self.gripper_transition_threshold,
+                self.gripper_smooth_weight,
+            )
+            < 0
+            or self.gripper_transition_radius < 0
+        ):
             raise ValueError("gripper bounded-continuous settings must be non-negative")
         probabilities = (
             self.bridge_clean_probability,
@@ -878,20 +976,30 @@ class HistoryTrajectoryPrior(nn.Module):
         self.context_proj = nn.Linear(h, config.hidden_size)
         self.residual_head.zero_init()
 
-    def forward(self, past_actions: Tensor, state_tokens: Tensor, physical_prior: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, past_actions: Tensor, state_tokens: Tensor, physical_prior: Tensor
+    ) -> tuple[Tensor, Tensor]:
         cfg = self.config
         if past_actions.ndim != 3 or past_actions.shape[-1] != cfg.action_dim:
-            raise ValueError(f"past_actions must be [B,H,{cfg.action_dim}], got {tuple(past_actions.shape)}")
+            raise ValueError(
+                f"past_actions must be [B,H,{cfg.action_dim}], got {tuple(past_actions.shape)}"
+            )
         if state_tokens.ndim != 2 or state_tokens.shape[-1] != cfg.state_dim:
-            raise ValueError(f"state_tokens must be [B,{cfg.state_dim}], got {tuple(state_tokens.shape)}")
+            raise ValueError(
+                f"state_tokens must be [B,{cfg.state_dim}], got {tuple(state_tokens.shape)}"
+            )
         if tuple(physical_prior.shape[1:]) != (cfg.prediction_horizon, cfg.action_dim):
-            raise ValueError(f"physical_prior must be [B,{cfg.prediction_horizon},{cfg.action_dim}]")
+            raise ValueError(
+                f"physical_prior must be [B,{cfg.prediction_horizon},{cfg.action_dim}]"
+            )
         history = past_actions
         if self.training and cfg.history_noise_std > 0:
             history = history + torch.randn_like(history) * cfg.history_noise_std
         state = self.state_in(state_tokens)
         encoded, hidden = self.encoder(self.action_in(history))
-        query = self.future_queries.unsqueeze(0).expand(history.shape[0], -1, -1) + state.unsqueeze(1)
+        query = self.future_queries.unsqueeze(0).expand(history.shape[0], -1, -1) + state.unsqueeze(
+            1
+        )
         attended, _ = self.cross(query, encoded, encoded, need_weights=False)
         query = self.norm(query + attended)
         delta = torch.tanh(self.residual_head(query)) * cfg.prior_residual_scale
@@ -925,7 +1033,9 @@ class StageModulationBank(nn.Module):
 
     def prepare(self, condition: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         if condition.ndim != 2 or condition.shape[1] != 3 * self.config.hidden_size:
-            raise ValueError(f"condition must be [B,{3 * self.config.hidden_size}], got {tuple(condition.shape)}")
+            raise ValueError(
+                f"condition must be [B,{3 * self.config.hidden_size}], got {tuple(condition.shape)}"
+            )
         latent = self.trunk(condition)
         return tuple(head(latent) for head in self.stage_heads)  # type: ignore[return-value]
 
@@ -954,7 +1064,12 @@ class MainlineRDTBlock(nn.Module):
         self.cond_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
         self.cross_attn = CrossAttention(core)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
-        self.ffn = FeedForward(config.hidden_size, 4 * config.hidden_size, config.multiple_of, config.ffn_dim_multiplier)
+        self.ffn = FeedForward(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.multiple_of,
+            config.ffn_dim_multiplier,
+        )
 
     @staticmethod
     def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
@@ -972,22 +1087,49 @@ class MainlineRDTBlock(nn.Module):
         use_cross_attention: bool = True,
     ) -> Tensor:
         if modulation.ndim != 2 or modulation.shape[1] != 9 * self.hidden_size:
-            raise ValueError(f"modulation must be [B,{9 * self.hidden_size}], got {tuple(modulation.shape)}")
-        shift_attn, scale_attn, gate_attn, shift_cross, scale_cross, gate_cross, shift_mlp, scale_mlp, gate_mlp = modulation.chunk(9, dim=1)
-        h = x + gate_attn.unsqueeze(1) * self.attn(self._modulate(self.attn_norm(x), shift_attn, scale_attn))
+            raise ValueError(
+                f"modulation must be [B,{9 * self.hidden_size}], got {tuple(modulation.shape)}"
+            )
+        (
+            shift_attn,
+            scale_attn,
+            gate_attn,
+            shift_cross,
+            scale_cross,
+            gate_cross,
+            shift_mlp,
+            scale_mlp,
+            gate_mlp,
+        ) = modulation.chunk(9, dim=1)
+        h = x + gate_attn.unsqueeze(1) * self.attn(
+            self._modulate(self.attn_norm(x), shift_attn, scale_attn)
+        )
         if use_cross_attention:
             if c is not None:
-                cross = self.cross_attn(self._modulate(self.cross_norm(h), shift_cross, scale_cross), c=self.cond_norm(c), mask=mask)
+                cross = self.cross_attn(
+                    self._modulate(self.cross_norm(h), shift_cross, scale_cross),
+                    c=self.cond_norm(c),
+                    mask=mask,
+                )
             else:
-                cross = self.cross_attn(self._modulate(self.cross_norm(h), shift_cross, scale_cross), ck=ck, cv=cv, mask=mask)
+                cross = self.cross_attn(
+                    self._modulate(self.cross_norm(h), shift_cross, scale_cross),
+                    ck=ck,
+                    cv=cv,
+                    mask=mask,
+                )
             h = h + gate_cross.unsqueeze(1) * cross
-        return h + gate_mlp.unsqueeze(1) * self.ffn(self._modulate(self.ffn_norm(h), shift_mlp, scale_mlp))
+        return h + gate_mlp.unsqueeze(1) * self.ffn(
+            self._modulate(self.ffn_norm(h), shift_mlp, scale_mlp)
+        )
 
 
 class ExitHead(nn.Module):
     """Lightweight native exit head for executable prefixes."""
 
-    def __init__(self, hidden_size: int, output_size: int, gripper_dim_index: int, norm_eps: float) -> None:
+    def __init__(
+        self, hidden_size: int, output_size: int, gripper_dim_index: int, norm_eps: float
+    ) -> None:
         super().__init__()
         self.norm = RMSNorm(hidden_size, eps=norm_eps)
         self.fc1 = nn.Linear(hidden_size, 2 * hidden_size)
@@ -1038,13 +1180,19 @@ class QueryLatentVisualCorrector(nn.Module):
         self.zero_init()
 
     def zero_init(self) -> None:
-        nn.init.zeros_(self.first_delta.weight); nn.init.zeros_(self.first_delta.bias)
-        nn.init.zeros_(self.prefix_delta.weight); nn.init.zeros_(self.prefix_delta.bias)
-        nn.init.zeros_(self.first_alpha.weight); nn.init.constant_(self.first_alpha.bias, self.init_logit)
-        nn.init.zeros_(self.prefix_alpha.weight); nn.init.constant_(self.prefix_alpha.bias, self.init_logit)
+        nn.init.zeros_(self.first_delta.weight)
+        nn.init.zeros_(self.first_delta.bias)
+        nn.init.zeros_(self.prefix_delta.weight)
+        nn.init.zeros_(self.prefix_delta.bias)
+        nn.init.zeros_(self.first_alpha.weight)
+        nn.init.constant_(self.first_alpha.bias, self.init_logit)
+        nn.init.zeros_(self.prefix_alpha.weight)
+        nn.init.constant_(self.prefix_alpha.bias, self.init_logit)
 
     @staticmethod
-    def _split_camera_tokens(dense_condition: Tensor, attention_mask: Tensor | None) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
+    def _split_camera_tokens(
+        dense_condition: Tensor, attention_mask: Tensor | None
+    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
         if dense_condition.ndim != 3:
             raise ValueError(f"dense_condition must be [B,L,D], got {tuple(dense_condition.shape)}")
         if dense_condition.shape[1] % 2:
@@ -1058,7 +1206,14 @@ class QueryLatentVisualCorrector(nn.Module):
         return top, wrist, attention_mask[:, :split], attention_mask[:, split:]
 
     @staticmethod
-    def _read(queries: Tensor, tokens: Tensor, mask: Tensor | None, *, attn: nn.MultiheadAttention, norm: nn.LayerNorm) -> Tensor:
+    def _read(
+        queries: Tensor,
+        tokens: Tensor,
+        mask: Tensor | None,
+        *,
+        attn: nn.MultiheadAttention,
+        norm: nn.LayerNorm,
+    ) -> Tensor:
         q = queries.expand(tokens.shape[0], -1, -1)
         key_padding_mask = None if mask is None else ~mask.to(dtype=torch.bool)
         out, _ = attn(q, tokens, tokens, key_padding_mask=key_padding_mask, need_weights=False)
@@ -1075,14 +1230,22 @@ class QueryLatentVisualCorrector(nn.Module):
     ) -> "VisualLatentCorrection":
         if state.shape != history.shape or state.shape != shallow_hidden.shape:
             raise ValueError("state, history and shallow_hidden must share [B,H]")
-        top_tokens, wrist_tokens, top_mask, wrist_mask = self._split_camera_tokens(dense_condition, attention_mask)
+        top_tokens, wrist_tokens, top_mask, wrist_mask = self._split_camera_tokens(
+            dense_condition, attention_mask
+        )
         top_tokens = self.dense_proj(top_tokens)
         wrist_tokens = self.dense_proj(wrist_tokens)
-        top_readout = self._read(self.top_queries, top_tokens, top_mask, attn=self.top_attn, norm=self.top_norm)
-        wrist_readout = self._read(self.wrist_queries, wrist_tokens, wrist_mask, attn=self.wrist_attn, norm=self.wrist_norm)
+        top_readout = self._read(
+            self.top_queries, top_tokens, top_mask, attn=self.top_attn, norm=self.top_norm
+        )
+        wrist_readout = self._read(
+            self.wrist_queries, wrist_tokens, wrist_mask, attn=self.wrist_attn, norm=self.wrist_norm
+        )
         top_hidden = self.top_to_hidden(top_readout)
         wrist_hidden = self.wrist_to_hidden(wrist_readout)
-        gate_context = torch.cat([state, history, shallow_hidden, top_hidden + wrist_hidden], dim=-1)
+        gate_context = torch.cat(
+            [state, history, shallow_hidden, top_hidden + wrist_hidden], dim=-1
+        )
         top_gate_raw = torch.sigmoid(self.top_gate(gate_context))
         top_gate = self.top_gate_floor + (1.0 - self.top_gate_floor) * top_gate_raw
         wrist_gate = torch.sigmoid(self.wrist_gate(gate_context))
@@ -1161,15 +1324,42 @@ class MainlineRDTCore(nn.Module):
         self.t_embedder = TimestepEmbedder(config.hidden_size, dtype=dtype)
         self.blocks = nn.ModuleList([MainlineRDTBlock(idx, config) for idx in range(config.depth)])
         self.modulation = StageModulationBank(config)
-        self.final_layer = MainlineFinalLayer(config.action_dim, config.gripper_dim_index, hidden_size=config.hidden_size, norm_eps=config.norm_eps)
-        self.first_exit_head = ExitHead(config.hidden_size, config.action_dim, config.gripper_dim_index, config.norm_eps)
-        self.prefix_exit_head = ExitHead(config.hidden_size, config.action_dim, config.gripper_dim_index, config.norm_eps)
-        self.first_gripper_head = BoundedContinuousGripperHead(config.hidden_size, config.norm_eps, residual_scale=config.gripper_openness_residual_scale)
-        self.prefix_gripper_head = BoundedContinuousGripperHead(config.hidden_size, config.norm_eps, residual_scale=config.gripper_openness_residual_scale)
-        self.full_gripper_head = BoundedContinuousGripperHead(config.hidden_size, config.norm_eps, residual_scale=config.gripper_openness_residual_scale)
+        self.final_layer = MainlineFinalLayer(
+            config.action_dim,
+            config.gripper_dim_index,
+            hidden_size=config.hidden_size,
+            norm_eps=config.norm_eps,
+        )
+        self.first_exit_head = ExitHead(
+            config.hidden_size, config.action_dim, config.gripper_dim_index, config.norm_eps
+        )
+        self.prefix_exit_head = ExitHead(
+            config.hidden_size, config.action_dim, config.gripper_dim_index, config.norm_eps
+        )
+        self.first_gripper_head = BoundedContinuousGripperHead(
+            config.hidden_size,
+            config.norm_eps,
+            residual_scale=config.gripper_openness_residual_scale,
+        )
+        self.prefix_gripper_head = BoundedContinuousGripperHead(
+            config.hidden_size,
+            config.norm_eps,
+            residual_scale=config.gripper_openness_residual_scale,
+        )
+        self.full_gripper_head = BoundedContinuousGripperHead(
+            config.hidden_size,
+            config.norm_eps,
+            residual_scale=config.gripper_openness_residual_scale,
+        )
         self.num_register_tokens = config.num_register_tokens
-        self.register_tokens = nn.Parameter(torch.randn(1, config.num_register_tokens, config.hidden_size))
-        self.x_pos_emb = nn.Parameter(torch.zeros(1, config.prediction_horizon + config.num_register_tokens, config.hidden_size))
+        self.register_tokens = nn.Parameter(
+            torch.randn(1, config.num_register_tokens, config.hidden_size)
+        )
+        self.x_pos_emb = nn.Parameter(
+            torch.zeros(
+                1, config.prediction_horizon + config.num_register_tokens, config.hidden_size
+            )
+        )
         self.state_pos_emb = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         # Optional modules must not perturb the shared mainline RNG stream.
         # This keeps same-seed none/query-latent experiments strictly paired.
@@ -1186,7 +1376,10 @@ class MainlineRDTCore(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        visual_modules = set(self.visual_corrector.modules()) if self.visual_corrector is not None else set()
+
+        visual_modules = (
+            set(self.visual_corrector.modules()) if self.visual_corrector is not None else set()
+        )
         for module in self.modules():
             if module is self or module in visual_modules:
                 continue
@@ -1196,21 +1389,32 @@ class MainlineRDTCore(nn.Module):
                 self.visual_corrector.apply(basic)
                 self.visual_corrector.zero_init()
         cfg = self.config
-        x_pos = get_multimodal_pos_embed(cfg.hidden_size, OrderedDict([("action", cfg.prediction_horizon), ("register", cfg.num_register_tokens)]))
+        x_pos = get_multimodal_pos_embed(
+            cfg.hidden_size,
+            OrderedDict(
+                [("action", cfg.prediction_horizon), ("register", cfg.num_register_tokens)]
+            ),
+        )
         state_pos = get_multimodal_pos_embed(cfg.hidden_size, OrderedDict([("state", 1)]))
         self.x_pos_emb.data.copy_(torch.from_numpy(x_pos).float().unsqueeze(0))
         self.state_pos_emb.data.copy_(torch.from_numpy(state_pos).float().unsqueeze(0))
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
         for head in self.modulation.stage_heads:
-            nn.init.zeros_(head.weight); nn.init.zeros_(head.bias)
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
         nn.init.zeros_(self.final_layer.adaLN_modulation[-1].weight)
         nn.init.zeros_(self.final_layer.adaLN_modulation[-1].bias)
         self.final_layer.fc2.zero_init()
         self.first_exit_head.fc2.zero_init()
         self.prefix_exit_head.fc2.zero_init()
-        for gripper_head in (self.first_gripper_head, self.prefix_gripper_head, self.full_gripper_head):
-            nn.init.zeros_(gripper_head.fc2.weight); nn.init.zeros_(gripper_head.fc2.bias)
+        for gripper_head in (
+            self.first_gripper_head,
+            self.prefix_gripper_head,
+            self.full_gripper_head,
+        ):
+            nn.init.zeros_(gripper_head.fc2.weight)
+            nn.init.zeros_(gripper_head.fc2.bias)
         self.to(dtype=dtype)
 
     def _condition_for_layer(
@@ -1244,7 +1448,9 @@ class MainlineRDTCore(nn.Module):
         if dense_condition is None and kv_cache is None:
             raise ValueError("mainline RDT2-FM requires dense condition tokens or KV cache")
         if tuple(base_gripper_openness.shape) != (x.shape[0], cfg.prediction_horizon):
-            raise ValueError(f"base_gripper_openness must be [B,{cfg.prediction_horizon}], got {tuple(base_gripper_openness.shape)}")
+            raise ValueError(
+                f"base_gripper_openness must be [B,{cfg.prediction_horizon}], got {tuple(base_gripper_openness.shape)}"
+            )
         time = self.t_embedder(timesteps)
         if time.shape[0] == 1:
             time = time.expand(x.shape[0], -1)
@@ -1261,7 +1467,9 @@ class MainlineRDTCore(nn.Module):
             use_cross = layer_idx >= cfg.visual_start_layer
             c = ck = cv = None
             if use_cross:
-                c, ck, cv = self._condition_for_layer(layer_idx, dense_condition=dense_condition, kv_cache=kv_cache)
+                c, ck, cv = self._condition_for_layer(
+                    layer_idx, dense_condition=dense_condition, kv_cache=kv_cache
+                )
             x = block(
                 x,
                 self.modulation.for_layer(prepared_modulation, layer_idx),
@@ -1278,7 +1486,9 @@ class MainlineRDTCore(nn.Module):
                     visual_latent = VisualLatentCorrection.zeros(shallow_hidden)
                 else:
                     if dense_condition is None:
-                        raise ValueError("query-latent visual corrector requires dense condition tokens, not KV-only conditioning")
+                        raise ValueError(
+                            "query-latent visual corrector requires dense condition tokens, not KV-only conditioning"
+                        )
                     visual_latent = self.visual_corrector(
                         state=state,
                         history=history_condition,
@@ -1295,10 +1505,14 @@ class MainlineRDTCore(nn.Module):
                 if visual_latent is None:
                     raise AssertionError("fast visual latent state missing")
                 prefix_hidden = x[:, : cfg.prefix_length].clone()
-                decay = torch.linspace(1.0, 0.25, cfg.prefix_length, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
+                decay = torch.linspace(
+                    1.0, 0.25, cfg.prefix_length, device=x.device, dtype=x.dtype
+                ).reshape(1, -1, 1)
                 prefix_hidden = prefix_hidden + decay * visual_latent.prefix.unsqueeze(1)
                 prefix = self.prefix_exit_head(prefix_hidden)
-                prefix_gripper = self.prefix_gripper_head(x[:, : cfg.prefix_length], base_gripper_openness[:, : cfg.prefix_length])
+                prefix_gripper = self.prefix_gripper_head(
+                    x[:, : cfg.prefix_length], base_gripper_openness[:, : cfg.prefix_length]
+                )
                 if stop_after == "prefix":
                     break
         if fast is None:
@@ -1307,8 +1521,8 @@ class MainlineRDTCore(nn.Module):
             raise AssertionError("prefix exit was not reached")
         if stop_after == "full":
             final_modulation = torch.cat([time, state], dim=-1)
-            full_hidden = x[:, :-cfg.num_register_tokens]
-            full = self.final_layer(x, final_modulation)[:, :-cfg.num_register_tokens]
+            full_hidden = x[:, : -cfg.num_register_tokens]
+            full = self.final_layer(x, final_modulation)[:, : -cfg.num_register_tokens]
             full_gripper = self.full_gripper_head(full_hidden, base_gripper_openness)
         if visual_latent is None:
             raise AssertionError("fast visual latent state missing")
@@ -1336,12 +1550,19 @@ class MainlineRDTCore(nn.Module):
 class MainlineRDT2FM(nn.Module):
     """Consolidated history-anchored residual-flow action expert."""
 
-    def __init__(self, config: MainlineRDT2FMConfig = MainlineRDT2FMConfig(), *, dtype: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self,
+        config: MainlineRDT2FMConfig = MainlineRDT2FMConfig(),
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         super().__init__()
         config.validate()
         self.config = config
         self.model = MainlineRDTCore(config, dtype=dtype)
-        self.lang_adaptor = self._build_adapter(config.lang_adaptor, config.lang_token_dim, config.hidden_size)
+        self.lang_adaptor = self._build_adapter(
+            config.lang_adaptor, config.lang_token_dim, config.hidden_size
+        )
         self.act_adaptor = self._build_adapter("mlp3x_silu", config.action_dim, config.hidden_size)
         self.state_adaptor = self._build_adapter("mlp3x_silu", config.state_dim, config.hidden_size)
         self.history_prior = HistoryTrajectoryPrior(config)
@@ -1406,7 +1627,9 @@ class MainlineRDT2FM(nn.Module):
         self.to(dtype=dtype)
 
     @staticmethod
-    def _build_adapter(kind: str | None, in_features: int | None, out_features: int) -> nn.Module | None:
+    def _build_adapter(
+        kind: str | None, in_features: int | None, out_features: int
+    ) -> nn.Module | None:
         if kind is None:
             return None
         if in_features is None:
@@ -1441,7 +1664,9 @@ class MainlineRDT2FM(nn.Module):
             raise RuntimeError("future latent dynamics is disabled")
         return self.future_dynamics.compress_future(future_tokens)
 
-    def future_residual_target(self, current_compressed: Tensor, future_compressed: Tensor) -> Tensor:
+    def future_residual_target(
+        self, current_compressed: Tensor, future_compressed: Tensor
+    ) -> Tensor:
         if self.future_dynamics is None:
             raise RuntimeError("future latent dynamics is disabled")
         return self.future_dynamics.residual_target(current_compressed, future_compressed)
@@ -1455,7 +1680,11 @@ class MainlineRDT2FM(nn.Module):
         return [] if self.future_dynamics is None else list(self.future_dynamics.parameters())
 
     def policy_parameters(self):
-        future_ids = set() if self.future_dynamics is None else {id(p) for p in self.future_dynamics.parameters()}
+        future_ids = (
+            set()
+            if self.future_dynamics is None
+            else {id(p) for p in self.future_dynamics.parameters()}
+        )
         return [p for p in self.parameters() if id(p) not in future_ids]
 
     def future_shared_parameters(self):
@@ -1487,7 +1716,9 @@ class MainlineRDT2FM(nn.Module):
             return 1.0
         return min(1.0, max(0.0, (global_step - warmup + 1) / float(ramp)))
 
-    def predict_prior(self, *, state_tokens: Tensor, past_actions: Tensor, physical_prior: Tensor) -> tuple[Tensor, Tensor]:
+    def predict_prior(
+        self, *, state_tokens: Tensor, past_actions: Tensor, physical_prior: Tensor
+    ) -> tuple[Tensor, Tensor]:
         if state_tokens.ndim != 2:
             raise ValueError("state_tokens must be [B,D]")
         return self.history_prior(past_actions, state_tokens, physical_prior)
@@ -1503,7 +1734,9 @@ class MainlineRDT2FM(nn.Module):
 
     def _openness_to_gripper(self, openness: Tensor) -> Tensor:
         cfg = self.config
-        return float(cfg.gripper_open_normalized) + openness.clamp(0.0, 1.0) * float(cfg.gripper_close_normalized - cfg.gripper_open_normalized)
+        return float(cfg.gripper_open_normalized) + openness.clamp(0.0, 1.0) * float(
+            cfg.gripper_close_normalized - cfg.gripper_open_normalized
+        )
 
     def _replace_gripper(self, action: Tensor, openness: Tensor, *, length: int) -> Tensor:
         if tuple(openness.shape) != (action.shape[0], length):
@@ -1528,7 +1761,9 @@ class MainlineRDT2FM(nn.Module):
         history_context: Tensor | None = None,
     ) -> tuple[MainlineVelocityOutput, Tensor]:
         if learned_prior is None or history_context is None:
-            learned_prior, history_context = self.predict_prior(state_tokens=state_tokens, past_actions=past_actions, physical_prior=physical_prior)
+            learned_prior, history_context = self.predict_prior(
+                state_tokens=state_tokens, past_actions=past_actions, physical_prior=physical_prior
+            )
         state = self.state_adaptor(state_tokens.unsqueeze(1))
         # The bounded gripper head must not receive target-derived bridge
         # residuals during training: inference starts from zero gripper
@@ -1545,7 +1780,9 @@ class MainlineRDT2FM(nn.Module):
             dense_condition=self._adapt_dense(dense_tokens),
             kv_cache=kv_cache,
             attention_mask=attention_mask,
-            base_gripper_openness=self._gripper_to_openness(physical_prior[..., self.gripper_dim_index]),
+            base_gripper_openness=self._gripper_to_openness(
+                physical_prior[..., self.gripper_dim_index]
+            ),
             stop_after=stop_after,
         )
         return output, learned_prior
@@ -1564,7 +1801,9 @@ class MainlineRDT2FM(nn.Module):
         global_step: int = 0,
         future_flow_generator: torch.Generator | None = None,
     ) -> dict[str, Tensor]:
-        learned_prior, history_context = self.predict_prior(state_tokens=state_tokens, past_actions=past_actions, physical_prior=physical_prior)
+        learned_prior, history_context = self.predict_prior(
+            state_tokens=state_tokens, past_actions=past_actions, physical_prior=physical_prior
+        )
         bridge = sample_residual_bridge(learned_prior.detach(), action_gt, self.bridge)
         output, _ = self._velocity(
             state_tokens=state_tokens,
@@ -1583,12 +1822,28 @@ class MainlineRDT2FM(nn.Module):
             raise AssertionError("full output missing")
         weights = self.position_weights.to(device=action_gt.device, dtype=action_gt.dtype)
         grip_idx = self.gripper_dim_index
-        prior_arm_mse = _arm_weighted_mse(learned_prior, action_gt, weights, gripper_dim_index=grip_idx)
-        full_arm_mse = _arm_weighted_mse(output.full, bridge.target_velocity, weights, gripper_dim_index=grip_idx)
-        first_arm_mse = _arm_weighted_mse(output.fast_first, bridge.target_velocity[:, :1], weights[:1], gripper_dim_index=grip_idx)
+        prior_arm_mse = _arm_weighted_mse(
+            learned_prior, action_gt, weights, gripper_dim_index=grip_idx
+        )
+        full_arm_mse = _arm_weighted_mse(
+            output.full, bridge.target_velocity, weights, gripper_dim_index=grip_idx
+        )
+        first_arm_mse = _arm_weighted_mse(
+            output.fast_first,
+            bridge.target_velocity[:, :1],
+            weights[:1],
+            gripper_dim_index=grip_idx,
+        )
         prefix_len = self.config.prefix_length
-        prefix_arm_mse = _arm_weighted_mse(output.prefix, bridge.target_velocity[:, :prefix_len], weights[:prefix_len], gripper_dim_index=grip_idx)
-        predicted_residual_endpoint = endpoint_from_velocity(bridge.residual_state, output.full, bridge.time)
+        prefix_arm_mse = _arm_weighted_mse(
+            output.prefix,
+            bridge.target_velocity[:, :prefix_len],
+            weights[:prefix_len],
+            gripper_dim_index=grip_idx,
+        )
+        predicted_residual_endpoint = endpoint_from_velocity(
+            bridge.residual_state, output.full, bridge.time
+        )
         predicted_action_endpoint = learned_prior + predicted_residual_endpoint
         arm_delta_loss = _arm_delta_matching_loss(
             predicted_action_endpoint,
@@ -1609,9 +1864,18 @@ class MainlineRDT2FM(nn.Module):
             transition_radius=self.config.gripper_transition_radius,
             smooth_weight=self.config.gripper_smooth_weight,
         )
-        full_grip = _bounded_gripper_loss(output.full_gripper_openness, target_openness, weights, **grip_kwargs)
-        first_grip = _bounded_gripper_loss(output.fast_gripper_openness, target_openness[:, :1], weights[:1], **grip_kwargs)
-        prefix_grip = _bounded_gripper_loss(output.prefix_gripper_openness, target_openness[:, :prefix_len], weights[:prefix_len], **grip_kwargs)
+        full_grip = _bounded_gripper_loss(
+            output.full_gripper_openness, target_openness, weights, **grip_kwargs
+        )
+        first_grip = _bounded_gripper_loss(
+            output.fast_gripper_openness, target_openness[:, :1], weights[:1], **grip_kwargs
+        )
+        prefix_grip = _bounded_gripper_loss(
+            output.prefix_gripper_openness,
+            target_openness[:, :prefix_len],
+            weights[:prefix_len],
+            **grip_kwargs,
+        )
         close_align_mask = _close_pre_mask(
             target_openness.clamp(0.0, 1.0),
             threshold=self.config.gripper_transition_threshold,
@@ -1624,8 +1888,13 @@ class MainlineRDT2FM(nn.Module):
             close_align_mask,
             gripper_dim_index=grip_idx,
         )
+
         def branch(arm: Tensor, grip: Tensor) -> Tensor:
-            return (self.config.arm_flow_loss_weight * arm + self.config.gripper_state_loss_weight * grip) / (self.config.arm_flow_loss_weight + self.config.gripper_state_loss_weight)
+            return (
+                self.config.arm_flow_loss_weight * arm
+                + self.config.gripper_state_loss_weight * grip
+            ) / (self.config.arm_flow_loss_weight + self.config.gripper_state_loss_weight)
+
         policy_total = (
             self.config.prior_loss_weight * prior_arm_mse
             + self.config.fast_exit_loss_weight * branch(first_arm_mse, first_grip["loss"])
@@ -1646,9 +1915,13 @@ class MainlineRDT2FM(nn.Module):
         future_metrics: dict[str, Tensor] = {}
         if self.future_latent_enabled:
             if future_latent_tokens is None:
-                raise ValueError("future_latent_tokens are required when future latent dynamics is enabled")
+                raise ValueError(
+                    "future_latent_tokens are required when future latent dynamics is enabled"
+                )
             if dense_tokens is None or kv_cache is not None:
-                raise ValueError("future latent dynamics requires dense current-visual conditioning")
+                raise ValueError(
+                    "future latent dynamics requires dense current-visual conditioning"
+                )
             future_module = self.future_dynamics
             if future_module is None:
                 raise AssertionError("future dynamics module missing")
@@ -1700,9 +1973,7 @@ class MainlineRDT2FM(nn.Module):
             # The same decoder must recover the action summary from both sides
             # of the shared semantic space.  This anchors the action branch and
             # removes the constant-vector solution that defeated cosine pairing.
-            action_reconstruction_prediction = future_module.inverse_prediction(
-                action_embedding
-            )
+            action_reconstruction_prediction = future_module.inverse_prediction(action_embedding)
             action_reconstruction_loss, action_reconstruction_metrics = future_module.inverse_loss(
                 action_reconstruction_prediction,
                 semantic_targets,
@@ -1729,12 +2000,17 @@ class MainlineRDT2FM(nn.Module):
                 self.config.prediction_horizon,
                 self.config.action_dim,
             )
-            state_negative = state_tokens.detach()[:, None].expand(
-                -1, negative_count, -1
-            ).reshape(batch_size * negative_count, self.config.state_dim)
-            past_negative = past_actions[:, -1].detach()[:, None].expand(
-                -1, negative_count, -1
-            ).reshape(batch_size * negative_count, self.config.action_dim)
+            state_negative = (
+                state_tokens.detach()[:, None]
+                .expand(-1, negative_count, -1)
+                .reshape(batch_size * negative_count, self.config.state_dim)
+            )
+            past_negative = (
+                past_actions[:, -1]
+                .detach()[:, None]
+                .expand(-1, negative_count, -1)
+                .reshape(batch_size * negative_count, self.config.action_dim)
+            )
             negative_embedding = future_module.encode_action_semantics(
                 negative_flat,
                 past_last_action=past_negative,
@@ -1760,8 +2036,7 @@ class MainlineRDT2FM(nn.Module):
             # negatives.  Masking them avoids punishing semantically equivalent
             # demonstrations while preserving all genuinely different pairs.
             action_pair_difference = (
-                action_gt.detach().float()[:, None]
-                - action_gt.detach().float()[None, :]
+                action_gt.detach().float()[:, None] - action_gt.detach().float()[None, :]
             ).square()
             duplicate_mask = torch.stack(
                 [
@@ -1771,9 +2046,11 @@ class MainlineRDT2FM(nn.Module):
                 ],
                 dim=0,
             )
-            transition_weight = 1.0 + float(
-                self.config.future_contrastive_transition_boost
-            ) * semantic_targets["transition"].float()
+            transition_weight = (
+                1.0
+                + float(self.config.future_contrastive_transition_boost)
+                * semantic_targets["transition"].float()
+            )
             align_terms = future_module.contrastive_alignment_terms(
                 action_embedding,
                 future_change_embedding,
@@ -1824,8 +2101,7 @@ class MainlineRDT2FM(nn.Module):
                 self.config.future_align_loss_weight * align_loss
                 + self.config.future_inverse_loss_weight * inverse_loss
                 + self.config.future_current_action_baseline_loss_weight * current_only_loss
-                + self.config.future_action_reconstruction_loss_weight
-                * action_reconstruction_loss
+                + self.config.future_action_reconstruction_loss_weight * action_reconstruction_loss
                 + self.config.future_embedding_variance_loss_weight
                 * embedding_regularization["variance_loss"]
                 + self.config.future_embedding_covariance_loss_weight
@@ -1841,48 +2117,67 @@ class MainlineRDT2FM(nn.Module):
                 / max(float(self.config.future_semantic_confidence_margin), 1e-6)
             ).clamp(0.0, 1.0)
             confidence_floor = float(self.config.future_consistency_confidence_floor)
-            semantic_confidence = confidence_floor + (1.0 - confidence_floor) * semantic_confidence_raw
+            semantic_confidence = (
+                confidence_floor + (1.0 - confidence_floor) * semantic_confidence_raw
+            )
             future_metrics.update(inverse_metrics)
             future_metrics.update(action_reconstruction_metrics)
             future_metrics.update(current_only_metrics)
             future_metrics.update(cycle_metrics)
-            future_metrics.update({
-                "future_semantic_objective": semantic_objective,
-                "future_semantic_scale": policy_total.new_tensor(float(future_semantic_scale)),
-                "future_align_loss": align_loss,
-                "future_align_symmetric_nce_loss": align_terms["symmetric_nce_loss"],
-                "future_align_action_to_future_nce_loss": align_terms["action_to_future_nce_loss"],
-                "future_align_future_to_action_nce_loss": align_terms["future_to_action_nce_loss"],
-                "future_align_structured_nce_loss": align_terms["structured_nce_loss"],
-                "future_align_positive_cosine": align_terms["positive_cosine"],
-                "future_align_negative_cosine": align_terms["negative_cosine"],
-                "future_align_batch_negative_cosine": align_terms["batch_negative_cosine"],
-                "future_align_structured_negative_cosine": align_terms["structured_negative_cosine"],
-                "future_align_margin": align_terms["margin"],
-                "future_align_action_to_future_top1": align_terms["action_to_future_top1"],
-                "future_align_future_to_action_top1": align_terms["future_to_action_top1"],
-                "future_align_structured_valid_fraction": align_terms["structured_valid_fraction"],
-                "future_align_hardest_negative_index": align_terms["hardest_negative_index"],
-                "future_embedding_variance_loss": embedding_regularization["variance_loss"],
-                "future_embedding_covariance_loss": embedding_regularization["covariance_loss"],
-                "future_action_embedding_std": embedding_regularization["action_std"],
-                "future_change_embedding_std": embedding_regularization["future_std"],
-                "future_pred_align_loss": predicted_align_loss,
-                "future_pred_align_action_to_future_top1": predicted_align_terms["action_to_future_top1"],
-                "future_pred_align_future_to_action_top1": predicted_align_terms["future_to_action_top1"],
-                "future_change_embedding_rms": future_change_embedding.square().mean().sqrt(),
-                "future_pred_change_embedding_rms": predicted_future_embedding.square().mean().sqrt(),
-                "future_semantic_confidence_mean": semantic_confidence.mean(),
-                "future_inverse_future_gain": current_only_loss.detach() - inverse_loss.detach(),
-                "future_align_pair_loss": policy_total.new_zeros(()),
-                "future_align_rank_loss": policy_total.new_zeros(()),
-                "future_align_rank_active_fraction": policy_total.new_zeros(()),
-            })
+            future_metrics.update(
+                {
+                    "future_semantic_objective": semantic_objective,
+                    "future_semantic_scale": policy_total.new_tensor(float(future_semantic_scale)),
+                    "future_align_loss": align_loss,
+                    "future_align_symmetric_nce_loss": align_terms["symmetric_nce_loss"],
+                    "future_align_action_to_future_nce_loss": align_terms[
+                        "action_to_future_nce_loss"
+                    ],
+                    "future_align_future_to_action_nce_loss": align_terms[
+                        "future_to_action_nce_loss"
+                    ],
+                    "future_align_structured_nce_loss": align_terms["structured_nce_loss"],
+                    "future_align_positive_cosine": align_terms["positive_cosine"],
+                    "future_align_negative_cosine": align_terms["negative_cosine"],
+                    "future_align_batch_negative_cosine": align_terms["batch_negative_cosine"],
+                    "future_align_structured_negative_cosine": align_terms[
+                        "structured_negative_cosine"
+                    ],
+                    "future_align_margin": align_terms["margin"],
+                    "future_align_action_to_future_top1": align_terms["action_to_future_top1"],
+                    "future_align_future_to_action_top1": align_terms["future_to_action_top1"],
+                    "future_align_structured_valid_fraction": align_terms[
+                        "structured_valid_fraction"
+                    ],
+                    "future_align_hardest_negative_index": align_terms["hardest_negative_index"],
+                    "future_embedding_variance_loss": embedding_regularization["variance_loss"],
+                    "future_embedding_covariance_loss": embedding_regularization["covariance_loss"],
+                    "future_action_embedding_std": embedding_regularization["action_std"],
+                    "future_change_embedding_std": embedding_regularization["future_std"],
+                    "future_pred_align_loss": predicted_align_loss,
+                    "future_pred_align_action_to_future_top1": predicted_align_terms[
+                        "action_to_future_top1"
+                    ],
+                    "future_pred_align_future_to_action_top1": predicted_align_terms[
+                        "future_to_action_top1"
+                    ],
+                    "future_change_embedding_rms": future_change_embedding.square().mean().sqrt(),
+                    "future_pred_change_embedding_rms": predicted_future_embedding.square()
+                    .mean()
+                    .sqrt(),
+                    "future_semantic_confidence_mean": semantic_confidence.mean(),
+                    "future_inverse_future_gain": current_only_loss.detach()
+                    - inverse_loss.detach(),
+                    "future_align_pair_loss": policy_total.new_zeros(()),
+                    "future_align_rank_loss": policy_total.new_zeros(()),
+                    "future_align_rank_active_fraction": policy_total.new_zeros(()),
+                }
+            )
             all_negative_cosine = align_terms["all_negative_cosine"]
             for negative_idx, negative_name in enumerate(semantic_negative_names):
-                future_metrics[
-                    f"future_align_negative_{negative_name}_cosine"
-                ] = all_negative_cosine[:, negative_idx].mean()
+                future_metrics[f"future_align_negative_{negative_name}_cosine"] = (
+                    all_negative_cosine[:, negative_idx].mean()
+                )
 
             # Retain the old flow-error ranking only as a low-weight auxiliary.
             corrupted_action, corruption_mode = future_module.corrupt_actions(
@@ -1914,9 +2209,7 @@ class MainlineRDT2FM(nn.Module):
                 demo_error=correct_per_sample,
                 corrupted_error=corrupted_per_sample,
                 zero_error=zero_velocity_per_sample,
-                dependency_margin=max(
-                    float(self.config.future_dependency_relative_margin), 1e-6
-                ),
+                dependency_margin=max(float(self.config.future_dependency_relative_margin), 1e-6),
                 world_skill_margin=max(
                     float(self.config.future_consistency_world_skill_margin), 1e-6
                 ),
@@ -1924,26 +2217,33 @@ class MainlineRDT2FM(nn.Module):
             )
             dependency_gap = confidence_terms["dependency_gap"]
             dependency_relative_gap = confidence_terms["dependency_relative_gap"]
-            raw_action_time_weights = (1.0 - future_flow.time.float()).pow(
-                float(self.config.future_action_time_power)
-            ).clamp_min(float(self.config.future_action_time_floor))
-            action_time_weights = raw_action_time_weights / raw_action_time_weights.mean().clamp_min(1e-6)
+            raw_action_time_weights = (
+                (1.0 - future_flow.time.float())
+                .pow(float(self.config.future_action_time_power))
+                .clamp_min(float(self.config.future_action_time_floor))
+            )
+            action_time_weights = (
+                raw_action_time_weights / raw_action_time_weights.mean().clamp_min(1e-6)
+            )
             dependency_loss = (
                 F.relu(
-                    float(self.config.future_dependency_relative_margin)
-                    - dependency_relative_gap
+                    float(self.config.future_dependency_relative_margin) - dependency_relative_gap
                 )
                 * action_time_weights.to(dtype=dependency_relative_gap.dtype)
             ).mean()
             action_delta_rms = (
-                action_gt.detach().float() - corrupted_action.float()
-            ).square().mean(dim=(1, 2)).sqrt()
+                (action_gt.detach().float() - corrupted_action.float())
+                .square()
+                .mean(dim=(1, 2))
+                .sqrt()
+            )
             future_delta_rms = (
-                world_velocity.float() - corrupted_velocity.float()
-            ).square().mean(dim=(1, 2, 3, 4)).sqrt()
-            action_jacobian_proxy = (
-                future_delta_rms / action_delta_rms.clamp_min(1e-6)
-            ).mean()
+                (world_velocity.float() - corrupted_velocity.float())
+                .square()
+                .mean(dim=(1, 2, 3, 4))
+                .sqrt()
+            )
+            action_jacobian_proxy = (future_delta_rms / action_delta_rms.clamp_min(1e-6)).mean()
             future_world_objective = (
                 future_metrics["future_latent_flow_mse"]
                 + self.config.future_endpoint_loss_weight
@@ -1951,20 +2251,22 @@ class MainlineRDT2FM(nn.Module):
                 + self.config.future_dependency_loss_weight * dependency_loss
                 + semantic_objective
             )
-            future_metrics.update({
-                "future_action_dependency_loss": dependency_loss,
-                "future_action_dependency_gap": dependency_gap.mean(),
-                "future_action_dependency_relative_gap": dependency_relative_gap.mean(),
-                "future_action_corrupted_flow_mse": corrupted_per_sample.mean(),
-                "future_world_demo_flow_mse": correct_per_sample.mean(),
-                "future_world_zero_velocity_flow_mse": zero_velocity_per_sample.mean(),
-                "future_world_relative_skill": confidence_terms["world_relative_skill"].mean(),
-                "future_action_corruption_mode": corruption_mode,
-                "future_action_time_weight_raw_mean": raw_action_time_weights.mean(),
-                "future_action_time_weight_raw_max": raw_action_time_weights.max(),
-                # Finite-difference/secant proxy; logged as a practical Jacobian diagnostic.
-                "future_action_jacobian_rms": action_jacobian_proxy,
-            })
+            future_metrics.update(
+                {
+                    "future_action_dependency_loss": dependency_loss,
+                    "future_action_dependency_gap": dependency_gap.mean(),
+                    "future_action_dependency_relative_gap": dependency_relative_gap.mean(),
+                    "future_action_corrupted_flow_mse": corrupted_per_sample.mean(),
+                    "future_world_demo_flow_mse": correct_per_sample.mean(),
+                    "future_world_zero_velocity_flow_mse": zero_velocity_per_sample.mean(),
+                    "future_world_relative_skill": confidence_terms["world_relative_skill"].mean(),
+                    "future_action_corruption_mode": corruption_mode,
+                    "future_action_time_weight_raw_mean": raw_action_time_weights.mean(),
+                    "future_action_time_weight_raw_max": raw_action_time_weights.max(),
+                    # Finite-difference/secant proxy; logged as a practical Jacobian diagnostic.
+                    "future_action_jacobian_rms": action_jacobian_proxy,
+                }
+            )
 
             # Closed-loop transfer is allowed only when flow skill, old
             # dependency, and the new action/future semantic margin agree.
@@ -2012,9 +2314,11 @@ class MainlineRDT2FM(nn.Module):
                 relative_hinge = consequence_terms["relative_hinge"]
                 teacher_relative = consequence_terms["teacher_relative"]
                 conservative_per_sample = consequence_terms["conservative"]
-                policy_bridge_raw = (1.0 - bridge.time.float()).pow(
-                    float(self.config.future_policy_bridge_time_power)
-                ).clamp_min(float(self.config.future_policy_bridge_time_floor))
+                policy_bridge_raw = (
+                    (1.0 - bridge.time.float())
+                    .pow(float(self.config.future_policy_bridge_time_power))
+                    .clamp_min(float(self.config.future_policy_bridge_time_floor))
+                )
                 policy_bridge_weights = policy_bridge_raw / policy_bridge_raw.mean().clamp_min(1e-6)
                 dependency_confidence = confidence_terms["dependency_confidence"]
                 world_relative_skill = confidence_terms["world_relative_skill"]
@@ -2022,57 +2326,59 @@ class MainlineRDT2FM(nn.Module):
                 flow_joint_confidence = confidence_terms["joint_confidence"]
                 joint_confidence = flow_joint_confidence * semantic_confidence
                 consequence_weight = (
-                    action_time_weights
-                    * policy_bridge_weights
-                    * joint_confidence
+                    action_time_weights * policy_bridge_weights * joint_confidence
                 ).clamp_max(float(self.config.future_consistency_weight_cap))
                 consequence_weight = consequence_weight.to(dtype=conservative_per_sample.dtype)
-                future_consistency_objective = (
-                    conservative_per_sample * consequence_weight
-                ).mean()
-                future_metrics.update({
-                    "future_policy_flow_mse": (
-                        policy_error_per_sample * consequence_weight
-                    ).mean(),
-                    "future_policy_demo_flow_mse": (
-                        demo_error_per_sample * consequence_weight
-                    ).mean(),
-                    "future_policy_minus_demo_flow_gap": (
-                        policy_minus_demo * consequence_weight
-                    ).mean(),
-                    "future_policy_relative_regret": (
-                        relative_regret * consequence_weight
-                    ).mean(),
-                    "future_policy_relative_hinge": (
-                        relative_hinge * consequence_weight
-                    ).mean(),
-                    "future_policy_teacher_consistency_mse": (
-                        teacher_per_sample * consequence_weight
-                    ).mean(),
-                    "future_policy_teacher_consistency_relative": (
-                        teacher_relative * consequence_weight
-                    ).mean(),
-                    "future_policy_velocity_rms": policy_velocity.square().mean().sqrt(),
-                    "future_policy_bridge_time_weight_raw_mean": policy_bridge_raw.mean(),
-                    "future_policy_bridge_time_weight_raw_max": policy_bridge_raw.max(),
-                    "future_policy_dependency_confidence_mean": dependency_confidence.mean(),
-                    "future_policy_world_skill_confidence_mean": world_skill_confidence.mean(),
-                    "future_policy_semantic_confidence_mean": semantic_confidence.mean(),
-                    "future_policy_flow_joint_confidence_mean": flow_joint_confidence.mean(),
-                    "future_policy_joint_confidence_mean": joint_confidence.mean(),
-                    "future_policy_dependency_positive_fraction": (
-                        dependency_relative_gap.detach() > 0
-                    ).float().mean(),
-                    "future_policy_world_skill_positive_fraction": (
-                        world_relative_skill > 0
-                    ).float().mean(),
-                    "future_policy_relative_hinge_active_fraction": (
-                        relative_regret.detach()
-                        > float(self.config.future_consistency_relative_margin)
-                    ).float().mean(),
-                    "future_policy_consequence_weight_mean": consequence_weight.mean(),
-                    "future_policy_consequence_weight_max": consequence_weight.max(),
-                })
+                future_consistency_objective = (conservative_per_sample * consequence_weight).mean()
+                future_metrics.update(
+                    {
+                        "future_policy_flow_mse": (
+                            policy_error_per_sample * consequence_weight
+                        ).mean(),
+                        "future_policy_demo_flow_mse": (
+                            demo_error_per_sample * consequence_weight
+                        ).mean(),
+                        "future_policy_minus_demo_flow_gap": (
+                            policy_minus_demo * consequence_weight
+                        ).mean(),
+                        "future_policy_relative_regret": (
+                            relative_regret * consequence_weight
+                        ).mean(),
+                        "future_policy_relative_hinge": (
+                            relative_hinge * consequence_weight
+                        ).mean(),
+                        "future_policy_teacher_consistency_mse": (
+                            teacher_per_sample * consequence_weight
+                        ).mean(),
+                        "future_policy_teacher_consistency_relative": (
+                            teacher_relative * consequence_weight
+                        ).mean(),
+                        "future_policy_velocity_rms": policy_velocity.square().mean().sqrt(),
+                        "future_policy_bridge_time_weight_raw_mean": policy_bridge_raw.mean(),
+                        "future_policy_bridge_time_weight_raw_max": policy_bridge_raw.max(),
+                        "future_policy_dependency_confidence_mean": dependency_confidence.mean(),
+                        "future_policy_world_skill_confidence_mean": world_skill_confidence.mean(),
+                        "future_policy_semantic_confidence_mean": semantic_confidence.mean(),
+                        "future_policy_flow_joint_confidence_mean": flow_joint_confidence.mean(),
+                        "future_policy_joint_confidence_mean": joint_confidence.mean(),
+                        "future_policy_dependency_positive_fraction": (
+                            dependency_relative_gap.detach() > 0
+                        )
+                        .float()
+                        .mean(),
+                        "future_policy_world_skill_positive_fraction": (world_relative_skill > 0)
+                        .float()
+                        .mean(),
+                        "future_policy_relative_hinge_active_fraction": (
+                            relative_regret.detach()
+                            > float(self.config.future_consistency_relative_margin)
+                        )
+                        .float()
+                        .mean(),
+                        "future_policy_consequence_weight_mean": consequence_weight.mean(),
+                        "future_policy_consequence_weight_max": consequence_weight.max(),
+                    }
+                )
 
         future_objective = (
             self.config.future_world_loss_weight * future_world_objective
@@ -2087,14 +2393,18 @@ class MainlineRDT2FM(nn.Module):
             "future_latent_objective": future_objective,
             "future_latent_weighted_objective": future_objective.detach(),
             "future_world_objective": future_world_objective,
-            "future_world_weighted_objective": (self.config.future_world_loss_weight * future_world_objective).detach(),
+            "future_world_weighted_objective": (
+                self.config.future_world_loss_weight * future_world_objective
+            ).detach(),
             "future_policy_consistency_objective": future_consistency_objective,
             "future_policy_consistency_weighted_objective": (
                 self.config.future_consistency_loss_weight
                 * float(future_consistency_scale)
                 * future_consistency_objective
             ).detach(),
-            "future_policy_consistency_scale": policy_total.new_tensor(float(future_consistency_scale)),
+            "future_policy_consistency_scale": policy_total.new_tensor(
+                float(future_consistency_scale)
+            ),
             "future_semantic_scale": policy_total.new_tensor(float(future_semantic_scale)),
             "future_flow_train_objective": future_flow_train_objective,
             "future_align_train_objective": future_align_train_objective,
@@ -2121,8 +2431,28 @@ class MainlineRDT2FM(nn.Module):
             "fast_visual_top_gate_mean": output.fast_visual_top_gate_mean.detach(),
             "fast_visual_wrist_gate_mean": output.fast_visual_wrist_gate_mean.detach(),
             "fast_visual_to_hidden_ratio": output.fast_visual_to_hidden_ratio.detach(),
-            "target_arm_residual_rms": torch.cat([bridge.target_residual[..., :grip_idx], bridge.target_residual[..., grip_idx + 1:]], dim=-1).detach().square().mean().sqrt(),
-            "source_arm_residual_rms": torch.cat([bridge.source_residual[..., :grip_idx], bridge.source_residual[..., grip_idx + 1:]], dim=-1).detach().square().mean().sqrt(),
+            "target_arm_residual_rms": torch.cat(
+                [
+                    bridge.target_residual[..., :grip_idx],
+                    bridge.target_residual[..., grip_idx + 1 :],
+                ],
+                dim=-1,
+            )
+            .detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "source_arm_residual_rms": torch.cat(
+                [
+                    bridge.source_residual[..., :grip_idx],
+                    bridge.source_residual[..., grip_idx + 1 :],
+                ],
+                dim=-1,
+            )
+            .detach()
+            .square()
+            .mean()
+            .sqrt(),
             **{key: value.detach() for key, value in future_metrics.items()},
         }
 
@@ -2141,10 +2471,14 @@ class MainlineRDT2FM(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         if steps <= 0:
             raise ValueError("steps must be positive")
-        learned_prior, history_context = self.predict_prior(state_tokens=state_tokens, past_actions=past_actions, physical_prior=physical_prior)
+        learned_prior, history_context = self.predict_prior(
+            state_tokens=state_tokens, past_actions=past_actions, physical_prior=physical_prior
+        )
         residual = torch.zeros_like(learned_prior)
         dt = 1.0 / steps
-        time = torch.zeros((state_tokens.shape[0],), device=state_tokens.device, dtype=state_tokens.dtype)
+        time = torch.zeros(
+            (state_tokens.shape[0],), device=state_tokens.device, dtype=state_tokens.dtype
+        )
         if mode == "fast":
             length = 1
         elif mode == "prefix":
@@ -2168,14 +2502,26 @@ class MainlineRDT2FM(nn.Module):
                 learned_prior=learned_prior,
                 history_context=history_context,
             )
-            velocity = output.fast_first if mode == "fast" else output.prefix if mode == "prefix" else output.full
+            velocity = (
+                output.fast_first
+                if mode == "fast"
+                else output.prefix
+                if mode == "prefix"
+                else output.full
+            )
             if velocity is None:
                 raise AssertionError("requested progressive velocity missing")
             residual[:, :length] = residual[:, :length] + velocity * dt
             time = time + dt
         if output is None:
             raise AssertionError("integration output missing")
-        openness = output.fast_gripper_openness if mode == "fast" else output.prefix_gripper_openness if mode == "prefix" else output.full_gripper_openness
+        openness = (
+            output.fast_gripper_openness
+            if mode == "fast"
+            else output.prefix_gripper_openness
+            if mode == "prefix"
+            else output.full_gripper_openness
+        )
         if openness is None:
             raise AssertionError("requested bounded gripper output missing")
         chunk = self._replace_gripper(learned_prior + residual, openness, length=length)
@@ -2208,7 +2554,11 @@ class MainlineRDT2FM(nn.Module):
             payload = torch.load(source, map_location="cpu", weights_only=False)
         else:
             payload = source
-        if isinstance(payload, dict) and "module" in payload and isinstance(payload["module"], dict):
+        if (
+            isinstance(payload, dict)
+            and "module" in payload
+            and isinstance(payload["module"], dict)
+        ):
             payload = payload["module"]
         if isinstance(payload, dict) and "model" in payload and isinstance(payload["model"], dict):
             payload = payload["model"]
@@ -2216,7 +2566,9 @@ class MainlineRDT2FM(nn.Module):
             raise TypeError("checkpoint must resolve to a state_dict")
         return {str(key).removeprefix("module."): value for key, value in payload.items()}
 
-    def load_compatible_reference_state_dict(self, source: str | Path | dict[str, Tensor]) -> dict[str, Any]:
+    def load_compatible_reference_state_dict(
+        self, source: str | Path | dict[str, Tensor]
+    ) -> dict[str, Any]:
         """Reuse only tensors whose names and shapes remain meaningful.
 
         Attention, FFN, timestep, positional, adaptor and final-head tensors can
@@ -2233,7 +2585,10 @@ class MainlineRDT2FM(nn.Module):
                 unexpected.append(key)
                 continue
             if tuple(value.shape) != tuple(target_state[key].shape):
-                skipped_shape[key] = {"source": list(value.shape), "target": list(target_state[key].shape)}
+                skipped_shape[key] = {
+                    "source": list(value.shape),
+                    "target": list(target_state[key].shape),
+                }
                 continue
             matched[key] = value
         self.load_state_dict(matched, strict=False)
@@ -2248,10 +2603,22 @@ class MainlineRDT2FM(nn.Module):
 
 
 __all__ = [
-    "MainlineRDT2FM", "MainlineRDT2FMConfig", "HistoryTrajectoryPrior",
-    "SplitActionProjection", "ArmOnlyProjection", "BoundedContinuousGripperHead",
-    "QueryLatentVisualCorrector", "VisualLatentCorrection", "FutureLatentDynamicsHead",
-    "_prefix_weights", "_chunk_execution_weights", "_horizon_weights",
-    "_gripper_transition_mask", "_arm_weighted_mse", "_arm_delta_matching_loss",
-    "_close_pre_mask", "_masked_arm_endpoint_loss", "_bounded_gripper_loss",
+    "MainlineRDT2FM",
+    "MainlineRDT2FMConfig",
+    "HistoryTrajectoryPrior",
+    "SplitActionProjection",
+    "ArmOnlyProjection",
+    "BoundedContinuousGripperHead",
+    "QueryLatentVisualCorrector",
+    "VisualLatentCorrection",
+    "FutureLatentDynamicsHead",
+    "_prefix_weights",
+    "_chunk_execution_weights",
+    "_horizon_weights",
+    "_gripper_transition_mask",
+    "_arm_weighted_mse",
+    "_arm_delta_matching_loss",
+    "_close_pre_mask",
+    "_masked_arm_endpoint_loss",
+    "_bounded_gripper_loss",
 ]

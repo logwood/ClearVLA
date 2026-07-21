@@ -55,11 +55,15 @@ class TemporalWorldActionDiT(nn.Module):
         self.rollout_codec = RolloutTargetCodec(config)
         self.seed = UnifiedCanvasSeed(config)
         self.time = TimeEmbedding(h)
-        self.content_mod = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
+        self.content_mod = nn.Sequential(
+            nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h)
+        )
         nn.init.normal_(self.content_mod[-1].weight, mean=0.0, std=2e-2)
         nn.init.zeros_(self.content_mod[-1].bias)
         self.content_mod_scale = nn.Parameter(torch.tensor(0.10))
-        self.blocks = nn.ModuleList([TemporalDynamicsBoundDiTBlock(config) for _ in range(config.depth)])
+        self.blocks = nn.ModuleList(
+            [TemporalDynamicsBoundDiTBlock(config) for _ in range(config.depth)]
+        )
         self.final_norm = nn.LayerNorm(h)
         self.direct_physical_head = CanvasPhysicalVelocityHead(config)
         self.rollout_residual_head = RolloutActionResidualHead(config)
@@ -79,7 +83,9 @@ class TemporalWorldActionDiT(nn.Module):
         proposal_keep: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if proposal_keep is None:
-            proposal_keep = torch.ones(noisy_physical.shape[0], device=noisy_physical.device, dtype=noisy_physical.dtype)
+            proposal_keep = torch.ones(
+                noisy_physical.shape[0], device=noisy_physical.device, dtype=noisy_physical.dtype
+            )
         visual_memory = self.visual_memory(visual)
         rollout_init = self.rollout_codec.rollout_init(visual)
         canvas, slices = self.seed(
@@ -97,7 +103,9 @@ class TemporalWorldActionDiT(nn.Module):
         time_norm_rows: list[Tensor] = []
         for block in self.blocks:
             summary = torch.cat([canvas.mean(dim=1), visual_memory.mean(dim=1)], dim=-1)
-            content_delta = self.content_mod(summary) * self.content_mod_scale.to(device=canvas.device, dtype=canvas.dtype)
+            content_delta = self.content_mod(summary) * self.content_mod_scale.to(
+                device=canvas.device, dtype=canvas.dtype
+            )
             mod_emb = time_emb + content_delta
             content_norm_rows.append(content_delta.float().norm(dim=-1).mean())
             time_norm_rows.append(time_emb.float().norm(dim=-1).mean())
@@ -109,22 +117,31 @@ class TemporalWorldActionDiT(nn.Module):
         registers = canvas[:, slices["registers"]]
         trajectory_pooled = self.direct_physical_head.pooled(trajectory)
         direct_velocity = self.direct_physical_head(trajectory)
-        context_kv = torch.cat([
-            canvas[:, slices["state"]],
-            canvas[:, slices["state_history"]],
-            canvas[:, slices["executed"]],
-            canvas[:, slices["proposal"]],
-        ], dim=1)
+        context_kv = torch.cat(
+            [
+                canvas[:, slices["state"]],
+                canvas[:, slices["state_history"]],
+                canvas[:, slices["executed"]],
+                canvas[:, slices["proposal"]],
+            ],
+            dim=1,
+        )
         dynamics = self.controlled_dynamics(
             rollout_init.to(device=canvas.device, dtype=canvas.dtype),
             context_kv,
             action_tokens=trajectory,
         )
         controlled_delta = dynamics["rollout_delta_pred"]
-        rollout_residual_velocity, rollout_alpha = self.rollout_residual_head(trajectory_pooled, controlled_delta)
+        rollout_residual_velocity, rollout_alpha = self.rollout_residual_head(
+            trajectory_pooled, controlled_delta
+        )
         pred_physical_velocity = direct_velocity + rollout_residual_velocity
         rollout_effect_pred = dynamics["rollout_effect_pred"]
-        event_context = controlled_delta[:, : self.config.action_horizon] if controlled_delta.shape[1] >= self.config.action_horizon else trajectory_pooled
+        event_context = (
+            controlled_delta[:, : self.config.action_horizon]
+            if controlled_delta.shape[1] >= self.config.action_horizon
+            else trajectory_pooled
+        )
         return {
             "canvas_tokens": canvas,
             "trajectory_tokens": trajectory,
@@ -149,14 +166,33 @@ class TemporalWorldActionDiT(nn.Module):
             "action_effect_pred": rollout_effect_pred,
             "event_logits": self.event_probe(event_context),
             "motion_logits": self.motion_probe(trajectory_pooled.detach()).squeeze(-1),
-            "transition_latent": controlled_delta.mean(dim=1, keepdim=True).expand(-1, self.config.action_horizon, -1),
-            "gate_self": torch.stack([row["gate_self"] for row in gate_rows]).mean() if gate_rows else torch.zeros((), device=canvas.device),
-            "gate_visual": torch.stack([row["gate_visual"] for row in gate_rows]).mean() if gate_rows else torch.zeros((), device=canvas.device),
-            "gate_rollout": torch.stack([row["gate_rollout"] for row in gate_rows]).mean() if gate_rows else torch.zeros((), device=canvas.device),
-            "gate_ffn": torch.stack([row["gate_ffn"] for row in gate_rows]).mean() if gate_rows else torch.zeros((), device=canvas.device),
-            "mod_content_norm": torch.stack(content_norm_rows).mean() if content_norm_rows else torch.zeros((), device=canvas.device),
-            "mod_time_norm": torch.stack(time_norm_rows).mean() if time_norm_rows else torch.zeros((), device=canvas.device),
-            "mod_content_to_time": (torch.stack(content_norm_rows).mean() / torch.stack(time_norm_rows).mean().clamp_min(1e-6)) if content_norm_rows and time_norm_rows else torch.zeros((), device=canvas.device),
+            "transition_latent": controlled_delta.mean(dim=1, keepdim=True).expand(
+                -1, self.config.action_horizon, -1
+            ),
+            "gate_self": torch.stack([row["gate_self"] for row in gate_rows]).mean()
+            if gate_rows
+            else torch.zeros((), device=canvas.device),
+            "gate_visual": torch.stack([row["gate_visual"] for row in gate_rows]).mean()
+            if gate_rows
+            else torch.zeros((), device=canvas.device),
+            "gate_rollout": torch.stack([row["gate_rollout"] for row in gate_rows]).mean()
+            if gate_rows
+            else torch.zeros((), device=canvas.device),
+            "gate_ffn": torch.stack([row["gate_ffn"] for row in gate_rows]).mean()
+            if gate_rows
+            else torch.zeros((), device=canvas.device),
+            "mod_content_norm": torch.stack(content_norm_rows).mean()
+            if content_norm_rows
+            else torch.zeros((), device=canvas.device),
+            "mod_time_norm": torch.stack(time_norm_rows).mean()
+            if time_norm_rows
+            else torch.zeros((), device=canvas.device),
+            "mod_content_to_time": (
+                torch.stack(content_norm_rows).mean()
+                / torch.stack(time_norm_rows).mean().clamp_min(1e-6)
+            )
+            if content_norm_rows and time_norm_rows
+            else torch.zeros((), device=canvas.device),
         }
 
     @torch.no_grad()
@@ -183,12 +219,25 @@ class V38PolicySystem(nn.Module):
         proposal_tokens: Tensor,
         proposal_keep: Tensor,
     ) -> dict[str, Tensor]:
-        return self.planner(noisy_physical, time, visual, state_history, state, executed_history, proposal_tokens, proposal_keep)
+        return self.planner(
+            noisy_physical,
+            time,
+            visual,
+            state_history,
+            state,
+            executed_history,
+            proposal_tokens,
+            proposal_keep,
+        )
 
     @torch.no_grad()
     def build_rollout_target_pack(self, visual: Tensor, target_visual: Tensor) -> dict[str, Tensor]:
         target = self.planner.target_rollout_effect(visual, target_visual).detach()
-        return {"rollout_effect_target": target, "future_latent_target": target, "action_effect_target": target}
+        return {
+            "rollout_effect_target": target,
+            "future_latent_target": target,
+            "action_effect_target": target,
+        }
 
     def flow_training_forward(
         self,
@@ -209,15 +258,36 @@ class V38PolicySystem(nn.Module):
         proposal = self.proposal(executed_history)
         codec_state = state if action_state is None else action_state
         target_physical = self.codec.encode(target_action, codec_state)
-        noise = self.codec.sample_noise(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
-        t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
+        noise = self.codec.sample_noise(
+            target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype
+        )
+        t = torch.rand(
+            target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype
+        )
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
         target_physical_velocity = noise - target_physical
-        drop = self.policy_config.proposal_dropout if proposal_dropout is None else float(proposal_dropout)
-        keep = (torch.rand(target_physical.shape[0], device=target_physical.device) >= drop).to(target_physical.dtype)
+        drop = (
+            self.policy_config.proposal_dropout
+            if proposal_dropout is None
+            else float(proposal_dropout)
+        )
+        keep = (torch.rand(target_physical.shape[0], device=target_physical.device) >= drop).to(
+            target_physical.dtype
+        )
 
-        action_policy = self._policy_forward(noisy_physical, t, visual, state_history, state, executed_history, proposal["tokens"].detach(), keep)
-        clean_physical_estimate = noisy_physical - t[:, None, None] * action_policy["pred_physical_velocity"]
+        action_policy = self._policy_forward(
+            noisy_physical,
+            t,
+            visual,
+            state_history,
+            state,
+            executed_history,
+            proposal["tokens"].detach(),
+            keep,
+        )
+        clean_physical_estimate = (
+            noisy_physical - t[:, None, None] * action_policy["pred_physical_velocity"]
+        )
         decoded_action = self.codec.decode(clean_physical_estimate, codec_state)
         out = {
             "pred_physical_velocity": action_policy["pred_physical_velocity"],
@@ -253,14 +323,18 @@ class V38PolicySystem(nn.Module):
             "mod_content_norm": action_policy["mod_content_norm"],
             "mod_time_norm": action_policy["mod_time_norm"],
             "mod_content_to_time": action_policy["mod_content_to_time"],
-            "future_conditioned_action_loss": torch.zeros((), device=target_physical.device, dtype=target_physical.dtype),
+            "future_conditioned_action_loss": torch.zeros(
+                (), device=target_physical.device, dtype=target_physical.dtype
+            ),
         }
 
         pack = rollout_target_pack
         if pack is None and target_visual is not None:
             pack = self.build_rollout_target_pack(visual, target_visual)
         if pack is not None:
-            target = pack["rollout_effect_target"].to(device=target_physical.device, dtype=action_policy["rollout_effect_pred"].dtype)
+            target = pack["rollout_effect_target"].to(
+                device=target_physical.device, dtype=action_policy["rollout_effect_pred"].dtype
+            )
             out["rollout_effect_target"] = target
             out["future_latent_target"] = target
             out["future_latent_velocity_target"] = target
@@ -270,20 +344,44 @@ class V38PolicySystem(nn.Module):
                 hold_action = codec_state[:, None].expand_as(target_action)
                 hold_physical = self.codec.encode(hold_action, codec_state)
                 hold_noisy = (1 - t[:, None, None]) * hold_physical + t[:, None, None] * noise
-                hold_policy = self._policy_forward(hold_noisy.detach(), t.detach(), visual, state_history, state, executed_history, proposal["tokens"].detach(), keep)
+                hold_policy = self._policy_forward(
+                    hold_noisy.detach(),
+                    t.detach(),
+                    visual,
+                    state_history,
+                    state,
+                    executed_history,
+                    proposal["tokens"].detach(),
+                    keep,
+                )
                 out["rollout_effect_pred_hold_action"] = hold_policy["rollout_effect_pred"]
                 out["rollout_delta_pred_hold_action"] = hold_policy["rollout_delta_pred"]
-                out["rollout_base_effect_pred_hold_action"] = hold_policy["rollout_base_effect_pred"]
+                out["rollout_base_effect_pred_hold_action"] = hold_policy[
+                    "rollout_base_effect_pred"
+                ]
                 if target_physical.shape[0] > 1:
-                    perm = torch.arange(target_physical.shape[0] - 1, -1, -1, device=target_physical.device)
+                    perm = torch.arange(
+                        target_physical.shape[0] - 1, -1, -1, device=target_physical.device
+                    )
                     shuffle_physical = target_physical[perm]
                 else:
                     shuffle_physical = target_physical
                 shuffle_noisy = (1 - t[:, None, None]) * shuffle_physical + t[:, None, None] * noise
-                shuffle_policy = self._policy_forward(shuffle_noisy.detach(), t.detach(), visual, state_history, state, executed_history, proposal["tokens"].detach(), keep)
+                shuffle_policy = self._policy_forward(
+                    shuffle_noisy.detach(),
+                    t.detach(),
+                    visual,
+                    state_history,
+                    state,
+                    executed_history,
+                    proposal["tokens"].detach(),
+                    keep,
+                )
                 out["rollout_effect_pred_shuffle_action"] = shuffle_policy["rollout_effect_pred"]
                 out["rollout_delta_pred_shuffle_action"] = shuffle_policy["rollout_delta_pred"]
-                out["rollout_base_effect_pred_shuffle_action"] = shuffle_policy["rollout_base_effect_pred"]
+                out["rollout_base_effect_pred_shuffle_action"] = shuffle_policy[
+                    "rollout_base_effect_pred"
+                ]
         return out
 
     @torch.no_grad()
@@ -306,20 +404,42 @@ class V38PolicySystem(nn.Module):
         else:
             x = noise.clone()
             if x.shape[-1] == self.policy_config.action_dim:
-                x = self.codec.encode(x.to(device=visual.device, dtype=visual.dtype), state.to(device=visual.device, dtype=visual.dtype))
+                x = self.codec.encode(
+                    x.to(device=visual.device, dtype=visual.dtype),
+                    state.to(device=visual.device, dtype=visual.dtype),
+                )
             elif x.shape[-1] != self.policy_config.physical_action_dim:
                 raise ValueError("noise must have last dim action_dim or physical_action_dim")
-        keep = torch.full((visual.shape[0],), 1.0 if use_proposal else 0.0, device=visual.device, dtype=visual.dtype)
+        keep = torch.full(
+            (visual.shape[0],),
+            1.0 if use_proposal else 0.0,
+            device=visual.device,
+            dtype=visual.dtype,
+        )
         last_out: dict[str, Tensor] | None = None
         for index in range(steps, 0, -1):
-            t = torch.full((visual.shape[0],), float(index) / float(steps), device=visual.device, dtype=visual.dtype)
-            last_out = self._policy_forward(x, t, visual, state_history, state, executed_history, proposal["tokens"], keep)
+            t = torch.full(
+                (visual.shape[0],),
+                float(index) / float(steps),
+                device=visual.device,
+                dtype=visual.dtype,
+            )
+            last_out = self._policy_forward(
+                x, t, visual, state_history, state, executed_history, proposal["tokens"], keep
+            )
             x = x - last_out["pred_physical_velocity"] / float(steps)
         action = self.codec.decode(x, state)
         if return_event_logits:
             zero_t = torch.zeros((visual.shape[0],), device=visual.device, dtype=visual.dtype)
-            event = self._policy_forward(x, zero_t, visual, state_history, state, executed_history, proposal["tokens"], keep)
-            return {"action": action, "physical_action": x, "event_logits": event["event_logits"], "motion_logits": event["motion_logits"]}
+            event = self._policy_forward(
+                x, zero_t, visual, state_history, state, executed_history, proposal["tokens"], keep
+            )
+            return {
+                "action": action,
+                "physical_action": x,
+                "event_logits": event["event_logits"],
+                "motion_logits": event["motion_logits"],
+            }
         return action
 
     def parameter_report(self) -> dict[str, int]:

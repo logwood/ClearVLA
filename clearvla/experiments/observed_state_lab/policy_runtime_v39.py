@@ -1,8 +1,9 @@
-from __future__ import annotations
-
 """Training/evaluation runtime for V39 staged mid-cut latent contract policy."""
 
+from __future__ import annotations
+
 import json
+import hashlib
 import math
 import random
 import time
@@ -18,43 +19,48 @@ from torch.utils.data import DataLoader
 
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import RDT2Conditioner
-from clearvla.experiments.dynamic_world_lab.shared_runtime import encode_current_tokens, encode_target_tokens, gripper_transition_metrics
+from clearvla.experiments.dynamic_world_lab.shared_runtime import (
+    encode_current_tokens,
+    gripper_transition_metrics,
+)
+from clearvla.policy.gauges import masked_candidate_center
 from clearvla.policy.system import V39PolicySystem
 
 from .policy_runtime_v36_3 import (
     V363PolicyTrainerConfig,
+    _normalized_event_emphasis,
     arm_motion_labels,
     balanced_score,
     decode,
     event_head_metrics,
-    flow_losses as v363_flow_losses,
     gripper_event_labels,
+    is_deploy_eligible,
     position_weights,
     semantic_physical_velocity_error,
-    _normalized_event_emphasis,
-    is_deploy_eligible,
-    mean_rows,
 )
-from .world_runtime import autocast_context, grad_norm, jsonable, scheduler
+from .policy_runtime_v36_3 import (
+    flow_losses as v363_flow_losses,
+)
+from .world_runtime import autocast_context, jsonable, scheduler
+
+POLICY_CHECKPOINT_SCHEMAS = frozenset(
+    {
+        "clearvla-v39-policy-checkpoint-v1",
+        "clearvla-v40-policy-checkpoint-v1",
+    }
+)
 
 
-POLICY_CHECKPOINT_SCHEMAS = frozenset({
-    "clearvla-v39-policy-checkpoint-v1",
-    "clearvla-v40-policy-checkpoint-v1",
-})
-
-
-def _operation_candidate_error(
+def _operation_candidate_error_field(
     system: V39PolicySystem,
     residual: Tensor,
     sample: dict[str, Tensor],
     trainer: V39PolicyTrainerConfig,
 ) -> Tensor:
-    """Task metric for candidate routing, including the gripper event budget."""
+    """Per-horizon arm/gripper value field in the physical training metric."""
     if residual.ndim != 5:
         raise ValueError(
-            "operation candidate residual must be [B,S,C,T,P], "
-            f"got {tuple(residual.shape)}"
+            f"operation candidate residual must be [B,S,C,T,P], got {tuple(residual.shape)}"
         )
     cfg = system.policy_config
     batch, steps, candidates, horizon, physical_dim = residual.shape
@@ -62,19 +68,16 @@ def _operation_candidate_error(
     gf = int(cfg.gripper_field_dim)
     flat = residual.reshape(-1, horizon, physical_dim)
     if system.codec.uses_arm_manifold:
-        arm_native, _, arm_null = system.codec.project_arm_tangent(flat[..., :2 * ad])
+        arm_native, _, arm_null = system.codec.project_arm_tangent(flat[..., : 2 * ad])
         arm_error = (
             arm_native.square()
             + max(float(trainer.arm_manifold_null_weight), 0.0)
-            * 0.5 * (
-                arm_null[..., :ad].square() + arm_null[..., ad:2 * ad].square()
-            )
+            * 0.5
+            * (arm_null[..., :ad].square() + arm_null[..., ad : 2 * ad].square())
         ).sum(dim=-1)
     else:
-        arm_error = 0.5 * (
-            flat[..., :ad].square() + flat[..., ad:2 * ad].square()
-        ).sum(dim=-1)
-    grip_field = flat[..., 2 * ad:2 * ad + gf]
+        arm_error = 0.5 * (flat[..., :ad].square() + flat[..., ad : 2 * ad].square()).sum(dim=-1)
+    grip_field = flat[..., 2 * ad : 2 * ad + gf]
     if system.codec.uses_parseval_gripper_field:
         native = system.codec.decode_gripper_field(grip_field)
         null = grip_field - system.codec.project_gripper_field(grip_field)
@@ -89,21 +92,18 @@ def _operation_candidate_error(
         threshold=trainer.gripper_event_threshold,
     )
     event_mask = labels.ne(0).to(dtype=grip_error.dtype)
-    event_mask = event_mask[:, None, None].expand(
-        batch, steps, candidates, horizon
-    ).reshape(-1, horizon)
-    position_weight = position_weights(
-        cfg, trainer, residual.device
-    ).to(dtype=grip_error.dtype)
+    event_mask = (
+        event_mask[:, None, None].expand(batch, steps, candidates, horizon).reshape(-1, horizon)
+    )
+    position_weight = position_weights(cfg, trainer, residual.device).to(dtype=grip_error.dtype)
     event_emphasis, _, _, _ = _normalized_event_emphasis(
         event_mask,
         position_weight,
         max(float(trainer.gripper_fm_event_boost), 0.0),
     )
-    grip_error = grip_error * event_emphasis.reshape(
-        batch, steps, candidates, horizon
-    )
-    return (arm_error.reshape(batch, steps, candidates, horizon) + grip_error) / float(ad + 1)
+    grip_error = grip_error * event_emphasis.reshape(batch, steps, candidates, horizon)
+    arm_error = arm_error.reshape(batch, steps, candidates, horizon) / float(ad)
+    return torch.stack([arm_error, grip_error], dim=-1)
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,9 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     # V39 staged mid-cut latent-contract objectives. Future
     # target tokens are targets only; no future-noisy latent is fed to the model.
     rollout_dynamics_loss_weight: float = 0.03
-    rollout_delta_loss_weight: float = 0.01
+    # ``rollout_delta`` duplicates the milestone delta target below.  Keep the
+    # old field loadable, but do not double-count one target by default.
+    rollout_delta_loss_weight: float = 0.0
     rollout_contrast_loss_weight: float = 0.06
     rollout_contrast_margin: float = 0.02
     # Main controlled rollout must match not only the future direction but also
@@ -131,6 +133,15 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     action_effect_loss_weight: float = 0.0
     future_latent_loss_start_epoch: int = 1
     future_latent_max_batches: int = 0
+
+    # Full action/event validation still covers every validation batch. These
+    # budgets apply only to the expensive sampling gauge fan-out and the second
+    # no-proposal denoising trajectory. Positive budgets are spread uniformly
+    # over the loader; zero preserves the historical all-batch diagnostics.
+    eval_sampling_diagnostic_batches: int = 16
+    eval_proposal_ablation_batches: int = 16
+    # Matched-noise structural probes for the Evidence execution plane.
+    eval_execution_ablation_batches: int = 8
 
     # Lightweight CUDA memory accounting. Disabled by default. Set
     # --memory-report-every N to emit a [cuda-mem] line and append JSONL rows
@@ -152,7 +163,7 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     midcut_aux_final_ratio: float = 0.20
     midcut_aux_decay_epochs: int = 4
     midcut_rollout_dynamics_loss_weight: float = 0.03
-    midcut_rollout_delta_loss_weight: float = 0.01
+    midcut_rollout_delta_loss_weight: float = 0.0
     midcut_rollout_contrast_loss_weight: float = 0.03
 
     # Optional safe residual action-flow denoiser.  This module is random at
@@ -182,11 +193,33 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     hierarchical_mmdit_operation_route_loss_weight: float = 0.0
     hierarchical_mmdit_operation_route_temperature: float = 0.5
     hierarchical_mmdit_operation_route_warmup_steps: int = 0
+    # V88 candidate-relative physical value regression. The loss is active
+    # during the fixed-path cold start; only execution waits for policy-config
+    # operation_value_warmup_steps.
+    hierarchical_mmdit_operation_value_loss_weight: float = 0.0
+    hierarchical_mmdit_operation_value_huber_delta: float = 0.1
+    # Zero selects a detached per-batch spread calibration. A positive value is
+    # an explicitly calibrated physical-value scale, never a hard threshold.
+    hierarchical_mmdit_operation_value_reliability_scale: float = 0.0
     # Legacy names remain loadable for old experiment manifests, but are not
     # consumed by the unified controller path.
     hierarchical_mmdit_dwell_value_loss_weight: float = 0.0
     hierarchical_mmdit_dwell_value_warmup_steps: int = 200
     hierarchical_mmdit_dwell_compute_cost: float = 0.0
+    # Native-time evidence decoder execution supervision. Physical candidate
+    # errors are detached targets; the attached value context keeps the natural
+    # multi-step gradient through controller/evidence/action state.
+    latent_cvae_mmdit_execution_value_loss_weight: float = 0.0
+    # ``flow_losses`` also needs the policy mode. Keep a trainer-side copy so
+    # the CLI cannot silently make a learned decoder look like ``fixed`` when
+    # deciding whether candidate-value supervision is active.
+    latent_cvae_mmdit_dwell_mode: str = "fixed"
+    # Compatibility-only field. The value reader trains from the first batch;
+    # execution_warmup_steps controls when selection may leave candidate one.
+    latent_cvae_mmdit_execution_value_warmup_steps: int = 200
+    # Retained for old checkpoints/configs; native execution cost is audit-only
+    # and is intentionally not added to the flow loss.
+    latent_cvae_mmdit_execution_compute_cost: float = 0.01
     # V42.1: train the deploy/inference prior path directly.  The posterior path
     # remains a weak auxiliary reconstruction target instead of being allowed to
     # carry the main policy loss by looking at the target chunk.
@@ -218,6 +251,13 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     layer_contract_final_action_loss_weight: float = 0.0
     layer_contract_final_action_lr_scale: float = 0.30
     layerwise_lr_min_scale: float = 0.30
+    # Policy-stage layer ownership is not a mid-cut preservation objective.
+    # Negative values preserve the historical wrapper behavior; V94 sets these
+    # explicitly so its attached layer contract has an auditable, independent
+    # schedule instead of silently decaying with ``midcut_aux_*``.
+    layer_contract_aux_loss_weight: float = -1.0
+    layer_contract_aux_final_ratio: float = -1.0
+    layer_contract_aux_decay_epochs: int = -1
     # Policy-stage migration knob.  The default 0 preserves the old behavior:
     # inherited layer-contract interfaces stay on upper_lr.  When a pre-fix
     # stage1 checkpoint is loaded with dirty adapter weights skipped, set this
@@ -261,9 +301,13 @@ def _validate_target_anchor_token_tensor(tokens: Tensor, *, system: V39PolicySys
     cfg = system.policy_config
     expected_tail = (cfg.num_cameras, cfg.patches_per_camera, cfg.visual_token_dim)
     if tokens.ndim != 5 or tuple(tokens.shape[2:]) != expected_tail:
-        raise ValueError(f"target_future_dinov2_tokens must be [B,F,{expected_tail}], got {tuple(tokens.shape)}")
+        raise ValueError(
+            f"target_future_dinov2_tokens must be [B,F,{expected_tail}], got {tuple(tokens.shape)}"
+        )
     if int(tokens.shape[1]) < int(cfg.future_anchors):
-        raise ValueError(f"target_future_dinov2_tokens has only {tokens.shape[1]} anchors; need {cfg.future_anchors}")
+        raise ValueError(
+            f"target_future_dinov2_tokens has only {tokens.shape[1]} anchors; need {cfg.future_anchors}"
+        )
 
 
 @torch.no_grad()
@@ -303,7 +347,12 @@ def encode_target_anchor_tokens(
         raise ValueError("V38 future target requires dense DINO tokens")
     dense = condition.dense_tokens
     expected_tokens = model_config.num_cameras * model_config.patches_per_camera
-    if dense.ndim != 3 or dense.shape[0] != batch * anchors or dense.shape[1] != expected_tokens or dense.shape[2] != model_config.latent_dim:
+    if (
+        dense.ndim != 3
+        or dense.shape[0] != batch * anchors
+        or dense.shape[1] != expected_tokens
+        or dense.shape[2] != model_config.latent_dim
+    ):
         raise ValueError(
             "DINO target-anchor geometry mismatch: "
             f"got {tuple(dense.shape)}, expected ({batch * anchors},{expected_tokens},{model_config.latent_dim})"
@@ -322,6 +371,7 @@ def model_config_owner(model_config):
     # shape checker.  It intentionally exposes only policy_config.
     class _Owner:
         policy_config = model_config
+
     return _Owner()
 
 
@@ -342,22 +392,42 @@ def prepare_v39_policy_sample(
         visual = visual.to(device=device, dtype=dtype, non_blocking=True)
     else:
         visual = encode_current_tokens(
-            sample, conditioner=conditioner, model_config=system.policy_config,
-            camera_names=camera_names, device=device, dtype=dtype,
+            sample,
+            conditioner=conditioner,
+            model_config=system.policy_config,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
         )
     keys = (
-        "state", "state_raw", "action_state", "history_state", "executed_action_history",
-        "executed_action_history_raw", "policy_action", "policy_action_raw",
+        "state",
+        "state_raw",
+        "action_state",
+        "history_state",
+        "executed_action_history",
+        "executed_action_history_raw",
+        "policy_action",
+        "policy_action_raw",
     )
     out = {key: sample[key].to(device=device, non_blocking=True) for key in keys}
-    for key in ("state", "action_state", "history_state", "executed_action_history", "policy_action"):
+    for key in (
+        "state",
+        "action_state",
+        "history_state",
+        "executed_action_history",
+        "policy_action",
+    ):
         out[key] = out[key].float()
     compute_dtype = dtype if device.type == "cuda" else torch.float32
     out["visual"] = visual.to(dtype=compute_dtype)
     if include_target_visual:
         target_visual = encode_target_anchor_tokens(
-            sample, conditioner=conditioner, model_config=system.policy_config,
-            camera_names=camera_names, device=device, dtype=dtype,
+            sample,
+            conditioner=conditioner,
+            model_config=system.policy_config,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
         )
         out["target_visual"] = target_visual.to(dtype=compute_dtype)
     return out
@@ -370,7 +440,6 @@ def _effect_distance(pred: Tensor, target: Tensor) -> Tensor:
     target_n = F.normalize(target.float().detach(), dim=-1)
     cosine = 1.0 - (pred_n * target_n).sum(dim=-1).mean(dim=1)
     return mse + 0.10 * cosine
-
 
 
 def _future_grid_count(system_or_output: Any | None, output: dict[str, Tensor]) -> int:
@@ -403,7 +472,11 @@ def _reshape_milestones(x: Tensor, *, grid: int) -> Tensor:
 
 def latent_variance_loss(output: dict[str, Tensor], *, grid: int) -> Tensor:
     if "rollout_effect_target" not in output:
-        return torch.zeros((), device=output["pred_physical_velocity"].device, dtype=output["pred_physical_velocity"].dtype)
+        return torch.zeros(
+            (),
+            device=output["pred_physical_velocity"].device,
+            dtype=output["pred_physical_velocity"].dtype,
+        )
     pred = output["rollout_effect_pred"].float()
     target = output["rollout_effect_target"].float().detach()
     steps = min(pred.shape[1], target.shape[1])
@@ -416,7 +489,11 @@ def latent_variance_loss(output: dict[str, Tensor], *, grid: int) -> Tensor:
 
 def latent_norm_loss(output: dict[str, Tensor]) -> Tensor:
     if "rollout_effect_target" not in output:
-        return torch.zeros((), device=output["pred_physical_velocity"].device, dtype=output["pred_physical_velocity"].dtype)
+        return torch.zeros(
+            (),
+            device=output["pred_physical_velocity"].device,
+            dtype=output["pred_physical_velocity"].dtype,
+        )
     pred = output["rollout_effect_pred"].float()
     target = output["rollout_effect_target"].float().detach()
     steps = min(pred.shape[1], target.shape[1])
@@ -427,7 +504,11 @@ def latent_norm_loss(output: dict[str, Tensor]) -> Tensor:
 
 def milestone_delta_match_loss(output: dict[str, Tensor], *, grid: int) -> Tensor:
     if "rollout_effect_target" not in output:
-        return torch.zeros((), device=output["pred_physical_velocity"].device, dtype=output["pred_physical_velocity"].dtype)
+        return torch.zeros(
+            (),
+            device=output["pred_physical_velocity"].device,
+            dtype=output["pred_physical_velocity"].dtype,
+        )
     if "milestone_step_delta_pred" in output:
         pred_delta_flat = output["milestone_step_delta_pred"].float()
         target_delta_flat = _milestone_step_delta_target(output, grid=grid)
@@ -450,6 +531,7 @@ def milestone_delta_match_loss(output: dict[str, Tensor], *, grid: int) -> Tenso
     cosine = (1.0 - (pred_n * target_n).sum(dim=-1)).mean()
     return smooth + 0.10 * cosine
 
+
 def _rollout_residual_target(output: dict[str, Tensor]) -> Tensor:
     target = output["rollout_effect_target"].float().detach()
     if "rollout_base_effect_pred" not in output:
@@ -466,7 +548,9 @@ def _milestone_step_delta_target(output: dict[str, Tensor], *, grid: int | None 
     target_m = _reshape_milestones(target, grid=int(grid))
     z_target = torch.zeros_like(target_m[:, :1])
     target_delta = target_m - torch.cat([z_target, target_m[:, :-1]], dim=1)
-    return target_delta.reshape(target_delta.shape[0], target_delta.shape[1] * target_delta.shape[2], target_delta.shape[-1])
+    return target_delta.reshape(
+        target_delta.shape[0], target_delta.shape[1] * target_delta.shape[2], target_delta.shape[-1]
+    )
 
 
 def rollout_delta_loss(output: dict[str, Tensor]) -> Tensor:
@@ -498,6 +582,7 @@ def rollout_delta_loss(output: dict[str, Tensor]) -> Tensor:
     cosine = (1.0 - (pred_n * target_n).sum(dim=-1)).mean()
     return smooth + 0.10 * cosine
 
+
 def rollout_dynamics_loss(output: dict[str, Tensor]) -> Tensor:
     """Supervise action-conditioned rollout latent against future residual.
 
@@ -522,7 +607,10 @@ def rollout_contrast_loss(output: dict[str, Tensor], *, margin: float = 0.02) ->
         device = output["pred_physical_velocity"].device
         return torch.zeros((), device=device, dtype=output["pred_physical_velocity"].dtype)
     state = None
-    if "milestone_step_delta_pred_hold_action" in output and "milestone_step_delta_pred_shuffle_action" in output:
+    if (
+        "milestone_step_delta_pred_hold_action" in output
+        and "milestone_step_delta_pred_shuffle_action" in output
+    ):
         target = _milestone_step_delta_target(output)
         real_pred = output["milestone_step_delta_pred"]
         hold_pred = output["milestone_step_delta_pred_hold_action"]
@@ -535,7 +623,9 @@ def rollout_contrast_loss(output: dict[str, Tensor], *, margin: float = 0.02) ->
         hold = _effect_distance(hold_pred[:, :steps], target[:, :steps])
         shuf = _effect_distance(shuf_pred[:, :steps], target[:, :steps])
         if "milestone_step_delta_pred_shuffle_state" in output:
-            state = _effect_distance(output["milestone_step_delta_pred_shuffle_state"][:, :steps], target[:, :steps])
+            state = _effect_distance(
+                output["milestone_step_delta_pred_shuffle_state"][:, :steps], target[:, :steps]
+            )
     elif "rollout_delta_pred_hold_action" in output:
         target = _rollout_residual_target(output)
         real = _effect_distance(output["rollout_delta_pred"], target)
@@ -552,14 +642,19 @@ def rollout_contrast_loss(output: dict[str, Tensor], *, margin: float = 0.02) ->
         loss = loss + F.relu(m + real - state)
     return loss.mean()
 
+
 def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
     rows: dict[str, Tensor] = {}
     if "rollout_effect_target" not in output:
         device = output["pred_physical_velocity"].device
         z = torch.zeros((), device=device, dtype=output["pred_physical_velocity"].dtype)
         for key in (
-            "rollout_distance_real", "rollout_distance_hold", "rollout_distance_shuffle",
-            "rollout_delta_hold", "rollout_delta_shuffle", "rollout_full_distance_real",
+            "rollout_distance_real",
+            "rollout_distance_hold",
+            "rollout_distance_shuffle",
+            "rollout_delta_hold",
+            "rollout_delta_shuffle",
+            "rollout_full_distance_real",
         ):
             rows[key] = z
         return rows
@@ -568,9 +663,17 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
     rows["rollout_full_distance_real"] = full_real.detach()
     rows["rollout_distance_real"] = full_real.detach()
     rows["rollout_base_mse"] = (
-        (output.get("rollout_base_effect_pred", output["rollout_effect_pred"]).float() - target_full).square().mean().detach()
+        (
+            output.get("rollout_base_effect_pred", output["rollout_effect_pred"]).float()
+            - target_full
+        )
+        .square()
+        .mean()
+        .detach()
     )
-    rows["rollout_delta_target_norm"] = _rollout_residual_target(output).detach().float().norm(dim=-1).mean()
+    rows["rollout_delta_target_norm"] = (
+        _rollout_residual_target(output).detach().float().norm(dim=-1).mean()
+    )
     if "rollout_delta_pred" in output:
         target_delta = _rollout_residual_target(output)
         delta_real = _effect_distance(output["rollout_delta_pred"], target_delta).mean()
@@ -613,24 +716,56 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
     if "milestone_step_delta_pred_hold_action" in output:
         target_step = _milestone_step_delta_target(output)
         steps = min(output["milestone_step_delta_pred"].shape[1], target_step.shape[1])
-        real_step = _effect_distance(output["milestone_step_delta_pred"][:, :steps], target_step[:, :steps]).mean()
-        hold_step = _effect_distance(output["milestone_step_delta_pred_hold_action"][:, :steps], target_step[:, :steps]).mean()
-        shuf_step = _effect_distance(output["milestone_step_delta_pred_shuffle_action"][:, :steps], target_step[:, :steps]).mean()
+        real_step = _effect_distance(
+            output["milestone_step_delta_pred"][:, :steps], target_step[:, :steps]
+        ).mean()
+        hold_step = _effect_distance(
+            output["milestone_step_delta_pred_hold_action"][:, :steps], target_step[:, :steps]
+        ).mean()
+        shuf_step = _effect_distance(
+            output["milestone_step_delta_pred_shuffle_action"][:, :steps], target_step[:, :steps]
+        ).mean()
         rows["step_delta_distance_real"] = real_step.detach()
         rows["step_delta_distance_hold"] = hold_step.detach()
         rows["step_delta_distance_shuffle"] = shuf_step.detach()
         rows["step_delta_hold"] = (hold_step - real_step).detach()
         rows["step_delta_shuffle"] = (shuf_step - real_step).detach()
-        rows["step_delta_change_hold"] = (output["milestone_step_delta_pred"].float() - output["milestone_step_delta_pred_hold_action"].float()).square().mean().detach()
-        rows["step_delta_change_shuffle"] = (output["milestone_step_delta_pred"].float() - output["milestone_step_delta_pred_shuffle_action"].float()).square().mean().detach()
+        rows["step_delta_change_hold"] = (
+            (
+                output["milestone_step_delta_pred"].float()
+                - output["milestone_step_delta_pred_hold_action"].float()
+            )
+            .square()
+            .mean()
+            .detach()
+        )
+        rows["step_delta_change_shuffle"] = (
+            (
+                output["milestone_step_delta_pred"].float()
+                - output["milestone_step_delta_pred_shuffle_action"].float()
+            )
+            .square()
+            .mean()
+            .detach()
+        )
         if "milestone_step_delta_pred_shuffle_state" in output:
-            state_steps = min(output["milestone_step_delta_pred_shuffle_state"].shape[1], target_step.shape[1])
-            state_step = _effect_distance(output["milestone_step_delta_pred_shuffle_state"][:, :state_steps], target_step[:, :state_steps]).mean()
+            state_steps = min(
+                output["milestone_step_delta_pred_shuffle_state"].shape[1], target_step.shape[1]
+            )
+            state_step = _effect_distance(
+                output["milestone_step_delta_pred_shuffle_state"][:, :state_steps],
+                target_step[:, :state_steps],
+            ).mean()
             rows["step_delta_state_shuffle"] = (state_step - real_step).detach()
             rows["step_delta_change_state_shuffle"] = (
-                output["milestone_step_delta_pred"][:, :state_steps].float()
-                - output["milestone_step_delta_pred_shuffle_state"][:, :state_steps].float()
-            ).square().mean().detach()
+                (
+                    output["milestone_step_delta_pred"][:, :state_steps].float()
+                    - output["milestone_step_delta_pred_shuffle_state"][:, :state_steps].float()
+                )
+                .square()
+                .mean()
+                .detach()
+            )
     if "rollout_delta_pred_hold_action" in output:
         target_delta = _rollout_residual_target(output)
         hold = _effect_distance(output["rollout_delta_pred_hold_action"], target_delta).mean()
@@ -640,10 +775,38 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
         rows["rollout_distance_shuffle"] = shuf.detach()
         rows["rollout_delta_hold"] = (hold - real).detach()
         rows["rollout_delta_shuffle"] = (shuf - real).detach()
-        delta_change_hold = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_hold_action"].float()).square().mean()
-        delta_change_shuffle = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_shuffle_action"].float()).square().mean()
-        full_change_hold = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_hold_action"].float()).square().mean()
-        full_change_shuffle = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_shuffle_action"].float()).square().mean()
+        delta_change_hold = (
+            (
+                output["rollout_delta_pred"].float()
+                - output["rollout_delta_pred_hold_action"].float()
+            )
+            .square()
+            .mean()
+        )
+        delta_change_shuffle = (
+            (
+                output["rollout_delta_pred"].float()
+                - output["rollout_delta_pred_shuffle_action"].float()
+            )
+            .square()
+            .mean()
+        )
+        full_change_hold = (
+            (
+                output["rollout_effect_pred"].float()
+                - output["rollout_effect_pred_hold_action"].float()
+            )
+            .square()
+            .mean()
+        )
+        full_change_shuffle = (
+            (
+                output["rollout_effect_pred"].float()
+                - output["rollout_effect_pred_shuffle_action"].float()
+            )
+            .square()
+            .mean()
+        )
         rows["rollout_effect_change_hold"] = delta_change_hold.detach()
         rows["rollout_effect_change_shuffle"] = delta_change_shuffle.detach()
         rows["rollout_full_effect_change_hold"] = full_change_hold.detach()
@@ -661,22 +824,49 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
         if "rollout_base_effect_pred" in output:
             base = output["rollout_base_effect_pred"].float()
             rows["rollout_effect_delta_gap"] = (
-                output["rollout_effect_pred"].float() - output["rollout_delta_pred"].float()
-            ).square().mean().detach()
+                (output["rollout_effect_pred"].float() - output["rollout_delta_pred"].float())
+                .square()
+                .mean()
+                .detach()
+            )
             if "rollout_base_effect_pred_hold_action" in output:
                 rows["rollout_base_change_hold"] = (
-                    base - output["rollout_base_effect_pred_hold_action"].float()
-                ).square().mean().detach()
+                    (base - output["rollout_base_effect_pred_hold_action"].float())
+                    .square()
+                    .mean()
+                    .detach()
+                )
             if "rollout_base_effect_pred_shuffle_action" in output:
                 rows["rollout_base_change_shuffle"] = (
-                    base - output["rollout_base_effect_pred_shuffle_action"].float()
-                ).square().mean().detach()
+                    (base - output["rollout_base_effect_pred_shuffle_action"].float())
+                    .square()
+                    .mean()
+                    .detach()
+                )
         if "rollout_delta_pred_shuffle_state" in output:
-            state = _effect_distance(output["rollout_delta_pred_shuffle_state"], target_delta).mean()
+            state = _effect_distance(
+                output["rollout_delta_pred_shuffle_state"], target_delta
+            ).mean()
             rows["rollout_delta_state_shuffle"] = (state - real).detach()
-            rows["rollout_effect_change_state_shuffle"] = (output["rollout_delta_pred"].float() - output["rollout_delta_pred_shuffle_state"].float()).square().mean().detach()
+            rows["rollout_effect_change_state_shuffle"] = (
+                (
+                    output["rollout_delta_pred"].float()
+                    - output["rollout_delta_pred_shuffle_state"].float()
+                )
+                .square()
+                .mean()
+                .detach()
+            )
         if "rollout_effect_pred_shuffle_state" in output:
-            rows["rollout_full_effect_change_state_shuffle"] = (output["rollout_effect_pred"].float() - output["rollout_effect_pred_shuffle_state"].float()).square().mean().detach()
+            rows["rollout_full_effect_change_state_shuffle"] = (
+                (
+                    output["rollout_effect_pred"].float()
+                    - output["rollout_effect_pred_shuffle_state"].float()
+                )
+                .square()
+                .mean()
+                .detach()
+            )
     for key in (
         "rollout_coeff_abs_mean",
         "rollout_neutral_coeff_abs_mean",
@@ -698,6 +888,7 @@ def rollout_diagnostics(output: dict[str, Tensor]) -> dict[str, Tensor]:
         if key in output:
             rows[key] = output[key].detach().float()
     return rows
+
 
 def future_latent_loss(output: dict[str, Tensor]) -> Tensor:
     # Compatibility alias: this is the full base+delta rollout loss, not a
@@ -735,12 +926,15 @@ def _micro_fixed_unfolded_weights(
     mid = pos * (0.35 + 1.2 * (idx < 8).float() + 0.5 * torch.exp(-((idx - 7.0).square()) / 24.0))
     tail = pos * (0.35 + 1.4 * (idx >= 8).float())
     full = pos
-    basis = torch.stack([
-        _normalize_horizon_weight(near),
-        _normalize_horizon_weight(mid),
-        _normalize_horizon_weight(tail),
-        _normalize_horizon_weight(full),
-    ], dim=0)
+    basis = torch.stack(
+        [
+            _normalize_horizon_weight(near),
+            _normalize_horizon_weight(mid),
+            _normalize_horizon_weight(tail),
+            _normalize_horizon_weight(full),
+        ],
+        dim=0,
+    )
 
     full_mix = torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=torch.float32)
     if steps <= 1:
@@ -758,7 +952,11 @@ def _micro_fixed_unfolded_weights(
         mix = (1.0 - terminal[:, None]) * mix + terminal[:, None] * full_mix[None]
         mix[-1] = full_mix
     fixed = torch.einsum("sk,kt->st", mix, basis)
-    return _normalize_horizon_weight(fixed).to(dtype=dtype), mix.to(dtype=dtype), basis.to(dtype=dtype)
+    return (
+        _normalize_horizon_weight(fixed).to(dtype=dtype),
+        mix.to(dtype=dtype),
+        basis.to(dtype=dtype),
+    )
 
 
 def micro_refine_supervision_losses(
@@ -801,14 +999,26 @@ def micro_refine_supervision_losses(
     normal = basis[-1].to(device=device, dtype=dtype)
     normal_prob = normal.float().clamp_min(1e-8)
     normal_prob = normal_prob / normal_prob.sum().clamp_min(1e-8)
-    prior_scale = max(float(getattr(trainer, "latent_cvae_micro_coverage_prior_logit_scale", 0.25)), 0.0)
+    prior_scale = max(
+        float(getattr(trainer, "latent_cvae_micro_coverage_prior_logit_scale", 0.25)), 0.0
+    )
 
     logits = output.get("latent_cvae_adaptive_micro_supervision_logits")
-    if isinstance(logits, Tensor) and logits.ndim == 3 and int(logits.shape[1]) == steps and int(logits.shape[2]) == horizon:
+    if (
+        isinstance(logits, Tensor)
+        and logits.ndim == 3
+        and int(logits.shape[1]) == steps
+        and int(logits.shape[2]) == horizon
+    ):
         logits_f = logits.to(device=device, dtype=torch.float32)
         prior_logits = prior_scale * fixed_prob.clamp_min(1e-8).log()[None]
         learned_prob = torch.softmax(logits_f + prior_logits, dim=-1)
-    elif isinstance(logits, Tensor) and logits.ndim == 3 and int(logits.shape[1]) == steps and int(logits.shape[2]) == 4:
+    elif (
+        isinstance(logits, Tensor)
+        and logits.ndim == 3
+        and int(logits.shape[1]) == steps
+        and int(logits.shape[2]) == 4
+    ):
         logits_f = logits.to(device=device, dtype=torch.float32)
         mix_prior = prior_scale * fixed_mix.float().clamp_min(1e-8).log()[None]
         learned_mix = torch.softmax(logits_f + mix_prior, dim=-1).to(dtype=dtype)
@@ -840,7 +1050,11 @@ def micro_refine_supervision_losses(
     micro_flow = (physical_error * weights).mean()
     mono_weight = normal.to(device=device, dtype=dtype)[None, None]
     mono_error = (physical_error * mono_weight).mean(dim=-1)
-    monotonic = F.relu(mono_error[:, 1:] - mono_error[:, :-1]).mean() if steps > 1 else torch.zeros((), device=device, dtype=dtype)
+    monotonic = (
+        F.relu(mono_error[:, 1:] - mono_error[:, :-1]).mean()
+        if steps > 1
+        else torch.zeros((), device=device, dtype=dtype)
+    )
 
     event_logits = output.get("latent_cvae_adaptive_micro_event_logits")
     micro_event = torch.zeros((), device=device, dtype=dtype)
@@ -852,26 +1066,45 @@ def micro_refine_supervision_losses(
             threshold=trainer.gripper_event_threshold,
         )
         labels = labels[:, None].expand(-1, steps, -1)
-        ce = F.cross_entropy(event_logits.reshape(-1, 3).float(), labels.reshape(-1), reduction="none").reshape(batch, steps, horizon)
+        ce = F.cross_entropy(
+            event_logits.reshape(-1, 3).float(), labels.reshape(-1), reduction="none"
+        ).reshape(batch, steps, horizon)
         pos = (labels != 0).to(dtype=ce.dtype)
-        event_weight = 1.0 + pos * max(float(getattr(trainer, "latent_cvae_micro_event_positive_weight", 2.0)) - 1.0, 0.0)
-        micro_event = (ce.to(dtype=dtype) * event_weight.to(dtype=dtype) * weights).sum() / (event_weight.to(dtype=dtype) * weights).sum().clamp_min(1.0)
+        event_weight = 1.0 + pos * max(
+            float(getattr(trainer, "latent_cvae_micro_event_positive_weight", 2.0)) - 1.0, 0.0
+        )
+        micro_event = (ce.to(dtype=dtype) * event_weight.to(dtype=dtype) * weights).sum() / (
+            event_weight.to(dtype=dtype) * weights
+        ).sum().clamp_min(1.0)
 
     fixed_prob_b = fixed_prob[None].expand(batch, -1, -1)
     weight_kl = (
-        learned_prob.clamp_min(1e-8)
-        * (learned_prob.clamp_min(1e-8).log() - fixed_prob_b.clamp_min(1e-8).log())
-    ).sum(dim=-1).mean().to(dtype=dtype)
+        (
+            learned_prob.clamp_min(1e-8)
+            * (learned_prob.clamp_min(1e-8).log() - fixed_prob_b.clamp_min(1e-8).log())
+        )
+        .sum(dim=-1)
+        .mean()
+        .to(dtype=dtype)
+    )
     smooth = (
         (learned_prob[:, 1:] - learned_prob[:, :-1]).square().sum(dim=-1).mean() * float(horizon)
-        if steps > 1 else torch.zeros((), device=device, dtype=dtype)
+        if steps > 1
+        else torch.zeros((), device=device, dtype=dtype)
     )
     avg_prob = learned_prob.mean(dim=1)
-    tail_start = min(max(int(getattr(system.policy_config, "rollout_tail_start_step", 8)), 0), max(horizon - 1, 0))
+    tail_start = min(
+        max(int(getattr(system.policy_config, "rollout_tail_start_step", 8)), 0),
+        max(horizon - 1, 0),
+    )
     tail_mask = torch.arange(horizon, device=device) >= tail_start
     tail_mass = avg_prob[:, tail_mask].sum(dim=-1)
-    tail_target = normal_prob[tail_mask].sum() * max(float(getattr(trainer, "latent_cvae_micro_coverage_floor_ratio", 0.55)), 0.0)
-    coverage_floor = F.relu(tail_target.to(device=device) - tail_mass).square().mean().to(dtype=dtype)
+    tail_target = normal_prob[tail_mask].sum() * max(
+        float(getattr(trainer, "latent_cvae_micro_coverage_floor_ratio", 0.55)), 0.0
+    )
+    coverage_floor = (
+        F.relu(tail_target.to(device=device) - tail_mass).square().mean().to(dtype=dtype)
+    )
     final_weight_diff = (weights[:, -1] - normal[None]).abs().mean()
     return {
         "latent_cvae_micro_supervision": micro_flow,
@@ -888,6 +1121,7 @@ def micro_refine_supervision_losses(
         "latent_cvae_micro_weight_last": weights[:, -1].mean().detach(),
     }
 
+
 def _shadow_refinement_probe_metrics(
     system: V39PolicySystem,
     output: dict[str, Tensor],
@@ -900,9 +1134,16 @@ def _shadow_refinement_probe_metrics(
     fixed_predictions = output.get("refinement_probe_pred_velocity")
     fixed_active = output.get("refinement_probe_active")
     target_velocity = output.get("target_physical_velocity")
-    if not all(torch.is_tensor(value) for value in (
-        shadow_predictions, shadow_active, fixed_predictions, fixed_active, target_velocity,
-    )):
+    if not all(
+        torch.is_tensor(value)
+        for value in (
+            shadow_predictions,
+            shadow_active,
+            fixed_predictions,
+            fixed_active,
+            target_velocity,
+        )
+    ):
         return {}
 
     def final_error(predictions: Tensor, active: Tensor) -> Tensor:
@@ -922,15 +1163,11 @@ def _shadow_refinement_probe_metrics(
         fixed_steps = fixed_active.float().sum(dim=1)
         return {
             "hierarchical_mmdit_shadow_refine_error_final": shadow_error.mean(),
-            "hierarchical_mmdit_shadow_refine_error_gap": (
-                shadow_error - fixed_error
-            ).mean(),
+            "hierarchical_mmdit_shadow_refine_error_gap": (shadow_error - fixed_error).mean(),
             "hierarchical_mmdit_shadow_refine_error_ratio": (
                 shadow_error / fixed_error.clamp_min(1e-8)
             ).mean(),
-            "hierarchical_mmdit_shadow_step_saving": (
-                fixed_steps - shadow_steps
-            ).mean(),
+            "hierarchical_mmdit_shadow_step_saving": (fixed_steps - shadow_steps).mean(),
         }
 
 
@@ -976,7 +1213,8 @@ def _oracle_exit_supervision(
     route_loss = (
         F.binary_cross_entropy_with_logits(
             exit_logits.float(), stop_target.float(), reduction="none"
-        ) * decision_float.float()
+        )
+        * decision_float.float()
     ).sum() / decision_float.float().sum().clamp_min(1.0)
 
     with torch.no_grad():
@@ -993,92 +1231,25 @@ def _oracle_exit_supervision(
         )
         predicted_error = errors.gather(1, predicted_index[:, None]).squeeze(1)
         oracle_error = errors.gather(1, oracle_index[:, None]).squeeze(1)
-        oracle_depth = candidate_depth.gather(
-            1, oracle_index[:, None]
-        ).squeeze(1).float()
-        predicted_depth = candidate_depth.gather(
-            1, predicted_index[:, None]
-        ).squeeze(1).float()
-        mean_probability = (
-            probabilities * mask.float()
-        ).sum() / mask.float().sum().clamp_min(1.0)
+        oracle_depth = candidate_depth.gather(1, oracle_index[:, None]).squeeze(1).float()
+        predicted_depth = candidate_depth.gather(1, predicted_index[:, None]).squeeze(1).float()
+        mean_probability = (probabilities * mask.float()).sum() / mask.float().sum().clamp_min(1.0)
 
     return {
         "loss": route_loss,
         "target_depth": (oracle_depth * valid_float).sum() / valid_denominator,
         "predicted_depth": (predicted_depth * valid_float).sum() / valid_denominator,
-        "depth_accuracy": (
-            (predicted_index == oracle_index).float() * valid_float
-        ).sum() / valid_denominator,
-        "depth_mae": (
-            (predicted_depth - oracle_depth).abs() * valid_float
-        ).sum() / valid_denominator,
+        "depth_accuracy": ((predicted_index == oracle_index).float() * valid_float).sum()
+        / valid_denominator,
+        "depth_mae": ((predicted_depth - oracle_depth).abs() * valid_float).sum()
+        / valid_denominator,
         "best_error": (safe_best_error * valid_float).sum() / valid_denominator,
         "target_error": (oracle_error * valid_float).sum() / valid_denominator,
         "predicted_error": (predicted_error * valid_float).sum() / valid_denominator,
-        "predicted_regret": (
-            (predicted_error - safe_best_error).clamp_min(0.0) * valid_float
-        ).sum() / valid_denominator,
+        "predicted_regret": ((predicted_error - safe_best_error).clamp_min(0.0) * valid_float).sum()
+        / valid_denominator,
         "stop_probability": mean_probability,
         "valid_fraction": valid_float.mean(),
-    }
-
-
-def _dwell_value_targets(
-    *,
-    prefix_error: Tensor,
-    block_ids: Tensor,
-    active: Tensor,
-    compute_cost: float,
-) -> dict[str, Tensor]:
-    """Build post-update value targets for stay/advance/exit decisions.
-
-    The controller emits values before update ``k``, but the routing decision
-    is applied after that update.  Exit therefore owns prefix ``k + 1``;
-    continuing owns the best prefix reachable after at least one additional
-    update.  Keeping this coordinate explicit prevents an apparently healthy
-    dwell loss from supervising the controller one refinement step late.
-    """
-    if prefix_error.ndim != 2:
-        raise ValueError("prefix_error must be [B,K+1]")
-    if block_ids.ndim != 2 or active.ndim != 2:
-        raise ValueError("block_ids and active must be [B,K]")
-    if tuple(block_ids.shape) != tuple(active.shape):
-        raise ValueError("block_ids and active must have the same shape")
-    batch, step_count = block_ids.shape
-    if tuple(prefix_error.shape) != (batch, step_count + 1):
-        raise ValueError("prefix_error must contain one more prefix than decisions")
-
-    active = active.bool()
-    block_ids = block_ids.long()
-    cost = max(float(compute_cost), 0.0)
-    exit_target = prefix_error[:, 1:]
-    exit_valid = active
-    continue_target = torch.zeros_like(exit_target)
-    continue_action = torch.zeros_like(block_ids)
-    continue_valid = torch.zeros_like(active)
-    if step_count > 1:
-        continue_action[:, :-1] = (
-            block_ids[:, 1:] != block_ids[:, :-1]
-        ).long()
-        continue_valid[:, :-1] = active[:, :-1] & active[:, 1:]
-        for step_index in range(step_count - 1):
-            future_error = prefix_error[:, step_index + 2:]
-            additional_steps = torch.arange(
-                1,
-                int(future_error.shape[1]) + 1,
-                device=future_error.device,
-                dtype=future_error.dtype,
-            )
-            continue_target[:, step_index] = (
-                future_error + cost * additional_steps[None]
-            ).min(dim=1).values
-    return {
-        "continue_action": continue_action,
-        "continue_target": continue_target,
-        "continue_valid": continue_valid,
-        "exit_target": exit_target,
-        "exit_valid": exit_valid,
     }
 
 
@@ -1092,6 +1263,288 @@ def flow_losses(
     global_step: int | None = None,
 ) -> dict[str, Tensor]:
     losses = v363_flow_losses(system, sample, output, trainer)  # type: ignore[arg-type]
+    for key, value in output.items():
+        if (
+            (key.startswith("arm_source_") or key.startswith("evidence_"))
+            and torch.is_tensor(value)
+            and value.numel() == 1
+        ):
+            losses[key] = value.detach().float().reshape(())
+    execution_cost = output.get("evidence_mmd_it_execution_cost")
+    if torch.is_tensor(execution_cost) and execution_cost.numel() == 1:
+        # The native controller exposes this as an audit-only statistic.  It
+        # is intentionally detached and must not inherit the hierarchical
+        # decoder's depth-usage penalty: adding a detached value would change
+        # the reported loss without giving any parameter a useful gradient.
+        execution_cost_weight = 0.0
+        losses["evidence_mmd_it_execution_cost"] = execution_cost.detach().float().reshape(())
+        losses["evidence_mmd_it_execution_cost_weight"] = torch.as_tensor(
+            execution_cost_weight,
+            device=execution_cost.device,
+            dtype=torch.float32,
+        )
+        if enable_future_loss and execution_cost_weight > 0.0:
+            losses["loss"] = losses["loss"] + execution_cost_weight * execution_cost
+    execution_value_field = output.get("evidence_mmd_it_execution_candidate_value_field")
+    execution_candidates = output.get("evidence_mmd_it_dwell_candidate_pred_velocity")
+    execution_candidate_mask = output.get("evidence_mmd_it_execution_candidate_value_mask")
+    execution_baseline = output.get("evidence_mmd_it_execution_baseline_pred_velocity")
+    execution_target = output.get("target_physical_velocity")
+    execution_value_weight = max(
+        float(getattr(trainer, "latent_cvae_mmdit_execution_value_loss_weight", 0.0)),
+        0.0,
+    )
+    execution_dwell_mode = str(getattr(trainer, "latent_cvae_mmdit_dwell_mode", "fixed"))
+    if (
+        execution_value_weight > 0.0
+        and execution_dwell_mode in {"learned", "learned_shadow"}
+        and all(
+            torch.is_tensor(value)
+            for value in (
+                execution_value_field,
+                execution_candidates,
+                execution_candidate_mask,
+                execution_baseline,
+                execution_target,
+            )
+        )
+    ):
+        # Candidate probes contain the global operation chart plus one terminal
+        # identity.  The latter is the actionable baseline, so centered values
+        # now learn whether doing more work is physically better than stopping.
+        # The final value-field axis is typed (arm, gripper), not categorical.
+        if (
+            execution_value_field.ndim != 5
+            or execution_candidates.ndim != 5
+            or execution_candidate_mask.ndim != 3
+            or execution_baseline.ndim != 4
+            or execution_target.ndim != 3
+            or int(execution_value_field.shape[-1]) != 2
+        ):
+            raise ValueError("native execution candidate value probes have invalid shapes")
+        if tuple(execution_value_field.shape[:4]) != tuple(execution_candidates.shape[:4]):
+            raise ValueError("native execution value field and candidates are misaligned")
+        if tuple(execution_candidate_mask.shape) != tuple(execution_candidates.shape[:3]):
+            raise ValueError("native execution dwell candidate mask is misaligned")
+        expected_target_shape = (
+            int(execution_candidates.shape[0]),
+            int(execution_candidates.shape[3]),
+            int(execution_candidates.shape[4]),
+        )
+        if tuple(execution_target.shape) != expected_target_shape:
+            raise ValueError("native execution target has the wrong physical shape")
+        expected_baseline_shape = (
+            int(execution_candidates.shape[0]),
+            int(execution_candidates.shape[1]),
+            int(execution_candidates.shape[3]),
+            int(execution_candidates.shape[4]),
+        )
+        if tuple(execution_baseline.shape) != expected_baseline_shape:
+            raise ValueError("native execution baseline has the wrong physical shape")
+        with torch.no_grad():
+            terminal_identity_error = (
+                execution_candidates[:, :, -1].float()
+                - execution_baseline.detach().float()
+            ).square().mean().sqrt()
+            candidate_residual = (
+                execution_candidates.float() - execution_target.detach().float()[:, None, None]
+            )
+            candidate_value = _operation_candidate_error_field(
+                system,
+                candidate_residual,
+                sample,
+                trainer,
+            ).detach()
+            target_value = candidate_value
+            valid = execution_candidate_mask.detach().bool()
+            target_centered, _ = masked_candidate_center(target_value, valid, candidate_dim=2)
+        predicted_value = execution_value_field.float()
+        predicted_centered, predicted_mean = masked_candidate_center(
+            predicted_value, valid, candidate_dim=2
+        )
+        valid_field = valid[..., None, None].expand_as(predicted_value)
+        valid_field_float = valid_field.float()
+        arm_dim = int(system.policy_config.arm_dim)
+        component_weight = torch.tensor(
+            [float(arm_dim), 1.0],
+            device=predicted_value.device,
+            dtype=predicted_value.dtype,
+        ) / float(arm_dim + 1)
+        physical_field_weight = valid_field_float * component_weight[None, None, None, None]
+        candidate_count = valid.float().sum(dim=2)
+        active_candidate = candidate_count > 1.0
+        row_denominator = (
+            valid[..., None]
+            .expand(-1, -1, -1, int(predicted_value.shape[-2]))
+            .float()
+            .sum(dim=(2, 3))
+            .clamp_min(1.0)
+        )
+        target_spread = torch.sqrt(
+            (target_centered.square() * physical_field_weight).sum(dim=(2, 3, 4)) / row_denominator
+        )
+        configured_scale = max(
+            float(getattr(trainer, "hierarchical_mmdit_operation_value_reliability_scale", 0.0)),
+            0.0,
+        )
+        active_float = active_candidate.float()
+        active_denominator = active_float.sum().clamp_min(1.0)
+        if configured_scale > 0.0:
+            reliability_scale = torch.as_tensor(
+                configured_scale,
+                device=target_spread.device,
+                dtype=target_spread.dtype,
+            )
+        else:
+            reliability_scale = (
+                (target_spread.detach() * active_float).sum() / active_denominator
+            ).clamp_min(1e-6)
+        reliability = target_spread / (target_spread + reliability_scale)
+        reliability = reliability * active_float
+        reliability_denominator = reliability.sum().clamp_min(1e-6)
+        # The reader emits a dimensionless candidate advantage.  Normalize the
+        # physical target per decision so temperature=1 has a stable meaning
+        # across batches and throughout training. Unreliable near-ties remain
+        # down-weighted by the physical spread above.
+        normalization_scale = torch.maximum(target_spread.detach(), reliability_scale.detach())
+        normalized_target = target_centered / normalization_scale[..., None, None, None]
+        huber_delta = max(
+            float(getattr(trainer, "hierarchical_mmdit_operation_value_huber_delta", 0.1)),
+            1e-6,
+        )
+        value_loss_field = (
+            F.smooth_l1_loss(
+                predicted_centered,
+                normalized_target,
+                reduction="none",
+                beta=huber_delta,
+            )
+            * physical_field_weight
+        )
+        value_loss_rows = value_loss_field.sum(dim=(2, 3, 4)) / row_denominator
+        execution_value_loss = (value_loss_rows * reliability).sum() / reliability_denominator
+        predicted_scalar = (
+            (predicted_value * component_weight[None, None, None, None]).sum(dim=-1).mean(dim=-1)
+        )
+        target_scalar = (
+            (normalized_target * component_weight[None, None, None, None]).sum(dim=-1).mean(dim=-1)
+        )
+        invalid_max = torch.finfo(predicted_scalar.dtype).max
+        predicted_best = predicted_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
+        target_best = target_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
+        decision_accuracy = (
+            (predicted_best == target_best).float() * active_float
+        ).sum() / active_denominator
+        target_difference = target_scalar[..., :, None] - target_scalar[..., None, :]
+        predicted_difference = predicted_scalar[..., :, None] - predicted_scalar[..., None, :]
+        pair_mask = valid[..., :, None] & valid[..., None, :]
+        pair_mask = pair_mask & torch.triu(
+            torch.ones(
+                int(valid.shape[-1]),
+                int(valid.shape[-1]),
+                device=valid.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+        informative_pair = pair_mask & target_difference.ne(0.0)
+        pair_denominator = informative_pair.float().sum().clamp_min(1.0)
+        pairwise_accuracy = (
+            (predicted_difference * target_difference > 0.0).float() * informative_pair.float()
+        ).sum() / pair_denominator
+        correlation = (predicted_centered * normalized_target * physical_field_weight).sum() / (
+            (predicted_centered.square() * physical_field_weight).sum().sqrt()
+            * (normalized_target.square() * physical_field_weight).sum().sqrt()
+        ).clamp_min(1e-8)
+        predicted_rms = (
+            (predicted_value.square() * physical_field_weight).sum()
+            / row_denominator.sum().clamp_min(1.0)
+        ).sqrt()
+        active_common = active_float[..., None, None, None]
+        predicted_common_rms = (
+            (
+                predicted_mean.square() * active_common * component_weight[None, None, None, None]
+            ).sum()
+            / (active_common.sum() * int(predicted_mean.shape[-2])).clamp_min(1.0)
+        ).sqrt()
+        common_mode_ratio = predicted_common_rms / predicted_rms.clamp_min(1e-8)
+        selected_spread = target_spread[active_candidate]
+        if int(selected_spread.numel()) > 0:
+            spread_p25, spread_p50, spread_p75 = (
+                torch.quantile(selected_spread, q) for q in (0.25, 0.50, 0.75)
+            )
+        else:
+            spread_p25 = spread_p50 = spread_p75 = torch.zeros(
+                (), device=target_spread.device, dtype=torch.float32
+            )
+        losses["evidence_mmd_it_execution_value_loss"] = execution_value_loss.detach().float()
+        losses["evidence_mmd_it_execution_value_weight"] = torch.as_tensor(
+            execution_value_weight,
+            device=execution_value_loss.device,
+            dtype=torch.float32,
+        )
+        losses["evidence_mmd_it_execution_value_reliability_scale"] = (
+            reliability_scale.detach().float()
+        )
+        losses["evidence_mmd_it_execution_value_reliability"] = (
+            (reliability.sum() / active_denominator).detach().float()
+        )
+        losses["evidence_mmd_it_execution_value_target_spread"] = (
+            ((target_spread * active_float).sum() / active_denominator).detach().float()
+        )
+        predicted_standardized_spread = torch.sqrt(
+            (predicted_centered.square() * physical_field_weight).sum(dim=(2, 3, 4))
+            / row_denominator
+        )
+        predicted_spread = predicted_standardized_spread * normalization_scale
+        losses["evidence_mmd_it_execution_value_predicted_spread"] = (
+            ((predicted_spread * active_float).sum() / active_denominator).detach().float()
+        )
+        losses["evidence_mmd_it_execution_value_predicted_standardized_spread"] = (
+            ((predicted_standardized_spread * active_float).sum() / active_denominator)
+            .detach()
+            .float()
+        )
+        losses["evidence_mmd_it_execution_value_target_spread_p25"] = spread_p25.detach().float()
+        losses["evidence_mmd_it_execution_value_target_spread_p50"] = spread_p50.detach().float()
+        losses["evidence_mmd_it_execution_value_target_spread_p75"] = spread_p75.detach().float()
+        losses["evidence_mmd_it_execution_value_correlation"] = correlation.detach().float()
+        losses["evidence_mmd_it_execution_value_pairwise_accuracy"] = (
+            pairwise_accuracy.detach().float()
+        )
+        losses["evidence_mmd_it_execution_value_decision_accuracy"] = (
+            decision_accuracy.detach().float()
+        )
+        losses["evidence_mmd_it_execution_value_common_mode_ratio"] = (
+            common_mode_ratio.detach().float()
+        )
+        losses["evidence_mmd_it_execution_candidate_coverage"] = valid.float().mean()
+        losses["evidence_mmd_it_terminal_identity_velocity_error"] = (
+            terminal_identity_error.detach().float()
+        )
+        terminal_valid = valid[..., -1] & active_candidate
+        operation_scalar = target_scalar[..., :-1].masked_fill(
+            ~valid[..., :-1], invalid_max
+        )
+        best_operation = operation_scalar.amin(dim=-1)
+        terminal_target_margin = target_scalar[..., -1] - best_operation
+        predicted_operation = predicted_scalar[..., :-1].masked_fill(
+            ~valid[..., :-1], invalid_max
+        )
+        predicted_terminal_margin = predicted_scalar[..., -1] - predicted_operation.amin(dim=-1)
+        terminal_denominator = terminal_valid.float().sum().clamp_min(1.0)
+        losses["evidence_mmd_it_terminal_target_cost_margin"] = (
+            (terminal_target_margin * terminal_valid.float()).sum() / terminal_denominator
+        ).detach().float()
+        losses["evidence_mmd_it_terminal_predicted_cost_margin"] = (
+            (predicted_terminal_margin * terminal_valid.float()).sum() / terminal_denominator
+        ).detach().float()
+        losses["evidence_mmd_it_terminal_target_preferred_fraction"] = (
+            ((terminal_target_margin < 0.0) & terminal_valid).float().sum()
+            / terminal_denominator
+        ).detach().float()
+        if enable_future_loss:
+            losses["loss"] = losses["loss"] + execution_value_weight * execution_value_loss
     dyn = rollout_dynamics_loss(output)
     delta = rollout_delta_loss(output)
     con = rollout_contrast_loss(output, margin=float(trainer.rollout_contrast_margin))
@@ -1105,6 +1558,67 @@ def flow_losses(
     losses["rollout_variance"] = rollout_var
     losses["rollout_norm"] = rollout_norm
     losses["rollout_milestone_delta_match"] = rollout_milestone
+    spectral_competition = output.get("hierarchical_mmdit_spectral_competition_loss")
+    if torch.is_tensor(spectral_competition) and spectral_competition.numel() == 1:
+        spectral_weight = max(
+            float(
+                getattr(
+                    system.policy_config,
+                    "hierarchical_mmdit_spectral_competition_loss_weight",
+                    0.0,
+                )
+            ),
+            0.0,
+        )
+        warmup_steps = max(
+            int(
+                getattr(
+                    system.policy_config,
+                    "hierarchical_mmdit_spectral_competition_warmup_steps",
+                    0,
+                )
+            ),
+            0,
+        )
+        step_value = 0 if global_step is None else max(int(global_step), 0)
+        losses["hierarchical_mmdit_spectral_competition_loss"] = (
+            spectral_competition.detach().float().reshape(())
+        )
+        losses["hierarchical_mmdit_spectral_competition_weight"] = torch.as_tensor(
+            spectral_weight if step_value >= warmup_steps else 0.0,
+            device=spectral_competition.device,
+            dtype=spectral_competition.dtype,
+        )
+        if enable_future_loss and spectral_weight > 0.0 and step_value >= warmup_steps:
+            losses["loss"] = losses["loss"] + spectral_weight * spectral_competition
+    predicted_coefficients = output.get("pred_velocity_coefficients")
+    target_flow_velocity = output.get("target_flow_velocity")
+    if (
+        torch.is_tensor(predicted_coefficients)
+        and predicted_coefficients.ndim == 3
+        and torch.is_tensor(target_flow_velocity)
+    ):
+        losses["hierarchical_mmdit_spectral_coefficient_flow_mse"] = (
+            predicted_coefficients.detach()
+            .float()
+            .sub(target_flow_velocity.detach().float())
+            .square()
+            .mean()
+        )
+        losses["hierarchical_mmdit_spectral_coefficient_flow_rms"] = (
+            predicted_coefficients.detach()
+            .float()
+            .sub(target_flow_velocity.detach().float())
+            .square()
+            .mean()
+            .sqrt()
+        )
+        losses["hierarchical_mmdit_spectral_coefficient_flow_energy"] = (
+            target_flow_velocity.detach().float().square().mean()
+        )
+        losses["hierarchical_mmdit_spectral_coefficient_prediction_energy"] = (
+            predicted_coefficients.detach().float().square().mean()
+        )
     # Compatibility log names: these no longer correspond to self-denoise.
     losses["future_latent"] = dyn.detach()
     losses["action_effect"] = delta.detach()
@@ -1119,7 +1633,9 @@ def flow_losses(
     if enable_future_loss and float(trainer.rollout_norm_loss_weight) > 0:
         losses["loss"] = losses["loss"] + float(trainer.rollout_norm_loss_weight) * rollout_norm
     if enable_future_loss and float(trainer.rollout_milestone_delta_match_weight) > 0:
-        losses["loss"] = losses["loss"] + float(trainer.rollout_milestone_delta_match_weight) * rollout_milestone
+        losses["loss"] = (
+            losses["loss"] + float(trainer.rollout_milestone_delta_match_weight) * rollout_milestone
+        )
     # Disabled by default. Kept only as compatibility knobs; they map to the
     # same dynamics-bound target rather than future-noisy denoise.
     if enable_future_loss and float(trainer.future_latent_loss_weight) > 0:
@@ -1135,7 +1651,9 @@ def flow_losses(
             losses["loss"] = losses["loss"] + weight * kl
     if "latent_cvae_kl" in output and "legacy_physical_velocity" in output:
         pred = output["pred_physical_velocity"]
-        legacy = output["legacy_physical_velocity"].detach().to(device=pred.device, dtype=pred.dtype)
+        legacy = (
+            output["legacy_physical_velocity"].detach().to(device=pred.device, dtype=pred.dtype)
+        )
         anchor_error = semantic_physical_velocity_error(
             system,
             pred - legacy,
@@ -1144,7 +1662,10 @@ def flow_losses(
         pos_w = position_weights(system.policy_config, trainer, pred.device).to(dtype=pred.dtype)
         anchor = (anchor_error * pos_w[None]).mean()
         base_weight = max(float(getattr(trainer, "latent_cvae_legacy_anchor_weight", 0.0)), 0.0)
-        min_weight = min(max(float(getattr(trainer, "latent_cvae_legacy_anchor_min_weight", 0.0)), 0.0), base_weight)
+        min_weight = min(
+            max(float(getattr(trainer, "latent_cvae_legacy_anchor_min_weight", 0.0)), 0.0),
+            base_weight,
+        )
         decay_steps = int(getattr(trainer, "latent_cvae_legacy_anchor_decay_steps", 0))
         step_value = 0 if global_step is None else max(int(global_step), 0)
         if decay_steps > 0:
@@ -1157,7 +1678,9 @@ def flow_losses(
         losses["latent_cvae_legacy_anchor_weight"] = anchor_weight.detach().float()
         flat_pred = pred.detach().float().flatten(1)
         flat_legacy = legacy.detach().float().flatten(1)
-        losses["latent_cvae_legacy_cosine"] = F.cosine_similarity(flat_pred, flat_legacy, dim=-1).mean()
+        losses["latent_cvae_legacy_cosine"] = F.cosine_similarity(
+            flat_pred, flat_legacy, dim=-1
+        ).mean()
         losses["latent_cvae_legacy_norm_ratio"] = (
             flat_pred.norm(dim=-1) / flat_legacy.norm(dim=-1).clamp_min(1e-6)
         ).mean()
@@ -1174,38 +1697,47 @@ def flow_losses(
             post_pred - output["target_physical_velocity"],
             arm_null_weight=trainer.arm_manifold_null_weight,
         )
-        pos_w = position_weights(system.policy_config, trainer, post_pred.device).to(dtype=post_pred.dtype)
+        pos_w = position_weights(system.policy_config, trainer, post_pred.device).to(
+            dtype=post_pred.dtype
+        )
         post_flow = (post_error * pos_w[None]).mean()
         losses["latent_cvae_post_flow"] = post_flow.detach().float()
         post_recon = post_flow
         if "post_pred_action_estimate" in output:
-            post_decoded = F.smooth_l1_loss(output["post_pred_action_estimate"], sample["policy_action"].to(device=post_pred.device))
+            post_decoded = F.smooth_l1_loss(
+                output["post_pred_action_estimate"],
+                sample["policy_action"].to(device=post_pred.device),
+            )
             losses["latent_cvae_post_decoded_action"] = post_decoded.detach().float()
             post_recon = post_recon + float(trainer.decoded_action_loss_weight) * post_decoded
         post_weight = float(getattr(trainer, "latent_cvae_posterior_recon_weight", 0.0))
         losses["latent_cvae_posterior_recon"] = post_recon.detach().float()
-        losses["latent_cvae_posterior_recon_weight"] = torch.as_tensor(post_weight, device=post_pred.device, dtype=post_pred.dtype)
+        losses["latent_cvae_posterior_recon_weight"] = torch.as_tensor(
+            post_weight, device=post_pred.device, dtype=post_pred.dtype
+        )
         if post_weight > 0:
             losses["loss"] = losses["loss"] + post_weight * post_recon
     if "latent_cvae_adaptive_regularizer" in output:
         reg = output["latent_cvae_adaptive_regularizer"]
         weight = float(getattr(trainer, "latent_cvae_adaptive_regularizer_weight", 0.0))
         losses["latent_cvae_adaptive_regularizer"] = reg.detach().float()
-        losses["latent_cvae_adaptive_regularizer_weight"] = torch.as_tensor(weight, device=reg.device, dtype=reg.dtype)
+        losses["latent_cvae_adaptive_regularizer_weight"] = torch.as_tensor(
+            weight, device=reg.device, dtype=reg.dtype
+        )
         if weight > 0:
             losses["loss"] = losses["loss"] + weight * reg
     if "latent_cvae_adaptive_route_entropy_regularizer" in output:
         route_reg = output["latent_cvae_adaptive_route_entropy_regularizer"]
         route_weight = float(getattr(trainer, "latent_cvae_adaptive_route_entropy_weight", 0.0))
         losses["latent_cvae_adaptive_route_entropy_regularizer"] = route_reg.detach().float()
-        losses["latent_cvae_adaptive_route_entropy_weight"] = torch.as_tensor(route_weight, device=route_reg.device, dtype=route_reg.dtype)
+        losses["latent_cvae_adaptive_route_entropy_weight"] = torch.as_tensor(
+            route_weight, device=route_reg.device, dtype=route_reg.dtype
+        )
         if route_weight > 0:
             losses["loss"] = losses["loss"] + route_weight * route_reg
     if "hierarchical_mmdit_depth_usage_regularizer" in output:
         depth_reg = output["hierarchical_mmdit_depth_usage_regularizer"]
-        depth_weight = float(
-            getattr(trainer, "hierarchical_mmdit_depth_usage_loss_weight", 0.0)
-        )
+        depth_weight = float(getattr(trainer, "hierarchical_mmdit_depth_usage_loss_weight", 0.0))
         losses["hierarchical_mmdit_depth_usage_regularizer"] = depth_reg.detach().float()
         losses["hierarchical_mmdit_depth_usage_loss_weight"] = torch.as_tensor(
             depth_weight, device=depth_reg.device, dtype=depth_reg.dtype
@@ -1217,22 +1749,19 @@ def flow_losses(
     probe_active = output.get("refinement_probe_active")
     exit_candidates = output.get("refinement_probe_exit_candidates")
     target_velocity = output.get("target_physical_velocity")
-    base_route_weight = max(
-        float(trainer.hierarchical_mmdit_oracle_route_loss_weight), 0.0
-    )
+    base_route_weight = max(float(trainer.hierarchical_mmdit_oracle_route_loss_weight), 0.0)
     if base_route_weight > 0.0 and int(
         getattr(system.policy_config, "hierarchical_mmdit_unified_controller", 0)
     ):
         raise ValueError(
             "legacy oracle exit supervision is incompatible with the unified controller; "
-            "use hierarchical_mmdit_operation_route_loss_weight"
+            "use hierarchical_mmdit_operation_value_loss_weight"
         )
-    if base_route_weight > 0.0 and str(
-        system.policy_config.hierarchical_mmdit_schedule_mode
-    ) != "fixed":
-        raise ValueError(
-            "oracle route supervision requires hierarchical_mmdit_schedule_mode=fixed"
-        )
+    if (
+        base_route_weight > 0.0
+        and str(system.policy_config.hierarchical_mmdit_schedule_mode) != "fixed"
+    ):
+        raise ValueError("oracle route supervision requires hierarchical_mmdit_schedule_mode=fixed")
     route_inputs = {
         "exit_logits": exit_logits,
         "probe_predictions": probe_predictions,
@@ -1250,10 +1779,7 @@ def flow_losses(
                 + ", ".join(missing_route_inputs)
             )
         with torch.no_grad():
-            route_residual = (
-                probe_predictions.float()
-                - target_velocity.detach().float()[:, None]
-            )
+            route_residual = probe_predictions.float() - target_velocity.detach().float()[:, None]
             route_horizon_error = semantic_physical_velocity_error(
                 system,
                 route_residual,
@@ -1262,27 +1788,19 @@ def flow_losses(
             route_position_weight = position_weights(
                 system.policy_config, trainer, route_horizon_error.device
             ).to(dtype=route_horizon_error.dtype)
-            route_step_error = (
-                route_horizon_error * route_position_weight[None, None]
-            ).mean(dim=-1)
+            route_step_error = (route_horizon_error * route_position_weight[None, None]).mean(
+                dim=-1
+            )
         route = _oracle_exit_supervision(
             exit_logits=exit_logits,
             candidate_error=route_step_error[:, 1:],
             initial_error=route_step_error[:, 0],
             candidate_mask=probe_active.bool() & exit_candidates.bool(),
-            relative_tolerance=float(
-                trainer.hierarchical_mmdit_oracle_route_relative_tolerance
-            ),
+            relative_tolerance=float(trainer.hierarchical_mmdit_oracle_route_relative_tolerance),
         )
-        route_warmup = max(
-            int(trainer.hierarchical_mmdit_oracle_route_warmup_steps), 0
-        )
+        route_warmup = max(int(trainer.hierarchical_mmdit_oracle_route_warmup_steps), 0)
         step_value = 0 if global_step is None else max(int(global_step), 0)
-        route_weight = (
-            base_route_weight
-            if system.training and step_value >= route_warmup
-            else 0.0
-        )
+        route_weight = base_route_weight if system.training and step_value >= route_warmup else 0.0
         losses["hierarchical_mmdit_oracle_route_loss"] = route["loss"].detach().float()
         losses["hierarchical_mmdit_oracle_route_weight"] = torch.as_tensor(
             route_weight, device=exit_logits.device, dtype=torch.float32
@@ -1299,10 +1817,7 @@ def flow_losses(
     refinement_step_error_cache: Tensor | None = None
     if torch.is_tensor(probe_predictions) and torch.is_tensor(target_velocity):
         with torch.no_grad():
-            prefix_residual = (
-                probe_predictions.float()
-                - target_velocity.detach().float()[:, None]
-            )
+            prefix_residual = probe_predictions.float() - target_velocity.detach().float()[:, None]
             prefix_horizon_error = semantic_physical_velocity_error(
                 system,
                 prefix_residual,
@@ -1311,12 +1826,14 @@ def flow_losses(
             prefix_position_weight = position_weights(
                 system.policy_config, trainer, prefix_horizon_error.device
             ).to(dtype=prefix_horizon_error.dtype)
-            prefix_error = (
-                prefix_horizon_error * prefix_position_weight[None, None]
-            ).mean(dim=-1)
+            prefix_error = (prefix_horizon_error * prefix_position_weight[None, None]).mean(dim=-1)
             refinement_step_error_cache = prefix_error.detach()
             prefix_gain = prefix_error[:, :-1] - prefix_error[:, 1:]
-            prefix_active = probe_active.float() if torch.is_tensor(probe_active) else torch.ones_like(prefix_gain)
+            prefix_active = (
+                probe_active.float()
+                if torch.is_tensor(probe_active)
+                else torch.ones_like(prefix_gain)
+            )
             prefix_denominator = prefix_active.sum().clamp_min(1.0)
             losses["hierarchical_mmdit_prefix_error_initial"] = prefix_error[:, 0].mean()
             losses["hierarchical_mmdit_prefix_error_final"] = prefix_error[:, -1].mean()
@@ -1327,121 +1844,247 @@ def flow_losses(
                 (prefix_gain > 0.0).float() * prefix_active
             ).sum() / prefix_denominator
 
-    operation_logits = output.get("hierarchical_mmdit_operation_logits")
-    operation_exit_logits = output.get("hierarchical_mmdit_operation_exit_logits")
-    operation_candidates = output.get(
-        "hierarchical_mmdit_operation_candidate_predictions"
-    )
+    operation_value_field = output.get("hierarchical_mmdit_operation_value_field")
+    operation_candidates = output.get("hierarchical_mmdit_operation_candidate_predictions")
     operation_mask = output.get("hierarchical_mmdit_operation_candidate_mask")
-    operation_weight_base = max(
+    retired_route_weight = max(
         float(getattr(trainer, "hierarchical_mmdit_operation_route_loss_weight", 0.0)),
         0.0,
     )
+    if retired_route_weight > 0.0:
+        raise ValueError(
+            "categorical operation-route supervision was retired in V88; "
+            "use hierarchical_mmdit_operation_value_loss_weight"
+        )
+    operation_weight_base = max(
+        float(
+            getattr(
+                trainer,
+                "hierarchical_mmdit_operation_value_loss_weight",
+                0.0,
+            )
+        ),
+        0.0,
+    )
     operation_inputs = {
-        "operation_logits": operation_logits,
-        "operation_exit_logits": operation_exit_logits,
+        "operation_value_field": operation_value_field,
         "operation_candidates": operation_candidates,
         "operation_mask": operation_mask,
         "target_velocity": target_velocity,
     }
     if operation_weight_base > 0.0:
-        missing = [
-            name for name, value in operation_inputs.items()
-            if not torch.is_tensor(value)
-        ]
+        if not int(
+            getattr(
+                system.policy_config,
+                "hierarchical_mmdit_operation_candidate_probes",
+                0,
+            )
+        ):
+            raise ValueError(
+                "operation value supervision requires "
+                "hierarchical_mmdit_operation_candidate_probes=1"
+            )
+        missing = [name for name, value in operation_inputs.items() if not torch.is_tensor(value)]
         if missing:
             raise RuntimeError(
-                "operation route supervision is missing probes: " + ", ".join(missing)
+                "operation value supervision is missing probes: " + ", ".join(missing)
             )
-        temperature = max(
-            float(getattr(trainer, "hierarchical_mmdit_operation_route_temperature", 0.5)),
-            1e-3,
+        if operation_candidates.ndim != 5 or operation_value_field.ndim != 5:
+            raise ValueError("operation value tensors must be [B,S,C,T,P] and [B,S,C,T,2]")
+        expected_value_shape = (
+            int(operation_candidates.shape[0]),
+            int(operation_candidates.shape[1]),
+            int(operation_candidates.shape[2]) - 1,
+            int(operation_candidates.shape[3]),
+            2,
         )
+        if tuple(operation_value_field.shape) != expected_value_shape:
+            raise ValueError(
+                "operation value field shape does not match candidate probes: "
+                f"expected {expected_value_shape}, got {tuple(operation_value_field.shape)}"
+            )
+        if tuple(operation_mask.shape) != tuple(operation_candidates.shape[:3]):
+            raise ValueError("operation candidate mask has the wrong shape")
         with torch.no_grad():
             candidate_residual = (
-                operation_candidates.float()
-                - target_velocity.detach().float()[:, None, None]
+                operation_candidates.float() - target_velocity.detach().float()[:, None, None]
             )
-            candidate_error = _operation_candidate_error(
+            candidate_error_field = _operation_candidate_error_field(
                 system, candidate_residual, sample, trainer
             )
             candidate_position_weight = position_weights(
-                system.policy_config, trainer, candidate_error.device
-            ).to(dtype=candidate_error.dtype)
-            candidate_error = (
-                candidate_error * candidate_position_weight[None, None, None]
-            ).mean(dim=-1)
-            candidate_gain = candidate_error[..., :1] - candidate_error
-            valid = operation_mask.bool()
-            target_logits = candidate_gain / temperature
-            target_logits = target_logits.masked_fill(
-                ~valid, torch.finfo(target_logits.dtype).min
+                system.policy_config, trainer, candidate_error_field.device
+            ).to(dtype=candidate_error_field.dtype)
+            candidate_error_field = (
+                candidate_error_field * candidate_position_weight[None, None, None, :, None]
             )
-            target_probability = torch.softmax(target_logits, dim=-1)
-            active_candidate = valid.any(dim=-1)
+            baseline_error = candidate_error_field[..., :1, :, :]
+            target_value = (candidate_error_field[..., 1:, :, :] - baseline_error).detach()
+            valid = operation_mask[..., 1:].detach().bool()
+            target_centered, target_mean = masked_candidate_center(
+                target_value, valid, candidate_dim=2
+            )
 
-        predicted_logits = torch.cat(
-            [operation_exit_logits[..., None], operation_logits.float()], dim=-1
+        predicted_value = operation_value_field.float()
+        predicted_centered, predicted_mean = masked_candidate_center(
+            predicted_value, valid, candidate_dim=2
         )
-        predicted_logits = predicted_logits.masked_fill(
-            ~operation_mask.bool(), torch.finfo(predicted_logits.dtype).min
+        valid_field = valid[..., None, None].expand_as(predicted_value)
+        valid_field_float = valid_field.float()
+        arm_dim = int(system.policy_config.arm_dim)
+        component_weight = torch.tensor(
+            [float(arm_dim), 1.0],
+            device=predicted_value.device,
+            dtype=predicted_value.dtype,
+        ) / float(arm_dim + 1)
+        physical_field_weight = valid_field_float * component_weight[None, None, None, None]
+        candidate_count = valid.float().sum(dim=2)
+        active_candidate = candidate_count > 1.0
+        row_denominator = (
+            valid[..., None]
+            .expand(-1, -1, -1, int(predicted_value.shape[-2]))
+            .float()
+            .sum(dim=(2, 3))
+            .clamp_min(1.0)
         )
-        predicted_log_probability = torch.log_softmax(predicted_logits, dim=-1)
-        route_loss_rows = -(
-            target_probability * predicted_log_probability
-        ).sum(dim=-1)
-        active_route = active_candidate.float()
-        active_route_denominator = active_route.sum().clamp_min(1.0)
-        route_loss = (
-            route_loss_rows * active_route
-        ).sum() / active_route_denominator
-        step_value = 0 if global_step is None else max(int(global_step), 0)
-        route_warmup = max(
-            int(getattr(trainer, "hierarchical_mmdit_operation_route_warmup_steps", 0)),
-            0,
+        target_spread = torch.sqrt(
+            (target_centered.square() * physical_field_weight).sum(dim=(2, 3, 4)) / row_denominator
         )
-        route_weight = (
-            operation_weight_base
-            if system.training and step_value >= route_warmup
-            else 0.0
+        configured_scale = max(
+            float(
+                getattr(
+                    trainer,
+                    "hierarchical_mmdit_operation_value_reliability_scale",
+                    0.0,
+                )
+            ),
+            0.0,
         )
-        target_entropy = -(
-            target_probability.clamp_min(1e-8)
-            * target_probability.clamp_min(1e-8).log()
-        ).sum(dim=-1)
-        predicted_probability = predicted_log_probability.exp()
-        predicted_entropy = -(
-            predicted_probability.clamp_min(1e-8)
-            * predicted_log_probability
-        ).sum(dim=-1)
-        target_best = target_probability.argmax(dim=-1)
-        predicted_best = predicted_probability.argmax(dim=-1)
-        gain_max = candidate_gain.masked_fill(~valid, 0.0).amax(dim=-1)
-        gain_min = candidate_gain.masked_fill(
-            ~valid, torch.finfo(candidate_gain.dtype).max
-        ).amin(dim=-1)
-        gain_spread = gain_max - gain_min
-        losses["hierarchical_mmdit_operation_route_loss"] = route_loss.detach().float()
-        losses["hierarchical_mmdit_operation_route_weight"] = torch.as_tensor(
-            route_weight, device=operation_logits.device, dtype=torch.float32
+        active_float = active_candidate.float()
+        active_denominator = active_float.sum().clamp_min(1.0)
+        if configured_scale > 0.0:
+            reliability_scale = torch.as_tensor(
+                configured_scale,
+                device=target_spread.device,
+                dtype=target_spread.dtype,
+            )
+        else:
+            reliability_scale = (
+                (target_spread.detach() * active_float).sum() / active_denominator
+            ).clamp_min(1e-6)
+        reliability = target_spread / (target_spread + reliability_scale)
+        reliability = reliability * active_float
+        reliability_denominator = reliability.sum().clamp_min(1e-6)
+        huber_delta = max(
+            float(
+                getattr(
+                    trainer,
+                    "hierarchical_mmdit_operation_value_huber_delta",
+                    0.1,
+                )
+            ),
+            1e-6,
         )
-        losses["hierarchical_mmdit_operation_target_entropy"] = (
-            target_entropy * active_route
-        ).sum() / active_route_denominator
-        losses["hierarchical_mmdit_operation_predicted_entropy"] = (
-            predicted_entropy * active_route
-        ).sum() / active_route_denominator
-        losses["hierarchical_mmdit_operation_gain_spread"] = (
-            gain_spread * active_route
-        ).sum() / active_route_denominator
-        losses["hierarchical_mmdit_operation_decision_accuracy"] = (
-            (target_best == predicted_best).float() * active_route
-        ).sum() / active_route_denominator
-        losses["hierarchical_mmdit_operation_candidate_coverage"] = (
-            operation_mask.float().mean()
+        value_loss_field = (
+            F.smooth_l1_loss(
+                predicted_centered,
+                target_centered,
+                reduction="none",
+                beta=huber_delta,
+            )
+            * physical_field_weight
         )
-        if route_weight > 0.0:
-            losses["loss"] = losses["loss"] + route_weight * route_loss
+        value_loss_rows = value_loss_field.sum(dim=(2, 3, 4)) / row_denominator
+        value_loss = (value_loss_rows * reliability).sum() / reliability_denominator
+        operation_weight = operation_weight_base if system.training else 0.0
+        predicted_scalar = (
+            (predicted_value * component_weight[None, None, None, None]).sum(dim=-1).mean(dim=-1)
+        )
+        target_scalar = (
+            (target_value * component_weight[None, None, None, None]).sum(dim=-1).mean(dim=-1)
+        )
+        invalid_max = torch.finfo(predicted_scalar.dtype).max
+        predicted_best = predicted_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
+        target_best = target_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
+        decision_accuracy = (
+            (predicted_best == target_best).float() * active_float
+        ).sum() / active_denominator
+
+        pair_mask = valid[..., :, None] & valid[..., None, :]
+        upper = torch.triu(
+            torch.ones(
+                int(valid.shape[-1]),
+                int(valid.shape[-1]),
+                device=valid.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+        pair_mask = pair_mask & upper
+        target_difference = target_scalar[..., :, None] - target_scalar[..., None, :]
+        predicted_difference = predicted_scalar[..., :, None] - predicted_scalar[..., None, :]
+        informative_pair = pair_mask & target_difference.ne(0.0)
+        pair_denominator = informative_pair.float().sum().clamp_min(1.0)
+        pairwise_accuracy = (
+            (predicted_difference * target_difference > 0.0).float() * informative_pair.float()
+        ).sum() / pair_denominator
+
+        predicted_flat = predicted_centered
+        target_flat = target_centered
+        correlation = (predicted_flat * target_flat * physical_field_weight).sum() / (
+            (predicted_flat.square() * physical_field_weight).sum().sqrt()
+            * (target_flat.square() * physical_field_weight).sum().sqrt()
+        ).clamp_min(1e-8)
+        predicted_rms = (
+            (predicted_value.square() * physical_field_weight).sum()
+            / row_denominator.sum().clamp_min(1.0)
+        ).sqrt()
+        active_common = active_float[..., None, None, None]
+        predicted_common_rms = (
+            (
+                predicted_mean.square() * active_common * component_weight[None, None, None, None]
+            ).sum()
+            / (active_common.sum() * int(predicted_mean.shape[-2])).clamp_min(1.0)
+        ).sqrt()
+        common_mode_ratio = predicted_common_rms / predicted_rms.clamp_min(1e-8)
+        selected_spread = target_spread[active_candidate]
+        if int(selected_spread.numel()) > 0:
+            spread_p25, spread_p50, spread_p75 = (
+                torch.quantile(selected_spread, q) for q in (0.25, 0.50, 0.75)
+            )
+        else:
+            spread_p25 = spread_p50 = spread_p75 = torch.zeros(
+                (), device=target_spread.device, dtype=torch.float32
+            )
+        losses["hierarchical_mmdit_operation_value_loss"] = value_loss.detach().float()
+        losses["hierarchical_mmdit_operation_value_weight"] = torch.as_tensor(
+            operation_weight, device=predicted_value.device, dtype=torch.float32
+        )
+        losses["hierarchical_mmdit_operation_value_reliability_scale"] = (
+            reliability_scale.detach().float()
+        )
+        losses["hierarchical_mmdit_operation_value_reliability"] = (
+            (reliability.sum() / active_denominator).detach().float()
+        )
+        losses["hierarchical_mmdit_operation_value_target_spread"] = (
+            ((target_spread * active_float).sum() / active_denominator).detach().float()
+        )
+        losses["hierarchical_mmdit_operation_value_target_spread_p25"] = spread_p25.detach().float()
+        losses["hierarchical_mmdit_operation_value_target_spread_p50"] = spread_p50.detach().float()
+        losses["hierarchical_mmdit_operation_value_target_spread_p75"] = spread_p75.detach().float()
+        losses["hierarchical_mmdit_operation_value_correlation"] = correlation.detach().float()
+        losses["hierarchical_mmdit_operation_value_pairwise_accuracy"] = (
+            pairwise_accuracy.detach().float()
+        )
+        losses["hierarchical_mmdit_operation_value_decision_accuracy"] = (
+            decision_accuracy.detach().float()
+        )
+        losses["hierarchical_mmdit_operation_value_common_mode_ratio"] = (
+            common_mode_ratio.detach().float()
+        )
+        losses["hierarchical_mmdit_operation_candidate_coverage"] = valid.float().mean()
+        if operation_weight > 0.0:
+            losses["loss"] = losses["loss"] + operation_weight * value_loss
     # V70: stable-denominator replacements for the retired xratio gauge.
     # volume parity = noisy token norm vs workspace token norm (1.0 = parity;
     # after the noisy LayerNorm lands this pins to 1 by construction).
@@ -1458,14 +2101,14 @@ def flow_losses(
         if torch.is_tensor(noisy_attn) and torch.is_tensor(ws_attn):
             losses["mmdit_noisy_influence_ratio"] = (
                 noisy_attn.detach().float() * noisy_vol.detach().float()
-            ) / (
-                ws_attn.detach().float() * ws_vol.detach().float()
-            ).clamp_min(1e-8)
+            ) / (ws_attn.detach().float() * ws_vol.detach().float()).clamp_min(1e-8)
     deterministic_intent_decoder = "intent_contract_deterministic" in output
     micro_losses = (
         {}
         if deterministic_intent_decoder
-        else micro_refine_supervision_losses(system, sample, output, trainer, global_step=global_step)
+        else micro_refine_supervision_losses(
+            system, sample, output, trainer, global_step=global_step
+        )
     )
     for key, value in micro_losses.items():
         losses[key] = value.detach().float()
@@ -1476,25 +2119,41 @@ def flow_losses(
     micro_smooth_weight = float(getattr(trainer, "latent_cvae_micro_coverage_smooth_weight", 0.0))
     micro_floor_weight = float(getattr(trainer, "latent_cvae_micro_coverage_floor_weight", 0.0))
     if micro_weight > 0 and "latent_cvae_micro_supervision" in micro_losses:
-        losses["loss"] = losses["loss"] + micro_weight * micro_losses["latent_cvae_micro_supervision"]
+        losses["loss"] = (
+            losses["loss"] + micro_weight * micro_losses["latent_cvae_micro_supervision"]
+        )
     if micro_event_weight > 0 and "latent_cvae_micro_event" in micro_losses:
-        losses["loss"] = losses["loss"] + micro_event_weight * micro_losses["latent_cvae_micro_event"]
+        losses["loss"] = (
+            losses["loss"] + micro_event_weight * micro_losses["latent_cvae_micro_event"]
+        )
     if micro_mono_weight > 0 and "latent_cvae_micro_monotonic" in micro_losses:
-        losses["loss"] = losses["loss"] + micro_mono_weight * micro_losses["latent_cvae_micro_monotonic"]
+        losses["loss"] = (
+            losses["loss"] + micro_mono_weight * micro_losses["latent_cvae_micro_monotonic"]
+        )
     if micro_kl_weight > 0 and "latent_cvae_micro_weight_kl" in micro_losses:
-        losses["loss"] = losses["loss"] + micro_kl_weight * micro_losses["latent_cvae_micro_weight_kl"]
+        losses["loss"] = (
+            losses["loss"] + micro_kl_weight * micro_losses["latent_cvae_micro_weight_kl"]
+        )
     if micro_smooth_weight > 0 and "latent_cvae_micro_coverage_smooth" in micro_losses:
-        losses["loss"] = losses["loss"] + micro_smooth_weight * micro_losses["latent_cvae_micro_coverage_smooth"]
+        losses["loss"] = (
+            losses["loss"] + micro_smooth_weight * micro_losses["latent_cvae_micro_coverage_smooth"]
+        )
     if micro_floor_weight > 0 and "latent_cvae_micro_coverage_floor" in micro_losses:
-        losses["loss"] = losses["loss"] + micro_floor_weight * micro_losses["latent_cvae_micro_coverage_floor"]
+        losses["loss"] = (
+            losses["loss"] + micro_floor_weight * micro_losses["latent_cvae_micro_coverage_floor"]
+        )
     losses.update(rollout_diagnostics(output))
     if "gate_self" in output:
         losses["gate_self"] = output["gate_self"].detach()
         losses["gate_visual"] = output["gate_visual"].detach()
-        losses["gate_rollout"] = output.get("gate_rollout", torch.zeros_like(output["gate_self"])).detach()
+        losses["gate_rollout"] = output.get(
+            "gate_rollout", torch.zeros_like(output["gate_self"])
+        ).detach()
         losses["gate_ffn"] = output["gate_ffn"].detach()
     for key in (
-        "mod_content_norm", "mod_time_norm", "mod_content_to_time",
+        "mod_content_norm",
+        "mod_time_norm",
+        "mod_content_to_time",
         "future_conditioned_action_loss",
     ):
         if key in output:
@@ -1749,16 +2408,22 @@ def flow_losses(
     probe_stage_ids = output.get("refinement_probe_stage_ids")
     probe_block_ids = output.get("refinement_probe_block_ids")
     target_velocity = output.get("target_physical_velocity")
-    if all(torch.is_tensor(value) for value in (
-        probe_predictions, probe_active, probe_response, probe_pressure,
-        probe_stage_ids, probe_block_ids, target_velocity,
-    )):
+    if all(
+        torch.is_tensor(value)
+        for value in (
+            probe_predictions,
+            probe_active,
+            probe_response,
+            probe_pressure,
+            probe_stage_ids,
+            probe_block_ids,
+            target_velocity,
+        )
+    ):
         with torch.no_grad():
-            if (
-                torch.is_tensor(refinement_step_error_cache)
-                and tuple(refinement_step_error_cache.shape[:2])
-                == tuple(probe_predictions.shape[:2])
-            ):
+            if torch.is_tensor(refinement_step_error_cache) and tuple(
+                refinement_step_error_cache.shape[:2]
+            ) == tuple(probe_predictions.shape[:2]):
                 step_error = refinement_step_error_cache
             else:
                 residual = probe_predictions.float() - target_velocity.detach().float()[:, None]
@@ -1796,15 +2461,15 @@ def flow_losses(
                 return (x_rows * y_rows).sum() / scale.clamp_min(1e-8)
 
             losses["hierarchical_mmdit_response_gain_corr"] = masked_correlation(
-                probe_response, marginal_gain,
+                probe_response,
+                marginal_gain,
             )
             losses["hierarchical_mmdit_pressure_gain_corr"] = masked_correlation(
-                probe_pressure, marginal_gain,
+                probe_pressure,
+                marginal_gain,
             )
             probe_time = output.get("time")
-            if torch.is_tensor(probe_time) and tuple(probe_time.shape) == (
-                int(active.shape[0]),
-            ):
+            if torch.is_tensor(probe_time) and tuple(probe_time.shape) == (int(active.shape[0]),):
                 time_bins = torch.clamp(
                     (probe_time.detach().float().clamp(0.0, 1.0) * 3.0).long(),
                     max=2,
@@ -1813,18 +2478,16 @@ def flow_losses(
                     selected = active.bool() & (time_bins[:, None] == time_bin)
                     selected_float = selected.float()
                     selected_denominator = selected_float.sum().clamp_min(1.0)
-                    losses[
-                        f"hierarchical_mmdit_response_gain_corr_t{time_bin}"
-                    ] = masked_correlation(probe_response, marginal_gain, selected)
-                    losses[
-                        f"hierarchical_mmdit_pressure_gain_corr_t{time_bin}"
-                    ] = masked_correlation(probe_pressure, marginal_gain, selected)
+                    losses[f"hierarchical_mmdit_response_gain_corr_t{time_bin}"] = (
+                        masked_correlation(probe_response, marginal_gain, selected)
+                    )
+                    losses[f"hierarchical_mmdit_pressure_gain_corr_t{time_bin}"] = (
+                        masked_correlation(probe_pressure, marginal_gain, selected)
+                    )
                     losses[f"hierarchical_mmdit_refine_gain_t{time_bin}"] = (
                         marginal_gain * selected_float
                     ).sum() / selected_denominator
-                    losses[
-                        f"hierarchical_mmdit_refine_positive_gain_fraction_t{time_bin}"
-                    ] = (
+                    losses[f"hierarchical_mmdit_refine_positive_gain_fraction_t{time_bin}"] = (
                         (marginal_gain > 0).float() * selected_float
                     ).sum() / selected_denominator
             for step_index in range(int(active.shape[1])):
@@ -1836,27 +2499,25 @@ def flow_losses(
                 losses[f"hierarchical_mmdit_step_{step_index}_positive_gain_fraction"] = (
                     (marginal_gain[:, step_index] > 0).float() * step_mask
                 ).sum() / step_denominator
-            for stage_index in range(
-                int(system.policy_config.hierarchical_mmdit_operator_stages)
-            ):
+            for stage_index in range(int(system.policy_config.hierarchical_mmdit_operator_stages)):
                 stage_mask = active * (probe_stage_ids == stage_index).float()
                 stage_denominator = stage_mask.sum().clamp_min(1.0)
                 losses[f"hierarchical_mmdit_stage_{stage_index}_gain"] = (
                     marginal_gain * stage_mask
                 ).sum() / stage_denominator
-            for block_index in range(
-                int(system.policy_config.hierarchical_mmdit_depth)
-            ):
+            for block_index in range(int(system.policy_config.hierarchical_mmdit_depth)):
                 block_mask = active * (probe_block_ids == block_index).float()
                 block_denominator = block_mask.sum().clamp_min(1.0)
                 losses[f"hierarchical_mmdit_block_{block_index}_gain"] = (
                     marginal_gain * block_mask
                 ).sum() / block_denominator
-    losses.update(_shadow_refinement_probe_metrics(
-        system,
-        output,
-        arm_null_weight=trainer.arm_manifold_null_weight,
-    ))
+    losses.update(
+        _shadow_refinement_probe_metrics(
+            system,
+            output,
+            arm_null_weight=trainer.arm_manifold_null_weight,
+        )
+    )
 
     # The deterministic decoder intentionally does not alias its diagnostics
     # into latent_cvae_* names.  Prefix pass-through keeps the new contract
@@ -1877,15 +2538,21 @@ def flow_losses(
     clean_noisy_fraction = output.get("hierarchical_mmdit_action_noisy_update_fraction")
     clean_stage_fraction = output.get("hierarchical_mmdit_action_stage_update_fraction")
     clean_low_fraction = output.get("hierarchical_mmdit_action_low_update_fraction")
-    if all(torch.is_tensor(value) for value in (
-        clean_noisy_fraction, clean_stage_fraction, clean_low_fraction,
-    )):
-        workspace_fraction = clean_stage_fraction.detach().float() + clean_low_fraction.detach().float()
+    if all(
+        torch.is_tensor(value)
+        for value in (
+            clean_noisy_fraction,
+            clean_stage_fraction,
+            clean_low_fraction,
+        )
+    ):
+        workspace_fraction = (
+            clean_stage_fraction.detach().float() + clean_low_fraction.detach().float()
+        )
         losses["hierarchical_mmdit_noisy_to_workspace_update_ratio"] = (
             clean_noisy_fraction.detach().float() / workspace_fraction.clamp_min(1e-8)
         )
     return losses
-
 
 
 def _midcut_aux_scale(trainer: V39PolicyTrainerConfig, epoch: int) -> float:
@@ -1900,6 +2567,31 @@ def _midcut_aux_scale(trainer: V39PolicyTrainerConfig, epoch: int) -> float:
     progress = min(max((int(epoch) - 1) / float(decay_epochs - 1), 0.0), 1.0)
     ratio = 1.0 + (final_ratio - 1.0) * progress
     return base * ratio
+
+
+def _layer_contract_aux_scale(trainer: V39PolicyTrainerConfig, epoch: int) -> float:
+    """Return the policy-stage layer-contract scale.
+
+    Older entry points inherit the mid-cut schedule.  Newer experiments can
+    opt into a distinct schedule without changing checkpoint compatibility.
+    """
+
+    configured = float(getattr(trainer, "layer_contract_aux_loss_weight", -1.0))
+    if configured < 0.0:
+        return _midcut_aux_scale(trainer, epoch)
+    if configured == 0.0:
+        return 0.0
+    decay_epochs = int(getattr(trainer, "layer_contract_aux_decay_epochs", -1))
+    final_ratio = float(getattr(trainer, "layer_contract_aux_final_ratio", -1.0))
+    if decay_epochs < 0:
+        decay_epochs = int(getattr(trainer, "midcut_aux_decay_epochs", 0))
+    if final_ratio < 0.0:
+        final_ratio = float(getattr(trainer, "midcut_aux_final_ratio", 1.0))
+    final_ratio = min(max(final_ratio, 0.0), 1.0)
+    if decay_epochs <= 1:
+        return configured * final_ratio
+    progress = min(max((int(epoch) - 1) / float(decay_epochs - 1), 0.0), 1.0)
+    return configured * (1.0 + (final_ratio - 1.0) * progress)
 
 
 def _midcut_as_primary(output: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -1969,7 +2661,15 @@ def midcut_contract_losses(
 
 def _uses_layer_adapter_contract(trainer: V39PolicyTrainerConfig) -> bool:
     mode = str(getattr(trainer, "contract_mode", "midcut")).lower().replace("-", "_")
-    if mode in {"layer", "layers", "adapter", "layer_adapter", "multilayer", "multi_layer", "multi_layer_adapter"}:
+    if mode in {
+        "layer",
+        "layers",
+        "adapter",
+        "layer_adapter",
+        "multilayer",
+        "multi_layer",
+        "multi_layer_adapter",
+    }:
         return True
     if mode in {"midcut", "mid_cut"}:
         return False
@@ -2037,8 +2737,14 @@ def _layer_contract_as_primary(
     for dst, src in replacements.items():
         if src in entry:
             fake[dst] = entry[src]
-    if "clean_physical_estimate" not in fake and "time" in output and "noisy_physical_action" in output:
-        t = output["time"].to(device=fake["pred_physical_velocity"].device, dtype=fake["pred_physical_velocity"].dtype)
+    if (
+        "clean_physical_estimate" not in fake
+        and "time" in output
+        and "noisy_physical_action" in output
+    ):
+        t = output["time"].to(
+            device=fake["pred_physical_velocity"].device, dtype=fake["pred_physical_velocity"].dtype
+        )
         boundary = sample["action_state"].to(
             device=fake["pred_physical_velocity"].device, dtype=fake["pred_physical_velocity"].dtype
         )
@@ -2070,7 +2776,11 @@ def layer_contract_losses(
     """
     layers = output.get("layer_contracts")
     if not isinstance(layers, list) or not layers:
-        z = torch.zeros((), device=output["pred_physical_velocity"].device, dtype=output["pred_physical_velocity"].dtype)
+        z = torch.zeros(
+            (),
+            device=output["pred_physical_velocity"].device,
+            dtype=output["pred_physical_velocity"].dtype,
+        )
         return {"loss": z, "layer_contract": z, "layer_contract_weight_sum": z}
 
     total: Tensor | None = None
@@ -2088,7 +2798,11 @@ def layer_contract_losses(
     w_var = float(getattr(trainer, "layer_variance_loss_weight", 0.0))
     w_norm = float(getattr(trainer, "layer_norm_loss_weight", 0.0))
     w_delta_match = float(getattr(trainer, "layer_delta_match_loss_weight", 0.0))
-    grid = int(system.policy_config.num_cameras) * int(system.policy_config.future_grid_size) * int(system.policy_config.future_grid_size)
+    grid = (
+        int(system.policy_config.num_cameras)
+        * int(system.policy_config.future_grid_size)
+        * int(system.policy_config.future_grid_size)
+    )
 
     for i, entry in enumerate(layers):
         weight = float(_layer_contract_weight(i, count))
@@ -2110,7 +2824,10 @@ def layer_contract_losses(
             layer_total = layer_total + w_latent * dyn
             # Delta keeps a separate action-conditioned latent residual alive;
             # default follows the existing midcut delta weight.
-            layer_total = layer_total + float(getattr(trainer, "midcut_rollout_delta_loss_weight", 0.0)) * delta
+            layer_total = (
+                layer_total
+                + float(getattr(trainer, "midcut_rollout_delta_loss_weight", 0.0)) * delta
+            )
             layer_total = layer_total + w_delta_match * delta_match
             layer_total = layer_total + w_var * var_loss
             layer_total = layer_total + w_norm * norm_loss
@@ -2139,19 +2856,44 @@ def layer_contract_losses(
             if not torch.is_tensor(value):
                 continue
             log_key = "layer_base_loss" if key == "loss" else key
-            metric_acc[log_key] = metric_acc.get(log_key, torch.zeros_like(value.detach().float())) + value.detach().float() * weight
+            metric_acc[log_key] = (
+                metric_acc.get(log_key, torch.zeros_like(value.detach().float()))
+                + value.detach().float() * weight
+            )
         log_rows[f"layer{i}_contract"] = layer_total.detach()
         for key in (
-            "latent", "rollout_dynamics", "physical_flow", "decoded_action", "event", "motion",
-            "rollout_delta", "rollout_delta_shuffle", "rollout_delta_hold", "rollout_contrast",
-            "rollout_effect_change_shuffle", "rollout_effect_change_hold",
-            "latent_variance", "latent_norm", "milestone_delta_match",
-            "rollout_pred_std_ratio", "rollout_pred_norm_ratio", "rollout_milestone_delta_norm_ratio",
-            "milestone_gate_mean", "milestone_step_delta_norm", "milestone_effect_norm", "milestone_effect_std",
-            "layer_causal_gain", "layer_latent_gain", "step_delta_shuffle", "step_delta_hold",
-            "step_delta_change_shuffle", "step_delta_change_hold",
-            "step_delta_state_shuffle", "step_delta_change_state_shuffle",
-            "rollout_delta_state_shuffle", "rollout_effect_change_state_shuffle",
+            "latent",
+            "rollout_dynamics",
+            "physical_flow",
+            "decoded_action",
+            "event",
+            "motion",
+            "rollout_delta",
+            "rollout_delta_shuffle",
+            "rollout_delta_hold",
+            "rollout_contrast",
+            "rollout_effect_change_shuffle",
+            "rollout_effect_change_hold",
+            "latent_variance",
+            "latent_norm",
+            "milestone_delta_match",
+            "rollout_pred_std_ratio",
+            "rollout_pred_norm_ratio",
+            "rollout_milestone_delta_norm_ratio",
+            "milestone_gate_mean",
+            "milestone_step_delta_norm",
+            "milestone_effect_norm",
+            "milestone_effect_std",
+            "layer_causal_gain",
+            "layer_latent_gain",
+            "step_delta_shuffle",
+            "step_delta_hold",
+            "step_delta_change_shuffle",
+            "step_delta_change_hold",
+            "step_delta_state_shuffle",
+            "step_delta_change_state_shuffle",
+            "rollout_delta_state_shuffle",
+            "rollout_effect_change_state_shuffle",
             "rollout_full_effect_change_state_shuffle",
         ):
             if key in merged:
@@ -2164,13 +2906,25 @@ def layer_contract_losses(
     out: dict[str, Tensor] = {
         "loss": contract * float(getattr(trainer, "layer_contract_loss_weight", 1.0)),
         "layer_contract": contract,
-        "layer_contract_weight_sum": torch.as_tensor(weight_sum, device=contract.device, dtype=contract.dtype),
-        "layer_latent_weight": torch.as_tensor(w_latent, device=contract.device, dtype=contract.dtype),
-        "layer_fm_probe_weight": torch.as_tensor(w_fm, device=contract.device, dtype=contract.dtype),
-        "layer_contrast_weight": torch.as_tensor(w_contrast, device=contract.device, dtype=contract.dtype),
-        "layer_variance_weight": torch.as_tensor(w_var, device=contract.device, dtype=contract.dtype),
+        "layer_contract_weight_sum": torch.as_tensor(
+            weight_sum, device=contract.device, dtype=contract.dtype
+        ),
+        "layer_latent_weight": torch.as_tensor(
+            w_latent, device=contract.device, dtype=contract.dtype
+        ),
+        "layer_fm_probe_weight": torch.as_tensor(
+            w_fm, device=contract.device, dtype=contract.dtype
+        ),
+        "layer_contrast_weight": torch.as_tensor(
+            w_contrast, device=contract.device, dtype=contract.dtype
+        ),
+        "layer_variance_weight": torch.as_tensor(
+            w_var, device=contract.device, dtype=contract.dtype
+        ),
         "layer_norm_weight": torch.as_tensor(w_norm, device=contract.device, dtype=contract.dtype),
-        "layer_delta_match_weight": torch.as_tensor(w_delta_match, device=contract.device, dtype=contract.dtype),
+        "layer_delta_match_weight": torch.as_tensor(
+            w_delta_match, device=contract.device, dtype=contract.dtype
+        ),
     }
     zero_base = [
         entry["consequence_zero_base_shift"]
@@ -2183,6 +2937,36 @@ def layer_contract_losses(
         out[key] = value / denom
     out.update(log_rows)
     return out
+
+
+def motion_head_metrics(
+    logits_rows: list[np.ndarray], target_rows: list[np.ndarray]
+) -> dict[str, float]:
+    """Binary validation metrics for the arm-motion auxiliary head."""
+
+    if not logits_rows:
+        return {}
+    logits = np.concatenate(logits_rows, axis=0)
+    target = np.concatenate(target_rows, axis=0) >= 0.5
+    probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -30.0, 30.0)))
+    pred = probability >= 0.5
+    tp = float(np.logical_and(pred, target).sum())
+    fp = float(np.logical_and(pred, ~target).sum())
+    fn = float(np.logical_and(~pred, target).sum())
+    precision = tp / max(tp + fp, 1.0)
+    recall = tp / max(tp + fn, 1.0)
+    f1 = 2.0 * precision * recall / max(precision + recall, 1e-8)
+    return {
+        "motion_head_accuracy": float((pred == target).mean()),
+        "motion_head_precision": float(precision),
+        "motion_head_recall": float(recall),
+        "motion_head_f1": float(f1),
+        "motion_head_pred_moving": float(pred.sum()),
+        "motion_head_target_moving": float(target.sum()),
+        "motion_head_predicted_rate": float(pred.mean()),
+        "motion_head_target_rate": float(target.mean()),
+        "motion_head_mean_probability": float(probability.mean()),
+    }
 
 
 @torch.no_grad()
@@ -2204,8 +2988,17 @@ def evaluate_v39_policy(
     system.eval()
     pred_rows, target_rows, current_rows = [], [], []
     no_proposal_rows = []
+    no_proposal_target_rows = []
+    proposal_ablation_pred_rows = []
+    execution_ablation_pred_rows: dict[str, list[np.ndarray]] = {
+        name: []
+        for name in ("primary", "hard", "neutral", "full_capacity", "three_basis_reduction")
+    }
+    execution_ablation_target_rows: list[np.ndarray] = []
     event_logits_rows: list[np.ndarray] = []
     event_target_rows: list[np.ndarray] = []
+    motion_logits_rows: list[np.ndarray] = []
+    motion_target_rows: list[np.ndarray] = []
     eval_field_null_sse = 0.0
     eval_field_energy = 0.0
     eval_field_null_count = 0
@@ -2221,6 +3014,41 @@ def evaluate_v39_policy(
     contract_metric_count = 0
     sampling_diagnostic_sums: dict[str, float] = {}
     sampling_diagnostic_counts: dict[str, int] = {}
+    completed_batches = 0
+    sampling_diagnostic_batches = 0
+    proposal_ablation_batches = 0
+    proposal_ablation_samples = 0
+    execution_ablation_batches = 0
+    eval_started_at = time.perf_counter()
+    primary_sample_seconds = 0.0
+    proposal_ablation_seconds = 0.0
+    planned_batches = len(loader)
+    if max_batches:
+        planned_batches = min(planned_batches, int(max_batches))
+
+    def diagnostic_batch_indices(budget: int) -> set[int]:
+        if budget < 0:
+            raise ValueError("eval diagnostic batch budgets must be non-negative")
+        if budget == 0 or budget >= planned_batches:
+            return set(range(1, planned_batches + 1))
+        if budget == 1:
+            return {1 + (planned_batches - 1) // 2}
+        return {
+            1 + round(index * (planned_batches - 1) / float(budget - 1)) for index in range(budget)
+        }
+
+    sampling_diagnostic_indices = diagnostic_batch_indices(
+        int(trainer.eval_sampling_diagnostic_batches)
+    )
+    proposal_ablation_indices = diagnostic_batch_indices(
+        int(trainer.eval_proposal_ablation_batches)
+    )
+    execution_ablation_indices = diagnostic_batch_indices(
+        int(trainer.eval_execution_ablation_batches)
+    )
+    evidence_execution_decoder = getattr(
+        system.planner, "evidence_latent_mmdit_action_decoder", None
+    )
     shadow_probe_eval = (
         str(getattr(system.policy_config, "final_action_decoder", "legacy"))
         == "hierarchical_mmdit_action"
@@ -2230,17 +3058,41 @@ def evaluate_v39_policy(
     for batch_index, batch in enumerate(loader, start=1):
         if max_batches and batch_index > max_batches:
             break
+        completed_batches += 1
+        collect_sampling_diagnostics = batch_index in sampling_diagnostic_indices
+        run_proposal_ablation = batch_index in proposal_ablation_indices
+        run_execution_ablation = (
+            evidence_execution_decoder is not None
+            and batch_index in execution_ablation_indices
+        )
         report_mem = memory_reporter is not None and memory_reporter.should_report(batch_index)
         if report_mem:
             memory_reporter.reset_peak()
             if memory_reporter.detail:
-                memory_reporter.snapshot(tag="eval_batch_start", phase="eval", epoch=epoch, batch=batch_index, global_step=global_step)
+                memory_reporter.snapshot(
+                    tag="eval_batch_start",
+                    phase="eval",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                )
         sample = prepare_v39_policy_sample(
-            batch, conditioner=conditioner, system=system, camera_names=camera_names,
-            device=device, dtype=dtype, include_target_visual=contract_eval,
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+            include_target_visual=contract_eval,
         )
         if report_mem and memory_reporter.detail:
-            memory_reporter.snapshot(tag="eval_after_prepare", phase="eval", epoch=epoch, batch=batch_index, global_step=global_step)
+            memory_reporter.snapshot(
+                tag="eval_after_prepare",
+                phase="eval",
+                epoch=epoch,
+                batch=batch_index,
+                global_step=global_step,
+            )
         generator = torch.Generator(device=device)
         generator.manual_seed(37237 + batch_index)
         noise = system.codec.sample_noise(
@@ -2251,41 +3103,133 @@ def evaluate_v39_policy(
             action_state=sample["action_state"],
         )
         contract_losses: dict[str, Tensor] | None = None
+        primary_start_event: torch.cuda.Event | None = None
+        primary_end_event: torch.cuda.Event | None = None
+        ablation_start_event: torch.cuda.Event | None = None
+        ablation_end_event: torch.cuda.Event | None = None
+        primary_started_at = time.perf_counter()
         with autocast_context(device, dtype):
             # Action metrics always use deploy-style sampling.  Layer-contract
             # stages additionally run a separately labelled teacher-forced
             # contract evaluation below; its values never enter action metrics.
-            stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer)
-            pred_pack = system.sample(
-                sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
-                action_state=sample["action_state"],
-                steps=trainer.eval_inference_steps, noise=noise, use_proposal=True, return_event_logits=True,
-                stop_at_midcut=stop_midcut_eval,
+            stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(
+                trainer
             )
+            if device.type == "cuda":
+                primary_start_event = torch.cuda.Event(enable_timing=True)
+                primary_end_event = torch.cuda.Event(enable_timing=True)
+                primary_start_event.record()
+            pred_pack = system.sample(
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                action_state=sample["action_state"],
+                steps=trainer.eval_inference_steps,
+                noise=noise,
+                use_proposal=True,
+                return_event_logits=True,
+                stop_at_midcut=stop_midcut_eval,
+                collect_diagnostics=collect_sampling_diagnostics,
+            )
+            if primary_end_event is not None:
+                primary_end_event.record()
+            else:
+                primary_sample_seconds += time.perf_counter() - primary_started_at
             assert isinstance(pred_pack, dict)
             diagnostic_weight = int(pred_pack["action"].shape[0])
+            if collect_sampling_diagnostics:
+                sampling_diagnostic_batches += 1
+            sampling_diagnostic_items: list[tuple[str, Tensor]] = []
             for key, value in pred_pack.items():
                 keep_sampling_diagnostic = (
                     key.startswith("sample_latent_cvae_")
                     or key.startswith("sample_intent_")
                     or key.startswith("sample_owned_")
                     or key.startswith("sample_hierarchical_mmdit_")
+                    or key.startswith("sample_evidence_")
                     or key.startswith("sample_arm_null_")
                     or key.startswith("sample_grip_null_")
                 )
                 if keep_sampling_diagnostic and torch.is_tensor(value) and value.numel() == 1:
+                    sampling_diagnostic_items.append((key, value.detach().float().reshape(())))
+            if sampling_diagnostic_items:
+                # One device-to-host transfer per validation batch, rather
+                # than one synchronization for every scalar gauge.
+                diagnostic_values = (
+                    torch.stack([value for _, value in sampling_diagnostic_items]).cpu().tolist()
+                )
+                for (key, _), value in zip(
+                    sampling_diagnostic_items, diagnostic_values, strict=True
+                ):
                     sampling_diagnostic_sums[key] = (
-                        sampling_diagnostic_sums.get(key, 0.0)
-                        + float(value.float().cpu()) * diagnostic_weight
+                        sampling_diagnostic_sums.get(key, 0.0) + float(value) * diagnostic_weight
                     )
-                    sampling_diagnostic_counts[key] = sampling_diagnostic_counts.get(key, 0) + diagnostic_weight
-            no_proposal = system.sample(
-                sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"],
-                action_state=sample["action_state"],
-                steps=trainer.eval_inference_steps, noise=noise, use_proposal=False,
-                stop_at_midcut=stop_midcut_eval,
-            )
-            if shadow_probe_eval:
+                    sampling_diagnostic_counts[key] = (
+                        sampling_diagnostic_counts.get(key, 0) + diagnostic_weight
+                    )
+            no_proposal: Tensor | dict[str, Tensor] | None = None
+            execution_ablation_packs: dict[str, Tensor | dict[str, Tensor]] = {}
+            if run_proposal_ablation:
+                ablation_started_at = time.perf_counter()
+                if device.type == "cuda":
+                    ablation_start_event = torch.cuda.Event(enable_timing=True)
+                    ablation_end_event = torch.cuda.Event(enable_timing=True)
+                    ablation_start_event.record()
+                no_proposal = system.sample(
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    action_state=sample["action_state"],
+                    steps=trainer.eval_inference_steps,
+                    noise=noise,
+                    use_proposal=False,
+                    stop_at_midcut=stop_midcut_eval,
+                    collect_diagnostics=False,
+                )
+                if ablation_end_event is not None:
+                    ablation_end_event.record()
+                else:
+                    proposal_ablation_seconds += time.perf_counter() - ablation_started_at
+                proposal_ablation_batches += 1
+                proposal_ablation_samples += diagnostic_weight
+            if run_execution_ablation:
+                execution_ablation_batches += 1
+                rank = max(
+                    int(getattr(system.policy_config, "latent_cvae_mmdit_operator_rank", 32)),
+                    1,
+                )
+                ablation_specs = {
+                    "hard": ("hard", None),
+                    "neutral": ("neutral", 1.0),
+                    "full_capacity": ("soft", 1.0),
+                    "three_basis_reduction": (
+                        "soft",
+                        max(float(rank - 3), 1.0) / float(rank),
+                    ),
+                }
+                for name, (policy, capacity_gate) in ablation_specs.items():
+                    evidence_execution_decoder.set_execution_eval_ablation(
+                        policy=policy,
+                        capacity_gate=capacity_gate,
+                    )
+                    try:
+                        execution_ablation_packs[name] = system.sample(
+                            sample["visual"],
+                            sample["history_state"],
+                            sample["executed_action_history"],
+                            sample["state"],
+                            action_state=sample["action_state"],
+                            steps=trainer.eval_inference_steps,
+                            noise=noise,
+                            use_proposal=True,
+                            stop_at_midcut=stop_midcut_eval,
+                            collect_diagnostics=False,
+                        )
+                    finally:
+                        evidence_execution_decoder.clear_execution_eval_ablation()
+            if shadow_probe_eval and collect_sampling_diagnostics:
                 fork_devices = (
                     [device.index if device.index is not None else torch.cuda.current_device()]
                     if device.type == "cuda"
@@ -2312,11 +3256,21 @@ def evaluate_v39_policy(
                     shadow_output,
                     arm_null_weight=trainer.arm_manifold_null_weight,
                 )
-                for key, value in shadow_metrics.items():
+                shadow_items = [
+                    (key, value.detach().float().reshape(()))
+                    for key, value in shadow_metrics.items()
+                    if torch.is_tensor(value) and value.numel() == 1
+                ]
+                shadow_values = (
+                    torch.stack([value for _, value in shadow_items]).cpu().tolist()
+                    if shadow_items
+                    else []
+                )
+                for (key, _), value in zip(shadow_items, shadow_values, strict=True):
                     metric_key = f"sample_{key}"
                     sampling_diagnostic_sums[metric_key] = (
                         sampling_diagnostic_sums.get(metric_key, 0.0)
-                        + float(value.detach().float().cpu()) * diagnostic_weight
+                        + float(value) * diagnostic_weight
                     )
                     sampling_diagnostic_counts[metric_key] = (
                         sampling_diagnostic_counts.get(metric_key, 0) + diagnostic_weight
@@ -2349,39 +3303,96 @@ def evaluate_v39_policy(
                 eval_arm_field_null_count += int(pred_arm_null.numel())
             if contract_eval:
                 contract_output = system.flow_training_forward(
-                    sample["visual"], sample["history_state"], sample["executed_action_history"],
-                    sample["state"], sample["policy_action"], action_state=sample["action_state"],
-                    target_visual=sample["target_visual"], make_counterfactuals=True,
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    sample["policy_action"],
+                    action_state=sample["action_state"],
+                    target_visual=sample["target_visual"],
+                    make_counterfactuals=True,
                     stop_at_midcut=False,
                 )
                 contract_losses = layer_contract_losses(
-                    system, sample, contract_output, trainer, enable_future_loss=True,
+                    system,
+                    sample,
+                    contract_output,
+                    trainer,
+                    enable_future_loss=True,
                 )
         if report_mem and memory_reporter.detail:
-            memory_reporter.snapshot(tag="eval_after_sample", phase="eval", epoch=epoch, batch=batch_index, global_step=global_step)
-        pred_rows.append(decode(action_normalizer, pred_pack["action"]))
-        no_proposal_rows.append(decode(action_normalizer, no_proposal))
-        target_rows.append(sample["policy_action_raw"].cpu().numpy())
+            memory_reporter.snapshot(
+                tag="eval_after_sample",
+                phase="eval",
+                epoch=epoch,
+                batch=batch_index,
+                global_step=global_step,
+            )
+        decoded_pred = decode(action_normalizer, pred_pack["action"])
+        pred_rows.append(decoded_pred)
+        target_raw = sample["policy_action_raw"].cpu().numpy()
+        target_rows.append(target_raw)
+        if run_execution_ablation:
+            execution_ablation_pred_rows["primary"].append(decoded_pred)
+            execution_ablation_target_rows.append(target_raw)
+            for name, pack in execution_ablation_packs.items():
+                action_value = pack["action"] if isinstance(pack, dict) else pack
+                execution_ablation_pred_rows[name].append(
+                    decode(action_normalizer, action_value)
+                )
+        if torch.is_tensor(no_proposal):
+            no_proposal_rows.append(decode(action_normalizer, no_proposal))
+            no_proposal_target_rows.append(target_raw)
+            proposal_ablation_pred_rows.append(decoded_pred)
         current_rows.append(sample["state_raw"].cpu().numpy())
         labels = gripper_event_labels(
-            target_raw=sample["policy_action_raw"], current_raw=sample["state_raw"],
-            gripper_index=system.policy_config.gripper_index, threshold=trainer.gripper_event_threshold,
+            target_raw=sample["policy_action_raw"],
+            current_raw=sample["state_raw"],
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
         )
         event_logits_rows.append(pred_pack["event_logits"].detach().float().cpu().numpy())
         event_target_rows.append(labels.cpu().numpy())
+        motion_target = arm_motion_labels(
+            system,
+            sample["policy_action"],
+            sample["action_state"],
+            trainer.arm_motion_threshold,
+        )
+        motion_logits_rows.append(pred_pack["motion_logits"].detach().float().cpu().numpy())
+        motion_target_rows.append(motion_target.detach().float().cpu().numpy())
+        if primary_start_event is not None and primary_end_event is not None:
+            primary_sample_seconds += primary_start_event.elapsed_time(primary_end_event) / 1000.0
+        if ablation_start_event is not None and ablation_end_event is not None:
+            proposal_ablation_seconds += (
+                ablation_start_event.elapsed_time(ablation_end_event) / 1000.0
+            )
         if contract_losses is not None:
             for key in (
-                "loss", "layer_contract", "latent", "rollout_dynamics", "rollout_delta",
-                "rollout_contrast", "milestone_delta_match",
+                "loss",
+                "layer_contract",
+                "latent",
+                "rollout_dynamics",
+                "rollout_delta",
+                "rollout_contrast",
+                "milestone_delta_match",
             ):
                 value = contract_losses.get(key)
                 if torch.is_tensor(value):
-                    contract_metric_sums[key] = contract_metric_sums.get(key, 0.0) + float(value.detach().float().cpu())
+                    contract_metric_sums[key] = contract_metric_sums.get(key, 0.0) + float(
+                        value.detach().float().cpu()
+                    )
             contract_metric_count += 1
         if report_mem:
-            memory_reporter.snapshot(tag="eval_batch_end", phase="eval", epoch=epoch, batch=batch_index, global_step=global_step, print_line=True)
+            memory_reporter.snapshot(
+                tag="eval_batch_end",
+                phase="eval",
+                epoch=epoch,
+                batch=batch_index,
+                global_step=global_step,
+                print_line=True,
+            )
     pred = np.concatenate(pred_rows)
-    no_proposal = np.concatenate(no_proposal_rows)
     target = np.concatenate(target_rows)
     current = np.concatenate(current_rows)
     squared = (pred - target) ** 2
@@ -2393,38 +3404,137 @@ def evaluate_v39_policy(
         "first_rmse": float(np.sqrt(squared[:, 0].mean())),
         "first4_rmse": float(np.sqrt(squared[:, :4].mean())),
         "first8_rmse": float(np.sqrt(squared[:, :8].mean())),
-        "tail_rmse": float(np.sqrt(squared[:, 8:].mean())) if squared.shape[1] > 8 else float("nan"),
+        "tail_rmse": float(np.sqrt(squared[:, 8:].mean()))
+        if squared.shape[1] > 8
+        else float("nan"),
         "arm_full_rmse": float(np.sqrt(arm_squared.mean())),
         "arm_first_rmse": float(np.sqrt(arm_squared[:, 0].mean())),
         "arm_first4_rmse": float(np.sqrt(arm_squared[:, :4].mean())),
         "arm_first8_rmse": float(np.sqrt(arm_squared[:, :8].mean())),
-        "arm_tail_rmse": float(np.sqrt(arm_squared[:, 8:].mean())) if arm_squared.shape[1] > 8 else float("nan"),
+        "arm_tail_rmse": float(np.sqrt(arm_squared[:, 8:].mean()))
+        if arm_squared.shape[1] > 8
+        else float("nan"),
         "gripper_full_rmse": float(np.sqrt(gripper_squared.mean())),
         "gripper_first_rmse": float(np.sqrt(gripper_squared[:, 0].mean())),
         "gripper_first4_rmse": float(np.sqrt(gripper_squared[:, :4].mean())),
         "gripper_first8_rmse": float(np.sqrt(gripper_squared[:, :8].mean())),
-        "gripper_tail_rmse": float(np.sqrt(gripper_squared[:, 8:].mean())) if gripper_squared.shape[1] > 8 else float("nan"),
-        "proposal_utility_mse_gain": float(((no_proposal - target) ** 2).mean() - squared.mean()),
+        "gripper_tail_rmse": float(np.sqrt(gripper_squared[:, 8:].mean()))
+        if gripper_squared.shape[1] > 8
+        else float("nan"),
     }
-    metrics.update(gripper_transition_metrics(
-        pred, target, current, gripper_index=system.policy_config.gripper_index,
-        threshold=trainer.gripper_event_threshold, tolerance=2,
-    ))
+    if no_proposal_rows:
+        no_proposal = np.concatenate(no_proposal_rows)
+        no_proposal_target = np.concatenate(no_proposal_target_rows)
+        selected_pred = np.concatenate(proposal_ablation_pred_rows)
+        metrics["proposal_utility_mse_gain"] = float(
+            ((no_proposal - no_proposal_target) ** 2).mean()
+            - ((selected_pred - no_proposal_target) ** 2).mean()
+        )
+    else:
+        metrics["proposal_utility_mse_gain"] = float("nan")
+    metrics["eval_batches"] = float(completed_batches)
+    metrics["eval_sampling_diagnostic_batches"] = float(sampling_diagnostic_batches)
+    metrics["eval_sampling_diagnostic_coverage"] = float(
+        sampling_diagnostic_batches / max(completed_batches, 1)
+    )
+    metrics["eval_proposal_ablation_batches"] = float(proposal_ablation_batches)
+    metrics["eval_proposal_ablation_samples"] = float(proposal_ablation_samples)
+    metrics["eval_proposal_ablation_coverage"] = float(
+        proposal_ablation_batches / max(completed_batches, 1)
+    )
+    metrics["eval_execution_ablation_batches"] = float(execution_ablation_batches)
+    metrics["eval_execution_ablation_coverage"] = float(
+        execution_ablation_batches / max(completed_batches, 1)
+    )
+    if execution_ablation_target_rows:
+        ablation_target = np.concatenate(execution_ablation_target_rows)
+        primary_ablation_mse = float(
+            ((np.concatenate(execution_ablation_pred_rows["primary"]) - ablation_target) ** 2).mean()
+        )
+        metrics["execution_ablation_primary_full_rmse"] = float(
+            math.sqrt(primary_ablation_mse)
+        )
+        for name in ("hard", "neutral", "full_capacity", "three_basis_reduction"):
+            mode_pred = np.concatenate(execution_ablation_pred_rows[name])
+            mode_squared = (mode_pred - ablation_target) ** 2
+            metrics[f"execution_ablation_{name}_full_rmse"] = float(
+                np.sqrt(mode_squared.mean())
+            )
+            metrics[f"execution_ablation_{name}_tail_rmse"] = (
+                float(np.sqrt(mode_squared[:, 8:].mean()))
+                if mode_squared.shape[1] > 8
+                else float("nan")
+            )
+            metrics[f"execution_ablation_{name}_mse_gain_vs_primary"] = float(
+                primary_ablation_mse - mode_squared.mean()
+            )
+    eval_wall_seconds = time.perf_counter() - eval_started_at
+    metrics["eval_wall_seconds"] = float(eval_wall_seconds)
+    metrics["eval_seconds_per_batch"] = float(eval_wall_seconds / max(completed_batches, 1))
+    metrics["eval_primary_sample_seconds"] = float(primary_sample_seconds)
+    metrics["eval_primary_sample_seconds_per_batch"] = float(
+        primary_sample_seconds / max(completed_batches, 1)
+    )
+    metrics["eval_proposal_ablation_seconds"] = float(proposal_ablation_seconds)
+    metrics["eval_proposal_ablation_seconds_per_probe_batch"] = float(
+        proposal_ablation_seconds / max(proposal_ablation_batches, 1)
+    )
+    non_sampling_seconds = max(
+        eval_wall_seconds - primary_sample_seconds - proposal_ablation_seconds,
+        0.0,
+    )
+    metrics["eval_non_sampling_seconds"] = float(non_sampling_seconds)
+    metrics["eval_non_sampling_seconds_per_batch"] = float(
+        non_sampling_seconds / max(completed_batches, 1)
+    )
+    metrics.update(
+        gripper_transition_metrics(
+            pred,
+            target,
+            current,
+            gripper_index=system.policy_config.gripper_index,
+            threshold=trainer.gripper_event_threshold,
+            tolerance=2,
+        )
+    )
     metrics.update(event_head_metrics(event_logits_rows, event_target_rows))
+    metrics.update(motion_head_metrics(motion_logits_rows, motion_target_rows))
+    metrics["event_head_minus_decoded_gripper_f1"] = float(
+        metrics.get("event_head_f1", 0.0) - metrics.get("gripper_f1", 0.0)
+    )
+    metrics["event_head_to_decoded_event_count_ratio"] = float(
+        metrics.get("event_head_pred_events", 0.0)
+        / max(metrics.get("gripper_pred_events", 0.0), 1.0)
+    )
     metrics["tail_first_ratio"] = float(metrics["tail_rmse"] / max(metrics["first_rmse"], 1e-8))
-    metrics["gripper_event_ratio"] = float(metrics.get("gripper_pred_events", 0.0) / max(metrics.get("gripper_target_events", 0.0), 1.0))
+    metrics["gripper_event_ratio"] = float(
+        metrics.get("gripper_pred_events", 0.0)
+        / max(metrics.get("gripper_target_events", 0.0), 1.0)
+    )
     metrics["eval_uses_target_action"] = 0.0
     metrics["eval_teacher_forced"] = 0.0
-    metrics["eval_stop_at_midcut"] = float(_is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer))
+    metrics["eval_stop_at_midcut"] = float(
+        _is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer)
+    )
     metrics["eval_layer_adapter_contract"] = float(_uses_layer_adapter_contract(trainer))
     metrics["contract_eval_teacher_forced_action"] = float(contract_eval)
     if system.codec.uses_parseval_gripper_field:
-        metrics["eval_gripper_field_projection_mse"] = eval_field_null_sse / max(eval_field_null_count, 1)
-        metrics["eval_gripper_field_null_ratio"] = eval_field_null_sse / max(eval_field_energy, 1e-12)
-        metrics["eval_gripper_noise_projection_mse"] = eval_noise_projection_sse / max(eval_noise_projection_count, 1)
+        metrics["eval_gripper_field_projection_mse"] = eval_field_null_sse / max(
+            eval_field_null_count, 1
+        )
+        metrics["eval_gripper_field_null_ratio"] = eval_field_null_sse / max(
+            eval_field_energy, 1e-12
+        )
+        metrics["eval_gripper_noise_projection_mse"] = eval_noise_projection_sse / max(
+            eval_noise_projection_count, 1
+        )
     if system.codec.uses_arm_manifold:
-        metrics["eval_arm_field_projection_mse"] = eval_arm_field_null_sse / max(eval_arm_field_null_count, 1)
-        metrics["eval_arm_field_null_ratio"] = eval_arm_field_null_sse / max(eval_arm_field_energy, 1e-12)
+        metrics["eval_arm_field_projection_mse"] = eval_arm_field_null_sse / max(
+            eval_arm_field_null_count, 1
+        )
+        metrics["eval_arm_field_null_ratio"] = eval_arm_field_null_sse / max(
+            eval_arm_field_energy, 1e-12
+        )
         metrics["eval_arm_noise_projection_mse"] = eval_arm_noise_projection_sse / max(
             eval_arm_noise_projection_count, 1
         )
@@ -2439,7 +3549,9 @@ def evaluate_v39_policy(
 
 def rng_state() -> dict[str, Any]:
     return {
-        "python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
         "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }
 
@@ -2447,17 +3559,15 @@ def rng_state() -> dict[str, Any]:
 def restore_rng(state: dict[str, Any] | None) -> None:
     if not state:
         return
-    random.setstate(state["python"]); np.random.set_state(state["numpy"]); torch.set_rng_state(state["torch"])
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
     if torch.cuda.is_available() and state.get("cuda") is not None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
-
-
-
-
 def _bytes_to_gib(value: int | float) -> float:
-    return float(value) / float(1024 ** 3)
+    return float(value) / float(1024**3)
 
 
 class CudaMemoryReporter:
@@ -2486,7 +3596,17 @@ class CudaMemoryReporter:
         if self.enabled:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
             with self.trace_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"schema": "clearvla-v38-cuda-memory-trace-v1", "event": "start", "variant": "v39_staged_midcut_contract"}, separators=(",", ":")) + "\n")
+                handle.write(
+                    json.dumps(
+                        {
+                            "schema": "clearvla-v38-cuda-memory-trace-v1",
+                            "event": "start",
+                            "variant": "v39_staged_midcut_contract",
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
 
     def should_report(self, batch_index: int) -> bool:
         return self.enabled and self.every > 0 and int(batch_index) % self.every == 0
@@ -2546,20 +3666,27 @@ def _detached_scalar_metric(key: str, value: Tensor) -> Tensor:
     detached = value.detach().float()
     if detached.numel() != 1:
         raise ValueError(
-            f"metric {key!r} must contain exactly one element; "
-            f"got shape={tuple(detached.shape)}"
+            f"metric {key!r} must contain exactly one element; got shape={tuple(detached.shape)}"
         )
     return detached.reshape(())
 
 
-def _accumulate_metric_tensors(acc: dict[str, Tensor], losses: dict[str, Tensor], *, grad: Tensor | float | None = None) -> None:
+def _accumulate_metric_tensors(
+    acc: dict[str, Tensor], losses: dict[str, Tensor], *, grad: Tensor | float | None = None
+) -> None:
     for key, value in losses.items():
         if not torch.is_tensor(value):
             continue
         detached = _detached_scalar_metric(key, value)
-        acc[key] = acc.get(key, torch.zeros((), device=detached.device, dtype=torch.float32)) + detached
+        acc[key] = (
+            acc.get(key, torch.zeros((), device=detached.device, dtype=torch.float32)) + detached
+        )
     if grad is not None:
-        g = _detached_scalar_metric("grad", grad) if torch.is_tensor(grad) else torch.tensor(float(grad))
+        g = (
+            _detached_scalar_metric("grad", grad)
+            if torch.is_tensor(grad)
+            else torch.tensor(float(grad))
+        )
         acc["grad"] = acc.get("grad", torch.zeros((), device=g.device, dtype=torch.float32)) + g
 
 
@@ -2572,7 +3699,9 @@ def _finalize_metric_tensors(acc: dict[str, Tensor], count: int) -> dict[str, fl
     }
 
 
-def _sync_loss_row(losses: dict[str, Tensor], *, grad: Tensor | float | None = None) -> dict[str, float]:
+def _sync_loss_row(
+    losses: dict[str, Tensor], *, grad: Tensor | float | None = None
+) -> dict[str, float]:
     row = {
         key: float(_detached_scalar_metric(key, value).cpu())
         for key, value in losses.items()
@@ -2587,7 +3716,507 @@ def _sync_loss_row(losses: dict[str, Tensor], *, grad: Tensor | float | None = N
     return row
 
 
+def _attach_v94_loss_ledger(
+    losses: dict[str, Tensor],
+    trainer: V39PolicyTrainerConfig,
+    *,
+    enable_future_loss: bool,
+    layer_aux_contribution: Tensor | None = None,
+) -> None:
+    """Attach an exact, detached ledger for the active Evidence objective.
+
+    Raw losses alone are not comparable because every term has a different
+    effective weight.  The ledger records weighted contributions and a signed
+    residual against the actual scalar sent to backward.  A non-trivial
+    residual is therefore an immediate signal that a new objective was added
+    without being made observable.
+    """
+
+    reference = losses["loss"].detach().float().reshape(())
+    grouped: dict[str, list[Tensor]] = {
+        "action": [],
+        "rollout": [],
+        "execution": [],
+        "latent": [],
+        "layer": [],
+    }
+
+    def add(name: str, metric: str, weight: float, group: str) -> None:
+        value = losses.get(metric)
+        effective_weight = float(weight)
+        if effective_weight <= 0.0 or not torch.is_tensor(value) or value.numel() != 1:
+            return
+        contribution = value.detach().float().reshape(()) * effective_weight
+        losses[f"loss_contrib_{name}"] = contribution
+        grouped[group].append(contribution)
+
+    add("flow", "physical_flow", 1.0, "action")
+    for name, metric, weight_name in (
+        ("proposal", "proposal", "proposal_loss_weight"),
+        ("event", "event", "event_loss_weight"),
+        ("motion", "motion", "arm_motion_loss_weight"),
+        ("gripper_transition", "transition_l1", "gripper_transition_l1_weight"),
+        ("smooth_delta", "smooth_delta", "smooth_delta_weight"),
+        ("decoded_action", "decoded_action", "decoded_action_loss_weight"),
+        (
+            "physical_delta_consistency",
+            "physical_delta_consistency",
+            "physical_delta_consistency_weight",
+        ),
+        (
+            "transition_gripper_flow",
+            "transition_gripper_flow",
+            "transition_gripper_flow_weight",
+        ),
+        (
+            "event_delta_consistency",
+            "event_delta_consistency",
+            "event_delta_consistency_weight",
+        ),
+        ("event_magnitude", "event_magnitude", "event_magnitude_weight"),
+        ("event_off_delta", "event_off_delta", "event_off_delta_weight"),
+    ):
+        add(name, metric, float(getattr(trainer, weight_name, 0.0)), "action")
+
+    if enable_future_loss:
+        for name, metric, weight_name in (
+            ("rollout_dynamics", "rollout_dynamics", "rollout_dynamics_loss_weight"),
+            ("rollout_delta", "rollout_delta", "rollout_delta_loss_weight"),
+            ("rollout_contrast", "rollout_contrast", "rollout_contrast_loss_weight"),
+            ("rollout_variance", "rollout_variance", "rollout_variance_loss_weight"),
+            ("rollout_norm", "rollout_norm", "rollout_norm_loss_weight"),
+            (
+                "rollout_milestone",
+                "rollout_milestone_delta_match",
+                "rollout_milestone_delta_match_weight",
+            ),
+        ):
+            add(name, metric, float(getattr(trainer, weight_name, 0.0)), "rollout")
+        # Compatibility knobs intentionally reuse the dynamics target.  Keep
+        # their contributions separately named if an old experiment enables them.
+        add(
+            "future_latent_compat",
+            "rollout_dynamics",
+            float(getattr(trainer, "future_latent_loss_weight", 0.0)),
+            "rollout",
+        )
+        add(
+            "action_effect_compat",
+            "rollout_dynamics",
+            float(getattr(trainer, "action_effect_loss_weight", 0.0)),
+            "rollout",
+        )
+        add(
+            "execution_value",
+            "evidence_mmd_it_execution_value_loss",
+            float(getattr(trainer, "latent_cvae_mmdit_execution_value_loss_weight", 0.0)),
+            "execution",
+        )
+
+    add(
+        "latent_kl",
+        "latent_cvae_kl",
+        float(getattr(trainer, "latent_cvae_kl_weight", 0.0)),
+        "latent",
+    )
+    add(
+        "latent_posterior_recon",
+        "latent_cvae_posterior_recon",
+        float(getattr(trainer, "latent_cvae_posterior_recon_weight", 0.0)),
+        "latent",
+    )
+    add(
+        "latent_adaptive_regularizer",
+        "latent_cvae_adaptive_regularizer",
+        float(getattr(trainer, "latent_cvae_adaptive_regularizer_weight", 0.0)),
+        "latent",
+    )
+    add(
+        "latent_route_entropy",
+        "latent_cvae_adaptive_route_entropy_regularizer",
+        float(getattr(trainer, "latent_cvae_adaptive_route_entropy_weight", 0.0)),
+        "latent",
+    )
+    legacy_anchor = losses.get("latent_cvae_legacy_anchor")
+    legacy_anchor_weight = losses.get("latent_cvae_legacy_anchor_weight")
+    if (
+        torch.is_tensor(legacy_anchor)
+        and legacy_anchor.numel() == 1
+        and torch.is_tensor(legacy_anchor_weight)
+        and legacy_anchor_weight.numel() == 1
+        and float(legacy_anchor_weight.detach().float()) > 0.0
+    ):
+        contribution = legacy_anchor.detach().float().reshape(
+            ()
+        ) * legacy_anchor_weight.detach().float().reshape(())
+        losses["loss_contrib_latent_legacy_anchor"] = contribution
+        grouped["latent"].append(contribution)
+
+    if torch.is_tensor(layer_aux_contribution):
+        contribution = layer_aux_contribution.detach().float().reshape(())
+        losses["loss_contrib_layer_contract"] = contribution
+        grouped["layer"].append(contribution)
+
+    group_values: list[Tensor] = []
+    zero = torch.zeros_like(reference)
+    for group, contributions in grouped.items():
+        if not contributions:
+            continue
+        group_value = torch.stack(contributions).sum()
+        losses[f"loss_group_{group}"] = group_value
+        group_values.append(group_value)
+    ledger_sum = torch.stack(group_values).sum() if group_values else zero
+    losses["loss_ledger_sum"] = ledger_sum
+    losses["loss_ledger_residual"] = reference - ledger_sum
+
+
+def _evidence_serial_log_line(
+    row: dict[str, float],
+    *,
+    epoch: int,
+    batch_index: int,
+    learning_rate: float,
+    seconds_per_batch: float,
+) -> str:
+    """Compact, active-branch batch log for the V94 Evidence decoder.
+
+    Optional values are emitted only when the forward/loss path actually
+    produced them.  A present zero gradient or invariant is retained because
+    it is evidence; fields from inactive decoder families are never fabricated.
+    """
+
+    def append(
+        parts: list[str],
+        label: str,
+        key: str,
+        spec: str = ".4f",
+        *,
+        keep_zero: bool = False,
+    ) -> None:
+        if key in row and (keep_zero or abs(float(row[key])) > 1e-12):
+            parts.append(f"{label}={format(row[key], spec)}")
+
+    loss_parts = [
+        f"[v94-train] epoch={epoch:03d}",
+        f"batch={batch_index:04d}",
+        f"loss_total={row['loss']:.6f}",
+        f"flow_loss={row['physical_flow']:.6f}",
+    ]
+    for label, key, spec in (
+        ("native_flow", "physical_flow_native", ".6f"),
+        ("arm_flow", "arm_fm_per_dim", ".5f"),
+        ("grip_flow", "gripper_fm_field", ".5f"),
+        ("decode_loss", "decoded_action", ".6f"),
+        ("flow_first8", "first8_physical_flow", ".6f"),
+        ("flow_tail", "tail_physical_flow", ".6f"),
+        ("event_loss", "event", ".5f"),
+        ("motion_loss", "motion", ".5f"),
+        ("proposal_loss", "proposal", ".5f"),
+        ("rollout_loss", "rollout_dynamics", ".5f"),
+        ("rollout_step", "rollout_milestone_delta_match", ".5f"),
+        ("rollout_contrast", "rollout_contrast", ".5f"),
+        ("rollout_std_ratio", "rollout_pred_std_ratio", ".3f"),
+        ("step_norm_ratio", "rollout_milestone_delta_norm_ratio", ".3f"),
+    ):
+        append(loss_parts, label, key, spec)
+    group_keys = ("action", "rollout", "execution", "latent", "layer")
+    present_groups = [
+        name
+        for name in group_keys
+        if f"loss_group_{name}" in row
+        and abs(float(row[f"loss_group_{name}"])) > 1e-12
+    ]
+    if present_groups:
+        loss_parts.append(
+            "loss_groups="
+            + "/".join(f"{name}:{row[f'loss_group_{name}']:.5f}" for name in present_groups)
+        )
+    contribution_keys = [
+        key
+        for key in row
+        if key.startswith("loss_contrib_") and abs(float(row[key])) > 1e-12
+    ]
+    if contribution_keys:
+        ranked_contributions = sorted(
+            contribution_keys,
+            key=lambda key: abs(float(row[key])),
+            reverse=True,
+        )[:6]
+        loss_parts.append(
+            "top_contrib="
+            + "/".join(
+                f"{key.removeprefix('loss_contrib_')}:{row[key]:.5f}"
+                for key in ranked_contributions
+            )
+        )
+    append(loss_parts, "ledger_gap", "loss_ledger_residual", "+.2e")
+
+    execution_parts = ["[v94-exec]"]
+    for label, key, spec in (
+        ("exec_progress", "evidence_mmd_it_execution_progress", ".2f"),
+        ("capacity_gate_mass", "evidence_mmd_it_capacity_gate_mass", ".5f"),
+        ("effective_basis_mass", "evidence_mmd_it_effective_basis_mass", ".3f"),
+        ("operation_probability", "evidence_mmd_it_operation_probability", ".3f"),
+        ("workload_audit", "evidence_mmd_it_execution_cost", ".3f"),
+        ("nonexp_violation", "evidence_mmd_it_nonexpansive_violation", ".1e"),
+        ("selection_entropy", "evidence_mmd_it_execution_selection_entropy", ".3f"),
+        ("selection_max", "evidence_mmd_it_execution_selection_max_probability", ".3f"),
+        ("terminal_prior", "evidence_mmd_it_terminal_prior_weight", ".3f"),
+        ("terminal_probability", "evidence_mmd_it_terminal_probability", ".3f"),
+        ("hard_terminal_fraction", "evidence_mmd_it_hard_terminal_fraction", ".3f"),
+    ):
+        append(execution_parts, label, key, spec)
+    for label, soft_key, hard_key in (
+        (
+            "route",
+            "evidence_mmd_it_dynamic_route_next_fraction",
+            "evidence_mmd_it_hard_route_next_fraction",
+        ),
+        (
+            "dwell",
+            "evidence_mmd_it_dwell_expected",
+            "evidence_mmd_it_hard_dwell_expected",
+        ),
+    ):
+        if soft_key in row and hard_key in row:
+            soft, hard = row[soft_key], row[hard_key]
+            if abs(float(soft)) > 1e-12 or abs(float(hard)) > 1e-12:
+                execution_parts.append(
+                    f"{label}=soft:{soft:.3f}/hard:{hard:.3f}/gap:{soft - hard:+.3f}"
+                )
+    for label, key, spec in (
+        ("value_loss", "evidence_mmd_it_execution_value_loss", ".4f"),
+        ("value_target_spread", "evidence_mmd_it_execution_value_target_spread", ".4f"),
+        ("value_pred_spread", "evidence_mmd_it_execution_value_predicted_spread", ".4f"),
+        ("value_corr", "evidence_mmd_it_execution_value_correlation", "+.2f"),
+        ("value_pair_acc", "evidence_mmd_it_execution_value_pairwise_accuracy", ".2f"),
+        ("value_top1_acc", "evidence_mmd_it_execution_value_decision_accuracy", ".2f"),
+        ("candidate_coverage", "evidence_mmd_it_execution_candidate_coverage", ".2f"),
+        ("value_common_ratio", "evidence_mmd_it_execution_value_common_mode_ratio", ".2f"),
+        ("terminal_target_margin", "evidence_mmd_it_terminal_target_cost_margin", "+.4f"),
+        ("terminal_pred_margin", "evidence_mmd_it_terminal_predicted_cost_margin", "+.4f"),
+        (
+            "terminal_target_preferred",
+            "evidence_mmd_it_terminal_target_preferred_fraction",
+            ".2f",
+        ),
+        (
+            "terminal_identity_error",
+            "evidence_mmd_it_terminal_identity_velocity_error",
+            ".2e",
+        ),
+        ("layer_loss_raw", "layer_contract", ".4f"),
+        ("layer_scale", "layer_contract_aux_scale", ".4f"),
+        ("layer_contrib", "loss_contrib_layer_contract", ".5f"),
+    ):
+        append(execution_parts, label, key, spec)
+    block_update_keys = sorted(
+        key
+        for key in row
+        if key.startswith("evidence_mmd_it_block_") and key.endswith("_update_norm")
+    )
+    if block_update_keys:
+        block_update_keys = [
+            key for key in block_update_keys if abs(float(row[key])) > 1e-12
+        ]
+    if block_update_keys:
+        execution_parts.append(
+            "block_updates=" + "/".join(f"{row[key]:.3f}" for key in block_update_keys)
+        )
+    layer_contract_keys = sorted(
+        key
+        for key in row
+        if key.startswith("layer") and key.endswith("_contract") and key[5:-9].isdigit()
+    )
+    if layer_contract_keys:
+        layer_contract_keys = [
+            key for key in layer_contract_keys if abs(float(row[key])) > 1e-12
+        ]
+    if layer_contract_keys:
+        execution_parts.append(
+            "layer_losses=" + "/".join(f"{row[key]:.4f}" for key in layer_contract_keys)
+        )
+
+    grad_parts = ["[v94-grad]"]
+    for label, key in (
+        ("view_adapter", "grad_evidence_view_adapter"),
+        ("organizer", "grad_evidence_condition_organizer"),
+        ("evidence_reader", "grad_evidence_mmdit_evidence_reader"),
+        ("action_state", "grad_evidence_mmdit_action_state"),
+        ("mmdit_blocks", "grad_evidence_mmdit_blocks"),
+        ("exec_controller", "grad_evidence_mmdit_execution_controller"),
+        ("capacity_control", "grad_evidence_mmdit_capacity_control"),
+        ("operator_capacity", "grad_evidence_mmdit_operator_capacity"),
+        ("operator_basis", "grad_evidence_mmdit_operator_basis"),
+        ("value_reader", "grad_evidence_mmdit_execution_value_reader"),
+        ("layer_adapter", "grad_layer_contract_adapters"),
+        ("consequence", "grad_layer_consequence_cell"),
+        ("dynamics", "grad_controlled_dynamics"),
+        ("dit_blocks", "grad_dit_blocks"),
+        ("policy_heads", "grad_final_policy_heads"),
+        ("global_preclip", "grad"),
+    ):
+        append(grad_parts, label, key, ".2e", keep_zero=True)
+    grad_parts.extend((f"lr={learning_rate:.3e}", f"sec_per_batch={seconds_per_batch:.3f}"))
+    return "\n".join((" ".join(loss_parts), " ".join(execution_parts), " ".join(grad_parts)))
+
+
+def _filter_inactive_evidence_epoch_metrics(
+    metrics: dict[str, float],
+) -> dict[str, float]:
+    """Drop zero placeholders from decoder families that V94 does not instantiate."""
+
+    inactive_zero_prefixes = (
+        "adaptive_cvae_",
+        "grad_hierarchical_mmdit_",
+        "grad_intent_",
+        "grad_latent_cvae_",
+        "grad_owned_",
+        "grad_residual_action_flow",
+        "hierarchical_mmdit_",
+        "intent_",
+        "latent_cvae_",
+        "owned_",
+    )
+    inactive_zero_keys = {
+        "arm_fm_null",
+        "arm_fm_null_output_fraction",
+        "arm_fm_null_ratio",
+        "arm_fm_null_rms",
+        "arm_fm_noise_projection_error",
+        "arm_fm_target_projection_error",
+        "arm_noise_abs_std",
+        "arm_noise_delta_std",
+        "arm_target_abs_std",
+        "arm_target_delta_std",
+        "gripper_fm_null",
+        "gripper_fm_null_event_hold_ratio",
+        "gripper_fm_null_event_rms",
+        "gripper_fm_null_hold_rms",
+        "gripper_fm_null_output_fraction",
+        "gripper_fm_null_ratio",
+        "gripper_fm_null_rms",
+        "gripper_fm_target_energy_ratio",
+        "gripper_fm_target_projection_error",
+    }
+    return {
+        key: value
+        for key, value in metrics.items()
+        if not (
+            abs(float(value)) <= 1e-12
+            and (key in inactive_zero_keys or key.startswith(inactive_zero_prefixes))
+        )
+    }
+
+
+def _evidence_epoch_log_line(
+    *,
+    epoch: int,
+    global_step: int,
+    train: dict[str, float],
+    val: dict[str, float],
+) -> str:
+    """Human-readable V94 epoch summary; the JSONL remains the full record."""
+
+    train_parts = [
+        f"[v94-epoch] epoch={epoch:03d}",
+        f"step={global_step}",
+        f"loss_total={train.get('loss', float('nan')):.6f}",
+        f"flow_loss={train.get('physical_flow', float('nan')):.6f}",
+    ]
+    groups = [
+        name
+        for name in ("action", "rollout", "execution", "latent", "layer")
+        if f"loss_group_{name}" in train
+        and abs(float(train[f"loss_group_{name}"])) > 1e-12
+    ]
+    if groups:
+        train_parts.append(
+            "loss_groups="
+            + "/".join(f"{name}:{train[f'loss_group_{name}']:.5f}" for name in groups)
+        )
+    if "loss_ledger_residual" in train:
+        train_parts.append(f"ledger_gap={train['loss_ledger_residual']:+.2e}")
+
+    val_parts = [
+        "[v94-val]",
+        f"action_rmse={val.get('full_rmse', float('nan')):.5f}",
+        f"first_rmse={val.get('first_rmse', float('nan')):.5f}",
+        f"first8_rmse={val.get('first8_rmse', float('nan')):.5f}",
+        f"tail_rmse={val.get('tail_rmse', float('nan')):.5f}",
+        f"tail_first_ratio={val.get('tail_first_ratio', float('nan')):.3f}",
+        f"arm_rmse={val.get('arm_full_rmse', float('nan')):.5f}",
+        f"grip_rmse={val.get('gripper_full_rmse', float('nan')):.5f}",
+        f"grip_event_ratio={val.get('gripper_event_ratio', float('nan')):.3f}",
+        f"grip_events_pred={val.get('gripper_pred_events', float('nan')):.0f}",
+        f"grip_events_target={val.get('gripper_target_events', float('nan')):.0f}",
+        "grip_event="
+        f"p:{val.get('gripper_precision', float('nan')):.3f}/"
+        f"r:{val.get('gripper_recall', float('nan')):.3f}/"
+        f"f1:{val.get('gripper_f1', float('nan')):.3f}",
+        "event_head="
+        f"p:{val.get('event_head_precision', float('nan')):.3f}/"
+        f"r:{val.get('event_head_recall', float('nan')):.3f}/"
+        f"f1:{val.get('event_head_f1', float('nan')):.3f}",
+        f"event_head_events_pred={val.get('event_head_pred_events', float('nan')):.0f}",
+        f"event_head_events_target={val.get('event_head_target_events', float('nan')):.0f}",
+        f"event_head_minus_decoded_f1={val.get('event_head_minus_decoded_gripper_f1', float('nan')):+.3f}",
+        "motion_head="
+        f"p:{val.get('motion_head_precision', float('nan')):.3f}/"
+        f"r:{val.get('motion_head_recall', float('nan')):.3f}/"
+        f"f1:{val.get('motion_head_f1', float('nan')):.3f}",
+        f"proposal_mse_gain={val.get('proposal_utility_mse_gain', float('nan')):+.3e}",
+        f"proposal_batch_cov={val.get('eval_proposal_ablation_coverage', 0.0):.2f}",
+        f"balanced_score={val.get('balanced_score', float('nan')):.5f}",
+        f"deploy_gate={val.get('deploy_eligible', 0.0):.0f}",
+    ]
+    execution_ablation_names = (
+        "hard",
+        "neutral",
+        "full_capacity",
+        "three_basis_reduction",
+    )
+    available_ablations = [
+        name
+        for name in execution_ablation_names
+        if f"execution_ablation_{name}_full_rmse" in val
+    ]
+    if available_ablations:
+        val_parts.append(
+            "execution_ablation_rmse="
+            + "/".join(
+                f"{name}:{val[f'execution_ablation_{name}_full_rmse']:.5f}"
+                for name in available_ablations
+            )
+        )
+        val_parts.append(
+            f"execution_ablation_cov={val.get('eval_execution_ablation_coverage', 0.0):.2f}"
+        )
+
+    probe_parts = ["[v94-probe]"]
+    for label, key, spec in (
+        ("z_zero_cond_delta", "sample_evidence_z_zero_condition_delta", ".4e"),
+        ("z_shuffle_cond_delta", "sample_evidence_z_shuffle_condition_delta", ".4e"),
+        ("capacity_gate_mass", "sample_evidence_mmd_it_capacity_gate_mass", ".5f"),
+        ("effective_basis_mass", "sample_evidence_mmd_it_effective_basis_mass", ".3f"),
+        ("route_soft", "sample_evidence_mmd_it_dynamic_route_next_fraction", ".3f"),
+        ("route_hard", "sample_evidence_mmd_it_hard_route_next_fraction", ".3f"),
+        ("dwell_soft", "sample_evidence_mmd_it_dwell_expected", ".3f"),
+        ("dwell_hard", "sample_evidence_mmd_it_hard_dwell_expected", ".3f"),
+        ("terminal_prior", "sample_evidence_mmd_it_terminal_prior_weight", ".3f"),
+        ("terminal_probability", "sample_evidence_mmd_it_terminal_probability", ".3f"),
+        ("hard_terminal_fraction", "sample_evidence_mmd_it_hard_terminal_fraction", ".3f"),
+        ("nonexp_violation", "sample_evidence_mmd_it_nonexpansive_violation", ".1e"),
+        ("probe_batch_cov", "eval_sampling_diagnostic_coverage", ".2f"),
+    ):
+        if key in val and abs(float(val[key])) > 1e-12:
+            probe_parts.append(f"{label}={format(val[key], spec)}")
+    return "\n".join((" ".join(train_parts), " ".join(val_parts), " ".join(probe_parts)))
+
+
 def _format_hierarchical_stage_usage(row: dict[str, float]) -> str:
+    if row.get("hierarchical_mmdit_memory_stage_execution_decoupled", 0.0) > 0.5:
+        return "memory-only"
     count = int(round(row.get("hierarchical_mmdit_operator_stage_count", 0.0)))
     if count <= 0:
         prefix = "hierarchical_mmdit_stage_"
@@ -2599,18 +4228,24 @@ def _format_hierarchical_stage_usage(row: dict[str, float]) -> str:
                 if middle.isdigit():
                     indices.append(int(middle))
         count = max(indices, default=-1) + 1
-    return "/".join(
-        f"{row.get(f'hierarchical_mmdit_stage_{index}_usage', 0.0):.2f}"
-        for index in range(count)
-    ) or "-"
+    return (
+        "/".join(
+            f"{row.get(f'hierarchical_mmdit_stage_{index}_usage', 0.0):.2f}"
+            for index in range(count)
+        )
+        or "-"
+    )
 
 
 def _format_hierarchical_block_usage(row: dict[str, float]) -> str:
     count = int(round(row.get("hierarchical_mmdit_refine_block_count", 0.0)))
-    return "/".join(
-        f"{row.get(f'hierarchical_mmdit_block_{index}_usage', 0.0):.2f}"
-        for index in range(count)
-    ) or "-"
+    return (
+        "/".join(
+            f"{row.get(f'hierarchical_mmdit_block_{index}_usage', 0.0):.2f}"
+            for index in range(count)
+        )
+        or "-"
+    )
 
 
 def _owned_serial_log_line(
@@ -2636,9 +4271,34 @@ def _owned_serial_log_line(
         f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} "
         f"anull={row.get('arm_fm_null_output_fraction', 0.0):.4f} "
         f"gnull={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
+        f"asrc={row.get('arm_source_residual_rms', 0.0):.3f}/"
+        f"{row.get('arm_source_delta_rms', 0.0):.3f}/"
+        f"{row.get('arm_source_acceleration_rms', 0.0):.3f} "
+        f"asexp={row.get('arm_source_expected_rms', 0.0):.3f}/"
+        f"{row.get('arm_source_expected_delta_rms', 0.0):.3f}/"
+        f"{row.get('arm_source_expected_acceleration_rms', 0.0):.3f} "
+        f"asgeo={row.get('arm_source_covariance_effective_dimension', 0.0):.2f}/"
+        f"{row.get('arm_source_covariance_condition', 0.0):.1f} "
+        f"asfirst={row.get('arm_source_first_step_rms', 0.0):.3f}/"
+        f"{row.get('arm_source_expected_first_step_std', 0.0):.3f} "
+        f"astail={row.get('arm_source_expected_terminal_std', 0.0):.3f} "
         f"hmchart={row.get('hierarchical_mmdit_native_time_chart_active', 0.0):.0f}/"
         f"{row.get('hierarchical_mmdit_native_time_chart_complete', 0.0):.0f}/"
         f"{row.get('hierarchical_mmdit_native_time_position_alignment', 0.0):.0f} "
+        f"hmspec={row.get('hierarchical_mmdit_spectral_state', 0.0):.0f}/"
+        f"{row.get('hierarchical_mmdit_spectral_final_progress', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_spectral_final_arm_mask', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_spectral_final_gripper_mask', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_spectral_competition_loss', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_spectral_coefficient_flow_mse', 0.0):.4f} "
+        f"hmswarp={row.get('hierarchical_mmdit_spectral_frequency_warp_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_spectral_frequency_spacing_min', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_spectral_frequency_spacing_max', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_spectral_final_controller_global_shift_rms', 0.0):.3f} "
+        f"hmsgeo={row.get('hierarchical_mmdit_spectral_flow_roundtrip_mse', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_spectral_bridge_null_fraction', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_spectral_target_tangent_null_fraction', 0.0):.1e}/"
+        f"{row.get('hierarchical_mmdit_spectral_prediction_tangent_null_fraction', 0.0):.1e} "
         f"hmtan={row.get('hierarchical_mmdit_velocity_arm_tangent_null_ratio', 0.0):.1e}/"
         f"{row.get('hierarchical_mmdit_velocity_gripper_tangent_null_ratio', 0.0):.1e}/"
         f"{row.get('hierarchical_mmdit_noisy_gripper_chart_null_ratio', 0.0):.1e} "
@@ -2652,6 +4312,9 @@ def _owned_serial_log_line(
         f"delta={row.get('rollout_delta', 0.0):.6f} "
         f"contrast={row.get('rollout_contrast', 0.0):.6f} "
         f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
+        f"dshuf_src={row.get('rollout_effect_change_shuffle', 0.0):.3e}/"
+        f"{row.get('rollout_delta_state_shuffle', 0.0):.3e}/"
+        f"{row.get('rollout_effect_change_state_shuffle', 0.0):.3e} "
         f"stdr={row.get('rollout_pred_std_ratio', 0.0):.4f} "
         f"dnratio={row.get('rollout_milestone_delta_norm_ratio', 0.0):.4f} "
         f"event={row.get('event', 0.0):.6f} "
@@ -2703,38 +4366,58 @@ def _owned_serial_log_line(
         f"{row.get('hierarchical_mmdit_action_low_removed_fraction', 0.0):.3f} "
         f"hmdepthreg={row.get('hierarchical_mmdit_operator_contraction_progress', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_depth_usage_regularizer', 0.0):.4f} "
-        f"hmsel={row.get('hierarchical_mmdit_stage_selector_entropy', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_stage_selector_max', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_stage_selector_exploration', 0.0):.2f} "
-        f"hmselq={row.get('hierarchical_mmdit_stage_selector_query_change', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_stage_selector_same_block_query_change', 0.0):.3f} "
-        f"hmexit={row.get('hierarchical_mmdit_exit_probability', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_exit_candidate_rate', 0.0):.3f} "
+        f"hmdwell={row.get('hierarchical_mmdit_learned_execution_active', 0.0):.0f}/"
+        f"{row.get('hierarchical_mmdit_value_dwell_warmup_active', 0.0):.0f}/"
+        f"{row.get('hierarchical_mmdit_value_dwell_shadow_active', 0.0):.0f}/"
+        f"{row.get('hierarchical_mmdit_operation_decision_shadow_active', 0.0):.0f} "
         f"hmpfx={row.get('hierarchical_mmdit_prefix_error_initial', 0.0):.4f}/"
         f"{row.get('hierarchical_mmdit_prefix_error_final', 0.0):.4f}/"
         f"{row.get('hierarchical_mmdit_prefix_gain_mean', 0.0):+.4f}/"
         f"{row.get('hierarchical_mmdit_prefix_gain_positive_fraction', 0.0):.2f} "
-        f"hmop={row.get('hierarchical_mmdit_operation_route_loss', 0.0):.4f}/"
-        f"{row.get('hierarchical_mmdit_operation_route_weight', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_operation_target_entropy', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_operation_predicted_entropy', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_operation_gain_spread', 0.0):.4f}/"
-        f"{row.get('hierarchical_mmdit_operation_decision_accuracy', 0.0):.2f}/"
+        f"hmval={row.get('hierarchical_mmdit_operation_value_loss', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_weight', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_target_spread', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_predicted_spread', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_correlation', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_decision_accuracy', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_operation_candidate_coverage', 0.0):.2f} "
-        f"hmctrl={row.get('hierarchical_mmdit_controller_state_effective_rank', 0.0):.2f}/"
+        f"hmvalq={row.get('hierarchical_mmdit_operation_value_target_spread_p25', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_target_spread_p50', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_target_spread_p75', 0.0):.4f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_reliability', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_operation_value_common_mode_ratio', 0.0):.2f} "
+        f"hmctrl={row.get('hierarchical_mmdit_controller_state_direction_participation', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_controller_state_pair_cosine', 0.0):+.2f}/"
         f"{row.get('hierarchical_mmdit_controller_recurrent_change', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_controller_operator_logit_rms', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_controller_exit_logit_rms', 0.0):.3f} "
+        f"{row.get('hierarchical_mmdit_controller_operation_value_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_operation_value_block_spread', row.get('hierarchical_mmdit_controller_operation_value_stage_spread', 0.0)):.3f} "
+        f"hmvctx={row.get('hierarchical_mmdit_controller_operation_value_memory_context_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_operation_value_action_context_rms', 0.0):.3f} "
+        f"hmpriv={row.get('hierarchical_mmdit_controller_private_pair_cosine', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_private_centered_energy_ratio', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_private_global_energy_ratio', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_private_residual_value_rms', 0.0):.3f} "
+        f"hmread={row.get('hierarchical_mmdit_controller_reader_operator_memory_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_reader_spectral_memory_attention', 0.0):.2f} "
+        f"hmmem={row.get('hierarchical_mmdit_controller_reader_operator_global_memory_attention', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_controller_reader_operator_private_memory_attention', 0.0):.2f} "
+        f"hmrdiv={row.get('hierarchical_mmdit_controller_reader_operator_attention_diversity', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_reader_spectral_attention_local_change', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_reader_family_attention_diversity', 0.0):.3f} "
+        f"hmfunc={row.get('hierarchical_mmdit_controller_operator_representation_diversity', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_spectral_representation_local_change', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_state_centered_energy_ratio', 0.0):.3f} "
+        f"hmfcand={row.get('hierarchical_mmdit_function_candidate_cosine', 0.0):+.2f}/"
+        f"{row.get('hierarchical_mmdit_function_candidate_diversity', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_function_candidate_update_rms', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_function_candidate_update_spread', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_function_candidate_valid_count', 0.0):.2f} "
         f"hmcomp={row.get('hierarchical_mmdit_controller_competition_source_effective_slots', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_controller_competition_source_owner_max', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_controller_competition_slot_load_effective', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_controller_competition_slot_load_max', 0.0):.2f} "
-        f"hmctl={row.get('hierarchical_mmdit_controller_operator_raw_update_mean', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_controller_operator_raw_depth_mean', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_controller_continue_keep_mean', 0.0):.3f}/"
-        f"{row.get('hierarchical_mmdit_controller_update_depth_correlation', 0.0):+.2f}/"
-        f"{row.get('hierarchical_mmdit_controller_joint_suppression_mass', 0.0):.4f} "
+        f"hmcap={row.get('hierarchical_mmdit_controller_operator_raw_depth_mean', 0.0):.3f}/"
+        f"{row.get('hierarchical_mmdit_controller_operator_depth_stage_std', 0.0):.3f} "
         f"hmwi={row.get('owned_workspace_interface_state_norm', 0.0):.2f}/"
         f"{row.get('owned_workspace_interface_state_slot_diversity', 0.0):.2f}/"
         f"{row.get('owned_workspace_interface_low_query_delta_ratio', 0.0):.3f}/"
@@ -2799,15 +4482,15 @@ def _owned_serial_log_line(
         f"{row.get('hierarchical_mmdit_budget_exhausted_rate', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_final_block', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_final_stage', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_early_exit_rate', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_block_advance_rate', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f} "
+        f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_operation_fixed_path_agreement', 0.0):.2f}/"
+        f"{row.get('hierarchical_mmdit_operation_monotonic_violation', 0.0):.0f} "
         f"hmshadow={row.get('hierarchical_mmdit_shadow_executed_steps', 0.0):.2f}/"
         f"{row.get('hierarchical_mmdit_shadow_step_saving', 0.0):+.2f}/"
         f"{row.get('hierarchical_mmdit_shadow_refine_error_ratio', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_shadow_operation_stay_rate', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_shadow_operation_advance_rate', 0.0):.2f}/"
-        f"{row.get('hierarchical_mmdit_shadow_operation_exit_rate', 0.0):.2f} "
+        f"{row.get('hierarchical_mmdit_shadow_operation_advance_rate', 0.0):.2f} "
         f"hmuresp={row.get('hierarchical_mmdit_action_response_arm', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_response_gripper', 0.0):.3f}/"
         f"{row.get('hierarchical_mmdit_action_response_arm_null', 0.0):.3f}/"
@@ -2871,14 +4554,11 @@ def _owned_serial_log_line(
         f"hmwgrad={row.get('grad_hierarchical_mmdit_base_projection', 0.0):.3e} "
         f"hmcopgrad={row.get('grad_hierarchical_mmdit_contractions', 0.0):.3e} "
         f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e} "
-        f"hmselgrad={row.get('grad_hierarchical_mmdit_stage_selector', 0.0):.3e} "
         f"hmctrlgrad={row.get('grad_hierarchical_mmdit_unified_controller', 0.0):.3e} "
         f"hmcg={row.get('grad_hierarchical_mmdit_controller_backbone', 0.0):.2e}/"
-        f"{row.get('grad_hierarchical_mmdit_controller_operator', 0.0):.2e}/"
-        f"{row.get('grad_hierarchical_mmdit_controller_exit', 0.0):.2e}/"
+        f"{row.get('grad_hierarchical_mmdit_controller_operator_controls', 0.0):.2e}/"
+        f"{row.get('grad_hierarchical_mmdit_controller_value_reader', 0.0):.2e}/"
         f"{row.get('grad_hierarchical_mmdit_controller_workspace_interface', 0.0):.2e} "
-        f"hmexitgrad={row.get('grad_hierarchical_mmdit_exit_controller', 0.0):.3e}/"
-        f"{row.get('grad_hierarchical_mmdit_exit_controller_post_clip', 0.0):.3e} "
         f"hmcmodgrad={row.get('grad_hierarchical_mmdit_content_modulation', 0.0):.3e} "
         f"hmgategrad={row.get('grad_hierarchical_mmdit_host_gates', 0.0):.3e} "
         f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
@@ -2896,9 +4576,7 @@ def _module_grad_norm(module: torch.nn.Module, *, reference: Tensor) -> Tensor:
     return total.sqrt()
 
 
-def _parameter_grad_norm(
-    parameters: Iterable[torch.nn.Parameter], *, reference: Tensor
-) -> Tensor:
+def _parameter_grad_norm(parameters: Iterable[torch.nn.Parameter], *, reference: Tensor) -> Tensor:
     total = torch.zeros((), device=reference.device, dtype=torch.float32)
     for parameter in parameters:
         if parameter.grad is not None:
@@ -2933,13 +4611,21 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     reference = losses["loss"]
     planner = system.planner
     losses["grad_dit_blocks"] = _module_grad_norm(planner.blocks, reference=reference)
-    losses["grad_layer_contract_adapters"] = _module_grad_norm(planner.layer_contract_heads, reference=reference)
+    losses["grad_layer_contract_adapters"] = _module_grad_norm(
+        planner.layer_contract_heads, reference=reference
+    )
     if getattr(planner, "layer_fm_probe", None) is not None:
-        losses["grad_layer_fm_probe"] = _module_grad_norm(planner.layer_fm_probe, reference=reference)
+        losses["grad_layer_fm_probe"] = _module_grad_norm(
+            planner.layer_fm_probe, reference=reference
+        )
     if getattr(planner, "layer_consequence_cell", None) is not None:
-        losses["grad_layer_consequence_cell"] = _module_grad_norm(planner.layer_consequence_cell, reference=reference)
+        losses["grad_layer_consequence_cell"] = _module_grad_norm(
+            planner.layer_consequence_cell, reference=reference
+        )
     losses["grad_midcut_heads"] = _module_grad_norm(planner.midcut_heads, reference=reference)
-    losses["grad_controlled_dynamics"] = _module_grad_norm(planner.controlled_dynamics, reference=reference)
+    losses["grad_controlled_dynamics"] = _module_grad_norm(
+        planner.controlled_dynamics, reference=reference
+    )
     final_modules = [
         planner.final_norm,
         planner.direct_physical_head,
@@ -2949,69 +4635,86 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         planner.motion_probe,
     ]
     if getattr(planner, "residual_action_flow_denoiser", None) is not None:
-        losses["grad_residual_action_flow"] = _module_grad_norm(planner.residual_action_flow_denoiser, reference=reference)
+        losses["grad_residual_action_flow"] = _module_grad_norm(
+            planner.residual_action_flow_denoiser, reference=reference
+        )
     if getattr(planner, "latent_main_action_decoder", None) is not None:
-        losses["grad_latent_main_action"] = _module_grad_norm(planner.latent_main_action_decoder, reference=reference)
+        losses["grad_latent_main_action"] = _module_grad_norm(
+            planner.latent_main_action_decoder, reference=reference
+        )
     if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
         decoder = planner.hierarchical_mmdit_action_decoder
         losses["grad_hierarchical_mmdit_action"] = _module_grad_norm(decoder, reference=reference)
         losses["grad_hierarchical_mmdit_velocity_head"] = _module_grad_norm(
-            decoder.velocity_head, reference=reference,
+            decoder.velocity_head,
+            reference=reference,
         )
         losses["grad_intent_contract_compiler"] = _module_grad_norm(
-            decoder.intent_compiler, reference=reference,
+            decoder.intent_compiler,
+            reference=reference,
         )
         losses["grad_condition_organizer"] = _module_grad_norm(
-            decoder.organizer, reference=reference,
+            decoder.organizer,
+            reference=reference,
         )
         losses["grad_owned_workspace"] = _module_grad_norm(
-            decoder.workspace, reference=reference,
+            decoder.workspace,
+            reference=reference,
         )
         blocks = decoder.blocks
         losses["grad_hierarchical_mmdit_blocks"] = _module_grad_norm(
-            blocks, reference=reference,
+            blocks,
+            reference=reference,
         )
-        shared_base_modules = torch.nn.ModuleList([
-            module
-            for block in blocks
-            for module in (
-                block.self_qkv,
-                block.self_out,
-                block.cross_q,
-                block.noisy_kv,
-                block.stage_kv,
-                block.low_kv,
-                block.noisy_out,
-                block.stage_out,
-                block.low_out,
-                block.ffn,
-            )
-        ])
+        shared_base_modules = torch.nn.ModuleList(
+            [
+                module
+                for block in blocks
+                for module in (
+                    block.self_qkv,
+                    block.self_out,
+                    block.cross_q,
+                    block.noisy_kv,
+                    block.stage_kv,
+                    block.low_kv,
+                    block.noisy_out,
+                    block.stage_out,
+                    block.low_out,
+                    block.ffn,
+                )
+            ]
+        )
         losses["grad_hierarchical_mmdit_shared_base"] = _module_grad_norm(
-            shared_base_modules, reference=reference,
+            shared_base_modules,
+            reference=reference,
         )
         losses["grad_hierarchical_mmdit_distinct_base"] = losses[
             "grad_hierarchical_mmdit_shared_base"
         ]
-        base_projection_modules = torch.nn.ModuleList([
-            module
-            for block in blocks
-            for module in (
-                block.self_out,
-                block.noisy_out,
-                block.stage_out,
-                block.low_out,
-                block.ffn.net[2],
-            )
-        ])
+        base_projection_modules = torch.nn.ModuleList(
+            [
+                module
+                for block in blocks
+                for module in (
+                    block.self_out,
+                    block.noisy_out,
+                    block.stage_out,
+                    block.low_out,
+                    block.ffn.net[2],
+                )
+            ]
+        )
         losses["grad_hierarchical_mmdit_base_projection"] = _module_grad_norm(
-            base_projection_modules, reference=reference,
+            base_projection_modules,
+            reference=reference,
         )
         losses["grad_hierarchical_mmdit_contractions"] = _module_grad_norm(
-            decoder.operator_contractions, reference=reference,
+            decoder.operator_contractions,
+            reference=reference,
         )
         losses["grad_hierarchical_mmdit_contraction_basis"] = _parameter_grad_norm(
-            decoder.factor_parameters(), reference=reference,
+            decoder.factor_parameters(),
+            reference=reference,
         )
         losses["grad_hierarchical_mmdit_contraction_depth"] = _parameter_grad_norm(
             (
@@ -3023,18 +4726,21 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
             reference=reference,
         )
         losses["grad_hierarchical_mmdit_stage_selector"] = _parameter_grad_norm(
-            decoder.stage_selector_parameters(), reference=reference,
+            decoder.stage_selector_parameters(),
+            reference=reference,
         )
         losses["grad_hierarchical_mmdit_exit_controller"] = _parameter_grad_norm(
-            decoder.exit_controller_parameters(), reference=reference,
+            decoder.exit_controller_parameters(),
+            reference=reference,
         )
         losses["grad_hierarchical_mmdit_unified_controller"] = _parameter_grad_norm(
-            decoder.unified_controller_parameters(), reference=reference,
+            decoder.unified_controller_parameters(),
+            reference=reference,
         )
         for group_name, parameters in decoder.unified_controller_parameter_groups().items():
-            losses[
-                f"grad_hierarchical_mmdit_controller_{group_name}"
-            ] = _parameter_grad_norm(parameters, reference=reference)
+            losses[f"grad_hierarchical_mmdit_controller_{group_name}"] = _parameter_grad_norm(
+                parameters, reference=reference
+            )
         losses["grad_hierarchical_mmdit_content_modulation"] = _linear_row_grad_norm(
             (block.mod for block in blocks),
             start=0,
@@ -3052,56 +4758,67 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_latent_cvae_action"] = _module_grad_norm(decoder, reference=reference)
         hierarchical_workspace = getattr(decoder, "hierarchical_workspace", None)
         legacy_workspace = getattr(decoder, "evidence_workspace", None)
-        workspace = hierarchical_workspace if hierarchical_workspace is not None else legacy_workspace
+        workspace = (
+            hierarchical_workspace if hierarchical_workspace is not None else legacy_workspace
+        )
         if workspace is not None:
             losses["grad_latent_cvae_workspace"] = _module_grad_norm(workspace, reference=reference)
             if hierarchical_workspace is not None:
                 losses["grad_latent_cvae_hierarchical_workspace"] = _module_grad_norm(
-                    hierarchical_workspace, reference=reference,
+                    hierarchical_workspace,
+                    reference=reference,
                 )
                 losses["grad_latent_cvae_hierarchical_manager"] = _module_grad_norm(
-                    hierarchical_workspace.manager, reference=reference,
+                    hierarchical_workspace.manager,
+                    reference=reference,
                 )
-                low_modules = torch.nn.ModuleList([
-                    hierarchical_workspace.condition_query,
-                    hierarchical_workspace.low_stage_query,
-                    hierarchical_workspace.low_stage_role_key,
-                    hierarchical_workspace.low_stage_content_key,
-                    hierarchical_workspace.low_stage_role_value,
-                    hierarchical_workspace.low_stage_content_value,
-                    hierarchical_workspace.low_stage_out,
-                    hierarchical_workspace.low_blocks,
-                    hierarchical_workspace.low_final_norm,
-                ])
+                low_modules = torch.nn.ModuleList(
+                    [
+                        hierarchical_workspace.condition_query,
+                        hierarchical_workspace.low_stage_query,
+                        hierarchical_workspace.low_stage_role_key,
+                        hierarchical_workspace.low_stage_content_key,
+                        hierarchical_workspace.low_stage_role_value,
+                        hierarchical_workspace.low_stage_content_value,
+                        hierarchical_workspace.low_stage_out,
+                        hierarchical_workspace.low_blocks,
+                        hierarchical_workspace.low_final_norm,
+                    ]
+                )
                 losses["grad_latent_cvae_hierarchical_low"] = _module_grad_norm(
-                    low_modules, reference=reference,
+                    low_modules,
+                    reference=reference,
                 )
-                stage_modules = torch.nn.ModuleList([
-                    hierarchical_workspace.stage_init,
-                    hierarchical_workspace.stage_role_query,
-                    hierarchical_workspace.stage_content_query,
-                    hierarchical_workspace.stage_condition_query,
-                    hierarchical_workspace.stage_low_key,
-                    hierarchical_workspace.stage_low_value,
-                    hierarchical_workspace.stage_promote_out,
-                    hierarchical_workspace.stage_gru,
-                    hierarchical_workspace.stage_content_out,
-                    hierarchical_workspace.stage_role_out,
-                ])
+                stage_modules = torch.nn.ModuleList(
+                    [
+                        hierarchical_workspace.stage_init,
+                        hierarchical_workspace.stage_role_query,
+                        hierarchical_workspace.stage_content_query,
+                        hierarchical_workspace.stage_condition_query,
+                        hierarchical_workspace.stage_low_key,
+                        hierarchical_workspace.stage_low_value,
+                        hierarchical_workspace.stage_promote_out,
+                        hierarchical_workspace.stage_gru,
+                        hierarchical_workspace.stage_content_out,
+                        hierarchical_workspace.stage_role_out,
+                    ]
+                )
                 losses["grad_latent_cvae_hierarchical_stage"] = _module_grad_norm(
-                    stage_modules, reference=reference,
+                    stage_modules,
+                    reference=reference,
                 )
             primary_modules: list[torch.nn.Module] = []
             primary_modules.extend(
-                block.mod for block in getattr(decoder, "blocks", [])
-                if hasattr(block, "mod")
+                block.mod for block in getattr(decoder, "blocks", []) if hasattr(block, "mod")
             )
             primary_modules.extend(
-                block.action_mod for block in getattr(decoder, "mmdit_blocks", [])
+                block.action_mod
+                for block in getattr(decoder, "mmdit_blocks", [])
                 if hasattr(block, "action_mod")
             )
             primary_modules.extend(
-                block.mod for block in (
+                block.mod
+                for block in (
                     getattr(workspace, "low_blocks", [])
                     if hierarchical_workspace is not None
                     else getattr(workspace, "blocks", [])
@@ -3116,7 +4833,72 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         else:
             rollout_projection = getattr(decoder, "mmdit_rollout_cond_proj", None)
             if rollout_projection is not None:
-                losses["grad_latent_cvae_rollout_condition"] = _module_grad_norm(rollout_projection, reference=reference)
+                losses["grad_latent_cvae_rollout_condition"] = _module_grad_norm(
+                    rollout_projection, reference=reference
+                )
+    if getattr(planner, "evidence_latent_mmdit_action_decoder", None) is not None:
+        decoder = planner.evidence_latent_mmdit_action_decoder
+        losses["grad_evidence_latent_mmdit_action"] = _module_grad_norm(
+            decoder, reference=reference
+        )
+        losses["grad_evidence_view_adapter"] = _module_grad_norm(
+            decoder.evidence_adapter,
+            reference=reference,
+        )
+        losses["grad_evidence_condition_organizer"] = _module_grad_norm(
+            decoder.organizer,
+            reference=reference,
+        )
+        losses["grad_evidence_mmdit_blocks"] = _module_grad_norm(
+            decoder.blocks,
+            reference=reference,
+        )
+        evidence_reader_parameters = [
+            parameter
+            for block in decoder.blocks
+            for parameter in block.evidence_reader_parameters()
+        ]
+        losses["grad_evidence_mmdit_evidence_reader"] = _parameter_grad_norm(
+            evidence_reader_parameters,
+            reference=reference,
+        )
+        losses["grad_evidence_mmdit_action_state"] = _module_grad_norm(
+            decoder.noisy_lift,
+            reference=reference,
+        )
+        if decoder.execution_controller is not None:
+            controller = decoder.execution_controller
+            losses["grad_evidence_mmdit_execution_controller"] = _module_grad_norm(
+                controller,
+                reference=reference,
+            )
+            losses["grad_evidence_mmdit_capacity_control"] = _module_grad_norm(
+                controller.capacity_head,
+                reference=reference,
+            )
+            losses["grad_evidence_mmdit_execution_value_reader"] = _module_grad_norm(
+                controller.value_reader,
+                reference=reference,
+            )
+        if decoder.operator_contractions:
+            losses["grad_evidence_mmdit_operator_capacity"] = _module_grad_norm(
+                decoder.operator_contractions,
+                reference=reference,
+            )
+            factor_parameters = [
+                parameter
+                for contraction in decoder.operator_contractions
+                for parameter in contraction.factor_parameters()
+            ]
+            losses["grad_evidence_mmdit_operator_basis"] = _parameter_grad_norm(
+                factor_parameters,
+                reference=reference,
+            )
+        for index, block in enumerate(decoder.blocks):
+            losses[f"grad_evidence_mmdit_block_{index}"] = _module_grad_norm(
+                block,
+                reference=reference,
+            )
     final = torch.nn.ModuleList(final_modules)
     losses["grad_final_policy_heads"] = _module_grad_norm(final, reference=reference)
 
@@ -3136,7 +4918,9 @@ def _unique_params(
     return params
 
 
-def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) -> list[dict[str, Any]]:
+def _optimizer_groups(
+    system: V39PolicySystem, trainer: V39PolicyTrainerConfig
+) -> list[dict[str, Any]]:
     stage = str(getattr(trainer, "training_stage", "contract")).lower().replace("-", "_")
     if stage not in {"contract", "stage1", "policy", "stage2"}:
         raise ValueError("training_stage must be contract/stage1 or policy/stage2")
@@ -3147,8 +4931,13 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
         getattr(planner, "latent_cvae_action_decoder", None) is not None
         or getattr(planner, "latent_main_action_decoder", None) is not None
         or getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None
+        or getattr(planner, "evidence_latent_mmdit_action_decoder", None) is not None
     )
-    legacy_action_readers = [] if complete_latent_decoder else [planner.direct_physical_head, planner.rollout_residual_head]
+    legacy_action_readers = (
+        []
+        if complete_latent_decoder
+        else [planner.direct_physical_head, planner.rollout_residual_head]
+    )
     legacy_motion_readers = [] if complete_latent_decoder else [planner.motion_probe]
 
     def add_hierarchical_decoder_groups(*, lr: float, name: str) -> None:
@@ -3172,45 +4961,122 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
         if any(
             left & right
             for index, left in enumerate(owner_sets)
-            for right in owner_sets[index + 1:]
+            for right in owner_sets[index + 1 :]
         ):
             raise RuntimeError("hierarchical MMDiT optimizer parameter owners overlap")
         special_ids = set().union(*owner_sets)
         regular_params = [
-            parameter for parameter in decoder.parameters()
+            parameter
+            for parameter in decoder.parameters()
             if parameter.requires_grad and id(parameter) not in special_ids
         ]
         if regular_params:
             groups.append({"params": regular_params, "lr": lr, "name": name})
         if factor_params:
-            groups.append({
-                "params": factor_params,
-                "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
-                "weight_decay": 0.0,
-                "name": f"{name}_contraction_basis_no_decay",
-            })
+            groups.append(
+                {
+                    "params": factor_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
+                    "weight_decay": 0.0,
+                    "name": f"{name}_contraction_basis_no_decay",
+                }
+            )
         if contraction_control_params:
-            groups.append({
-                "params": contraction_control_params,
-                "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
-                "weight_decay": 0.0,
-                "name": f"{name}_contraction_depth_no_decay",
-            })
+            groups.append(
+                {
+                    "params": contraction_control_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
+                    "weight_decay": 0.0,
+                    "name": f"{name}_contraction_depth_no_decay",
+                }
+            )
         if controller_params:
-            groups.append({
-                "params": controller_params,
-                "lr": lr * float(trainer.hierarchical_mmdit_controller_lr_scale),
-                "name": f"{name}_unified_controller",
-            })
+            groups.append(
+                {
+                    "params": controller_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_controller_lr_scale),
+                    "name": f"{name}_unified_controller",
+                }
+            )
         if base_scale_params:
-            groups.append({
-                "params": base_scale_params,
-                "lr": lr * float(trainer.hierarchical_mmdit_shared_base_lr_scale),
-                "weight_decay": 0.0,
-                "name": f"{name}_scale_invariant_base_no_decay",
-            })
+            groups.append(
+                {
+                    "params": base_scale_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_shared_base_lr_scale),
+                    "weight_decay": 0.0,
+                    "name": f"{name}_scale_invariant_base_no_decay",
+                }
+            )
 
-    if _uses_layer_adapter_contract(trainer) and len(getattr(planner, "layer_contract_heads", [])) > 0:
+    def add_evidence_decoder_groups(*, lr: float, name: str) -> None:
+        decoder = getattr(planner, "evidence_latent_mmdit_action_decoder", None)
+        if decoder is None:
+            return
+        factor_params = [
+            parameter
+            for contraction in decoder.operator_contractions
+            for parameter in contraction.factor_parameters()
+            if parameter.requires_grad
+        ]
+        depth_params = [
+            parameter
+            for contraction in decoder.operator_contractions
+            for parameter in contraction.control_parameters()
+            if parameter.requires_grad
+        ]
+        controller_params = (
+            []
+            if decoder.execution_controller is None
+            else [
+                parameter
+                for parameter in decoder.execution_controller.parameters()
+                if parameter.requires_grad
+            ]
+        )
+        factor_ids = {id(parameter) for parameter in factor_params}
+        depth_ids = {id(parameter) for parameter in depth_params}
+        controller_ids = {id(parameter) for parameter in controller_params}
+        if factor_ids & depth_ids or factor_ids & controller_ids or depth_ids & controller_ids:
+            raise RuntimeError("native evidence MMDiT optimizer parameter owners overlap")
+        special_ids = factor_ids | depth_ids | controller_ids
+        regular_params = [
+            parameter
+            for parameter in decoder.parameters()
+            if parameter.requires_grad and id(parameter) not in special_ids
+        ]
+        if regular_params:
+            groups.append({"params": regular_params, "lr": lr, "name": name})
+        if factor_params:
+            groups.append(
+                {
+                    "params": factor_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
+                    "weight_decay": 0.0,
+                    "name": f"{name}_operator_basis_no_decay",
+                }
+            )
+        if depth_params:
+            groups.append(
+                {
+                    "params": depth_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_contraction_lr_scale),
+                    "weight_decay": 0.0,
+                    "name": f"{name}_operator_depth_no_decay",
+                }
+            )
+        if controller_params:
+            groups.append(
+                {
+                    "params": controller_params,
+                    "lr": lr * float(trainer.hierarchical_mmdit_controller_lr_scale),
+                    "name": f"{name}_execution_controller",
+                }
+            )
+
+    if (
+        _uses_layer_adapter_contract(trainer)
+        and len(getattr(planner, "layer_contract_heads", [])) > 0
+    ):
         shared_modules = [
             planner.visual_memory,
             planner.rollout_codec,
@@ -3223,12 +5089,28 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
         min_scale = float(getattr(trainer, "layerwise_lr_min_scale", 0.30))
         min_scale = min(max(min_scale, 0.01), 1.0)
         if stage in {"contract", "stage1"}:
-            groups.append({"params": _unique_params(shared_modules), "lr": trainer.lr * 0.5, "name": "shared_input_low_lr"})
+            groups.append(
+                {
+                    "params": _unique_params(shared_modules),
+                    "lr": trainer.lr * 0.5,
+                    "name": "shared_input_low_lr",
+                }
+            )
             for i, block in enumerate(planner.blocks):
                 frac = 0.0 if depth <= 1 else float(i) / float(depth - 1)
                 scale = min_scale + (1.0 - min_scale) * frac
-                groups.append({"params": list(block.parameters()), "lr": trainer.lr * scale, "name": f"dit_block_{i}_lr{scale:.2f}"})
-            contract_modules = [planner.midcut_norm, planner.midcut_heads, planner.layer_contract_heads]
+                groups.append(
+                    {
+                        "params": list(block.parameters()),
+                        "lr": trainer.lr * scale,
+                        "name": f"dit_block_{i}_lr{scale:.2f}",
+                    }
+                )
+            contract_modules = [
+                planner.midcut_norm,
+                planner.midcut_heads,
+                planner.layer_contract_heads,
+            ]
             if planner.layer_fm_probe is not None:
                 contract_modules.append(planner.layer_fm_probe)
             if getattr(planner, "layer_consequence_cell", None) is not None:
@@ -3239,8 +5121,19 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             )
             if event_probe_in_contract:
                 contract_modules.append(planner.event_probe)
-            groups.append({"params": _unique_params(contract_modules), "lr": trainer.lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)), "name": "contract_adapters_heads"})
-            final_modules = [planner.final_norm, *legacy_action_readers, planner.controlled_dynamics, *legacy_motion_readers]
+            groups.append(
+                {
+                    "params": _unique_params(contract_modules),
+                    "lr": trainer.lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)),
+                    "name": "contract_adapters_heads",
+                }
+            )
+            final_modules = [
+                planner.final_norm,
+                *legacy_action_readers,
+                planner.controlled_dynamics,
+                *legacy_motion_readers,
+            ]
             if not event_probe_in_contract:
                 final_modules.append(planner.event_probe)
             if getattr(planner, "residual_action_flow_denoiser", None) is not None:
@@ -3250,61 +5143,138 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
             if getattr(planner, "latent_cvae_action_decoder", None) is not None:
                 final_modules.append(planner.latent_cvae_action_decoder)
             if float(getattr(trainer, "layer_contract_final_action_loss_weight", 0.0)) > 0:
-                groups.append({"params": _unique_params(final_modules), "lr": trainer.lr * float(getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)), "name": "weak_final_policy_probe"})
+                weak_final_lr = trainer.lr * float(
+                    getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)
+                )
+                groups.append(
+                    {
+                        "params": _unique_params(final_modules),
+                        "lr": weak_final_lr,
+                        "name": "weak_final_policy_probe",
+                    }
+                )
+                add_evidence_decoder_groups(
+                    lr=weak_final_lr,
+                    name="weak_evidence_latent_mmdit_action_decoder",
+                )
                 add_hierarchical_decoder_groups(
-                    lr=trainer.lr * float(getattr(trainer, "layer_contract_final_action_lr_scale", 0.30)),
+                    lr=weak_final_lr,
                     name="weak_hierarchical_mmdit_action_decoder",
                 )
-            groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
+            groups.append(
+                {
+                    "params": list(system.proposal.parameters()),
+                    "lr": trainer.proposal_lr,
+                    "name": "proposal",
+                }
+            )
         else:
             upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
-            groups.append({"params": _unique_params(shared_modules), "lr": upper_lr * 0.5, "name": "shared_input_low_lr"})
+            groups.append(
+                {
+                    "params": _unique_params(shared_modules),
+                    "lr": upper_lr * 0.5,
+                    "name": "shared_input_low_lr",
+                }
+            )
             for i, block in enumerate(planner.blocks):
                 frac = 0.0 if depth <= 1 else float(i) / float(depth - 1)
                 lr = upper_lr + (trainer.lr - upper_lr) * frac
                 lr = max(lr, trainer.lr * min_scale * 0.25)
-                groups.append({"params": list(block.parameters()), "lr": lr, "name": f"dit_block_{i}_policy_layerwise"})
+                groups.append(
+                    {
+                        "params": list(block.parameters()),
+                        "lr": lr,
+                        "name": f"dit_block_{i}_policy_layerwise",
+                    }
+                )
             inherited_contract_lr = upper_lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0))
-            groups.append({
-                "params": _unique_params([planner.midcut_norm, planner.midcut_heads]),
-                "lr": inherited_contract_lr,
-                "name": "midcut_contract_heads_low_lr",
-            })
+            groups.append(
+                {
+                    "params": _unique_params([planner.midcut_norm, planner.midcut_heads]),
+                    "lr": inherited_contract_lr,
+                    "name": "midcut_contract_heads_low_lr",
+                }
+            )
             adapter_modules = [planner.layer_contract_heads]
             if planner.layer_fm_probe is not None:
                 adapter_modules.append(planner.layer_fm_probe)
             if getattr(planner, "layer_consequence_cell", None) is not None:
                 adapter_modules.append(planner.layer_consequence_cell)
-            adapter_lr_scale = float(getattr(trainer, "layer_contract_adapter_policy_lr_scale", 0.0))
-            adapter_lr = trainer.lr * adapter_lr_scale if adapter_lr_scale > 0 else inherited_contract_lr
-            adapter_name = "layer_contract_adapters_reset_lr" if adapter_lr_scale > 0 else "layer_contract_adapters_low_lr"
-            groups.append({"params": _unique_params(adapter_modules), "lr": adapter_lr, "name": adapter_name})
-            final_modules = [planner.final_norm, *legacy_action_readers, planner.controlled_dynamics, planner.event_probe, *legacy_motion_readers]
-            groups.append({"params": _unique_params(final_modules), "lr": trainer.lr, "name": "final_policy_heads"})
+            adapter_lr_scale = float(
+                getattr(trainer, "layer_contract_adapter_policy_lr_scale", 0.0)
+            )
+            adapter_lr = (
+                trainer.lr * adapter_lr_scale if adapter_lr_scale > 0 else inherited_contract_lr
+            )
+            adapter_name = (
+                "layer_contract_adapters_reset_lr"
+                if adapter_lr_scale > 0
+                else "layer_contract_adapters_low_lr"
+            )
+            groups.append(
+                {"params": _unique_params(adapter_modules), "lr": adapter_lr, "name": adapter_name}
+            )
+            final_modules = [
+                planner.final_norm,
+                *legacy_action_readers,
+                planner.controlled_dynamics,
+                planner.event_probe,
+                *legacy_motion_readers,
+            ]
+            groups.append(
+                {
+                    "params": _unique_params(final_modules),
+                    "lr": trainer.lr,
+                    "name": "final_policy_heads",
+                }
+            )
             if getattr(planner, "residual_action_flow_denoiser", None) is not None:
-                groups.append({
-                    "params": list(planner.residual_action_flow_denoiser.parameters()),
-                    "lr": trainer.lr * float(getattr(trainer, "action_flow_residual_lr_scale", 1.5)),
-                    "name": "residual_action_flow_denoiser",
-                })
+                groups.append(
+                    {
+                        "params": list(planner.residual_action_flow_denoiser.parameters()),
+                        "lr": trainer.lr
+                        * float(getattr(trainer, "action_flow_residual_lr_scale", 1.5)),
+                        "name": "residual_action_flow_denoiser",
+                    }
+                )
             if getattr(planner, "latent_main_action_decoder", None) is not None:
-                groups.append({
-                    "params": list(planner.latent_main_action_decoder.parameters()),
-                    "lr": trainer.lr * float(getattr(trainer, "latent_action_decoder_lr_scale", 1.5)),
-                    "name": "latent_main_action_decoder",
-                })
+                groups.append(
+                    {
+                        "params": list(planner.latent_main_action_decoder.parameters()),
+                        "lr": trainer.lr
+                        * float(getattr(trainer, "latent_action_decoder_lr_scale", 1.5)),
+                        "name": "latent_main_action_decoder",
+                    }
+                )
             if getattr(planner, "latent_cvae_action_decoder", None) is not None:
-                groups.append({
-                    "params": list(planner.latent_cvae_action_decoder.parameters()),
-                    "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
-                    "name": "latent_cvae_action_decoder",
-                })
+                groups.append(
+                    {
+                        "params": list(planner.latent_cvae_action_decoder.parameters()),
+                        "lr": trainer.lr
+                        * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                        "name": "latent_cvae_action_decoder",
+                    }
+                )
+            if getattr(planner, "evidence_latent_mmdit_action_decoder", None) is not None:
+                add_evidence_decoder_groups(
+                    lr=trainer.lr
+                    * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                    name="evidence_latent_mmdit_action_decoder",
+                )
             if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
                 add_hierarchical_decoder_groups(
-                    lr=trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                    lr=trainer.lr
+                    * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                     name="hierarchical_mmdit_action_decoder",
                 )
-            groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
+            groups.append(
+                {
+                    "params": list(system.proposal.parameters()),
+                    "lr": trainer.proposal_lr,
+                    "name": "proposal",
+                }
+            )
         return [group for group in groups if len(group["params"]) > 0]
 
     pre_modules = [
@@ -3327,42 +5297,175 @@ def _optimizer_groups(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) 
         *legacy_motion_readers,
     ]
     if stage in {"contract", "stage1"}:
-        groups.append({"params": _unique_params(pre_modules), "lr": trainer.lr, "name": "pre_midcut_trunk"})
-        groups.append({"params": _unique_params(mid_modules), "lr": trainer.lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)), "name": "midcut_contract_heads"})
-        groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
+        groups.append(
+            {"params": _unique_params(pre_modules), "lr": trainer.lr, "name": "pre_midcut_trunk"}
+        )
+        groups.append(
+            {
+                "params": _unique_params(mid_modules),
+                "lr": trainer.lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)),
+                "name": "midcut_contract_heads",
+            }
+        )
+        groups.append(
+            {
+                "params": list(system.proposal.parameters()),
+                "lr": trainer.proposal_lr,
+                "name": "proposal",
+            }
+        )
     else:
         upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
-        groups.append({"params": _unique_params(pre_modules), "lr": upper_lr, "name": "pre_midcut_trunk_low_lr"})
-        groups.append({"params": _unique_params(mid_modules), "lr": upper_lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)), "name": "midcut_contract_heads_low_lr"})
-        groups.append({"params": _unique_params(post_modules), "lr": trainer.lr, "name": "post_midcut_policy"})
+        groups.append(
+            {
+                "params": _unique_params(pre_modules),
+                "lr": upper_lr,
+                "name": "pre_midcut_trunk_low_lr",
+            }
+        )
+        groups.append(
+            {
+                "params": _unique_params(mid_modules),
+                "lr": upper_lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0)),
+                "name": "midcut_contract_heads_low_lr",
+            }
+        )
+        groups.append(
+            {"params": _unique_params(post_modules), "lr": trainer.lr, "name": "post_midcut_policy"}
+        )
         if getattr(planner, "residual_action_flow_denoiser", None) is not None:
-            groups.append({
-                "params": list(planner.residual_action_flow_denoiser.parameters()),
-                "lr": trainer.lr * float(getattr(trainer, "action_flow_residual_lr_scale", 1.5)),
-                "name": "residual_action_flow_denoiser",
-            })
+            groups.append(
+                {
+                    "params": list(planner.residual_action_flow_denoiser.parameters()),
+                    "lr": trainer.lr
+                    * float(getattr(trainer, "action_flow_residual_lr_scale", 1.5)),
+                    "name": "residual_action_flow_denoiser",
+                }
+            )
         if getattr(planner, "latent_main_action_decoder", None) is not None:
-            groups.append({
-                "params": list(planner.latent_main_action_decoder.parameters()),
-                "lr": trainer.lr * float(getattr(trainer, "latent_action_decoder_lr_scale", 1.5)),
-                "name": "latent_main_action_decoder",
-            })
+            groups.append(
+                {
+                    "params": list(planner.latent_main_action_decoder.parameters()),
+                    "lr": trainer.lr
+                    * float(getattr(trainer, "latent_action_decoder_lr_scale", 1.5)),
+                    "name": "latent_main_action_decoder",
+                }
+            )
         if getattr(planner, "latent_cvae_action_decoder", None) is not None:
-            groups.append({
-                "params": list(planner.latent_cvae_action_decoder.parameters()),
-                "lr": trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
-                "name": "latent_cvae_action_decoder",
-            })
+            groups.append(
+                {
+                    "params": list(planner.latent_cvae_action_decoder.parameters()),
+                    "lr": trainer.lr
+                    * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                    "name": "latent_cvae_action_decoder",
+                }
+            )
+        if getattr(planner, "evidence_latent_mmdit_action_decoder", None) is not None:
+            add_evidence_decoder_groups(
+                lr=trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
+                name="evidence_latent_mmdit_action_decoder",
+            )
         if getattr(planner, "hierarchical_mmdit_action_decoder", None) is not None:
             add_hierarchical_decoder_groups(
                 lr=trainer.lr * float(getattr(trainer, "latent_cvae_action_decoder_lr_scale", 1.0)),
                 name="hierarchical_mmdit_action_decoder",
             )
-        groups.append({"params": list(system.proposal.parameters()), "lr": trainer.proposal_lr, "name": "proposal"})
+        groups.append(
+            {
+                "params": list(system.proposal.parameters()),
+                "lr": trainer.proposal_lr,
+                "name": "proposal",
+            }
+        )
     return [group for group in groups if len(group["params"]) > 0]
 
+
 def _is_contract_stage(trainer: V39PolicyTrainerConfig) -> bool:
-    return str(getattr(trainer, "training_stage", "contract")).lower().replace("-", "_") in {"contract", "stage1"}
+    return str(getattr(trainer, "training_stage", "contract")).lower().replace("-", "_") in {
+        "contract",
+        "stage1",
+    }
+
+
+def _stable_json_fingerprint(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _run_contract_manifest(
+    *,
+    system: V39PolicySystem,
+    trainer: V39PolicyTrainerConfig,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    trainer_contract = asdict(trainer)
+    # These fields control how long/where a compatible run proceeds, not the
+    # mathematical experiment.  They may change for an explicit resume.
+    for name in ("epochs", "max_train_batches", "max_val_batches"):
+        trainer_contract.pop(name, None)
+    contract = {
+        "policy_config": asdict(system.policy_config),
+        "trainer_contract": trainer_contract,
+        "context_schema": context.get("schema"),
+        "dataset": context.get("dataset"),
+        "splits": context.get("splits"),
+        "visual_geometry": context.get("visual_geometry"),
+        "performance_contract": context.get("performance_contract"),
+        "source_fingerprint": context.get("source_fingerprint"),
+    }
+    return {
+        "schema": "clearvla-run-contract-manifest-v1",
+        "fingerprint": _stable_json_fingerprint(contract),
+        "contract": contract,
+    }
+
+
+def _prepare_run_directory(
+    *,
+    out_dir: Path,
+    manifest: dict[str, Any],
+    resume: Path | None,
+) -> None:
+    """Prevent accidental JSONL append/checkpoint overwrite across contracts."""
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_dir / "run_manifest.json"
+    artifacts = (
+        out_dir / "v39_policy_epochs.jsonl",
+        out_dir / "v40_policy_summary.json",
+        out_dir / "checkpoints" / "latest.pt",
+    )
+    has_artifacts = any(path.exists() for path in artifacts)
+    existing: dict[str, Any] | None = None
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if has_artifacts and resume is None:
+        raise FileExistsError(
+            f"output directory already contains a run: {out_dir}; choose a new OUT_DIR "
+            "or pass an explicit compatible --resume checkpoint"
+        )
+    if has_artifacts and existing is None:
+        raise ValueError(
+            f"cannot resume legacy output directory without run_manifest.json: {out_dir}; "
+            "resume into a new OUT_DIR instead"
+        )
+    if existing is not None and existing.get("fingerprint") != manifest.get("fingerprint"):
+        raise ValueError(
+            "run contract mismatch for output directory: "
+            f"saved={existing.get('fingerprint')}, current={manifest.get('fingerprint')}"
+        )
+    if existing is None:
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+
 
 def train_v39_policy(
     *,
@@ -3380,8 +5483,18 @@ def train_v39_policy(
     context: dict[str, Any],
     resume: Path | None = None,
 ) -> dict[str, Any]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = out_dir / "checkpoints"; ckpt_dir.mkdir(exist_ok=True)
+    run_manifest = _run_contract_manifest(
+        system=system,
+        trainer=trainer,
+        context=context,
+    )
+    _prepare_run_directory(
+        out_dir=out_dir,
+        manifest=run_manifest,
+        resume=resume,
+    )
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(exist_ok=True)
     memory_reporter = CudaMemoryReporter(
         device=device,
         out_dir=out_dir,
@@ -3394,10 +5507,14 @@ def train_v39_policy(
         memory_reporter.snapshot(tag="after_model_to_device", phase="setup", print_line=True)
     optimizer = torch.optim.AdamW(
         _optimizer_groups(system, trainer),
-        weight_decay=trainer.weight_decay, betas=(trainer.beta1, trainer.beta2), eps=trainer.eps,
+        weight_decay=trainer.weight_decay,
+        betas=(trainer.beta1, trainer.beta2),
+        eps=trainer.eps,
     )
     steps_per_epoch = trainer.max_train_batches or len(train_loader)
-    schedule = scheduler(optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio)
+    schedule = scheduler(
+        optimizer, steps_per_epoch * trainer.epochs, trainer.warmup_steps, trainer.min_lr_ratio
+    )
     start_epoch, global_step = 1, 0
     # do_before_v78 M1 quarantine proof: CALLGRAPH_AUDIT=1 turns this run into
     # a one-batch diagnostic -- hooks attach here, the report is written right
@@ -3405,16 +5522,24 @@ def train_v39_policy(
     # exits.  Zero effect when the env var is absent.
     callgraph_auditor = None
     import os as _os
+
     if _os.environ.get("CALLGRAPH_AUDIT", "0") == "1":
         from clearvla.tools.callgraph_audit import CallGraphAuditor
+
         callgraph_auditor = CallGraphAuditor(system)
         callgraph_auditor.attach(first_phase="train")
-        print("[callgraph-audit] hooks attached; diagnostic run, will exit after first batch", flush=True)
+        print(
+            "[callgraph-audit] hooks attached; diagnostic run, will exit after first batch",
+            flush=True,
+        )
     history: list[dict[str, Any]] = []
     best = {
-        "full_mse": float("inf"), "gripper_f1": -float("inf"),
-        "gripper_recall": -float("inf"), "balanced": float("inf"),
-        "deploy_full_rmse": float("inf"), "layer_contract": float("inf"),
+        "full_mse": float("inf"),
+        "gripper_f1": -float("inf"),
+        "gripper_recall": -float("inf"),
+        "balanced": float("inf"),
+        "deploy_full_rmse": float("inf"),
+        "layer_contract": float("inf"),
     }
     if resume is not None:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
@@ -3436,7 +5561,7 @@ def train_v39_policy(
                 getattr(
                     system.policy_config,
                     "hierarchical_mmdit_architecture_version",
-                    "post_gate_contraction_sidecar_v11_oracle_router",
+                    "post_gate_contraction_sidecar_v12_value_dwell",
                 )
             )
             if saved_architecture != current_architecture:
@@ -3463,6 +5588,8 @@ def train_v39_policy(
                 "hierarchical_mmdit_control_tokens",
                 "hierarchical_mmdit_controller_depth",
                 "hierarchical_mmdit_controller_heads",
+                "hierarchical_mmdit_spectral_state",
+                "hierarchical_mmdit_operation_candidate_probes",
             ):
                 saved_value = int(saved_policy.get(field, getattr(system.policy_config, field)))
                 current_value = int(getattr(system.policy_config, field))
@@ -3479,6 +5606,11 @@ def train_v39_policy(
                 "hierarchical_mmdit_residual_scale_max",
                 "hierarchical_mmdit_random_prefix_probability",
                 "hierarchical_mmdit_controller_ffn_expansion",
+                "hierarchical_mmdit_spectral_arm_start_fraction",
+                "hierarchical_mmdit_spectral_gripper_start_fraction",
+                "hierarchical_mmdit_spectral_temperature",
+                "hierarchical_mmdit_spectral_schedule_power",
+                "hierarchical_mmdit_spectral_controller_shift_limit",
             ):
                 saved_value = float(saved_policy.get(field, getattr(system.policy_config, field)))
                 current_value = float(getattr(system.policy_config, field))
@@ -3499,6 +5631,8 @@ def train_v39_policy(
                 "hierarchical_mmdit_stage_pressure_thresholds",
                 "hierarchical_mmdit_action_response_floor",
                 "hierarchical_mmdit_exhaustion_confirm_steps",
+                "hierarchical_mmdit_dwell_mode",
+                "hierarchical_mmdit_operation_value_warmup_steps",
             )
             for field in runtime_override_fields:
                 saved_value = saved_policy.get(field, getattr(system.policy_config, field))
@@ -3513,14 +5647,18 @@ def train_v39_policy(
                         flush=True,
                     )
         saved_workspace_tokens = int(saved_policy.get("latent_cvae_horizon_tokens", 24))
-        current_workspace_tokens = int(getattr(system.policy_config, "latent_cvae_horizon_tokens", 24))
+        current_workspace_tokens = int(
+            getattr(system.policy_config, "latent_cvae_horizon_tokens", 24)
+        )
         if saved_workspace_tokens != current_workspace_tokens:
             raise ValueError(
                 "resume workspace-token mismatch: "
                 f"checkpoint={saved_workspace_tokens}, current={current_workspace_tokens}"
             )
         saved_hierarchical = int(saved_policy.get("latent_cvae_hierarchical_workspace", 0))
-        current_hierarchical = int(getattr(system.policy_config, "latent_cvae_hierarchical_workspace", 0))
+        current_hierarchical = int(
+            getattr(system.policy_config, "latent_cvae_hierarchical_workspace", 0)
+        )
         if saved_hierarchical != current_hierarchical:
             raise ValueError(
                 "resume hierarchical-workspace mismatch: "
@@ -3535,36 +5673,68 @@ def train_v39_policy(
                     f"checkpoint={saved_stage_slots}, current={current_stage_slots}"
                 )
         system.load_state_dict(payload["model"], strict=True)
-        optimizer.load_state_dict(payload["optimizer"]); schedule.load_state_dict(payload["scheduler"])
-        start_epoch = int(payload["epoch"]) + 1; global_step = int(payload["global_step"])
-        history = list(payload.get("history", [])); best.update(payload.get("best", {})); restore_rng(payload.get("rng"))
+        optimizer.load_state_dict(payload["optimizer"])
+        schedule.load_state_dict(payload["scheduler"])
+        start_epoch = int(payload["epoch"]) + 1
+        global_step = int(payload["global_step"])
+        history = list(payload.get("history", []))
+        best.update(payload.get("best", {}))
+        restore_rng(payload.get("rng"))
 
     for epoch in range(start_epoch, trainer.epochs + 1):
-        system.train(); metric_sums: dict[str, Tensor] = {}; metric_count = 0
+        system.train()
+        metric_sums: dict[str, Tensor] = {}
+        metric_count = 0
         throughput_start = time.perf_counter()
         throughput_batch = 0
         include_future = (
-            (float(trainer.rollout_dynamics_loss_weight) > 0 or float(trainer.rollout_contrast_loss_weight) > 0
-             or float(trainer.future_latent_loss_weight) > 0 or float(trainer.action_effect_loss_weight) > 0
-             or float(getattr(trainer, "layer_latent_loss_weight", 0.0)) > 0
-             or float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0)
-            and epoch >= int(trainer.future_latent_loss_start_epoch)
-        )
+            float(trainer.rollout_dynamics_loss_weight) > 0
+            or float(trainer.rollout_delta_loss_weight) > 0
+            or float(trainer.rollout_contrast_loss_weight) > 0
+            or float(trainer.rollout_variance_loss_weight) > 0
+            or float(trainer.rollout_norm_loss_weight) > 0
+            or float(trainer.rollout_milestone_delta_match_weight) > 0
+            or float(trainer.future_latent_loss_weight) > 0
+            or float(trainer.action_effect_loss_weight) > 0
+            or float(getattr(trainer, "latent_cvae_mmdit_execution_value_loss_weight", 0.0)) > 0
+            or float(getattr(trainer, "layer_latent_loss_weight", 0.0)) > 0
+            or float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0
+        ) and epoch >= int(trainer.future_latent_loss_start_epoch)
         for batch_index, batch in enumerate(train_loader, start=1):
             if trainer.max_train_batches and batch_index > trainer.max_train_batches:
                 break
-            use_future = include_future and (not trainer.future_latent_max_batches or batch_index <= trainer.future_latent_max_batches)
+            use_future = include_future and (
+                not trainer.future_latent_max_batches
+                or batch_index <= trainer.future_latent_max_batches
+            )
             report_mem = memory_reporter.should_report(batch_index)
             if report_mem:
                 memory_reporter.reset_peak()
                 if memory_reporter.detail:
-                    memory_reporter.snapshot(tag="train_batch_start", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
+                    memory_reporter.snapshot(
+                        tag="train_batch_start",
+                        epoch=epoch,
+                        batch=batch_index,
+                        global_step=global_step,
+                        extra={"use_future": bool(use_future)},
+                    )
             sample = prepare_v39_policy_sample(
-                batch, conditioner=conditioner, system=system, camera_names=camera_names, device=device, dtype=dtype,
+                batch,
+                conditioner=conditioner,
+                system=system,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
                 include_target_visual=use_future,
             )
             if report_mem and memory_reporter.detail:
-                memory_reporter.snapshot(tag="train_after_prepare", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
+                memory_reporter.snapshot(
+                    tag="train_after_prepare",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                    extra={"use_future": bool(use_future)},
+                )
             # Clear every model gradient, including parameters intentionally
             # frozen out of the current optimizer stage.  This prevents stale
             # gradients from accumulating and polluting global grad clipping.
@@ -3574,40 +5744,97 @@ def train_v39_policy(
             )
             if hierarchical_decoder is not None:
                 hierarchical_decoder.set_operator_contraction_training_step(global_step)
+            evidence_decoder = getattr(system.planner, "evidence_latent_mmdit_action_decoder", None)
+            if evidence_decoder is not None:
+                evidence_decoder.set_execution_training_step(global_step)
             if report_mem and memory_reporter.detail:
-                memory_reporter.snapshot(tag="train_after_zero_grad", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
+                memory_reporter.snapshot(
+                    tag="train_after_zero_grad",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                    extra={"use_future": bool(use_future)},
+                )
             layer_mode = _uses_layer_adapter_contract(trainer)
-            stop_midcut = _is_contract_stage(trainer) and not layer_mode
+            contract_stage = _is_contract_stage(trainer)
+            stop_midcut = contract_stage and not layer_mode
+            layer_aux_contribution: Tensor | None = None
             with autocast_context(device, dtype):
                 output = system.flow_training_forward(
-                    sample["visual"], sample["history_state"], sample["executed_action_history"], sample["state"], sample["policy_action"],
-                    action_state=sample["action_state"], target_visual=sample.get("target_visual"), make_counterfactuals=use_future,
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    sample["policy_action"],
+                    action_state=sample["action_state"],
+                    target_visual=sample.get("target_visual"),
+                    make_counterfactuals=use_future,
                     stop_at_midcut=stop_midcut,
                 )
-                if _is_contract_stage(trainer) and layer_mode:
-                    losses = layer_contract_losses(system, sample, output, trainer, enable_future_loss=use_future)
-                    final_weight = float(getattr(trainer, "layer_contract_final_action_loss_weight", 0.0))
+                if contract_stage and layer_mode:
+                    losses = layer_contract_losses(
+                        system, sample, output, trainer, enable_future_loss=use_future
+                    )
+                    final_weight = float(
+                        getattr(trainer, "layer_contract_final_action_loss_weight", 0.0)
+                    )
                     if final_weight > 0:
-                        final_losses = flow_losses(system, sample, output, trainer, enable_future_loss=False, global_step=global_step)
+                        final_losses = flow_losses(
+                            system,
+                            sample,
+                            output,
+                            trainer,
+                            enable_future_loss=False,
+                            global_step=global_step,
+                        )
                         losses["loss"] = losses["loss"] + final_weight * final_losses["loss"]
                         losses["final_action_probe"] = final_losses["loss"].detach()
                     losses["stage_contract"] = losses["loss"].detach()
-                    losses["layer_adapter_contract"] = torch.as_tensor(1.0, device=losses["loss"].device, dtype=losses["loss"].dtype)
+                    losses["layer_adapter_contract"] = torch.as_tensor(
+                        1.0, device=losses["loss"].device, dtype=losses["loss"].dtype
+                    )
                 elif stop_midcut:
-                    losses = flow_losses(system, sample, output, trainer, enable_future_loss=use_future, global_step=global_step)
+                    losses = flow_losses(
+                        system,
+                        sample,
+                        output,
+                        trainer,
+                        enable_future_loss=use_future,
+                        global_step=global_step,
+                    )
                     losses["stage_contract"] = losses["loss"].detach()
                 else:
-                    losses = flow_losses(system, sample, output, trainer, enable_future_loss=use_future, global_step=global_step)
+                    losses = flow_losses(
+                        system,
+                        sample,
+                        output,
+                        trainer,
+                        enable_future_loss=use_future,
+                        global_step=global_step,
+                    )
                     if layer_mode:
-                        aux_losses = layer_contract_losses(system, sample, output, trainer, enable_future_loss=use_future)
+                        aux_losses = layer_contract_losses(
+                            system, sample, output, trainer, enable_future_loss=use_future
+                        )
                         aux_key = "layer_contract"
+                        aux_scale = _layer_contract_aux_scale(trainer, epoch)
+                        # ``loss`` is the weighted layer-contract objective.
+                        # Using the raw ``layer_contract`` here silently made
+                        # layer_contract_loss_weight ineffective in Stage 2.
+                        aux_objective = aux_losses["loss"]
                     else:
-                        aux_losses = midcut_contract_losses(system, sample, output, trainer, enable_future_loss=use_future)
+                        aux_losses = midcut_contract_losses(
+                            system, sample, output, trainer, enable_future_loss=use_future
+                        )
                         aux_key = "midcut_contract"
-                    aux_scale = _midcut_aux_scale(trainer, epoch)
+                        aux_scale = _midcut_aux_scale(trainer, epoch)
+                        aux_objective = aux_losses[aux_key]
                     total_loss = losses["loss"]
                     if aux_scale > 0:
-                        total_loss = total_loss + aux_scale * aux_losses[aux_key]
+                        scaled_aux_objective = aux_scale * aux_objective
+                        total_loss = total_loss + scaled_aux_objective
+                        if layer_mode:
+                            layer_aux_contribution = scaled_aux_objective.detach()
                     # Merge auxiliary logs without overwriting the deployable
                     # policy loss.  The previous implementation used
                     # losses.update(aux_losses), which could replace
@@ -3618,15 +5845,35 @@ def train_v39_policy(
                     # when names collide so pflow remains the deploy path.
                     for key, value in aux_losses.items():
                         if key == "loss":
-                            losses[f"aux_{aux_key}_loss"] = value.detach() if torch.is_tensor(value) else value
+                            losses[f"aux_{aux_key}_loss"] = (
+                                value.detach() if torch.is_tensor(value) else value
+                            )
                         elif key in losses:
-                            losses[f"aux_{aux_key}_{key}"] = value.detach() if torch.is_tensor(value) else value
+                            losses[f"aux_{aux_key}_{key}"] = (
+                                value.detach() if torch.is_tensor(value) else value
+                            )
                         else:
                             losses[key] = value
                     losses["loss"] = total_loss
-                    losses["midcut_aux_scale"] = torch.as_tensor(aux_scale, device=losses["loss"].device, dtype=losses["loss"].dtype)
+                    aux_scale_key = "layer_contract_aux_scale" if layer_mode else "midcut_aux_scale"
+                    losses[aux_scale_key] = torch.as_tensor(
+                        aux_scale, device=losses["loss"].device, dtype=losses["loss"].dtype
+                    )
+            if evidence_decoder is not None and not contract_stage:
+                _attach_v94_loss_ledger(
+                    losses,
+                    trainer,
+                    enable_future_loss=use_future,
+                    layer_aux_contribution=layer_aux_contribution,
+                )
             if report_mem and memory_reporter.detail:
-                memory_reporter.snapshot(tag="train_after_forward_loss", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
+                memory_reporter.snapshot(
+                    tag="train_after_forward_loss",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                    extra={"use_future": bool(use_future)},
+                )
             if not torch.isfinite(losses["loss"].detach()).all():
                 raise FloatingPointError(
                     f"non-finite training loss before backward at epoch={epoch} batch={batch_index}"
@@ -3653,27 +5900,48 @@ def train_v39_policy(
                     out_dir / "callgraph_audit",
                     context_note=(
                         f"epoch={epoch} batch={batch_index} decoder="
-                        + ("hierarchical" if getattr(system.planner, "hierarchical_mmdit_action_decoder", None) is not None else "legacy")
+                        + (
+                            "hierarchical"
+                            if getattr(system.planner, "hierarchical_mmdit_action_decoder", None)
+                            is not None
+                            else "legacy"
+                        )
                     ),
                 )
-                print(f"[callgraph-audit] report written to {report_path}; exiting diagnostic run", flush=True)
+                print(
+                    f"[callgraph-audit] report written to {report_path}; exiting diagnostic run",
+                    flush=True,
+                )
                 return {"callgraph_audit": str(report_path)}
             if report_mem and memory_reporter.detail:
-                memory_reporter.snapshot(tag="train_after_backward", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
+                memory_reporter.snapshot(
+                    tag="train_after_backward",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                    extra={"use_future": bool(use_future)},
+                )
             latent_decoder = getattr(system.planner, "latent_cvae_action_decoder", None)
             clean_decoder = getattr(system.planner, "hierarchical_mmdit_action_decoder", None)
-            decoder_for_local_clip = clean_decoder if clean_decoder is not None else latent_decoder
+            evidence_decoder = getattr(system.planner, "evidence_latent_mmdit_action_decoder", None)
+            decoder_for_local_clip = (
+                clean_decoder
+                if clean_decoder is not None
+                else evidence_decoder
+                if evidence_decoder is not None
+                else latent_decoder
+            )
             exit_controller_params = (
                 list(clean_decoder.exit_controller_parameters())
-                if clean_decoder is not None else []
+                if clean_decoder is not None
+                else []
             )
-            exit_controller_ids = {
-                id(parameter) for parameter in exit_controller_params
-            }
+            exit_controller_ids = {id(parameter) for parameter in exit_controller_params}
             latent_clip = float(getattr(trainer, "latent_cvae_grad_clip", 0.0))
             if decoder_for_local_clip is not None and latent_clip > 0:
                 local_clip_params = [
-                    parameter for parameter in decoder_for_local_clip.parameters()
+                    parameter
+                    for parameter in decoder_for_local_clip.parameters()
                     if id(parameter) not in exit_controller_ids
                 ]
                 torch.nn.utils.clip_grad_norm_(
@@ -3683,13 +5951,18 @@ def train_v39_policy(
                 )
                 clip_key = (
                     "grad_hierarchical_mmdit_action_post_clip"
-                    if clean_decoder is not None else "grad_latent_cvae_action_post_clip"
+                    if clean_decoder is not None
+                    else "grad_evidence_latent_mmdit_action_post_clip"
+                    if evidence_decoder is not None
+                    else "grad_latent_cvae_action_post_clip"
                 )
                 losses[clip_key] = _parameter_grad_norm(
-                    local_clip_params, reference=losses["loss"],
+                    local_clip_params,
+                    reference=losses["loss"],
                 )
             main_clip_params = [
-                parameter for parameter in system.parameters()
+                parameter
+                for parameter in system.parameters()
                 if id(parameter) not in exit_controller_ids
             ]
             grad = torch.nn.utils.clip_grad_norm_(
@@ -3703,16 +5976,30 @@ def train_v39_policy(
                     trainer.grad_clip,
                     error_if_nonfinite=True,
                 )
-                losses["grad_hierarchical_mmdit_exit_controller_post_clip"] = (
-                    _parameter_grad_norm(
-                        exit_controller_params, reference=losses["loss"],
-                    )
+                losses["grad_hierarchical_mmdit_exit_controller_post_clip"] = _parameter_grad_norm(
+                    exit_controller_params,
+                    reference=losses["loss"],
                 )
             if report_mem and memory_reporter.detail:
-                memory_reporter.snapshot(tag="train_after_clip", epoch=epoch, batch=batch_index, global_step=global_step, extra={"use_future": bool(use_future)})
-            optimizer.step(); schedule.step(); global_step += 1
+                memory_reporter.snapshot(
+                    tag="train_after_clip",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                    extra={"use_future": bool(use_future)},
+                )
+            optimizer.step()
+            schedule.step()
+            global_step += 1
             if report_mem:
-                memory_reporter.snapshot(tag="train_after_step", epoch=epoch, batch=batch_index, global_step=global_step, print_line=True, extra={"use_future": bool(use_future)})
+                memory_reporter.snapshot(
+                    tag="train_after_step",
+                    epoch=epoch,
+                    batch=batch_index,
+                    global_step=global_step,
+                    print_line=True,
+                    extra={"use_future": bool(use_future)},
+                )
             _accumulate_metric_tensors(metric_sums, losses, grad=grad)
             metric_count += 1
             if trainer.log_every and batch_index % trainer.log_every == 0:
@@ -3729,393 +6016,498 @@ def train_v39_policy(
                         batch_index=batch_index,
                         learning_rate=float(optimizer.param_groups[0]["lr"]),
                         seconds_per_batch=seconds_per_batch,
-                    ) if clean_decoder is not None else (
-                    f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
-                    f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
-                    f"pfn={row.get('physical_flow_native', 0.0):.6f} pfnu={row.get('physical_flow_native_uniform', 0.0):.6f} "
-                    f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} gfmf={row.get('gripper_fm_field', 0.0):.5f} "
-                    f"afmn={row.get('arm_fm_native', 0.0):.5f} afmnull={row.get('arm_fm_null', 0.0):.5f} "
-                    f"afmnrms={row.get('arm_fm_null_rms', 0.0):.4f} afmnf={row.get('arm_fm_null_output_fraction', 0.0):.4f} "
-                    f"afmproj={row.get('arm_fm_target_projection_error', 0.0):.2e} "
-                    f"afmnoise={row.get('arm_fm_noise_projection_error', 0.0):.2e} "
-                    f"anstd={row.get('arm_noise_abs_std', 0.0):.3f}/{row.get('arm_noise_delta_std', 0.0):.3f} "
-                    f"atstd={row.get('arm_target_abs_std', 0.0):.3f}/{row.get('arm_target_delta_std', 0.0):.3f} "
-                    f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
-                    f"gfme={row.get('gripper_fm_event', 0.0):.5f} gfmh={row.get('gripper_fm_hold', 0.0):.5f} "
-                    f"gfmem={row.get('gripper_fm_event_loss_mass', 0.0):.3f} "
-                    f"gfmew={row.get('gripper_fm_event_emphasis_mean', 0.0):.2f}/"
-                    f"{row.get('gripper_fm_hold_emphasis_mean', 0.0):.2f} "
-                    f"gfmn={row.get('gripper_fm_native', 0.0):.5f} gfmnull={row.get('gripper_fm_null', 0.0):.5f} "
-                    f"gfmnrms={row.get('gripper_fm_null_rms', 0.0):.4f} gfmnf={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
-                    f"hmchart={row.get('hierarchical_mmdit_native_time_chart_active', 0.0):.0f}/"
-                    f"{row.get('hierarchical_mmdit_native_time_chart_complete', 0.0):.0f}/"
-                    f"{row.get('hierarchical_mmdit_native_time_position_alignment', 0.0):.0f} "
-                    f"hmtan={row.get('hierarchical_mmdit_velocity_arm_tangent_null_ratio', 0.0):.1e}/"
-                    f"{row.get('hierarchical_mmdit_velocity_gripper_tangent_null_ratio', 0.0):.1e}/"
-                    f"{row.get('hierarchical_mmdit_noisy_gripper_chart_null_ratio', 0.0):.1e} "
-                    f"gfnehr={row.get('gripper_fm_null_event_hold_ratio', 0.0):.2f} "
-                    f"gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
-                    f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
-                    f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
-                    f"rvar={row.get('rollout_variance', 0.0):.4f} rnorm={row.get('rollout_norm', 0.0):.4f} "
-                    f"rstep={row.get('rollout_milestone_delta_match', 0.0):.4f} "
-                    f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
-                    f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
-                    f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
-                    f"rbase={row.get('rollout_base_norm', 0.0):.3f} "
-                    f"rexp={row.get('rollout_decomposition_expansion_ratio', 0.0):.3f} "
-                    f"rcancel={row.get('rollout_shuffle_cancellation_fraction', 0.0):.3f} "
-                    f"rbleak={row.get('rollout_base_change_shuffle', 0.0):.2e} "
-                    f"stdr={row.get('rollout_pred_std_ratio', 0.0):.4f} dnratio={row.get('rollout_milestone_delta_norm_ratio', 0.0):.4f} "
-                    f"rdeep={row.get('rollout_deep_update_norm', 0.0):.2f} "
-                    f"rdnorm={row.get('rollout_deep_token_norm', 0.0):.2f} "
-                    f"event={row['event']:.6f} "
-                    f"cz={row.get('latent_cvae_prior_z_norm', row.get('latent_cvae_z_norm', 0.0)):.2f} "
-                    f"cpz={row.get('latent_cvae_post_z_norm', 0.0):.2f} "
-                    f"cmug={row.get('latent_cvae_mu_gap', 0.0):.2f} "
-                    f"ckl={row.get('latent_cvae_kl', 0.0):.4f} "
-                    f"cpflow={row.get('latent_cvae_post_flow', 0.0):.4f} "
-                    f"cstd={row.get('latent_cvae_prior_std', 0.0):.3f} "
-                    f"cgate={row.get('latent_cvae_gripper_gate_mean', 0.0):.3f} "
-                    f"clmem={row.get('latent_cvae_layer_memory_count', 0.0):.1f} "
-                    f"cscan={row.get('latent_cvae_condition_scan_norm', 0.0):.2f} "
-                    f"clat={row.get('latent_cvae_condition_lateral_norm', 0.0):.2f} "
-                    f"craw={row.get('latent_cvae_condition_raw_norm', 0.0):.2f} "
-                    f"zcond={row.get('latent_cvae_primary_condition_norm', 0.0):.2f} "
-                    f"zfx={row.get('latent_cvae_primary_z_effect_norm', 0.0):.2f} "
-                    f"clsum={row.get('latent_cvae_layer_summary_norm', 0.0):.2f} "
-                    f"ctraw={row.get('latent_cvae_transition_source_raw_norm', 0.0):.2f} "
-                    f"ctmem={row.get('latent_cvae_transition_condition_norm', 0.0):.2f} "
-                    f"ccscale={row.get('latent_cvae_consequence_scale_mean', 0.0):.3f} "
-                    f"ccpref={row.get('latent_cvae_consequence_gate_preference', 0.0):.3f} "
-                    f"ccmix={row.get('latent_cvae_consequence_mix_ratio', 0.0):.3f} "
-                    f"cadu={row.get('latent_cvae_adaptive_refine_update_mean', 0.0):.3f} "
-                    f"cxgate={row.get('latent_cvae_adaptive_noisy_gate_mean', 0.0):.3f} "
-                    f"xnorm={row.get('latent_cvae_adaptive_noisy_branch_norm', 0.0):.3f} "
-                    f"volpar={row.get('mmdit_noisy_volume_parity', 0.0):.3f} "
-                    f"xinfl={row.get('mmdit_noisy_influence_ratio', 0.0):.2f} "
-                    f"crmax={row.get('latent_cvae_adaptive_route_max', 0.0):.3f} "
-                    f"crent={row.get('latent_cvae_adaptive_route_entropy', 0.0):.3f} "
-                    f"creff={row.get('latent_cvae_adaptive_route_effective_slots', 0.0):.2f} "
-                    f"cprmax={row.get('latent_cvae_adaptive_progress_max', 0.0):.3f} "
-                    f"cprent={row.get('latent_cvae_adaptive_progress_entropy', 0.0):.3f} "
-                    f"cpeff={row.get('latent_cvae_adaptive_progress_effective_slots', 0.0):.2f} "
-                    f"cprog={row.get('latent_cvae_adaptive_progress_norm', 0.0):.2f} "
-                    f"ccont={row.get('latent_cvae_adaptive_continue_mean', 0.0):.3f} "
-                    f"cprefix={row.get('latent_cvae_adaptive_prefix_norm', 0.0):.2f} "
-                    f"czseed={row.get('latent_cvae_adaptive_progress_seed_norm', 0.0):.3f} "
-                    f"czseff={row.get('latent_cvae_adaptive_progress_seed_effective_slots', 0.0):.2f} "
-                    f"ctemp={row.get('latent_cvae_adaptive_route_temperature_mean', 0.0):.2f} "
-                    f"rtime={row.get('latent_cvae_adaptive_route_time_query_norm', 0.0):.3f} "
-                    f"cfunc={row.get('latent_cvae_adaptive_function_delta_norm', 0.0):.3f} "
-                    f"cbasehf={row.get('latent_cvae_adaptive_base_highfreq_norm', 0.0):.3f} "
-                    f"cstep={row.get('latent_cvae_adaptive_refine_step_bias_norm', 0.0):.3f} "
-                    f"ccmax={row.get('latent_cvae_adaptive_capsule_layer_max', 0.0):.3f} "
-                    f"ccleff={row.get('latent_cvae_adaptive_capsule_layer_effective_slots', 0.0):.2f} "
-                    f"cstr={row.get('latent_cvae_adaptive_condition_strength_mean', 0.0):.3f} "
-                    f"ccond={row.get('latent_cvae_adaptive_condition_residual_norm', 0.0):.3f} "
-                    f"mdu={row.get('latent_cvae_mmdit_action_update_norm', 0.0):.3f} "
-                    f"mdcu={row.get('latent_cvae_mmdit_cond_update_norm', 0.0):.3f} "
-                    f"mdca={row.get('latent_cvae_mmdit_action_cond_attention', 0.0):.3f} "
-                    f"mdna={row.get('latent_cvae_mmdit_action_noisy_attention', 0.0):.3f} "
-                    f"mdat={row.get('latent_cvae_mmdit_action_token_norm', 0.0):.2f} "
-                    f"mdct={row.get('latent_cvae_mmdit_condition_token_norm', 0.0):.2f} "
-                    f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
-                    f"mdwa={row.get('latent_cvae_mmdit_action_workspace_attention', 0.0):.3f} "
-                    f"mdwe={row.get('latent_cvae_mmdit_action_workspace_enrichment', 0.0):.3f} "
-                    f"mdla={row.get('latent_cvae_mmdit_action_low_attention', 0.0):.3f} "
-                    f"mdsa={row.get('latent_cvae_mmdit_action_stage_attention', 0.0):.3f} "
-                    f"mdle={row.get('latent_cvae_mmdit_action_low_enrichment', 0.0):.3f} "
-                    f"mdse={row.get('latent_cvae_mmdit_action_stage_enrichment', 0.0):.3f} "
-                    f"mdnaT={row.get('latent_cvae_mmdit_noisy_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_noisy_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_noisy_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
-                    f"mdwaT={row.get('latent_cvae_mmdit_workspace_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_workspace_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_workspace_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
-                    f"mdlaT={row.get('latent_cvae_mmdit_low_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_low_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_low_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
-                    f"mdsaT={row.get('latent_cvae_mmdit_stage_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_stage_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
-                    f"/{row.get('latent_cvae_mmdit_stage_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
-                    f"mdra={row.get('latent_cvae_mmdit_action_rollout_attention', 0.0):.3f} "
-                    f"mdre={row.get('latent_cvae_mmdit_action_rollout_enrichment', 0.0):.3f} "
-                    f"mdrn={row.get('latent_cvae_rollout_token_norm', 0.0):.2f} "
-                    f"mdrc={row.get('latent_cvae_rollout_token_count', 0.0):.0f} "
-                    f"wk={row.get('latent_cvae_workspace_token_count', 0.0):.0f} "
-                    f"wtok={row.get('latent_cvae_workspace_token_norm', 0.0):.2f} "
-                    f"wdelta={row.get('latent_cvae_workspace_update_norm', 0.0):.2f} "
-                    f"wgstate={row.get('latent_cvae_workspace_global_state_norm', 0.0):.2f} "
-                    f"wgslot={row.get('latent_cvae_workspace_global_slot_delta_norm', 0.0):.3f} "
-                    f"wsdiv={row.get('latent_cvae_workspace_global_slot_diversity', 0.0):.3f} "
-                    f"wsrc={row.get('latent_cvae_workspace_source_count', 0.0):.0f} "
-                    f"wcache={row.get('latent_cvae_workspace_cached_token_fraction', 0.0):.3f} "
-                    f"wqscale={row.get('latent_cvae_workspace_noisy_query_scale', 0.0):.3f} "
-                    f"went={row.get('latent_cvae_workspace_attention_entropy', 0.0):.3f} "
-                    f"wmax={row.get('latent_cvae_workspace_attention_max', 0.0):.3f} "
-                    f"wgent={row.get('latent_cvae_workspace_group_attention_entropy', 0.0):.3f} "
-                    f"wgeff={row.get('latent_cvae_workspace_group_effective_sources', 0.0):.2f} "
-                    f"wmass={row.get('latent_cvae_workspace_attention_mass_error', 0.0):.1e} "
-                    f"wupd={row.get('latent_cvae_workspace_action_update_ratio', 0.0):.3f} "
-                    f"wprog={row.get('latent_cvae_workspace_progress_attention', 0.0):.3f} "
-                    f"wpq={row.get('latent_cvae_workspace_progress_query_norm', 0.0):.3f} "
-                    f"wpupd={row.get('latent_cvae_workspace_progress_update_norm', 0.0):.3f} "
-                    f"wpact={row.get('latent_cvae_workspace_progress_action_dependence', 0.0):.3f} "
-                    f"rstem={row.get('latent_cvae_legacy_stem_effect_ratio', 0.0):.3f} "
-                    f"zzero={row.get('latent_cvae_z_zero_delta', 0.0):.3f} "
-                    f"zshuf={row.get('latent_cvae_z_shuffle_delta', 0.0):.3f} "
-                    f"wscan={row.get('latent_cvae_workspace_scan_attention', 0.0):.3f} "
-                    f"wlat={row.get('latent_cvae_workspace_lateral_attention', 0.0):.3f} "
-                    f"wtrans={row.get('latent_cvae_workspace_transition_total_attention', row.get('latent_cvae_workspace_transition_attention', 0.0)):.3f} "
-                    f"wtraj={row.get('latent_cvae_workspace_trajectory_attention', 0.0):.3f} "
-                    f"wroll={row.get('latent_cvae_workspace_rollout_attention', 0.0):.3f} "
-                    f"wcaps={row.get('latent_cvae_workspace_capsule_attention', 0.0):.3f} "
-                    f"wroute={row.get('latent_cvae_workspace_routed_layer_attention', 0.0):.3f} "
-                    f"wgeom={row.get('latent_cvae_workspace_role_geom_attention', 0.0):.3f} "
-                    f"wtrn={row.get('latent_cvae_workspace_role_transition_attention', 0.0):.3f} "
-                    f"wevt={row.get('latent_cvae_workspace_role_event_attention', 0.0):.3f} "
-                    f"wstate={row.get('latent_cvae_workspace_role_state_attention', 0.0):.3f} "
-                    f"wrlay={row.get('latent_cvae_workspace_role_layer_attention', 0.0):.3f} "
-                    f"wglob={row.get('latent_cvae_workspace_role_global_attention', 0.0):.3f} "
-                    f"ctrlcap={row.get('latent_cvae_workspace_controller_capacity', 0.0):.3f} "
-                    f"ctrldly={row.get('latent_cvae_workspace_controller_delay', 0.0):.3f} "
-                    f"ctrlent={row.get('latent_cvae_workspace_controller_role_entropy', 0.0):.3f} "
-                    f"ctrlq={row.get('latent_cvae_workspace_controller_query_delta_norm', 0.0):.3f} "
-                    f"hlow={row.get('latent_cvae_hierarchical_low_token_count', 0.0):.0f}/{row.get('latent_cvae_hierarchical_low_token_norm', 0.0):.2f} "
-                    f"hlsel={row.get('latent_cvae_hierarchical_low_selector_stage_effective_slots', 0.0):.2f} "
-                    f"hsrole={row.get('latent_cvae_hierarchical_stage_token_count', 0.0):.0f}/{row.get('latent_cvae_hierarchical_stage_role_norm', 0.0):.2f} "
-                    f"hscont={row.get('latent_cvae_hierarchical_stage_content_norm', 0.0):.2f} "
-                    f"hsrdiv={row.get('latent_cvae_hierarchical_stage_role_diversity', 0.0):.2f} "
-                    f"hscdiv={row.get('latent_cvae_hierarchical_stage_content_diversity', 0.0):.2f} "
-                    f"hsrcos={row.get('latent_cvae_hierarchical_stage_role_content_cosine', 0.0):.3f} "
-                    f"hsrfrac={row.get('latent_cvae_hierarchical_stage_role_output_fraction', 0.0):.3f} "
-                    f"hsupd={row.get('latent_cvae_hierarchical_stage_update_norm', 0.0):.3f} "
-                    f"hsret={row.get('latent_cvae_hierarchical_stage_retain_mean', 0.0):.3f} "
-                    f"hsprom={row.get('latent_cvae_hierarchical_stage_promote_scale', 0.0):.3f} "
-                    f"hmrole={row.get('latent_cvae_hierarchical_manager_role_entropy', 0.0):.3f} "
-                    f"hmprom={row.get('latent_cvae_hierarchical_manager_promote_gate', 0.0):.3f} "
-                    f"hmlow={row.get('latent_cvae_hierarchical_manager_low_output_strength', 0.0):.3f} "
-                    f"hmstage={row.get('latent_cvae_hierarchical_manager_stage_output_strength', 0.0):.3f} "
-                    # V72 (S5 cleanup): dead cm* micro-controller console keys
-                    # removed -- micro is config-off AND structurally excluded
-                    # under mmdit_refine; the loss-dict keys remain intact for
-                    # legacy non-MMDiT configs.
-                    f"careg={row.get('latent_cvae_adaptive_regularizer', 0.0):.4f} "
-                    f"carent={row.get('latent_cvae_adaptive_route_entropy_regularizer', 0.0):.4f} "
-                    f"czbase={row.get('consequence_zero_base_shift', 0.0):.3f} "
-                    f"csc={row.get('consequence_self_condition', 0.0):.0f} "
-                    f"cscmse={row.get('consequence_self_condition_target_mse', 0.0):.4f} "
-                    f"cscnmse={row.get('consequence_self_condition_noisy_mse', 0.0):.4f} "
-                    f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
-                    f"iglob={row.get('intent_global_norm', 0.0):.2f} "
-                    f"istage={row.get('intent_stage_contract_norm', 0.0):.2f} "
-                    f"iread={row.get('intent_read_contract_norm', 0.0):.2f} "
-                    f"icgs={row.get('intent_global_stage_cosine', 0.0):.3f} "
-                    f"icgr={row.get('intent_global_read_cosine', 0.0):.3f} "
-                    f"icsr={row.get('intent_stage_read_cosine', 0.0):.3f} "
-                    f"hmdu={row.get('hierarchical_mmdit_action_update_norm', 0.0):.3f} "
-                    f"hmur={row.get('hierarchical_mmdit_action_update_ratio', 0.0):.3f} "
-                    f"hmcan={row.get('hierarchical_mmdit_action_serial_cancellation_fraction', 0.0):.3f} "
-                    f"hmorth={row.get('hierarchical_mmdit_action_serial_cancellation_orthogonal_baseline', 0.0):.3f} "
-                    f"hmxcan={row.get('hierarchical_mmdit_action_serial_cancellation_excess', 0.0):+.3f} "
-                    f"hmbdot={row.get('hierarchical_mmdit_action_branch_weighted_cosine', 0.0):+.3f} "
-                    f"hmcos={row.get('hierarchical_mmdit_action_state_cosine', 0.0):.3f} "
-                    f"hmnu={row.get('hierarchical_mmdit_action_noisy_update_norm', 0.0):.3f} "
-                    f"hmsu={row.get('hierarchical_mmdit_action_stage_update_norm', 0.0):.3f} "
-                    f"hmlu={row.get('hierarchical_mmdit_action_low_update_norm', 0.0):.3f} "
-                    f"hmnf={row.get('hierarchical_mmdit_action_noisy_update_fraction', 0.0):.3f} "
-                    f"hmsf={row.get('hierarchical_mmdit_action_stage_update_fraction', 0.0):.3f} "
-                    f"hmlf={row.get('hierarchical_mmdit_action_low_update_fraction', 0.0):.3f} "
-                    f"hmdepth={row.get('hierarchical_mmdit_action_noisy_depth_ratio', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_depth_ratio', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_depth_ratio', 0.0):.2f} "
-                    f"hmraw={row.get('hierarchical_mmdit_action_noisy_raw_depth_ratio', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_raw_depth_ratio', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_raw_depth_ratio', 0.0):.2f} "
-                    f"hmkeep={row.get('hierarchical_mmdit_action_self_update_keep', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_noisy_update_keep', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_update_keep', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_update_keep', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_ffn_update_keep', 0.0):.2f} "
-                    f"hmedepth={row.get('hierarchical_mmdit_action_noisy_effective_depth', 0.0):.1f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_effective_depth', 0.0):.1f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_effective_depth', 0.0):.1f} "
-                    f"hmcontract={row.get('hierarchical_mmdit_action_noisy_contraction_ratio', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_contraction_ratio', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_contraction_ratio', 0.0):.3f} "
-                    f"hmhost={row.get('hierarchical_mmdit_action_noisy_host_update_rms', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_host_update_rms', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_host_update_rms', 0.0):.3f} "
-                    f"hmcover={row.get('hierarchical_mmdit_action_noisy_subspace_energy_fraction', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_subspace_energy_fraction', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_subspace_energy_fraction', 0.0):.3f} "
-                    f"hmremove={row.get('hierarchical_mmdit_action_noisy_removed_fraction', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_removed_fraction', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_removed_fraction', 0.0):.3f} "
-                    f"hmdepthreg={row.get('hierarchical_mmdit_operator_contraction_progress', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_depth_usage_regularizer', 0.0):.4f} "
-                    f"hmsel={row.get('hierarchical_mmdit_stage_selector_entropy', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_selector_max', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_selector_exploration', 0.0):.2f} "
-                    f"hmselq={row.get('hierarchical_mmdit_stage_selector_query_change', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_selector_same_block_query_change', 0.0):.3f} "
-                    f"hmexit={row.get('hierarchical_mmdit_exit_probability', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_exit_candidate_rate', 0.0):.3f} "
-                    f"hmcomp={row.get('hierarchical_mmdit_controller_competition_source_effective_slots', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_controller_competition_source_owner_max', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_controller_competition_slot_load_effective', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_controller_competition_slot_load_max', 0.0):.2f} "
-                    f"hmctl={row.get('hierarchical_mmdit_controller_operator_raw_update_mean', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_controller_operator_raw_depth_mean', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_controller_continue_keep_mean', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_controller_update_depth_correlation', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_controller_joint_suppression_mass', 0.0):.4f} "
-                    f"hmoracle={row.get('hierarchical_mmdit_oracle_route_loss', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_oracle_route_weight', 0.0):.3f} "
-                    f"hmodepth={row.get('hierarchical_mmdit_oracle_target_depth', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_oracle_predicted_depth', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_oracle_depth_accuracy', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_oracle_predicted_regret', 0.0):.4f} "
-                    f"hmstage={_format_hierarchical_stage_usage(row)} "
-                    f"hmblock={_format_hierarchical_block_usage(row)} "
-                    f"hmopgain={row.get('hierarchical_mmdit_action_noisy_operator_gain', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_operator_gain', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_operator_gain', 0.0):.3f} "
-                    f"hmdir={row.get('hierarchical_mmdit_action_noisy_direction_change', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_direction_change', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_direction_change', 0.0):.3f} "
-                    f"hmbcos2={row.get('hierarchical_mmdit_action_noisy_direction_cosine', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_direction_cosine', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_direction_cosine', 0.0):+.2f} "
-                    f"hmbgain={row.get('hierarchical_mmdit_action_noisy_base_data_gain', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_base_data_gain', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_base_data_gain', 0.0):.2f} "
-                    f"hmbprm={row.get('hierarchical_mmdit_action_noisy_base_parameter_rms', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_base_parameter_rms', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_base_parameter_rms', 0.0):.2f} "
-                    f"hmgate={row.get('hierarchical_mmdit_action_self_base_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_noisy_base_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_base_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_base_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_ffn_base_gate', 0.0):.3f} "
-                    f"hmegate={row.get('hierarchical_mmdit_action_self_effective_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_noisy_effective_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_effective_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_low_effective_gate', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_ffn_effective_gate', 0.0):.3f} "
-                    f"hmkerr={row.get('hierarchical_mmdit_action_noisy_keep_scale_error', 0.0):.1e}/"
-                    f"{row.get('hierarchical_mmdit_action_stage_keep_scale_error', 0.0):.1e}/"
-                    f"{row.get('hierarchical_mmdit_action_low_keep_scale_error', 0.0):.1e} "
-                    f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-                    f"hmnrms={row.get('hierarchical_mmdit_action_pre_norm_rms', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_post_norm_rms', 0.0):.3f} "
-                    f"hmbound={max(row.get(f'hierarchical_mmdit_action_{name}_boundary_identity_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-                    f"hmnexp={max(row.get(f'hierarchical_mmdit_action_{name}_nonexpansive_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-                    f"hmnest={max(row.get(f'hierarchical_mmdit_action_{name}_nested_order_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-                    f"hmbasis={max(row.get(f'hierarchical_mmdit_action_{name}_basis_norm_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e}/"
-                    f"{max(row.get(f'hierarchical_mmdit_action_{name}_basis_orthogonality_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
-                    f"hexh={row.get('hierarchical_mmdit_executed_steps', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_rel', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_pressure_rel', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_refine_gain', 0.0):+.4f}/"
-                    f"{row.get('hierarchical_mmdit_response_gain_corr', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_unresolved_rate', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_budget_exhausted_rate', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_final_block', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_final_stage', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_early_exit_rate', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_block_advance_rate', 0.0):.2f}/"
-                    f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f} "
-                    f"hmuresp={row.get('hierarchical_mmdit_action_response_arm', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_gripper', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_arm_null', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_gripper_null', 0.0):.3f} "
-                    f"hmuq={row.get('hierarchical_mmdit_action_response_p25', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_p50', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_p75', 0.0):.3f} "
-                    f"hmpq={row.get('hierarchical_mmdit_stage_pressure_p25', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_pressure_p50', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_pressure_p75', 0.0):.3f} "
-                    f"hmuT50={row.get('hierarchical_mmdit_action_response_t0_p50', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_t1_p50', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_action_response_t2_p50', 0.0):.3f} "
-                    f"hmpT50={row.get('hierarchical_mmdit_stage_pressure_t0_p50', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_pressure_t1_p50', 0.0):.3f}/"
-                    f"{row.get('hierarchical_mmdit_stage_pressure_t2_p50', 0.0):.3f} "
-                    f"hmucT={row.get('hierarchical_mmdit_response_gain_corr_t0', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_response_gain_corr_t1', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_response_gain_corr_t2', 0.0):+.2f} "
-                    f"hmpcT={row.get('hierarchical_mmdit_pressure_gain_corr_t0', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_pressure_gain_corr_t1', 0.0):+.2f}/"
-                    f"{row.get('hierarchical_mmdit_pressure_gain_corr_t2', 0.0):+.2f} "
-                    f"hmnmax={row.get('hierarchical_mmdit_action_noisy_attention_max', 0.0):.3f} "
-                    f"hmsmax={row.get('hierarchical_mmdit_action_stage_attention_max', 0.0):.3f} "
-                    f"hmlmax={row.get('hierarchical_mmdit_action_low_attention_max', 0.0):.3f} "
-                    f"halreff={row.get('hierarchical_mmdit_action_low_role_effective_count', 0.0):.2f} "
-                    f"halgeo={row.get('hierarchical_mmdit_action_low_role_geom_attention', 0.0):.3f} "
-                    f"haltrn={row.get('hierarchical_mmdit_action_low_role_transition_attention', 0.0):.3f} "
-                    f"halevt={row.get('hierarchical_mmdit_action_low_role_event_attention', 0.0):.3f} "
-                    f"halsta={row.get('hierarchical_mmdit_action_low_role_state_attention', 0.0):.3f} "
-                    f"hallay={row.get('hierarchical_mmdit_action_low_role_layer_attention', 0.0):.3f} "
-                    f"ogeo={row.get('owned_workspace_role_geom_attention', 0.0):.3f} "
-                    f"otrn={row.get('owned_workspace_role_transition_attention', 0.0):.3f} "
-                    f"oevt={row.get('owned_workspace_role_event_attention', 0.0):.3f} "
-                    f"osta={row.get('owned_workspace_role_state_attention', 0.0):.3f} "
-                    f"olay={row.get('owned_workspace_role_layer_attention', 0.0):.3f} "
-                    f"ofixed={row.get('owned_hierarchical_manager_fixed_output_prior', 0.0):.0f} "
-                    f"ofrole={row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f} "
-                    f"ostrat={row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
-                    f"hmwieff={row.get('owned_workspace_interface_low_control_effective_control_tokens', 0.0):.2f}/"
-                    f"{row.get('owned_workspace_interface_stage_control_effective_control_tokens', 0.0):.2f} "
-                    f"ohsupd={row.get('owned_hierarchical_stage_update_norm', 0.0):.3f} "
-                    f"ohprom={row.get('owned_hierarchical_manager_promote_gate', 0.0):.3f} "
-                    f"ohprms={row.get('owned_hierarchical_stage_promoted_projected_rms', 0.0):.3f}/"
-                    f"{row.get('owned_hierarchical_stage_promoted_normalized_rms', 0.0):.3f}/"
-                    f"{row.get('owned_hierarchical_stage_promoted_realized_scale', 0.0):.3f} "
-                    f"ohgerr={row.get('owned_hierarchical_stage_promote_gate_scale_error', 0.0):.1e} "
-                    f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
-                    f"hwgrad={row.get('grad_latent_cvae_hierarchical_workspace', 0.0):.3e} "
-                    f"hlgrad={row.get('grad_latent_cvae_hierarchical_low', 0.0):.3e} "
-                    f"hsgrad={row.get('grad_latent_cvae_hierarchical_stage', 0.0):.3e} "
-                    f"hmgrad={row.get('grad_latent_cvae_hierarchical_manager', 0.0):.3e} "
-                    f"cgclip={row.get('grad_latent_cvae_action_post_clip', 0.0):.3e} "
-                    f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
-                    f"rdgrad={row.get('grad_controlled_dynamics', 0.0):.3e} "
-                    f"rcgrad={row.get('grad_latent_cvae_rollout_condition', 0.0):.3e} "
-                    f"wgrad={row.get('grad_latent_cvae_workspace', 0.0):.3e} "
-                    f"zpgrad={row.get('grad_latent_cvae_primary_modulation', 0.0):.3e} "
-                    f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
-                    f"hmvgrad={row.get('grad_hierarchical_mmdit_velocity_head', 0.0):.3e} "
-                    f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
-                    f"owgrad={row.get('grad_owned_workspace', 0.0):.3e} "
-                    f"hmbgrad={row.get('grad_hierarchical_mmdit_blocks', 0.0):.3e} "
-                    f"hmbasegrad={row.get('grad_hierarchical_mmdit_shared_base', 0.0):.3e} "
-                    f"hmwgrad={row.get('grad_hierarchical_mmdit_base_projection', 0.0):.3e} "
-                    f"hmcopgrad={row.get('grad_hierarchical_mmdit_contractions', 0.0):.3e} "
-                    f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e}/"
-                    f"{row.get('grad_hierarchical_mmdit_contraction_depth', 0.0):.3e} "
-                    f"hmselgrad={row.get('grad_hierarchical_mmdit_stage_selector', 0.0):.3e} "
-                    f"hmexitgrad={row.get('grad_hierarchical_mmdit_exit_controller', 0.0):.3e}/"
-                    f"{row.get('grad_hierarchical_mmdit_exit_controller_post_clip', 0.0):.3e} "
-                    f"hmcmodgrad={row.get('grad_hierarchical_mmdit_content_modulation', 0.0):.3e} "
-                    f"hmgategrad={row.get('grad_hierarchical_mmdit_host_gates', 0.0):.3e} "
-                    f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
-                    f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e} "
-                    f"spb={seconds_per_batch:.3f}"),
+                    )
+                    if clean_decoder is not None
+                    else _evidence_serial_log_line(
+                        row,
+                        epoch=epoch,
+                        batch_index=batch_index,
+                        learning_rate=float(optimizer.param_groups[0]["lr"]),
+                        seconds_per_batch=seconds_per_batch,
+                    )
+                    if evidence_decoder is not None
+                    else (
+                        f"[v39-layer] epoch={epoch:03d} batch={batch_index:04d} loss={row['loss']:.6f} "
+                        f"pflow={row['physical_flow']:.6f} pflowu={row.get('physical_flow_uniform', row['physical_flow']):.6f} "
+                        f"pfn={row.get('physical_flow_native', 0.0):.6f} pfnu={row.get('physical_flow_native_uniform', 0.0):.6f} "
+                        f"afmd={row.get('arm_fm_per_dim', 0.0):.5f} gfmf={row.get('gripper_fm_field', 0.0):.5f} "
+                        f"afmn={row.get('arm_fm_native', 0.0):.5f} afmnull={row.get('arm_fm_null', 0.0):.5f} "
+                        f"afmnrms={row.get('arm_fm_null_rms', 0.0):.4f} afmnf={row.get('arm_fm_null_output_fraction', 0.0):.4f} "
+                        f"afmproj={row.get('arm_fm_target_projection_error', 0.0):.2e} "
+                        f"afmnoise={row.get('arm_fm_noise_projection_error', 0.0):.2e} "
+                        f"anstd={row.get('arm_noise_abs_std', 0.0):.3f}/{row.get('arm_noise_delta_std', 0.0):.3f} "
+                        f"atstd={row.get('arm_target_abs_std', 0.0):.3f}/{row.get('arm_target_delta_std', 0.0):.3f} "
+                        f"asrc={row.get('arm_source_residual_rms', 0.0):.3f}/"
+                        f"{row.get('arm_source_delta_rms', 0.0):.3f}/"
+                        f"{row.get('arm_source_acceleration_rms', 0.0):.3f} "
+                        f"asexp={row.get('arm_source_expected_rms', 0.0):.3f}/"
+                        f"{row.get('arm_source_expected_delta_rms', 0.0):.3f}/"
+                        f"{row.get('arm_source_expected_acceleration_rms', 0.0):.3f} "
+                        f"asgeo={row.get('arm_source_covariance_effective_dimension', 0.0):.2f}/"
+                        f"{row.get('arm_source_covariance_condition', 0.0):.1f} "
+                        f"asfirst={row.get('arm_source_first_step_rms', 0.0):.3f}/"
+                        f"{row.get('arm_source_expected_first_step_std', 0.0):.3f} "
+                        f"astail={row.get('arm_source_expected_terminal_std', 0.0):.3f} "
+                        f"gfar={row.get('gripper_arm_fm_ratio', 0.0):.3f} gfmv={row.get('gripper_fm_value', 0.0):.5f} gfmd={row.get('gripper_fm_delta', 0.0):.5f} "
+                        f"gfme={row.get('gripper_fm_event', 0.0):.5f} gfmh={row.get('gripper_fm_hold', 0.0):.5f} "
+                        f"gfmem={row.get('gripper_fm_event_loss_mass', 0.0):.3f} "
+                        f"gfmew={row.get('gripper_fm_event_emphasis_mean', 0.0):.2f}/"
+                        f"{row.get('gripper_fm_hold_emphasis_mean', 0.0):.2f} "
+                        f"gfmn={row.get('gripper_fm_native', 0.0):.5f} gfmnull={row.get('gripper_fm_null', 0.0):.5f} "
+                        f"gfmnrms={row.get('gripper_fm_null_rms', 0.0):.4f} gfmnf={row.get('gripper_fm_null_output_fraction', 0.0):.4f} "
+                        f"hmchart={row.get('hierarchical_mmdit_native_time_chart_active', 0.0):.0f}/"
+                        f"{row.get('hierarchical_mmdit_native_time_chart_complete', 0.0):.0f}/"
+                        f"{row.get('hierarchical_mmdit_native_time_position_alignment', 0.0):.0f} "
+                        f"hmtan={row.get('hierarchical_mmdit_velocity_arm_tangent_null_ratio', 0.0):.1e}/"
+                        f"{row.get('hierarchical_mmdit_velocity_gripper_tangent_null_ratio', 0.0):.1e}/"
+                        f"{row.get('hierarchical_mmdit_noisy_gripper_chart_null_ratio', 0.0):.1e} "
+                        f"gfnehr={row.get('gripper_fm_null_event_hold_ratio', 0.0):.2f} "
+                        f"gfmproj={row.get('gripper_fm_target_projection_error', 0.0):.2e} "
+                        f"gfmer={row.get('gripper_fm_target_energy_ratio', 0.0):.3f} "
+                        f"decode={row['decoded_action']:.6f} rollout={row.get('rollout_dynamics', 0.0):.6f} "
+                        f"rvar={row.get('rollout_variance', 0.0):.4f} rnorm={row.get('rollout_norm', 0.0):.4f} "
+                        f"rstep={row.get('rollout_milestone_delta_match', 0.0):.4f} "
+                        f"first8={row.get('first8_physical_flow', 0.0):.6f} tail={row.get('tail_physical_flow', 0.0):.6f} "
+                        f"delta={row.get('rollout_delta', 0.0):.6f} contrast={row.get('rollout_contrast', 0.0):.6f} "
+                        f"d_shuffle={row.get('rollout_delta_shuffle', 0.0):.6f} "
+                        f"dshuf_src={row.get('rollout_effect_change_shuffle', 0.0):.3e}/"
+                        f"{row.get('rollout_delta_state_shuffle', 0.0):.3e}/"
+                        f"{row.get('rollout_effect_change_state_shuffle', 0.0):.3e} "
+                        f"rbase={row.get('rollout_base_norm', 0.0):.3f} "
+                        f"rexp={row.get('rollout_decomposition_expansion_ratio', 0.0):.3f} "
+                        f"rcancel={row.get('rollout_shuffle_cancellation_fraction', 0.0):.3f} "
+                        f"rbleak={row.get('rollout_base_change_shuffle', 0.0):.2e} "
+                        f"stdr={row.get('rollout_pred_std_ratio', 0.0):.4f} dnratio={row.get('rollout_milestone_delta_norm_ratio', 0.0):.4f} "
+                        f"rdeep={row.get('rollout_deep_update_norm', 0.0):.2f} "
+                        f"rdnorm={row.get('rollout_deep_token_norm', 0.0):.2f} "
+                        f"event={row['event']:.6f} "
+                        f"ev={row.get('evidence_condition_scan_norm', 0.0):.2f}/"
+                        f"{row.get('evidence_condition_lateral_norm', 0.0):.2f}/"
+                        f"{row.get('evidence_condition_norm', 0.0):.2f}/"
+                        f"{row.get('evidence_latent_norm', 0.0):.2f} "
+                        f"evwrite={row.get('evidence_mmd_it_self_update_norm', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_evidence_update_norm', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_ffn_update_norm', 0.0):.3f} "
+                        f"evstate={row.get('evidence_mmd_it_action_state_scale', 1.0):.2f}/"
+                        f"{row.get('evidence_mmd_it_action_state_token_norm', 0.0):.2f} "
+                        f"evscale={row.get('evidence_mmd_it_evidence_scale', 1.0):.2f}/"
+                        f"{row.get('evidence_mmd_it_action_state_scale', 1.0):.2f} "
+                        f"evgate={row.get('evidence_mmd_it_residual_gate_mean', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_ffn_gate_mean', 0.0):.3f} "
+                        f"evupd={row.get('evidence_mmd_it_block_0_update_norm', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_block_1_update_norm', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_block_2_update_norm', 0.0):.3f} "
+                        f"evexec={row.get('evidence_mmd_it_execution_progress', 0.0):.2f}/"
+                        f"{row.get('evidence_mmd_it_capacity_ratio', 1.0):.5f}/"
+                        f"{row.get('evidence_mmd_it_dwell_expected', 1.0):.2f}/"
+                        f"{row.get('evidence_mmd_it_execution_cost', 0.0):.3f} "
+                        f"evroute={row.get('evidence_mmd_it_dynamic_route_next_fraction', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_hard_route_next_fraction', 0.0):.3f} "
+                        f"evdwell={row.get('evidence_mmd_it_dwell_expected', 1.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_hard_dwell_expected', 1.0):.3f} "
+                        f"evctrl={row.get('evidence_mmd_it_controller_slot_pair_cosine', 0.0):+.2f}/"
+                        f"{row.get('evidence_mmd_it_controller_slot_common_mode_ratio', 0.0):.2f}/"
+                        f"{row.get('evidence_mmd_it_controller_slot_private_energy_ratio', 0.0):.2f} "
+                        f"evval={row.get('evidence_mmd_it_execution_value_loss', 0.0):.4f}/"
+                        f"{row.get('evidence_mmd_it_execution_value_target_spread', 0.0):.4f}/"
+                        f"{row.get('evidence_mmd_it_execution_value_predicted_spread', 0.0):.4f}/"
+                        f"{row.get('evidence_mmd_it_execution_value_decision_accuracy', 0.0):.2f}/"
+                        f"{row.get('evidence_mmd_it_execution_value_common_mode_ratio', 0.0):.2f} "
+                        f"evcap={row.get('evidence_mmd_it_effective_depth', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_removed_channel_fraction', 0.0):.5f}/"
+                        f"{row.get('evidence_mmd_it_nonexpansive_violation', 0.0):.1e} "
+                        f"evsel={row.get('evidence_mmd_it_execution_selection_entropy', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_learned_selection_entropy', 0.0):.3f}/"
+                        f"{row.get('evidence_mmd_it_execution_selection_max_probability', 1.0):.3f} "
+                        f"evgrad={row.get('grad_evidence_view_adapter', 0.0):.2e}/"
+                        f"{row.get('grad_evidence_condition_organizer', 0.0):.2e}/"
+                        f"{row.get('grad_evidence_mmdit_evidence_reader', 0.0):.2e}/"
+                        f"{row.get('grad_evidence_mmdit_action_state', 0.0):.2e}/"
+                        f"{row.get('grad_evidence_mmdit_blocks', 0.0):.2e} "
+                        f"evcgrad={row.get('grad_evidence_mmdit_execution_controller', 0.0):.2e}/"
+                        f"{row.get('grad_evidence_mmdit_operator_basis', 0.0):.2e}/"
+                        f"{row.get('grad_evidence_mmdit_execution_value_reader', 0.0):.2e} "
+                        f"cz={row.get('latent_cvae_prior_z_norm', row.get('latent_cvae_z_norm', 0.0)):.2f} "
+                        f"cpz={row.get('latent_cvae_post_z_norm', 0.0):.2f} "
+                        f"cmug={row.get('latent_cvae_mu_gap', 0.0):.2f} "
+                        f"ckl={row.get('latent_cvae_kl', 0.0):.4f} "
+                        f"cpflow={row.get('latent_cvae_post_flow', 0.0):.4f} "
+                        f"cstd={row.get('latent_cvae_prior_std', 0.0):.3f} "
+                        f"cgate={row.get('latent_cvae_gripper_gate_mean', 0.0):.3f} "
+                        f"clmem={row.get('latent_cvae_layer_memory_count', 0.0):.1f} "
+                        f"cscan={row.get('latent_cvae_condition_scan_norm', 0.0):.2f} "
+                        f"clat={row.get('latent_cvae_condition_lateral_norm', 0.0):.2f} "
+                        f"craw={row.get('latent_cvae_condition_raw_norm', 0.0):.2f} "
+                        f"zcond={row.get('latent_cvae_primary_condition_norm', 0.0):.2f} "
+                        f"zfx={row.get('latent_cvae_primary_z_effect_norm', 0.0):.2f} "
+                        f"clsum={row.get('latent_cvae_layer_summary_norm', 0.0):.2f} "
+                        f"ctraw={row.get('latent_cvae_transition_source_raw_norm', 0.0):.2f} "
+                        f"ctmem={row.get('latent_cvae_transition_condition_norm', 0.0):.2f} "
+                        f"ccscale={row.get('latent_cvae_consequence_scale_mean', 0.0):.3f} "
+                        f"ccpref={row.get('latent_cvae_consequence_gate_preference', 0.0):.3f} "
+                        f"ccmix={row.get('latent_cvae_consequence_mix_ratio', 0.0):.3f} "
+                        f"cadu={row.get('latent_cvae_adaptive_refine_update_mean', 0.0):.3f} "
+                        f"cxgate={row.get('latent_cvae_adaptive_noisy_gate_mean', 0.0):.3f} "
+                        f"xnorm={row.get('latent_cvae_adaptive_noisy_branch_norm', 0.0):.3f} "
+                        f"volpar={row.get('mmdit_noisy_volume_parity', 0.0):.3f} "
+                        f"xinfl={row.get('mmdit_noisy_influence_ratio', 0.0):.2f} "
+                        f"crmax={row.get('latent_cvae_adaptive_route_max', 0.0):.3f} "
+                        f"crent={row.get('latent_cvae_adaptive_route_entropy', 0.0):.3f} "
+                        f"creff={row.get('latent_cvae_adaptive_route_effective_slots', 0.0):.2f} "
+                        f"cprmax={row.get('latent_cvae_adaptive_progress_max', 0.0):.3f} "
+                        f"cprent={row.get('latent_cvae_adaptive_progress_entropy', 0.0):.3f} "
+                        f"cpeff={row.get('latent_cvae_adaptive_progress_effective_slots', 0.0):.2f} "
+                        f"cprog={row.get('latent_cvae_adaptive_progress_norm', 0.0):.2f} "
+                        f"ccont={row.get('latent_cvae_adaptive_continue_mean', 0.0):.3f} "
+                        f"cprefix={row.get('latent_cvae_adaptive_prefix_norm', 0.0):.2f} "
+                        f"czseed={row.get('latent_cvae_adaptive_progress_seed_norm', 0.0):.3f} "
+                        f"czseff={row.get('latent_cvae_adaptive_progress_seed_effective_slots', 0.0):.2f} "
+                        f"ctemp={row.get('latent_cvae_adaptive_route_temperature_mean', 0.0):.2f} "
+                        f"rtime={row.get('latent_cvae_adaptive_route_time_query_norm', 0.0):.3f} "
+                        f"cfunc={row.get('latent_cvae_adaptive_function_delta_norm', 0.0):.3f} "
+                        f"cbasehf={row.get('latent_cvae_adaptive_base_highfreq_norm', 0.0):.3f} "
+                        f"cstep={row.get('latent_cvae_adaptive_refine_step_bias_norm', 0.0):.3f} "
+                        f"ccmax={row.get('latent_cvae_adaptive_capsule_layer_max', 0.0):.3f} "
+                        f"ccleff={row.get('latent_cvae_adaptive_capsule_layer_effective_slots', 0.0):.2f} "
+                        f"cstr={row.get('latent_cvae_adaptive_condition_strength_mean', 0.0):.3f} "
+                        f"ccond={row.get('latent_cvae_adaptive_condition_residual_norm', 0.0):.3f} "
+                        f"mdu={row.get('latent_cvae_mmdit_action_update_norm', 0.0):.3f} "
+                        f"mdcu={row.get('latent_cvae_mmdit_cond_update_norm', 0.0):.3f} "
+                        f"mdca={row.get('latent_cvae_mmdit_action_cond_attention', 0.0):.3f} "
+                        f"mdna={row.get('latent_cvae_mmdit_action_noisy_attention', 0.0):.3f} "
+                        f"mdat={row.get('latent_cvae_mmdit_action_token_norm', 0.0):.2f} "
+                        f"mdct={row.get('latent_cvae_mmdit_condition_token_norm', 0.0):.2f} "
+                        f"mdnt={row.get('latent_cvae_mmdit_noisy_token_norm', 0.0):.2f} "
+                        f"mdwa={row.get('latent_cvae_mmdit_action_workspace_attention', 0.0):.3f} "
+                        f"mdwe={row.get('latent_cvae_mmdit_action_workspace_enrichment', 0.0):.3f} "
+                        f"mdla={row.get('latent_cvae_mmdit_action_low_attention', 0.0):.3f} "
+                        f"mdsa={row.get('latent_cvae_mmdit_action_stage_attention', 0.0):.3f} "
+                        f"mdle={row.get('latent_cvae_mmdit_action_low_enrichment', 0.0):.3f} "
+                        f"mdse={row.get('latent_cvae_mmdit_action_stage_enrichment', 0.0):.3f} "
+                        f"mdnaT={row.get('latent_cvae_mmdit_noisy_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_noisy_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_noisy_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                        f"mdwaT={row.get('latent_cvae_mmdit_workspace_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_workspace_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_workspace_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                        f"mdlaT={row.get('latent_cvae_mmdit_low_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_low_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_low_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                        f"mdsaT={row.get('latent_cvae_mmdit_stage_attn_t0_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t0_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_stage_attn_t1_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t1_count', 0.0), 1e-6):.3f}"
+                        f"/{row.get('latent_cvae_mmdit_stage_attn_t2_sum', 0.0) / max(row.get('latent_cvae_mmdit_attn_t2_count', 0.0), 1e-6):.3f} "
+                        f"mdra={row.get('latent_cvae_mmdit_action_rollout_attention', 0.0):.3f} "
+                        f"mdre={row.get('latent_cvae_mmdit_action_rollout_enrichment', 0.0):.3f} "
+                        f"mdrn={row.get('latent_cvae_rollout_token_norm', 0.0):.2f} "
+                        f"mdrc={row.get('latent_cvae_rollout_token_count', 0.0):.0f} "
+                        f"wk={row.get('latent_cvae_workspace_token_count', 0.0):.0f} "
+                        f"wtok={row.get('latent_cvae_workspace_token_norm', 0.0):.2f} "
+                        f"wdelta={row.get('latent_cvae_workspace_update_norm', 0.0):.2f} "
+                        f"wgstate={row.get('latent_cvae_workspace_global_state_norm', 0.0):.2f} "
+                        f"wgslot={row.get('latent_cvae_workspace_global_slot_delta_norm', 0.0):.3f} "
+                        f"wsdiv={row.get('latent_cvae_workspace_global_slot_diversity', 0.0):.3f} "
+                        f"wsrc={row.get('latent_cvae_workspace_source_count', 0.0):.0f} "
+                        f"wcache={row.get('latent_cvae_workspace_cached_token_fraction', 0.0):.3f} "
+                        f"wqscale={row.get('latent_cvae_workspace_noisy_query_scale', 0.0):.3f} "
+                        f"went={row.get('latent_cvae_workspace_attention_entropy', 0.0):.3f} "
+                        f"wmax={row.get('latent_cvae_workspace_attention_max', 0.0):.3f} "
+                        f"wgent={row.get('latent_cvae_workspace_group_attention_entropy', 0.0):.3f} "
+                        f"wgeff={row.get('latent_cvae_workspace_group_effective_sources', 0.0):.2f} "
+                        f"wmass={row.get('latent_cvae_workspace_attention_mass_error', 0.0):.1e} "
+                        f"wupd={row.get('latent_cvae_workspace_action_update_ratio', 0.0):.3f} "
+                        f"wprog={row.get('latent_cvae_workspace_progress_attention', 0.0):.3f} "
+                        f"wpq={row.get('latent_cvae_workspace_progress_query_norm', 0.0):.3f} "
+                        f"wpupd={row.get('latent_cvae_workspace_progress_update_norm', 0.0):.3f} "
+                        f"wpact={row.get('latent_cvae_workspace_progress_action_dependence', 0.0):.3f} "
+                        f"rstem={row.get('latent_cvae_legacy_stem_effect_ratio', 0.0):.3f} "
+                        f"zzero={row.get('latent_cvae_z_zero_delta', 0.0):.3f} "
+                        f"zshuf={row.get('latent_cvae_z_shuffle_delta', 0.0):.3f} "
+                        f"wscan={row.get('latent_cvae_workspace_scan_attention', 0.0):.3f} "
+                        f"wlat={row.get('latent_cvae_workspace_lateral_attention', 0.0):.3f} "
+                        f"wtrans={row.get('latent_cvae_workspace_transition_total_attention', row.get('latent_cvae_workspace_transition_attention', 0.0)):.3f} "
+                        f"wtraj={row.get('latent_cvae_workspace_trajectory_attention', 0.0):.3f} "
+                        f"wroll={row.get('latent_cvae_workspace_rollout_attention', 0.0):.3f} "
+                        f"wcaps={row.get('latent_cvae_workspace_capsule_attention', 0.0):.3f} "
+                        f"wroute={row.get('latent_cvae_workspace_routed_layer_attention', 0.0):.3f} "
+                        f"wgeom={row.get('latent_cvae_workspace_role_geom_attention', 0.0):.3f} "
+                        f"wtrn={row.get('latent_cvae_workspace_role_transition_attention', 0.0):.3f} "
+                        f"wevt={row.get('latent_cvae_workspace_role_event_attention', 0.0):.3f} "
+                        f"wstate={row.get('latent_cvae_workspace_role_state_attention', 0.0):.3f} "
+                        f"wrlay={row.get('latent_cvae_workspace_role_layer_attention', 0.0):.3f} "
+                        f"wglob={row.get('latent_cvae_workspace_role_global_attention', 0.0):.3f} "
+                        f"ctrlcap={row.get('latent_cvae_workspace_controller_capacity', 0.0):.3f} "
+                        f"ctrldly={row.get('latent_cvae_workspace_controller_delay', 0.0):.3f} "
+                        f"ctrlent={row.get('latent_cvae_workspace_controller_role_entropy', 0.0):.3f} "
+                        f"ctrlq={row.get('latent_cvae_workspace_controller_query_delta_norm', 0.0):.3f} "
+                        f"hlow={row.get('latent_cvae_hierarchical_low_token_count', 0.0):.0f}/{row.get('latent_cvae_hierarchical_low_token_norm', 0.0):.2f} "
+                        f"hlsel={row.get('latent_cvae_hierarchical_low_selector_stage_effective_slots', 0.0):.2f} "
+                        f"hsrole={row.get('latent_cvae_hierarchical_stage_token_count', 0.0):.0f}/{row.get('latent_cvae_hierarchical_stage_role_norm', 0.0):.2f} "
+                        f"hscont={row.get('latent_cvae_hierarchical_stage_content_norm', 0.0):.2f} "
+                        f"hsrdiv={row.get('latent_cvae_hierarchical_stage_role_diversity', 0.0):.2f} "
+                        f"hscdiv={row.get('latent_cvae_hierarchical_stage_content_diversity', 0.0):.2f} "
+                        f"hsrcos={row.get('latent_cvae_hierarchical_stage_role_content_cosine', 0.0):.3f} "
+                        f"hsrfrac={row.get('latent_cvae_hierarchical_stage_role_output_fraction', 0.0):.3f} "
+                        f"hsupd={row.get('latent_cvae_hierarchical_stage_update_norm', 0.0):.3f} "
+                        f"hsret={row.get('latent_cvae_hierarchical_stage_retain_mean', 0.0):.3f} "
+                        f"hsprom={row.get('latent_cvae_hierarchical_stage_promote_scale', 0.0):.3f} "
+                        f"hmrole={row.get('latent_cvae_hierarchical_manager_role_entropy', 0.0):.3f} "
+                        f"hmprom={row.get('latent_cvae_hierarchical_manager_promote_gate', 0.0):.3f} "
+                        f"hmlow={row.get('latent_cvae_hierarchical_manager_low_output_strength', 0.0):.3f} "
+                        f"hmstage={row.get('latent_cvae_hierarchical_manager_stage_output_strength', 0.0):.3f} "
+                        # V72 (S5 cleanup): dead cm* micro-controller console keys
+                        # removed -- micro is config-off AND structurally excluded
+                        # under mmdit_refine; the loss-dict keys remain intact for
+                        # legacy non-MMDiT configs.
+                        f"careg={row.get('latent_cvae_adaptive_regularizer', 0.0):.4f} "
+                        f"carent={row.get('latent_cvae_adaptive_route_entropy_regularizer', 0.0):.4f} "
+                        f"czbase={row.get('consequence_zero_base_shift', 0.0):.3f} "
+                        f"csc={row.get('consequence_self_condition', 0.0):.0f} "
+                        f"cscmse={row.get('consequence_self_condition_target_mse', 0.0):.4f} "
+                        f"cscnmse={row.get('consequence_self_condition_noisy_mse', 0.0):.4f} "
+                        f"cspflow={row.get('consequence_preview_flow', 0.0):.4f} "
+                        f"iglob={row.get('intent_global_norm', 0.0):.2f} "
+                        f"istage={row.get('intent_stage_contract_norm', 0.0):.2f} "
+                        f"iread={row.get('intent_read_contract_norm', 0.0):.2f} "
+                        f"icgs={row.get('intent_global_stage_cosine', 0.0):.3f} "
+                        f"icgr={row.get('intent_global_read_cosine', 0.0):.3f} "
+                        f"icsr={row.get('intent_stage_read_cosine', 0.0):.3f} "
+                        f"hmdu={row.get('hierarchical_mmdit_action_update_norm', 0.0):.3f} "
+                        f"hmur={row.get('hierarchical_mmdit_action_update_ratio', 0.0):.3f} "
+                        f"hmcan={row.get('hierarchical_mmdit_action_serial_cancellation_fraction', 0.0):.3f} "
+                        f"hmorth={row.get('hierarchical_mmdit_action_serial_cancellation_orthogonal_baseline', 0.0):.3f} "
+                        f"hmxcan={row.get('hierarchical_mmdit_action_serial_cancellation_excess', 0.0):+.3f} "
+                        f"hmbdot={row.get('hierarchical_mmdit_action_branch_weighted_cosine', 0.0):+.3f} "
+                        f"hmcos={row.get('hierarchical_mmdit_action_state_cosine', 0.0):.3f} "
+                        f"hmnu={row.get('hierarchical_mmdit_action_noisy_update_norm', 0.0):.3f} "
+                        f"hmsu={row.get('hierarchical_mmdit_action_stage_update_norm', 0.0):.3f} "
+                        f"hmlu={row.get('hierarchical_mmdit_action_low_update_norm', 0.0):.3f} "
+                        f"hmnf={row.get('hierarchical_mmdit_action_noisy_update_fraction', 0.0):.3f} "
+                        f"hmsf={row.get('hierarchical_mmdit_action_stage_update_fraction', 0.0):.3f} "
+                        f"hmlf={row.get('hierarchical_mmdit_action_low_update_fraction', 0.0):.3f} "
+                        f"hmdepth={row.get('hierarchical_mmdit_action_noisy_depth_ratio', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_depth_ratio', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_depth_ratio', 0.0):.2f} "
+                        f"hmraw={row.get('hierarchical_mmdit_action_noisy_raw_depth_ratio', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_raw_depth_ratio', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_raw_depth_ratio', 0.0):.2f} "
+                        f"hmkeep={row.get('hierarchical_mmdit_action_self_update_keep', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_noisy_update_keep', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_update_keep', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_update_keep', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_ffn_update_keep', 0.0):.2f} "
+                        f"hmedepth={row.get('hierarchical_mmdit_action_noisy_effective_depth', 0.0):.1f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_effective_depth', 0.0):.1f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_effective_depth', 0.0):.1f} "
+                        f"hmcontract={row.get('hierarchical_mmdit_action_noisy_contraction_ratio', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_contraction_ratio', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_contraction_ratio', 0.0):.3f} "
+                        f"hmhost={row.get('hierarchical_mmdit_action_noisy_host_update_rms', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_host_update_rms', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_host_update_rms', 0.0):.3f} "
+                        f"hmcover={row.get('hierarchical_mmdit_action_noisy_subspace_energy_fraction', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_subspace_energy_fraction', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_subspace_energy_fraction', 0.0):.3f} "
+                        f"hmremove={row.get('hierarchical_mmdit_action_noisy_removed_fraction', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_removed_fraction', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_removed_fraction', 0.0):.3f} "
+                        f"hmdepthreg={row.get('hierarchical_mmdit_operator_contraction_progress', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_depth_usage_regularizer', 0.0):.4f} "
+                        f"hmdwell={row.get('hierarchical_mmdit_learned_execution_active', 0.0):.0f}/"
+                        f"{row.get('hierarchical_mmdit_value_dwell_warmup_active', 0.0):.0f}/"
+                        f"{row.get('hierarchical_mmdit_value_dwell_shadow_active', 0.0):.0f}/"
+                        f"{row.get('hierarchical_mmdit_operation_decision_shadow_active', 0.0):.0f} "
+                        f"hmval={row.get('hierarchical_mmdit_operation_value_loss', 0.0):.4f}/"
+                        f"{row.get('hierarchical_mmdit_operation_value_target_spread', 0.0):.4f}/"
+                        f"{row.get('hierarchical_mmdit_operation_value_predicted_spread', 0.0):.4f}/"
+                        f"{row.get('hierarchical_mmdit_operation_value_correlation', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_operation_value_decision_accuracy', 0.0):.2f} "
+                        f"hmread={row.get('hierarchical_mmdit_controller_reader_operator_memory_attention', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_controller_reader_spectral_memory_attention', 0.0):.2f} "
+                        f"hmmem={row.get('hierarchical_mmdit_controller_reader_operator_global_memory_attention', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_controller_reader_operator_private_memory_attention', 0.0):.2f} "
+                        f"hmrdiv={row.get('hierarchical_mmdit_controller_reader_operator_attention_diversity', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_reader_spectral_attention_local_change', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_reader_family_attention_diversity', 0.0):.3f} "
+                        f"hmfunc={row.get('hierarchical_mmdit_controller_operator_representation_diversity', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_spectral_representation_local_change', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_state_centered_energy_ratio', 0.0):.3f} "
+                        f"hmfcand={row.get('hierarchical_mmdit_function_candidate_cosine', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_function_candidate_diversity', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_function_candidate_update_rms', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_function_candidate_update_spread', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_function_candidate_valid_count', 0.0):.2f} "
+                        f"hmpriv={row.get('hierarchical_mmdit_controller_private_pair_cosine', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_controller_private_centered_energy_ratio', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_private_global_energy_ratio', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_private_residual_value_rms', 0.0):.3f} "
+                        f"hmcomp={row.get('hierarchical_mmdit_controller_competition_source_effective_slots', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_controller_competition_source_owner_max', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_controller_competition_slot_load_effective', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_controller_competition_slot_load_max', 0.0):.2f} "
+                        f"hmcap={row.get('hierarchical_mmdit_controller_operator_raw_depth_mean', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_controller_operator_depth_stage_std', 0.0):.3f} "
+                        f"hmoracle={row.get('hierarchical_mmdit_oracle_route_loss', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_oracle_route_weight', 0.0):.3f} "
+                        f"hmodepth={row.get('hierarchical_mmdit_oracle_target_depth', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_oracle_predicted_depth', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_oracle_depth_accuracy', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_oracle_predicted_regret', 0.0):.4f} "
+                        f"hmstage={_format_hierarchical_stage_usage(row)} "
+                        f"hmblock={_format_hierarchical_block_usage(row)} "
+                        f"hmopgain={row.get('hierarchical_mmdit_action_noisy_operator_gain', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_operator_gain', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_operator_gain', 0.0):.3f} "
+                        f"hmdir={row.get('hierarchical_mmdit_action_noisy_direction_change', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_direction_change', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_direction_change', 0.0):.3f} "
+                        f"hmbcos2={row.get('hierarchical_mmdit_action_noisy_direction_cosine', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_direction_cosine', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_direction_cosine', 0.0):+.2f} "
+                        f"hmbgain={row.get('hierarchical_mmdit_action_noisy_base_data_gain', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_base_data_gain', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_base_data_gain', 0.0):.2f} "
+                        f"hmbprm={row.get('hierarchical_mmdit_action_noisy_base_parameter_rms', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_base_parameter_rms', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_base_parameter_rms', 0.0):.2f} "
+                        f"hmgate={row.get('hierarchical_mmdit_action_self_base_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_noisy_base_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_base_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_base_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_ffn_base_gate', 0.0):.3f} "
+                        f"hmegate={row.get('hierarchical_mmdit_action_self_effective_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_noisy_effective_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_effective_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_low_effective_gate', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_ffn_effective_gate', 0.0):.3f} "
+                        f"hmkerr={row.get('hierarchical_mmdit_action_noisy_keep_scale_error', 0.0):.1e}/"
+                        f"{row.get('hierarchical_mmdit_action_stage_keep_scale_error', 0.0):.1e}/"
+                        f"{row.get('hierarchical_mmdit_action_low_keep_scale_error', 0.0):.1e} "
+                        f"hmgerr={max(row.get(f'hierarchical_mmdit_action_{name}_gate_scale_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                        f"hmnrms={row.get('hierarchical_mmdit_action_pre_norm_rms', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_post_norm_rms', 0.0):.3f} "
+                        f"hmbound={max(row.get(f'hierarchical_mmdit_action_{name}_boundary_identity_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                        f"hmnexp={max(row.get(f'hierarchical_mmdit_action_{name}_nonexpansive_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                        f"hmnest={max(row.get(f'hierarchical_mmdit_action_{name}_nested_order_violation', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                        f"hmbasis={max(row.get(f'hierarchical_mmdit_action_{name}_basis_norm_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e}/"
+                        f"{max(row.get(f'hierarchical_mmdit_action_{name}_basis_orthogonality_error', 0.0) for name in ('self', 'noisy', 'stage', 'low', 'ffn')):.1e} "
+                        f"hexh={row.get('hierarchical_mmdit_executed_steps', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_rel', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_stage_pressure_rel', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_refine_gain', 0.0):+.4f}/"
+                        f"{row.get('hierarchical_mmdit_response_gain_corr', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_unresolved_rate', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_budget_exhausted_rate', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_final_block', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_final_stage', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_early_exit_rate', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_block_advance_rate', 0.0):.2f}/"
+                        f"{row.get('hierarchical_mmdit_stage_advance_rate', 0.0):.2f} "
+                        f"hmuresp={row.get('hierarchical_mmdit_action_response_arm', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_gripper', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_arm_null', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_gripper_null', 0.0):.3f} "
+                        f"hmuq={row.get('hierarchical_mmdit_action_response_p25', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_p50', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_p75', 0.0):.3f} "
+                        f"hmpq={row.get('hierarchical_mmdit_stage_pressure_p25', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_stage_pressure_p50', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_stage_pressure_p75', 0.0):.3f} "
+                        f"hmuT50={row.get('hierarchical_mmdit_action_response_t0_p50', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_t1_p50', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_action_response_t2_p50', 0.0):.3f} "
+                        f"hmpT50={row.get('hierarchical_mmdit_stage_pressure_t0_p50', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_stage_pressure_t1_p50', 0.0):.3f}/"
+                        f"{row.get('hierarchical_mmdit_stage_pressure_t2_p50', 0.0):.3f} "
+                        f"hmucT={row.get('hierarchical_mmdit_response_gain_corr_t0', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_response_gain_corr_t1', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_response_gain_corr_t2', 0.0):+.2f} "
+                        f"hmpcT={row.get('hierarchical_mmdit_pressure_gain_corr_t0', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_pressure_gain_corr_t1', 0.0):+.2f}/"
+                        f"{row.get('hierarchical_mmdit_pressure_gain_corr_t2', 0.0):+.2f} "
+                        f"hmnmax={row.get('hierarchical_mmdit_action_noisy_attention_max', 0.0):.3f} "
+                        f"hmsmax={row.get('hierarchical_mmdit_action_stage_attention_max', 0.0):.3f} "
+                        f"hmlmax={row.get('hierarchical_mmdit_action_low_attention_max', 0.0):.3f} "
+                        f"halreff={row.get('hierarchical_mmdit_action_low_role_effective_count', 0.0):.2f} "
+                        f"halgeo={row.get('hierarchical_mmdit_action_low_role_geom_attention', 0.0):.3f} "
+                        f"haltrn={row.get('hierarchical_mmdit_action_low_role_transition_attention', 0.0):.3f} "
+                        f"halevt={row.get('hierarchical_mmdit_action_low_role_event_attention', 0.0):.3f} "
+                        f"halsta={row.get('hierarchical_mmdit_action_low_role_state_attention', 0.0):.3f} "
+                        f"hallay={row.get('hierarchical_mmdit_action_low_role_layer_attention', 0.0):.3f} "
+                        f"ogeo={row.get('owned_workspace_role_geom_attention', 0.0):.3f} "
+                        f"otrn={row.get('owned_workspace_role_transition_attention', 0.0):.3f} "
+                        f"oevt={row.get('owned_workspace_role_event_attention', 0.0):.3f} "
+                        f"osta={row.get('owned_workspace_role_state_attention', 0.0):.3f} "
+                        f"olay={row.get('owned_workspace_role_layer_attention', 0.0):.3f} "
+                        f"ofixed={row.get('owned_hierarchical_manager_fixed_output_prior', 0.0):.0f} "
+                        f"ofrole={row.get('owned_hierarchical_manager_fixed_role_prior', 0.0):.0f} "
+                        f"ostrat={row.get('owned_hierarchical_low_role_stratified', 0.0):.0f} "
+                        f"hmwieff={row.get('owned_workspace_interface_low_control_effective_control_tokens', 0.0):.2f}/"
+                        f"{row.get('owned_workspace_interface_stage_control_effective_control_tokens', 0.0):.2f} "
+                        f"ohsupd={row.get('owned_hierarchical_stage_update_norm', 0.0):.3f} "
+                        f"ohprom={row.get('owned_hierarchical_manager_promote_gate', 0.0):.3f} "
+                        f"ohprms={row.get('owned_hierarchical_stage_promoted_projected_rms', 0.0):.3f}/"
+                        f"{row.get('owned_hierarchical_stage_promoted_normalized_rms', 0.0):.3f}/"
+                        f"{row.get('owned_hierarchical_stage_promoted_realized_scale', 0.0):.3f} "
+                        f"ohgerr={row.get('owned_hierarchical_stage_promote_gate_scale_error', 0.0):.1e} "
+                        f"cgrad={row.get('grad_latent_cvae_action', 0.0):.3e} "
+                        f"hwgrad={row.get('grad_latent_cvae_hierarchical_workspace', 0.0):.3e} "
+                        f"hlgrad={row.get('grad_latent_cvae_hierarchical_low', 0.0):.3e} "
+                        f"hsgrad={row.get('grad_latent_cvae_hierarchical_stage', 0.0):.3e} "
+                        f"hmgrad={row.get('grad_latent_cvae_hierarchical_manager', 0.0):.3e} "
+                        f"cgclip={row.get('grad_latent_cvae_action_post_clip', 0.0):.3e} "
+                        f"agrad={row.get('grad_residual_action_flow', 0.0):.3e} "
+                        f"rdgrad={row.get('grad_controlled_dynamics', 0.0):.3e} "
+                        f"rcgrad={row.get('grad_latent_cvae_rollout_condition', 0.0):.3e} "
+                        f"wgrad={row.get('grad_latent_cvae_workspace', 0.0):.3e} "
+                        f"zpgrad={row.get('grad_latent_cvae_primary_modulation', 0.0):.3e} "
+                        f"hmdgrad={row.get('grad_hierarchical_mmdit_action', 0.0):.3e} "
+                        f"hmvgrad={row.get('grad_hierarchical_mmdit_velocity_head', 0.0):.3e} "
+                        f"icgrad={row.get('grad_intent_contract_compiler', 0.0):.3e} "
+                        f"owgrad={row.get('grad_owned_workspace', 0.0):.3e} "
+                        f"hmbgrad={row.get('grad_hierarchical_mmdit_blocks', 0.0):.3e} "
+                        f"hmbasegrad={row.get('grad_hierarchical_mmdit_shared_base', 0.0):.3e} "
+                        f"hmwgrad={row.get('grad_hierarchical_mmdit_base_projection', 0.0):.3e} "
+                        f"hmcopgrad={row.get('grad_hierarchical_mmdit_contractions', 0.0):.3e} "
+                        f"hmcgrad={row.get('grad_hierarchical_mmdit_contraction_basis', 0.0):.3e}/"
+                        f"{row.get('grad_hierarchical_mmdit_contraction_depth', 0.0):.3e} "
+                        f"hmcmodgrad={row.get('grad_hierarchical_mmdit_content_modulation', 0.0):.3e} "
+                        f"hmgategrad={row.get('grad_hierarchical_mmdit_host_gates', 0.0):.3e} "
+                        f"hmdclip={row.get('grad_hierarchical_mmdit_action_post_clip', 0.0):.3e} "
+                        f"grad={row['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e} "
+                        f"spb={seconds_per_batch:.3f}"
+                    ),
                     flush=True,
                 )
         train_metrics = _finalize_metric_tensors(metric_sums, metric_count)
+        evidence_epoch = (
+            getattr(system.planner, "evidence_latent_mmdit_action_decoder", None) is not None
+        )
+        if evidence_epoch:
+            train_metrics = _filter_inactive_evidence_epoch_metrics(train_metrics)
         val_metrics = evaluate_v39_policy(
-            system=system, loader=val_loader, conditioner=conditioner, device=device, dtype=dtype,
-            camera_names=camera_names, action_normalizer=action_normalizer, trainer=trainer,
-            max_batches=trainer.max_val_batches, memory_reporter=memory_reporter, epoch=epoch, global_step=global_step,
+            system=system,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            action_normalizer=action_normalizer,
+            trainer=trainer,
+            max_batches=trainer.max_val_batches,
+            memory_reporter=memory_reporter,
+            epoch=epoch,
+            global_step=global_step,
         )
         score = balanced_score(val_metrics, trainer)  # type: ignore[arg-type]
         deploy_eligible = is_deploy_eligible(val_metrics, trainer)  # type: ignore[arg-type]
         val_metrics["balanced_score"] = score
         val_metrics["deploy_eligible"] = float(deploy_eligible)
-        record = {"epoch": epoch, "global_step": global_step, "train": train_metrics, "val": val_metrics}
+        record = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "train": train_metrics,
+            "val": val_metrics,
+        }
         history.append(record)
         with (out_dir / "v39_policy_epochs.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(jsonable(record), separators=(",", ":")) + "\n")
@@ -4131,27 +6523,60 @@ def train_v39_policy(
                 save.append("best_contract.pt")
         else:
             if full < best["full_mse"]:
-                best["full_mse"] = full; save.append("best_full.pt")
+                best["full_mse"] = full
+                save.append("best_full.pt")
             if f1 > best["gripper_f1"]:
-                best["gripper_f1"] = f1; save.append("best_gripper_f1.pt")
+                best["gripper_f1"] = f1
+                save.append("best_gripper_f1.pt")
             if recall > best["gripper_recall"]:
-                best["gripper_recall"] = recall; save.append("best_gripper_recall.pt")
+                best["gripper_recall"] = recall
+                save.append("best_gripper_recall.pt")
             if score < best["balanced"]:
-                best["balanced"] = score; save.append("best_balanced.pt")
+                best["balanced"] = score
+                save.append("best_balanced.pt")
             if deploy_eligible and float(val_metrics["full_rmse"]) < best["deploy_full_rmse"]:
-                best["deploy_full_rmse"] = float(val_metrics["full_rmse"]); save.append("best_deploy.pt")
+                best["deploy_full_rmse"] = float(val_metrics["full_rmse"])
+                save.append("best_deploy.pt")
         payload = {
-            "schema": "clearvla-v40-policy-checkpoint-v1", "epoch": epoch, "global_step": global_step,
-            "model": system.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": schedule.state_dict(),
-            "policy_config": asdict(system.policy_config), "trainer_config": asdict(trainer),
-            "action_normalizer": action_normalizer.to_dict(), "state_normalizer": state_normalizer.to_dict(),
-            "context": context, "history": history, "best": best, "rng": rng_state(),
+            "schema": "clearvla-v40-policy-checkpoint-v1",
+            "epoch": epoch,
+            "global_step": global_step,
+            "model": system.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": schedule.state_dict(),
+            "policy_config": asdict(system.policy_config),
+            "trainer_config": asdict(trainer),
+            "action_normalizer": action_normalizer.to_dict(),
+            "state_normalizer": state_normalizer.to_dict(),
+            "context": context,
+            "history": history,
+            "best": best,
+            "rng": rng_state(),
         }
         for name in save:
             torch.save(payload, ckpt_dir / name)
         torch.save(payload, ckpt_dir / "latest.pt")
-        (out_dir / "v40_policy_summary.json").write_text(json.dumps(jsonable({"schema": "clearvla-v40-policy-summary-v1", "best": best, "latest": record}), indent=2), encoding="utf-8")
-        print(json.dumps(jsonable(record), separators=(",", ":")), flush=True)
+        (out_dir / "v40_policy_summary.json").write_text(
+            json.dumps(
+                jsonable(
+                    {"schema": "clearvla-v40-policy-summary-v1", "best": best, "latest": record}
+                ),
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if evidence_epoch:
+            print(
+                _evidence_epoch_log_line(
+                    epoch=epoch,
+                    global_step=global_step,
+                    train=train_metrics,
+                    val=val_metrics,
+                ),
+                flush=True,
+            )
+        else:
+            print(json.dumps(jsonable(record), separators=(",", ":")), flush=True)
     return {"history": history, "best": best}
 
 

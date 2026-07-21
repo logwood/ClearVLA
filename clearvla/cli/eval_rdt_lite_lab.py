@@ -12,10 +12,20 @@ from clearvla.cli.common import resolve_device
 from clearvla.data.hdf5_episode import load_episodes
 from clearvla.data.split import split_episode_ids
 from clearvla.experiments.rdt_lite_lab.codec import RDTLiteCodecs, apply_rdt_lite_codecs
-from clearvla.experiments.rdt_lite_lab.dataset import RDTLiteDataset, RDTLiteDatasetConfig, compute_rdt_lite_event_scores
-from clearvla.experiments.rdt_lite_lab.evaluation import evaluate_rdt_lite_model, visual_dependency_report
+from clearvla.experiments.rdt_lite_lab.dataset import (
+    RDTLiteDataset,
+    RDTLiteDatasetConfig,
+    compute_rdt_lite_event_scores,
+)
+from clearvla.experiments.rdt_lite_lab.evaluation import (
+    evaluate_rdt_lite_model,
+    visual_dependency_report,
+)
 from clearvla.experiments.rdt_lite_lab.model import RDTLiteModel, RDTLiteModelConfig
-from clearvla.experiments.rdt_lite_lab.schedule import CosineDiffusionSchedule, DiffusionScheduleConfig
+from clearvla.experiments.rdt_lite_lab.schedule import (
+    CosineDiffusionSchedule,
+    DiffusionScheduleConfig,
+)
 from clearvla.experiments.vision_usage_lab.dataset import LabEventScoreConfig, LabVisualMode
 from clearvla.experiments.vision_usage_lab.latent_cache import VisionLatentCacheStore
 
@@ -61,11 +71,25 @@ def main() -> None:
     model_config = RDTLiteModelConfig.from_dict(dict(payload["model_config"]))
     codecs = RDTLiteCodecs.from_dict(dict(payload["codecs"]))
     loss_data = dict(payload.get("loss_config") or payload.get("summary", {}).get("loss") or {})
-    trainer_data = dict(payload.get("trainer_config") or payload.get("summary", {}).get("trainer") or {})
-    schedule_data = dict(payload.get("diffusion_schedule_config") or payload.get("summary", {}).get("diffusion_schedule") or {})
-    objective = str(loss_data.get("objective", payload.get("summary", {}).get("objective", "rdt_denoise")))
-    sampling_steps = int(args.sampling_steps or trainer_data.get("sampling_steps") or (5 if objective == "rdt_denoise" else 10))
-    schedule_config = DiffusionScheduleConfig(**schedule_data) if schedule_data else DiffusionScheduleConfig()
+    trainer_data = dict(
+        payload.get("trainer_config") or payload.get("summary", {}).get("trainer") or {}
+    )
+    schedule_data = dict(
+        payload.get("diffusion_schedule_config")
+        or payload.get("summary", {}).get("diffusion_schedule")
+        or {}
+    )
+    objective = str(
+        loss_data.get("objective", payload.get("summary", {}).get("objective", "rdt_denoise"))
+    )
+    sampling_steps = int(
+        args.sampling_steps
+        or trainer_data.get("sampling_steps")
+        or (5 if objective == "rdt_denoise" else 10)
+    )
+    schedule_config = (
+        DiffusionScheduleConfig(**schedule_data) if schedule_data else DiffusionScheduleConfig()
+    )
     context_args = dict(payload.get("context", {}).get("args", {}))
     data_config_data = dict(payload.get("context", {}).get("data_config", {}))
     if not data_config_data:
@@ -87,28 +111,118 @@ def main() -> None:
     data_config = RDTLiteDatasetConfig(**data_config_data)
     cameras = tuple(str(value) for value in args.cameras)
     if cameras != model_config.camera_names:
-        raise ValueError(f"checkpoint cameras={model_config.camera_names} but CLI cameras={cameras}")
-    min_length = max(data_config.past_len, data_config.state_history_len, data_config.obs_horizon) + data_config.chunk_len + max(abs(data_config.state_offset), abs(data_config.image_offset), abs(data_config.action_offset))
-    episodes, skipped = load_episodes(args.data_root, args.glob, cameras=cameras, min_length=min_length, action_key=args.action_key, state_key=args.state_key, camera_key_overrides={"top": args.top_key, "wrist": args.wrist_key})
-    train_ids, val_ids, test_ids = split_episode_ids(len(episodes), args.train_frac, args.val_frac, args.seed)
+        raise ValueError(
+            f"checkpoint cameras={model_config.camera_names} but CLI cameras={cameras}"
+        )
+    min_length = (
+        max(data_config.past_len, data_config.state_history_len, data_config.obs_horizon)
+        + data_config.chunk_len
+        + max(
+            abs(data_config.state_offset),
+            abs(data_config.image_offset),
+            abs(data_config.action_offset),
+        )
+    )
+    episodes, skipped = load_episodes(
+        args.data_root,
+        args.glob,
+        cameras=cameras,
+        min_length=min_length,
+        action_key=args.action_key,
+        state_key=args.state_key,
+        camera_key_overrides={"top": args.top_key, "wrist": args.wrist_key},
+    )
+    train_ids, val_ids, test_ids = split_episode_ids(
+        len(episodes), args.train_frac, args.val_frac, args.seed
+    )
     apply_rdt_lite_codecs(episodes, codecs)
     ids = val_ids if args.split == "val" else test_ids
     visual_pool = ids if len(ids) > 1 else list(range(len(episodes)))
-    latent_store = VisionLatentCacheStore(args.latent_cache_dir, camera_names=cameras); latent_store.validate_consistent(episodes)
+    latent_store = VisionLatentCacheStore(args.latent_cache_dir, camera_names=cameras)
+    latent_store.validate_consistent(episodes)
     loaders: dict[str, DataLoader] = {}
     for mode in LabVisualMode:
-        ds = RDTLiteDataset(episodes, ids, latent_store=latent_store, codecs=codecs, config=data_config, visual_mode=mode, visual_pool_episode_ids=visual_pool)
-        ds.attach_event_scores(compute_rdt_lite_event_scores(ds, LabEventScoreConfig(event_quantile=args.event_quantile)))
-        loaders[mode.value] = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
+        ds = RDTLiteDataset(
+            episodes,
+            ids,
+            latent_store=latent_store,
+            codecs=codecs,
+            config=data_config,
+            visual_mode=mode,
+            visual_pool_episode_ids=visual_pool,
+        )
+        ds.attach_event_scores(
+            compute_rdt_lite_event_scores(
+                ds, LabEventScoreConfig(event_quantile=args.event_quantile)
+            )
+        )
+        loaders[mode.value] = DataLoader(
+            ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+        )
     model = RDTLiteModel(model_config)
     model.load_state_dict(payload.get("model_state_dict", payload), strict=True)
     model.to(device)
     schedule = CosineDiffusionSchedule(schedule_config)
-    metrics = {mode: evaluate_rdt_lite_model(model, loader, objective=objective, device=device, codecs=codecs, sampling_steps=sampling_steps, diffusion_schedule=schedule) for mode, loader in loaders.items()}
-    report = {"schema": "clearvla-rdt-lite-lab-eval-v13.1", "checkpoint": str(args.checkpoint), "split": args.split, "objective": objective, "sampling_steps": sampling_steps, "skipped": skipped, "metrics": metrics, "dependency": visual_dependency_report(metrics)}
+    metrics = {
+        mode: evaluate_rdt_lite_model(
+            model,
+            loader,
+            objective=objective,
+            device=device,
+            codecs=codecs,
+            sampling_steps=sampling_steps,
+            diffusion_schedule=schedule,
+        )
+        for mode, loader in loaders.items()
+    }
+    report = {
+        "schema": "clearvla-rdt-lite-lab-eval-v13.1",
+        "checkpoint": str(args.checkpoint),
+        "split": args.split,
+        "objective": objective,
+        "sampling_steps": sampling_steps,
+        "skipped": skipped,
+        "metrics": metrics,
+        "dependency": visual_dependency_report(metrics),
+    }
     if args.summary_only:
         correct = metrics["correct"]
-        print(json.dumps({"schema": report["schema"], "checkpoint": report["checkpoint"], "split": args.split, "objective": objective, "sampling_steps": sampling_steps, "action_representation": codecs.action_representation, "correct": {key: correct[key] for key in ("full_mse", "full_rmse", "normalized_mae", "first_rmse", "first4_rmse", "arm_first_rmse", "arm_first4_rmse", "gripper_first_rmse", "gripper_full_rmse", "pred_boundary_jump_norm", "target_boundary_jump_norm", "per_horizon_rmse") if key in correct}, "dependency": report["dependency"]}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "schema": report["schema"],
+                    "checkpoint": report["checkpoint"],
+                    "split": args.split,
+                    "objective": objective,
+                    "sampling_steps": sampling_steps,
+                    "action_representation": codecs.action_representation,
+                    "correct": {
+                        key: correct[key]
+                        for key in (
+                            "full_mse",
+                            "full_rmse",
+                            "normalized_mae",
+                            "first_rmse",
+                            "first4_rmse",
+                            "arm_first_rmse",
+                            "arm_first4_rmse",
+                            "gripper_first_rmse",
+                            "gripper_full_rmse",
+                            "pred_boundary_jump_norm",
+                            "target_boundary_jump_norm",
+                            "per_horizon_rmse",
+                        )
+                        if key in correct
+                    },
+                    "dependency": report["dependency"],
+                },
+                indent=2,
+            )
+        )
     else:
         print(json.dumps(report, indent=2))
 

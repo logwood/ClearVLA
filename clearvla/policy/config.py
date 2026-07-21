@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Configuration lineage for the current staged policy."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -32,23 +32,34 @@ class V362PolicyConfig:
     # [absolute, delta] coordinates used by the policy.
     arm_flow_mode: str = "legacy_independent"
     arm_noise_temporal_rho: float = 0.0
+    # Native arm source endpoint. ``ar1`` preserves historical behavior;
+    # ``boundary_multiscale`` is state-anchored and mixes full-rank position,
+    # velocity, and acceleration operators before the existing field/DCT chart.
+    arm_source_mode: str = "ar1"
+    arm_source_scale: float = 1.0
+    arm_source_innovation_weight: float = 0.50
+    arm_source_velocity_weight: float = 0.35
+    arm_source_acceleration_weight: float = 0.15
 
     def validate(self) -> None:
-        if min(
-            self.action_dim,
-            self.state_dim,
-            self.action_horizon,
-            self.executed_history_length,
-            self.hidden_size,
-            self.num_heads,
-            self.depth,
-            self.action_decoder_depth,
-            self.proposal_depth,
-            self.event_tokens,
-            self.inference_steps,
-            self.first_execution_steps,
-            self.mid_execution_steps,
-        ) <= 0:
+        if (
+            min(
+                self.action_dim,
+                self.state_dim,
+                self.action_horizon,
+                self.executed_history_length,
+                self.hidden_size,
+                self.num_heads,
+                self.depth,
+                self.action_decoder_depth,
+                self.proposal_depth,
+                self.event_tokens,
+                self.inference_steps,
+                self.first_execution_steps,
+                self.mid_execution_steps,
+            )
+            <= 0
+        ):
             raise ValueError("V36.2 policy dimensions must be positive")
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
@@ -68,6 +79,24 @@ class V362PolicyConfig:
             raise ValueError("arm_flow_mode must be legacy_independent or manifold_native")
         if not 0.0 <= float(self.arm_noise_temporal_rho) < 1.0:
             raise ValueError("arm_noise_temporal_rho must be in [0,1)")
+        if str(self.arm_source_mode) not in {"ar1", "boundary_multiscale"}:
+            raise ValueError("arm_source_mode must be ar1 or boundary_multiscale")
+        if float(self.arm_source_scale) <= 0.0:
+            raise ValueError("arm_source_scale must be positive")
+        source_weights = (
+            float(self.arm_source_innovation_weight),
+            float(self.arm_source_velocity_weight),
+            float(self.arm_source_acceleration_weight),
+        )
+        if any(value < 0.0 for value in source_weights) or sum(source_weights) <= 0.0:
+            raise ValueError("arm source weights must be non-negative with positive sum")
+        if (
+            str(self.arm_source_mode) == "boundary_multiscale"
+            and float(self.arm_source_innovation_weight) <= 0.0
+        ):
+            raise ValueError("boundary_multiscale requires positive arm_source_innovation_weight")
+        if str(self.arm_source_mode) != "ar1" and str(self.arm_flow_mode) != "manifold_native":
+            raise ValueError("non-AR arm source modes require arm_flow_mode=manifold_native")
         if self.first_execution_steps > self.action_horizon:
             raise ValueError("first_execution_steps cannot exceed action_horizon")
         if self.mid_execution_steps > self.action_horizon:
@@ -75,7 +104,11 @@ class V362PolicyConfig:
 
     @property
     def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.action_dim + self.gripper_dim_index
+        return (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.action_dim + self.gripper_dim_index
+        )
 
     @property
     def arm_dim(self) -> int:
@@ -123,17 +156,20 @@ class V38PolicyConfig(V362PolicyConfig):
 
     def validate(self) -> None:
         super().validate()
-        if min(
-            self.visual_token_dim,
-            self.visual_history_length,
-            self.num_cameras,
-            self.patches_per_camera,
-            self.canvas_registers,
-            self.future_anchors,
-            self.target_future_count,
-            self.action_basis_tokens,
-            self.future_grid_size,
-        ) <= 0:
+        if (
+            min(
+                self.visual_token_dim,
+                self.visual_history_length,
+                self.num_cameras,
+                self.patches_per_camera,
+                self.canvas_registers,
+                self.future_anchors,
+                self.target_future_count,
+                self.action_basis_tokens,
+                self.future_grid_size,
+            )
+            <= 0
+        ):
             raise ValueError("V38 dimensions must be positive")
         if self.future_anchors > self.target_future_count:
             raise ValueError("future_anchors cannot exceed target_future_count")
@@ -143,16 +179,32 @@ class V38PolicyConfig(V362PolicyConfig):
             raise ValueError("canvas_dropout must be in [0,1)")
         if not 0 <= self.role_dropout < 1:
             raise ValueError("role_dropout must be in [0,1)")
-        if self.rollout_tail_start_step < 1 or self.rollout_tail_full_step < self.rollout_tail_start_step:
+        if (
+            self.rollout_tail_start_step < 1
+            or self.rollout_tail_full_step < self.rollout_tail_start_step
+        ):
             raise ValueError("invalid rollout tail binding schedule")
-        if min(self.controlled_delta_rank, self.base_effect_hidden, self.latent_action_tokens, self.neutral_action_tokens) <= 0:
+        if (
+            min(
+                self.controlled_delta_rank,
+                self.base_effect_hidden,
+                self.latent_action_tokens,
+                self.neutral_action_tokens,
+            )
+            <= 0
+        ):
             raise ValueError("controlled residual dynamics dimensions must be positive")
         if not 0 <= self.controlled_delta_dropout < 1:
             raise ValueError("controlled_delta_dropout must be in [0,1)")
 
     @property
     def future_token_count(self) -> int:
-        return int(self.future_anchors) * int(self.num_cameras) * int(self.future_grid_size) * int(self.future_grid_size)
+        return (
+            int(self.future_anchors)
+            * int(self.num_cameras)
+            * int(self.future_grid_size)
+            * int(self.future_grid_size)
+        )
 
     @property
     def history_length(self) -> int:
@@ -298,11 +350,14 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_ffn_expansion: float = 2.0
     latent_cvae_layer_memory: int = 1
     latent_cvae_transition_memory: int = 1
-    latent_cvae_transition_detach: int = 1
+    # Keep the native evidence execution path end-to-end differentiable by
+    # default. Legacy ablations may still opt into a causal stop-gradient.
+    latent_cvae_transition_detach: int = 0
     latent_cvae_context_memory: int = 0
     latent_cvae_visual_memory: int = 0
-    latent_cvae_layer_detach: int = 1
-    latent_cvae_layer_grad_scale: float = 0.0
+    # Detach is an explicit ablation; the main evidence path is end-to-end.
+    latent_cvae_layer_detach: int = 0
+    latent_cvae_layer_grad_scale: float = 1.0
     # Keep rollout/consequence features visible to the final decoder without
     # letting their unconstrained scale or gradients turn them into an
     # auxiliary action-prediction path.
@@ -334,20 +389,65 @@ class V39PolicyConfig(V38PolicyConfig):
     latent_cvae_layer_scan_alpha: float = 0.2
     # V60: MMDiT-lite bottom decoder.  The CVAE prior/posterior contract stays
     # intact, but the final action tokens read layer/trajectory/noisy/progress
-    # tokens through a compact joint-attention mixer.  Noisy action is kept out
-    # of the action residual stream by default, so the velocity head cannot use
-    # a pure x_t -> output linear shortcut.
+    # tokens through the native-time MMDiT path. The flow state x_t is part of
+    # the action-token stream; it is not exposed as a separately controlled
+    # noisy writer.
     latent_cvae_mmdit_decoder: int = 0
     latent_cvae_mmdit_depth: int = 3
     latent_cvae_mmdit_cond_update: int = 0
     latent_cvae_mmdit_noisy_causal: int = 1
-    # V70: close the volume degree of freedom on the x_t evidence.  Noisy
-    # condition tokens pass through LayerNorm (same volume scale as every
-    # other market participant) and the t-gate moves from value scaling to an
-    # additive log g(t) bias on the noisy attention logits -- same gating
-    # semantics, but no longer defeatable by lift amplification, and the
-    # attention-share gauges become honest influence readings.
+    # Legacy compatibility fields for older decoders. The native-time MMDiT
+    # path does not use a separate noisy reader or source gate.
     latent_cvae_mmdit_noisy_logit_gate: int = 0
+    # The host MMDiT residual gate remains the only update-scale owner.
+    latent_cvae_mmdit_residual_scale_max: float = 0.25
+    # Deprecated V91 source-router bound. Kept in the config surface so old
+    # launch scripts remain readable; the evidence-owned correction path does
+    # not use a two-source route.
+    latent_cvae_mmdit_source_route_delta_max: float = 1.0
+    # Retained for checkpoint and CLI compatibility with the previous V91
+    # decoder. The native-time path no longer constructs a noisy correction
+    # budget or a source controller from these values.
+    latent_cvae_mmdit_noisy_correction_min: float = 0.05
+    latent_cvae_mmdit_noisy_correction_max: float = 0.75
+    latent_cvae_mmdit_noisy_correction_power: float = 1.5
+    latent_cvae_mmdit_noisy_correction_logit_delta: float = 1.0
+    latent_cvae_mmdit_controller_modulation_scale: float = 0.25
+    # Evaluation-only source ablation controls. Defaults preserve the normal
+    # path and are never learned by the model.
+    latent_cvae_mmdit_evidence_scale: float = 1.0
+    latent_cvae_mmdit_noisy_scale: float = 1.0
+    # V92: native-time execution plane. The controller gates the host
+    # residual writers before the ordered contraction bank; the bank closes
+    # the same ordered directions continuously and the controller selects
+    # capacity/repetition.
+    latent_cvae_mmdit_operator_capacity: int = 0
+    latent_cvae_mmdit_operator_rank: int = 32
+    # Rank-level ordered capacity is the differentiable training contract.
+    # Hardware-sized grouping can still be selected explicitly for deployment,
+    # but the default must not hide small changes such as rank 32 -> 29.
+    latent_cvae_mmdit_operator_groups: int = 32
+    latent_cvae_mmdit_operator_depth_logit_init: float = 4.0
+    latent_cvae_mmdit_execution_controller: int = 0
+    # Let the native execution plane choose any still-uncommitted host block or
+    # terminal identity. Training/default evaluation use the attached soft
+    # action chart; hard execution remains an explicit ablation.
+    latent_cvae_mmdit_dynamic_block_route: int = 0
+    latent_cvae_mmdit_control_tokens: int = 8
+    latent_cvae_mmdit_controller_depth: int = 2
+    latent_cvae_mmdit_controller_heads: int = 8
+    latent_cvae_mmdit_controller_ffn_expansion: float = 2.0
+    latent_cvae_mmdit_max_dwell: int = 2
+    latent_cvae_mmdit_dwell_mode: str = "fixed"
+    latent_cvae_mmdit_execution_soft_temperature: float = 1.0
+    # Stopping is a real identity candidate.  Its smaller prior expresses that
+    # a premature exit is more consequential than applying one normal block;
+    # task gradients may still overcome that prior when stopping is correct.
+    latent_cvae_mmdit_identity_candidate: int = 1
+    latent_cvae_mmdit_terminal_prior_weight: float = 0.25
+    latent_cvae_mmdit_execution_eval_policy: str = "soft"
+    latent_cvae_mmdit_execution_warmup_steps: int = 200
+    latent_cvae_mmdit_execution_transition_steps: int = 1000
     # V72: shelf discipline -- the evidence workspace is for world evidence;
     # content the action wrote must not return as evidence. When enabled, the
     # per-step progress update no longer receives the raw action summary
@@ -437,7 +537,27 @@ class V39PolicyConfig(V38PolicyConfig):
     hierarchical_mmdit_controller_depth: int = 2
     hierarchical_mmdit_controller_heads: int = 8
     hierarchical_mmdit_controller_ffn_expansion: float = 2.0
+    # V87: run the hierarchical MMDiT state in the complete orthonormal DCT
+    # coefficient chart. Refinement changes a soft bandwidth, never the state
+    # dimensionality or the flow bridge.
+    hierarchical_mmdit_spectral_state: int = 0
+    hierarchical_mmdit_spectral_arm_start_fraction: float = 0.16
+    hierarchical_mmdit_spectral_gripper_start_fraction: float = 0.33
+    hierarchical_mmdit_spectral_temperature: float = 1.5
+    hierarchical_mmdit_spectral_schedule_power: float = 1.0
+    hierarchical_mmdit_spectral_controller_shift_limit: float = 2.0
+    hierarchical_mmdit_spectral_competition_loss_weight: float = 0.0
+    hierarchical_mmdit_spectral_competition_warmup_steps: int = 200
     hierarchical_mmdit_operation_candidate_probes: int = 0
+    # V88: value-supervised monotonic dwell. Fixed and shadow retain the exact
+    # V87 execution path; learned changes execution only after the warm-up.
+    hierarchical_mmdit_operation_value_warmup_steps: int = 200
+    hierarchical_mmdit_dwell_mode: str = "fixed"
+    # V89: separate the central control policy from its typed actuators.  The
+    # Both contracts now route operations and nested capacity only. The old
+    # name remains load-compatible, but controller update-keep logits are not
+    # consumed; residual amplitude stays with each block's host LayerScale.
+    hierarchical_mmdit_execution_contract: str = "legacy_stage_keep"
     # Training schedule and deployment routing are orthogonal controls. Random
     # dwell is a legacy schedule option; learned operation selection is driven
     # by the unified controller's legal candidate policy.
@@ -452,7 +572,7 @@ class V39PolicyConfig(V38PolicyConfig):
     # completed gated operation; neither may replace the learned host gate.
     hierarchical_mmdit_residual_scale_init: float = 0.05
     hierarchical_mmdit_residual_scale_max: float = 0.20
-    hierarchical_mmdit_architecture_version: str = "post_gate_contraction_sidecar_v11_oracle_router"
+    hierarchical_mmdit_architecture_version: str = "post_gate_contraction_sidecar_v12_value_dwell"
     # CR7 fallback (item 23): dedicated restricted contract for event/motion
     # subheads (never velocity).  0 = action-only output (mainline first try).
     hierarchical_mmdit_output_contract: int = 0
@@ -557,8 +677,10 @@ class V39PolicyConfig(V38PolicyConfig):
         if int(self.layer_causal_memory_tokens) < 1:
             raise ValueError("layer_causal_memory_tokens must be >= 1")
         for name in (
-            "layer_low_causal_weight", "layer_high_causal_weight",
-            "layer_low_latent_weight", "layer_high_latent_weight",
+            "layer_low_causal_weight",
+            "layer_high_causal_weight",
+            "layer_low_latent_weight",
+            "layer_high_latent_weight",
         ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f"{name} must be non-negative")
@@ -570,8 +692,19 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("action_consequence_self_condition must be 0 or 1")
         if int(self.layer_zero_base_diagnostic) not in (0, 1):
             raise ValueError("layer_zero_base_diagnostic must be 0 or 1")
-        if str(self.final_action_decoder) not in {"legacy", "residual_action_flow", "layered_residual_action_flow", "latent_main_action", "latent_cvae_action", "adaptive_recurrent_cvae_action", "hierarchical_mmdit_action"}:
-            raise ValueError("final_action_decoder must be legacy, residual_action_flow, layered_residual_action_flow, latent_main_action, latent_cvae_action, adaptive_recurrent_cvae_action, or hierarchical_mmdit_action")
+        if str(self.final_action_decoder) not in {
+            "legacy",
+            "residual_action_flow",
+            "layered_residual_action_flow",
+            "latent_main_action",
+            "latent_cvae_action",
+            "adaptive_recurrent_cvae_action",
+            "hierarchical_mmdit_action",
+            "evidence_latent_mmdit_action",
+        }:
+            raise ValueError(
+                "final_action_decoder must be legacy, residual_action_flow, layered_residual_action_flow, latent_main_action, latent_cvae_action, adaptive_recurrent_cvae_action, hierarchical_mmdit_action, or evidence_latent_mmdit_action"
+            )
         if int(self.action_flow_residual_depth) < 1:
             raise ValueError("action_flow_residual_depth must be >= 1")
         if int(self.action_flow_residual_high_slots) < 1:
@@ -614,8 +747,12 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_action_mid_steps cannot exceed action_horizon")
         if int(self.latent_action_mid_depth) < int(self.latent_action_near_depth):
             raise ValueError("latent_action_mid_depth must be >= latent_action_near_depth")
-        if int(self.latent_action_near_depth) > int(self.latent_action_decoder_depth) or int(self.latent_action_mid_depth) > int(self.latent_action_decoder_depth):
-            raise ValueError("latent_action_near_depth/mid_depth cannot exceed latent_action_decoder_depth")
+        if int(self.latent_action_near_depth) > int(self.latent_action_decoder_depth) or int(
+            self.latent_action_mid_depth
+        ) > int(self.latent_action_decoder_depth):
+            raise ValueError(
+                "latent_action_near_depth/mid_depth cannot exceed latent_action_decoder_depth"
+            )
         if int(self.latent_cvae_z_dim) < 1:
             raise ValueError("latent_cvae_z_dim must be >= 1")
         if int(self.latent_cvae_decoder_depth) < 1:
@@ -623,20 +760,33 @@ class V39PolicyConfig(V38PolicyConfig):
         if float(self.latent_cvae_ffn_expansion) < 1.0:
             raise ValueError("latent_cvae_ffn_expansion must be >= 1")
         for name in (
-            "latent_cvae_layer_memory", "latent_cvae_transition_memory",
-            "latent_cvae_transition_detach", "latent_cvae_context_memory", "latent_cvae_visual_memory",
-            "latent_cvae_layer_detach", "latent_cvae_condition_source_norm",
+            "latent_cvae_layer_memory",
+            "latent_cvae_transition_memory",
+            "latent_cvae_transition_detach",
+            "latent_cvae_context_memory",
+            "latent_cvae_visual_memory",
+            "latent_cvae_layer_detach",
+            "latent_cvae_condition_source_norm",
             "latent_cvae_bounded_consequence_fusion",
             "latent_cvae_event_gripper_gate",
-            "latent_cvae_inference_sample", "latent_cvae_variational", "latent_cvae_z_probe",
-            "latent_cvae_noisy_gate", "latent_cvae_layer_scan",
-            "latent_cvae_mmdit_decoder", "latent_cvae_mmdit_cond_update", "latent_cvae_mmdit_noisy_causal",
+            "latent_cvae_inference_sample",
+            "latent_cvae_variational",
+            "latent_cvae_z_probe",
+            "latent_cvae_noisy_gate",
+            "latent_cvae_layer_scan",
+            "latent_cvae_mmdit_decoder",
+            "latent_cvae_mmdit_cond_update",
+            "latent_cvae_mmdit_noisy_causal",
             "latent_cvae_mmdit_noisy_logit_gate",
             "latent_cvae_progress_action_isolation",
-            "latent_cvae_workspace_noisy_query", "latent_cvae_workspace_trajectory_source",
-            "latent_cvae_workspace_global_sources", "latent_cvae_workspace_layer_source",
-            "latent_cvae_workspace_progress_value", "latent_cvae_workspace_time_state",
-            "latent_cvae_workspace_slot_time_state", "latent_cvae_workspace_controller",
+            "latent_cvae_workspace_noisy_query",
+            "latent_cvae_workspace_trajectory_source",
+            "latent_cvae_workspace_global_sources",
+            "latent_cvae_workspace_layer_source",
+            "latent_cvae_workspace_progress_value",
+            "latent_cvae_workspace_time_state",
+            "latent_cvae_workspace_slot_time_state",
+            "latent_cvae_workspace_controller",
             "latent_cvae_hierarchical_workspace",
         ):
             if int(getattr(self, name)) not in (0, 1):
@@ -645,6 +795,100 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_cvae_workspace_slot_time_scale must be >= 0")
         if int(self.latent_cvae_mmdit_depth) < 1:
             raise ValueError("latent_cvae_mmdit_depth must be >= 1")
+        if not (0.0 < float(self.latent_cvae_mmdit_residual_scale_max) <= 1.0):
+            raise ValueError("latent_cvae_mmdit_residual_scale_max must be in (0, 1]")
+        if float(self.latent_cvae_mmdit_source_route_delta_max) < 0.0:
+            raise ValueError("latent_cvae_mmdit_source_route_delta_max must be >= 0")
+        correction_min = float(self.latent_cvae_mmdit_noisy_correction_min)
+        correction_max = float(self.latent_cvae_mmdit_noisy_correction_max)
+        if not (0.0 <= correction_min < correction_max <= 1.0):
+            raise ValueError(
+                "latent_cvae_mmdit_noisy_correction_min/max must satisfy "
+                "0 <= min < max <= 1"
+            )
+        if float(self.latent_cvae_mmdit_noisy_correction_power) <= 0.0:
+            raise ValueError("latent_cvae_mmdit_noisy_correction_power must be positive")
+        if float(self.latent_cvae_mmdit_noisy_correction_logit_delta) < 0.0:
+            raise ValueError(
+                "latent_cvae_mmdit_noisy_correction_logit_delta must be >= 0"
+            )
+        if float(self.latent_cvae_mmdit_controller_modulation_scale) < 0.0:
+            raise ValueError(
+                "latent_cvae_mmdit_controller_modulation_scale must be >= 0"
+            )
+        if float(self.latent_cvae_mmdit_evidence_scale) < 0.0:
+            raise ValueError("latent_cvae_mmdit_evidence_scale must be >= 0")
+        if float(self.latent_cvae_mmdit_noisy_scale) < 0.0:
+            raise ValueError("latent_cvae_mmdit_noisy_scale must be >= 0")
+        if int(self.latent_cvae_mmdit_operator_capacity) not in (0, 1):
+            raise ValueError("latent_cvae_mmdit_operator_capacity must be 0 or 1")
+        if int(self.latent_cvae_mmdit_execution_controller) not in (0, 1):
+            raise ValueError("latent_cvae_mmdit_execution_controller must be 0 or 1")
+        if int(self.latent_cvae_mmdit_dynamic_block_route) not in (0, 1):
+            raise ValueError("latent_cvae_mmdit_dynamic_block_route must be 0 or 1")
+        if int(self.latent_cvae_mmdit_dynamic_block_route) and not int(
+            self.latent_cvae_mmdit_execution_controller
+        ):
+            raise ValueError("dynamic native block routing requires the execution controller")
+        if int(self.latent_cvae_mmdit_operator_capacity):
+            if int(self.latent_cvae_mmdit_operator_rank) < 1:
+                raise ValueError("latent_cvae_mmdit_operator_rank must be >= 1")
+            if int(self.latent_cvae_mmdit_operator_rank) > int(self.hidden_size):
+                raise ValueError("latent_cvae_mmdit_operator_rank cannot exceed hidden_size")
+            if int(self.latent_cvae_mmdit_operator_groups) < 1 or int(
+                self.latent_cvae_mmdit_operator_rank
+            ) % int(self.latent_cvae_mmdit_operator_groups):
+                raise ValueError("operator rank must be divisible by positive operator groups")
+            if float(self.latent_cvae_mmdit_operator_depth_logit_init) <= 0.0:
+                raise ValueError("operator depth-logit initialization must be positive")
+        if int(self.latent_cvae_mmdit_execution_controller):
+            if int(self.latent_cvae_mmdit_control_tokens) < 2:
+                raise ValueError("native controller needs at least two control tokens")
+            if int(self.latent_cvae_mmdit_controller_depth) < 1:
+                raise ValueError("native controller depth must be >= 1")
+            if int(self.latent_cvae_mmdit_controller_heads) < 1 or int(
+                self.hidden_size
+            ) % int(self.latent_cvae_mmdit_controller_heads):
+                raise ValueError("native controller heads must divide hidden_size")
+            if float(self.latent_cvae_mmdit_controller_ffn_expansion) < 1.0:
+                raise ValueError("native controller FFN expansion must be >= 1")
+        if int(self.latent_cvae_mmdit_max_dwell) < 1:
+            raise ValueError("native controller max dwell must be >= 1")
+        if str(self.latent_cvae_mmdit_dwell_mode) not in {
+            "fixed",
+            "random",
+            "learned_shadow",
+            "learned",
+        }:
+            raise ValueError("unsupported native controller dwell mode")
+        if str(self.latent_cvae_mmdit_dwell_mode) != "fixed" and not int(
+            self.latent_cvae_mmdit_execution_controller
+        ):
+            raise ValueError("adaptive native dwell requires the execution controller")
+        if str(self.latent_cvae_mmdit_dwell_mode) != "fixed" and int(
+            self.latent_cvae_mmdit_max_dwell
+        ) < 2:
+            raise ValueError("adaptive native dwell requires max_dwell >= 2")
+        if float(self.latent_cvae_mmdit_execution_soft_temperature) <= 0.0:
+            raise ValueError("native execution soft temperature must be positive")
+        if int(self.latent_cvae_mmdit_identity_candidate) not in (0, 1):
+            raise ValueError("latent_cvae_mmdit_identity_candidate must be 0 or 1")
+        if int(self.latent_cvae_mmdit_dynamic_block_route) and not int(
+            self.latent_cvae_mmdit_identity_candidate
+        ):
+            raise ValueError("dynamic native execution requires an identity candidate")
+        if not (0.0 < float(self.latent_cvae_mmdit_terminal_prior_weight) <= 1.0):
+            raise ValueError("native terminal prior weight must be in (0, 1]")
+        if str(self.latent_cvae_mmdit_execution_eval_policy) not in {
+            "soft",
+            "hard",
+            "neutral",
+        }:
+            raise ValueError("native execution eval policy must be soft, hard, or neutral")
+        if int(self.latent_cvae_mmdit_execution_warmup_steps) < 0:
+            raise ValueError("native execution warmup must be >= 0")
+        if int(self.latent_cvae_mmdit_execution_transition_steps) < 1:
+            raise ValueError("native execution transition must be >= 1")
         if int(self.latent_cvae_horizon_tokens) < 1:
             raise ValueError("latent_cvae_horizon_tokens must be >= 1")
         if int(self.latent_cvae_stage_slots) < 1:
@@ -667,7 +911,8 @@ class V39PolicyConfig(V38PolicyConfig):
         if float(self.hierarchical_mmdit_consequence_scale_max) <= 0.0:
             raise ValueError("hierarchical_mmdit_consequence_scale_max must be positive")
         if not (
-            0.0 <= float(self.hierarchical_mmdit_consequence_scale_init)
+            0.0
+            <= float(self.hierarchical_mmdit_consequence_scale_init)
             <= float(self.hierarchical_mmdit_consequence_scale_max)
         ):
             raise ValueError("hierarchical_mmdit_consequence_scale_init must be in [0, max]")
@@ -690,7 +935,8 @@ class V39PolicyConfig(V38PolicyConfig):
         if not (0.0 < float(self.hierarchical_mmdit_residual_scale_max) <= 1.0):
             raise ValueError("hierarchical_mmdit_residual_scale_max must be in (0, 1]")
         if not (
-            0.0 < float(self.hierarchical_mmdit_residual_scale_init)
+            0.0
+            < float(self.hierarchical_mmdit_residual_scale_init)
             <= float(self.hierarchical_mmdit_residual_scale_max)
         ):
             raise ValueError("hierarchical_mmdit_residual_scale_init must be in (0, max]")
@@ -704,7 +950,9 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("hierarchical_mmdit_operator_rank cannot exceed hidden_size")
         if int(self.hierarchical_mmdit_operator_groups) < 1:
             raise ValueError("hierarchical_mmdit_operator_groups must be positive")
-        if int(self.hierarchical_mmdit_operator_rank) % int(self.hierarchical_mmdit_operator_groups):
+        if int(self.hierarchical_mmdit_operator_rank) % int(
+            self.hierarchical_mmdit_operator_groups
+        ):
             raise ValueError("hierarchical_mmdit_operator_rank must be divisible by groups")
         if float(self.hierarchical_mmdit_operator_depth_logit_init) <= 0.0:
             raise ValueError("operator depth logit init must be positive")
@@ -720,13 +968,44 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("hierarchical_mmdit_controller_depth must be positive")
         if int(self.hierarchical_mmdit_controller_heads) < 1:
             raise ValueError("hierarchical_mmdit_controller_heads must be positive")
-        if (
-            int(self.hierarchical_mmdit_unified_controller)
-            and int(self.hidden_size) % int(self.hierarchical_mmdit_controller_heads)
+        if int(self.hierarchical_mmdit_unified_controller) and int(self.hidden_size) % int(
+            self.hierarchical_mmdit_controller_heads
         ):
             raise ValueError("hidden_size must be divisible by controller_heads")
         if float(self.hierarchical_mmdit_controller_ffn_expansion) < 1.0:
             raise ValueError("controller_ffn_expansion must be >= 1")
+        if int(self.hierarchical_mmdit_spectral_state) not in (0, 1):
+            raise ValueError("hierarchical_mmdit_spectral_state must be 0 or 1")
+        if int(self.hierarchical_mmdit_spectral_state):
+            if str(self.arm_flow_mode) != "manifold_native":
+                raise ValueError("complete spectral flow requires arm_flow_mode=manifold_native")
+            if str(self.gripper_field_mode) != "parseval_temporal":
+                raise ValueError(
+                    "complete spectral flow requires gripper_field_mode=parseval_temporal"
+                )
+        for name in (
+            "hierarchical_mmdit_spectral_arm_start_fraction",
+            "hierarchical_mmdit_spectral_gripper_start_fraction",
+        ):
+            value = float(getattr(self, name))
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} must be in (0, 1]")
+        if float(self.hierarchical_mmdit_spectral_temperature) <= 0.0:
+            raise ValueError("hierarchical_mmdit_spectral_temperature must be positive")
+        if float(self.hierarchical_mmdit_spectral_schedule_power) <= 0.0:
+            raise ValueError("hierarchical_mmdit_spectral_schedule_power must be positive")
+        if float(self.hierarchical_mmdit_spectral_controller_shift_limit) < 0.0:
+            raise ValueError(
+                "hierarchical_mmdit_spectral_controller_shift_limit must be non-negative"
+            )
+        if float(self.hierarchical_mmdit_spectral_competition_loss_weight) < 0.0:
+            raise ValueError(
+                "hierarchical_mmdit_spectral_competition_loss_weight must be non-negative"
+            )
+        if int(self.hierarchical_mmdit_spectral_competition_warmup_steps) < 0:
+            raise ValueError(
+                "hierarchical_mmdit_spectral_competition_warmup_steps must be non-negative"
+            )
         if (
             int(self.hierarchical_mmdit_unified_controller)
             and str(self.final_action_decoder) != "hierarchical_mmdit_action"
@@ -738,13 +1017,42 @@ class V39PolicyConfig(V38PolicyConfig):
         if str(self.hierarchical_mmdit_schedule_mode) not in {"fixed", "random_dwell"}:
             raise ValueError("hierarchical_mmdit_schedule_mode must be fixed or random_dwell")
         if int(self.hierarchical_mmdit_operation_candidate_probes) not in {0, 1}:
+            raise ValueError("hierarchical_mmdit_operation_candidate_probes must be 0 or 1")
+        if int(self.hierarchical_mmdit_operation_value_warmup_steps) < 0:
+            raise ValueError("hierarchical_mmdit_operation_value_warmup_steps must be non-negative")
+        if str(self.hierarchical_mmdit_dwell_mode) not in {
+            "fixed",
+            "shadow",
+            "learned",
+        }:
+            raise ValueError("hierarchical_mmdit_dwell_mode must be fixed, shadow, or learned")
+        if str(self.hierarchical_mmdit_execution_contract) not in {
+            "legacy_stage_keep",
+            "typed_block_budget",
+        }:
             raise ValueError(
-                "hierarchical_mmdit_operation_candidate_probes must be 0 or 1"
+                "hierarchical_mmdit_execution_contract must be "
+                "legacy_stage_keep or typed_block_budget"
             )
+        if str(self.hierarchical_mmdit_execution_contract) == "typed_block_budget" and not int(
+            self.hierarchical_mmdit_unified_controller
+        ):
+            raise ValueError("typed_block_budget requires hierarchical_mmdit_unified_controller=1")
+        if str(self.hierarchical_mmdit_dwell_mode) != "fixed":
+            if not int(self.hierarchical_mmdit_unified_controller):
+                raise ValueError("value dwell requires hierarchical_mmdit_unified_controller=1")
+            if not int(self.hierarchical_mmdit_operation_candidate_probes):
+                raise ValueError(
+                    "value dwell requires hierarchical_mmdit_operation_candidate_probes=1"
+                )
         if not 0.0 <= float(self.hierarchical_mmdit_random_prefix_probability) <= 1.0:
             raise ValueError("hierarchical_mmdit_random_prefix_probability must be in [0,1]")
         if str(self.hierarchical_mmdit_exhaustion_mode) not in {
-            "off", "shadow", "adaptive", "learned_shadow", "learned",
+            "off",
+            "shadow",
+            "adaptive",
+            "learned_shadow",
+            "learned",
         }:
             raise ValueError(
                 "hierarchical_mmdit_exhaustion_mode must be off, shadow, adaptive, "
@@ -772,10 +1080,9 @@ class V39PolicyConfig(V38PolicyConfig):
                 raise ValueError(
                     "shadow/adaptive exhaustion requires three calibrated positive stage-pressure thresholds"
                 )
-        if (
-            int(self.hierarchical_mmdit_unified_controller)
-            and str(self.hierarchical_mmdit_exhaustion_mode) in {"shadow", "adaptive"}
-        ):
+        if int(self.hierarchical_mmdit_unified_controller) and str(
+            self.hierarchical_mmdit_exhaustion_mode
+        ) in {"shadow", "adaptive"}:
             raise ValueError(
                 "the unified controller does not use threshold-based shadow/adaptive exhaustion; "
                 "use off, learned_shadow, or learned"
@@ -785,40 +1092,51 @@ class V39PolicyConfig(V38PolicyConfig):
         if int(self.hierarchical_mmdit_exhaustion_confirm_steps) < 1:
             raise ValueError("hierarchical_mmdit_exhaustion_confirm_steps must be positive")
         if str(self.hierarchical_mmdit_architecture_version) != (
-            "post_gate_contraction_sidecar_v11_oracle_router"
+            "post_gate_contraction_sidecar_v12_value_dwell"
         ):
             raise ValueError(
                 "unsupported hierarchical_mmdit_architecture_version: "
                 f"{self.hierarchical_mmdit_architecture_version!r}"
             )
-        if str(self.final_action_decoder) == "hierarchical_mmdit_action" and not int(self.layer_contract_adapters):
+        if str(self.final_action_decoder) == "hierarchical_mmdit_action" and not int(
+            self.layer_contract_adapters
+        ):
             raise ValueError("hierarchical_mmdit_action requires layer_contract_adapters=1")
+        if str(self.final_action_decoder) == "evidence_latent_mmdit_action":
+            if not int(self.layer_contract_adapters):
+                raise ValueError("evidence_latent_mmdit_action requires layer_contract_adapters=1")
+            if int(self.hierarchical_mmdit_spectral_state):
+                raise ValueError(
+                    "evidence_latent_mmdit_action is a native-time migration path; "
+                    "disable hierarchical_mmdit_spectral_state"
+                )
+            if int(self.latent_cvae_mmdit_cond_update):
+                raise ValueError("evidence_latent_mmdit_action requires read-only condition tokens")
         if str(self.final_action_decoder) == "hierarchical_mmdit_action":
             if int(self.hierarchical_mmdit_refine_steps) < int(self.hierarchical_mmdit_depth):
                 raise ValueError(
                     "hierarchical_mmdit_refine_steps must cover every distinct refinement block"
                 )
-            if int(self.hierarchical_mmdit_low_slots) < 5 or int(self.hierarchical_mmdit_low_slots) % 5 != 0:
+            if (
+                int(self.hierarchical_mmdit_low_slots) < 5
+                or int(self.hierarchical_mmdit_low_slots) % 5 != 0
+            ):
                 raise ValueError(
                     "hierarchical_mmdit_action requires low slots to be a positive multiple of five"
                 )
             if int(self.hierarchical_mmdit_stage_slots) < int(
                 self.hierarchical_mmdit_operator_stages
             ):
-                raise ValueError(
-                    "hierarchical_mmdit_stage_slots must cover every operator stage"
-                )
-            if (
-                str(self.hierarchical_mmdit_schedule_mode) == "random_dwell"
-                and int(self.hierarchical_mmdit_refine_steps)
-                < int(self.hierarchical_mmdit_depth)
-            ):
+                raise ValueError("hierarchical_mmdit_stage_slots must cover every operator stage")
+            if str(self.hierarchical_mmdit_schedule_mode) == "random_dwell" and int(
+                self.hierarchical_mmdit_refine_steps
+            ) < int(self.hierarchical_mmdit_depth):
                 raise ValueError(
                     "random_dwell requires enough refine steps to cover every refinement block"
                 )
             if int(self.hierarchical_mmdit_noisy_gate_mode) != 0:
                 raise ValueError(
-                    "post_gate_contraction_sidecar_v11 does not add an external noisy amplitude gate"
+                    "post_gate_contraction_sidecar_v12 does not add an external noisy amplitude gate"
                 )
         if int(self.latent_cvae_hierarchical_workspace):
             if str(self.final_action_decoder) != "adaptive_recurrent_cvae_action":
@@ -841,7 +1159,10 @@ class V39PolicyConfig(V38PolicyConfig):
                     "hierarchical workspace owns selection/state routing; disable incompatible paths: "
                     + ", ".join(enabled)
                 )
-        if str(self.final_action_decoder) in ("latent_cvae_action", "adaptive_recurrent_cvae_action"):
+        if str(self.final_action_decoder) in (
+            "latent_cvae_action",
+            "adaptive_recurrent_cvae_action",
+        ):
             if int(self.latent_cvae_layer_memory) and not int(self.layer_contract_adapters):
                 raise ValueError(
                     f"{self.final_action_decoder} with latent_cvae_layer_memory=1 "
@@ -877,7 +1198,9 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("adaptive_cvae_progress_role_dim must be >= 2")
         if str(self.final_action_decoder) == "adaptive_recurrent_cvae_action":
             if int(self.latent_cvae_layer_memory) and not int(self.layer_contract_adapters):
-                raise ValueError("adaptive_recurrent_cvae_action with latent_cvae_layer_memory=1 requires layer_contract_adapters=1")
+                raise ValueError(
+                    "adaptive_recurrent_cvae_action with latent_cvae_layer_memory=1 requires layer_contract_adapters=1"
+                )
         if float(self.latent_cvae_output_init_std) < 0:
             raise ValueError("latent_cvae_output_init_std must be non-negative")
         if float(self.latent_cvae_mu_bound) < 0:
@@ -930,7 +1253,9 @@ class V39PolicyConfig(V38PolicyConfig):
                 raise ValueError(f"{name} must be 0 or 1")
         if float(self.adaptive_cvae_route_min_temperature) <= 0:
             raise ValueError("adaptive_cvae_route_min_temperature must be positive")
-        if float(self.adaptive_cvae_route_max_temperature) < float(self.adaptive_cvae_route_min_temperature):
+        if float(self.adaptive_cvae_route_max_temperature) < float(
+            self.adaptive_cvae_route_min_temperature
+        ):
             raise ValueError("adaptive_cvae_route_max_temperature must be >= min temperature")
         if int(self.adaptive_cvae_coarse_stride) < 1:
             raise ValueError("adaptive_cvae_coarse_stride must be >= 1")
@@ -943,7 +1268,9 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("adaptive_cvae_context_capsule_count must be >= 1")
         if float(self.adaptive_cvae_condition_strength_min) < 0:
             raise ValueError("adaptive_cvae_condition_strength_min must be non-negative")
-        if float(self.adaptive_cvae_condition_strength_max) < float(self.adaptive_cvae_condition_strength_min):
+        if float(self.adaptive_cvae_condition_strength_max) < float(
+            self.adaptive_cvae_condition_strength_min
+        ):
             raise ValueError("adaptive_cvae_condition_strength_max must be >= min")
         if not (
             float(self.adaptive_cvae_condition_strength_min)
@@ -963,9 +1290,13 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("adaptive_cvae_micro_step_init must be within [min, max]")
         if float(self.adaptive_cvae_micro_kp_max) < 0 or float(self.adaptive_cvae_micro_kd_max) < 0:
             raise ValueError("adaptive_cvae_micro gain maxima must be non-negative")
-        if not (0.0 <= float(self.adaptive_cvae_micro_kp_init) <= float(self.adaptive_cvae_micro_kp_max)):
+        if not (
+            0.0 <= float(self.adaptive_cvae_micro_kp_init) <= float(self.adaptive_cvae_micro_kp_max)
+        ):
             raise ValueError("adaptive_cvae_micro_kp_init must be within [0, kp_max]")
-        if not (0.0 <= float(self.adaptive_cvae_micro_kd_init) <= float(self.adaptive_cvae_micro_kd_max)):
+        if not (
+            0.0 <= float(self.adaptive_cvae_micro_kd_init) <= float(self.adaptive_cvae_micro_kd_max)
+        ):
             raise ValueError("adaptive_cvae_micro_kd_init must be within [0, kd_max]")
         if float(self.adaptive_cvae_micro_update_scale) < 0:
             raise ValueError("adaptive_cvae_micro_update_scale must be non-negative")
@@ -979,9 +1310,13 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_action_near_depth must be <= latent_action_mid_depth")
         if int(self.latent_action_mid_depth) > int(self.latent_action_decoder_depth):
             raise ValueError("latent_action_mid_depth cannot exceed latent_action_decoder_depth")
-        if int(self.layer_recurrent_consequence) and int(self.layer_consequence_steps) != int(self.future_anchors):
+        if int(self.layer_recurrent_consequence) and int(self.layer_consequence_steps) != int(
+            self.future_anchors
+        ):
             raise ValueError(
                 "layer_consequence_steps must equal future_anchors while the milestone losses use one target per anchor"
             )
-        if int(self.layer_recurrent_consequence) and int(self.layer_consequence_steps) > int(self.action_horizon):
+        if int(self.layer_recurrent_consequence) and int(self.layer_consequence_steps) > int(
+            self.action_horizon
+        ):
             raise ValueError("layer_consequence_steps cannot exceed action_horizon")

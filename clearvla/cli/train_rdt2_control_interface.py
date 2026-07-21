@@ -20,9 +20,18 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     serializable,
 )
 from clearvla.experiments.classic_policy_lab.dataset import RDT2FMDatasetConfig, RDT2FMWindowDataset
-from clearvla.experiments.classic_policy_lab.rdt2_conditioning import CachedDinoV2DenseConditioner, DebugDenseConditioner, DinoV2DenseConditioner
-from clearvla.experiments.classic_policy_lab.rdt2_control_interface import ControlInterfaceRDT2FMConfig, RDT2ControlInterface
-from clearvla.experiments.classic_policy_lab.rdt2_control_interface_runtime import train_control_interface_rdt2_fm
+from clearvla.experiments.classic_policy_lab.rdt2_conditioning import (
+    CachedDinoV2DenseConditioner,
+    DebugDenseConditioner,
+    DinoV2DenseConditioner,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_control_interface import (
+    ControlInterfaceRDT2FMConfig,
+    RDT2ControlInterface,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_control_interface_runtime import (
+    train_control_interface_rdt2_fm,
+)
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import DinoV2TokenStore
 from clearvla.experiments.classic_policy_lab.trainer import RDTTrainerConfig
 
@@ -58,7 +67,9 @@ PRESETS: dict[str, dict[str, int]] = {
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train v21 RDT2-FM with a control-relevant condition interface")
+    p = argparse.ArgumentParser(
+        description="Train v21 RDT2-FM with a control-relevant condition interface"
+    )
     add_data_args(p, default_resize=(224, 224))
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--prediction-horizon", type=int, default=24)
@@ -84,7 +95,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--inference-steps", type=int, default=5)
     p.add_argument("--no-flash-attn", action="store_true")
 
-    p.add_argument("--condition-mode", choices=["debug-dense", "dinov2", "dinov2-cache"], default="dinov2-cache")
+    p.add_argument(
+        "--condition-mode",
+        choices=["debug-dense", "dinov2", "dinov2-cache"],
+        default="dinov2-cache",
+    )
     p.add_argument("--instruction", default="")
     p.add_argument("--debug-cond-tokens", type=int, default=8)
     p.add_argument("--debug-dense-token-dim", type=int, default=32)
@@ -112,7 +127,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta2", type=float, default=0.999)
     p.add_argument("--adam-eps", type=float, default=1e-8)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant")
+    p.add_argument(
+        "--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant"
+    )
     p.add_argument("--warmup-steps", type=int, default=0)
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=10)
@@ -128,8 +145,16 @@ def parse_args() -> argparse.Namespace:
 
 def _resolve_shape(args: argparse.Namespace) -> None:
     names = (
-        "hidden_size", "depth", "heads", "kv_heads", "register_tokens", "multiple_of",
-        "interface_hidden_size", "interface_heads", "interface_kv_heads", "interface_multiple_of",
+        "hidden_size",
+        "depth",
+        "heads",
+        "kv_heads",
+        "register_tokens",
+        "multiple_of",
+        "interface_hidden_size",
+        "interface_heads",
+        "interface_kv_heads",
+        "interface_multiple_of",
     )
     if args.model_size == "custom":
         missing = [name for name in names if getattr(args, name) is None]
@@ -157,11 +182,18 @@ def _dtype(name: str, device: torch.device) -> torch.dtype:
     return torch.float32
 
 
-def _build_dense_conditioner(args: argparse.Namespace, *, episodes, cameras: tuple[str, ...], device: torch.device):
+def _build_dense_conditioner(
+    args: argparse.Namespace, *, episodes, cameras: tuple[str, ...], device: torch.device
+):
     if args.condition_mode == "debug-dense":
-        return DebugDenseConditioner(token_dim=args.debug_dense_token_dim, tokens_per_camera=max(1, args.debug_cond_tokens // max(len(cameras), 1))).to(device)
+        return DebugDenseConditioner(
+            token_dim=args.debug_dense_token_dim,
+            tokens_per_camera=max(1, args.debug_cond_tokens // max(len(cameras), 1)),
+        ).to(device)
     if args.condition_mode == "dinov2":
-        return DinoV2DenseConditioner(args.dinov2_model, local_files_only=args.dinov2_local_files_only).to(device)
+        return DinoV2DenseConditioner(
+            args.dinov2_model, local_files_only=args.dinov2_local_files_only
+        ).to(device)
     if args.dinov2_token_cache_dir is None:
         raise ValueError("--condition-mode dinov2-cache requires --dinov2-token-cache-dir")
     store = DinoV2TokenStore(
@@ -180,11 +212,19 @@ def main() -> None:
     _resolve_shape(args)
     if args.torch_num_threads > 0:
         torch.set_num_threads(args.torch_num_threads)
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     device = resolve_device(args.device)
     dtype = _dtype(args.dtype, device)
-    min_length = args.prediction_horizon + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset)) + 1
-    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
+    min_length = (
+        args.prediction_horizon
+        + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset))
+        + 1
+    )
+    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = (
+        load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
+    )
     action_dim = int(episodes[0].actions_raw.shape[1])
     state_dim = int(episodes[0].states_raw.shape[1])
     cameras = tuple(str(value) for value in args.cameras)
@@ -196,10 +236,30 @@ def main() -> None:
         stride=args.stride,
         zero_state=args.zero_state,
     )
-    train_ds = RDT2FMWindowDataset(episodes, train_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    val_ds = RDT2FMWindowDataset(episodes, val_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    train_loader = make_loader(train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device)
-    val_loader = make_loader(val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+    train_ds = RDT2FMWindowDataset(
+        episodes,
+        train_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    val_ds = RDT2FMWindowDataset(
+        episodes,
+        val_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    train_loader = make_loader(
+        train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device
+    )
+    val_loader = make_loader(
+        val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
     conditioner = _build_dense_conditioner(args, episodes=episodes, cameras=cameras, device=device)
     dense_token_dim = int(conditioner.token_dim)
     model_config = ControlInterfaceRDT2FMConfig(
@@ -262,29 +322,33 @@ def main() -> None:
             "mode": args.condition_mode,
             "dense_token_dim": dense_token_dim,
             "instruction": args.instruction,
-            "dinov2_token_cache_dir": None if args.dinov2_token_cache_dir is None else str(args.dinov2_token_cache_dir),
+            "dinov2_token_cache_dir": None
+            if args.dinov2_token_cache_dir is None
+            else str(args.dinov2_token_cache_dir),
         },
         "controlled_difference": "two-stage condition interface only: static scene-task compiler plus optional action-aware per-flow-step readout",
     }
-    print_context({
-        "model": "RDT2ControlInterface",
-        "model_size": args.model_size,
-        "interface_mode": args.interface_mode,
-        "parameters": model.parameter_count(),
-        "parameter_groups": model.parameter_groups(),
-        "motor_core_depth": args.depth,
-        "motor_core_hidden_size": args.hidden_size,
-        "train_windows": len(train_ds),
-        "val_windows": len(val_ds),
-        "cameras": cameras,
-        "action_dim": action_dim,
-        "state_dim": state_dim,
-        "prediction_horizon": args.prediction_horizon,
-        "condition_mode": args.condition_mode,
-        "normalizer": args.normalizer,
-        "zero_state": args.zero_state,
-        "controlled_difference": context["controlled_difference"],
-    })
+    print_context(
+        {
+            "model": "RDT2ControlInterface",
+            "model_size": args.model_size,
+            "interface_mode": args.interface_mode,
+            "parameters": model.parameter_count(),
+            "parameter_groups": model.parameter_groups(),
+            "motor_core_depth": args.depth,
+            "motor_core_hidden_size": args.hidden_size,
+            "train_windows": len(train_ds),
+            "val_windows": len(val_ds),
+            "cameras": cameras,
+            "action_dim": action_dim,
+            "state_dim": state_dim,
+            "prediction_horizon": args.prediction_horizon,
+            "condition_mode": args.condition_mode,
+            "normalizer": args.normalizer,
+            "zero_state": args.zero_state,
+            "controlled_difference": context["controlled_difference"],
+        }
+    )
     if args.dry_run:
         batch = next(iter(train_loader))
         state = batch["state"].to(device=device, dtype=dtype)
@@ -292,10 +356,21 @@ def main() -> None:
         images = batch["obs_image"].to(device=device)
         keys = torch.stack([batch["episode_idx"], batch["image_index"]], dim=1)
         with torch.no_grad():
-            condition = conditioner.encode(images, [args.instruction] * state.shape[0], sample_keys=keys, image_ablation="normal", camera_names=cameras).to(device=device, dtype=dtype)
+            condition = conditioner.encode(
+                images,
+                [args.instruction] * state.shape[0],
+                sample_keys=keys,
+                image_ablation="normal",
+                camera_names=cameras,
+            ).to(device=device, dtype=dtype)
         if condition.dense_tokens is None:
             raise AssertionError("dense condition missing")
-        losses = model.compute_loss(state_tokens=state, action_gt=actions, dense_tokens=condition.dense_tokens, attention_mask=condition.attention_mask)
+        losses = model.compute_loss(
+            state_tokens=state,
+            action_gt=actions,
+            dense_tokens=condition.dense_tokens,
+            attention_mask=condition.attention_mask,
+        )
         losses["loss"].backward()
         with torch.no_grad():
             pred, diagnostics = model.predict_action(
@@ -305,18 +380,22 @@ def main() -> None:
                 inference_steps=args.inference_steps,
                 return_diagnostics=True,
             )
-        print_context({
-            "dry_run_loss": float(losses["loss"].detach().cpu()),
-            "condition": tuple(condition.dense_tokens.shape),
-            "condition_mask": tuple(condition.attention_mask.shape),
-            "prediction": tuple(pred.shape),
-            "diagnostic_groups": diagnostics["source_group_names"],
-            "diagnostic_flow_steps": len(diagnostics["flow_steps"]),
-            "status": "control-interface dry-run passed",
-        })
+        print_context(
+            {
+                "dry_run_loss": float(losses["loss"].detach().cpu()),
+                "condition": tuple(condition.dense_tokens.shape),
+                "condition_mask": tuple(condition.attention_mask.shape),
+                "prediction": tuple(pred.shape),
+                "diagnostic_groups": diagnostics["source_group_names"],
+                "diagnostic_flow_steps": len(diagnostics["flow_steps"]),
+                "status": "control-interface dry-run passed",
+            }
+        )
         return
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "train_context.json").write_text(json.dumps(serializable(context), indent=2), encoding="utf-8")
+    (args.out_dir / "train_context.json").write_text(
+        json.dumps(serializable(context), indent=2), encoding="utf-8"
+    )
     train_control_interface_rdt2_fm(
         model=model,
         conditioner=conditioner,

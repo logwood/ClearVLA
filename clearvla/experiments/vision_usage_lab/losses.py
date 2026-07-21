@@ -34,10 +34,24 @@ class VisionUsageLabLossConfig:
 
     def validate(self) -> None:
         weights = (
-            self.flow_weight, self.endpoint_weight, self.first_weight, self.first4_weight,
-            self.velocity_weight, self.source_weight, self.prefix_weight, self.prefix_teacher_weight,
-            self.streaming_weight, self.streaming_teacher_forced_weight, self.streaming_teacher_weight, self.consistency_weight, self.dynamics_weight, self.dynamics_cosine_weight,
-            self.ranking_weight, self.ranking_demand_boost, self.event_weight, self.demand_weight,
+            self.flow_weight,
+            self.endpoint_weight,
+            self.first_weight,
+            self.first4_weight,
+            self.velocity_weight,
+            self.source_weight,
+            self.prefix_weight,
+            self.prefix_teacher_weight,
+            self.streaming_weight,
+            self.streaming_teacher_forced_weight,
+            self.streaming_teacher_weight,
+            self.consistency_weight,
+            self.dynamics_weight,
+            self.dynamics_cosine_weight,
+            self.ranking_weight,
+            self.ranking_demand_boost,
+            self.event_weight,
+            self.demand_weight,
         )
         if any(float(value) < 0 for value in weights):
             raise ValueError("loss weights must be non-negative")
@@ -78,9 +92,13 @@ def action_composite_per_sample(
         raise ValueError("pred and target action chunks must share [B,K,A]")
     full = _smooth_l1_per_sample(pred, target, config.huber_beta)
     first = _smooth_l1_per_sample(pred[:, :1], target[:, :1], config.huber_beta)
-    first4 = _smooth_l1_per_sample(pred[:, : min(4, pred.shape[1])], target[:, : min(4, target.shape[1])], config.huber_beta)
+    first4 = _smooth_l1_per_sample(
+        pred[:, : min(4, pred.shape[1])], target[:, : min(4, target.shape[1])], config.huber_beta
+    )
     if pred.shape[1] >= 2:
-        velocity = _smooth_l1_per_sample(pred[:, 1:] - pred[:, :-1], target[:, 1:] - target[:, :-1], config.huber_beta)
+        velocity = _smooth_l1_per_sample(
+            pred[:, 1:] - pred[:, :-1], target[:, 1:] - target[:, :-1], config.huber_beta
+        )
     else:
         velocity = torch.zeros_like(full)
     total = (
@@ -89,7 +107,12 @@ def action_composite_per_sample(
         + config.first4_weight * first4
         + config.velocity_weight * velocity
     )
-    return total, {"endpoint_full": full, "endpoint_first": first, "endpoint_first4": first4, "endpoint_velocity": velocity}
+    return total, {
+        "endpoint_full": full,
+        "endpoint_first": first,
+        "endpoint_first4": first4,
+        "endpoint_velocity": velocity,
+    }
 
 
 def _visual_dynamics_losses(
@@ -149,7 +172,9 @@ def vision_usage_lab_loss(
         raise ValueError(f"unsupported lab phase={phase!r}")
     if correct.visual_delta_tokens is None:
         raise ValueError("correct output must include visual_delta_tokens")
-    dyn_huber, dyn_cosine = _visual_dynamics_losses(correct.visual_delta_tokens, target_visual_delta_tokens, config)
+    dyn_huber, dyn_cosine = _visual_dynamics_losses(
+        correct.visual_delta_tokens, target_visual_delta_tokens, config
+    )
     zero = torch.zeros((), device=dyn_huber.device, dtype=dyn_huber.dtype)
     source = _smooth_l1_per_sample(correct.learned_source, target_actions, config.huber_beta).mean()
     if correct.fast_prefix is None:
@@ -158,11 +183,15 @@ def vision_usage_lab_loss(
     prefix = _smooth_l1_per_sample(correct.fast_prefix, prefix_target, config.huber_beta).mean()
     streaming = zero
     if correct.streaming_actions is not None:
-        streaming = _smooth_l1_per_sample(correct.streaming_actions, target_actions, config.huber_beta).mean()
+        streaming = _smooth_l1_per_sample(
+            correct.streaming_actions, target_actions, config.huber_beta
+        ).mean()
     streaming_teacher_forced = zero
     if correct.streaming_teacher_forced_actions is not None:
         streaming_teacher_forced = _smooth_l1_per_sample(
-            correct.streaming_teacher_forced_actions, target_actions, config.huber_beta,
+            correct.streaming_teacher_forced_actions,
+            target_actions,
+            config.huber_beta,
         ).mean()
     streaming_teacher = zero
     flow = zero
@@ -181,8 +210,12 @@ def vision_usage_lab_loss(
     event = zero
     if event_flag is not None and config.event_weight > 0:
         if event_flag.ndim != 1 or event_flag.shape != correct.event_logit.shape:
-            raise ValueError(f"event_flag shape={tuple(event_flag.shape)} != logit={tuple(correct.event_logit.shape)}")
-        event = F.binary_cross_entropy_with_logits(correct.event_logit, event_flag.to(dtype=correct.event_logit.dtype))
+            raise ValueError(
+                f"event_flag shape={tuple(event_flag.shape)} != logit={tuple(correct.event_logit.shape)}"
+            )
+        event = F.binary_cross_entropy_with_logits(
+            correct.event_logit, event_flag.to(dtype=correct.event_logit.dtype)
+        )
     demand = _correction_demand_loss(correct, demand_target, config, fallback=zero)
 
     if phase == "representation_pretrain":
@@ -203,18 +236,28 @@ def vision_usage_lab_loss(
         if consistency_output is not None:
             if consistency_output.velocity is None:
                 raise ValueError("consistency output must include velocity")
-            consistency = _smooth_l1_per_sample(consistency_output.velocity, correct.velocity.detach(), config.huber_beta).mean()
-        action_per_sample, action_parts = action_composite_per_sample(correct.endpoint, target_actions, config)
+            consistency = _smooth_l1_per_sample(
+                consistency_output.velocity, correct.velocity.detach(), config.huber_beta
+            ).mean()
+        action_per_sample, action_parts = action_composite_per_sample(
+            correct.endpoint, target_actions, config
+        )
         action = action_per_sample.mean()
         teacher_endpoint = correct.endpoint.detach()
         teacher_prefix = teacher_endpoint[:, : correct.fast_prefix.shape[1]]
-        prefix_teacher = _smooth_l1_per_sample(correct.fast_prefix, teacher_prefix, config.huber_beta).mean()
+        prefix_teacher = _smooth_l1_per_sample(
+            correct.fast_prefix, teacher_prefix, config.huber_beta
+        ).mean()
         if correct.streaming_actions is not None:
-            streaming_teacher = _smooth_l1_per_sample(correct.streaming_actions, teacher_endpoint, config.huber_beta).mean()
+            streaming_teacher = _smooth_l1_per_sample(
+                correct.streaming_actions, teacher_endpoint, config.huber_beta
+            ).mean()
         if wrong is not None and config.ranking_weight > 0:
             if wrong.endpoint is None:
                 raise ValueError("counterfactual output must include endpoint")
-            wrong_per_sample, _ = action_composite_per_sample(wrong.endpoint, target_actions, config)
+            wrong_per_sample, _ = action_composite_per_sample(
+                wrong.endpoint, target_actions, config
+            )
             wrong_action = wrong_per_sample.mean()
             rank_per_sample = F.relu(config.ranking_margin + action_per_sample - wrong_per_sample)
             if demand_target is None:
@@ -222,7 +265,9 @@ def vision_usage_lab_loss(
             else:
                 if demand_target.ndim != 1 or demand_target.shape != rank_per_sample.shape:
                     raise ValueError("demand_target must align with action batch for ranking")
-                rank_weights = 1.0 + config.ranking_demand_boost * demand_target.to(dtype=rank_per_sample.dtype)
+                rank_weights = 1.0 + config.ranking_demand_boost * demand_target.to(
+                    dtype=rank_per_sample.dtype
+                )
             ranking_weight_mean = rank_weights.mean()
             ranking = _weighted_mean(rank_per_sample, rank_weights)
         total = (

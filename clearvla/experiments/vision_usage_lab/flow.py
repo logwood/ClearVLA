@@ -31,7 +31,15 @@ class ActionBridgeConfig:
             raise ValueError("bridge probabilities must be non-negative")
         if abs(sum(probabilities) - 1.0) > 1e-6:
             raise ValueError(f"bridge probabilities must sum to 1, got {sum(probabilities)}")
-        if min(self.mild_noise_std, self.strong_noise_std, self.mild_velocity_bias_std, self.strong_velocity_bias_std) < 0:
+        if (
+            min(
+                self.mild_noise_std,
+                self.strong_noise_std,
+                self.mild_velocity_bias_std,
+                self.strong_velocity_bias_std,
+            )
+            < 0
+        ):
             raise ValueError("bridge noise scales must be non-negative")
         if not 0.0 <= self.min_time < self.max_time <= 1.0:
             raise ValueError("bridge time range must satisfy 0 <= min < max <= 1")
@@ -39,11 +47,11 @@ class ActionBridgeConfig:
 
 @dataclass(frozen=True)
 class ActionBridgeBatch:
-    source: torch.Tensor         # [B,K,A]
-    state: torch.Tensor          # [B,K,A]
+    source: torch.Tensor  # [B,K,A]
+    state: torch.Tensor  # [B,K,A]
     target_velocity: torch.Tensor  # [B,K,A]
-    time: torch.Tensor           # [B]
-    noise_level: torch.Tensor    # [B], normalized RMS magnitude
+    time: torch.Tensor  # [B]
+    noise_level: torch.Tensor  # [B], normalized RMS magnitude
     corruption_level: torch.Tensor  # [B] long: 0 clean, 1 mild, 2 strong
 
 
@@ -64,7 +72,9 @@ def sample_action_bridge(
 ) -> ActionBridgeBatch:
     config.validate()
     if prior.shape != target.shape or prior.ndim != 3:
-        raise ValueError(f"prior and target must share [B,K,A], got {tuple(prior.shape)} vs {tuple(target.shape)}")
+        raise ValueError(
+            f"prior and target must share [B,K,A], got {tuple(prior.shape)} vs {tuple(target.shape)}"
+        )
     if not torch.isfinite(prior).all() or not torch.isfinite(target).all():
         raise ValueError("prior and target must be finite")
     batch, horizon, _ = prior.shape
@@ -75,23 +85,38 @@ def sample_action_bridge(
     level = torch.where(draw >= mild_boundary, torch.full_like(level, 2), level)
     noise_std = torch.zeros((batch,), dtype=prior.dtype, device=prior.device)
     bias_std = torch.zeros_like(noise_std)
-    noise_std = torch.where(level == 1, torch.full_like(noise_std, config.mild_noise_std), noise_std)
-    noise_std = torch.where(level == 2, torch.full_like(noise_std, config.strong_noise_std), noise_std)
-    bias_std = torch.where(level == 1, torch.full_like(bias_std, config.mild_velocity_bias_std), bias_std)
-    bias_std = torch.where(level == 2, torch.full_like(bias_std, config.strong_velocity_bias_std), bias_std)
+    noise_std = torch.where(
+        level == 1, torch.full_like(noise_std, config.mild_noise_std), noise_std
+    )
+    noise_std = torch.where(
+        level == 2, torch.full_like(noise_std, config.strong_noise_std), noise_std
+    )
+    bias_std = torch.where(
+        level == 1, torch.full_like(bias_std, config.mild_velocity_bias_std), bias_std
+    )
+    bias_std = torch.where(
+        level == 2, torch.full_like(bias_std, config.strong_velocity_bias_std), bias_std
+    )
     smooth = _smooth_noise(prior, noise_std)
-    velocity_bias = torch.randn((batch, 1, prior.shape[-1]), device=prior.device, dtype=prior.dtype) * bias_std[:, None, None]
+    velocity_bias = (
+        torch.randn((batch, 1, prior.shape[-1]), device=prior.device, dtype=prior.dtype)
+        * bias_std[:, None, None]
+    )
     ramp = torch.linspace(0.0, 1.0, horizon, device=prior.device, dtype=prior.dtype)[None, :, None]
     corruption = smooth + ramp * velocity_bias
     source = prior + corruption
-    time = torch.empty((batch,), dtype=prior.dtype, device=prior.device).uniform_(config.min_time, config.max_time)
+    time = torch.empty((batch,), dtype=prior.dtype, device=prior.device).uniform_(
+        config.min_time, config.max_time
+    )
     state = (1.0 - time[:, None, None]) * source + time[:, None, None] * target
     velocity = target - source
     rms = torch.sqrt(torch.mean(corruption.square(), dim=(1, 2)) + 1e-12)
     return ActionBridgeBatch(source, state, velocity, time, rms, level)
 
 
-def endpoint_from_velocity(state: torch.Tensor, velocity: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
+def endpoint_from_velocity(
+    state: torch.Tensor, velocity: torch.Tensor, time: torch.Tensor
+) -> torch.Tensor:
     if state.shape != velocity.shape or state.ndim != 3:
         raise ValueError("state and velocity must share [B,K,A]")
     if time.ndim != 1 or time.shape[0] != state.shape[0]:

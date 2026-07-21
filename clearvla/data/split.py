@@ -5,7 +5,9 @@ import re
 from collections.abc import Sequence
 
 
-def split_episode_ids(n: int, train_frac: float, val_frac: float, seed: int) -> tuple[list[int], list[int], list[int]]:
+def split_episode_ids(
+    n: int, train_frac: float, val_frac: float, seed: int
+) -> tuple[list[int], list[int], list[int]]:
     """Legacy seeded random-fraction split."""
     if n < 3:
         raise ValueError("Need at least 3 episodes for train/val/test split")
@@ -17,7 +19,7 @@ def split_episode_ids(n: int, train_frac: float, val_frac: float, seed: int) -> 
     random.Random(seed).shuffle(ids)
     n_train = min(max(1, int(round(n * train_frac))), n - 2)
     n_val = min(max(1, int(round(n * val_frac))), n - n_train - 1)
-    return ids[:n_train], ids[n_train:n_train + n_val], ids[n_train + n_val:]
+    return ids[:n_train], ids[n_train : n_train + n_val], ids[n_train + n_val :]
 
 
 def _natural_key(value: str) -> tuple[tuple[int, int | str], ...]:
@@ -56,7 +58,9 @@ def split_episode_ids_ordered(
         raise ValueError(f"ordered-counts split requires positive episode counts, got {invalid}")
     requested = sum(counts.values())
     if requested > n:
-        raise ValueError(f"ordered-counts split requests {requested} episodes but only {n} are available")
+        raise ValueError(
+            f"ordered-counts split requests {requested} episodes but only {n} are available"
+        )
     if episode_names is not None and len(episode_names) != n:
         raise ValueError(f"episode_names length {len(episode_names)} != episode count {n}")
 
@@ -71,7 +75,11 @@ def split_episode_ids_ordered(
     val_ids = ids[val_start:test_start]
     test_ids = ids[test_start:]
 
-    if set(train_ids) & set(val_ids) or set(train_ids) & set(test_ids) or set(val_ids) & set(test_ids):
+    if (
+        set(train_ids) & set(val_ids)
+        or set(train_ids) & set(test_ids)
+        or set(val_ids) & set(test_ids)
+    ):
         raise AssertionError("ordered-counts split produced overlapping subsets")
     return train_ids, val_ids, test_ids
 

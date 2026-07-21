@@ -31,8 +31,7 @@ class LoadedEpisode:
 
 def find_hdf5_files(root: Path, pattern: str) -> list[Path]:
     files = sorted(
-        p for p in root.glob(pattern)
-        if p.is_file() and p.suffix.lower() in {".h5", ".hdf5"}
+        p for p in root.glob(pattern) if p.is_file() and p.suffix.lower() in {".h5", ".hdf5"}
     )
     if not files:
         raise FileNotFoundError(f"No HDF5 files found under {root} with glob={pattern!r}")
@@ -51,12 +50,16 @@ def load_episode(
     datasets = list_hdf5_datasets(str(path))
     resolved_action = resolve_key(datasets, action_key, ACTION_ALIASES, required=True)
     assert resolved_action is not None
-    resolved_state = resolve_key(datasets, state_key, STATE_ALIASES, required=True) if state_key else None
+    resolved_state = (
+        resolve_key(datasets, state_key, STATE_ALIASES, required=True) if state_key else None
+    )
 
     camera_keys: dict[str, str] = {}
     for camera in cameras:
         if camera not in CAMERA_ALIASES:
-            raise KeyError(f"Unknown camera name={camera!r}. Known cameras={sorted(CAMERA_ALIASES)}")
+            raise KeyError(
+                f"Unknown camera name={camera!r}. Known cameras={sorted(CAMERA_ALIASES)}"
+            )
         key = resolve_key(
             datasets,
             overrides.get(camera),
@@ -68,7 +71,11 @@ def load_episode(
 
     with h5py.File(path, "r") as f:
         actions = np.asarray(f[resolved_action], dtype=np.float32)
-        states = np.asarray(f[resolved_state], dtype=np.float32) if resolved_state is not None else actions.copy()
+        states = (
+            np.asarray(f[resolved_state], dtype=np.float32)
+            if resolved_state is not None
+            else actions.copy()
+        )
 
     if actions.ndim != 2:
         raise ValueError(f"{path}: action must have shape [T,D], got {actions.shape}")
@@ -78,9 +85,13 @@ def load_episode(
         bad = np.argwhere(~np.isfinite(actions))
         raise ValueError(f"{path}: action contains non-finite values at {bad[:20].tolist()}")
     if states.ndim != 2 or states.shape[0] != actions.shape[0]:
-        raise ValueError(f"{path}: state must have shape [T,D] aligned with action, got {states.shape}")
+        raise ValueError(
+            f"{path}: state must have shape [T,D] aligned with action, got {states.shape}"
+        )
     if states.shape[1] != actions.shape[1]:
-        raise ValueError(f"{path}: state/action dims must match for unified RDT token space, got {states.shape[1]} != {actions.shape[1]}")
+        raise ValueError(
+            f"{path}: state/action dims must match for unified RDT token space, got {states.shape[1]} != {actions.shape[1]}"
+        )
     if not np.isfinite(states).all():
         bad = np.argwhere(~np.isfinite(states))
         raise ValueError(f"{path}: state contains non-finite values at {bad[:20].tolist()}")

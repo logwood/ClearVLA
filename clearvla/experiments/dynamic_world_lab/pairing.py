@@ -53,7 +53,9 @@ class LocalPairTable:
         )
 
 
-def _standardize(value: np.ndarray, *, mean: np.ndarray | None = None, std: np.ndarray | None = None):
+def _standardize(
+    value: np.ndarray, *, mean: np.ndarray | None = None, std: np.ndarray | None = None
+):
     value = np.asarray(value, dtype=np.float32)
     if mean is None:
         mean = value.mean(axis=0, keepdims=True)
@@ -62,7 +64,9 @@ def _standardize(value: np.ndarray, *, mean: np.ndarray | None = None, std: np.n
     return (value - mean) / std, mean, std
 
 
-def _neighbours(query: np.ndarray, reference: np.ndarray, count: int) -> tuple[np.ndarray, np.ndarray]:
+def _neighbours(
+    query: np.ndarray, reference: np.ndarray, count: int
+) -> tuple[np.ndarray, np.ndarray]:
     count = min(int(count), len(reference))
     try:
         from sklearn.neighbors import NearestNeighbors
@@ -119,11 +123,15 @@ def build_local_pair_table(
             current_action_distance = float(np.linalg.norm(action[row] - action[candidate]))
             current_future_distance = float(np.linalg.norm(future[row] - future[candidate]))
             if fallback is None:
-                fallback = (candidate, float(distance), current_action_distance, current_future_distance)
-            if (
-                current_action_distance >= float(min_action_distance)
-                and current_future_distance >= float(min_future_distance)
-            ):
+                fallback = (
+                    candidate,
+                    float(distance),
+                    current_action_distance,
+                    current_future_distance,
+                )
+            if current_action_distance >= float(
+                min_action_distance
+            ) and current_future_distance >= float(min_future_distance):
                 pair_index[row] = candidate
                 pair_valid[row] = True
                 pair_distance[row] = float(distance)
@@ -137,9 +145,7 @@ def build_local_pair_table(
                 action_distance[row],
                 future_distance[row],
             ) = fallback
-    return LocalPairTable(
-        pair_index, pair_valid, pair_distance, action_distance, future_distance
-    )
+    return LocalPairTable(pair_index, pair_valid, pair_distance, action_distance, future_distance)
 
 
 def nearest_support(
@@ -164,5 +170,8 @@ def nearest_support_distance(
 
 
 __all__ = [
-    "LocalPairTable", "build_local_pair_table", "nearest_support", "nearest_support_distance"
+    "LocalPairTable",
+    "build_local_pair_table",
+    "nearest_support",
+    "nearest_support_distance",
 ]

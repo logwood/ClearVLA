@@ -70,7 +70,9 @@ class DecodedImageEpisodeMeta:
         PreprocessConfig.from_dict(dict(self.preprocessing))
         required_fingerprint = {"resolved_path", "size_bytes", "mtime_ns"}
         if set(self.source_fingerprint) != required_fingerprint:
-            raise ValueError(f"source_fingerprint must contain exactly {sorted(required_fingerprint)}")
+            raise ValueError(
+                f"source_fingerprint must contain exactly {sorted(required_fingerprint)}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -228,11 +230,17 @@ class DecodedImageStore:
             )
         meta = DecodedImageEpisodeMeta.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
         if meta.episode_stem != episode.stem:
-            raise ValueError(f"decoded-image stem mismatch: {meta.episode_stem!r} != {episode.stem!r}")
+            raise ValueError(
+                f"decoded-image stem mismatch: {meta.episode_stem!r} != {episode.stem!r}"
+            )
         if meta.num_frames != episode.length:
-            raise ValueError(f"decoded-image frame count mismatch: {meta.num_frames} != {episode.length}")
+            raise ValueError(
+                f"decoded-image frame count mismatch: {meta.num_frames} != {episode.length}"
+            )
         if meta.cameras != self.camera_names:
-            raise ValueError(f"decoded-image cameras mismatch: {meta.cameras} != {self.camera_names}")
+            raise ValueError(
+                f"decoded-image cameras mismatch: {meta.cameras} != {self.camera_names}"
+            )
         if meta.preprocessing != self.preprocessing.to_dict():
             raise ValueError(
                 f"decoded-image preprocessing mismatch: cached={meta.preprocessing}, "
@@ -240,7 +248,9 @@ class DecodedImageStore:
             )
         expected_keys = {camera: episode.camera_keys[camera] for camera in self.camera_names}
         if meta.camera_keys != expected_keys:
-            raise ValueError(f"decoded-image camera key mismatch: cached={meta.camera_keys}, expected={expected_keys}")
+            raise ValueError(
+                f"decoded-image camera key mismatch: cached={meta.camera_keys}, expected={expected_keys}"
+            )
         fingerprint = _source_fingerprint(episode.path)
         if meta.source_fingerprint != fingerprint:
             raise ValueError(

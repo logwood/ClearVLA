@@ -19,6 +19,7 @@ from clearvla.policy.codec import (
     PhysicalVelocityHead as PackagedPhysicalVelocityHead,
     TransitionAwarePhysicalVelocityHead as PackagedTransitionAwarePhysicalVelocityHead,
 )
+from clearvla.policy.source_process import BoundaryConditionedArmSource
 from clearvla.policy.decoder import ActionOnlyPhysicalVelocityHead
 from clearvla.experiments.observed_state_lab.policy_v36_3 import TransitionAwarePhysicalVelocityHead
 
@@ -29,7 +30,9 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         self.assertIs(PhysicalActionCodec, PackagedPhysicalActionCodec)
         self.assertIs(PhysicalActionTokenLift, PackagedPhysicalActionTokenLift)
         self.assertIs(PhysicalVelocityHead, PackagedPhysicalVelocityHead)
-        self.assertIs(TransitionAwarePhysicalVelocityHead, PackagedTransitionAwarePhysicalVelocityHead)
+        self.assertIs(
+            TransitionAwarePhysicalVelocityHead, PackagedTransitionAwarePhysicalVelocityHead
+        )
 
     def setUp(self) -> None:
         self.config = V362PolicyConfig(
@@ -57,24 +60,28 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         action = torch.randn(16, self.config.action_horizon, self.config.action_dim)
         target = self.codec.encode(action, self.state)
         noise = self.codec.sample_noise(
-            16, device=torch.device("cpu"), dtype=torch.float32, action_state=self.state,
+            16,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            action_state=self.state,
         )
         torch.testing.assert_close(
-            self.codec.project_physical(noise, self.state), noise, atol=2e-6, rtol=2e-6,
+            self.codec.project_physical(noise, self.state),
+            noise,
+            atol=2e-6,
+            rtol=2e-6,
         )
         _, _, tangent_null = self.codec.project_arm_tangent(
             (noise - target)[..., : 2 * self.config.arm_dim]
         )
-        torch.testing.assert_close(tangent_null, torch.zeros_like(tangent_null), atol=2e-6, rtol=0.0)
+        torch.testing.assert_close(
+            tangent_null, torch.zeros_like(tangent_null), atol=2e-6, rtol=0.0
+        )
 
     def test_native_velocity_expands_exactly_into_both_tangent_spaces(self) -> None:
-        arm_velocity = torch.randn(
-            3, self.config.action_horizon, self.config.arm_dim
-        )
+        arm_velocity = torch.randn(3, self.config.action_horizon, self.config.arm_dim)
         arm_field = self.codec.encode_arm_tangent(arm_velocity)
-        recovered_arm, projected_arm, arm_null = self.codec.project_arm_tangent(
-            arm_field
-        )
+        recovered_arm, projected_arm, arm_null = self.codec.project_arm_tangent(arm_field)
         torch.testing.assert_close(recovered_arm, arm_velocity, atol=2e-6, rtol=2e-6)
         torch.testing.assert_close(projected_arm, arm_field, atol=2e-6, rtol=2e-6)
         torch.testing.assert_close(arm_null, torch.zeros_like(arm_null), atol=2e-6, rtol=0.0)
@@ -103,8 +110,7 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         physical_a = self.codec.encode(action_a, state)
         physical_b = self.codec.encode(action_b, state)
         field_delta = (
-            physical_b[..., 2 * self.config.arm_dim :]
-            - physical_a[..., 2 * self.config.arm_dim :]
+            physical_b[..., 2 * self.config.arm_dim :] - physical_a[..., 2 * self.config.arm_dim :]
         )
         field_time_support = field_delta.abs().sum(dim=-1)[0] > 1e-6
         self.assertGreater(int(field_time_support.sum()), 1)
@@ -138,9 +144,7 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
 
     def test_action_only_head_emits_native_time_tangent_velocity(self) -> None:
         head = ActionOnlyPhysicalVelocityHead(self.config).eval()
-        tokens = torch.randn(
-            3, self.config.action_horizon, self.config.hidden_size
-        )
+        tokens = torch.randn(3, self.config.action_horizon, self.config.hidden_size)
         physical_velocity = head(tokens)
         self.assertEqual(
             tuple(physical_velocity.shape),
@@ -163,9 +167,7 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         source_step = 2
         base_tokens = torch.zeros_like(tokens)
         changed_tokens = base_tokens.clone()
-        changed_tokens[:, source_step] = torch.randn_like(
-            changed_tokens[:, source_step]
-        )
+        changed_tokens[:, source_step] = torch.randn_like(changed_tokens[:, source_step])
         velocity_delta = head(changed_tokens) - head(base_tokens)
         arm_delta, _, _ = self.codec.project_arm_tangent(
             velocity_delta[..., : 2 * self.config.arm_dim]
@@ -174,9 +176,7 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
             velocity_delta[..., 2 * self.config.arm_dim :]
         )
         native_delta = torch.cat([arm_delta, gripper_delta], dim=-1)
-        outside_source = torch.ones(
-            self.config.action_horizon, dtype=torch.bool
-        )
+        outside_source = torch.ones(self.config.action_horizon, dtype=torch.bool)
         outside_source[source_step] = False
         torch.testing.assert_close(
             native_delta[:, outside_source],
@@ -196,7 +196,10 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         batch = 4096
         state = torch.zeros(batch, self.config.action_dim)
         noise = self.codec.sample_noise(
-            batch, device=torch.device("cpu"), dtype=torch.float32, action_state=state,
+            batch,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            action_state=state,
         )
         arm_abs = noise[..., : self.config.arm_dim]
         arm_delta = noise[..., self.config.arm_dim : 2 * self.config.arm_dim]
@@ -207,9 +210,7 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         step = torch.arange(1, self.config.action_horizon + 1, dtype=torch.float32)
         expected_abs = 1.0 - rho ** (2.0 * step)
         previous_step = torch.arange(self.config.action_horizon, dtype=torch.float32)
-        expected_delta = (1.0 - rho * rho) + (1.0 - rho) ** 2 * (
-            1.0 - rho ** (2.0 * previous_step)
-        )
+        expected_delta = (1.0 - rho * rho) + (1.0 - rho) ** 2 * (1.0 - rho ** (2.0 * previous_step))
         torch.testing.assert_close(abs_variance, expected_abs, atol=0.025, rtol=0.05)
         torch.testing.assert_close(delta_variance, expected_delta, atol=0.025, rtol=0.05)
 
@@ -217,7 +218,10 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
         batch = 4096
         state = torch.randn(batch, self.config.action_dim)
         noise = self.codec.sample_noise(
-            batch, device=torch.device("cpu"), dtype=torch.float32, action_state=state,
+            batch,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            action_state=state,
         )
         arm_abs = noise[..., : self.config.arm_dim]
         arm_delta = noise[..., self.config.arm_dim : 2 * self.config.arm_dim]
@@ -234,6 +238,139 @@ class PhysicalActionCodecManifoldTest(unittest.TestCase):
     def test_manifold_noise_requires_action_state(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires action_state"):
             self.codec.sample_noise(2, device=torch.device("cpu"), dtype=torch.float32)
+
+    def test_legacy_ar1_source_matches_historical_construction_exactly(self) -> None:
+        batch = 5
+        seed = 913
+        state = torch.randn(batch, self.config.action_dim)
+        state_arm, _ = self.codec.split_action(state)
+        source = BoundaryConditionedArmSource(
+            horizon=self.config.action_horizon,
+            arm_dim=self.config.arm_dim,
+            mode="ar1",
+            temporal_rho=self.config.arm_noise_temporal_rho,
+            scale=3.0,
+            innovation_weight=0.2,
+            velocity_weight=0.5,
+            acceleration_weight=0.3,
+        )
+        actual_generator = torch.Generator().manual_seed(seed)
+        actual = source.sample(
+            state_arm,
+            dtype=torch.float32,
+            generator=actual_generator,
+        )
+
+        expected_generator = torch.Generator().manual_seed(seed)
+        white = torch.randn(
+            batch,
+            self.config.action_horizon,
+            self.config.arm_dim,
+            generator=expected_generator,
+        )
+        expected = torch.einsum("ts,bsd->btd", source.factor, white)
+        expected = expected + source.state_gain[None, :, None] * state_arm[:, None]
+        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+
+    def test_boundary_multiscale_source_is_state_translation_equivariant(self) -> None:
+        source = BoundaryConditionedArmSource(
+            horizon=self.config.action_horizon,
+            arm_dim=self.config.arm_dim,
+            mode="boundary_multiscale",
+            temporal_rho=0.0,
+            scale=0.8,
+            innovation_weight=0.2,
+            velocity_weight=0.5,
+            acceleration_weight=0.3,
+        )
+        state_a = torch.zeros(7, self.config.arm_dim)
+        state_b = torch.randn_like(state_a)
+        sample_a = source.sample(
+            state_a,
+            dtype=torch.float32,
+            generator=torch.Generator().manual_seed(71),
+        )
+        sample_b = source.sample(
+            state_b,
+            dtype=torch.float32,
+            generator=torch.Generator().manual_seed(71),
+        )
+        torch.testing.assert_close(
+            sample_b - sample_a,
+            state_b[:, None].expand_as(sample_b),
+            atol=2e-6,
+            rtol=2e-6,
+        )
+
+    def test_boundary_multiscale_covariance_has_owned_scale_and_full_rank(self) -> None:
+        scale = 0.75
+        source = BoundaryConditionedArmSource(
+            horizon=self.config.action_horizon,
+            arm_dim=self.config.arm_dim,
+            mode="boundary_multiscale",
+            temporal_rho=0.0,
+            scale=scale,
+            innovation_weight=0.15,
+            velocity_weight=0.50,
+            acceleration_weight=0.35,
+        )
+        eigenvalues = torch.linalg.eigvalsh(source.covariance.double())
+        self.assertGreater(float(eigenvalues.min()), 0.0)
+        self.assertTrue(torch.isfinite(source.covariance_condition))
+        torch.testing.assert_close(
+            torch.trace(source.covariance) / float(self.config.action_horizon),
+            torch.tensor(scale * scale),
+            atol=2e-6,
+            rtol=2e-6,
+        )
+        self.assertEqual(sum(parameter.numel() for parameter in source.parameters()), 0)
+        self.assertEqual(dict(source.state_dict()), {})
+
+    def test_source_ab_keeps_gripper_rng_draw_identical(self) -> None:
+        common = dict(
+            arm_flow_mode="manifold_native",
+            gripper_field_mode="parseval_temporal",
+            gripper_field_dim=6,
+        )
+        ar_codec = PhysicalActionCodec(
+            V362PolicyConfig(
+                **common,
+                arm_source_mode="ar1",
+                arm_noise_temporal_rho=0.95,
+            )
+        )
+        multiscale_codec = PhysicalActionCodec(
+            V362PolicyConfig(
+                **common,
+                arm_source_mode="boundary_multiscale",
+            )
+        )
+        state = torch.randn(11, self.config.action_dim)
+        ar_noise = ar_codec.sample_noise(
+            11,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            action_state=state,
+            generator=torch.Generator().manual_seed(991),
+        )
+        multiscale_noise = multiscale_codec.sample_noise(
+            11,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            action_state=state,
+            generator=torch.Generator().manual_seed(991),
+        )
+        arm_span = 2 * self.config.arm_dim
+        torch.testing.assert_close(
+            ar_noise[..., arm_span:],
+            multiscale_noise[..., arm_span:],
+            atol=0.0,
+            rtol=0.0,
+        )
+        self.assertGreater(
+            float((ar_noise[..., :arm_span] - multiscale_noise[..., :arm_span]).abs().max()),
+            0.0,
+        )
 
 
 if __name__ == "__main__":

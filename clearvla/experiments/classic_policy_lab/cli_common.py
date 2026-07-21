@@ -25,7 +25,9 @@ def add_data_args(parser: argparse.ArgumentParser, *, default_resize: tuple[int,
     parser.add_argument("--state-key", default="qpos")
     parser.add_argument("--top-key", default="observations/images/cam_high")
     parser.add_argument("--wrist-key", default="observations/images/cam_right_wrist")
-    parser.add_argument("--cache-resize", nargs=2, type=int, default=list(default_resize), metavar=("H", "W"))
+    parser.add_argument(
+        "--cache-resize", nargs=2, type=int, default=list(default_resize), metavar=("H", "W")
+    )
     parser.add_argument("--cache-crop", nargs=2, type=int, default=None, metavar=("H", "W"))
     parser.add_argument("--train-frac", type=float, default=0.8)
     parser.add_argument("--val-frac", type=float, default=0.1)
@@ -58,7 +60,9 @@ def resolve_device(name: str) -> torch.device:
 
 
 def preprocessing_from_args(args: argparse.Namespace) -> PreprocessConfig:
-    return PreprocessConfig(resize_hw=parse_hw(args.cache_resize), crop_hw=parse_hw(args.cache_crop))
+    return PreprocessConfig(
+        resize_hw=parse_hw(args.cache_resize), crop_hw=parse_hw(args.cache_crop)
+    )
 
 
 def load_data(
@@ -69,7 +73,16 @@ def load_data(
     action_normalizer: ArrayNormalizer | None = None,
     state_normalizer: ArrayNormalizer | None = None,
     splits: dict[str, list[int]] | None = None,
-) -> tuple[list[LoadedEpisode], list[int], list[int], list[int], ArrayNormalizer, ArrayNormalizer, DecodedImageStore, list[tuple[str, str]]]:
+) -> tuple[
+    list[LoadedEpisode],
+    list[int],
+    list[int],
+    list[int],
+    ArrayNormalizer,
+    ArrayNormalizer,
+    DecodedImageStore,
+    list[tuple[str, str]],
+]:
     cameras = tuple(str(x) for x in args.cameras)
     episodes, skipped = load_episodes(
         args.data_root,
@@ -107,13 +120,28 @@ def load_data(
             raise ValueError(f"unknown normalizer mode: {normalizer_mode}")
         action_normalizer = fit([episodes[index].actions_raw for index in train_ids])
         state_normalizer = fit([episodes[index].states_raw for index in train_ids])
-    image_store = DecodedImageStore(args.decoded_image_cache_dir, camera_names=cameras, preprocessing=preprocessing_from_args(args))
+    image_store = DecodedImageStore(
+        args.decoded_image_cache_dir,
+        camera_names=cameras,
+        preprocessing=preprocessing_from_args(args),
+    )
     for episode in episodes:
         image_store.validate_episode(episode)
-    return episodes, train_ids, val_ids, test_ids, action_normalizer, state_normalizer, image_store, skipped
+    return (
+        episodes,
+        train_ids,
+        val_ids,
+        test_ids,
+        action_normalizer,
+        state_normalizer,
+        image_store,
+        skipped,
+    )
 
 
-def make_loader(dataset, *, batch_size: int, workers: int, shuffle: bool, device: torch.device) -> DataLoader:
+def make_loader(
+    dataset, *, batch_size: int, workers: int, shuffle: bool, device: torch.device
+) -> DataLoader:
     return DataLoader(
         dataset,
         batch_size=batch_size,

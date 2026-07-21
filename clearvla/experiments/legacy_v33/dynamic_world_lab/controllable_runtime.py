@@ -115,7 +115,9 @@ def _scheduler(optimizer, *, total_steps: int, warmup_steps: int, min_lr_ratio: 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
-def _phase_for_epoch(model: ControllableDynamicWorld, trainer: ControllableWorldTrainerConfig, epoch: int) -> str:
+def _phase_for_epoch(
+    model: ControllableDynamicWorld, trainer: ControllableWorldTrainerConfig, epoch: int
+) -> str:
     if model.config.input_mode == "current-only":
         return "prior"
     if epoch <= trainer.prior_warmup_epochs:
@@ -140,9 +142,7 @@ def _make_optimizer(
     steps_per_epoch: int,
     current_epoch: int,
 ):
-    model.set_training_phase(
-        phase, unfreeze_dynamic_blocks=trainer.unfreeze_dynamic_blocks
-    )
+    model.set_training_phase(phase, unfreeze_dynamic_blocks=trainer.unfreeze_dynamic_blocks)
     named = model.trainable_named_parameters()
     if not named:
         raise ValueError(f"phase {phase} has no trainable parameters")
@@ -337,9 +337,7 @@ def evaluate_controllable_world(
                 reduction="none",
             ).mean(dim=(-1, -2, -3))
             knn_rows.append(
-                (knn_dynamic + loss_config.scene_predictive_weight * knn_scene)
-                .cpu()
-                .numpy()
+                (knn_dynamic + loss_config.scene_predictive_weight * knn_scene).cpu().numpy()
             )
 
         if batch_index <= ablation_batches:
@@ -373,9 +371,7 @@ def evaluate_controllable_world(
         {
             "state_path_rmse": float(np.sqrt(np.mean(error**2))),
             "prior_state_path_rmse": float(np.sqrt(np.mean(prior_error**2))),
-            "state_path_gain": float(
-                np.sqrt(np.mean(prior_error**2)) - np.sqrt(np.mean(error**2))
-            ),
+            "state_path_gain": float(np.sqrt(np.mean(prior_error**2)) - np.sqrt(np.mean(error**2))),
             "state_endpoint_rmse": float(np.sqrt(np.mean(error[:, -1] ** 2))),
             "arm_state_path_rmse": float(
                 np.sqrt(np.mean(np.delete(error, model.config.gripper_index, axis=-1) ** 2))

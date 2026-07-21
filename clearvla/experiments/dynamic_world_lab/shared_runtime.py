@@ -53,9 +53,7 @@ def encode_current_tokens(
         condition = conditioner.encode(flat_images, camera_names=camera_names)
     else:
         keys = sample["history_keys"].reshape(batch * history, 2)
-        dummy = torch.zeros(
-            batch * history, model_config.num_cameras, 3, 1, 1, dtype=torch.float32
-        )
+        dummy = torch.zeros(batch * history, model_config.num_cameras, 3, 1, 1, dtype=torch.float32)
         condition = conditioner.encode(dummy, sample_keys=keys, camera_names=camera_names)
     if condition.dense_tokens is None:
         raise ValueError("latent world requires dense DINO tokens")
@@ -90,19 +88,23 @@ def encode_target_tokens(
         condition = conditioner.encode(dummy, sample_keys=keys, camera_names=camera_names)
     if condition.dense_tokens is None:
         raise ValueError("latent world requires dense DINO tokens")
-    return _reshape_dense_tokens(
-        condition.dense_tokens,
-        batch=batch * future,
-        history=history,
-        config=model_config,
-    ).reshape(
-        batch,
-        future,
-        history,
-        model_config.num_cameras,
-        model_config.patches_per_camera,
-        model_config.latent_dim,
-    ).to(device=device, dtype=dtype)
+    return (
+        _reshape_dense_tokens(
+            condition.dense_tokens,
+            batch=batch * future,
+            history=history,
+            config=model_config,
+        )
+        .reshape(
+            batch,
+            future,
+            history,
+            model_config.num_cameras,
+            model_config.patches_per_camera,
+            model_config.latent_dim,
+        )
+        .to(device=device, dtype=dtype)
+    )
 
 
 @torch.no_grad()
@@ -163,8 +165,7 @@ def gripper_transition_metrics(
                 (np.abs(target_delta[row]) >= threshold) & (np.sign(target_delta[row]) == direction)
             ).tolist()
             dp: list[list[tuple[int, float, tuple[float, ...]]]] = [
-                [(0, 0.0, ()) for _ in range(len(target_idx) + 1)]
-                for _ in range(len(pred_idx) + 1)
+                [(0, 0.0, ()) for _ in range(len(target_idx) + 1)] for _ in range(len(pred_idx) + 1)
             ]
 
             def better(
@@ -222,8 +223,12 @@ def gripper_transition_metrics(
             "gripper_pred_events": float(tp + fp),
             "gripper_target_events": float(tp + fn),
             "gripper_timing_mae_steps": float(np.mean(timing)) if timing else float("nan"),
-            "gripper_close_timing_mae_steps": float(np.mean(close_timing)) if close_timing else float("nan"),
-            "gripper_open_timing_mae_steps": float(np.mean(open_timing)) if open_timing else float("nan"),
+            "gripper_close_timing_mae_steps": float(np.mean(close_timing))
+            if close_timing
+            else float("nan"),
+            "gripper_open_timing_mae_steps": float(np.mean(open_timing))
+            if open_timing
+            else float("nan"),
         }
     )
     return metrics

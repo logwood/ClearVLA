@@ -15,7 +15,9 @@ from clearvla.vision.preprocessing import PreprocessConfig
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build strict frame-local frozen patch-token caches for vision-usage experiments")
+    p = argparse.ArgumentParser(
+        description="Build strict frame-local frozen patch-token caches for vision-usage experiments"
+    )
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--glob", default="*.hdf5")
     p.add_argument("--cache-dir", type=Path, required=True)
@@ -24,8 +26,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--action-key", default="action")
     p.add_argument("--top-key", default="observations/images/cam_high")
     p.add_argument("--wrist-key", default="observations/images/cam_right_wrist")
-    p.add_argument("--teacher-backend", choices=["dinov2_vits14", "tiny_patch"], default="dinov2_vits14")
-    p.add_argument("--teacher-image-size", type=int, nargs=2, metavar=("H", "W"), default=(224, 224))
+    p.add_argument(
+        "--teacher-backend", choices=["dinov2_vits14", "tiny_patch"], default="dinov2_vits14"
+    )
+    p.add_argument(
+        "--teacher-image-size", type=int, nargs=2, metavar=("H", "W"), default=(224, 224)
+    )
     p.add_argument("--teacher-patch-size", type=int, default=None)
     p.add_argument("--teacher-token-dim", type=int, default=None)
     p.add_argument("--teacher-source", choices=["github", "local"], default="github")
@@ -86,15 +92,20 @@ def main() -> None:
         batch_frames=args.batch_frames,
         rebuild=args.rebuild,
     )
-    print(json.dumps({
-        "episodes": len(episodes),
-        "skipped": skipped,
-        "cache_dir": str(args.cache_dir),
-        "teacher": teacher_cfg.to_dict(),
-        "patch_grid": list(teacher_cfg.patch_grid()),
-        "token_dim": teacher_cfg.resolved_token_dim(),
-        "metas": [meta.to_dict() for meta in metas],
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "episodes": len(episodes),
+                "skipped": skipped,
+                "cache_dir": str(args.cache_dir),
+                "teacher": teacher_cfg.to_dict(),
+                "patch_grid": list(teacher_cfg.patch_grid()),
+                "token_dim": teacher_cfg.resolved_token_dim(),
+                "metas": [meta.to_dict() for meta in metas],
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from clearvla.experiments.vision_usage_lab.model import AttentionKV, QKNormAttention, RMSNorm, ResidualScale, SwiGLU
+from clearvla.experiments.vision_usage_lab.model import (
+    AttentionKV,
+    QKNormAttention,
+    RMSNorm,
+    ResidualScale,
+    SwiGLU,
+)
 from .flow import endpoint_from_velocity
 
 
@@ -70,7 +76,11 @@ class ResidualFlowLabModelConfig:
             raise ValueError("local_action_kernel must be odd")
         if not 0.0 <= self.independent_camera_dropout < 1.0:
             raise ValueError("independent_camera_dropout must be in [0,1)")
-        if self.layerscale_init < 0 or self.source_residual_scale < 0 or self.history_source_noise_std < 0:
+        if (
+            self.layerscale_init < 0
+            or self.source_residual_scale < 0
+            or self.history_source_noise_std < 0
+        ):
             raise ValueError("scale values must be non-negative")
         if self.delta_topk > self.patch_count:
             raise ValueError("delta_topk cannot exceed patch_count")
@@ -88,7 +98,9 @@ class ResidualFlowLabModelConfig:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "ResidualFlowLabModelConfig":
         payload = dict(data)
-        payload["camera_names"] = tuple(str(x) for x in payload.get("camera_names", ("top", "wrist")))
+        payload["camera_names"] = tuple(
+            str(x) for x in payload.get("camera_names", ("top", "wrist"))
+        )
         patch = payload.get("patch_grid", (16, 16))
         payload["patch_grid"] = (int(patch[0]), int(patch[1]))  # type: ignore[index]
         out = cls(**payload)  # type: ignore[arg-type]
@@ -137,7 +149,9 @@ class LearnedHistorySource(nn.Module):
         nn.init.zeros_(self.residual_head.weight)
         nn.init.zeros_(self.residual_head.bias)
 
-    def forward(self, past: torch.Tensor, physical_prior: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, past: torch.Tensor, physical_prior: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.config
         if tuple(past.shape[1:]) != (cfg.past_len, cfg.action_dim):
             raise ValueError(f"past must be [B,{cfg.past_len},{cfg.action_dim}]")
@@ -145,7 +159,9 @@ class LearnedHistorySource(nn.Module):
             raise ValueError(f"physical_prior must be [B,{cfg.chunk_len},{cfg.action_dim}]")
         history_input = past
         if self.training and cfg.history_source_noise_std > 0:
-            history_input = history_input + torch.randn_like(history_input) * cfg.history_source_noise_std
+            history_input = (
+                history_input + torch.randn_like(history_input) * cfg.history_source_noise_std
+            )
         history = self.local(self.action_proj(history_input) + self.past_pos[None])
         query = self.horizon_query[None].expand(past.shape[0], -1, -1)
         query = query + self.cross(self.query_norm(query), self.history_norm(history))
@@ -158,7 +174,7 @@ class AdaptedVisualTokens:
     dense_tokens: torch.Tensor
     camera_tokens: tuple[torch.Tensor, ...]
     delta_statistics_by_camera: torch.Tensor  # [B,V,4]: mean/max/topk/q90
-    camera_keep_mask: torch.Tensor             # [B,V]
+    camera_keep_mask: torch.Tensor  # [B,V]
 
 
 class VisualTokenAdaptor(nn.Module):
@@ -176,8 +192,12 @@ class VisualTokenAdaptor(nn.Module):
         self.config = config
         dim = config.latent_dim
         self.observed_norm = nn.LayerNorm(config.teacher_dim)
-        self.observed_proj = nn.Sequential(nn.Linear(config.teacher_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.delta_direction_proj = nn.Sequential(nn.Linear(config.teacher_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
+        self.observed_proj = nn.Sequential(
+            nn.Linear(config.teacher_dim, dim), nn.SiLU(), nn.Linear(dim, dim)
+        )
+        self.delta_direction_proj = nn.Sequential(
+            nn.Linear(config.teacher_dim, dim), nn.SiLU(), nn.Linear(dim, dim)
+        )
         self.delta_magnitude_proj = nn.Sequential(nn.Linear(1, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.delta_direction_gate = nn.Linear(1, 1)
         nn.init.zeros_(self.delta_direction_gate.weight)
@@ -223,11 +243,15 @@ class VisualTokenAdaptor(nn.Module):
         for index in range(len(cfg.camera_names)):
             per_camera.append(observed[:, :, index].reshape(batch, -1, cfg.latent_dim))
 
-        statistics = torch.zeros((batch, len(cfg.camera_names), 4), device=tokens.device, dtype=tokens.dtype)
+        statistics = torch.zeros(
+            (batch, len(cfg.camera_names), 4), device=tokens.device, dtype=tokens.dtype
+        )
         if cfg.obs_horizon >= 2:
             delta_raw = tokens[:, -1] - tokens[:, -2]  # [B,V,P,C]
             delta_raw = delta_raw * keep[:, :, None, None].to(dtype=delta_raw.dtype)
-            delta_rms = torch.sqrt(torch.mean(delta_raw.float().square(), dim=-1, keepdim=True) + 1e-12).to(dtype=tokens.dtype)
+            delta_rms = torch.sqrt(
+                torch.mean(delta_raw.float().square(), dim=-1, keepdim=True) + 1e-12
+            ).to(dtype=tokens.dtype)
             flat_rms = delta_rms.squeeze(-1)
             topk = min(cfg.delta_topk, cfg.patch_count)
             statistics = torch.stack(
@@ -243,7 +267,9 @@ class VisualTokenAdaptor(nn.Module):
                 direction = delta_raw / delta_rms.clamp_min(1e-6)
                 magnitude = torch.log1p(delta_rms)
                 gate = torch.sigmoid(self.delta_direction_gate(magnitude))
-                delta = gate * self.delta_direction_proj(direction) + self.delta_magnitude_proj(magnitude)
+                delta = gate * self.delta_direction_proj(direction) + self.delta_magnitude_proj(
+                    magnitude
+                )
                 delta = delta + self.camera_embed[None, :, None, :]
                 delta = delta + self.patch_embed[None, None, :, :]
                 delta = delta + self.type_embed[1][None, None, None, :]
@@ -261,7 +287,9 @@ class VisualTokenAdaptor(nn.Module):
 
 
 class SceneBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, hidden: int, *, dropout: float, layerscale_init: float) -> None:
+    def __init__(
+        self, dim: int, heads: int, hidden: int, *, dropout: float, layerscale_init: float
+    ) -> None:
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = QKNormAttention(dim, heads, dropout=dropout)
@@ -287,7 +315,13 @@ class SceneEncoder(nn.Module):
         self.cross_scale = ResidualScale(dim, config.layerscale_init)
         self.blocks = nn.ModuleList(
             [
-                SceneBlock(dim, config.num_heads, config.ffn_hidden, dropout=config.dropout, layerscale_init=config.layerscale_init)
+                SceneBlock(
+                    dim,
+                    config.num_heads,
+                    config.ffn_hidden,
+                    dropout=config.dropout,
+                    layerscale_init=config.layerscale_init,
+                )
                 for _ in range(config.scene_depth)
             ]
         )
@@ -295,7 +329,9 @@ class SceneEncoder(nn.Module):
 
     def forward(self, dense_visual: torch.Tensor) -> torch.Tensor:
         scene = self.latents[None].expand(dense_visual.shape[0], -1, -1)
-        scene = scene + self.cross_scale(self.cross(self.query_norm(scene), self.visual_norm(dense_visual)))
+        scene = scene + self.cross_scale(
+            self.cross(self.query_norm(scene), self.visual_norm(dense_visual))
+        )
         for block in self.blocks:
             scene = block(scene)
         return self.out_norm(scene)
@@ -322,7 +358,9 @@ class HistoryTrajectoryEncoder(nn.Module):
             raise ValueError(f"past must be [B,{cfg.past_len},{cfg.action_dim}]")
         velocity = torch.diff(past, dim=1, prepend=past[:, :1])
         acceleration = torch.diff(velocity, dim=1, prepend=velocity[:, :1])
-        token = self.local(self.in_proj(torch.cat([past, velocity, acceleration], dim=-1)) + self.pos[None])
+        token = self.local(
+            self.in_proj(torch.cat([past, velocity, acceleration], dim=-1)) + self.pos[None]
+        )
         token = token + self.scale(self.attn(self.norm(token), self.norm(token)))
         token = self.out_norm(token)
         return token, token.mean(dim=1)
@@ -337,7 +375,11 @@ class FlowConditionEncoder(nn.Module):
 
     def _time_embedding(self, time: torch.Tensor) -> torch.Tensor:
         half = self.dim // 2
-        frequencies = torch.exp(torch.linspace(math.log(1.0), math.log(1000.0), half, device=time.device, dtype=time.dtype))
+        frequencies = torch.exp(
+            torch.linspace(
+                math.log(1.0), math.log(1000.0), half, device=time.device, dtype=time.dtype
+            )
+        )
         phase = time[:, None] * frequencies[None]
         value = torch.cat([torch.sin(phase), torch.cos(phase)], dim=-1)
         if value.shape[-1] < self.dim:
@@ -356,7 +398,11 @@ class FlowConditionEncoder(nn.Module):
         if time.ndim != 1 or step_size.ndim != 1 or noise_level.ndim != 1:
             raise ValueError("time, step_size and noise_level must be [B]")
         scalars = self.scalar_proj(torch.stack([time, step_size, noise_level], dim=-1))
-        return self.mlp(torch.cat([self._time_embedding(time) + scalars, history_summary, source_summary], dim=-1))
+        return self.mlp(
+            torch.cat(
+                [self._time_embedding(time) + scalars, history_summary, source_summary], dim=-1
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -377,29 +423,47 @@ class ResidualTrajectoryBlock(nn.Module):
         self.self_attn = QKNormAttention(dim, config.num_heads, dropout=config.dropout)
         self.scene_norm = nn.LayerNorm(dim, elementwise_affine=False)
         self.scene_attn = QKNormAttention(dim, config.num_heads, dropout=config.dropout)
-        self.camera_norm = nn.LayerNorm(dim, elementwise_affine=False) if camera_index is not None else None
-        self.camera_attn = QKNormAttention(dim, config.num_heads, dropout=config.dropout) if camera_index is not None else None
+        self.camera_norm = (
+            nn.LayerNorm(dim, elementwise_affine=False) if camera_index is not None else None
+        )
+        self.camera_attn = (
+            QKNormAttention(dim, config.num_heads, dropout=config.dropout)
+            if camera_index is not None
+            else None
+        )
         self.ffn_norm = nn.LayerNorm(dim, elementwise_affine=False)
         self.ffn = SwiGLU(dim, config.ffn_hidden, dropout=config.dropout)
         self.modulation = nn.Linear(dim, dim * 4)
         nn.init.zeros_(self.modulation.weight)
         nn.init.constant_(self.modulation.bias, 0.02)
 
-    def prepare_memory(self, *, scene: torch.Tensor, camera_tokens: tuple[torch.Tensor, ...]) -> FlowMemory:
+    def prepare_memory(
+        self, *, scene: torch.Tensor, camera_tokens: tuple[torch.Tensor, ...]
+    ) -> FlowMemory:
         camera_kv = None
         if self.camera_attn is not None:
             assert self.camera_index is not None
             camera_kv = self.camera_attn.prepare_key_value(camera_tokens[self.camera_index])
         return FlowMemory(scene_kv=self.scene_attn.prepare_key_value(scene), camera_kv=camera_kv)
 
-    def forward(self, action: torch.Tensor, *, cond: torch.Tensor, memory: FlowMemory) -> torch.Tensor:
-        gate_self, gate_scene, gate_camera, gate_ffn = torch.tanh(self.modulation(cond)).chunk(4, dim=-1)
+    def forward(
+        self, action: torch.Tensor, *, cond: torch.Tensor, memory: FlowMemory
+    ) -> torch.Tensor:
+        gate_self, gate_scene, gate_camera, gate_ffn = torch.tanh(self.modulation(cond)).chunk(
+            4, dim=-1
+        )
         action = self.local(action)
-        action = action + gate_self[:, None] * self.self_attn(self.self_norm(action), self.self_norm(action))
-        action = action + gate_scene[:, None] * self.scene_attn(self.scene_norm(action), prepared_kv=memory.scene_kv)
+        action = action + gate_self[:, None] * self.self_attn(
+            self.self_norm(action), self.self_norm(action)
+        )
+        action = action + gate_scene[:, None] * self.scene_attn(
+            self.scene_norm(action), prepared_kv=memory.scene_kv
+        )
         if self.camera_attn is not None:
             assert self.camera_norm is not None and memory.camera_kv is not None
-            action = action + gate_camera[:, None] * self.camera_attn(self.camera_norm(action), prepared_kv=memory.camera_kv)
+            action = action + gate_camera[:, None] * self.camera_attn(
+                self.camera_norm(action), prepared_kv=memory.camera_kv
+            )
         action = action + gate_ffn[:, None] * self.ffn(self.ffn_norm(action))
         return action
 
@@ -409,7 +473,13 @@ class NonlinearResidualVelocityDecoder(nn.Module):
         super().__init__()
         self.norm = RMSNorm(dim)
         self.skip = nn.Linear(dim, action_dim)
-        self.mlp = nn.Sequential(nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, 128), nn.SiLU(), nn.Linear(128, action_dim))
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, 128),
+            nn.SiLU(),
+            nn.Linear(128, action_dim),
+        )
         nn.init.normal_(self.skip.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.skip.bias)
         nn.init.zeros_(self.mlp[-1].weight)
@@ -471,7 +541,9 @@ class ResidualFlowLabModel(nn.Module):
                 # Wrist/local view is read first when cameras are (top, wrist).
                 schedule.append((cameras - (index % cameras)) % cameras)
         self.camera_schedule = tuple(schedule)
-        self.blocks = nn.ModuleList([ResidualTrajectoryBlock(config, camera_index=index) for index in self.camera_schedule])
+        self.blocks = nn.ModuleList(
+            [ResidualTrajectoryBlock(config, camera_index=index) for index in self.camera_schedule]
+        )
         self.decoder = NonlinearResidualVelocityDecoder(dim, config.action_dim)
 
     def prepare_visual(self, visual_tokens: torch.Tensor) -> PreparedVisualState:
@@ -485,13 +557,17 @@ class ResidualFlowLabModel(nn.Module):
             camera_keep_mask=adapted.camera_keep_mask,
         )
 
-    def predict_source(self, past: torch.Tensor, prior: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def predict_source(
+        self, past: torch.Tensor, prior: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.history_source(past, prior)
 
     def prepare_flow_memory(self, prepared_visual: PreparedVisualState) -> PreparedFlowMemory:
         return PreparedFlowMemory(
             block_memories=tuple(
-                block.prepare_memory(scene=prepared_visual.scene_tokens, camera_tokens=prepared_visual.camera_tokens)
+                block.prepare_memory(
+                    scene=prepared_visual.scene_tokens, camera_tokens=prepared_visual.camera_tokens
+                )
                 for block in self.blocks
             )
         )
@@ -515,9 +591,13 @@ class ResidualFlowLabModel(nn.Module):
             raise ValueError("learned_source and residual_state must share shape")
         batch = residual_state.shape[0]
         if step_size is None:
-            step_size = torch.zeros((batch,), device=residual_state.device, dtype=residual_state.dtype)
+            step_size = torch.zeros(
+                (batch,), device=residual_state.device, dtype=residual_state.dtype
+            )
         if noise_level is None:
-            noise_level = torch.zeros((batch,), device=residual_state.device, dtype=residual_state.dtype)
+            noise_level = torch.zeros(
+                (batch,), device=residual_state.device, dtype=residual_state.dtype
+            )
         history_tokens, history_summary = self.history_encoder(past)
         source_tokens = self.source_norm(self.source_proj(learned_source) + self.source_pos[None])
         source_summary = source_tokens.mean(dim=1)
@@ -529,7 +609,9 @@ class ResidualFlowLabModel(nn.Module):
             source_summary=source_summary,
         )
         token = self.residual_in(residual_state) + self.residual_pos[None]
-        memory = self.prepare_flow_memory(prepared_visual) if prepared_flow is None else prepared_flow
+        memory = (
+            self.prepare_flow_memory(prepared_visual) if prepared_flow is None else prepared_flow
+        )
         for block, block_memory in zip(self.blocks, memory.block_memories, strict=True):
             token = block(token, cond=cond, memory=block_memory)
         velocity = self.decoder(token)
@@ -594,14 +676,18 @@ class ResidualFlowLabModel(nn.Module):
         if steps <= 0:
             raise ValueError("steps must be positive")
         source = self.predict_source(past, prior)[0] if learned_source is None else learned_source
-        memory = self.prepare_flow_memory(prepared_visual) if prepared_flow is None else prepared_flow
+        memory = (
+            self.prepare_flow_memory(prepared_visual) if prepared_flow is None else prepared_flow
+        )
         residual = torch.zeros_like(source)
         batch = source.shape[0]
         dt = 1.0 / float(steps)
         step_size = torch.full((batch,), dt, device=source.device, dtype=source.dtype)
         noise = torch.zeros((batch,), device=source.device, dtype=source.dtype)
         for index in range(steps):
-            time = torch.full((batch,), float(index) / float(steps), device=source.device, dtype=source.dtype)
+            time = torch.full(
+                (batch,), float(index) / float(steps), device=source.device, dtype=source.dtype
+            )
             output = self.predict_residual_velocity_prepared(
                 past=past,
                 learned_source=source,
@@ -616,6 +702,15 @@ class ResidualFlowLabModel(nn.Module):
         return source + residual
 
     @torch.no_grad()
-    def integrate(self, *, past: torch.Tensor, prior: torch.Tensor, visual_tokens: torch.Tensor, steps: int = 4) -> torch.Tensor:
+    def integrate(
+        self,
+        *,
+        past: torch.Tensor,
+        prior: torch.Tensor,
+        visual_tokens: torch.Tensor,
+        steps: int = 4,
+    ) -> torch.Tensor:
         prepared = self.prepare_visual(visual_tokens)
-        return self.integrate_prepared(past=past, prior=prior, prepared_visual=prepared, steps=steps)
+        return self.integrate_prepared(
+            past=past, prior=prior, prepared_visual=prepared, steps=steps
+        )

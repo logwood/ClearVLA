@@ -135,7 +135,14 @@ class GroundedMotorRDT2FMConfig:
             raise ValueError("history_hidden_size must be positive")
         if self.history_noise_std < 0:
             raise ValueError("history_noise_std must be non-negative")
-        if min(self.full_flow_loss_weight, self.first_flow_loss_weight, self.full_first_position_weight) <= 0:
+        if (
+            min(
+                self.full_flow_loss_weight,
+                self.first_flow_loss_weight,
+                self.full_first_position_weight,
+            )
+            <= 0
+        ):
             raise ValueError("loss weights must be positive")
 
     @property
@@ -166,7 +173,9 @@ class MotionStateEncoder(nn.Module):
         if state.ndim != 2 or state.shape[-1] != cfg.state_dim:
             raise ValueError(f"state must be [B,{cfg.state_dim}], got {tuple(state.shape)}")
         if past_actions.ndim != 3 or past_actions.shape[-1] != cfg.action_dim:
-            raise ValueError(f"past_actions must be [B,T,{cfg.action_dim}], got {tuple(past_actions.shape)}")
+            raise ValueError(
+                f"past_actions must be [B,T,{cfg.action_dim}], got {tuple(past_actions.shape)}"
+            )
         history = past_actions
         if self.training and cfg.history_noise_std:
             history = history + torch.randn_like(history) * cfg.history_noise_std
@@ -174,7 +183,9 @@ class MotionStateEncoder(nn.Module):
         delta[:, 1:] = history[:, 1:] - history[:, :-1]
         encoded, hidden = self.encoder(self.history_in(torch.cat([history, delta], dim=-1)))
         state_hidden = self.state_in(state)
-        query = self.motion_queries.unsqueeze(0).expand(state.shape[0], -1, -1) + state_hidden.unsqueeze(1)
+        query = self.motion_queries.unsqueeze(0).expand(
+            state.shape[0], -1, -1
+        ) + state_hidden.unsqueeze(1)
         attended, _ = self.readout(query, encoded, encoded, need_weights=False)
         motion = self.token_out(self.norm(query + attended))
         state_token = self.state_out(state_hidden).unsqueeze(1)
@@ -202,12 +213,19 @@ class GroundingBlock(nn.Module):
         self.visual_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
         self.cross_attn = CrossAttention(core)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
-        self.ffn = FeedForward(config.hidden_size, 4 * config.hidden_size, config.multiple_of, config.ffn_dim_multiplier)
+        self.ffn = FeedForward(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.multiple_of,
+            config.ffn_dim_multiplier,
+        )
         self.scale = 1.0 / math.sqrt(max(config.grounding_depth, 1))
 
     def forward(self, query: Tensor, visual: Tensor, visual_mask: Tensor | None) -> Tensor:
         query = query + self.scale * self.self_attn(self.self_norm(query))
-        query = query + self.scale * self.cross_attn(self.cross_norm(query), c=self.visual_norm(visual), mask=visual_mask)
+        query = query + self.scale * self.cross_attn(
+            self.cross_norm(query), c=self.visual_norm(visual), mask=visual_mask
+        )
         return query + self.scale * self.ffn(self.ffn_norm(query))
 
 
@@ -223,8 +241,12 @@ class SemanticVisualGrounder(nn.Module):
         super().__init__()
         self.config = config
         self.visual_in = _adapter(config.visual_adaptor, config.dense_token_dim, config.hidden_size)
-        self.default_task = nn.Parameter(torch.randn(1, config.default_task_tokens, config.hidden_size) * 0.02)
-        self.query = nn.Parameter(torch.randn(1, config.grounding_queries, config.hidden_size) * 0.02)
+        self.default_task = nn.Parameter(
+            torch.randn(1, config.default_task_tokens, config.hidden_size) * 0.02
+        )
+        self.query = nn.Parameter(
+            torch.randn(1, config.grounding_queries, config.hidden_size) * 0.02
+        )
         self.query_bias = nn.Linear(2 * config.hidden_size, config.hidden_size)
         self.blocks = nn.ModuleList([GroundingBlock(config) for _ in range(config.grounding_depth)])
         self.task_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
@@ -240,22 +262,30 @@ class SemanticVisualGrounder(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         cfg = self.config
         if dense_tokens.ndim != 3 or dense_tokens.shape[-1] != cfg.dense_token_dim:
-            raise ValueError(f"dense_tokens must be [B,L,{cfg.dense_token_dim}], got {tuple(dense_tokens.shape)}")
+            raise ValueError(
+                f"dense_tokens must be [B,L,{cfg.dense_token_dim}], got {tuple(dense_tokens.shape)}"
+            )
         if attention_mask is not None and attention_mask.shape != dense_tokens.shape[:2]:
             raise ValueError("attention_mask must match dense-token batch and length")
         if motion_summary.ndim != 2 or motion_summary.shape[-1] != cfg.hidden_size:
-            raise ValueError(f"motion_summary must be [B,{cfg.hidden_size}], got {tuple(motion_summary.shape)}")
+            raise ValueError(
+                f"motion_summary must be [B,{cfg.hidden_size}], got {tuple(motion_summary.shape)}"
+            )
         visual = self.visual_in(dense_tokens)
         if task_tokens is None:
             task = self.default_task.expand(dense_tokens.shape[0], -1, -1)
         else:
             if task_tokens.ndim != 3 or task_tokens.shape[-1] != cfg.hidden_size:
-                raise ValueError(f"task_tokens must already be [B,T,{cfg.hidden_size}], got {tuple(task_tokens.shape)}")
+                raise ValueError(
+                    f"task_tokens must already be [B,T,{cfg.hidden_size}], got {tuple(task_tokens.shape)}"
+                )
             task = task_tokens
         task = self.task_norm(task)
         task_summary = task.mean(dim=1)
         query = self.query.expand(dense_tokens.shape[0], -1, -1)
-        query = query + self.query_bias(torch.cat([task_summary, motion_summary], dim=-1)).unsqueeze(1)
+        query = query + self.query_bias(
+            torch.cat([task_summary, motion_summary], dim=-1)
+        ).unsqueeze(1)
         for block in self.blocks:
             query = block(query, visual, attention_mask)
         grounded = self.out_norm(query)
@@ -282,7 +312,12 @@ class MotorBlock(nn.Module):
         self.context_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
         self.cross_attn = CrossAttention(core)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
-        self.ffn = FeedForward(config.hidden_size, 4 * config.hidden_size, config.multiple_of, config.ffn_dim_multiplier)
+        self.ffn = FeedForward(
+            config.hidden_size,
+            4 * config.hidden_size,
+            config.multiple_of,
+            config.ffn_dim_multiplier,
+        )
         self.scale = 1.0 / math.sqrt(max(stage_depth, 1))
 
     def forward(self, x: Tensor, context: Tensor) -> Tensor:
@@ -326,9 +361,15 @@ class GroundedMotorCore(nn.Module):
         self.t_embedder = TimestepEmbedder(config.hidden_size, dtype=dtype)
         self.action_in = _adapter("mlp2x_silu", config.action_dim, config.hidden_size)
         self.first_pos = nn.Parameter(torch.randn(1, 1, config.hidden_size) * 0.02)
-        self.tail_pos = nn.Parameter(torch.randn(1, config.prediction_horizon - 1, config.hidden_size) * 0.02)
-        self.first_blocks = nn.ModuleList([MotorBlock(config, stage_depth=config.first_depth) for _ in range(config.first_depth)])
-        self.tail_blocks = nn.ModuleList([MotorBlock(config, stage_depth=config.tail_depth) for _ in range(config.tail_depth)])
+        self.tail_pos = nn.Parameter(
+            torch.randn(1, config.prediction_horizon - 1, config.hidden_size) * 0.02
+        )
+        self.first_blocks = nn.ModuleList(
+            [MotorBlock(config, stage_depth=config.first_depth) for _ in range(config.first_depth)]
+        )
+        self.tail_blocks = nn.ModuleList(
+            [MotorBlock(config, stage_depth=config.tail_depth) for _ in range(config.tail_depth)]
+        )
         self.readout = ActionReadout(config)
         self.anchor_in = nn.Linear(config.action_dim, config.hidden_size)
         self.anchor_type = nn.Parameter(torch.randn(1, 1, config.hidden_size) * 0.02)
@@ -340,6 +381,7 @@ class GroundedMotorCore(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+
         self.apply(basic)
         self.to(dtype=dtype)
 
@@ -351,26 +393,47 @@ class GroundedMotorCore(nn.Module):
             raise ValueError("timestep batch does not match action batch")
         return time.unsqueeze(1)
 
-    def first_velocity(self, *, noisy_first: Tensor, timesteps: Tensor, context: PreparedGroundedContext) -> Tensor:
+    def first_velocity(
+        self, *, noisy_first: Tensor, timesteps: Tensor, context: PreparedGroundedContext
+    ) -> Tensor:
         if noisy_first.ndim != 3 or tuple(noisy_first.shape[1:]) != (1, self.config.action_dim):
-            raise ValueError(f"noisy_first must be [B,1,{self.config.action_dim}], got {tuple(noisy_first.shape)}")
-        x = self.action_in(noisy_first) + self.first_pos + self._time(timesteps, noisy_first.shape[0])
+            raise ValueError(
+                f"noisy_first must be [B,1,{self.config.action_dim}], got {tuple(noisy_first.shape)}"
+            )
+        x = (
+            self.action_in(noisy_first)
+            + self.first_pos
+            + self._time(timesteps, noisy_first.shape[0])
+        )
         for block in self.first_blocks:
             x = block(x, context.tokens)
         return self.readout(x)
 
-    def full_velocity(self, *, noisy_action: Tensor, timesteps: Tensor, context: PreparedGroundedContext) -> GroundedMotorVelocityOutput:
+    def full_velocity(
+        self, *, noisy_action: Tensor, timesteps: Tensor, context: PreparedGroundedContext
+    ) -> GroundedMotorVelocityOutput:
         cfg = self.config
-        if noisy_action.ndim != 3 or tuple(noisy_action.shape[1:]) != (cfg.prediction_horizon, cfg.action_dim):
-            raise ValueError(f"noisy_action must be [B,{cfg.prediction_horizon},{cfg.action_dim}], got {tuple(noisy_action.shape)}")
-        first = self.first_velocity(noisy_first=noisy_action[:, :1], timesteps=timesteps, context=context)
+        if noisy_action.ndim != 3 or tuple(noisy_action.shape[1:]) != (
+            cfg.prediction_horizon,
+            cfg.action_dim,
+        ):
+            raise ValueError(
+                f"noisy_action must be [B,{cfg.prediction_horizon},{cfg.action_dim}], got {tuple(noisy_action.shape)}"
+            )
+        first = self.first_velocity(
+            noisy_first=noisy_action[:, :1], timesteps=timesteps, context=context
+        )
         anchor_source = first.detach() if cfg.detach_first_anchor else first
         anchor = self.anchor_in(anchor_source) + self.anchor_type
         tail_context = PreparedGroundedContext(
             tokens=torch.cat([context.tokens, anchor], dim=1),
             grounding_summary=context.grounding_summary,
         )
-        tail = self.action_in(noisy_action[:, 1:]) + self.tail_pos + self._time(timesteps, noisy_action.shape[0])
+        tail = (
+            self.action_in(noisy_action[:, 1:])
+            + self.tail_pos
+            + self._time(timesteps, noisy_action.shape[0])
+        )
         for block in self.tail_blocks:
             tail = block(tail, tail_context.tokens)
         tail_velocity = self.readout(tail)
@@ -387,7 +450,12 @@ class GroundedMotorCore(nn.Module):
 class GroundedMotorRDT2FM(nn.Module):
     """One-time grounding plus native-first shallow flow-matching policy."""
 
-    def __init__(self, config: GroundedMotorRDT2FMConfig = GroundedMotorRDT2FMConfig(), *, dtype: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self,
+        config: GroundedMotorRDT2FMConfig = GroundedMotorRDT2FMConfig(),
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         super().__init__()
         config.validate()
         self.config = config
@@ -400,7 +468,9 @@ class GroundedMotorRDT2FM(nn.Module):
         self.to(dtype=dtype)
 
     def sample_timesteps(self, batch_size: int, device: torch.device) -> Tensor:
-        distribution = LogisticNormal(torch.tensor(0.0, device=device), torch.tensor(1.0, device=device))
+        distribution = LogisticNormal(
+            torch.tensor(0.0, device=device), torch.tensor(1.0, device=device)
+        )
         return distribution.sample((batch_size,))[:, 0]
 
     def prepare_context(
@@ -419,7 +489,10 @@ class GroundedMotorRDT2FM(nn.Module):
             motion_summary=motion_summary,
             task_tokens=task_tokens,
         )
-        return PreparedGroundedContext(tokens=torch.cat([motion_tokens, grounded_tokens], dim=1), grounding_summary=grounding_summary)
+        return PreparedGroundedContext(
+            tokens=torch.cat([motion_tokens, grounded_tokens], dim=1),
+            grounding_summary=grounding_summary,
+        )
 
     def compute_loss(
         self,
@@ -445,9 +518,13 @@ class GroundedMotorRDT2FM(nn.Module):
             task_tokens=task_tokens,
         )
         output = self.core.full_velocity(noisy_action=noisy, timesteps=timesteps, context=context)
-        full = _weighted_full_mse(output.full, target_velocity, self.config.full_first_position_weight)
+        full = _weighted_full_mse(
+            output.full, target_velocity, self.config.full_first_position_weight
+        )
         first = F.mse_loss(output.first, target_velocity[:, :1])
-        total = self.config.full_flow_loss_weight * full + self.config.first_flow_loss_weight * first
+        total = (
+            self.config.full_flow_loss_weight * full + self.config.first_flow_loss_weight * first
+        )
         return {
             "loss": total,
             "full_flow_mse": full.detach(),
@@ -478,14 +555,21 @@ class GroundedMotorRDT2FM(nn.Module):
         )
         batch = state_tokens.shape[0]
         if noisy_first is None:
-            noisy_first = torch.randn((batch, 1, self.action_dim), device=state_tokens.device, dtype=state_tokens.dtype, generator=generator)
+            noisy_first = torch.randn(
+                (batch, 1, self.action_dim),
+                device=state_tokens.device,
+                dtype=state_tokens.dtype,
+                generator=generator,
+            )
         steps = int(inference_steps or self.num_inference_timesteps)
         if steps <= 0:
             raise ValueError("inference_steps must be positive")
         dt = 1.0 / steps
         time = torch.tensor([0.0], device=state_tokens.device, dtype=state_tokens.dtype)
         for _ in range(steps):
-            velocity = self.core.first_velocity(noisy_first=noisy_first, timesteps=time, context=context)
+            velocity = self.core.first_velocity(
+                noisy_first=noisy_first, timesteps=time, context=context
+            )
             noisy_first = noisy_first + velocity * dt
             time = time + dt
         return noisy_first[:, 0]
@@ -512,14 +596,21 @@ class GroundedMotorRDT2FM(nn.Module):
         )
         batch = state_tokens.shape[0]
         if noisy_action is None:
-            noisy_action = torch.randn((batch, self.pred_horizon, self.action_dim), device=state_tokens.device, dtype=state_tokens.dtype, generator=generator)
+            noisy_action = torch.randn(
+                (batch, self.pred_horizon, self.action_dim),
+                device=state_tokens.device,
+                dtype=state_tokens.dtype,
+                generator=generator,
+            )
         steps = int(inference_steps or self.num_inference_timesteps)
         if steps <= 0:
             raise ValueError("inference_steps must be positive")
         dt = 1.0 / steps
         time = torch.tensor([0.0], device=state_tokens.device, dtype=state_tokens.dtype)
         for _ in range(steps):
-            velocity = self.core.full_velocity(noisy_action=noisy_action, timesteps=time, context=context).full
+            velocity = self.core.full_velocity(
+                noisy_action=noisy_action, timesteps=time, context=context
+            ).full
             noisy_action = noisy_action + velocity * dt
             time = time + dt
         return noisy_action

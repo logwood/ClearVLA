@@ -191,8 +191,7 @@ def _encode_future_latents(
         future_images = batch["future_obs_image"]
         if future_images.ndim != 6:
             raise ValueError(
-                "future_obs_image must be [B,T,Cam,RGB,H,W], "
-                f"got {tuple(future_images.shape)}"
+                f"future_obs_image must be [B,T,Cam,RGB,H,W], got {tuple(future_images.shape)}"
             )
         flat_images = future_images.reshape(
             batch_size * future_steps,
@@ -202,10 +201,11 @@ def _encode_future_latents(
         # CachedDinoV2DenseConditioner ignores image values and uses sample_keys.
         # Repeating the current image keeps the conditioner protocol uniform.
         current = batch["obs_image"]
-        flat_images = current[:, None].expand(
-            batch_size, future_steps, *current.shape[1:]
-        ).reshape(batch_size * future_steps, *current.shape[1:]).to(
-            device=device, non_blocking=True
+        flat_images = (
+            current[:, None]
+            .expand(batch_size, future_steps, *current.shape[1:])
+            .reshape(batch_size * future_steps, *current.shape[1:])
+            .to(device=device, non_blocking=True)
         )
     encoded = conditioner.encode(
         flat_images,
@@ -381,9 +381,7 @@ def _format_future_metrics(prefix: str, metrics: dict[str, float], model) -> str
             metrics.get(f"future_latent_t{time_idx}_c{camera_idx}_mse", float("nan"))
             for camera_idx in range(cameras)
         ]
-        per_target.append(
-            f"t+{offset}=" + "/".join(f"{value:.5f}" for value in camera_values)
-        )
+        per_target.append(f"t+{offset}=" + "/".join(f"{value:.5f}" for value in camera_values))
     fields.append("targets[" + ",".join(per_target) + "]")
     return " ".join(fields)
 
@@ -401,7 +399,15 @@ def evaluate_mainline_rdt2_fm(
     instruction: str = "",
     image_ablation: str = "normal",
 ) -> dict[str, Any]:
-    allowed = {"normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"}
+    allowed = {
+        "normal",
+        "zero",
+        "mean",
+        "shuffle-batch",
+        "shuffle-episode",
+        "top-only",
+        "wrist-only",
+    }
     if image_ablation not in allowed:
         raise ValueError(f"unsupported image_ablation={image_ablation!r}")
     model.eval()
@@ -432,7 +438,9 @@ def evaluate_mainline_rdt2_fm(
         conditioner_ablation = image_ablation
         if image_ablation == "shuffle-episode":
             sample_keys = loader.dataset.cross_episode_keys(sample_keys, seed=batch_index)
-            images = loader.dataset.load_images_for_keys(sample_keys).to(device=device, non_blocking=True)
+            images = loader.dataset.load_images_for_keys(sample_keys).to(
+                device=device, non_blocking=True
+            )
             conditioner_ablation = "normal"
         condition = conditioner.encode(
             images,
@@ -495,7 +503,9 @@ def evaluate_mainline_rdt2_fm(
         )
         _timer_sync(device)
         latency["full_ms"].append((time.perf_counter() - start) * 1000)
-        learned_prior, _ = model.predict_prior(state_tokens=state, past_actions=past, physical_prior=hold)
+        learned_prior, _ = model.predict_prior(
+            state_tokens=state, past_actions=past, physical_prior=hold
+        )
         fast_chunk = learned_prior.clone()
         fast_chunk[:, 0] = fast
         prefix_chunk = learned_prior.clone()
@@ -511,23 +521,53 @@ def evaluate_mainline_rdt2_fm(
     target = _concat(target_rows)
     prior = _concat(hold_rows)
     past = _concat(past_rows)
-    metrics = compute_metrics(pred_norm=pred, target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    learned_metrics = compute_metrics(pred_norm=_concat(learned_prior_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    fast_metrics = compute_metrics(pred_norm=_concat(fast_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    prefix_metrics = compute_metrics(pred_norm=_concat(prefix_rows), target_norm=target, prior_norm=prior, past_norm=past, normalizer=action_normalizer)
-    metrics.update({
-        "inference_steps": int(inference_steps),
-        "image_ablation": str(image_ablation),
-        "learned_prior_full_mse": learned_metrics["full_mse"],
-        "learned_prior_arm_first_rmse": learned_metrics.get("arm_first_rmse", learned_metrics["first_rmse"]),
-        "fast_exit_arm_first_rmse": fast_metrics.get("arm_first_rmse", fast_metrics["first_rmse"]),
-        "fast_exit_first_rmse": fast_metrics["first_rmse"],
-        "prefix_exit_first4_rmse": prefix_metrics["first4_rmse"],
-        "prefix_exit_first8_rmse": prefix_metrics["first8_rmse"],
-        "latency_fast_ms": float(np.mean(latency["fast_ms"])),
-        "latency_prefix_ms": float(np.mean(latency["prefix_ms"])),
-        "latency_full_ms": float(np.mean(latency["full_ms"])),
-    })
+    metrics = compute_metrics(
+        pred_norm=pred,
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    learned_metrics = compute_metrics(
+        pred_norm=_concat(learned_prior_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    fast_metrics = compute_metrics(
+        pred_norm=_concat(fast_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    prefix_metrics = compute_metrics(
+        pred_norm=_concat(prefix_rows),
+        target_norm=target,
+        prior_norm=prior,
+        past_norm=past,
+        normalizer=action_normalizer,
+    )
+    metrics.update(
+        {
+            "inference_steps": int(inference_steps),
+            "image_ablation": str(image_ablation),
+            "learned_prior_full_mse": learned_metrics["full_mse"],
+            "learned_prior_arm_first_rmse": learned_metrics.get(
+                "arm_first_rmse", learned_metrics["first_rmse"]
+            ),
+            "fast_exit_arm_first_rmse": fast_metrics.get(
+                "arm_first_rmse", fast_metrics["first_rmse"]
+            ),
+            "fast_exit_first_rmse": fast_metrics["first_rmse"],
+            "prefix_exit_first4_rmse": prefix_metrics["first4_rmse"],
+            "prefix_exit_first8_rmse": prefix_metrics["first8_rmse"],
+            "latency_fast_ms": float(np.mean(latency["fast_ms"])),
+            "latency_prefix_ms": float(np.mean(latency["prefix_ms"])),
+            "latency_full_ms": float(np.mean(latency["full_ms"])),
+        }
+    )
     for key in losses[0]:
         metrics[f"val_{key}"] = float(np.mean([row[key] for row in losses]))
     return metrics
@@ -607,23 +647,29 @@ def train_mainline_rdt2_fm(
         }
     ]
     if world_parameters:
-        parameter_groups.append({
-            "params": world_parameters,
-            "lr": trainer.lr if future_world_lr is None else float(future_world_lr),
-            "weight_decay": (
-                trainer.weight_decay
-                if future_world_weight_decay is None
-                else float(future_world_weight_decay)
-            ),
-            "group_name": "future_world",
-        })
+        parameter_groups.append(
+            {
+                "params": world_parameters,
+                "lr": trainer.lr if future_world_lr is None else float(future_world_lr),
+                "weight_decay": (
+                    trainer.weight_decay
+                    if future_world_weight_decay is None
+                    else float(future_world_weight_decay)
+                ),
+                "group_name": "future_world",
+            }
+        )
     optimizer = torch.optim.AdamW(
         parameter_groups,
         lr=trainer.lr,
         betas=(trainer.beta1, trainer.beta2),
         eps=trainer.eps,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     scheduler = _rdt_scheduler(
         optimizer,
         scheduler=trainer.scheduler,
@@ -728,8 +774,7 @@ def train_mainline_rdt2_fm(
                 )
                 if model.future_latent_enabled:
                     flow_component = (
-                        model.config.future_world_loss_weight
-                        * loss["future_flow_train_objective"]
+                        model.config.future_world_loss_weight * loss["future_flow_train_objective"]
                     )
                     align_component = (
                         model.config.future_world_loss_weight
@@ -758,25 +803,33 @@ def train_mainline_rdt2_fm(
                         _align_grad,
                         align_to_flow_grad_ratio,
                         align_flow_grad_cosine,
-                    ) = _objective_grad_pair_stats(flow_component, align_component, world_parameters)
+                    ) = _objective_grad_pair_stats(
+                        flow_component, align_component, world_parameters
+                    )
                     (
                         _flow_again,
                         _inverse_grad,
                         inverse_to_flow_grad_ratio,
                         inverse_flow_grad_cosine,
-                    ) = _objective_grad_pair_stats(flow_component, inverse_component, world_parameters)
+                    ) = _objective_grad_pair_stats(
+                        flow_component, inverse_component, world_parameters
+                    )
                     (
                         _flow_again,
                         _pred_align_grad,
                         pred_align_to_flow_grad_ratio,
                         pred_align_flow_grad_cosine,
-                    ) = _objective_grad_pair_stats(flow_component, pred_align_component, world_parameters)
+                    ) = _objective_grad_pair_stats(
+                        flow_component, pred_align_component, world_parameters
+                    )
                     (
                         _flow_again,
                         _cycle_grad,
                         cycle_to_flow_grad_ratio,
                         cycle_flow_grad_cosine,
-                    ) = _objective_grad_pair_stats(flow_component, cycle_component, world_parameters)
+                    ) = _objective_grad_pair_stats(
+                        flow_component, cycle_component, world_parameters
+                    )
             loss["loss"].backward()
             grad_policy = _grad_norm(policy_parameters)
             grad_world = _grad_norm(world_parameters)
@@ -796,33 +849,35 @@ def train_mainline_rdt2_fm(
             scheduler.step()
             global_step += 1
             row = {key: float(value.detach().float().cpu()) for key, value in loss.items()}
-            row.update({
-                "grad_total": grad_total,
-                "grad_policy": grad_policy,
-                "grad_world": grad_world,
-                "grad_shared": grad_policy,
-                "grad_future": grad_world,
-                "grad_policy_clip_input": policy_clip_norm,
-                "grad_world_clip_input": world_clip_norm,
-                "grad_policy_component_shared": policy_component_grad,
-                "grad_world_to_policy": world_to_policy_grad,
-                "grad_consistency_to_policy": consistency_to_policy_grad,
-                "grad_consistency_to_world": consistency_to_world_grad,
-                "grad_consistency_to_policy_ratio": consistency_to_policy_ratio,
-                "grad_policy_consistency_cosine": policy_consistency_grad_cosine,
-                "grad_semantic_flow": semantic_flow_grad,
-                "grad_align_to_flow_ratio": align_to_flow_grad_ratio,
-                "grad_inverse_to_flow_ratio": inverse_to_flow_grad_ratio,
-                "grad_pred_align_to_flow_ratio": pred_align_to_flow_grad_ratio,
-                "grad_cycle_to_flow_ratio": cycle_to_flow_grad_ratio,
-                "grad_align_flow_cosine": align_flow_grad_cosine,
-                "grad_inverse_flow_cosine": inverse_flow_grad_cosine,
-                "grad_pred_align_flow_cosine": pred_align_flow_grad_cosine,
-                "grad_cycle_flow_cosine": cycle_flow_grad_cosine,
-            })
+            row.update(
+                {
+                    "grad_total": grad_total,
+                    "grad_policy": grad_policy,
+                    "grad_world": grad_world,
+                    "grad_shared": grad_policy,
+                    "grad_future": grad_world,
+                    "grad_policy_clip_input": policy_clip_norm,
+                    "grad_world_clip_input": world_clip_norm,
+                    "grad_policy_component_shared": policy_component_grad,
+                    "grad_world_to_policy": world_to_policy_grad,
+                    "grad_consistency_to_policy": consistency_to_policy_grad,
+                    "grad_consistency_to_world": consistency_to_world_grad,
+                    "grad_consistency_to_policy_ratio": consistency_to_policy_ratio,
+                    "grad_policy_consistency_cosine": policy_consistency_grad_cosine,
+                    "grad_semantic_flow": semantic_flow_grad,
+                    "grad_align_to_flow_ratio": align_to_flow_grad_ratio,
+                    "grad_inverse_to_flow_ratio": inverse_to_flow_grad_ratio,
+                    "grad_pred_align_to_flow_ratio": pred_align_to_flow_grad_ratio,
+                    "grad_cycle_to_flow_ratio": cycle_to_flow_grad_ratio,
+                    "grad_align_flow_cosine": align_flow_grad_cosine,
+                    "grad_inverse_flow_cosine": inverse_flow_grad_cosine,
+                    "grad_pred_align_flow_cosine": pred_align_flow_grad_cosine,
+                    "grad_cycle_flow_cosine": cycle_flow_grad_cosine,
+                }
+            )
             rows.append(row)
             if should_log:
-                latest = rows[-trainer.log_every:]
+                latest = rows[-trainer.log_every :]
                 avg = {key: float(np.mean([item[key] for item in latest])) for key in latest[0]}
                 step_payload = {
                     "schema": "clearvla-rdt2-mainline-step-v9-contrastive-action-anchor",
@@ -886,10 +941,13 @@ def train_mainline_rdt2_fm(
             "val": metrics,
         }
         history.append(record)
-        _append_jsonl(epoch_log_path, {
-            "schema": "clearvla-rdt2-mainline-epoch-v9-contrastive-action-anchor",
-            **record,
-        })
+        _append_jsonl(
+            epoch_log_path,
+            {
+                "schema": "clearvla-rdt2-mainline-epoch-v9-contrastive-action-anchor",
+                **record,
+            },
+        )
         if metrics:
             print(
                 f"[rdt2-mainline] epoch={epoch:03d}/{trainer.epochs:03d} sec={record['seconds']:.2f} "
@@ -916,7 +974,10 @@ def train_mainline_rdt2_fm(
             "schema": "clearvla-rdt2-mainline-checkpoint-v7-contrastive-action-anchor",
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "optimizer_groups": [group.get("group_name", f"group_{idx}") for idx, group in enumerate(optimizer.param_groups)],
+            "optimizer_groups": [
+                group.get("group_name", f"group_{idx}")
+                for idx, group in enumerate(optimizer.param_groups)
+            ],
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "global_step": global_step,
@@ -935,7 +996,9 @@ def train_mainline_rdt2_fm(
                 _save(out_dir / "checkpoints/best_fast_first.pt", payload)
             if model.future_latent_enabled:
                 future_score = metrics["val_future_latent_flow_mse"]
-                joint_score = metrics["full_mse"] + model.config.future_world_loss_weight * future_score
+                joint_score = (
+                    metrics["full_mse"] + model.config.future_world_loss_weight * future_score
+                )
                 if future_score < best_future:
                     best_future = future_score
                     _save(out_dir / "checkpoints/best_future_latent.pt", payload)
@@ -945,7 +1008,9 @@ def train_mainline_rdt2_fm(
     summary = {
         "schema": "clearvla-rdt2-mainline-summary-v8-contrastive-action-anchor",
         "parameter_count": model.parameter_count(),
-        "future_latent_parameter_count": sum(parameter.numel() for parameter in model.future_latent_parameters()),
+        "future_latent_parameter_count": sum(
+            parameter.numel() for parameter in model.future_latent_parameters()
+        ),
         "best_full_mse": best_full,
         "best_fast_first_arm_rmse": best_fast,
         "best_future_latent_flow_mse": best_future,

@@ -45,19 +45,22 @@ class V36PolicyConfig:
     inference_steps: int = 5
 
     def validate(self) -> None:
-        if min(
-            self.action_dim,
-            self.state_dim,
-            self.action_horizon,
-            self.executed_history_length,
-            self.hidden_size,
-            self.num_heads,
-            self.depth,
-            self.action_decoder_depth,
-            self.proposal_depth,
-            self.event_tokens,
-            self.inference_steps,
-        ) <= 0:
+        if (
+            min(
+                self.action_dim,
+                self.state_dim,
+                self.action_horizon,
+                self.executed_history_length,
+                self.hidden_size,
+                self.num_heads,
+                self.depth,
+                self.action_decoder_depth,
+                self.proposal_depth,
+                self.event_tokens,
+                self.inference_steps,
+            )
+            <= 0
+        ):
             raise ValueError("V36 policy dimensions must be positive")
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
@@ -70,7 +73,11 @@ class V36PolicyConfig:
 
     @property
     def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.action_dim + self.gripper_dim_index
+        return (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.action_dim + self.gripper_dim_index
+        )
 
 
 class DiTPlannerBlock(nn.Module):
@@ -80,7 +87,9 @@ class DiTPlannerBlock(nn.Module):
         super().__init__()
         h = config.hidden_size
         self.n1 = nn.LayerNorm(h, elementwise_affine=False)
-        self.self_attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.self_attn = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n2 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, config.ffn_expansion)
         self.drop = nn.Dropout(config.dropout)
@@ -93,7 +102,9 @@ class DiTPlannerBlock(nn.Module):
         return x * (1 + scale[:, None]) + shift[:, None]
 
     def forward(self, x: Tensor, time: Tensor) -> Tensor:
-        attn_shift, attn_scale, attn_gate, ffn_shift, ffn_scale, ffn_gate = self.mod(time).chunk(6, dim=-1)
+        attn_shift, attn_scale, attn_gate, ffn_shift, ffn_scale, ffn_gate = self.mod(time).chunk(
+            6, dim=-1
+        )
         value = self.n1(x)
         query = self.modulate(value, attn_shift, attn_scale)
         update, _ = self.self_attn(query, query, value, need_weights=False)
@@ -152,14 +163,20 @@ class PolicyLatentDiTPlanner(nn.Module):
         world_tokens = self.world_proj(world) + self.world_type
         state_token = self.state_proj(state)[:, None] + self.state_type
         executed = self.executed_proj(executed_history) + self.executed_type
-        proposal = self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
-        horizon = self.horizon_query.expand(batch, -1, -1) + hpos + self.noisy_action_proj(noisy_action)
+        proposal = (
+            self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        )
+        horizon = (
+            self.horizon_query.expand(batch, -1, -1) + hpos + self.noisy_action_proj(noisy_action)
+        )
         event = self.event_query.expand(batch, -1, -1) + self.event_type
         prefix_len = 1 + world_tokens.shape[1] + 1 + executed.shape[1] + proposal.shape[1]
         action_slice = slice(prefix_len, prefix_len + self.config.action_horizon)
         event_start = prefix_len + self.config.action_horizon
         event_slice = slice(event_start, event_start + self.config.event_tokens)
-        tokens = torch.cat([task, world_tokens, state_token, executed, proposal, horizon, event], dim=1)
+        tokens = torch.cat(
+            [task, world_tokens, state_token, executed, proposal, horizon, event], dim=1
+        )
         return tokens, action_slice, event_slice
 
     def forward(
@@ -173,7 +190,9 @@ class PolicyLatentDiTPlanner(nn.Module):
         proposal_keep: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if proposal_keep is None:
-            proposal_keep = torch.ones(noisy_action.shape[0], device=noisy_action.device, dtype=noisy_action.dtype)
+            proposal_keep = torch.ones(
+                noisy_action.shape[0], device=noisy_action.device, dtype=noisy_action.dtype
+            )
         tokens, action_slice, event_slice = self._tokens(
             noisy_action, world, state, executed_history, proposal_tokens, proposal_keep
         )
@@ -197,10 +216,14 @@ class ActionExpertBlock(nn.Module):
         super().__init__()
         h = config.hidden_size
         self.n1 = nn.LayerNorm(h, elementwise_affine=False)
-        self.self_attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.self_attn = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n2 = nn.LayerNorm(h, elementwise_affine=False)
         self.cn = nn.LayerNorm(h)
-        self.cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n3 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, config.ffn_expansion)
         self.drop = nn.Dropout(config.dropout)
@@ -257,7 +280,9 @@ class PlannerConditionedActionExpert(nn.Module):
             persistent=True,
         )
         self.time = TimeEmbedding(h)
-        self.blocks = nn.ModuleList([ActionExpertBlock(config) for _ in range(config.action_decoder_depth)])
+        self.blocks = nn.ModuleList(
+            [ActionExpertBlock(config) for _ in range(config.action_decoder_depth)]
+        )
         self.out = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, config.action_dim))
 
     def memory(
@@ -272,7 +297,9 @@ class PlannerConditionedActionExpert(nn.Module):
         world_tokens = self.world_proj(world) + self.world_type
         state_token = self.state_proj(state)[:, None] + self.state_type
         executed = self.executed_proj(executed_history) + self.executed_type
-        proposal = self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        proposal = (
+            self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        )
         task = self.task_token.expand(world.shape[0], -1, -1)
         planner = planner_tokens + self.planner_memory_type
         return torch.cat([task, world_tokens, state_token, executed, proposal, planner], dim=1)
@@ -291,7 +318,9 @@ class PlannerConditionedActionExpert(nn.Module):
     ) -> Tensor:
         x = self.noisy_action_proj(noisy_action) + self.planner_action_proj(planner_action_tokens)
         position = self.action_position.to(device=x.device, dtype=x.dtype)
-        memory = self.memory(world, state, executed_history, proposal_tokens, proposal_keep, planner_tokens)
+        memory = self.memory(
+            world, state, executed_history, proposal_tokens, proposal_keep, planner_tokens
+        )
         t = self.time(time.to(dtype=x.dtype))
         for block in self.blocks:
             x = block(x, memory, t, position)
@@ -313,10 +342,14 @@ class V36PolicySystem(nn.Module):
         self.world_encoder.eval()
         self.proposal = RejectableHistoryProposal(policy_config)
         self.planner = PolicyLatentDiTPlanner(
-            policy_config, world_hidden=world_config.hidden_size, world_tokens=world_config.world_tokens
+            policy_config,
+            world_hidden=world_config.hidden_size,
+            world_tokens=world_config.world_tokens,
         )
         self.decoder = PlannerConditionedActionExpert(
-            policy_config, world_hidden=world_config.hidden_size, world_tokens=world_config.world_tokens
+            policy_config,
+            world_hidden=world_config.hidden_size,
+            world_tokens=world_config.world_tokens,
         )
 
     def train(self, mode: bool = True):
@@ -325,7 +358,9 @@ class V36PolicySystem(nn.Module):
         return self
 
     @torch.no_grad()
-    def encode_world(self, visual: Tensor, state_history: Tensor, executed_history: Tensor) -> Tensor:
+    def encode_world(
+        self, visual: Tensor, state_history: Tensor, executed_history: Tensor
+    ) -> Tensor:
         return self.world_encoder(visual.float(), state_history.float(), executed_history.float())
 
     def _policy_forward(
@@ -338,7 +373,9 @@ class V36PolicySystem(nn.Module):
         proposal_tokens: Tensor,
         proposal_keep: Tensor,
     ) -> dict[str, Tensor]:
-        planner = self.planner(noisy_action, time, world, state, executed_history, proposal_tokens, proposal_keep)
+        planner = self.planner(
+            noisy_action, time, world, state, executed_history, proposal_tokens, proposal_keep
+        )
         pred_velocity = self.decoder(
             noisy_action,
             time,
@@ -366,12 +403,22 @@ class V36PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         noise = torch.randn_like(target_action)
-        t = torch.rand(target_action.shape[0], device=target_action.device, dtype=target_action.dtype)
+        t = torch.rand(
+            target_action.shape[0], device=target_action.device, dtype=target_action.dtype
+        )
         noisy = (1 - t[:, None, None]) * target_action + t[:, None, None] * noise
         target_velocity = noise - target_action
-        drop = self.policy_config.proposal_dropout if proposal_dropout is None else float(proposal_dropout)
-        keep = (torch.rand(target_action.shape[0], device=target_action.device) >= drop).to(target_action.dtype)
-        policy = self._policy_forward(noisy, t, world, state, executed_history, proposal["tokens"].detach(), keep)
+        drop = (
+            self.policy_config.proposal_dropout
+            if proposal_dropout is None
+            else float(proposal_dropout)
+        )
+        keep = (torch.rand(target_action.shape[0], device=target_action.device) >= drop).to(
+            target_action.dtype
+        )
+        policy = self._policy_forward(
+            noisy, t, world, state, executed_history, proposal["tokens"].detach(), keep
+        )
         clean_estimate = noisy - t[:, None, None] * policy["pred_velocity"]
         return {
             "pred_velocity": policy["pred_velocity"],
@@ -400,19 +447,40 @@ class V36PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         steps = int(steps or self.policy_config.inference_steps)
-        x = torch.randn(
-            visual.shape[0], self.policy_config.action_horizon, self.policy_config.action_dim,
-            device=visual.device, dtype=visual.dtype,
-        ) if noise is None else noise.clone()
-        keep = torch.full((visual.shape[0],), 1.0 if use_proposal else 0.0, device=visual.device, dtype=visual.dtype)
+        x = (
+            torch.randn(
+                visual.shape[0],
+                self.policy_config.action_horizon,
+                self.policy_config.action_dim,
+                device=visual.device,
+                dtype=visual.dtype,
+            )
+            if noise is None
+            else noise.clone()
+        )
+        keep = torch.full(
+            (visual.shape[0],),
+            1.0 if use_proposal else 0.0,
+            device=visual.device,
+            dtype=visual.dtype,
+        )
         last: dict[str, Tensor] | None = None
         for index in range(steps, 0, -1):
-            t = torch.full((visual.shape[0],), float(index) / float(steps), device=visual.device, dtype=visual.dtype)
-            last = self._policy_forward(x, t, world, state, executed_history, proposal["tokens"], keep)
+            t = torch.full(
+                (visual.shape[0],),
+                float(index) / float(steps),
+                device=visual.device,
+                dtype=visual.dtype,
+            )
+            last = self._policy_forward(
+                x, t, world, state, executed_history, proposal["tokens"], keep
+            )
             x = x - last["pred_velocity"] / float(steps)
         if return_event_logits:
             zero_t = torch.zeros((visual.shape[0],), device=visual.device, dtype=visual.dtype)
-            event = self._policy_forward(x, zero_t, world, state, executed_history, proposal["tokens"], keep)["event_logits"]
+            event = self._policy_forward(
+                x, zero_t, world, state, executed_history, proposal["tokens"], keep
+            )["event_logits"]
             return {"action": x, "event_logits": event}
         return x
 

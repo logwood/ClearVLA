@@ -21,7 +21,10 @@ from clearvla.experiments.dynamic_world_lab.dataset import (
     DynamicWorldWindowDataset,
     PairedDynamicWorldDataset,
 )
-from clearvla.experiments.legacy_v33.dynamic_world_lab.model import DynamicPredictiveWorld, DynamicPredictiveWorldConfig
+from clearvla.experiments.legacy_v33.dynamic_world_lab.model import (
+    DynamicPredictiveWorld,
+    DynamicPredictiveWorldConfig,
+)
 from clearvla.experiments.legacy_v33.dynamic_world_lab.objectives import DynamicWorldLossConfig
 from clearvla.experiments.dynamic_world_lab.pairing import LocalPairTable
 from clearvla.experiments.legacy_v33.dynamic_world_lab.runtime import evaluate_dynamic_world
@@ -33,7 +36,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--pair-index-dir", type=Path, required=True)
     p.add_argument("--split", choices=["val", "test"], default="val")
-    p.add_argument("--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache")
+    p.add_argument(
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
+    )
     p.add_argument("--dinov2-model", default="facebook/dinov2-base")
     p.add_argument("--dinov2-local-files-only", action="store_true")
     p.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
@@ -134,8 +141,12 @@ def main() -> None:
         config=effective_dataset_config,
     )
     pair_name = "val_local_pairs.npz" if args.split == "val" else "test_local_pairs.npz"
-    support_name = "val_support_distance.npy" if args.split == "val" else "test_support_distance.npy"
-    support_index_name = "val_support_index.npy" if args.split == "val" else "test_support_index.npy"
+    support_name = (
+        "val_support_distance.npy" if args.split == "val" else "test_support_distance.npy"
+    )
+    support_index_name = (
+        "val_support_index.npy" if args.split == "val" else "test_support_index.npy"
+    )
     pair_path = args.pair_index_dir / pair_name
     support_path = args.pair_index_dir / support_name
     support_index_path = args.pair_index_dir / support_index_name

@@ -25,7 +25,11 @@ from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import RDT2Conditioner
 
 from .latent_world_model import LatentWorldModel
-from .latent_world_objectives import LatentWorldLossConfig, _legacy_error, compute_latent_world_losses
+from .latent_world_objectives import (
+    LatentWorldLossConfig,
+    _legacy_error,
+    compute_latent_world_losses,
+)
 from .shared_runtime import encode_sample_tokens, gripper_transition_metrics
 
 
@@ -104,15 +108,23 @@ def prepare_latent_sample(
         "current_tokens": current,
         "target_tokens": target,
         "state": sample["state"].to(device=device, dtype=torch.float32, non_blocking=True),
-        "action_state": sample["action_state"].to(device=device, dtype=torch.float32, non_blocking=True),
-        "history_state": sample["history_state"].to(device=device, dtype=torch.float32, non_blocking=True),
+        "action_state": sample["action_state"].to(
+            device=device, dtype=torch.float32, non_blocking=True
+        ),
+        "history_state": sample["history_state"].to(
+            device=device, dtype=torch.float32, non_blocking=True
+        ),
         "target_history_state": sample["target_history_state"].to(
             device=device, dtype=torch.float32, non_blocking=True
         ),
         "state_raw": sample["state_raw"].to(device=device, dtype=torch.float32, non_blocking=True),
         "action": sample["action"].to(device=device, dtype=torch.float32, non_blocking=True),
-        "action_raw": sample["action_raw"].to(device=device, dtype=torch.float32, non_blocking=True),
-        "future_state": sample["future_state"].to(device=device, dtype=torch.float32, non_blocking=True),
+        "action_raw": sample["action_raw"].to(
+            device=device, dtype=torch.float32, non_blocking=True
+        ),
+        "future_state": sample["future_state"].to(
+            device=device, dtype=torch.float32, non_blocking=True
+        ),
         "future_state_raw": sample["future_state_raw"].to(
             device=device, dtype=torch.float32, non_blocking=True
         ),
@@ -312,12 +324,18 @@ def evaluate_latent_world(
         target_state_rows.append(primary["future_state_raw"].cpu().numpy())
         current_state_rows.append(primary["state_raw"].cpu().numpy())
         full_per = _legacy_error(
-            model, output["pred_world"], output["target_world"],
-            scene_weight=loss_config.scene_predictive_weight, reduction="none"
+            model,
+            output["pred_world"],
+            output["target_world"],
+            scene_weight=loss_config.scene_predictive_weight,
+            reduction="none",
         ).mean(dim=1)
         hold_per = _legacy_error(
-            model, output["hold_world"], output["target_world"],
-            scene_weight=loss_config.scene_predictive_weight, reduction="none"
+            model,
+            output["hold_world"],
+            output["target_world"],
+            scene_weight=loss_config.scene_predictive_weight,
+            reduction="none",
         ).mean(dim=1)
         full_rows.append(full_per.float().cpu().numpy())
         hold_rows.append(hold_per.float().cpu().numpy())
@@ -327,24 +345,35 @@ def evaluate_latent_world(
         )
         event_rows.append(
             ((gripper - boundary).abs() >= loss_config.gripper_transition_threshold)
-            .any(dim=1).cpu().numpy()
+            .any(dim=1)
+            .cpu()
+            .numpy()
         )
 
         if "support_distance" in batch:
             support_distance_rows.append(batch["support_distance"].cpu().numpy())
         if "support" in batch:
             support = prepare_latent_sample(
-                batch["support"], conditioner=conditioner, model=model,
-                camera_names=camera_names, device=device, dtype=dtype
+                batch["support"],
+                conditioner=conditioner,
+                model=model,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             with _autocast(device, dtype):
                 _, support_future = model.encode_targets(
-                    support["current_tokens"], support["target_tokens"],
-                    support["history_state"], support["target_history_state"]
+                    support["current_tokens"],
+                    support["target_tokens"],
+                    support["history_state"],
+                    support["target_history_state"],
                 )
                 knn_error = _legacy_error(
-                    model, support_future, output["target_world"],
-                    scene_weight=loss_config.scene_predictive_weight, reduction="none"
+                    model,
+                    support_future,
+                    output["target_world"],
+                    scene_weight=loss_config.scene_predictive_weight,
+                    reduction="none",
                 ).mean(dim=1)
             knn_rows.append(knn_error.float().cpu().numpy())
 
@@ -355,24 +384,40 @@ def evaluate_latent_world(
                     output["initial_world"], primary["action"][permutation], primary["action_state"]
                 )
                 shuffled_error = _legacy_error(
-                    model, shuffled["pred_world"], output["target_world"],
-                    scene_weight=loss_config.scene_predictive_weight, reduction="none"
+                    model,
+                    shuffled["pred_world"],
+                    output["target_world"],
+                    scene_weight=loss_config.scene_predictive_weight,
+                    reduction="none",
                 ).mean(dim=1)
                 zero_world = torch.zeros_like(output["initial_world"])
                 action_tokens = model.action_tokenizer(primary["action"], primary["action_state"])
-                zero_rollout = model.dynamics.rollout_pair(zero_world, action_tokens["effect_steps"])
+                zero_rollout = model.dynamics.rollout_pair(
+                    zero_world, action_tokens["effect_steps"]
+                )
                 zero_effect = (
-                    zero_rollout["pred_world"] - zero_rollout["hold_world"]
-                ).float().square().mean(dim=(-1, -2, -3)).sqrt()
+                    (zero_rollout["pred_world"] - zero_rollout["hold_world"])
+                    .float()
+                    .square()
+                    .mean(dim=(-1, -2, -3))
+                    .sqrt()
+                )
 
                 def ablated_error(tokens: Tensor, states: Tensor) -> Tensor:
                     result = model(
-                        tokens, primary["target_tokens"], states,
-                        primary["target_history_state"], primary["action"], primary["action_state"]
+                        tokens,
+                        primary["target_tokens"],
+                        states,
+                        primary["target_history_state"],
+                        primary["action"],
+                        primary["action_state"],
                     )
                     return _legacy_error(
-                        model, result["pred_world"], output["target_world"],
-                        scene_weight=loss_config.scene_predictive_weight, reduction="none"
+                        model,
+                        result["pred_world"],
+                        output["target_world"],
+                        scene_weight=loss_config.scene_predictive_weight,
+                        reduction="none",
                     ).mean(dim=1)
 
                 no_perception = ablated_error(
@@ -386,8 +431,10 @@ def evaluate_latent_world(
                     torch.zeros_like(primary["current_tokens"]), primary["history_state"]
                 )
                 if model.config.num_cameras == 2:
-                    top_tokens = primary["current_tokens"].clone(); top_tokens[:, :, 1] = 0
-                    wrist_tokens = primary["current_tokens"].clone(); wrist_tokens[:, :, 0] = 0
+                    top_tokens = primary["current_tokens"].clone()
+                    top_tokens[:, :, 1] = 0
+                    wrist_tokens = primary["current_tokens"].clone()
+                    wrist_tokens[:, :, 0] = 0
                     top_error = ablated_error(top_tokens, primary["history_state"])
                     wrist_error = ablated_error(wrist_tokens, primary["history_state"])
                 else:
@@ -407,17 +454,23 @@ def evaluate_latent_world(
     full = np.concatenate(full_rows)
     hold = np.concatenate(hold_rows)
     event = np.concatenate(event_rows).astype(bool)
-    metrics.update({
-        "val_full": float(full.mean()),
-        "val_hold": float(hold.mean()),
-        "full_vs_hold_gain": float((hold - full).mean()),
-        "full_vs_hold_relative_gain": float((hold.mean() - full.mean()) / max(hold.mean(), 1e-8)),
-    })
+    metrics.update(
+        {
+            "val_full": float(full.mean()),
+            "val_hold": float(hold.mean()),
+            "full_vs_hold_gain": float((hold - full).mean()),
+            "full_vs_hold_relative_gain": float(
+                (hold.mean() - full.mean()) / max(hold.mean(), 1e-8)
+            ),
+        }
+    )
     for name, mask in (("event", event), ("non_event", ~event)):
         metrics[f"{name}_count"] = float(mask.sum())
         metrics[f"{name}_full"] = float(full[mask].mean()) if mask.any() else float("nan")
         metrics[f"{name}_hold"] = float(hold[mask].mean()) if mask.any() else float("nan")
-        metrics[f"{name}_gain"] = float((hold[mask] - full[mask]).mean()) if mask.any() else float("nan")
+        metrics[f"{name}_gain"] = (
+            float((hold[mask] - full[mask]).mean()) if mask.any() else float("nan")
+        )
 
     pred_raw = np.concatenate(pred_state_rows)
     hold_raw = np.concatenate(hold_state_rows)
@@ -425,26 +478,34 @@ def evaluate_latent_world(
     current_raw = np.concatenate(current_state_rows)
     error = pred_raw - target_raw
     hold_error = hold_raw - target_raw
-    metrics.update({
-        "state_path_rmse": float(np.sqrt(np.mean(error ** 2))),
-        "hold_state_path_rmse": float(np.sqrt(np.mean(hold_error ** 2))),
-        "state_path_gain": float(np.sqrt(np.mean(hold_error ** 2)) - np.sqrt(np.mean(error ** 2))),
-        "state_endpoint_rmse": float(np.sqrt(np.mean(error[:, -1] ** 2))),
-        "arm_state_path_rmse": float(
-            np.sqrt(np.mean(np.delete(error, model.config.gripper_index, axis=-1) ** 2))
-        ),
-        "gripper_state_path_rmse": float(
-            np.sqrt(np.mean(error[..., model.config.gripper_index] ** 2))
-        ),
-    })
-    metrics.update(gripper_transition_metrics(
-        pred_raw, target_raw, current_raw,
-        gripper_index=model.config.gripper_index,
-        threshold=loss_config.gripper_transition_threshold,
-        tolerance=loss_config.gripper_transition_radius,
-    ))
+    metrics.update(
+        {
+            "state_path_rmse": float(np.sqrt(np.mean(error**2))),
+            "hold_state_path_rmse": float(np.sqrt(np.mean(hold_error**2))),
+            "state_path_gain": float(np.sqrt(np.mean(hold_error**2)) - np.sqrt(np.mean(error**2))),
+            "state_endpoint_rmse": float(np.sqrt(np.mean(error[:, -1] ** 2))),
+            "arm_state_path_rmse": float(
+                np.sqrt(np.mean(np.delete(error, model.config.gripper_index, axis=-1) ** 2))
+            ),
+            "gripper_state_path_rmse": float(
+                np.sqrt(np.mean(error[..., model.config.gripper_index] ** 2))
+            ),
+        }
+    )
+    metrics.update(
+        gripper_transition_metrics(
+            pred_raw,
+            target_raw,
+            current_raw,
+            gripper_index=model.config.gripper_index,
+            threshold=loss_config.gripper_transition_threshold,
+            tolerance=loss_config.gripper_transition_radius,
+        )
+    )
     hold_gripper = gripper_transition_metrics(
-        hold_raw, target_raw, current_raw,
+        hold_raw,
+        target_raw,
+        current_raw,
         gripper_index=model.config.gripper_index,
         threshold=loss_config.gripper_transition_threshold,
         tolerance=loss_config.gripper_transition_radius,
@@ -473,8 +534,12 @@ def evaluate_latent_world(
         order = np.argsort(support_distance, kind="stable")
         for quartile, indices in enumerate(np.array_split(order, 4), start=1):
             metrics[f"support_q{quartile}_count"] = float(len(indices))
-            metrics[f"support_q{quartile}_predictive"] = float(full[indices].mean()) if len(indices) else float("nan")
-            metrics[f"support_q{quartile}_gain"] = float((hold[indices] - full[indices]).mean()) if len(indices) else float("nan")
+            metrics[f"support_q{quartile}_predictive"] = (
+                float(full[indices].mean()) if len(indices) else float("nan")
+            )
+            metrics[f"support_q{quartile}_gain"] = (
+                float((hold[indices] - full[indices]).mean()) if len(indices) else float("nan")
+            )
     if shuffled_rows:
         shuffled_value = np.concatenate(shuffled_rows)
         subset = full[: len(shuffled_value)]
@@ -504,10 +569,18 @@ def _restore_rng(state: dict[str, Any] | None) -> None:
 
 
 def _checkpoint_payload(
-    *, model: LatentWorldModel, optimizer, scheduler, epoch: int, global_step: int,
-    context: dict[str, Any], action_normalizer: ArrayNormalizer,
-    state_normalizer: ArrayNormalizer, history: list[dict[str, Any]],
-    trainer: LatentWorldTrainerConfig, loss_config: LatentWorldLossConfig,
+    *,
+    model: LatentWorldModel,
+    optimizer,
+    scheduler,
+    epoch: int,
+    global_step: int,
+    context: dict[str, Any],
+    action_normalizer: ArrayNormalizer,
+    state_normalizer: ArrayNormalizer,
+    history: list[dict[str, Any]],
+    trainer: LatentWorldTrainerConfig,
+    loss_config: LatentWorldLossConfig,
     best: dict[str, float],
 ) -> dict[str, Any]:
     return {
@@ -549,7 +622,8 @@ def _checkpoint_eligible(
         "closed_loop": gap <= max(0.05, 0.75 * max(full, 1e-8)),
         "zero_world": (not ablations_enabled) or zero <= 1e-6,
         "perception_required": (not ablations_enabled) or full <= no_perception + 1e-8,
-        "vision_not_harmful": (not ablations_enabled) or full <= (1.0 + trainer.checkpoint_predictive_slack) * state_only + 1e-8,
+        "vision_not_harmful": (not ablations_enabled)
+        or full <= (1.0 + trainer.checkpoint_predictive_slack) * state_only + 1e-8,
     }
     return all(gates.values()), gates
 
@@ -571,7 +645,8 @@ def train_latent_world(
     context: dict[str, Any],
     resume: Path | None = None,
 ) -> dict[str, Any]:
-    trainer.validate(); loss_config.validate()
+    trainer.validate()
+    loss_config.validate()
     out_dir = Path(out_dir)
     checkpoint_dir = out_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -580,22 +655,48 @@ def train_latent_world(
     # FP32 master parameters and FP32 EMA; dtype is autocast only.
     model.to(device=device, dtype=torch.float32)
     perceiver_ids = {id(p) for p in model.online_perceiver.parameters()}
-    dynamics_ids = {id(p) for p in list(model.action_tokenizer.parameters()) + list(model.dynamics.parameters())}
+    dynamics_ids = {
+        id(p) for p in list(model.action_tokenizer.parameters()) + list(model.dynamics.parameters())
+    }
     groups = [
-        {"params": [p for p in model.parameters() if p.requires_grad and id(p) in perceiver_ids], "lr": trainer.perceiver_lr, "name": "perceiver"},
-        {"params": [p for p in model.parameters() if p.requires_grad and id(p) in dynamics_ids], "lr": trainer.dynamics_lr, "name": "dynamics"},
-        {"params": [p for p in model.parameters() if p.requires_grad and id(p) not in perceiver_ids and id(p) not in dynamics_ids], "lr": trainer.auxiliary_lr, "name": "auxiliary"},
+        {
+            "params": [p for p in model.parameters() if p.requires_grad and id(p) in perceiver_ids],
+            "lr": trainer.perceiver_lr,
+            "name": "perceiver",
+        },
+        {
+            "params": [p for p in model.parameters() if p.requires_grad and id(p) in dynamics_ids],
+            "lr": trainer.dynamics_lr,
+            "name": "dynamics",
+        },
+        {
+            "params": [
+                p
+                for p in model.parameters()
+                if p.requires_grad and id(p) not in perceiver_ids and id(p) not in dynamics_ids
+            ],
+            "lr": trainer.auxiliary_lr,
+            "name": "auxiliary",
+        },
     ]
     groups = [group for group in groups if group["params"]]
     optimizer = torch.optim.AdamW(
-        groups, betas=(trainer.beta1, trainer.beta2), eps=trainer.eps,
-        weight_decay=trainer.weight_decay
+        groups,
+        betas=(trainer.beta1, trainer.beta2),
+        eps=trainer.eps,
+        weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     total_steps = max(steps_per_epoch * trainer.epochs, 1)
     scheduler = _scheduler(
-        optimizer, total_steps=total_steps, warmup_steps=trainer.warmup_steps,
-        min_lr_ratio=trainer.min_lr_ratio
+        optimizer,
+        total_steps=total_steps,
+        warmup_steps=trainer.warmup_steps,
+        min_lr_ratio=trainer.min_lr_ratio,
     )
 
     history: list[dict[str, Any]] = []
@@ -615,7 +716,9 @@ def train_latent_world(
         history = list(payload.get("history", []))
         best.update(payload.get("best", {}))
         _restore_rng(payload.get("rng"))
-        print(f"[latent-world] resumed {resume} at epoch={start_epoch} step={global_step}", flush=True)
+        print(
+            f"[latent-world] resumed {resume} at epoch={start_epoch} step={global_step}", flush=True
+        )
 
     for epoch in range(start_epoch, trainer.epochs + 1):
         model.train()
@@ -626,22 +729,36 @@ def train_latent_world(
                 break
             raw_primary = batch["primary"] if "primary" in batch else batch
             primary = prepare_latent_sample(
-                raw_primary, conditioner=conditioner, model=model, camera_names=camera_names,
-                device=device, dtype=dtype
+                raw_primary,
+                conditioner=conditioner,
+                model=model,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             with _autocast(device, dtype):
                 output = _forward(model, primary)
                 masked_tokens, masked_states = _masked_perception_inputs(primary, trainer)
                 output["masked_initial_world"] = model.encode_online(masked_tokens, masked_states)
-                pair_output = None; pair_valid = None; swapped = None
+                pair_output = None
+                pair_valid = None
+                swapped = None
                 if "pair" in batch:
                     pair = prepare_latent_sample(
-                        batch["pair"], conditioner=conditioner, model=model,
-                        camera_names=camera_names, device=device, dtype=dtype
+                        batch["pair"],
+                        conditioner=conditioner,
+                        model=model,
+                        camera_names=camera_names,
+                        device=device,
+                        dtype=dtype,
                     )
                     pair_output = model.forward_local_pair(
-                        pair["current_tokens"], pair["target_tokens"], pair["history_state"],
-                        pair["target_history_state"], pair["action"], pair["action_state"]
+                        pair["current_tokens"],
+                        pair["target_tokens"],
+                        pair["history_state"],
+                        pair["target_history_state"],
+                        pair["action"],
+                        pair["action_state"],
                     )
                     pair_valid = batch["pair_valid"].to(device=device)
                     swapped = model.swapped_action_rollout(
@@ -650,21 +767,35 @@ def train_latent_world(
                 action_scale = _ramp(global_step + 1, trainer.action_warmup_steps)
                 stability_scale = _ramp(global_step + 1, trainer.stability_warmup_steps)
                 losses = compute_latent_world_losses(
-                    model, primary, output, config=loss_config,
-                    action_scale=action_scale, stability_scale=stability_scale,
-                    pair_output=pair_output, pair_valid=pair_valid, swapped_output=swapped
+                    model,
+                    primary,
+                    output,
+                    config=loss_config,
+                    action_scale=action_scale,
+                    stability_scale=stability_scale,
+                    pair_output=pair_output,
+                    pair_valid=pair_valid,
+                    swapped_output=swapped,
                 )
             optimizer.zero_grad(set_to_none=True)
             losses["loss"].backward()
             parameters = [p for p in model.parameters() if p.requires_grad]
             grad = _grad_norm(parameters)
             torch.nn.utils.clip_grad_norm_(parameters, trainer.grad_clip)
-            optimizer.step(); scheduler.step(); global_step += 1
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
             decay = _ema_decay(global_step, total_steps, trainer)
             model.update_ema(decay)
 
             row = {key: float(value.detach().float().cpu()) for key, value in losses.items()}
-            row.update({"grad": grad, "ema_decay": decay, "lr": float(max(g["lr"] for g in optimizer.param_groups))})
+            row.update(
+                {
+                    "grad": grad,
+                    "ema_decay": decay,
+                    "lr": float(max(g["lr"] for g in optimizer.param_groups)),
+                }
+            )
             train_rows.append(row)
             if trainer.log_every and batch_index % trainer.log_every == 0:
                 print(
@@ -679,19 +810,31 @@ def train_latent_world(
                 )
 
         val = evaluate_latent_world(
-            model=model, loader=val_loader, conditioner=conditioner, device=device, dtype=dtype,
-            camera_names=camera_names, loss_config=loss_config,
-            state_normalizer=state_normalizer, max_batches=trainer.max_val_batches,
-            ablation_batches=trainer.eval_ablation_batches
+            model=model,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            loss_config=loss_config,
+            state_normalizer=state_normalizer,
+            max_batches=trainer.max_val_batches,
+            ablation_batches=trainer.eval_ablation_batches,
         )
-        eligible, gates = _checkpoint_eligible(val, best_predictive=best["predictive"], trainer=trainer)
+        eligible, gates = _checkpoint_eligible(
+            val, best_predictive=best["predictive"], trainer=trainer
+        )
         val.update({f"checkpoint_gate_{name}": float(value) for name, value in gates.items()})
         val["checkpoint_eligible"] = float(eligible)
         epoch_row = {
-            "epoch": epoch, "global_step": global_step, "seconds": time.time() - started,
-            "train": _mean(train_rows), "val": val,
+            "epoch": epoch,
+            "global_step": global_step,
+            "seconds": time.time() - started,
+            "train": _mean(train_rows),
+            "val": val,
         }
-        history.append(epoch_row); _append_jsonl(epoch_path, epoch_row)
+        history.append(epoch_row)
+        _append_jsonl(epoch_path, epoch_row)
 
         predictive = _finite_metric(val, "val_full", float("inf"))
         improved_predictive = predictive < best["predictive"]
@@ -726,10 +869,18 @@ def train_latent_world(
             best["balanced"] = balanced
 
         payload = _checkpoint_payload(
-            model=model, optimizer=optimizer, scheduler=scheduler, epoch=epoch,
-            global_step=global_step, context=context, action_normalizer=action_normalizer,
-            state_normalizer=state_normalizer, history=history, trainer=trainer,
-            loss_config=loss_config, best=best
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            global_step=global_step,
+            context=context,
+            action_normalizer=action_normalizer,
+            state_normalizer=state_normalizer,
+            history=history,
+            trainer=trainer,
+            loss_config=loss_config,
+            best=best,
         )
         if improved_predictive:
             torch.save(payload, checkpoint_dir / "best_predictive.pt")

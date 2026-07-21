@@ -28,11 +28,15 @@ class DiffusionScheduleConfig:
             raise ValueError("max_beta must be in (0,1)")
 
 
-def cosine_beta_schedule(config: DiffusionScheduleConfig, *, device: torch.device | None = None) -> torch.Tensor:
+def cosine_beta_schedule(
+    config: DiffusionScheduleConfig, *, device: torch.device | None = None
+) -> torch.Tensor:
     config.validate()
     steps = int(config.train_timesteps)
     x = torch.linspace(0, steps, steps + 1, dtype=torch.float64, device=device)
-    alpha_bar = torch.cos(((x / steps + config.cosine_s) / (1.0 + config.cosine_s)) * math.pi * 0.5).square()
+    alpha_bar = torch.cos(
+        ((x / steps + config.cosine_s) / (1.0 + config.cosine_s)) * math.pi * 0.5
+    ).square()
     alpha_bar = alpha_bar / alpha_bar[0]
     betas = 1.0 - (alpha_bar[1:] / alpha_bar[:-1])
     return betas.clamp(min=1e-8, max=config.max_beta).to(dtype=torch.float32)
@@ -57,12 +61,18 @@ class CosineDiffusionSchedule:
     def _alpha_bars(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         return self._alpha_bars_cpu.to(device=device, dtype=dtype)
 
-    def sample_timesteps(self, batch: int, *, device: torch.device, generator: torch.Generator | None = None) -> torch.Tensor:
+    def sample_timesteps(
+        self, batch: int, *, device: torch.device, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
         if batch <= 0:
             raise ValueError("batch must be positive")
-        return torch.randint(0, self.train_timesteps, (batch,), device=device, generator=generator, dtype=torch.long)
+        return torch.randint(
+            0, self.train_timesteps, (batch,), device=device, generator=generator, dtype=torch.long
+        )
 
-    def add_noise(self, clean: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+    def add_noise(
+        self, clean: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor
+    ) -> torch.Tensor:
         if clean.shape != noise.shape:
             raise ValueError("clean and noise must have the same shape")
         if timesteps.ndim != 1 or timesteps.shape[0] != clean.shape[0]:
@@ -82,7 +92,13 @@ class CosineDiffusionSchedule:
             raise ValueError(f"inference steps={steps} produces duplicate schedule indices")
         return indices
 
-    def ddim_step(self, noisy: torch.Tensor, pred_clean: torch.Tensor, timestep: int, prev_timestep: int | None) -> torch.Tensor:
+    def ddim_step(
+        self,
+        noisy: torch.Tensor,
+        pred_clean: torch.Tensor,
+        timestep: int,
+        prev_timestep: int | None,
+    ) -> torch.Tensor:
         if noisy.shape != pred_clean.shape:
             raise ValueError("noisy and pred_clean must have the same shape")
         alpha_bars = self._alpha_bars(device=noisy.device, dtype=noisy.dtype)
@@ -124,7 +140,9 @@ def sample_pi_time(
     return value * 0.999 + 0.001
 
 
-def pi_flow_bridge(actions: torch.Tensor, noise: torch.Tensor, time: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def pi_flow_bridge(
+    actions: torch.Tensor, noise: torch.Tensor, time: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``x_t`` and target velocity using the public OpenPI convention.
 
     ``x_t = t * noise + (1 - t) * actions`` and ``u_t = noise - actions``.

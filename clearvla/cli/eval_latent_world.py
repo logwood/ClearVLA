@@ -21,9 +21,15 @@ from clearvla.experiments.dynamic_world_lab.dataset import (
     DynamicWorldWindowDataset,
     PairedDynamicWorldDataset,
 )
-from clearvla.experiments.dynamic_world_lab.latent_world_model import LatentWorldConfig, LatentWorldModel
+from clearvla.experiments.dynamic_world_lab.latent_world_model import (
+    LatentWorldConfig,
+    LatentWorldModel,
+)
 from clearvla.experiments.dynamic_world_lab.latent_world_objectives import LatentWorldLossConfig
-from clearvla.experiments.dynamic_world_lab.latent_world_runtime import _jsonable, evaluate_latent_world
+from clearvla.experiments.dynamic_world_lab.latent_world_runtime import (
+    _jsonable,
+    evaluate_latent_world,
+)
 from clearvla.experiments.dynamic_world_lab.pairing import LocalPairTable
 
 
@@ -38,7 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pair-index-dir", type=Path, required=True)
     parser.add_argument("--split", choices=["val", "test"], default="val")
     parser.add_argument(
-        "--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache"
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
     )
     parser.add_argument("--dinov2-model", default="facebook/dinov2-base")
     parser.add_argument("--dinov2-local-files-only", action="store_true")

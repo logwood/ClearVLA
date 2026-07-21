@@ -31,7 +31,10 @@ def _quantiles(values: np.ndarray) -> dict[str, float]:
     x = np.asarray(values, dtype=np.float64).reshape(-1)
     x = x[np.isfinite(x)]
     if x.size == 0:
-        return {k: float("nan") for k in ("min", "p01", "p05", "p25", "p50", "p75", "p95", "p99", "max", "mean", "std")}
+        return {
+            k: float("nan")
+            for k in ("min", "p01", "p05", "p25", "p50", "p75", "p95", "p99", "max", "mean", "std")
+        }
     qs = np.quantile(x, [0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99])
     return {
         "min": float(np.min(x)),
@@ -61,7 +64,9 @@ def _summarize_counter(counter: dict[str, float]) -> dict[str, float]:
     return out
 
 
-def _summarize_window_event_counts(counter: dict[str, float], total_windows: float) -> dict[str, float]:
+def _summarize_window_event_counts(
+    counter: dict[str, float], total_windows: float
+) -> dict[str, float]:
     out: dict[str, float] = {"total": float(total_windows)}
     for key in ("none", "any", "close", "open", "both"):
         value = float(counter.get(key, 0.0))
@@ -121,14 +126,16 @@ def _event_runs(labels: np.ndarray, delta: np.ndarray) -> list[dict[str, float]]
         while j < labels.size and int(labels[j]) == direction:
             j += 1
         segment = delta[i:j]
-        runs.append({
-            "direction": float(direction),
-            "start": float(i),
-            "length": float(j - i),
-            "signed_change": float(segment.sum()),
-            "abs_change": float(np.abs(segment).sum()),
-            "max_abs_step": float(np.max(np.abs(segment))) if segment.size else 0.0,
-        })
+        runs.append(
+            {
+                "direction": float(direction),
+                "start": float(i),
+                "length": float(j - i),
+                "signed_change": float(segment.sum()),
+                "abs_change": float(np.abs(segment).sum()),
+                "max_abs_step": float(np.max(np.abs(segment))) if segment.size else 0.0,
+            }
+        )
         i = j
     return runs
 
@@ -143,20 +150,35 @@ def _load_gripper_arrays(
     datasets = list_hdf5_datasets(str(path))
     resolved_action = resolve_key(datasets, action_key, ACTION_ALIASES, required=True)
     assert resolved_action is not None
-    resolved_state = resolve_key(datasets, state_key, STATE_ALIASES, required=False) if state_key else None
+    resolved_state = (
+        resolve_key(datasets, state_key, STATE_ALIASES, required=False) if state_key else None
+    )
     with h5py.File(path, "r") as f:
         actions = np.asarray(f[resolved_action], dtype=np.float32)
-        states = np.asarray(f[resolved_state], dtype=np.float32) if resolved_state is not None else actions.copy()
+        states = (
+            np.asarray(f[resolved_state], dtype=np.float32)
+            if resolved_state is not None
+            else actions.copy()
+        )
     if actions.ndim != 2:
         raise ValueError(f"{path}: action must have [T,D], got {actions.shape}")
     if states.ndim != 2 or states.shape != actions.shape:
-        raise ValueError(f"{path}: state must align with action, got state={states.shape} action={actions.shape}")
+        raise ValueError(
+            f"{path}: state must align with action, got state={states.shape} action={actions.shape}"
+        )
     gi = int(gripper_index)
     if gi < 0:
         gi = int(actions.shape[1]) + gi
     if gi < 0 or gi >= int(actions.shape[1]):
-        raise ValueError(f"{path}: gripper index {gripper_index} resolved to {gi}, action_dim={actions.shape[1]}")
-    return actions[:, gi].astype(np.float64), states[:, gi].astype(np.float64), resolved_action, resolved_state
+        raise ValueError(
+            f"{path}: gripper index {gripper_index} resolved to {gi}, action_dim={actions.shape[1]}"
+        )
+    return (
+        actions[:, gi].astype(np.float64),
+        states[:, gi].astype(np.float64),
+        resolved_action,
+        resolved_state,
+    )
 
 
 def _segment_name(index: int, horizon: int) -> str:
@@ -204,8 +226,14 @@ def probe_dataset(args: argparse.Namespace) -> dict[str, Any]:
     event_threshold = float(args.event_threshold_deg)
     hold_threshold = float(args.hold_threshold_deg)
     angle_max = float(args.angle_max_deg)
-    closed_threshold = float(args.closed_threshold_deg) if args.closed_threshold_deg is not None else 0.5 * angle_max
-    open_threshold = float(args.open_threshold_deg) if args.open_threshold_deg is not None else 0.1 * angle_max
+    closed_threshold = (
+        float(args.closed_threshold_deg)
+        if args.closed_threshold_deg is not None
+        else 0.5 * angle_max
+    )
+    open_threshold = (
+        float(args.open_threshold_deg) if args.open_threshold_deg is not None else 0.1 * angle_max
+    )
 
     action_values: list[np.ndarray] = []
     state_values: list[np.ndarray] = []
@@ -251,24 +279,32 @@ def probe_dataset(args: argparse.Namespace) -> dict[str, Any]:
             runs.extend(_event_runs(labels, action_delta))
         state_to_action_delta.append(action_g - state_g)
 
-        local_labels = _event_labels(action_g[1:] - action_g[:-1], event_threshold) if action_g.size > 1 else np.zeros(0, dtype=np.int8)
+        local_labels = (
+            _event_labels(action_g[1:] - action_g[:-1], event_threshold)
+            if action_g.size > 1
+            else np.zeros(0, dtype=np.int8)
+        )
         close_steps = int(np.sum(local_labels > 0))
         open_steps = int(np.sum(local_labels < 0))
         hold_steps = int(local_labels.size - close_steps - open_steps)
-        episode_rows.append({
-            "path": str(path),
-            "length": int(action_g.size),
-            "action_key": resolved_action,
-            "state_key": resolved_state,
-            "action_gripper": _quantiles(action_g),
-            "state_gripper": _quantiles(state_g),
-            "action_step_delta": _quantiles(action_g[1:] - action_g[:-1]) if action_g.size > 1 else {},
-            "state_to_action_delta": _quantiles(action_g - state_g),
-            "close_step_count": close_steps,
-            "open_step_count": open_steps,
-            "hold_step_count": hold_steps,
-            "event_step_rate": _safe_ratio(close_steps + open_steps, max(local_labels.size, 1)),
-        })
+        episode_rows.append(
+            {
+                "path": str(path),
+                "length": int(action_g.size),
+                "action_key": resolved_action,
+                "state_key": resolved_state,
+                "action_gripper": _quantiles(action_g),
+                "state_gripper": _quantiles(state_g),
+                "action_step_delta": _quantiles(action_g[1:] - action_g[:-1])
+                if action_g.size > 1
+                else {},
+                "state_to_action_delta": _quantiles(action_g - state_g),
+                "close_step_count": close_steps,
+                "open_step_count": open_steps,
+                "hold_step_count": hold_steps,
+                "event_step_rate": _safe_ratio(close_steps + open_steps, max(local_labels.size, 1)),
+            }
+        )
 
         max_start = int(action_g.size) - horizon
         if max_start < 0:
@@ -315,13 +351,37 @@ def probe_dataset(args: argparse.Namespace) -> dict[str, Any]:
 
     action_all = np.concatenate(action_values)
     state_all = np.concatenate(state_values)
-    action_delta_all = np.concatenate(action_step_delta) if action_step_delta else np.asarray([], dtype=np.float64)
-    state_delta_all = np.concatenate(state_step_delta) if state_step_delta else np.asarray([], dtype=np.float64)
-    state_to_action_all = np.concatenate(state_to_action_delta) if state_to_action_delta else np.asarray([], dtype=np.float64)
-    event_delta_all = np.concatenate([x for x in event_step_delta if x.size]) if any(x.size for x in event_step_delta) else np.asarray([], dtype=np.float64)
-    hold_abs_all = np.concatenate([x for x in hold_step_abs_delta if x.size]) if any(x.size for x in hold_step_abs_delta) else np.asarray([], dtype=np.float64)
-    window_event_delta_all = np.concatenate([x for x in all_window_event_delta if x.size]) if any(x.size for x in all_window_event_delta) else np.asarray([], dtype=np.float64)
-    window_hold_abs_all = np.concatenate([x for x in all_window_hold_abs_delta if x.size]) if any(x.size for x in all_window_hold_abs_delta) else np.asarray([], dtype=np.float64)
+    action_delta_all = (
+        np.concatenate(action_step_delta) if action_step_delta else np.asarray([], dtype=np.float64)
+    )
+    state_delta_all = (
+        np.concatenate(state_step_delta) if state_step_delta else np.asarray([], dtype=np.float64)
+    )
+    state_to_action_all = (
+        np.concatenate(state_to_action_delta)
+        if state_to_action_delta
+        else np.asarray([], dtype=np.float64)
+    )
+    event_delta_all = (
+        np.concatenate([x for x in event_step_delta if x.size])
+        if any(x.size for x in event_step_delta)
+        else np.asarray([], dtype=np.float64)
+    )
+    hold_abs_all = (
+        np.concatenate([x for x in hold_step_abs_delta if x.size])
+        if any(x.size for x in hold_step_abs_delta)
+        else np.asarray([], dtype=np.float64)
+    )
+    window_event_delta_all = (
+        np.concatenate([x for x in all_window_event_delta if x.size])
+        if any(x.size for x in all_window_event_delta)
+        else np.asarray([], dtype=np.float64)
+    )
+    window_hold_abs_all = (
+        np.concatenate([x for x in all_window_hold_abs_delta if x.size])
+        if any(x.size for x in all_window_hold_abs_delta)
+        else np.asarray([], dtype=np.float64)
+    )
 
     action_labels = _event_labels(action_delta_all, event_threshold)
     close_steps = float(np.sum(action_labels > 0))
@@ -354,17 +414,29 @@ def probe_dataset(args: argparse.Namespace) -> dict[str, Any]:
     hold_abs_p95 = _quantiles(window_hold_abs_all).get("p95", float("nan"))
     event_abs_p50 = _quantiles(np.abs(window_event_delta_all)).get("p50", float("nan"))
     if event_rate < 0.05:
-        supervision_hint.append("Events are sparse: do not rely on uniform gripper MSE; use event-window weighting.")
+        supervision_hint.append(
+            "Events are sparse: do not rely on uniform gripper MSE; use event-window weighting."
+        )
     if repeated_close_rate > 0.20 or repeated_open_rate > 0.20:
-        supervision_hint.append("Events can originate inside the same coarse open/closed bucket; avoid hard binary state penalties.")
+        supervision_hint.append(
+            "Events can originate inside the same coarse open/closed bucket; avoid hard binary state penalties."
+        )
     if np.isfinite(hold_abs_p95) and hold_abs_p95 > 0.25 * event_threshold:
-        supervision_hint.append("Hold regions have non-trivial drift: include a hold-stability term if model over-triggers.")
+        supervision_hint.append(
+            "Hold regions have non-trivial drift: include a hold-stability term if model over-triggers."
+        )
     if np.isfinite(event_abs_p50) and event_abs_p50 > 2.0 * event_threshold:
-        supervision_hint.append("Event magnitudes are well above threshold: matched event-delta Huber is meaningful.")
+        supervision_hint.append(
+            "Event magnitudes are well above threshold: matched event-delta Huber is meaningful."
+        )
     if close_open_balance < 0.50:
-        supervision_hint.append("Open/close events are imbalanced: report direction-specific metrics and avoid one shared positive weight.")
+        supervision_hint.append(
+            "Open/close events are imbalanced: report direction-specific metrics and avoid one shared positive weight."
+        )
     if mid_rate > 0.25:
-        supervision_hint.append("Many gripper values are intermediate: avoid hard binary closed/open assumptions; keep continuous output primary.")
+        supervision_hint.append(
+            "Many gripper values are intermediate: avoid hard binary closed/open assumptions; keep continuous output primary."
+        )
 
     return {
         "schema": "clearvla-gripper-dataset-probe-v1",
@@ -416,7 +488,9 @@ def probe_dataset(args: argparse.Namespace) -> dict[str, Any]:
             "event_run_abs_change_deg": _quantiles(run_abs),
         },
         "windows": {
-            "window_event_counts": _summarize_window_event_counts(window_event_counts, total_windows),
+            "window_event_counts": _summarize_window_event_counts(
+                window_event_counts, total_windows
+            ),
             "first_event_position_rate": first_hist,
             "segment_event_rates": segment_rates,
             "window_event_delta_deg": _quantiles(window_event_delta_all),
@@ -436,7 +510,9 @@ def probe_dataset(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Probe gripper state/transition statistics directly from HDF5 episodes.")
+    parser = argparse.ArgumentParser(
+        description="Probe gripper state/transition statistics directly from HDF5 episodes."
+    )
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--glob", default="*.hdf5")
     parser.add_argument("--action-key", default="action")
@@ -457,7 +533,9 @@ def main() -> None:
     parser.add_argument("--indent", type=int, default=2)
     args = parser.parse_args()
     result = probe_dataset(args)
-    text = json.dumps(_jsonable(result), ensure_ascii=False, indent=int(args.indent), sort_keys=True)
+    text = json.dumps(
+        _jsonable(result), ensure_ascii=False, indent=int(args.indent), sort_keys=True
+    )
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)

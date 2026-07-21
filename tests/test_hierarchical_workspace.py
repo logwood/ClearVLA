@@ -52,7 +52,9 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
     def test_stage_cannot_enter_low_value_when_selection_is_degenerate(self) -> None:
         prepared = self._prepared(token_count=1)
         stage_a = torch.randn(
-            self.batch, self.config.latent_cvae_stage_slots, self.config.hidden_size,
+            self.batch,
+            self.config.latent_cvae_stage_slots,
+            self.config.hidden_size,
             requires_grad=True,
         )
         stage_b = torch.randn_like(stage_a)
@@ -77,7 +79,9 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
         probe = torch.linspace(-1.0, 1.0, self.config.hidden_size).reshape(1, 1, -1)
         stage_grad = torch.autograd.grad((low_a * probe).sum(), stage_a, allow_unused=True)[0]
         if stage_grad is not None:
-            torch.testing.assert_close(stage_grad, torch.zeros_like(stage_grad), atol=1e-7, rtol=0.0)
+            torch.testing.assert_close(
+                stage_grad, torch.zeros_like(stage_grad), atol=1e-7, rtol=0.0
+            )
         self.assertIn("hierarchical_stage_role_norm", metrics)
         self.assertIn("hierarchical_stage_content_norm", metrics)
         self.assertIn("hierarchical_stage_role_content_cosine", metrics)
@@ -85,7 +89,9 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
     def test_stage_still_controls_multi_value_selection(self) -> None:
         prepared = self._prepared(token_count=3)
         stage = torch.randn(
-            self.batch, self.config.latent_cvae_stage_slots, self.config.hidden_size,
+            self.batch,
+            self.config.latent_cvae_stage_slots,
+            self.config.hidden_size,
             requires_grad=True,
         )
         low, _, _, _, _, _ = self.workspace.step(
@@ -112,9 +118,33 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
         self.assertEqual(tuple(content_next.shape), tuple(content.shape))
         self.assertEqual(tuple(stage_tokens.shape), tuple(content.shape))
         torch.testing.assert_close(low_bias.exp(), torch.ones_like(low_bias), atol=1e-6, rtol=1e-6)
-        torch.testing.assert_close(stage_bias.exp(), torch.full_like(stage_bias, 0.1), atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(
+            stage_bias.exp(), torch.full_like(stage_bias, 0.1), atol=1e-6, rtol=1e-6
+        )
         self.assertGreater(float(metrics["hierarchical_stage_update_norm"]), 0.0)
         self.assertGreater(float(metrics["hierarchical_stage_role_diversity"]), 0.0)
+
+    def test_typed_stage_memory_keeps_role_and_content_as_distinct_tokens(self) -> None:
+        prepared = self._prepared(token_count=3)
+        content = self.workspace.init_stage(self.primary)
+        _, _, stage_tokens, _, _, metrics = self.workspace.step(
+            prepared_evidence=prepared,
+            stage_content=content,
+            primary_cond=self.primary,
+            step_index=0,
+            typed_stage_memory=True,
+        )
+        self.assertEqual(
+            tuple(stage_tokens.shape),
+            (self.batch, 2 * self.config.latent_cvae_stage_slots, self.config.hidden_size),
+        )
+        self.assertEqual(float(metrics["hierarchical_stage_action_memory_typed"]), 1.0)
+        self.assertEqual(
+            float(metrics["hierarchical_stage_action_memory_token_count"]),
+            float(2 * self.config.latent_cvae_stage_slots),
+        )
+        role_tokens, content_tokens = stage_tokens.chunk(2, dim=1)
+        self.assertGreater(float((role_tokens - content_tokens).detach().abs().mean()), 0.0)
 
     def test_promotion_projection_scale_cannot_bypass_manager_gate(self) -> None:
         prepared = self._prepared(token_count=3)
@@ -162,22 +192,20 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
             atol=5e-4,
             rtol=5e-4,
         )
-        self.assertLess(
-            float(scaled_metrics["hierarchical_stage_promote_gate_scale_error"]), 2e-5
-        )
+        self.assertLess(float(scaled_metrics["hierarchical_stage_promote_gate_scale_error"]), 2e-5)
         self.workspace.stage_promote_out.load_state_dict(state)
 
     def test_per_stage_promotion_gate_is_the_realized_scale_contract(self) -> None:
         stage_content = self.workspace.init_stage(self.primary)
         stage_role = self.workspace.stage_role.expand(self.batch, -1, -1)
-        promote_gate = torch.tensor([
-            [0.05, 0.10, 0.20],
-            [0.30, 0.15, 0.08],
-        ])
+        promote_gate = torch.tensor(
+            [
+                [0.05, 0.10, 0.20],
+                [0.30, 0.15, 0.08],
+            ]
+        )
         promotion = self.workspace._promote_stage(
-            low_tokens=torch.randn(
-                self.batch, self.workspace.low_count, self.config.hidden_size
-            ),
+            low_tokens=torch.randn(self.batch, self.workspace.low_count, self.config.hidden_size),
             stage_role=stage_role,
             stage_content=stage_content,
             primary_cond=self.primary,
@@ -188,9 +216,9 @@ class HierarchicalWorkspaceTest(unittest.TestCase):
             promotion.gate_rows.squeeze(-1), promote_gate, atol=0.0, rtol=0.0
         )
         realized_scale = promotion.gated.float().square().mean(dim=-1).sqrt()
-        torch.testing.assert_close(
-            realized_scale, promote_gate, atol=2e-5, rtol=0.0
-        )
+        # LayerNorm uses a non-zero eps, so its RMS is within numerical
+        # tolerance of one rather than exactly one.
+        torch.testing.assert_close(realized_scale, promote_gate, atol=1e-4, rtol=0.0)
 
     def test_mmdit_condition_groups_have_length_fair_prior_mass(self) -> None:
         block = LatentCVAEMMDiTBlock(self.config)

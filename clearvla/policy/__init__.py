@@ -6,16 +6,20 @@ ownership moves into this package.
 
 from .codec import (
     ActionTemporalDCT,
+    DCTFlowCodec,
+    FrequencyPhysicalActionTokenLift,
     NativeTimePhysicalActionTokenLift,
     ParsevalGripperTemporalFrame,
     PhysicalActionCodec,
     PhysicalActionTokenLift,
     PhysicalVelocityHead,
+    SoftSpectralAperture,
     TemporalDCT,
     TransitionAwarePhysicalVelocityHead,
 )
 from .config import V362PolicyConfig, V38PolicyConfig, V39PolicyConfig
 from .controller import (
+    ControllerExecutionContract,
     ControllerMemory,
     UnifiedControllerOutput,
     UnifiedHierarchicalController,
@@ -25,6 +29,7 @@ from .decoder import (
     ConditionNeutralActionInitializer,
     HierarchicalMMDiTActionDecoder,
     OwnedHierarchicalActionBlock,
+    SpectralPhysicalVelocityHead,
 )
 from .evidence import (
     EvidenceMemoryBank,
@@ -41,6 +46,7 @@ from .intent import IndependentIntentFusion, IntentContractCompiler, PolicyCondi
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .proposal import ProposalBlock, RejectableHistoryProposal
 from .refinement import NestedLowRankContractionBank
+from .source_process import ArmSourceGeometry, BoundaryConditionedArmSource
 from .trunk_primitives import (
     CanvasPhysicalVelocityHead,
     ControlledResidualLatentDynamics,
@@ -61,26 +67,38 @@ from .trunk import (
     UnifiedInterventionBlock,
 )
 from .system import V39PolicySystem
+from .time_domain_mmdit import (
+    EvidenceConditionOrganizer,
+    EvidenceLatentMMDiTActionDecoder,
+    EvidenceView,
+    EvidenceViewAdapter,
+    TimeDomainMMDiTBlock,
+)
 
 __all__ = [
     "ActionTemporalDCT",
+    "DCTFlowCodec",
+    "FrequencyPhysicalActionTokenLift",
     "NativeTimePhysicalActionTokenLift",
     "ParsevalGripperTemporalFrame",
     "PhysicalActionCodec",
     "PhysicalActionTokenLift",
     "PhysicalVelocityHead",
+    "SoftSpectralAperture",
     "TemporalDCT",
     "TransitionAwarePhysicalVelocityHead",
     "V362PolicyConfig",
     "V38PolicyConfig",
     "V39PolicyConfig",
     "UnifiedControllerOutput",
+    "ControllerExecutionContract",
     "ControllerMemory",
     "UnifiedHierarchicalController",
     "ActionOnlyPhysicalVelocityHead",
     "ConditionNeutralActionInitializer",
     "HierarchicalMMDiTActionDecoder",
     "OwnedHierarchicalActionBlock",
+    "SpectralPhysicalVelocityHead",
     "EvidenceMemoryBank",
     "HierarchicalEvidenceWorkspace",
     "HierarchicalWorkspaceManager",
@@ -99,6 +117,8 @@ __all__ = [
     "ProposalBlock",
     "RejectableHistoryProposal",
     "NestedLowRankContractionBank",
+    "ArmSourceGeometry",
+    "BoundaryConditionedArmSource",
     "CanvasPhysicalVelocityHead",
     "ControlledResidualLatentDynamics",
     "DenseVisualMemory",
@@ -115,4 +135,9 @@ __all__ = [
     "TemporalMidcutWorldActionDiT",
     "UnifiedInterventionBlock",
     "V39PolicySystem",
+    "EvidenceView",
+    "EvidenceViewAdapter",
+    "EvidenceConditionOrganizer",
+    "TimeDomainMMDiTBlock",
+    "EvidenceLatentMMDiTActionDecoder",
 ]

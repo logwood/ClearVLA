@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Stage-owned nested contraction paths for action refinement."""
+
+from __future__ import annotations
 
 import math
 
@@ -60,9 +60,7 @@ class NestedLowRankContractionBank(nn.Module):
         # One scalar depth per semantic stage is deliberate: independent rank
         # masks would no longer describe a nested path.
         self.depth_weight = nn.Parameter(torch.zeros(stage_count, condition_size))
-        self.depth_bias = nn.Parameter(
-            torch.full((stage_count,), float(depth_logit_init))
-        )
+        self.depth_bias = nn.Parameter(torch.full((stage_count,), float(depth_logit_init)))
         self.reset_parameters(float(depth_logit_init))
 
     def reset_parameters(self, depth_logit_init: float) -> None:
@@ -98,9 +96,7 @@ class NestedLowRankContractionBank(nn.Module):
     @staticmethod
     def _candidate_rows(value: Tensor, stage_candidates: Tensor) -> Tensor:
         flat = stage_candidates.reshape(-1)
-        return value.index_select(0, flat).reshape(
-            *stage_candidates.shape, *value.shape[1:]
-        )
+        return value.index_select(0, flat).reshape(*stage_candidates.shape, *value.shape[1:])
 
     @staticmethod
     def _selected_candidate(value: Tensor, selected: Tensor) -> Tensor:
@@ -135,12 +131,25 @@ class NestedLowRankContractionBank(nn.Module):
             device=depth_ratio.device,
             dtype=depth_ratio.dtype,
         )
-        group_transparency = (
-            group_depth[..., None] - group_index
-        ).clamp(0.0, 1.0)
-        return group_transparency.repeat_interleave(
-            self.channels_per_group, dim=-1
+        group_transparency = (group_depth[..., None] - group_index).clamp(0.0, 1.0)
+        return group_transparency.repeat_interleave(self.channels_per_group, dim=-1)
+
+    def _ordered_group_mask(self, depth_ratio: Tensor) -> Tensor:
+        """Return a hard nested prefix with a soft backward path.
+
+        The forward operator either keeps or removes a complete rank group.
+        The straight-through expression only supplies a learning derivative;
+        it cannot attenuate a group that is active in the forward pass.
+        """
+        soft = self._ordered_transparency(depth_ratio)
+        group_depth = depth_ratio.clamp(0.0, 1.0) * float(self.group_count)
+        group_index = torch.arange(
+            self.group_count, device=depth_ratio.device, dtype=depth_ratio.dtype
         )
+        count = torch.ceil(group_depth).clamp(0.0, float(self.group_count))
+        hard_groups = (group_index < count[..., None]).to(dtype=soft.dtype)
+        hard = hard_groups.repeat_interleave(self.channels_per_group, dim=-1)
+        return hard + soft - soft.detach()
 
     @staticmethod
     def _normalize_stage_probabilities(
@@ -173,9 +182,7 @@ class NestedLowRankContractionBank(nn.Module):
         elif tuple(ratio.shape) == (batch,):
             ratio = ratio[:, None].expand(batch, candidate_count)
         elif tuple(ratio.shape) != (batch, candidate_count):
-            raise ValueError(
-                "depth_ratio_override must be scalar, [B], or [B,K]"
-            )
+            raise ValueError("depth_ratio_override must be scalar, [B], or [B,K]")
         return ratio.clamp(0.0, 1.0)
 
     def forward(
@@ -190,18 +197,18 @@ class NestedLowRankContractionBank(nn.Module):
         prepared_factors: Tensor | None = None,
         depth_ratio_override: Tensor | float | None = None,
         raw_depth_ratio_override: Tensor | float | None = None,
+        binary_group_selection: bool = False,
         identity_bypass: bool | None = None,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         if base_update.ndim != 3 or int(base_update.shape[-1]) != self.hidden_size:
             raise ValueError(
-                f"base_update must be [B,N,{self.hidden_size}], "
-                f"got {tuple(base_update.shape)}"
+                f"base_update must be [B,N,{self.hidden_size}], got {tuple(base_update.shape)}"
             )
         batch = int(base_update.shape[0])
         if tuple(condition.shape) != (batch, self.condition_size):
             raise ValueError(
-                f"condition must be [B,{self.condition_size}], "
-                f"got {tuple(condition.shape)}"
+                f"condition must be [B,{self.condition_size}], got {tuple(condition.shape)}"
             )
         if tuple(stage_index.shape) != (batch,):
             raise ValueError("stage_index must contain one index per sample")
@@ -210,25 +217,19 @@ class NestedLowRankContractionBank(nn.Module):
         if stage_candidates is None:
             stage_candidates = stage_index[:, None]
         else:
-            stage_candidates = stage_candidates.to(
-                device=base_update.device, dtype=torch.long
-            )
+            stage_candidates = stage_candidates.to(device=base_update.device, dtype=torch.long)
         if stage_candidates.ndim != 2 or int(stage_candidates.shape[0]) != batch:
             raise ValueError("stage_candidates must be [B,K]")
         if stage_candidates.device.type == "cpu":
             if bool((stage_candidates < 0).any()) or bool(
                 (stage_candidates >= self.stage_count).any()
             ):
-                raise ValueError(
-                    "stage_candidates contain an index outside the contraction bank"
-                )
+                raise ValueError("stage_candidates contain an index outside the contraction bank")
         selected_matches = stage_candidates == stage_index[:, None]
         if selected_matches.device.type == "cpu" and not bool(
             (selected_matches.sum(dim=-1) == 1).all()
         ):
-            raise ValueError(
-                "each selected stage must occur exactly once in stage_candidates"
-            )
+            raise ValueError("each selected stage must occur exactly once in stage_candidates")
         selected = selected_matches.float().argmax(dim=-1)
         candidate_count = int(stage_candidates.shape[1])
         stage_probabilities = self._normalize_stage_probabilities(
@@ -243,9 +244,7 @@ class NestedLowRankContractionBank(nn.Module):
             )
         if raw_depth_ratio_override is None:
             normalized_condition = self.condition_norm(condition).float()
-            depth_weight = self._candidate_rows(
-                self.depth_weight.float(), stage_candidates
-            )
+            depth_weight = self._candidate_rows(self.depth_weight.float(), stage_candidates)
             depth_bias = self._candidate_rows(self.depth_bias.float(), stage_candidates)
             depth_logits = torch.einsum(
                 "bh,bkh->bk", normalized_condition, depth_weight
@@ -282,13 +281,11 @@ class NestedLowRankContractionBank(nn.Module):
             # A true topology-level bypass: identity warm-up must not pay for
             # QR/projection work or expose contraction parameters to the main
             # loss through a numerically cancelling graph.
-            one_rows = torch.ones(
-                batch, device=base_update.device, dtype=torch.float32
-            )
+            one_rows = torch.ones(batch, device=base_update.device, dtype=torch.float32)
             zero_rows = torch.zeros_like(one_rows)
-            rank = torch.as_tensor(
-                float(self.rank), device=base_update.device, dtype=torch.float32
-            )
+            rank = torch.as_tensor(float(self.rank), device=base_update.device, dtype=torch.float32)
+            if not collect_diagnostics:
+                return base_update, {}
             metrics = {
                 "depth_ratio": one_rows.mean(),
                 "depth_ratio_min": one_rows.amin(),
@@ -332,16 +329,16 @@ class NestedLowRankContractionBank(nn.Module):
                 candidate_count=candidate_count,
                 device=base_update.device,
             )
-        transparency = self._ordered_transparency(depth_ratio)
+        transparency = (
+            self._ordered_group_mask(depth_ratio)
+            if binary_group_selection
+            else self._ordered_transparency(depth_ratio)
+        )
 
         base_fp32 = base_update.float()
         coordinates = torch.einsum("bnh,bkhr->bknr", base_fp32, basis)
-        removed_coordinates = coordinates * (
-            1.0 - transparency[:, :, None, :]
-        )
-        removed = torch.einsum(
-            "bknr,bkhr->bknh", removed_coordinates, basis
-        )
+        removed_coordinates = coordinates * (1.0 - transparency[:, :, None, :])
+        removed = torch.einsum("bknr,bkhr->bknh", removed_coordinates, basis)
         candidate_updates = base_fp32[:, None] - removed
 
         hard_candidate_weight = selected_matches.to(dtype=candidate_updates.dtype)
@@ -353,10 +350,10 @@ class NestedLowRankContractionBank(nn.Module):
             )
         else:
             routing_weight = hard_candidate_weight
-        update_fp32 = (
-            candidate_updates * routing_weight[:, :, None, None]
-        ).sum(dim=1)
+        update_fp32 = (candidate_updates * routing_weight[:, :, None, None]).sum(dim=1)
         update = update_fp32.to(dtype=base_update.dtype)
+        if not collect_diagnostics:
+            return update, {}
 
         selected_depth = self._selected_candidate(depth_ratio, selected)
         selected_transparency = self._selected_candidate(transparency, selected)
@@ -373,9 +370,9 @@ class NestedLowRankContractionBank(nn.Module):
             / base_fp32.detach().square().sum(dim=(1, 2)).clamp_min(1e-8)
         ).clamp(0.0, 1.0)
         effective_depth_rows = selected_transparency.sum(dim=-1)
-        identity = torch.eye(
-            self.rank, device=selected_basis.device, dtype=selected_basis.dtype
-        )[None]
+        identity = torch.eye(self.rank, device=selected_basis.device, dtype=selected_basis.dtype)[
+            None
+        ]
         gram = torch.matmul(selected_basis.transpose(-2, -1), selected_basis)
         orthogonality_error_rows = (gram - identity).abs().amax(dim=(-2, -1))
         if self.rank > 1:
@@ -385,9 +382,7 @@ class NestedLowRankContractionBank(nn.Module):
         else:
             nested_order_violation_rows = torch.zeros_like(selected_depth)
         nonexpansive_violation_rows = torch.relu(contraction_ratio_rows - 1.0)
-        full_transparency = self._ordered_transparency(
-            torch.ones_like(depth_ratio)
-        )
+        full_transparency = self._ordered_transparency(torch.ones_like(depth_ratio))
         boundary_identity_error = (full_transparency - 1.0).abs().amax()
 
         # Penalize chosen depth only.  This cannot shrink basis vectors or the
@@ -414,9 +409,7 @@ class NestedLowRankContractionBank(nn.Module):
             "boundary_identity_error": boundary_identity_error.detach(),
             "nonexpansive_violation": nonexpansive_violation_rows.detach().amax(),
             "nested_order_violation": nested_order_violation_rows.detach().amax(),
-            "basis_norm_error": (
-                selected_basis.norm(dim=-2) - 1.0
-            ).abs().detach().amax(),
+            "basis_norm_error": (selected_basis.norm(dim=-2) - 1.0).abs().detach().amax(),
             "basis_orthogonality_error": orthogonality_error_rows.detach().mean(),
             "basis_raw_norm": self.basis_raw.detach().float().norm(dim=-2).mean(),
             "depth_ratio_rows": selected_depth.detach(),

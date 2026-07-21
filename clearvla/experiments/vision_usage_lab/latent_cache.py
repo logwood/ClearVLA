@@ -104,7 +104,9 @@ class VisionLatentEpisodeMeta:
             raise ValueError(f"invalid cameras={self.cameras}")
         gh, gw = int(self.patch_grid[0]), int(self.patch_grid[1])
         if gh <= 0 or gw <= 0 or int(self.patch_count) != gh * gw:
-            raise ValueError(f"invalid patch grid/count: grid={self.patch_grid}, count={self.patch_count}")
+            raise ValueError(
+                f"invalid patch grid/count: grid={self.patch_grid}, count={self.patch_count}"
+            )
         if self.token_dim <= 0:
             raise ValueError("token_dim must be positive")
         if self.dtype != "float16":
@@ -113,9 +115,13 @@ class VisionLatentEpisodeMeta:
         # shape-bearing resolved values.  Do not recompute a runtime fingerprint.
         config = PatchTeacherConfig.from_dict(dict(self.teacher_config))
         if config.patch_grid() != self.patch_grid:
-            raise ValueError(f"teacher patch grid mismatch: {config.patch_grid()} != {self.patch_grid}")
+            raise ValueError(
+                f"teacher patch grid mismatch: {config.patch_grid()} != {self.patch_grid}"
+            )
         if config.resolved_token_dim() != self.token_dim:
-            raise ValueError(f"teacher token dim mismatch: {config.resolved_token_dim()} != {self.token_dim}")
+            raise ValueError(
+                f"teacher token dim mismatch: {config.resolved_token_dim()} != {self.token_dim}"
+            )
         if not self.teacher_fingerprint:
             raise ValueError("teacher_fingerprint must be non-empty")
         required_source = {"resolved_path", "size_bytes", "mtime_ns"}
@@ -176,16 +182,22 @@ def _write_episode_cache_atomic(
             for start in range(0, episode.length, batch_frames):
                 stop = min(start + batch_frames, episode.length)
                 indices = np.arange(start, stop, dtype=np.int64)
-                frames = visual_store.load_window(episode, indices)[camera].to(device=device, non_blocking=True)
+                frames = visual_store.load_window(episode, indices)[camera].to(
+                    device=device, non_blocking=True
+                )
                 tokens, _ = teacher.encode(frames)
                 if tuple(tokens.shape) != (stop - start, patch_count, expected_dim):
                     raise RuntimeError(
                         f"camera={camera!r} teacher tokens shape={tuple(tokens.shape)} "
-                        f"!= {(stop-start, patch_count, expected_dim)}"
+                        f"!= {(stop - start, patch_count, expected_dim)}"
                     )
                 if not torch.isfinite(tokens).all():
-                    raise FloatingPointError(f"camera={camera!r} teacher returned non-finite latent")
-                tokens_mm[start:stop] = tokens.detach().to(dtype=torch.float16, device="cpu").numpy()
+                    raise FloatingPointError(
+                        f"camera={camera!r} teacher returned non-finite latent"
+                    )
+                tokens_mm[start:stop] = (
+                    tokens.detach().to(dtype=torch.float16, device="cpu").numpy()
+                )
             tokens_mm.flush()
             del tokens_mm
 
@@ -248,7 +260,9 @@ def build_episode_vision_latent_cache(
     cache_dir.mkdir(parents=True, exist_ok=True)
     meta_path = _meta_path(cache_dir, episode.stem)
     if meta_path.exists() and not rebuild:
-        meta = VisionLatentCacheStore(cache_dir, camera_names=camera_names).validate_episode(episode)
+        meta = VisionLatentCacheStore(cache_dir, camera_names=camera_names).validate_episode(
+            episode
+        )
         if meta.patch_grid != expected_grid or meta.token_dim != expected_dim:
             raise ValueError(
                 "existing latent cache shape is incompatible with requested teacher: "
@@ -328,14 +342,25 @@ class VisionLatentCacheStore:
                 "Run `python -m clearvla.cli.build_vision_latent_cache ...` first."
             )
         meta = VisionLatentEpisodeMeta.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        if meta.cache_version == VISION_LATENT_CACHE_VERSION and not _complete_path(self.cache_dir, episode.stem).exists():
-            raise ValueError(f"incomplete latent cache: {_episode_dir(self.cache_dir, episode.stem)}")
+        if (
+            meta.cache_version == VISION_LATENT_CACHE_VERSION
+            and not _complete_path(self.cache_dir, episode.stem).exists()
+        ):
+            raise ValueError(
+                f"incomplete latent cache: {_episode_dir(self.cache_dir, episode.stem)}"
+            )
         if meta.episode_stem != episode.stem:
-            raise ValueError(f"latent cache stem mismatch: {meta.episode_stem!r} != {episode.stem!r}")
+            raise ValueError(
+                f"latent cache stem mismatch: {meta.episode_stem!r} != {episode.stem!r}"
+            )
         if meta.num_frames != episode.length:
-            raise ValueError(f"latent cache frame count mismatch: {meta.num_frames} != {episode.length}")
+            raise ValueError(
+                f"latent cache frame count mismatch: {meta.num_frames} != {episode.length}"
+            )
         if meta.cameras != self.camera_names:
-            raise ValueError(f"latent cache cameras mismatch: {meta.cameras} != {self.camera_names}")
+            raise ValueError(
+                f"latent cache cameras mismatch: {meta.cameras} != {self.camera_names}"
+            )
         if meta.source_fingerprint != _source_fingerprint(episode.path):
             raise ValueError(f"latent cache source fingerprint mismatch for {episode.path}")
         for camera in self.camera_names:
@@ -366,7 +391,9 @@ class VisionLatentCacheStore:
         if key not in self._arrays:
             if episode.stem not in self._metas:
                 self.validate_episode(episode)
-            self._arrays[key] = np.load(_tokens_path(self.cache_dir, episode.stem, camera), mmap_mode="r")
+            self._arrays[key] = np.load(
+                _tokens_path(self.cache_dir, episode.stem, camera), mmap_mode="r"
+            )
         return self._arrays[key]
 
     def load_tokens(self, episode: LoadedEpisode, indices: np.ndarray) -> np.ndarray:
@@ -374,9 +401,14 @@ class VisionLatentCacheStore:
         if indices.ndim != 1 or len(indices) == 0:
             raise ValueError(f"indices must be non-empty [H], got {indices.shape}")
         if int(indices.min()) < 0 or int(indices.max()) >= episode.length:
-            raise IndexError(f"indices range [{int(indices.min())},{int(indices.max())}] outside T={episode.length}")
-        tokens = np.stack([
-            np.asarray(self._array(episode, camera)[indices], dtype=np.float32)
-            for camera in self.camera_names
-        ], axis=1)
+            raise IndexError(
+                f"indices range [{int(indices.min())},{int(indices.max())}] outside T={episode.length}"
+            )
+        tokens = np.stack(
+            [
+                np.asarray(self._array(episode, camera)[indices], dtype=np.float32)
+                for camera in self.camera_names
+            ],
+            axis=1,
+        )
         return np.ascontiguousarray(tokens)

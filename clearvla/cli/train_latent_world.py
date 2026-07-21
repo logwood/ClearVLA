@@ -76,7 +76,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--control-hz", type=float, default=30.0)
 
-    parser.add_argument("--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache")
+    parser.add_argument(
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
+    )
     parser.add_argument("--dinov2-model", default="facebook/dinov2-base")
     parser.add_argument("--dinov2-local-files-only", action="store_true")
     parser.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
@@ -84,7 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-patches-per-camera", type=int, default=16)
 
     parser.add_argument("--hidden-size", type=int, default=256)
-    parser.add_argument("--encoder-depth", type=int, default=1, help="legacy config field; V34.1 Perceiver does not use the old encoder")
+    parser.add_argument(
+        "--encoder-depth",
+        type=int,
+        default=1,
+        help="legacy config field; V34.1 Perceiver does not use the old encoder",
+    )
     parser.add_argument("--perceiver-depth", type=int, default=4)
     parser.add_argument("--action-depth", type=int, default=3)
     parser.add_argument("--dynamics-depth", type=int, default=6)
@@ -116,7 +125,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rebuild-pairs", action="store_true")
     parser.add_argument("--pair-build-batch-size", type=int, default=32)
 
-    parser.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16", help="forward autocast dtype; parameters and EMA remain FP32")
+    parser.add_argument(
+        "--dtype",
+        choices=["fp32", "bf16"],
+        default="bf16",
+        help="forward autocast dtype; parameters and EMA remain FP32",
+    )
     trainer_defaults = LatentWorldTrainerConfig()
     parser.add_argument("--epochs", type=int, default=trainer_defaults.epochs)
     parser.add_argument("--perceiver-lr", type=float, default=trainer_defaults.perceiver_lr)
@@ -128,21 +142,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adam-eps", type=float, default=trainer_defaults.eps)
     parser.add_argument("--grad-clip", type=float, default=trainer_defaults.grad_clip)
     parser.add_argument("--warmup-steps", type=int, default=trainer_defaults.warmup_steps)
-    parser.add_argument("--action-warmup-steps", type=int, default=trainer_defaults.action_warmup_steps)
-    parser.add_argument("--stability-warmup-steps", type=int, default=trainer_defaults.stability_warmup_steps)
+    parser.add_argument(
+        "--action-warmup-steps", type=int, default=trainer_defaults.action_warmup_steps
+    )
+    parser.add_argument(
+        "--stability-warmup-steps", type=int, default=trainer_defaults.stability_warmup_steps
+    )
     parser.add_argument("--min-lr-ratio", type=float, default=trainer_defaults.min_lr_ratio)
     parser.add_argument("--ema-decay-start", type=float, default=trainer_defaults.ema_decay_start)
     parser.add_argument("--ema-decay-end", type=float, default=trainer_defaults.ema_decay_end)
     parser.add_argument("--camera-drop-prob", type=float, default=trainer_defaults.camera_drop_prob)
     parser.add_argument("--state-mask-prob", type=float, default=trainer_defaults.state_mask_prob)
     parser.add_argument("--patch-mask-prob", type=float, default=trainer_defaults.patch_mask_prob)
-    parser.add_argument("--checkpoint-predictive-slack", type=float, default=trainer_defaults.checkpoint_predictive_slack)
-    parser.add_argument("--checkpoint-hold-ratio-max", type=float, default=trainer_defaults.checkpoint_hold_ratio_max)
-    parser.add_argument("--checkpoint-min-embedding-std", type=float, default=trainer_defaults.checkpoint_min_embedding_std)
+    parser.add_argument(
+        "--checkpoint-predictive-slack",
+        type=float,
+        default=trainer_defaults.checkpoint_predictive_slack,
+    )
+    parser.add_argument(
+        "--checkpoint-hold-ratio-max",
+        type=float,
+        default=trainer_defaults.checkpoint_hold_ratio_max,
+    )
+    parser.add_argument(
+        "--checkpoint-min-embedding-std",
+        type=float,
+        default=trainer_defaults.checkpoint_min_embedding_std,
+    )
     parser.add_argument("--log-every", type=int, default=trainer_defaults.log_every)
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--max-val-batches", type=int, default=0)
-    parser.add_argument("--eval-ablation-batches", type=int, default=trainer_defaults.eval_ablation_batches)
+    parser.add_argument(
+        "--eval-ablation-batches", type=int, default=trainer_defaults.eval_ablation_batches
+    )
     return parser.parse_args()
 
 
@@ -180,7 +212,9 @@ def _pair_descriptors(
         )
         dynamic_descriptor = model.fixed_dynamic_descriptor(current).cpu().numpy()
         static = current.float()[:, -1].mean(dim=2) @ model.descriptor_projection.float()
-        static = torch.nn.functional.normalize(static, dim=-1).reshape(len(current), -1).cpu().numpy()
+        static = (
+            torch.nn.functional.normalize(static, dim=-1).reshape(len(current), -1).cpu().numpy()
+        )
         state = batch["state"].numpy().reshape(len(current), -1)
         action_state = batch["action_state"].numpy().reshape(len(current), -1)
         condition_rows.append(np.concatenate([state, static, dynamic_descriptor], axis=1))
@@ -266,8 +300,13 @@ def _build_or_load_pairs(
         "gripper_midpoint": float(0.5 * (args.gripper_open_value + args.gripper_close_value)),
     }
     required = [
-        paths["train"], paths["val"], paths["test"], paths["val_support"],
-        paths["val_support_index"], paths["test_support"], paths["test_support_index"],
+        paths["train"],
+        paths["val"],
+        paths["test"],
+        paths["val_support"],
+        paths["val_support_index"],
+        paths["test_support"],
+        paths["test_support_index"],
         paths["manifest"],
     ]
     if not args.rebuild_pairs and all(path.exists() for path in required):
@@ -325,8 +364,13 @@ def _build_or_load_pairs(
     np.save(paths["test_support"], test_support)
     paths["manifest"].write_text(json.dumps(expected, indent=2), encoding="utf-8")
     return (
-        tables["train"], tables["val"], tables["test"],
-        val_support_index, val_support, test_support_index, test_support,
+        tables["train"],
+        tables["val"],
+        tables["test"],
+        val_support_index,
+        val_support,
+        test_support_index,
+        test_support,
     )
 
 
@@ -466,17 +510,22 @@ def main() -> None:
         support_index=val_support_index,
     )
     train_loader = make_loader(
-        train_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device
+        train_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=True,
+        device=device,
     )
     val_loader = make_loader(
-        val_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+        val_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=False,
+        device=device,
     )
 
     loss_config = LatentWorldLossConfig(
-        **{
-            field: getattr(args, field)
-            for field in LatentWorldLossConfig.__dataclass_fields__
-        }
+        **{field: getattr(args, field) for field in LatentWorldLossConfig.__dataclass_fields__}
     )
     trainer = LatentWorldTrainerConfig(
         epochs=args.epochs,

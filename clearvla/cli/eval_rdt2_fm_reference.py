@@ -26,10 +26,21 @@ from clearvla.experiments.classic_policy_lab.rdt2_conditioning import (
     RDT2VQKVConditioner,
 )
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import DinoV2TokenStore
-from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import RDT2FMReference, RDT2FMReferenceConfig
+from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import (
+    RDT2FMReference,
+    RDT2FMReferenceConfig,
+)
 
 
-IMAGE_ABLATIONS = ["normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"]
+IMAGE_ABLATIONS = [
+    "normal",
+    "zero",
+    "mean",
+    "shuffle-batch",
+    "shuffle-episode",
+    "top-only",
+    "wrist-only",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,7 +49,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--split", choices=["train", "val", "test"], default="val")
     p.add_argument("--inference-steps", type=int, default=None)
-    p.add_argument("--condition-mode", choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"], default=None)
+    p.add_argument(
+        "--condition-mode",
+        choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"],
+        default=None,
+    )
     p.add_argument("--instruction", default=None)
     p.add_argument("--dinov2-model", default=None)
     p.add_argument("--dinov2-local-files-only", action="store_true")
@@ -50,8 +65,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-val-batches", type=int, default=0)
     p.add_argument("--eval-seed", type=int, default=0)
     p.add_argument("--image-ablation", choices=IMAGE_ABLATIONS, default="normal")
-    p.add_argument("--compare-image-ablations", nargs="+", choices=IMAGE_ABLATIONS, default=None,
-                   help="Optionally evaluate normal images and several counterfactual image conditions in one reproducible report")
+    p.add_argument(
+        "--compare-image-ablations",
+        nargs="+",
+        choices=IMAGE_ABLATIONS,
+        default=None,
+        help="Optionally evaluate normal images and several counterfactual image conditions in one reproducible report",
+    )
     p.add_argument("--out-json", type=Path, default=None)
     return p.parse_args()
 
@@ -69,18 +89,40 @@ def _build_conditioner(
 ):
     saved_args = context["args"]
     if mode == "none":
-        return NullKVConditioner(depth=model_config.depth, num_kv_heads=model_config.num_kv_heads, head_dim=model_config.head_dim).to(device)
+        return NullKVConditioner(
+            depth=model_config.depth,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+        ).to(device)
     if mode == "debug-kv":
-        return DebugKVConditioner(depth=model_config.depth, num_kv_heads=model_config.num_kv_heads, head_dim=model_config.head_dim, tokens=int(saved_args.get("debug_cond_tokens", 8))).to(device)
+        return DebugKVConditioner(
+            depth=model_config.depth,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+            tokens=int(saved_args.get("debug_cond_tokens", 8)),
+        ).to(device)
     if mode == "debug-dense":
-        return DebugDenseConditioner(token_dim=int(saved_args.get("debug_dense_token_dim", 32)), tokens_per_camera=max(1, int(saved_args.get("debug_cond_tokens", 8)) // max(len(cameras), 1))).to(device)
+        return DebugDenseConditioner(
+            token_dim=int(saved_args.get("debug_dense_token_dim", 32)),
+            tokens_per_camera=max(
+                1, int(saved_args.get("debug_cond_tokens", 8)) // max(len(cameras), 1)
+            ),
+        ).to(device)
     if mode == "dinov2":
         name = args.dinov2_model or saved_args.get("dinov2_model", "facebook/dinov2-large")
-        return DinoV2DenseConditioner(name, local_files_only=args.dinov2_local_files_only).to(device)
+        return DinoV2DenseConditioner(name, local_files_only=args.dinov2_local_files_only).to(
+            device
+        )
     if mode == "dinov2-cache":
-        path = args.dinov2_token_cache_dir or saved_args.get("dinov2_token_cache_dir") or context.get("conditioning", {}).get("dinov2_token_cache_dir")
+        path = (
+            args.dinov2_token_cache_dir
+            or saved_args.get("dinov2_token_cache_dir")
+            or context.get("conditioning", {}).get("dinov2_token_cache_dir")
+        )
         if path is None:
-            raise ValueError("dinov2-cache evaluation requires --dinov2-token-cache-dir or a saved training cache path")
+            raise ValueError(
+                "dinov2-cache evaluation requires --dinov2-token-cache-dir or a saved training cache path"
+            )
         name = args.dinov2_model or saved_args.get("dinov2_model", "facebook/dinov2-large")
         store = DinoV2TokenStore(
             Path(path),
@@ -90,10 +132,22 @@ def _build_conditioner(
             dinov2_model=name,
         )
         return CachedDinoV2DenseConditioner(store).to(device)
-    name = args.rdt2_vq_model or saved_args.get("rdt2_vq_model", "robotics-diffusion-transformer/RDT2-VQ")
-    processor = args.rdt2_vq_processor or saved_args.get("rdt2_vq_processor", "Qwen/Qwen2.5-VL-7B-Instruct")
-    selected_layers = context["conditioning"].get("selected_layers", list(range(model_config.depth)))
-    return RDT2VQKVConditioner(name, selected_layers=selected_layers, processor_name_or_path=processor, dtype=dtype, local_files_only=args.rdt2_vq_local_files_only).to(device)
+    name = args.rdt2_vq_model or saved_args.get(
+        "rdt2_vq_model", "robotics-diffusion-transformer/RDT2-VQ"
+    )
+    processor = args.rdt2_vq_processor or saved_args.get(
+        "rdt2_vq_processor", "Qwen/Qwen2.5-VL-7B-Instruct"
+    )
+    selected_layers = context["conditioning"].get(
+        "selected_layers", list(range(model_config.depth))
+    )
+    return RDT2VQKVConditioner(
+        name,
+        selected_layers=selected_layers,
+        processor_name_or_path=processor,
+        dtype=dtype,
+        local_files_only=args.rdt2_vq_local_files_only,
+    ).to(device)
 
 
 def main() -> None:
@@ -121,15 +175,41 @@ def main() -> None:
     ids = {"train": train_ids, "val": val_ids, "test": test_ids}[args.split]
     cameras = tuple(str(value) for value in context["args"]["cameras"])
     if tuple(str(value) for value in args.cameras) != cameras:
-        raise ValueError(f"evaluation cameras must match checkpoint cameras: requested={tuple(args.cameras)}, checkpoint={cameras}")
-    dataset = RDT2FMWindowDataset(episodes, ids, image_store=store, camera_names=cameras, state_normalizer=state_normalizer, action_normalizer=action_normalizer, config=data_config)
-    loader = make_loader(dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+        raise ValueError(
+            f"evaluation cameras must match checkpoint cameras: requested={tuple(args.cameras)}, checkpoint={cameras}"
+        )
+    dataset = RDT2FMWindowDataset(
+        episodes,
+        ids,
+        image_store=store,
+        camera_names=cameras,
+        state_normalizer=state_normalizer,
+        action_normalizer=action_normalizer,
+        config=data_config,
+    )
+    loader = make_loader(
+        dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
     model = RDT2FMReference(model_config, dtype=dtype).to(device=device, dtype=dtype)
     model.load_state_dict(payload["model"])
     mode = args.condition_mode or context["conditioning"]["mode"]
-    conditioner = _build_conditioner(mode, context, args, model_config=model_config, episodes=episodes, cameras=cameras, device=device, dtype=dtype)
-    instruction = context["conditioning"].get("instruction", "") if args.instruction is None else args.instruction
+    conditioner = _build_conditioner(
+        mode,
+        context,
+        args,
+        model_config=model_config,
+        episodes=episodes,
+        cameras=cameras,
+        device=device,
+        dtype=dtype,
+    )
+    instruction = (
+        context["conditioning"].get("instruction", "")
+        if args.instruction is None
+        else args.instruction
+    )
     steps = int(args.inference_steps or model_config.num_inference_timesteps)
+
     def run_one(image_ablation: str):
         return evaluate_rdt2_fm(
             model,
@@ -160,7 +240,9 @@ def main() -> None:
         for value in requested:
             if value not in modes:
                 modes.append(value)
-        ablation_metrics = {value: (metrics if value == args.image_ablation else run_one(value)) for value in modes}
+        ablation_metrics = {
+            value: (metrics if value == args.image_ablation else run_one(value)) for value in modes
+        }
         normal = ablation_metrics["normal"]
         keys = ("full_mse", "arm_first_rmse", "first4_rmse", "first8_rmse")
         degradation = {}

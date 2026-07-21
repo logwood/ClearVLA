@@ -68,12 +68,16 @@ def _normalization(
     scale = (high - low) * 0.5
     scale = np.where(scale > 1e-12, scale, 1.0)
     offset = (high + low) * 0.5
-    return offset, scale, {
-        "mode": mode,
-        "quantile_low": low.tolist(),
-        "quantile_high": high.tolist(),
-        "mapped_range": [-1.0, 1.0],
-    }
+    return (
+        offset,
+        scale,
+        {
+            "mode": mode,
+            "quantile_low": low.tolist(),
+            "quantile_high": high.tolist(),
+            "mapped_range": [-1.0, 1.0],
+        },
+    )
 
 
 def _group_indices(
@@ -140,15 +144,9 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
         if any(value < 1 or value > int(args.horizon) for value in keep_values):
             raise ValueError(f"all {group} keep values must be in [1, {args.horizon}]")
 
-    error_sums = {
-        group: {str(keep): 0.0 for keep in keep_values}
-        for group in groups
-    }
+    error_sums = {group: {str(keep): 0.0 for keep in keep_values} for group in groups}
     error_counts = {group: 0 for group in groups}
-    energy_sums = {
-        group: np.zeros(int(args.horizon), dtype=np.float64)
-        for group in groups
-    }
+    energy_sums = {group: np.zeros(int(args.horizon), dtype=np.float64) for group in groups}
     roundtrip_squared_sum = 0.0
     roundtrip_count = 0
     window_count = 0
@@ -173,10 +171,7 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
                     group_coefficients.ndim - 1,
                 )
                 energy_sums[group] += (
-                    group_coefficients.float()
-                    .square()
-                    .mean(dim=energy_reduce_dims)
-                    .numpy()
+                    group_coefficients.float().square().mean(dim=energy_reduce_dims).numpy()
                 )
                 group_original = original[..., list(indices)]
                 error_counts[group] += int(group_original.numel())
@@ -197,9 +192,7 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
     frequency_energy_fraction: dict[str, list[float]] = {}
     for group, energy in energy_sums.items():
         total = float(energy.sum())
-        frequency_energy_fraction[group] = (
-            (energy / max(total, 1e-12)).tolist()
-        )
+        frequency_energy_fraction[group] = (energy / max(total, 1e-12)).tolist()
 
     return {
         "schema": "clearvla-action-dct-probe-v1",
@@ -244,7 +237,9 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Probe native action trajectories with an exact DCT chart.")
+    parser = argparse.ArgumentParser(
+        description="Probe native action trajectories with an exact DCT chart."
+    )
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--glob", default="*.hdf5")
     parser.add_argument("--action-key", default="action")
@@ -261,7 +256,9 @@ def main() -> None:
     parser.add_argument("--indent", type=int, default=2)
     args = parser.parse_args()
     result = probe(args)
-    text = json.dumps(_jsonable(result), ensure_ascii=False, indent=int(args.indent), sort_keys=True)
+    text = json.dumps(
+        _jsonable(result), ensure_ascii=False, indent=int(args.indent), sort_keys=True
+    )
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)

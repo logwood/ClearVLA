@@ -449,7 +449,9 @@ def _write_html_index(out_dir: Path, *, layer_count: int, prefix: str, has_state
     if has_state:
         lines.append(f"<h2>Experimental state shuffle</h2><img src='{prefix}_state_shuffle.png'>")
     else:
-        lines.append("<h2>Experimental state shuffle</h2><p>Unavailable. It requires --state-shuffle and batches with at least two samples.</p>")
+        lines.append(
+            "<h2>Experimental state shuffle</h2><p>Unavailable. It requires --state-shuffle and batches with at least two samples.</p>"
+        )
     lines.extend(
         [
             f"<h2>Neutral vs intervention separation</h2><img src='{prefix}_neutral_intervention.png'>",
@@ -457,7 +459,9 @@ def _write_html_index(out_dir: Path, *, layer_count: int, prefix: str, has_state
         ]
     )
     for layer in range(layer_count):
-        lines.append(f"<h3>Layer {layer}</h3><img src='{prefix}_pca_layer{layer}_neutral_intervention.png'>")
+        lines.append(
+            f"<h3>Layer {layer}</h3><img src='{prefix}_pca_layer{layer}_neutral_intervention.png'>"
+        )
     lines.append("<h2>Data files</h2><ul>")
     for name in (
         "report.md",
@@ -563,7 +567,9 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                 )
             layers = output.get("layer_contracts")
             if not isinstance(layers, list) or len(layers) != layer_count:
-                raise ValueError("checkpoint/model did not return one V40 layer contract per DiT layer")
+                raise ValueError(
+                    "checkpoint/model did not return one V40 layer contract per DiT layer"
+                )
             labels = gripper_event_labels(
                 target_raw=sample["policy_action_raw"],
                 current_raw=sample["state_raw"],
@@ -598,7 +604,9 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                 store["target"].append(target_vec)
                 residual_target = target.float().detach()
                 if "rollout_base_effect_pred" in entry:
-                    residual_target = residual_target - entry["rollout_base_effect_pred"].float().detach()
+                    residual_target = (
+                        residual_target - entry["rollout_base_effect_pred"].float().detach()
+                    )
                 neutral_tensor = entry["neutral_latent_pred"].float()
                 intervention_tensor = entry["unified_intervention_latent_pred"].float()
                 effect_tensor = entry["rollout_effect_pred"].float()
@@ -611,18 +619,14 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                         f"{tuple(neutral_tensor.shape)}, {tuple(intervention_tensor.shape)}, "
                         f"{tuple(effect_tensor.shape)}"
                     )
-                store["neutral"].append(
-                    _flatten_tokens(neutral_tensor).detach().cpu().numpy()
-                )
+                store["neutral"].append(_flatten_tokens(neutral_tensor).detach().cpu().numpy())
                 store["intervention"].append(
                     _flatten_tokens(intervention_tensor).detach().cpu().numpy()
                 )
                 token_delta = intervention_tensor - neutral_tensor
                 batch_size = int(token_delta.shape[0])
                 token_delta_flat = token_delta.reshape(batch_size, -1, token_delta.shape[-1])
-                neutral_flat = neutral_tensor.reshape(
-                    batch_size, -1, neutral_tensor.shape[-1]
-                )
+                neutral_flat = neutral_tensor.reshape(batch_size, -1, neutral_tensor.shape[-1])
                 intervention_flat = intervention_tensor.reshape(
                     batch_size, -1, intervention_tensor.shape[-1]
                 )
@@ -668,10 +672,7 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                         _flatten_tokens(entry["rollout_effect_pred"]).detach().cpu().numpy()
                     )
                     store["state_effect"].append(
-                        _flatten_tokens(shuffled_state_tensor)
-                        .detach()
-                        .cpu()
-                        .numpy()
+                        _flatten_tokens(shuffled_state_tensor).detach().cpu().numpy()
                     )
                     store["state_residual_target"].append(
                         _flatten_tokens(residual_target).detach().cpu().numpy()
@@ -698,29 +699,16 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 if "milestone_step_delta_pred_shuffle_state" in entry:
                     real_step_tensor = entry["milestone_step_delta_pred"].float()
-                    shuffled_step_tensor = entry[
-                        "milestone_step_delta_pred_shuffle_state"
-                    ].float()
-                    step_target_tensor = _milestone_step_target(
-                        residual_target, runtime_config
-                    )
+                    shuffled_step_tensor = entry["milestone_step_delta_pred_shuffle_state"].float()
+                    step_target_tensor = _milestone_step_target(residual_target, runtime_config)
                     store["state_real_step_delta"].append(
-                        _flatten_tokens(real_step_tensor)
-                        .detach()
-                        .cpu()
-                        .numpy()
+                        _flatten_tokens(real_step_tensor).detach().cpu().numpy()
                     )
                     store["state_step_delta"].append(
-                        _flatten_tokens(shuffled_step_tensor)
-                        .detach()
-                        .cpu()
-                        .numpy()
+                        _flatten_tokens(shuffled_step_tensor).detach().cpu().numpy()
                     )
                     store["state_step_target"].append(
-                        _flatten_tokens(step_target_tensor)
-                        .detach()
-                        .cpu()
-                        .numpy()
+                        _flatten_tokens(step_target_tensor).detach().cpu().numpy()
                     )
                     store["state_step_distance_real"].append(
                         _effect_distance_per_sample(real_step_tensor, step_target_tensor)
@@ -763,9 +751,7 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
 
     for layer in range(layer_count):
         data = by_layer[layer]
-        arrays = {
-            key: np.concatenate(values) if values else None for key, values in data.items()
-        }
+        arrays = {key: np.concatenate(values) if values else None for key, values in data.items()}
         effect = arrays["effect"]
         delta = arrays["delta"]
         target = arrays["target"]
@@ -883,19 +869,15 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
             }
             if arrays["state_step_distance_real"] is not None:
                 step_real_distance = float(np.mean(arrays["state_step_distance_real"]))
-                step_shuffled_distance = float(
-                    np.mean(arrays["state_step_distance_shuffle"])
-                )
+                step_shuffled_distance = float(np.mean(arrays["state_step_distance_shuffle"]))
                 step_change = float(np.mean(arrays["state_step_change"]))
                 exact.update(
                     {
                         "step_real_distance": step_real_distance,
                         "step_state_shuffle_distance": step_shuffled_distance,
-                        "step_d_state_shuffle": step_shuffled_distance
-                        - step_real_distance,
+                        "step_d_state_shuffle": step_shuffled_distance - step_real_distance,
                         "step_change_state_shuffle": step_change,
-                        "step_delta_state_shuffle": step_shuffled_distance
-                        - step_real_distance,
+                        "step_delta_state_shuffle": step_shuffled_distance - step_real_distance,
                         "step_delta_change_state_shuffle": step_change,
                     }
                 )
@@ -908,11 +890,7 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
                     # direct/base prediction. The unprefixed values match the
                     # token-level runtime metric; pooled values preserve the
                     # V39.2 inspector's compact-vector view.
-                    **{
-                        f"pooled_{key}": value
-                        for key, value in pooled.items()
-                        if key != "n"
-                    },
+                    **{f"pooled_{key}": value for key, value in pooled.items() if key != "n"},
                     "n": int(pooled["n"]),
                     **exact,
                 }
@@ -957,9 +935,7 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
         "action_metrics_are_not_policy_eval": True,
         "state_shuffle_is_experimental_non_strict": True,
         "state_shuffle_requested": bool(args.state_shuffle),
-        "state_shuffle_enabled_in_checkpoint": bool(
-            checkpoint_config.layer_state_counterfactual
-        ),
+        "state_shuffle_enabled_in_checkpoint": bool(checkpoint_config.layer_state_counterfactual),
         "state_shuffle_enabled_for_inspection": bool(runtime_config.layer_state_counterfactual),
         "state_shuffle_available": state_available,
         "processed_batches": processed_batches,
@@ -1006,9 +982,7 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
             _plot_action_counterfactuals(
                 plt, action_rows, out_dir / f"{args.plot_prefix}_action_counterfactuals.png"
             )
-            _plot_state_shuffle(
-                plt, state_rows, out_dir / f"{args.plot_prefix}_state_shuffle.png"
-            )
+            _plot_state_shuffle(plt, state_rows, out_dir / f"{args.plot_prefix}_state_shuffle.png")
             _plot_separation(
                 plt,
                 separation_rows,
@@ -1034,9 +1008,7 @@ def inspect_latents(args: argparse.Namespace) -> dict[str, Any]:
         "out_dir": str(out_dir),
         "metadata": metadata,
         "best_by_latent_mse": min(layer_rows, key=lambda row: float(row["latent_mse"])),
-        "best_by_action_shuffle_delta": max(
-            layer_rows, key=lambda row: float(row["d_shuffle"])
-        ),
+        "best_by_action_shuffle_delta": max(layer_rows, key=lambda row: float(row["d_shuffle"])),
         "best_by_state_shuffle_delta": (
             max(_available_rows(state_rows), key=lambda row: float(row["d_state_shuffle"]))
             if state_available

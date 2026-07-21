@@ -41,7 +41,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pair-index-dir", type=Path, required=True)
     p.add_argument("--split", choices=["val", "test"], default="val")
     p.add_argument(
-        "--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache"
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
     )
     p.add_argument("--dinov2-model", default="facebook/dinov2-base")
     p.add_argument("--dinov2-local-files-only", action="store_true")
@@ -65,16 +67,21 @@ def main() -> None:
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if checkpoint.get("schema") != "clearvla-v33.6-controllable-world-checkpoint-v1":
         raise ValueError(
-            "expected V33.6 controllable-world checkpoint-v1; "
-            f"got {checkpoint.get('schema')!r}"
+            f"expected V33.6 controllable-world checkpoint-v1; got {checkpoint.get('schema')!r}"
         )
     model_config = ControllableWorldConfig(**checkpoint["model_config"])
     context = checkpoint["context"]
     saved_args = context.get("args", {})
     current_args = vars(args)
     fields = (
-        "cameras", "dinov2_model", "cache_resize", "cache_crop", "action_key",
-        "state_key", "top_key", "wrist_key",
+        "cameras",
+        "dinov2_model",
+        "cache_resize",
+        "cache_crop",
+        "action_key",
+        "state_key",
+        "top_key",
+        "wrist_key",
     )
     mismatches = {}
     for field in fields:
@@ -98,7 +105,14 @@ def main() -> None:
     )
     min_length = max_extent + abs(min(dataset_config.history_offsets)) + 2
     (
-        episodes, train_ids, val_ids, test_ids, _, _, image_store, _,
+        episodes,
+        train_ids,
+        val_ids,
+        test_ids,
+        _,
+        _,
+        image_store,
+        _,
     ) = load_data(
         args,
         min_length=min_length,
@@ -113,13 +127,21 @@ def main() -> None:
         **{**context["dataset"], "return_images": args.condition_mode != "dinov2-cache"}
     )
     train_base = DynamicWorldWindowDataset(
-        episodes, train_ids, image_store=image_store, camera_names=cameras,
-        state_normalizer=state_normalizer, action_normalizer=action_normalizer,
+        episodes,
+        train_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_normalizer,
+        action_normalizer=action_normalizer,
         config=effective_config,
     )
     base = DynamicWorldWindowDataset(
-        episodes, ids, image_store=image_store, camera_names=cameras,
-        state_normalizer=state_normalizer, action_normalizer=action_normalizer,
+        episodes,
+        ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_normalizer,
+        action_normalizer=action_normalizer,
         config=effective_config,
     )
     prefix = "val" if args.split == "val" else "test"
@@ -127,7 +149,11 @@ def main() -> None:
     support_path = args.pair_index_dir / f"{prefix}_support_distance.npy"
     support_index_path = args.pair_index_dir / f"{prefix}_support_index.npy"
     manifest_path = args.pair_index_dir / "pair_index_manifest.json"
-    missing = [str(p) for p in (pair_path, support_path, support_index_path, manifest_path) if not p.is_file()]
+    missing = [
+        str(p)
+        for p in (pair_path, support_path, support_index_path, manifest_path)
+        if not p.is_file()
+    ]
     if missing:
         raise FileNotFoundError(f"missing formal pair/support contract: {missing}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -141,7 +167,11 @@ def main() -> None:
         "future_offsets": list(model_config.future_offsets),
         "action_horizon": model_config.action_horizon,
     }
-    bad = {key: (manifest.get(key), value) for key, value in expected.items() if manifest.get(key) != value}
+    bad = {
+        key: (manifest.get(key), value)
+        for key, value in expected.items()
+        if manifest.get(key) != value
+    }
     if bad:
         raise ValueError(f"pair/support index contract mismatch: {bad}")
 

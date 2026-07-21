@@ -1,12 +1,9 @@
-from __future__ import annotations
-
 """Current staged world/action trunk and layer contracts."""
 
-import math
+from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
-import torch.nn.functional as F
 
 from .codec import ParsevalGripperTemporalFrame
 from .config import V39PolicyConfig
@@ -20,6 +17,7 @@ from .legacy import (
     V37StyleResidualActionFlowDenoiser,
 )
 from .primitives import TimeEmbedding
+from .time_domain_mmdit import EvidenceLatentMMDiTActionDecoder
 from .trunk_primitives import (
     CanvasPhysicalVelocityHead,
     ControlledResidualLatentDynamics,
@@ -39,17 +37,21 @@ def _align_milestone_tokens_to_horizon(tokens: Tensor, horizon: int) -> Tensor:
     horizon = int(horizon)
     steps = int(tokens.shape[1])
     if horizon < 1 or steps < 1 or steps > horizon:
-        raise ValueError(f"expected 1 <= milestone steps <= horizon, got steps={steps} horizon={horizon}")
+        raise ValueError(
+            f"expected 1 <= milestone steps <= horizon, got steps={steps} horizon={horizon}"
+        )
     rows: list[Tensor] = []
     for step in range(steps):
         lo = int(round(step * horizon / float(steps)))
         hi = int(round((step + 1) * horizon / float(steps)))
         hi = max(hi, lo + 1)
         hi = min(hi, horizon)
-        rows.append(tokens[:, step:step + 1].expand(-1, hi - lo, -1))
+        rows.append(tokens[:, step : step + 1].expand(-1, hi - lo, -1))
     aligned = torch.cat(rows, dim=1)
     if aligned.shape[1] != horizon:
-        raise RuntimeError(f"milestone alignment produced {aligned.shape[1]} tokens for horizon={horizon}")
+        raise RuntimeError(
+            f"milestone alignment produced {aligned.shape[1]} tokens for horizon={horizon}"
+        )
     return aligned
 
 
@@ -61,7 +63,9 @@ def _rollout_tokens_to_action_horizon(tokens: Tensor, config: V39PolicyConfig) -
     grid = int(config.num_cameras) * int(config.future_grid_size) * int(config.future_grid_size)
     expected = int(config.future_anchors) * grid
     if int(tokens.shape[1]) != expected:
-        raise ValueError(f"rollout token count must be future_anchors*grid={expected}, got {tokens.shape[1]}")
+        raise ValueError(
+            f"rollout token count must be future_anchors*grid={expected}, got {tokens.shape[1]}"
+        )
     milestones = tokens.reshape(
         tokens.shape[0], int(config.future_anchors), grid, tokens.shape[-1]
     ).mean(dim=2)
@@ -86,7 +90,9 @@ class MidcutContractHeads(nn.Module):
         self.rollout_effect_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.rollout_delta_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         self.transition_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-        self.future_gain = nn.Parameter(torch.tensor(float(config.midcut_future_gain_init), dtype=torch.float32))
+        self.future_gain = nn.Parameter(
+            torch.tensor(float(config.midcut_future_gain_init), dtype=torch.float32)
+        )
         # Start action/event readouts small but not exactly zero.  A fully
         # zero final Linear makes the first backward step update only the head
         # itself and gives essentially no gradient to the upstream latent.
@@ -95,14 +101,20 @@ class MidcutContractHeads(nn.Module):
         for module in (self.action_head[-1], self.event_head[-1], self.motion_head[-1]):
             nn.init.normal_(module.weight, mean=0.0, std=1e-3)
             nn.init.zeros_(module.bias)
-        for module in (self.rollout_effect_head[-1], self.rollout_delta_head[-1], self.transition_head[-1]):
+        for module in (
+            self.rollout_effect_head[-1],
+            self.rollout_delta_head[-1],
+            self.transition_head[-1],
+        ):
             nn.init.normal_(module.weight, mean=0.0, std=1e-3)
             nn.init.zeros_(module.bias)
 
     def trajectory_pooled(self, trajectory_tokens: Tensor) -> Tensor:
         cfg = self.config
         b = trajectory_tokens.shape[0]
-        grouped = trajectory_tokens.reshape(b, cfg.action_horizon, cfg.action_basis_tokens, cfg.hidden_size)
+        grouped = trajectory_tokens.reshape(
+            b, cfg.action_horizon, cfg.action_basis_tokens, cfg.hidden_size
+        )
         return grouped.mean(dim=2)
 
     def forward(self, canvas: Tensor, slices: dict[str, slice]) -> dict[str, Tensor]:
@@ -130,10 +142,19 @@ class MidcutContractHeads(nn.Module):
             "midcut_pred_physical_velocity": self.action_head(trajectory_pooled),
             "midcut_direct_physical_velocity": self.action_head(trajectory_pooled),
             "midcut_rollout_residual_velocity": torch.zeros(
-                trajectory_pooled.shape[0], cfg.action_horizon, cfg.physical_action_dim,
-                device=trajectory_pooled.device, dtype=trajectory_pooled.dtype,
+                trajectory_pooled.shape[0],
+                cfg.action_horizon,
+                cfg.physical_action_dim,
+                device=trajectory_pooled.device,
+                dtype=trajectory_pooled.dtype,
             ),
-            "midcut_rollout_alpha": torch.zeros(1, cfg.action_horizon, 1, device=trajectory_pooled.device, dtype=trajectory_pooled.dtype),
+            "midcut_rollout_alpha": torch.zeros(
+                1,
+                cfg.action_horizon,
+                1,
+                device=trajectory_pooled.device,
+                dtype=trajectory_pooled.dtype,
+            ),
             "midcut_rollout_effect_pred": effect,
             "midcut_rollout_delta_pred": delta,
             "midcut_rollout_base_effect_pred": torch.zeros_like(effect),
@@ -180,9 +201,11 @@ class LayerContractAdapterHeads(nn.Module):
         adapted = canvas + scale * self.adapter(canvas)
         mid = self.readout(adapted, slices)
         out: dict[str, Tensor] = {
-            key[len("midcut_"):]: value for key, value in mid.items() if key.startswith("midcut_")
+            key[len("midcut_") :]: value for key, value in mid.items() if key.startswith("midcut_")
         }
-        out["layer_index"] = torch.as_tensor(self.layer_index, device=canvas.device, dtype=torch.long)
+        out["layer_index"] = torch.as_tensor(
+            self.layer_index, device=canvas.device, dtype=torch.long
+        )
         return out
 
 
@@ -203,7 +226,9 @@ class SharedLayerFlowActionProbe(nn.Module):
         ph = int(config.physical_action_dim)
         mid = int(config.layer_fm_probe_hidden)
         self.noisy_proj = nn.Linear(ph, h)
-        self.latent_proj = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
+        self.latent_proj = nn.Sequential(
+            nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h)
+        )
         self.time = TimeEmbedding(h)
         self.net = nn.Sequential(
             nn.LayerNorm(h),
@@ -233,8 +258,15 @@ class SharedLayerFlowActionProbe(nn.Module):
             dim=-1,
         )
         latent_bias = self.latent_proj(latent_summary).to(dtype=trajectory_pooled.dtype)[:, None, :]
-        t = self.time(time.to(dtype=trajectory_pooled.dtype)).to(dtype=trajectory_pooled.dtype)[:, None, :]
-        x = self.noisy_proj(noisy_physical.to(dtype=trajectory_pooled.dtype)) + trajectory_pooled + latent_bias + t
+        t = self.time(time.to(dtype=trajectory_pooled.dtype)).to(dtype=trajectory_pooled.dtype)[
+            :, None, :
+        ]
+        x = (
+            self.noisy_proj(noisy_physical.to(dtype=trajectory_pooled.dtype))
+            + trajectory_pooled
+            + latent_bias
+            + t
+        )
         return self.net(x)
 
 
@@ -250,7 +282,9 @@ class LayerRoleScheduler(nn.Module):
         super().__init__()
         self.config = config
 
-    def forward(self, layer_index: int | Tensor, *, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, layer_index: int | Tensor, *, device: torch.device, dtype: torch.dtype
+    ) -> tuple[Tensor, Tensor]:
         count = max(int(self.config.depth) - 1, 1)
         if torch.is_tensor(layer_index):
             idx = layer_index.to(device=device, dtype=dtype)
@@ -286,7 +320,9 @@ class UnifiedInterventionBlock(nn.Module):
         nn.init.zeros_(self.ffn[-1].bias)
 
     def forward(self, state: Tensor, context: Tensor) -> Tensor:
-        update, _ = self.cross(self.qn(state), self.kn(context), self.kn(context), need_weights=False)
+        update, _ = self.cross(
+            self.qn(state), self.kn(context), self.kn(context), need_weights=False
+        )
         state = state + update
         state = state + self.ffn(self.fn(state)).to(dtype=state.dtype)
         return state
@@ -319,7 +355,8 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
         mid = int(config.layer_consequence_hidden)
         self.gripper_frame = (
             ParsevalGripperTemporalFrame(config.action_horizon, config.gripper_field_dim)
-            if str(getattr(config, "gripper_field_mode", "legacy_handcrafted")) == "parseval_temporal"
+            if str(getattr(config, "gripper_field_mode", "legacy_handcrafted"))
+            == "parseval_temporal"
             else None
         )
         semantic_ph = 2 * int(config.arm_dim) + 1 if self.gripper_frame is not None else ph
@@ -332,23 +369,46 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
         )
         self.step_embed = nn.Embedding(int(config.layer_consequence_steps), h)
         self.layer_embed = nn.Embedding(int(config.depth), h)
-        self.memory_tokens = nn.Parameter(torch.randn(1, int(config.layer_causal_memory_tokens), h) * 0.02)
+        self.memory_tokens = nn.Parameter(
+            torch.randn(1, int(config.layer_causal_memory_tokens), h) * 0.02
+        )
         self.context_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
-        self.action_film = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, 2 * h))
-        self.context_gate = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, mid), nn.SiLU(), nn.Linear(mid, 1))
-        self.delta_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, h))
-        self.neutral_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, h))
-        self.policy_effect_proj = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, h))
-        self.interaction_blocks = nn.ModuleList([
-            UnifiedInterventionBlock(h, int(config.num_heads), mid)
-            for _ in range(int(config.layer_causal_feedback_depth))
-        ])
+        self.action_film = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, 2 * h)
+        )
+        self.context_gate = nn.Sequential(
+            nn.LayerNorm(2 * h), nn.Linear(2 * h, mid), nn.SiLU(), nn.Linear(mid, 1)
+        )
+        self.delta_head = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, h)
+        )
+        self.neutral_head = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, h)
+        )
+        self.policy_effect_proj = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, mid), nn.SiLU(), nn.Linear(mid, h)
+        )
+        self.interaction_blocks = nn.ModuleList(
+            [
+                UnifiedInterventionBlock(h, int(config.num_heads), mid)
+                for _ in range(int(config.layer_causal_feedback_depth))
+            ]
+        )
         self.effect_norm = nn.LayerNorm(h)
-        self.effect_gain = nn.Parameter(torch.tensor(float(config.layer_consequence_initial_gain), dtype=torch.float32))
-        self.delta_scale = nn.Parameter(torch.tensor(float(config.layer_consequence_delta_scale), dtype=torch.float32))
+        self.effect_gain = nn.Parameter(
+            torch.tensor(float(config.layer_consequence_initial_gain), dtype=torch.float32)
+        )
+        self.delta_scale = nn.Parameter(
+            torch.tensor(float(config.layer_consequence_delta_scale), dtype=torch.float32)
+        )
         for module in (
-            self.action_encoder[-1], self.context_proj[-1], self.action_film[-1],
-            self.context_gate[-1], self.delta_head[-1], self.neutral_head[-1], self.policy_effect_proj[-1],
+            self.action_encoder[-1],
+            self.context_proj[-1],
+            self.action_film[-1],
+            self.context_gate[-1],
+            self.delta_head[-1],
+            self.neutral_head[-1],
+            self.policy_effect_proj[-1],
         ):
             nn.init.normal_(module.weight, mean=0.0, std=1e-3)
             nn.init.zeros_(module.bias)
@@ -383,7 +443,9 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
                 # action_physical is [arm_abs, arm_delta, gripper_value, gripper_delta].
                 grip_value = 2 * ad
                 grip_mean = seg[..., grip_value].mean(dim=1, keepdim=True)
-                grip_delta = last[:, grip_value:grip_value + 1] - first[:, grip_value:grip_value + 1]
+                grip_delta = (
+                    last[:, grip_value : grip_value + 1] - first[:, grip_value : grip_value + 1]
+                )
                 arm = seg[..., : 2 * ad]
             else:
                 g = int(cfg.gripper_dim_index)
@@ -391,11 +453,24 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
                     g += ph
                 g = min(max(g, 0), ph - 1)
                 grip_mean = seg[..., g].mean(dim=1, keepdim=True)
-                grip_delta = last[:, g:g + 1] - first[:, g:g + 1]
-                arm = torch.cat([seg[..., :g], seg[..., g + 1:]], dim=-1) if ph > 1 else seg[..., :0]
-            arm_norm = arm.float().norm(dim=-1).mean(dim=1, keepdim=True).to(dtype=action_physical.dtype) if arm.numel() else torch.zeros(b, 1, device=action_physical.device, dtype=action_physical.dtype)
-            action_norm = seg.float().norm(dim=-1).mean(dim=1, keepdim=True).to(dtype=action_physical.dtype)
-            rows.append(torch.cat([mean, first, last, delta, std, grip_mean, grip_delta, arm_norm, action_norm], dim=-1))
+                grip_delta = last[:, g : g + 1] - first[:, g : g + 1]
+                arm = (
+                    torch.cat([seg[..., :g], seg[..., g + 1 :]], dim=-1) if ph > 1 else seg[..., :0]
+                )
+            arm_norm = (
+                arm.float().norm(dim=-1).mean(dim=1, keepdim=True).to(dtype=action_physical.dtype)
+                if arm.numel()
+                else torch.zeros(b, 1, device=action_physical.device, dtype=action_physical.dtype)
+            )
+            action_norm = (
+                seg.float().norm(dim=-1).mean(dim=1, keepdim=True).to(dtype=action_physical.dtype)
+            )
+            rows.append(
+                torch.cat(
+                    [mean, first, last, delta, std, grip_mean, grip_delta, arm_norm, action_norm],
+                    dim=-1,
+                )
+            )
         return torch.stack(rows, dim=1)
 
     def _compact_tokens(self, x: Tensor | None, *, max_tokens: int = 8) -> Tensor | None:
@@ -423,7 +498,9 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
         layer_token: Tensor,
     ) -> tuple[Tensor, Tensor]:
         b = base_tokens.shape[0]
-        mem = self.memory_tokens.to(device=base_tokens.device, dtype=base_tokens.dtype).expand(b, -1, -1)
+        mem = self.memory_tokens.to(device=base_tokens.device, dtype=base_tokens.dtype).expand(
+            b, -1, -1
+        )
         parts = [
             base_tokens,
             self._compact_tokens(state_tokens, max_tokens=2),
@@ -471,20 +548,28 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
                 f"rollout_tokens must have future_token_count={cfg.future_token_count}, got {rollout_tokens.shape[1]}"
             )
         grouped = rollout_tokens.reshape(b, int(cfg.future_anchors), grid, h)
-        action_segments = self._segment_action(action_physical.to(device=rollout_tokens.device, dtype=rollout_tokens.dtype))
+        action_segments = self._segment_action(
+            action_physical.to(device=rollout_tokens.device, dtype=rollout_tokens.dtype)
+        )
         action_embed = self.action_encoder(action_segments).to(dtype=rollout_tokens.dtype)
         step_ids = torch.arange(k, device=rollout_tokens.device)
         step_embed = self.step_embed(step_ids).to(dtype=rollout_tokens.dtype)
         if layer_index is None:
             layer_id = torch.zeros((), device=rollout_tokens.device, dtype=torch.long)
         elif torch.is_tensor(layer_index):
-            layer_id = layer_index.to(device=rollout_tokens.device, dtype=torch.long).clamp(0, int(cfg.depth) - 1)
+            layer_id = layer_index.to(device=rollout_tokens.device, dtype=torch.long).clamp(
+                0, int(cfg.depth) - 1
+            )
         else:
-            layer_id = torch.as_tensor(int(layer_index), device=rollout_tokens.device, dtype=torch.long).clamp(0, int(cfg.depth) - 1)
+            layer_id = torch.as_tensor(
+                int(layer_index), device=rollout_tokens.device, dtype=torch.long
+            ).clamp(0, int(cfg.depth) - 1)
         layer_token = self.layer_embed(layer_id)[None].expand(b, -1).to(dtype=rollout_tokens.dtype)
         scale = self.delta_scale.to(device=rollout_tokens.device, dtype=rollout_tokens.dtype).abs()
         gain = self.effect_gain.to(device=rollout_tokens.device, dtype=rollout_tokens.dtype).abs()
-        effect_state = torch.zeros(b, grid, h, device=rollout_tokens.device, dtype=rollout_tokens.dtype)
+        effect_state = torch.zeros(
+            b, grid, h, device=rollout_tokens.device, dtype=rollout_tokens.dtype
+        )
         preds: list[Tensor] = []
         deltas: list[Tensor] = []
         gates: list[Tensor] = []
@@ -515,7 +600,9 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
             gamma_beta = self.action_film(joint_condition).to(dtype=rollout_tokens.dtype)
             gamma, beta = gamma_beta.chunk(2, dim=-1)
             modulated = intervention * (1.0 + gamma[:, None, :]) + beta[:, None, :]
-            gate_in = torch.cat([modulated, joint_condition[:, None, :].expand(-1, grid, -1)], dim=-1)
+            gate_in = torch.cat(
+                [modulated, joint_condition[:, None, :].expand(-1, grid, -1)], dim=-1
+            )
             gate = torch.sigmoid(self.context_gate(gate_in).to(dtype=rollout_tokens.dtype))
             raw_delta = torch.tanh(self.delta_head(modulated).to(dtype=rollout_tokens.dtype))
             # V40.1 keeps the local/cumulative contract closed, but restores the
@@ -533,7 +620,9 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
             preds.append(effect_state)
             deltas.append(step_delta)
             gates.append(gate)
-            policy_tokens.append(self.policy_effect_proj(z_intervene).to(dtype=rollout_tokens.dtype))
+            policy_tokens.append(
+                self.policy_effect_proj(z_intervene).to(dtype=rollout_tokens.dtype)
+            )
             neutral_tokens.append(neutral)
             intervene_tokens.append(z_intervene)
         pred = torch.stack(preds, dim=1)
@@ -567,6 +656,7 @@ class RecurrentMilestoneConsequenceCell(nn.Module):
 def _zeros_like_scalar(reference: Tensor) -> Tensor:
     return torch.zeros((), device=reference.device, dtype=reference.dtype)
 
+
 class TemporalMidcutWorldActionDiT(nn.Module):
     """V38 DiT split into a mid-cut contract trunk and a policy tail."""
 
@@ -579,22 +669,32 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         self.rollout_codec = RolloutTargetCodec(config)
         self.seed = UnifiedCanvasSeed(config)
         self.time = TimeEmbedding(h)
-        self.content_mod = nn.Sequential(nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h))
+        self.content_mod = nn.Sequential(
+            nn.LayerNorm(2 * h), nn.Linear(2 * h, h), nn.SiLU(), nn.Linear(h, h)
+        )
         nn.init.normal_(self.content_mod[-1].weight, mean=0.0, std=2e-2)
         nn.init.zeros_(self.content_mod[-1].bias)
         self.content_mod_scale = nn.Parameter(torch.tensor(0.10))
-        self.blocks = nn.ModuleList([TemporalDynamicsBoundDiTBlock(config) for _ in range(config.depth)])
+        self.blocks = nn.ModuleList(
+            [TemporalDynamicsBoundDiTBlock(config) for _ in range(config.depth)]
+        )
         self.midcut_norm = nn.LayerNorm(h)
         self.midcut_heads = MidcutContractHeads(config)
         if int(config.layer_contract_adapters):
-            self.layer_contract_heads = nn.ModuleList([
-                LayerContractAdapterHeads(config, layer_index=i) for i in range(int(config.depth))
-            ])
+            self.layer_contract_heads = nn.ModuleList(
+                [LayerContractAdapterHeads(config, layer_index=i) for i in range(int(config.depth))]
+            )
         else:
             self.layer_contract_heads = nn.ModuleList()
-        self.layer_fm_probe = SharedLayerFlowActionProbe(config) if int(config.layer_shared_fm_probe) else None
+        self.layer_fm_probe = (
+            SharedLayerFlowActionProbe(config) if int(config.layer_shared_fm_probe) else None
+        )
         self.layer_role_scheduler = LayerRoleScheduler(config)
-        self.layer_consequence_cell = RecurrentMilestoneConsequenceCell(config) if int(config.layer_recurrent_consequence) else None
+        self.layer_consequence_cell = (
+            RecurrentMilestoneConsequenceCell(config)
+            if int(config.layer_recurrent_consequence)
+            else None
+        )
         self.final_norm = nn.LayerNorm(h)
         self.direct_physical_head = CanvasPhysicalVelocityHead(config)
         self.rollout_residual_head = RolloutActionResidualHead(config)
@@ -603,6 +703,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         self.motion_probe = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
         final_decoder = str(getattr(config, "final_action_decoder", "legacy"))
         self.hierarchical_mmdit_action_decoder: HierarchicalMMDiTActionDecoder | None = None
+        self.evidence_latent_mmdit_action_decoder: EvidenceLatentMMDiTActionDecoder | None = None
         if final_decoder == "residual_action_flow":
             self.residual_action_flow_denoiser = V37StyleResidualActionFlowDenoiser(config)
             self.latent_main_action_decoder = None
@@ -628,6 +729,12 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             self.latent_main_action_decoder = None
             self.latent_cvae_action_decoder = None
             self.hierarchical_mmdit_action_decoder = HierarchicalMMDiTActionDecoder(config)
+        elif final_decoder == "evidence_latent_mmdit_action":
+            self.residual_action_flow_denoiser = None
+            self.latent_main_action_decoder = None
+            self.latent_cvae_action_decoder = None
+            self.hierarchical_mmdit_action_decoder = None
+            self.evidence_latent_mmdit_action_decoder = EvidenceLatentMMDiTActionDecoder(config)
         else:
             self.residual_action_flow_denoiser = None
             self.latent_main_action_decoder = None
@@ -636,6 +743,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             self.latent_cvae_action_decoder is not None
             or self.latent_main_action_decoder is not None
             or self.hierarchical_mmdit_action_decoder is not None
+            or self.evidence_latent_mmdit_action_decoder is not None
         ):
             # These readers belong to the legacy action tower. Keep the modules
             # for checkpoint compatibility and the parameter-free pooled()
@@ -645,12 +753,23 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             self.rollout_residual_head.requires_grad_(False)
             self.motion_probe.requires_grad_(False)
 
-    def _mod_embed(self, canvas: Tensor, visual_memory: Tensor, time_emb: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def _mod_embed(
+        self, canvas: Tensor, visual_memory: Tensor, time_emb: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
         summary = torch.cat([canvas.mean(dim=1), visual_memory.mean(dim=1)], dim=-1)
-        content_delta = self.content_mod(summary) * self.content_mod_scale.to(device=canvas.device, dtype=canvas.dtype)
+        content_delta = self.content_mod(summary) * self.content_mod_scale.to(
+            device=canvas.device, dtype=canvas.dtype
+        )
         return time_emb + content_delta, content_delta, time_emb
 
-    def _promote_midcut(self, mid: dict[str, Tensor], *, gates: dict[str, Tensor], content_norm: Tensor, time_norm: Tensor) -> dict[str, Tensor]:
+    def _promote_midcut(
+        self,
+        mid: dict[str, Tensor],
+        *,
+        gates: dict[str, Tensor],
+        content_norm: Tensor,
+        time_norm: Tensor,
+    ) -> dict[str, Tensor]:
         pred = mid["midcut_pred_physical_velocity"]
         effect = mid["midcut_rollout_effect_pred"]
         delta = mid["midcut_rollout_delta_pred"]
@@ -707,14 +826,19 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         cvae_target_physical: Tensor | None = None,
         enable_layer_contracts: bool = True,
         enable_final_action_decoder: bool = True,
+        collect_diagnostics: bool = True,
     ) -> dict[str, Tensor]:
         cfg = self.config
         if proposal_keep is None:
-            proposal_keep = torch.ones(noisy_physical.shape[0], device=noisy_physical.device, dtype=noisy_physical.dtype)
+            proposal_keep = torch.ones(
+                noisy_physical.shape[0], device=noisy_physical.device, dtype=noisy_physical.dtype
+            )
         if consequence_physical is None:
             consequence_physical = noisy_physical
         else:
-            consequence_physical = consequence_physical.to(device=noisy_physical.device, dtype=noisy_physical.dtype)
+            consequence_physical = consequence_physical.to(
+                device=noisy_physical.device, dtype=noisy_physical.dtype
+            )
         visual_memory = self.visual_memory(visual)
         rollout_init = self.rollout_codec.rollout_init(visual)
         canvas, slices = self.seed(
@@ -757,8 +881,12 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         final_decoder = str(getattr(cfg, "final_action_decoder", "legacy"))
         force_layer_contracts = (
             final_decoder == "latent_main_action"
-            or (final_decoder in {"latent_cvae_action", "adaptive_recurrent_cvae_action"} and bool(int(getattr(cfg, "latent_cvae_layer_memory", 1))))
+            or (
+                final_decoder in {"latent_cvae_action", "adaptive_recurrent_cvae_action"}
+                and bool(int(getattr(cfg, "latent_cvae_layer_memory", 1)))
+            )
             or final_decoder == "hierarchical_mmdit_action"
+            or final_decoder == "evidence_latent_mmdit_action"
         )
         effective_layer_contracts = bool(enable_layer_contracts) or force_layer_contracts
         cut = int(cfg.midcut_layer)
@@ -790,16 +918,12 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         layer_index=index - 1,
                     )
                     causal_gain, latent_gain = self.layer_role_scheduler(
-                        index - 1, device=latent_effect.device, dtype=latent_effect.dtype,
+                        index - 1,
+                        device=latent_effect.device,
+                        dtype=latent_effect.dtype,
                     )
                     causal_effect = cons["milestone_rollout_effect_pred"]
                     causal_delta = cons["milestone_rollout_delta_pred"]
-                    if latent_effect.shape[1] != causal_effect.shape[1]:
-                        latent_effect_for_mix = latent_effect[:, : causal_effect.shape[1]]
-                        latent_delta_for_mix = latent_delta[:, : causal_delta.shape[1]]
-                    else:
-                        latent_effect_for_mix = latent_effect
-                        latent_delta_for_mix = latent_delta
                     layer_entry["latent_rollout_effect_pred"] = latent_effect
                     layer_entry["latent_rollout_delta_pred"] = latent_delta
                     layer_entry["causal_rollout_effect_pred"] = causal_effect
@@ -815,11 +939,15 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     layer_entry["policy_effect_tokens"] = cons["milestone_policy_effect_tokens"]
                     layer_entry["policy_effect_time_tokens"] = cons["milestone_policy_time_tokens"]
                     layer_entry["milestone_step_delta_pred"] = cons["milestone_step_delta_pred"]
-                    layer_entry["unified_intervention_latent_pred"] = cons["milestone_intervention_latent_pred"]
+                    layer_entry["unified_intervention_latent_pred"] = cons[
+                        "milestone_intervention_latent_pred"
+                    ]
                     layer_entry["neutral_latent_pred"] = cons["milestone_neutral_latent_pred"]
                     layer_entry["layer_causal_gain"] = causal_gain.detach().float()
                     layer_entry["layer_latent_gain"] = latent_gain.detach().float()
-                    if bool(enable_layer_contracts) and int(getattr(cfg, "layer_zero_base_diagnostic", 0)):
+                    if bool(enable_layer_contracts) and int(
+                        getattr(cfg, "layer_zero_base_diagnostic", 0)
+                    ):
                         # Loss-free shortcut probe.  If zeroing the rollout
                         # tokens barely moves the consequence output, the cell
                         # is probably relying on action features instead of the
@@ -837,35 +965,64 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                             )
                             base_eff = cons["milestone_rollout_effect_pred"].detach().float()
                             zero_eff = cons_zero["milestone_rollout_effect_pred"].float()
-                            zero_shift = (
-                                (base_eff - zero_eff).norm(dim=-1).mean()
-                                / base_eff.norm(dim=-1).mean().clamp_min(1e-6)
-                            )
+                            zero_shift = (base_eff - zero_eff).norm(dim=-1).mean() / base_eff.norm(
+                                dim=-1
+                            ).mean().clamp_min(1e-6)
                         layer_entry["consequence_zero_base_shift"] = zero_shift
-                    if bool(enable_layer_contracts) and int(getattr(cfg, "layer_state_counterfactual", 0)) and int(layer_entry["rollout_tokens"].shape[0]) > 1:
+                    if (
+                        bool(enable_layer_contracts)
+                        and int(getattr(cfg, "layer_state_counterfactual", 0))
+                        and int(layer_entry["rollout_tokens"].shape[0]) > 1
+                    ):
                         flat_state = layer_entry["rollout_tokens"].detach().float().flatten(1)
                         dist_state = torch.cdist(flat_state, flat_state, p=2)
-                        eye_state = torch.eye(dist_state.shape[0], device=dist_state.device, dtype=torch.bool)
+                        eye_state = torch.eye(
+                            dist_state.shape[0], device=dist_state.device, dtype=torch.bool
+                        )
                         dist_state = dist_state.masked_fill(eye_state, -1.0)
                         state_perm = dist_state.argmax(dim=1)
                         cons_state = self.layer_consequence_cell(
                             rollout_tokens=layer_entry["rollout_tokens"][state_perm],
                             action_physical=consequence_physical,
-                            state_tokens=None if layer_entry.get("state_tokens") is None else layer_entry["state_tokens"][state_perm],
-                            state_history_tokens=None if layer_entry.get("state_history_tokens") is None else layer_entry["state_history_tokens"][state_perm],
-                            executed_tokens=None if layer_entry.get("executed_tokens") is None else layer_entry["executed_tokens"][state_perm],
-                            trajectory_tokens=None if layer_entry.get("trajectory_tokens") is None else layer_entry["trajectory_tokens"][state_perm],
-                            proposal_tokens=None if layer_entry.get("proposal_tokens") is None else layer_entry["proposal_tokens"][state_perm],
+                            state_tokens=None
+                            if layer_entry.get("state_tokens") is None
+                            else layer_entry["state_tokens"][state_perm],
+                            state_history_tokens=None
+                            if layer_entry.get("state_history_tokens") is None
+                            else layer_entry["state_history_tokens"][state_perm],
+                            executed_tokens=None
+                            if layer_entry.get("executed_tokens") is None
+                            else layer_entry["executed_tokens"][state_perm],
+                            trajectory_tokens=None
+                            if layer_entry.get("trajectory_tokens") is None
+                            else layer_entry["trajectory_tokens"][state_perm],
+                            proposal_tokens=None
+                            if layer_entry.get("proposal_tokens") is None
+                            else layer_entry["proposal_tokens"][state_perm],
                             layer_index=index - 1,
                         )
-                        layer_entry["rollout_effect_pred_shuffle_state"] = cons_state["milestone_rollout_effect_pred"]
-                        layer_entry["rollout_delta_pred_shuffle_state"] = cons_state["milestone_rollout_delta_pred"]
-                        layer_entry["milestone_step_delta_pred_shuffle_state"] = cons_state["milestone_step_delta_pred"]
-                        layer_entry["policy_effect_tokens_shuffle_state"] = cons_state["milestone_policy_effect_tokens"]
+                        layer_entry["rollout_effect_pred_shuffle_state"] = cons_state[
+                            "milestone_rollout_effect_pred"
+                        ]
+                        layer_entry["rollout_delta_pred_shuffle_state"] = cons_state[
+                            "milestone_rollout_delta_pred"
+                        ]
+                        layer_entry["milestone_step_delta_pred_shuffle_state"] = cons_state[
+                            "milestone_step_delta_pred"
+                        ]
+                        layer_entry["policy_effect_tokens_shuffle_state"] = cons_state[
+                            "milestone_policy_effect_tokens"
+                        ]
                     if int(getattr(cfg, "layer_causal_event_from_effect", 1)):
                         event_src = cons["milestone_policy_time_tokens"]
                         layer_entry["event_logits"] = self.event_probe(event_src)
-                    for key in ("milestone_gate_mean", "milestone_step_delta_norm", "milestone_effect_norm", "milestone_effect_std", "milestone_effect_gain"):
+                    for key in (
+                        "milestone_gate_mean",
+                        "milestone_step_delta_norm",
+                        "milestone_effect_norm",
+                        "milestone_effect_std",
+                        "milestone_effect_gain",
+                    ):
                         layer_entry[key] = cons[key]
                 if self.layer_fm_probe is not None:
                     probe_velocity = self.layer_fm_probe(
@@ -887,13 +1044,23 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 mid_canvas = self.midcut_norm(canvas)
                 midcut = self.midcut_heads(mid_canvas, slices)
                 if stop_at_midcut:
-                    content_norm = torch.stack(content_norm_rows).mean() if content_norm_rows else _zeros_like_scalar(canvas)
-                    time_norm = torch.stack(time_norm_rows).mean() if time_norm_rows else _zeros_like_scalar(canvas)
+                    content_norm = (
+                        torch.stack(content_norm_rows).mean()
+                        if content_norm_rows
+                        else _zeros_like_scalar(canvas)
+                    )
+                    time_norm = (
+                        torch.stack(time_norm_rows).mean()
+                        if time_norm_rows
+                        else _zeros_like_scalar(canvas)
+                    )
                     gate_mean = {
                         key: torch.stack([row[key] for row in gate_rows]).mean()
                         for key in ("gate_self", "gate_visual", "gate_rollout", "gate_ffn")
                     }
-                    promoted = self._promote_midcut(midcut, gates=gate_mean, content_norm=content_norm, time_norm=time_norm)
+                    promoted = self._promote_midcut(
+                        midcut, gates=gate_mean, content_norm=content_norm, time_norm=time_norm
+                    )
                     if layer_contracts:
                         promoted["layer_contracts"] = layer_contracts
                     return promoted
@@ -905,12 +1072,15 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         rollout = canvas[:, slices["rollout"]]
         registers = canvas[:, slices["registers"]]
         trajectory_pooled = self.direct_physical_head.pooled(trajectory)
-        context_kv = torch.cat([
-            canvas[:, slices["state"]],
-            canvas[:, slices["state_history"]],
-            canvas[:, slices["executed"]],
-            canvas[:, slices["proposal"]],
-        ], dim=1)
+        context_kv = torch.cat(
+            [
+                canvas[:, slices["state"]],
+                canvas[:, slices["state_history"]],
+                canvas[:, slices["executed"]],
+                canvas[:, slices["proposal"]],
+            ],
+            dim=1,
+        )
         if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
             dynamics = self.controlled_dynamics(
                 rollout_init.to(device=rollout.device, dtype=rollout.dtype),
@@ -940,6 +1110,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         latent_main_action: dict[str, Tensor] | None = None
         latent_cvae_action: dict[str, Tensor] | None = None
         hierarchical_mmdit_action: dict[str, Tensor] | None = None
+        evidence_latent_mmdit_action: dict[str, Tensor] | None = None
         if not enable_final_action_decoder:
             # Counterfactual rollout branches consume only dynamics and layer
             # contracts. Running the final CVAE/MMDiT tower here duplicated a
@@ -951,6 +1122,52 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             legacy_motion_logits = event_context.new_zeros(
                 int(event_context.shape[0]), int(event_context.shape[1])
             )
+        elif self.evidence_latent_mmdit_action_decoder is not None:
+            transition_detach = bool(int(getattr(cfg, "latent_cvae_transition_detach", 0)))
+
+            def _evidence_transition_source(value: Tensor) -> Tensor:
+                return value.detach() if transition_detach else value
+
+            if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
+                transition_memory = [
+                    _evidence_transition_source(controlled_delta),
+                    _evidence_transition_source(event_context),
+                ]
+            else:
+                transition_memory = [
+                    _evidence_transition_source(controlled_delta),
+                    _evidence_transition_source(rollout_effect_pred),
+                    _evidence_transition_source(event_context),
+                ]
+            event_evidence = None
+            if layer_contracts:
+                candidate = layer_contracts[-1].get("event_logits")
+                if (
+                    isinstance(candidate, Tensor)
+                    and candidate.ndim == 3
+                    and int(candidate.shape[-1]) == 3
+                ):
+                    event_evidence = candidate
+            if event_evidence is None:
+                event_evidence = self.event_probe(event_context)
+            evidence_latent_mmdit_action = self.evidence_latent_mmdit_action_decoder(
+                noisy_physical=noisy_physical,
+                time=time,
+                trajectory_tokens=owned_trajectory_memory,
+                trajectory_workspace_tokens=owned_trajectory_memory,
+                rollout_tokens=rollout,
+                transition_memory=transition_memory,
+                event_evidence=event_evidence,
+                state_memory=owned_state_memory,
+                layer_contracts=layer_contracts,
+                intent_memory=owned_intent_memory,
+                collect_diagnostics=collect_diagnostics,
+                evidence_scale=float(getattr(cfg, "latent_cvae_mmdit_evidence_scale", 1.0)),
+                noisy_scale=float(getattr(cfg, "latent_cvae_mmdit_noisy_scale", 1.0)),
+            )
+            pred_physical_velocity = evidence_latent_mmdit_action["pred_velocity"]
+            legacy_event_logits = evidence_latent_mmdit_action["event_logits"]
+            legacy_motion_logits = evidence_latent_mmdit_action["motion_logits"]
         elif self.hierarchical_mmdit_action_decoder is not None:
             if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
                 transition_memory = [controlled_delta]
@@ -959,7 +1176,11 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             event_evidence = None
             if layer_contracts:
                 candidate = layer_contracts[-1].get("event_logits")
-                if isinstance(candidate, Tensor) and candidate.ndim == 3 and int(candidate.shape[-1]) == 3:
+                if (
+                    isinstance(candidate, Tensor)
+                    and candidate.ndim == 3
+                    and int(candidate.shape[-1]) == 3
+                ):
                     event_evidence = candidate
             if event_evidence is None:
                 event_evidence = self.event_probe(event_context)
@@ -974,17 +1195,22 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 state_memory=owned_state_memory,
                 intent_memory=owned_intent_memory,
                 layer_contracts=layer_contracts,
+                collect_diagnostics=collect_diagnostics,
             )
             pred_physical_velocity = hierarchical_mmdit_action["pred_velocity"]
             legacy_event_logits = hierarchical_mmdit_action["event_logits"]
             legacy_motion_logits = hierarchical_mmdit_action["motion_logits"]
         elif self.latent_cvae_action_decoder is not None:
-            context_memory = [
-                canvas[:, slices["state"]],
-                canvas[:, slices["state_history"]],
-                canvas[:, slices["executed"]],
-                canvas[:, slices["proposal"]],
-            ] if int(getattr(cfg, "latent_cvae_context_memory", 0)) else None
+            context_memory = (
+                [
+                    canvas[:, slices["state"]],
+                    canvas[:, slices["state_history"]],
+                    canvas[:, slices["executed"]],
+                    canvas[:, slices["proposal"]],
+                ]
+                if int(getattr(cfg, "latent_cvae_context_memory", 0))
+                else None
+            )
             # Rollout has its own full-resolution workspace source. Transition
             # memory therefore carries only explicit consequence semantics and
             # does not duplicate the same rollout grid through a pooled path.
@@ -1005,7 +1231,9 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 rollout_tokens=rollout,
                 context_memory=context_memory,
                 transition_memory=transition_memory,
-                visual_memory=visual_memory if int(getattr(cfg, "latent_cvae_visual_memory", 0)) else None,
+                visual_memory=visual_memory
+                if int(getattr(cfg, "latent_cvae_visual_memory", 0))
+                else None,
                 layer_contracts=layer_contracts,
                 target_physical=cvae_target_physical,
             )
@@ -1013,18 +1241,26 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             legacy_event_logits = latent_cvae_action["event_logits"]
             legacy_motion_logits = latent_cvae_action["motion_logits"]
         elif self.latent_main_action_decoder is not None:
-            context_memory = context_kv if int(getattr(cfg, "latent_action_context_memory", 0)) else None
+            context_memory = (
+                context_kv if int(getattr(cfg, "latent_action_context_memory", 0)) else None
+            )
             transition_parts = [rollout, controlled_delta, event_context]
             if str(getattr(cfg, "controlled_base_mode", "learned")) != "fixed_zero":
                 transition_parts.insert(2, rollout_effect_pred)
-            transition_memory = torch.cat(transition_parts, dim=1) if int(getattr(cfg, "latent_action_transition_memory", 1)) else None
+            transition_memory = (
+                torch.cat(transition_parts, dim=1)
+                if int(getattr(cfg, "latent_action_transition_memory", 1))
+                else None
+            )
             latent_main_action = self.latent_main_action_decoder(
                 noisy_physical=noisy_physical,
                 time=time,
                 trajectory_tokens=trajectory_pooled,
                 context_memory=context_memory,
                 transition_memory=transition_memory,
-                visual_memory=visual_memory if int(getattr(cfg, "latent_action_visual_memory", 0)) else None,
+                visual_memory=visual_memory
+                if int(getattr(cfg, "latent_action_visual_memory", 0))
+                else None,
                 layer_contracts=layer_contracts,
             )
             pred_physical_velocity = latent_main_action["pred_velocity"]
@@ -1036,26 +1272,44 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             # rollout-to-action tower there wastes memory and creates misleading
             # anchor diagnostics for a path that deployment never uses.
             direct_velocity = self.direct_physical_head(trajectory)
-            rollout_residual_velocity, rollout_alpha = self.rollout_residual_head(trajectory_pooled, controlled_delta)
+            rollout_residual_velocity, rollout_alpha = self.rollout_residual_head(
+                trajectory_pooled, controlled_delta
+            )
             legacy_velocity = direct_velocity + rollout_residual_velocity
             pred_physical_velocity = legacy_velocity
             legacy_event_logits = self.event_probe(event_context)
             legacy_motion_logits = self.motion_probe(trajectory_pooled.detach()).squeeze(-1)
-        if self.latent_cvae_action_decoder is None and self.latent_main_action_decoder is None and self.residual_action_flow_denoiser is not None:
+        if (
+            self.latent_cvae_action_decoder is None
+            and self.latent_main_action_decoder is None
+            and self.hierarchical_mmdit_action_decoder is None
+            and self.evidence_latent_mmdit_action_decoder is None
+            and self.residual_action_flow_denoiser is not None
+        ):
             assert legacy_velocity is not None
             if decoder_mode == "layered_residual_action_flow":
-                context_memory = torch.cat([context_kv, registers], dim=1) if int(getattr(cfg, "action_flow_residual_context_memory", 1)) else context_kv
+                context_memory = (
+                    torch.cat([context_kv, registers], dim=1)
+                    if int(getattr(cfg, "action_flow_residual_context_memory", 1))
+                    else context_kv
+                )
                 transition_parts = [rollout, controlled_delta, event_context]
                 if str(getattr(cfg, "controlled_base_mode", "learned")) != "fixed_zero":
                     transition_parts.insert(2, rollout_effect_pred)
-                transition_memory = torch.cat(transition_parts, dim=1) if int(getattr(cfg, "action_flow_residual_transition_memory", 1)) else None
+                transition_memory = (
+                    torch.cat(transition_parts, dim=1)
+                    if int(getattr(cfg, "action_flow_residual_transition_memory", 1))
+                    else None
+                )
                 residual_action_flow = self.residual_action_flow_denoiser(
                     noisy_physical=noisy_physical,
                     time=time,
                     trajectory_pooled=trajectory_pooled,
                     context_memory=context_memory,
                     transition_memory=transition_memory,
-                    visual_memory=visual_memory if int(getattr(cfg, "action_flow_residual_visual_memory", 1)) else None,
+                    visual_memory=visual_memory
+                    if int(getattr(cfg, "action_flow_residual_visual_memory", 1))
+                    else None,
                     layer_contracts=layer_contracts,
                 )
             else:
@@ -1064,14 +1318,25 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     memory_parts.append(context_kv)
                     memory_parts.append(registers)
                 if int(getattr(cfg, "action_flow_residual_transition_memory", 1)):
-                    memory_parts.extend([rollout, controlled_delta, rollout_effect_pred, event_context])
+                    memory_parts.extend(
+                        [rollout, controlled_delta, rollout_effect_pred, event_context]
+                    )
                 if int(getattr(cfg, "action_flow_residual_visual_memory", 1)):
                     memory_parts.append(visual_memory)
                 if int(getattr(cfg, "action_flow_residual_layer_memory", 1)) and layer_contracts:
                     last_layer = layer_contracts[-1]
-                    for key in ("policy_effect_time_tokens", "policy_effect_tokens", "rollout_effect_pred", "rollout_delta_pred"):
+                    for key in (
+                        "policy_effect_time_tokens",
+                        "policy_effect_tokens",
+                        "rollout_effect_pred",
+                        "rollout_delta_pred",
+                    ):
                         value = last_layer.get(key)
-                        if isinstance(value, Tensor) and value.ndim == 3 and value.shape[-1] == cfg.hidden_size:
+                        if (
+                            isinstance(value, Tensor)
+                            and value.ndim == 3
+                            and value.shape[-1] == cfg.hidden_size
+                        ):
                             memory_parts.append(value)
                 residual_memory = torch.cat(memory_parts, dim=1) if memory_parts else context_kv
                 residual_action_flow = self.residual_action_flow_denoiser(
@@ -1082,16 +1347,44 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 )
             pred_physical_velocity = legacy_velocity + residual_action_flow["residual_velocity"]
             legacy_event_logits = legacy_event_logits + residual_action_flow["event_delta_logits"]
-            legacy_motion_logits = legacy_motion_logits + residual_action_flow["motion_delta_logits"]
+            legacy_motion_logits = (
+                legacy_motion_logits + residual_action_flow["motion_delta_logits"]
+            )
+        if not collect_diagnostics:
+            minimal = {
+                "pred_physical_velocity": pred_physical_velocity,
+                "event_logits": legacy_event_logits,
+                "motion_logits": legacy_motion_logits,
+            }
+            if (
+                hierarchical_mmdit_action is not None
+                and "pred_velocity_coefficients" in hierarchical_mmdit_action
+            ):
+                minimal["pred_velocity_coefficients"] = hierarchical_mmdit_action[
+                    "pred_velocity_coefficients"
+                ]
+            return minimal
         gate_mean = {
-            key: torch.stack([row[key] for row in gate_rows]).mean() if gate_rows else _zeros_like_scalar(canvas)
+            key: torch.stack([row[key] for row in gate_rows]).mean()
+            if gate_rows
+            else _zeros_like_scalar(canvas)
             for key in ("gate_self", "gate_visual", "gate_rollout", "gate_ffn")
         }
-        content_norm = torch.stack(content_norm_rows).mean() if content_norm_rows else _zeros_like_scalar(canvas)
-        time_norm = torch.stack(time_norm_rows).mean() if time_norm_rows else _zeros_like_scalar(canvas)
+        content_norm = (
+            torch.stack(content_norm_rows).mean()
+            if content_norm_rows
+            else _zeros_like_scalar(canvas)
+        )
+        time_norm = (
+            torch.stack(time_norm_rows).mean() if time_norm_rows else _zeros_like_scalar(canvas)
+        )
         with torch.no_grad():
-            rollout_seed_final = self.final_norm(rollout_seed.to(device=rollout.device, dtype=rollout.dtype))
-            rollout_deep_update_norm = (rollout.detach() - rollout_seed_final).float().norm(dim=-1).mean()
+            rollout_seed_final = self.final_norm(
+                rollout_seed.to(device=rollout.device, dtype=rollout.dtype)
+            )
+            rollout_deep_update_norm = (
+                (rollout.detach() - rollout_seed_final).float().norm(dim=-1).mean()
+            )
         out = {
             **midcut,
             "layer_contracts": layer_contracts,
@@ -1104,375 +1397,663 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             "pred_physical_velocity": pred_physical_velocity,
             "action_flow_residual_velocity": (
                 torch.zeros_like(pred_physical_velocity)
-                if residual_action_flow is None else residual_action_flow["residual_velocity"]
+                if residual_action_flow is None
+                else residual_action_flow["residual_velocity"]
             ),
             "action_flow_residual_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if residual_action_flow is None else residual_action_flow["residual_norm"]
+                if residual_action_flow is None
+                else residual_action_flow["residual_norm"]
             ),
             "action_flow_raw_residual_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if residual_action_flow is None else residual_action_flow["raw_residual_norm"]
+                if residual_action_flow is None
+                else residual_action_flow["raw_residual_norm"]
             ),
             "action_flow_residual_alpha_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if residual_action_flow is None else residual_action_flow["alpha_mean"]
+                if residual_action_flow is None
+                else residual_action_flow["alpha_mean"]
             ),
             "action_flow_stage_router_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if residual_action_flow is None else residual_action_flow.get("stage_router_entropy", _zeros_like_scalar(pred_physical_velocity))
+                if residual_action_flow is None
+                else residual_action_flow.get(
+                    "stage_router_entropy", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "action_flow_stage_router_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if residual_action_flow is None else residual_action_flow.get("stage_router_max", _zeros_like_scalar(pred_physical_velocity))
+                if residual_action_flow is None
+                else residual_action_flow.get(
+                    "stage_router_max", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_stage_router_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("stage_router_entropy", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "stage_router_entropy", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_stage_router_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("stage_router_max", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "stage_router_max", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_gripper_gate_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("gripper_gate_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "gripper_gate_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_layer_memory_count": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("layer_memory_count", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "layer_memory_count", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_temporal_update_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("temporal_action_update_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "temporal_action_update_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_temporal_near_depth": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("temporal_near_depth", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "temporal_near_depth", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_action_temporal_mid_depth": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_main_action is None else latent_main_action.get("temporal_mid_depth", _zeros_like_scalar(pred_physical_velocity))
+                if latent_main_action is None
+                else latent_main_action.get(
+                    "temporal_mid_depth", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_kl": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_kl", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get("cvae_kl", _zeros_like_scalar(pred_physical_velocity))
             ),
             "latent_cvae_prior_std": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_prior_std", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_prior_std", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_post_std": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_post_std", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_post_std", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_z_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_z_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_z_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_condition_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_condition_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_condition_scan_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_scan_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_condition_scan_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_condition_lateral_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_condition_lateral_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_condition_lateral_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_layer_summary_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_layer_summary_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_layer_summary_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_transition_condition_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_transition_condition_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_transition_condition_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_transition_source_raw_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_transition_source_raw_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_transition_source_raw_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_rollout_token_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_rollout_token_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_rollout_token_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_rollout_token_count": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_rollout_token_count", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_rollout_token_count", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_consequence_scale_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_consequence_scale_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_consequence_scale_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_consequence_gate_preference": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_consequence_gate_preference", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_consequence_gate_preference", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_consequence_mix_ratio": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_consequence_mix_ratio", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_consequence_mix_ratio", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_posterior_used": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_posterior_used", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_posterior_used", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_gripper_gate_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("gripper_gate_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "gripper_gate_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_layer_memory_count": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("layer_memory_count", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "layer_memory_count", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_prior_z_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_prior_z_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_prior_z_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_post_z_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_post_z_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_post_z_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mu_gap": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mu_gap", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mu_gap", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_prior_pred_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_prior_pred_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_prior_pred_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_post_pred_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_post_pred_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_post_pred_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_post_gripper_gate_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_post_gripper_gate_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_post_gripper_gate_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_refine_update_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_refine_update_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_refine_update_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_noisy_gate_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_noisy_gate_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_noisy_gate_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_noisy_branch_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_noisy_branch_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_noisy_branch_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_noisy_branch_ratio": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_noisy_branch_ratio", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_noisy_branch_ratio", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_route_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_route_entropy", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_route_entropy", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_route_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_route_max", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_route_max", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_route_effective_slots": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_route_effective_slots", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_route_effective_slots",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_progress_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_entropy", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_entropy", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_progress_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_max", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_max", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_progress_effective_slots": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_effective_slots", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_effective_slots",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_progress_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_continue_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_continue_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_continue_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_prefix_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_prefix_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_prefix_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_progress_seed_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_seed_entropy", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_seed_entropy",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_progress_seed_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_seed_max", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_seed_max", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_progress_seed_effective_slots": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_seed_effective_slots", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_seed_effective_slots",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_progress_seed_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_progress_seed_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_progress_seed_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_route_temperature_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_route_temperature_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_route_temperature_mean",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_semantic_bias_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_semantic_bias_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_semantic_bias_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_output_adapter_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_output_adapter_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_output_adapter_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_function_delta_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_function_delta_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_function_delta_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_base_highfreq_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_base_highfreq_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_base_highfreq_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_refine_step_bias_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_refine_step_bias_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_refine_step_bias_norm",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_capsule_layer_entropy": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_capsule_layer_entropy", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_capsule_layer_entropy",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_capsule_layer_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_capsule_layer_max", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_capsule_layer_max", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_capsule_layer_effective_slots": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_capsule_layer_effective_slots", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_capsule_layer_effective_slots",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_condition_strength_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_condition_strength_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_condition_strength_mean",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_condition_strength_std": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_condition_strength_std", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_condition_strength_std",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_condition_strength_max": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_condition_strength_max", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_condition_strength_max",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_condition_strength_min": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_condition_strength_min", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_condition_strength_min",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_condition_residual_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_condition_residual_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_condition_residual_norm",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_context_direction_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_context_direction_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_context_direction_norm",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_micro_step_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_step_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_step_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_step_std": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_step_std", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_step_std", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_progress_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_progress_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_progress_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_kp_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_kp_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_kp_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_kd_mean": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_kd_mean", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_kd_mean", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_feedforward_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_feedforward_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_feedforward_norm",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_micro_feedback_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_feedback_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_feedback_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_damping_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_damping_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_damping_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_function_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_function_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_function_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_control_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_control_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_control_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_update_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_update_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_update_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_heun_error": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_heun_error", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_heun_error", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_micro_refine_block_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_micro_refine_block_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_micro_refine_block_norm",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_adaptive_regularizer": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_regularizer", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_regularizer", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_adaptive_route_entropy_regularizer": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_adaptive_route_entropy_regularizer", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_adaptive_route_entropy_regularizer",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_mmdit_action_update_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_update_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_action_update_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mmdit_cond_update_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_cond_update_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_cond_update_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mmdit_action_cond_attention": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_cond_attention", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_action_cond_attention", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mmdit_action_noisy_attention": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_noisy_attention", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_action_noisy_attention", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mmdit_action_rollout_attention": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_rollout_attention", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_action_rollout_attention",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_mmdit_action_rollout_enrichment": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_rollout_enrichment", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_action_rollout_enrichment",
+                    _zeros_like_scalar(pred_physical_velocity),
+                )
             ),
             "latent_cvae_mmdit_action_token_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_action_token_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_action_token_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mmdit_condition_token_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_condition_token_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_condition_token_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "latent_cvae_mmdit_noisy_token_norm": (
                 _zeros_like_scalar(pred_physical_velocity)
-                if latent_cvae_action is None else latent_cvae_action.get("cvae_mmdit_noisy_token_norm", _zeros_like_scalar(pred_physical_velocity))
+                if latent_cvae_action is None
+                else latent_cvae_action.get(
+                    "cvae_mmdit_noisy_token_norm", _zeros_like_scalar(pred_physical_velocity)
+                )
             ),
             "rollout_effect_pred": rollout_effect_pred,
             "rollout_base_effect_pred": dynamics["rollout_base_effect_pred"],
@@ -1483,7 +2064,9 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             "rollout_basis_norm": dynamics["rollout_basis_norm"],
             "rollout_delta_norm": dynamics["rollout_delta_norm"],
             "rollout_base_norm": dynamics["rollout_base_norm"],
-            "rollout_decomposition_expansion_ratio": dynamics["rollout_decomposition_expansion_ratio"],
+            "rollout_decomposition_expansion_ratio": dynamics[
+                "rollout_decomposition_expansion_ratio"
+            ],
             "rollout_base_is_fixed_zero": dynamics["rollout_base_is_fixed_zero"],
             "rollout_delta_gain": dynamics["rollout_delta_gain"],
             "future_latent_pred": rollout_effect_pred,
@@ -1508,22 +2091,30 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             assert direct_velocity is not None
             assert rollout_residual_velocity is not None
             assert rollout_alpha is not None
-            out.update({
-                "direct_physical_velocity": direct_velocity,
-                "rollout_residual_velocity": rollout_residual_velocity,
-                "legacy_physical_velocity": legacy_velocity,
-                "rollout_alpha": rollout_alpha,
-            })
+            out.update(
+                {
+                    "direct_physical_velocity": direct_velocity,
+                    "rollout_residual_velocity": rollout_residual_velocity,
+                    "legacy_physical_velocity": legacy_velocity,
+                    "rollout_alpha": rollout_alpha,
+                }
+            )
         if latent_cvae_action is not None:
             for key, value in latent_cvae_action.items():
                 if key.startswith("cvae_") and isinstance(value, Tensor):
                     out.setdefault(f"latent_{key}", value)
         if latent_cvae_action is not None and "post_pred_velocity" in latent_cvae_action:
-            out.update({
-                "post_pred_velocity": latent_cvae_action["post_pred_velocity"],
-                "post_event_logits": latent_cvae_action.get("post_event_logits", legacy_event_logits),
-                "post_motion_logits": latent_cvae_action.get("post_motion_logits", legacy_motion_logits),
-            })
+            out.update(
+                {
+                    "post_pred_velocity": latent_cvae_action["post_pred_velocity"],
+                    "post_event_logits": latent_cvae_action.get(
+                        "post_event_logits", legacy_event_logits
+                    ),
+                    "post_motion_logits": latent_cvae_action.get(
+                        "post_motion_logits", legacy_motion_logits
+                    ),
+                }
+            )
         if latent_cvae_action is not None:
             for key in (
                 "cvae_adaptive_micro_controller_norm",
@@ -1537,16 +2128,30 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             for key in tuple(out):
                 if key.startswith("latent_cvae_"):
                     out.pop(key)
+            if "pred_velocity_coefficients" in hierarchical_mmdit_action:
+                out["pred_velocity_coefficients"] = hierarchical_mmdit_action[
+                    "pred_velocity_coefficients"
+                ]
             for key, value in hierarchical_mmdit_action.items():
                 if not isinstance(value, Tensor):
                     continue
-                if key.startswith((
-                    "intent_",
-                    "owned_",
-                    "hierarchical_mmdit_",
-                    "refinement_probe_",
-                    "refinement_shadow_probe_",
-                )):
+                if key.startswith(
+                    (
+                        "intent_",
+                        "owned_",
+                        "hierarchical_mmdit_",
+                        "refinement_probe_",
+                        "refinement_shadow_probe_",
+                    )
+                ):
+                    out[key] = value
+        if evidence_latent_mmdit_action is not None:
+            for key, value in evidence_latent_mmdit_action.items():
+                if isinstance(value, Tensor) and key not in {
+                    "pred_velocity",
+                    "event_logits",
+                    "motion_logits",
+                }:
                     out[key] = value
         return out
 

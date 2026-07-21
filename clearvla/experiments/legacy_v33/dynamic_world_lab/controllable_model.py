@@ -78,7 +78,10 @@ class FullWorldAdapter(nn.Module):
         self.scene_type = nn.Parameter(torch.randn(1, 1, h) * 0.02)
         self.dynamic_type = nn.Parameter(torch.randn(1, 1, h) * 0.02)
         self.blocks = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.adapter_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.adapter_depth)
+            ]
         )
         self.norm = nn.LayerNorm(h)
         self.out = nn.Linear(h, h, bias=False)
@@ -88,9 +91,7 @@ class FullWorldAdapter(nn.Module):
         if scene.ndim != 3 or dynamic.ndim != 3 or scene.shape[0] != dynamic.shape[0]:
             raise ValueError("scene and dynamic must be [B,Q,H] with the same batch")
         base = torch.cat([scene, dynamic], dim=1)
-        typed = torch.cat(
-            [scene + self.scene_type, dynamic + self.dynamic_type], dim=1
-        )
+        typed = torch.cat([scene + self.scene_type, dynamic + self.dynamic_type], dim=1)
         x = typed
         for block in self.blocks:
             x = block(x)
@@ -160,7 +161,7 @@ class CounterfactualActionEncoder(nn.Module):
         interval_rows = []
         start = 0
         for end in cfg.future_offsets:
-            interval_rows.append(effect_steps[:, start:int(end)].mean(dim=1))
+            interval_rows.append(effect_steps[:, start : int(end)].mean(dim=1))
             start = int(end)
         return {
             "effect_steps": effect_steps,
@@ -181,15 +182,22 @@ class PriorWorldTransition(nn.Module):
         self.dynamic_type = nn.Parameter(torch.randn(1, 1, h) * 0.02)
         self.query_norm = nn.LayerNorm(h)
         self.memory_norm = nn.LayerNorm(h)
-        self.cross = nn.MultiheadAttention(h, config.num_heads, dropout=config.dropout, batch_first=True)
+        self.cross = nn.MultiheadAttention(
+            h, config.num_heads, dropout=config.dropout, batch_first=True
+        )
         self.blocks = nn.ModuleList(
-            [_SelfAttentionBlock(h, config.num_heads, config.dropout) for _ in range(config.prior_depth)]
+            [
+                _SelfAttentionBlock(h, config.num_heads, config.dropout)
+                for _ in range(config.prior_depth)
+            ]
         )
         self.out_norm = nn.LayerNorm(h)
         self.out = nn.Linear(h, h, bias=False)
         self.layer_scale = nn.Parameter(torch.full((h,), float(config.prior_layer_scale)))
 
-    def forward(self, scene: Tensor, dynamic: Tensor, root_context: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def forward(
+        self, scene: Tensor, dynamic: Tensor, root_context: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
         base = torch.cat([scene, dynamic], dim=1)
         typed = torch.cat([scene + self.scene_type, dynamic + self.dynamic_type], dim=1)
         memory = torch.cat([root_context, typed], dim=1)
@@ -365,9 +373,7 @@ class ActionWorldEffect(nn.Module):
         if action_prefix.ndim != 3 or action_prefix.shape[1] == 0:
             raise ValueError("action_prefix must be non-empty [B,T,H]")
         world_content = torch.cat([scene, dynamic], dim=1)
-        typed_world = torch.cat(
-            [scene + self.scene_type, dynamic + self.dynamic_type], dim=1
-        )
+        typed_world = torch.cat([scene + self.scene_type, dynamic + self.dynamic_type], dim=1)
         root_bias = self.root_proj(root_context.mean(dim=1, keepdim=True))
         effect = torch.zeros_like(world_content)
         action_tokens = action_prefix
@@ -386,9 +392,7 @@ class ActionWorldEffect(nn.Module):
         effect = self.effect_out(effect)
         scene_effect = effect[:, : self.context_tokens] * self.scene_scale
         dynamic_effect = effect[:, self.context_tokens :] * self.dynamic_scale
-        diagnostics = {
-            key: torch.stack(values).mean() for key, values in diagnostic_rows.items()
-        }
+        diagnostics = {key: torch.stack(values).mean() for key, values in diagnostic_rows.items()}
         diagnostics["effect_rms"] = effect.float().square().mean().sqrt()
         return scene_effect, dynamic_effect, effect, diagnostics
 
@@ -420,8 +424,12 @@ class WorldActionInverseDecoder(nn.Module):
         self.blocks = nn.ModuleList(
             [_SelfAttentionBlock(h, config.num_heads, 0.0) for _ in range(config.inverse_depth)]
         )
-        self.action_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, config.action_dim, bias=False))
-        self.delta_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, config.action_dim, bias=False))
+        self.action_head = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, config.action_dim, bias=False)
+        )
+        self.delta_head = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, config.action_dim, bias=False)
+        )
         self.gripper_head = nn.Sequential(
             nn.LayerNorm(h), nn.Linear(h, config.inverse_gripper_classes)
         )
@@ -458,9 +466,7 @@ class WorldActionInverseDecoder(nn.Module):
         attention = torch.softmax(torch.matmul(query, key.transpose(-1, -2)) * scale, dim=-1)
         change = torch.matmul(attention, value)
         current_summary = current_world.mean(dim=1, keepdim=True).expand_as(change)
-        x = self.fuse_out(
-            F.gelu(self.change_proj(change) * self.current_proj(current_summary))
-        )
+        x = self.fuse_out(F.gelu(self.change_proj(change) * self.current_proj(current_summary)))
         for block in self.blocks:
             x = block(x) - block(torch.zeros_like(x))
         return {
@@ -531,7 +537,9 @@ class ControllableDynamicWorld(DynamicPredictiveWorld):
         }
 
     @torch.no_grad()
-    def encode_target_world(self, current_tokens: Tensor, target_tokens: Tensor) -> dict[str, Tensor]:
+    def encode_target_world(
+        self, current_tokens: Tensor, target_tokens: Tensor
+    ) -> dict[str, Tensor]:
         cfg = self.config
         initial_base_scene, initial_base_dynamic = self.target_encoder(current_tokens)
         initial_scene, initial_dynamic, initial_delta = self._adapt(
@@ -796,7 +804,10 @@ class ControllableDynamicWorld(DynamicPredictiveWorld):
             "prior_descriptor": self.descriptor_prediction(rollout["prior_pred_dynamic"]),
             "initial_descriptor": self.descriptor_prediction(current["dynamic"]),
             "target_descriptor": torch.stack(
-                [self.fixed_dynamic_descriptor(target_tokens[:, k]) for k in range(self.config.num_future)],
+                [
+                    self.fixed_dynamic_descriptor(target_tokens[:, k])
+                    for k in range(self.config.num_future)
+                ],
                 dim=1,
             ).to(dtype=rollout["pred_dynamic"].dtype),
             "current_descriptor": self.fixed_dynamic_descriptor(current_tokens).to(
@@ -892,7 +903,9 @@ class ControllableDynamicWorld(DynamicPredictiveWorld):
                 self.null_dynamic.requires_grad_(True)
             if phase == "align" and self.config.input_mode == "full":
                 enable(self.online_adapter)
-                count = max(0, min(int(unfreeze_dynamic_blocks), len(self.online_encoder.dynamic_blocks)))
+                count = max(
+                    0, min(int(unfreeze_dynamic_blocks), len(self.online_encoder.dynamic_blocks))
+                )
                 if count:
                     enable(self.online_encoder.dynamic_pool)
                     for block in self.online_encoder.dynamic_blocks[-count:]:
@@ -905,7 +918,11 @@ class ControllableDynamicWorld(DynamicPredictiveWorld):
             self.eval()
 
     def trainable_named_parameters(self):
-        return [(name, parameter) for name, parameter in self.named_parameters() if parameter.requires_grad]
+        return [
+            (name, parameter)
+            for name, parameter in self.named_parameters()
+            if parameter.requires_grad
+        ]
 
 
 __all__ = ["ControllableWorldConfig", "ControllableDynamicWorld"]

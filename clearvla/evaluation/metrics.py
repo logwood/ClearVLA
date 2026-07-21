@@ -58,21 +58,27 @@ def compute_metrics(
     target_jump = target[:, 0] - past[:, -1]
     pred_velocity = pred[:, 1:] - pred[:, :-1]
     target_velocity = target[:, 1:] - target[:, :-1]
-    pred_velocity_with_boundary = np.concatenate([pred[:, :1] - past[:, -1:], pred_velocity], axis=1)
-    target_velocity_with_boundary = np.concatenate([target[:, :1] - past[:, -1:], target_velocity], axis=1)
+    pred_velocity_with_boundary = np.concatenate(
+        [pred[:, :1] - past[:, -1:], pred_velocity], axis=1
+    )
+    target_velocity_with_boundary = np.concatenate(
+        [target[:, :1] - past[:, -1:], target_velocity], axis=1
+    )
     error = pred - target
     prior_error = prior - target
     replay_error = replay - target
-    horizon_mse = np.mean(error ** 2, axis=(0, 2))
+    horizon_mse = np.mean(error**2, axis=(0, 2))
     horizon_rmse = np.sqrt(horizon_mse)
     horizon_mae = np.mean(np.abs(error), axis=(0, 2))
     first4 = min(4, pred.shape[1])
     first8 = min(8, pred.shape[1])
-    per_dim_rmse = np.sqrt(np.mean(error ** 2, axis=(0, 1)))
+    per_dim_rmse = np.sqrt(np.mean(error**2, axis=(0, 1)))
     per_dim_mae = np.mean(np.abs(error), axis=(0, 1))
     action_std = np.asarray(normalizer.std, dtype=np.float32).reshape(-1)
     if action_std.shape != per_dim_rmse.shape:
-        raise ValueError(f"normalizer std shape={action_std.shape} is incompatible with action error shape={per_dim_rmse.shape}")
+        raise ValueError(
+            f"normalizer std shape={action_std.shape} is incompatible with action error shape={per_dim_rmse.shape}"
+        )
     per_dim_nrmse = per_dim_rmse / np.maximum(action_std, 1e-8)
 
     # This project conventionally stores the gripper in the last action
@@ -150,24 +156,30 @@ def compute_metrics(
         arm_first4_rmse = rmse_np(arm[:, :first4], np.zeros_like(arm[:, :first4]))
         arm_first8_rmse = rmse_np(arm[:, :first8], np.zeros_like(arm[:, :first8]))
         arm_delta = pred_velocity_with_boundary[..., :-1] - target_velocity_with_boundary[..., :-1]
-        out.update({
-            "arm_full_rmse": arm_full_rmse,
-            "arm_first_rmse": arm_first_rmse,
-            "arm_first4_rmse": arm_first4_rmse,
-            "arm_first8_rmse": arm_first8_rmse,
-            "arm_endpoint_rmse": rmse_np(arm[:, -1], np.zeros_like(arm[:, -1])),
-            "arm_delta_rmse": rmse_np(arm_delta, np.zeros_like(arm_delta)),
-            "arm_full_mae": mae_np(arm, np.zeros_like(arm)),
-            "arm_full_rmse_deg_if_rad": float(np.degrees(arm_full_rmse)),
-            "arm_first_rmse_deg_if_rad": float(np.degrees(arm_first_rmse)),
-            "arm_first4_rmse_deg_if_rad": float(np.degrees(arm_first4_rmse)),
-            "arm_first8_rmse_deg_if_rad": float(np.degrees(arm_first8_rmse)),
-        })
+        out.update(
+            {
+                "arm_full_rmse": arm_full_rmse,
+                "arm_first_rmse": arm_first_rmse,
+                "arm_first4_rmse": arm_first4_rmse,
+                "arm_first8_rmse": arm_first8_rmse,
+                "arm_endpoint_rmse": rmse_np(arm[:, -1], np.zeros_like(arm[:, -1])),
+                "arm_delta_rmse": rmse_np(arm_delta, np.zeros_like(arm_delta)),
+                "arm_full_mae": mae_np(arm, np.zeros_like(arm)),
+                "arm_full_rmse_deg_if_rad": float(np.degrees(arm_full_rmse)),
+                "arm_first_rmse_deg_if_rad": float(np.degrees(arm_first_rmse)),
+                "arm_first4_rmse_deg_if_rad": float(np.degrees(arm_first4_rmse)),
+                "arm_first8_rmse_deg_if_rad": float(np.degrees(arm_first8_rmse)),
+            }
+        )
     if out["prior_full_mse"] > 0:
-        out["relative_mse_improvement_vs_prior"] = float(1.0 - out["full_mse"] / out["prior_full_mse"])
+        out["relative_mse_improvement_vs_prior"] = float(
+            1.0 - out["full_mse"] / out["prior_full_mse"]
+        )
         out["relative_mse_improvement_vs_hold_last"] = out["relative_mse_improvement_vs_prior"]
     if out["history_replay_full_mse"] > 0:
-        out["relative_mse_improvement_vs_history_replay"] = float(1.0 - out["full_mse"] / out["history_replay_full_mse"])
+        out["relative_mse_improvement_vs_history_replay"] = float(
+            1.0 - out["full_mse"] / out["history_replay_full_mse"]
+        )
     for step in (1, 2, 4, 8, 12, 16, 20, 24, 25):
         if step <= len(horizon_mse):
             out[f"step_{step}_mse"] = float(horizon_mse[step - 1])

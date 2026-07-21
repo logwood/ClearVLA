@@ -17,13 +17,18 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     serializable,
 )
 from clearvla.experiments.classic_policy_lab.dataset import RDT2FMDatasetConfig, RDT2FMWindowDataset
-from clearvla.experiments.classic_policy_lab.rdt2_mainline import MainlineRDT2FM, MainlineRDT2FMConfig
+from clearvla.experiments.classic_policy_lab.rdt2_mainline import (
+    MainlineRDT2FM,
+    MainlineRDT2FMConfig,
+)
 from clearvla.experiments.classic_policy_lab.rdt2_mainline_runtime import train_mainline_rdt2_fm
 from clearvla.experiments.classic_policy_lab.trainer import RDTTrainerConfig
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train the v29 ClearVLA RDT2 chunk policy with an isolated action-conditioned future-DINO residual world model")
+    p = argparse.ArgumentParser(
+        description="Train the v29 ClearVLA RDT2 chunk policy with an isolated action-conditioned future-DINO residual world model"
+    )
     add_data_args(p, default_resize=(224, 224))
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--prediction-horizon", type=int, default=24)
@@ -34,7 +39,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--zero-state", action="store_true")
     p.add_argument("--normalizer", choices=["identity", "limits", "zscore"], default="zscore")
 
-    p.add_argument("--model-size", choices=["small", "medium", "official", "custom"], default="medium")
+    p.add_argument(
+        "--model-size", choices=["small", "medium", "official", "custom"], default="medium"
+    )
     p.add_argument("--hidden-size", type=int, default=None)
     p.add_argument("--depth", type=int, default=None)
     p.add_argument("--heads", type=int, default=None)
@@ -44,13 +51,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--norm-eps", type=float, default=1e-5)
     p.add_argument("--inference-steps", type=int, default=5)
     p.add_argument("--no-flash-attn", action="store_true")
-    p.add_argument("--base-checkpoint", type=Path, default=None, help="Optional v18 ClearVLA checkpoint or released RDT2-FM state dict; only shape-compatible tensors transfer")
+    p.add_argument(
+        "--base-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional v18 ClearVLA checkpoint or released RDT2-FM state dict; only shape-compatible tensors transfer",
+    )
 
-    p.add_argument("--condition-mode", choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"], default="dinov2-cache")
+    p.add_argument(
+        "--condition-mode",
+        choices=["none", "debug-kv", "debug-dense", "dinov2", "dinov2-cache", "rdt2-vq"],
+        default="dinov2-cache",
+    )
     p.add_argument("--instruction", default="")
     p.add_argument("--debug-cond-tokens", type=int, default=8)
     p.add_argument("--debug-dense-token-dim", type=int, default=32)
-    p.add_argument("--dense-condition-adaptor", choices=["none", "linear", "mlp2x_silu"], default="mlp2x_silu")
+    p.add_argument(
+        "--dense-condition-adaptor", choices=["none", "linear", "mlp2x_silu"], default="mlp2x_silu"
+    )
     p.add_argument("--dinov2-model", default="facebook/dinov2-base")
     p.add_argument("--dinov2-local-files-only", action="store_true")
     p.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
@@ -69,14 +87,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--visual-start-layer", type=int, default=None)
     p.add_argument("--modulation-rank", type=int, default=None)
 
-    p.add_argument("--visual-corrector", choices=["none", "query-latent"], default="none", help="Optional structured fast visual readout; stable baseline is none")
+    p.add_argument(
+        "--visual-corrector",
+        choices=["none", "query-latent"],
+        default="none",
+        help="Optional structured fast visual readout; stable baseline is none",
+    )
     p.add_argument("--visual-top-query-tokens", type=int, default=2)
     p.add_argument("--visual-wrist-query-tokens", type=int, default=4)
     p.add_argument("--visual-query-hidden-size", type=int, default=None)
     p.add_argument("--visual-query-heads", type=int, default=4)
     p.add_argument("--visual-latent-max-scale", type=float, default=0.10)
     p.add_argument("--visual-latent-init-logit", type=float, default=-3.0)
-    p.add_argument("--visual-top-gate-floor", type=float, default=0.0, help="Minimum retained top-camera query-latent gate; 0 keeps v28.2 behavior")
+    p.add_argument(
+        "--visual-top-gate-floor",
+        type=float,
+        default=0.0,
+        help="Minimum retained top-camera query-latent gate; 0 keeps v28.2 behavior",
+    )
 
     p.add_argument(
         "--future-latent-variant",
@@ -89,15 +117,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--future-latent-offsets", nargs="+", type=int, default=[8, 16, 24],
+        "--future-latent-offsets",
+        nargs="+",
+        type=int,
+        default=[8, 16, 24],
         help="Future frame offsets relative to the current observation",
     )
     p.add_argument(
-        "--match-future-window-support", action="store_true",
+        "--match-future-window-support",
+        action="store_true",
         help="With variant=none, crop windows to the same future-frame support as world-model runs for a fair policy baseline",
     )
     p.add_argument(
-        "--future-latent-grid-size", type=int, default=8,
+        "--future-latent-grid-size",
+        type=int,
+        default=8,
         help="Spatial DINO residual grid per camera/time; 8 gives 384 tokens for 3 times x 2 cameras",
     )
     p.add_argument("--future-latent-hidden-size", type=int, default=768)
@@ -133,7 +167,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--future-inverse-transition-threshold", type=float, default=0.10)
     p.add_argument("--future-semantic-warmup-steps", type=int, default=3217)
     p.add_argument("--future-semantic-ramp-steps", type=int, default=3217)
-    p.add_argument("--future-action-cross-scale", type=float, default=0.0, help="Fixed ungated action cross-attention residual scale; <=0 selects 1/sqrt(depth)")
+    p.add_argument(
+        "--future-action-cross-scale",
+        type=float,
+        default=0.0,
+        help="Fixed ungated action cross-attention residual scale; <=0 selects 1/sqrt(depth)",
+    )
     p.add_argument("--future-semantic-negative-delay", type=int, default=3)
     p.add_argument(
         "--future-dependency-relative-margin",
@@ -141,9 +180,19 @@ def parse_args() -> argparse.Namespace:
         default=0.03,
         help="Required relative increase in world-model error for a corrupted action",
     )
-    p.add_argument("--future-action-time-power", type=float, default=1.0, help="Emphasize low future-flow times where the noisy future reveals less target information")
+    p.add_argument(
+        "--future-action-time-power",
+        type=float,
+        default=1.0,
+        help="Emphasize low future-flow times where the noisy future reveals less target information",
+    )
     p.add_argument("--future-action-time-floor", type=float, default=0.10)
-    p.add_argument("--future-policy-bridge-time-power", type=float, default=1.0, help="Emphasize low policy action-flow bridge times for consequence supervision")
+    p.add_argument(
+        "--future-policy-bridge-time-power",
+        type=float,
+        default=1.0,
+        help="Emphasize low policy action-flow bridge times for consequence supervision",
+    )
     p.add_argument("--future-policy-bridge-time-floor", type=float, default=0.10)
     p.add_argument(
         "--future-consistency-relative-margin",
@@ -175,46 +224,119 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--future-consistency-loss-weight", type=float, default=0.02)
     p.add_argument("--future-consistency-warmup-steps", type=int, default=3217)
     p.add_argument("--future-consistency-ramp-steps", type=int, default=3217)
-    p.add_argument("--future-world-lr", type=float, default=None, help="World-model optimizer LR; defaults to --lr")
-    p.add_argument("--future-world-weight-decay", type=float, default=None, help="World-model weight decay; defaults to --weight-decay")
-    p.add_argument("--future-world-grad-clip", type=float, default=1.0, help="Independent world-model gradient clipping threshold")
+    p.add_argument(
+        "--future-world-lr",
+        type=float,
+        default=None,
+        help="World-model optimizer LR; defaults to --lr",
+    )
+    p.add_argument(
+        "--future-world-weight-decay",
+        type=float,
+        default=None,
+        help="World-model weight decay; defaults to --weight-decay",
+    )
+    p.add_argument(
+        "--future-world-grad-clip",
+        type=float,
+        default=1.0,
+        help="Independent world-model gradient clipping threshold",
+    )
     p.add_argument("--future-latent-stat-eps", type=float, default=1e-5)
     p.add_argument(
-        "--future-latent-stat-batches", type=int, default=128,
+        "--future-latent-stat-batches",
+        type=int,
+        default=128,
         help="Batches used once to estimate fixed per-time/per-camera/per-channel DINO-residual statistics; 0 uses the full train loader",
     )
     p.add_argument(
-        "--no-component-grad-log", action="store_true",
+        "--no-component-grad-log",
+        action="store_true",
         help="Disable policy-vs-latent shared-gradient norms at log intervals",
     )
 
-    p.add_argument("--horizon-weight-mode", choices=["prefix", "uniform", "chunk-balanced"], default="chunk-balanced", help="v29 default trains the whole 24-step chunk for chunk execution")
+    p.add_argument(
+        "--horizon-weight-mode",
+        choices=["prefix", "uniform", "chunk-balanced"],
+        default="chunk-balanced",
+        help="v29 default trains the whole 24-step chunk for chunk execution",
+    )
     p.add_argument("--first-position-weight", type=float, default=8.0)
     p.add_argument("--first4-position-weight", type=float, default=4.0)
     p.add_argument("--first8-position-weight", type=float, default=2.0)
     p.add_argument("--tail-position-weight", type=float, default=1.0)
     p.add_argument("--chunk-first4-position-weight", type=float, default=1.5)
-    p.add_argument("--chunk-middle-position-weight", type=float, default=1.5, help="Weight for steps 5-12 in chunk-balanced mode")
-    p.add_argument("--chunk-late-position-weight", type=float, default=1.5, help="Weight for steps 13-20 in chunk-balanced mode")
-    p.add_argument("--chunk-tail-position-weight", type=float, default=1.2, help="Weight for steps 21+ in chunk-balanced mode")
+    p.add_argument(
+        "--chunk-middle-position-weight",
+        type=float,
+        default=1.5,
+        help="Weight for steps 5-12 in chunk-balanced mode",
+    )
+    p.add_argument(
+        "--chunk-late-position-weight",
+        type=float,
+        default=1.5,
+        help="Weight for steps 13-20 in chunk-balanced mode",
+    )
+    p.add_argument(
+        "--chunk-tail-position-weight",
+        type=float,
+        default=1.2,
+        help="Weight for steps 21+ in chunk-balanced mode",
+    )
     p.add_argument("--prior-loss-weight", type=float, default=0.50)
     p.add_argument("--fast-exit-loss-weight", type=float, default=1.00)
     p.add_argument("--prefix-exit-loss-weight", type=float, default=0.50)
     p.add_argument("--full-flow-loss-weight", type=float, default=1.00)
-    p.add_argument("--arm-delta-loss-weight", type=float, default=0.10, help="Endpoint arm delta-matching weight for executable chunks")
-    p.add_argument("--align-phase-loss-weight", type=float, default=0.0, help="Extra arm endpoint loss on steps before true close transitions")
+    p.add_argument(
+        "--arm-delta-loss-weight",
+        type=float,
+        default=0.10,
+        help="Endpoint arm delta-matching weight for executable chunks",
+    )
+    p.add_argument(
+        "--align-phase-loss-weight",
+        type=float,
+        default=0.0,
+        help="Extra arm endpoint loss on steps before true close transitions",
+    )
     p.add_argument("--align-phase-pre-steps", type=int, default=8)
     p.add_argument("--gripper-dim-index", type=int, default=-1)
-    p.add_argument("--gripper-open-value", type=float, default=None, help="Raw physical gripper value for fully open; defaults to the train split minimum")
-    p.add_argument("--gripper-close-value", type=float, default=None, help="Raw physical gripper value for fully closed; defaults to the train split maximum")
-    p.add_argument("--gripper-openness-residual-scale", type=float, default=1.0, help="Maximum normalized continuous openness correction around the held physical prior")
+    p.add_argument(
+        "--gripper-open-value",
+        type=float,
+        default=None,
+        help="Raw physical gripper value for fully open; defaults to the train split minimum",
+    )
+    p.add_argument(
+        "--gripper-close-value",
+        type=float,
+        default=None,
+        help="Raw physical gripper value for fully closed; defaults to the train split maximum",
+    )
+    p.add_argument(
+        "--gripper-openness-residual-scale",
+        type=float,
+        default=1.0,
+        help="Maximum normalized continuous openness correction around the held physical prior",
+    )
     p.add_argument("--arm-flow-loss-weight", type=float, default=1.0)
     p.add_argument("--gripper-state-loss-weight", type=float, default=2.0)
     p.add_argument("--gripper-transition-boost", type=float, default=3.0)
     p.add_argument("--gripper-transition-aux-weight", type=float, default=0.50)
-    p.add_argument("--gripper-transition-threshold", type=float, default=0.10, help="Transition threshold in continuous openness units [0,1]")
+    p.add_argument(
+        "--gripper-transition-threshold",
+        type=float,
+        default=0.10,
+        help="Transition threshold in continuous openness units [0,1]",
+    )
     p.add_argument("--gripper-transition-radius", type=int, default=1)
-    p.add_argument("--gripper-smooth-weight", type=float, default=0.02, help="Weight for continuous openness delta-matching loss")
+    p.add_argument(
+        "--gripper-smooth-weight",
+        type=float,
+        default=0.02,
+        help="Weight for continuous openness delta-matching loss",
+    )
 
     p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
     p.add_argument("--epochs", type=int, default=16)
@@ -224,7 +346,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta2", type=float, default=0.999)
     p.add_argument("--adam-eps", type=float, default=1e-8)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant")
+    p.add_argument(
+        "--scheduler", choices=["constant", "constant_with_warmup", "cosine"], default="constant"
+    )
     p.add_argument("--warmup-steps", type=int, default=0)
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=10)
@@ -238,10 +362,34 @@ def parse_args() -> argparse.Namespace:
 def _resolve_mainline_shape(args: argparse.Namespace) -> None:
     _resolve_model_shape(args)
     defaults = {
-        "small": {"history_hidden_size": 64, "fast_exit_layer": 2, "prefix_exit_layer": 4, "visual_start_layer": 2, "modulation_rank": 64},
-        "medium": {"history_hidden_size": 128, "fast_exit_layer": 2, "prefix_exit_layer": 4, "visual_start_layer": 2, "modulation_rank": 128},
-        "official": {"history_hidden_size": 256, "fast_exit_layer": 4, "prefix_exit_layer": 8, "visual_start_layer": 4, "modulation_rank": 256},
-        "custom": {"history_hidden_size": 64, "fast_exit_layer": max(1, args.depth // 3), "prefix_exit_layer": max(1, 2 * args.depth // 3), "visual_start_layer": max(1, args.depth // 3), "modulation_rank": max(16, args.hidden_size // 4)},
+        "small": {
+            "history_hidden_size": 64,
+            "fast_exit_layer": 2,
+            "prefix_exit_layer": 4,
+            "visual_start_layer": 2,
+            "modulation_rank": 64,
+        },
+        "medium": {
+            "history_hidden_size": 128,
+            "fast_exit_layer": 2,
+            "prefix_exit_layer": 4,
+            "visual_start_layer": 2,
+            "modulation_rank": 128,
+        },
+        "official": {
+            "history_hidden_size": 256,
+            "fast_exit_layer": 4,
+            "prefix_exit_layer": 8,
+            "visual_start_layer": 4,
+            "modulation_rank": 256,
+        },
+        "custom": {
+            "history_hidden_size": 64,
+            "fast_exit_layer": max(1, args.depth // 3),
+            "prefix_exit_layer": max(1, 2 * args.depth // 3),
+            "visual_start_layer": max(1, args.depth // 3),
+            "modulation_rank": max(16, args.hidden_size // 4),
+        },
     }[args.model_size]
     for name, value in defaults.items():
         if getattr(args, name) is None:
@@ -250,12 +398,16 @@ def _resolve_mainline_shape(args: argparse.Namespace) -> None:
         args.visual_query_hidden_size = min(256, args.hidden_size)
 
 
-def _resolve_gripper_calibration(args: argparse.Namespace, action_norm, action_dim: int) -> dict[str, float | str]:
+def _resolve_gripper_calibration(
+    args: argparse.Namespace, action_norm, action_dim: int
+) -> dict[str, float | str]:
     index = int(args.gripper_dim_index)
     if index < 0:
         index += int(action_dim)
     if not (0 <= index < int(action_dim)):
-        raise ValueError(f"gripper_dim_index={args.gripper_dim_index} invalid for action_dim={action_dim}")
+        raise ValueError(
+            f"gripper_dim_index={args.gripper_dim_index} invalid for action_dim={action_dim}"
+        )
     minimum = float(action_norm.minimum.reshape(-1)[index])
     maximum = float(action_norm.maximum.reshape(-1)[index])
     explicit = args.gripper_open_value is not None or args.gripper_close_value is not None
@@ -281,8 +433,11 @@ def main() -> None:
     _resolve_mainline_shape(args)
     if args.torch_num_threads > 0:
         torch.set_num_threads(args.torch_num_threads)
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     from clearvla.experiments.classic_policy_lab.cli_common import resolve_device
+
     device = resolve_device(args.device)
     dtype = _dtype(args.dtype, device)
     future_offsets = (
@@ -291,9 +446,16 @@ def main() -> None:
         else ()
     )
     future_span = max(future_offsets, default=0) + 1
-    min_length = max(args.prediction_horizon, future_span) + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset)) + 1
-    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
-    action_dim = int(episodes[0].actions_raw.shape[1]); state_dim = int(episodes[0].states_raw.shape[1])
+    min_length = (
+        max(args.prediction_horizon, future_span)
+        + max(abs(args.state_offset), abs(args.image_offset), abs(args.action_offset))
+        + 1
+    )
+    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = (
+        load_data(args, min_length=min_length, normalizer_mode=args.normalizer)
+    )
+    action_dim = int(episodes[0].actions_raw.shape[1])
+    state_dim = int(episodes[0].states_raw.shape[1])
     gripper_calibration = _resolve_gripper_calibration(args, action_norm, action_dim)
     cameras = tuple(str(value) for value in args.cameras)
     data_config = RDT2FMDatasetConfig(
@@ -304,44 +466,109 @@ def main() -> None:
         stride=args.stride,
         zero_state=args.zero_state,
         future_latent_offsets=future_offsets,
-        return_future_images=(args.future_latent_variant != "none" and args.condition_mode != "dinov2-cache"),
+        return_future_images=(
+            args.future_latent_variant != "none" and args.condition_mode != "dinov2-cache"
+        ),
     )
-    train_ds = RDT2FMWindowDataset(episodes, train_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    val_ds = RDT2FMWindowDataset(episodes, val_ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    train_loader = make_loader(train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device)
-    val_loader = make_loader(val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
-    conditioner = _build_conditioner(args, episodes=episodes, cameras=cameras, device=device, dtype=dtype, depth=args.depth, kv_heads=args.kv_heads, head_dim=args.hidden_size // args.heads)
-    dense_dim = int(getattr(conditioner, "token_dim")) if hasattr(conditioner, "token_dim") else None
+    train_ds = RDT2FMWindowDataset(
+        episodes,
+        train_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    val_ds = RDT2FMWindowDataset(
+        episodes,
+        val_ids,
+        image_store=image_store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    train_loader = make_loader(
+        train_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device
+    )
+    val_loader = make_loader(
+        val_ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
+    conditioner = _build_conditioner(
+        args,
+        episodes=episodes,
+        cameras=cameras,
+        device=device,
+        dtype=dtype,
+        depth=args.depth,
+        kv_heads=args.kv_heads,
+        head_dim=args.hidden_size // args.heads,
+    )
+    dense_dim = (
+        int(getattr(conditioner, "token_dim")) if hasattr(conditioner, "token_dim") else None
+    )
     if args.visual_corrector == "query-latent" and dense_dim is None:
-        raise ValueError("--visual-corrector query-latent requires a dense-token conditioner such as dinov2, dinov2-cache, or debug-dense")
+        raise ValueError(
+            "--visual-corrector query-latent requires a dense-token conditioner such as dinov2, dinov2-cache, or debug-dense"
+        )
     if args.future_latent_variant != "none":
         if dense_dim is None or args.condition_mode in {"none", "debug-kv", "rdt2-vq"}:
-            raise ValueError("future latent dynamics requires dense DINO-style tokens; use dinov2, dinov2-cache, or debug-dense")
+            raise ValueError(
+                "future latent dynamics requires dense DINO-style tokens; use dinov2, dinov2-cache, or debug-dense"
+            )
         if args.condition_mode == "debug-dense":
-            raise ValueError("formal future latent experiments require DINO tokens; debug-dense is only suitable for unit tests")
+            raise ValueError(
+                "formal future latent experiments require DINO tokens; debug-dense is only suitable for unit tests"
+            )
         if len(cameras) < 1:
             raise ValueError("future latent dynamics requires at least one camera")
-    adaptor = None if dense_dim is None or args.dense_condition_adaptor == "none" else args.dense_condition_adaptor
+    adaptor = (
+        None
+        if dense_dim is None or args.dense_condition_adaptor == "none"
+        else args.dense_condition_adaptor
+    )
     if dense_dim is not None and adaptor is None and dense_dim != args.hidden_size:
-        raise ValueError("dense condition tokens require an adaptor when token width differs from hidden size")
+        raise ValueError(
+            "dense condition tokens require an adaptor when token width differs from hidden size"
+        )
     config = MainlineRDT2FMConfig(
-        action_dim=action_dim, state_dim=state_dim, prediction_horizon=args.prediction_horizon,
-        hidden_size=args.hidden_size, depth=args.depth, num_heads=args.heads, num_kv_heads=args.kv_heads,
-        num_register_tokens=args.register_tokens, norm_eps=args.norm_eps, multiple_of=args.multiple_of,
-        use_flash_attn=not args.no_flash_attn, num_inference_timesteps=args.inference_steps,
-        lang_adaptor=adaptor, lang_token_dim=dense_dim,
-        history_hidden_size=args.history_hidden_size, history_layers=args.history_layers,
-        prior_residual_scale=args.prior_residual_scale, history_noise_std=args.history_noise_std,
-        fast_exit_layer=args.fast_exit_layer, prefix_exit_layer=args.prefix_exit_layer,
-        prefix_length=args.prefix_length, visual_start_layer=args.visual_start_layer,
+        action_dim=action_dim,
+        state_dim=state_dim,
+        prediction_horizon=args.prediction_horizon,
+        hidden_size=args.hidden_size,
+        depth=args.depth,
+        num_heads=args.heads,
+        num_kv_heads=args.kv_heads,
+        num_register_tokens=args.register_tokens,
+        norm_eps=args.norm_eps,
+        multiple_of=args.multiple_of,
+        use_flash_attn=not args.no_flash_attn,
+        num_inference_timesteps=args.inference_steps,
+        lang_adaptor=adaptor,
+        lang_token_dim=dense_dim,
+        history_hidden_size=args.history_hidden_size,
+        history_layers=args.history_layers,
+        prior_residual_scale=args.prior_residual_scale,
+        history_noise_std=args.history_noise_std,
+        fast_exit_layer=args.fast_exit_layer,
+        prefix_exit_layer=args.prefix_exit_layer,
+        prefix_length=args.prefix_length,
+        visual_start_layer=args.visual_start_layer,
         modulation_rank=args.modulation_rank,
-        visual_corrector=args.visual_corrector, visual_top_query_tokens=args.visual_top_query_tokens,
-        visual_wrist_query_tokens=args.visual_wrist_query_tokens, visual_query_hidden_size=args.visual_query_hidden_size,
-        visual_query_heads=args.visual_query_heads, visual_latent_max_scale=args.visual_latent_max_scale,
-        visual_latent_init_logit=args.visual_latent_init_logit, visual_top_gate_floor=args.visual_top_gate_floor,
-        future_latent_variant=args.future_latent_variant, future_latent_dim=dense_dim,
-        future_latent_offsets=future_offsets or tuple(int(value) for value in args.future_latent_offsets),
-        future_latent_num_cameras=len(cameras), future_latent_grid_size=args.future_latent_grid_size,
+        visual_corrector=args.visual_corrector,
+        visual_top_query_tokens=args.visual_top_query_tokens,
+        visual_wrist_query_tokens=args.visual_wrist_query_tokens,
+        visual_query_hidden_size=args.visual_query_hidden_size,
+        visual_query_heads=args.visual_query_heads,
+        visual_latent_max_scale=args.visual_latent_max_scale,
+        visual_latent_init_logit=args.visual_latent_init_logit,
+        visual_top_gate_floor=args.visual_top_gate_floor,
+        future_latent_variant=args.future_latent_variant,
+        future_latent_dim=dense_dim,
+        future_latent_offsets=future_offsets
+        or tuple(int(value) for value in args.future_latent_offsets),
+        future_latent_num_cameras=len(cameras),
+        future_latent_grid_size=args.future_latent_grid_size,
         future_latent_hidden_size=args.future_latent_hidden_size,
         future_latent_depth=args.future_latent_depth,
         future_latent_heads=args.future_latent_heads,
@@ -394,22 +621,33 @@ def main() -> None:
         future_consistency_ramp_steps=args.future_consistency_ramp_steps,
         future_latent_stat_eps=args.future_latent_stat_eps,
         horizon_weight_mode=args.horizon_weight_mode,
-        first_position_weight=args.first_position_weight, first4_position_weight=args.first4_position_weight,
-        first8_position_weight=args.first8_position_weight, tail_position_weight=args.tail_position_weight,
+        first_position_weight=args.first_position_weight,
+        first4_position_weight=args.first4_position_weight,
+        first8_position_weight=args.first8_position_weight,
+        tail_position_weight=args.tail_position_weight,
         chunk_first4_position_weight=args.chunk_first4_position_weight,
         chunk_middle_position_weight=args.chunk_middle_position_weight,
         chunk_late_position_weight=args.chunk_late_position_weight,
         chunk_tail_position_weight=args.chunk_tail_position_weight,
-        prior_loss_weight=args.prior_loss_weight, fast_exit_loss_weight=args.fast_exit_loss_weight,
-        prefix_exit_loss_weight=args.prefix_exit_loss_weight, full_flow_loss_weight=args.full_flow_loss_weight,
-        arm_delta_loss_weight=args.arm_delta_loss_weight, align_phase_loss_weight=args.align_phase_loss_weight,
+        prior_loss_weight=args.prior_loss_weight,
+        fast_exit_loss_weight=args.fast_exit_loss_weight,
+        prefix_exit_loss_weight=args.prefix_exit_loss_weight,
+        full_flow_loss_weight=args.full_flow_loss_weight,
+        arm_delta_loss_weight=args.arm_delta_loss_weight,
+        align_phase_loss_weight=args.align_phase_loss_weight,
         align_phase_pre_steps=args.align_phase_pre_steps,
-        gripper_dim_index=args.gripper_dim_index, arm_flow_loss_weight=args.arm_flow_loss_weight,
-        gripper_open_raw=float(gripper_calibration["open_raw"]), gripper_close_raw=float(gripper_calibration["close_raw"]),
-        gripper_open_normalized=float(gripper_calibration["open_normalized"]), gripper_close_normalized=float(gripper_calibration["close_normalized"]),
-        gripper_openness_residual_scale=args.gripper_openness_residual_scale, gripper_state_loss_weight=args.gripper_state_loss_weight,
-        gripper_transition_boost=args.gripper_transition_boost, gripper_transition_aux_weight=args.gripper_transition_aux_weight,
-        gripper_transition_threshold=args.gripper_transition_threshold, gripper_transition_radius=args.gripper_transition_radius,
+        gripper_dim_index=args.gripper_dim_index,
+        arm_flow_loss_weight=args.arm_flow_loss_weight,
+        gripper_open_raw=float(gripper_calibration["open_raw"]),
+        gripper_close_raw=float(gripper_calibration["close_raw"]),
+        gripper_open_normalized=float(gripper_calibration["open_normalized"]),
+        gripper_close_normalized=float(gripper_calibration["close_normalized"]),
+        gripper_openness_residual_scale=args.gripper_openness_residual_scale,
+        gripper_state_loss_weight=args.gripper_state_loss_weight,
+        gripper_transition_boost=args.gripper_transition_boost,
+        gripper_transition_aux_weight=args.gripper_transition_aux_weight,
+        gripper_transition_threshold=args.gripper_transition_threshold,
+        gripper_transition_radius=args.gripper_transition_radius,
         gripper_smooth_weight=args.gripper_smooth_weight,
     )
     model = MainlineRDT2FM(config, dtype=dtype).to(device=device, dtype=dtype)
@@ -417,9 +655,16 @@ def main() -> None:
     if args.base_checkpoint is not None:
         load_report = model.load_compatible_reference_state_dict(args.base_checkpoint)
     trainer = RDTTrainerConfig(
-        epochs=1 if args.dry_run else args.epochs, lr=args.lr, weight_decay=args.weight_decay,
-        beta1=args.beta1, beta2=args.beta2, eps=args.adam_eps, grad_clip=args.grad_clip,
-        scheduler=args.scheduler, warmup_steps=args.warmup_steps, min_lr_ratio=args.min_lr_ratio,
+        epochs=1 if args.dry_run else args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        beta1=args.beta1,
+        beta2=args.beta2,
+        eps=args.adam_eps,
+        grad_clip=args.grad_clip,
+        scheduler=args.scheduler,
+        warmup_steps=args.warmup_steps,
+        min_lr_ratio=args.min_lr_ratio,
         log_every=1 if args.dry_run else args.log_every,
         max_train_batches=1 if args.dry_run else args.max_train_batches,
         max_val_batches=1 if args.dry_run else args.max_val_batches,
@@ -439,25 +684,38 @@ def main() -> None:
         "splits": {"train": train_ids, "val": val_ids, "test": test_ids},
         "split_summary": {
             "mode": args.episode_split_mode,
-            "counts": {"train": len(train_ids), "val": len(val_ids), "test": len(test_ids), "unused": len(unused_episode_ids)},
+            "counts": {
+                "train": len(train_ids),
+                "val": len(val_ids),
+                "test": len(test_ids),
+                "unused": len(unused_episode_ids),
+            },
             "episode_names": split_episode_names,
         },
         "skipped": skipped,
         "data": serializable(vars(data_config)),
         "model": model.config_dict(),
         "trainer": serializable(vars(trainer)),
-        "conditioning": {"mode": args.condition_mode, "dense_token_dim": dense_dim, "instruction": args.instruction},
+        "conditioning": {
+            "mode": args.condition_mode,
+            "dense_token_dim": dense_dim,
+            "instruction": args.instruction,
+        },
         "future_latent": {
             "variant": args.future_latent_variant,
             "offsets": list(future_offsets),
-            "temporal_strides": [future_offsets[0]] + [future_offsets[i] - future_offsets[i - 1] for i in range(1, len(future_offsets))] if future_offsets else [],
+            "temporal_strides": [future_offsets[0]]
+            + [future_offsets[i] - future_offsets[i - 1] for i in range(1, len(future_offsets))]
+            if future_offsets
+            else [],
             "grid_size": args.future_latent_grid_size,
             "tokens_per_camera_time": (
-                args.future_latent_grid_size ** 2 if args.future_latent_variant != "none" else 0
+                args.future_latent_grid_size**2 if args.future_latent_variant != "none" else 0
             ),
             "total_tokens": (
-                len(future_offsets) * len(cameras) * (args.future_latent_grid_size ** 2)
-                if args.future_latent_variant != "none" else 0
+                len(future_offsets) * len(cameras) * (args.future_latent_grid_size**2)
+                if args.future_latent_variant != "none"
+                else 0
             ),
             "matched_window_support_only": bool(
                 args.match_future_window_support and args.future_latent_variant == "none"
@@ -517,7 +775,9 @@ def main() -> None:
             "consistency_warmup_steps": args.future_consistency_warmup_steps,
             "consistency_ramp_steps": args.future_consistency_ramp_steps,
             "world_optimizer_lr": args.lr if args.future_world_lr is None else args.future_world_lr,
-            "world_optimizer_weight_decay": args.weight_decay if args.future_world_weight_decay is None else args.future_world_weight_decay,
+            "world_optimizer_weight_decay": args.weight_decay
+            if args.future_world_weight_decay is None
+            else args.future_world_weight_decay,
             "world_optimizer_grad_clip": args.future_world_grad_clip,
             "independent_gradient_clipping": True,
             "parameter_sharing_with_policy": False,
@@ -531,21 +791,37 @@ def main() -> None:
         "gripper_calibration": gripper_calibration,
         "base_load": load_report,
         "parameters": model.parameter_count(),
-        "future_latent_parameters": sum(parameter.numel() for parameter in model.future_latent_parameters()),
-        "future_world_model_depth": (model.future_dynamics.depth if model.future_dynamics is not None else 0),
+        "future_latent_parameters": sum(
+            parameter.numel() for parameter in model.future_latent_parameters()
+        ),
+        "future_world_model_depth": (
+            model.future_dynamics.depth if model.future_dynamics is not None else 0
+        ),
         "future_world_model_policy_shared_parameters": 0,
-        "train_windows": len(train_ds), "val_windows": len(val_ds),
+        "train_windows": len(train_ds),
+        "val_windows": len(val_ds),
     }
     print_context(context)
     train_mainline_rdt2_fm(
-        model=model, conditioner=conditioner, train_loader=train_loader, val_loader=val_loader,
-        device=device, out_dir=args.out_dir, trainer=trainer, action_normalizer=action_norm,
-        state_normalizer=state_norm, context=context, inference_steps=args.inference_steps,
-        instruction=args.instruction, future_latent_stat_batches=args.future_latent_stat_batches,
+        model=model,
+        conditioner=conditioner,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        out_dir=args.out_dir,
+        trainer=trainer,
+        action_normalizer=action_norm,
+        state_normalizer=state_norm,
+        context=context,
+        inference_steps=args.inference_steps,
+        instruction=args.instruction,
+        future_latent_stat_batches=args.future_latent_stat_batches,
         log_component_grad_norms=not args.no_component_grad_log,
         future_world_lr=(args.lr if args.future_world_lr is None else args.future_world_lr),
         future_world_weight_decay=(
-            args.weight_decay if args.future_world_weight_decay is None else args.future_world_weight_decay
+            args.weight_decay
+            if args.future_world_weight_decay is None
+            else args.future_world_weight_decay
         ),
         future_world_grad_clip=args.future_world_grad_clip,
     )

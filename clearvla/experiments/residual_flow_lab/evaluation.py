@@ -22,8 +22,20 @@ def _subset_metrics(
     mask: np.ndarray,
     normalizer: ZScoreNormalizer,
 ) -> dict[str, float]:
-    final = compute_metrics(pred_norm=pred[mask], target_norm=future[mask], prior_norm=prior[mask], past_norm=past[mask], normalizer=normalizer)
-    source_metrics = compute_metrics(pred_norm=source[mask], target_norm=future[mask], prior_norm=prior[mask], past_norm=past[mask], normalizer=normalizer)
+    final = compute_metrics(
+        pred_norm=pred[mask],
+        target_norm=future[mask],
+        prior_norm=prior[mask],
+        past_norm=past[mask],
+        normalizer=normalizer,
+    )
+    source_metrics = compute_metrics(
+        pred_norm=source[mask],
+        target_norm=future[mask],
+        prior_norm=prior[mask],
+        past_norm=past[mask],
+        normalizer=normalizer,
+    )
     out = {
         "full_mse": float(final["full_mse"]),
         "full_rmse": float(final["full_rmse"]),
@@ -78,7 +90,9 @@ def evaluate_residual_flow_model(
             prepared_visual=prepared,
             residual_state=zeros,
             bridge_time=torch.zeros((batch_size,), device=device, dtype=source.dtype),
-            step_size=torch.full((batch_size,), 1.0 / float(integration_steps), device=device, dtype=source.dtype),
+            step_size=torch.full(
+                (batch_size,), 1.0 / float(integration_steps), device=device, dtype=source.dtype
+            ),
             noise_level=torch.zeros((batch_size,), device=device, dtype=source.dtype),
             prepared_flow=flow_memory,
         )
@@ -93,21 +107,50 @@ def evaluate_residual_flow_model(
             event_target.append(batch["event_flag"].cpu().numpy())
     joined = {key: np.concatenate(value, axis=0) for key, value in rows.items()}
     metrics = compute_metrics(
-        pred_norm=joined["pred"], target_norm=joined["future"], prior_norm=joined["prior"], past_norm=joined["past"], normalizer=normalizer,
+        pred_norm=joined["pred"],
+        target_norm=joined["future"],
+        prior_norm=joined["prior"],
+        past_norm=joined["past"],
+        normalizer=normalizer,
     )
     source_metrics = compute_metrics(
-        pred_norm=joined["source"], target_norm=joined["future"], prior_norm=joined["prior"], past_norm=joined["past"], normalizer=normalizer,
+        pred_norm=joined["source"],
+        target_norm=joined["future"],
+        prior_norm=joined["prior"],
+        past_norm=joined["past"],
+        normalizer=normalizer,
     )
     keys = (
-        "full_mse", "full_rmse", "full_mae", "normalized_mae",
-        "first_mse", "first_rmse", "first_mae",
-        "first4_mse", "first4_rmse", "first4_mae",
-        "delta_mse", "delta_rmse", "delta_mae",
-        "relative_mse_improvement_vs_prior", "per_dim_rmse", "per_dim_mae", "per_dim_nrmse",
-        "per_horizon_rmse", "per_horizon_mae",
-        "arm_full_rmse", "arm_first_rmse", "arm_first4_rmse", "arm_full_mae",
-        "arm_full_rmse_deg_if_rad", "arm_first_rmse_deg_if_rad", "arm_first4_rmse_deg_if_rad",
-        "gripper_full_rmse", "gripper_first_rmse", "gripper_first4_rmse", "gripper_full_mae",
+        "full_mse",
+        "full_rmse",
+        "full_mae",
+        "normalized_mae",
+        "first_mse",
+        "first_rmse",
+        "first_mae",
+        "first4_mse",
+        "first4_rmse",
+        "first4_mae",
+        "delta_mse",
+        "delta_rmse",
+        "delta_mae",
+        "relative_mse_improvement_vs_prior",
+        "per_dim_rmse",
+        "per_dim_mae",
+        "per_dim_nrmse",
+        "per_horizon_rmse",
+        "per_horizon_mae",
+        "arm_full_rmse",
+        "arm_first_rmse",
+        "arm_first4_rmse",
+        "arm_full_mae",
+        "arm_full_rmse_deg_if_rad",
+        "arm_first_rmse_deg_if_rad",
+        "arm_first4_rmse_deg_if_rad",
+        "gripper_full_rmse",
+        "gripper_first_rmse",
+        "gripper_first4_rmse",
+        "gripper_full_mae",
     )
     for key in keys:
         if key in source_metrics:
@@ -124,7 +167,13 @@ def evaluate_residual_flow_model(
         for label, mask in (("event", y >= 0.5), ("regular", y < 0.5)):
             if bool(mask.any()):
                 subset = _subset_metrics(
-                    pred=joined["pred"], source=joined["source"], future=joined["future"], prior=joined["prior"], past=joined["past"], mask=mask, normalizer=normalizer,
+                    pred=joined["pred"],
+                    source=joined["source"],
+                    future=joined["future"],
+                    prior=joined["prior"],
+                    past=joined["past"],
+                    mask=mask,
+                    normalizer=normalizer,
                 )
                 for key, value in subset.items():
                     metrics[f"{label}_{key}"] = value

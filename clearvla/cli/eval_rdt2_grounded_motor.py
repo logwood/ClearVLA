@@ -8,25 +8,53 @@ from clearvla.experiments.classic_policy_lab.legacy_guard import require_legacy_
 
 import torch
 
-from clearvla.experiments.classic_policy_lab.cli_common import add_data_args, load_data, make_loader, preprocessing_from_args, resolve_device, serializable
+from clearvla.experiments.classic_policy_lab.cli_common import (
+    add_data_args,
+    load_data,
+    make_loader,
+    preprocessing_from_args,
+    resolve_device,
+    serializable,
+)
 from clearvla.experiments.classic_policy_lab.dataset import RDT2FMDatasetConfig, RDT2FMWindowDataset
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
-from clearvla.experiments.classic_policy_lab.rdt2_conditioning import CachedDinoV2DenseConditioner, DebugDenseConditioner, DinoV2DenseConditioner
+from clearvla.experiments.classic_policy_lab.rdt2_conditioning import (
+    CachedDinoV2DenseConditioner,
+    DebugDenseConditioner,
+    DinoV2DenseConditioner,
+)
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import DinoV2TokenStore
-from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor import GroundedMotorRDT2FM, GroundedMotorRDT2FMConfig
-from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor_runtime import evaluate_grounded_motor_rdt2_fm
+from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor import (
+    GroundedMotorRDT2FM,
+    GroundedMotorRDT2FMConfig,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor_runtime import (
+    evaluate_grounded_motor_rdt2_fm,
+)
 
 
-IMAGE_ABLATIONS = ["normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"]
+IMAGE_ABLATIONS = [
+    "normal",
+    "zero",
+    "mean",
+    "shuffle-batch",
+    "shuffle-episode",
+    "top-only",
+    "wrist-only",
+]
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate a v20 grounded shallow motor RDT2-FM checkpoint")
+    p = argparse.ArgumentParser(
+        description="Evaluate a v20 grounded shallow motor RDT2-FM checkpoint"
+    )
     add_data_args(p, default_resize=(224, 224))
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--split", choices=["train", "val", "test"], default="val")
     p.add_argument("--inference-steps", type=int, default=None)
-    p.add_argument("--condition-mode", choices=["debug-dense", "dinov2", "dinov2-cache"], default=None)
+    p.add_argument(
+        "--condition-mode", choices=["debug-dense", "dinov2", "dinov2-cache"], default=None
+    )
     p.add_argument("--instruction", default=None)
     p.add_argument("--debug-cond-tokens", type=int, default=None)
     p.add_argument("--debug-dense-token-dim", type=int, default=None)
@@ -42,19 +70,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _build_conditioner(args: argparse.Namespace, context: dict, *, episodes, cameras: tuple[str, ...], device: torch.device):
+def _build_conditioner(
+    args: argparse.Namespace,
+    context: dict,
+    *,
+    episodes,
+    cameras: tuple[str, ...],
+    device: torch.device,
+):
     saved = context["args"]
     mode = args.condition_mode or context["conditioning"]["mode"]
     if mode == "debug-dense":
         token_dim = int(args.debug_dense_token_dim or saved.get("debug_dense_token_dim", 32))
         token_count = int(args.debug_cond_tokens or saved.get("debug_cond_tokens", 8))
-        return mode, DebugDenseConditioner(token_dim=token_dim, tokens_per_camera=max(1, token_count // max(len(cameras), 1))).to(device)
+        return mode, DebugDenseConditioner(
+            token_dim=token_dim, tokens_per_camera=max(1, token_count // max(len(cameras), 1))
+        ).to(device)
     model_name = args.dinov2_model or saved.get("dinov2_model", "facebook/dinov2-base")
     if mode == "dinov2":
-        return mode, DinoV2DenseConditioner(model_name, local_files_only=args.dinov2_local_files_only).to(device)
-    cache_dir = args.dinov2_token_cache_dir or saved.get("dinov2_token_cache_dir") or context["conditioning"].get("dinov2_token_cache_dir")
+        return mode, DinoV2DenseConditioner(
+            model_name, local_files_only=args.dinov2_local_files_only
+        ).to(device)
+    cache_dir = (
+        args.dinov2_token_cache_dir
+        or saved.get("dinov2_token_cache_dir")
+        or context["conditioning"].get("dinov2_token_cache_dir")
+    )
     if cache_dir is None:
-        raise ValueError("dinov2-cache evaluation requires --dinov2-token-cache-dir or the saved training cache path")
+        raise ValueError(
+            "dinov2-cache evaluation requires --dinov2-token-cache-dir or the saved training cache path"
+        )
     store = DinoV2TokenStore(
         Path(cache_dir),
         episodes=episodes,
@@ -91,15 +136,35 @@ def main() -> None:
     ids = {"train": train_ids, "val": val_ids, "test": test_ids}[args.split]
     cameras = tuple(str(value) for value in context["args"]["cameras"])
     if tuple(str(value) for value in args.cameras) != cameras:
-        raise ValueError(f"evaluation cameras must match checkpoint cameras: {tuple(args.cameras)} != {cameras}")
-    dataset = RDT2FMWindowDataset(episodes, ids, image_store=store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=data_config)
-    loader = make_loader(dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+        raise ValueError(
+            f"evaluation cameras must match checkpoint cameras: {tuple(args.cameras)} != {cameras}"
+        )
+    dataset = RDT2FMWindowDataset(
+        episodes,
+        ids,
+        image_store=store,
+        camera_names=cameras,
+        state_normalizer=state_norm,
+        action_normalizer=action_norm,
+        config=data_config,
+    )
+    loader = make_loader(
+        dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
     model = GroundedMotorRDT2FM(model_config, dtype=dtype).to(device=device, dtype=dtype)
     model.load_state_dict(payload["model"])
-    mode, conditioner = _build_conditioner(args, context, episodes=episodes, cameras=cameras, device=device)
+    mode, conditioner = _build_conditioner(
+        args, context, episodes=episodes, cameras=cameras, device=device
+    )
     if int(conditioner.token_dim) != model_config.dense_token_dim:
-        raise ValueError(f"condition token width changed: checkpoint={model_config.dense_token_dim}, evaluator={conditioner.token_dim}")
-    instruction = context["conditioning"].get("instruction", "") if args.instruction is None else args.instruction
+        raise ValueError(
+            f"condition token width changed: checkpoint={model_config.dense_token_dim}, evaluator={conditioner.token_dim}"
+        )
+    instruction = (
+        context["conditioning"].get("instruction", "")
+        if args.instruction is None
+        else args.instruction
+    )
     steps = int(args.inference_steps or model_config.num_inference_timesteps)
 
     def run_one(ablation: str):
@@ -131,7 +196,9 @@ def main() -> None:
         for value in ["normal", *args.compare_image_ablations]:
             if value not in modes:
                 modes.append(value)
-        rows = {value: (metrics if value == args.image_ablation else run_one(value)) for value in modes}
+        rows = {
+            value: (metrics if value == args.image_ablation else run_one(value)) for value in modes
+        }
         normal = rows["normal"]
         keys = ("full_mse", "arm_first_rmse", "first4_rmse", "first8_rmse", "native_first_arm_rmse")
         report["ablation_metrics"] = rows

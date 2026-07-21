@@ -49,10 +49,14 @@ class OnlineVisualStore:
         self.decoded_cache_dir = None if decoded_cache_dir is None else Path(decoded_cache_dir)
         self.frame_lru_capacity = int(frame_lru_capacity)
         self.open_file_capacity = int(open_file_capacity)
-        self._decoded_store = None if self.decoded_cache_dir is None else DecodedImageStore(
-            self.decoded_cache_dir,
-            camera_names=self.camera_names,
-            preprocessing=self.preprocessing,
+        self._decoded_store = (
+            None
+            if self.decoded_cache_dir is None
+            else DecodedImageStore(
+                self.decoded_cache_dir,
+                camera_names=self.camera_names,
+                preprocessing=self.preprocessing,
+            )
         )
         self._pid = os.getpid()
         self._frame_lru: OrderedDict[tuple[str, str, int], np.ndarray] = OrderedDict()

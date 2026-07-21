@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 
-from clearvla.experiments.classic_policy_lab.rdt_small_reference import RDTSmallReference, RDTSmallReferenceConfig
+from clearvla.experiments.classic_policy_lab.rdt_small_reference import (
+    RDTSmallReference,
+    RDTSmallReferenceConfig,
+)
 
 
 def parse_args() -> argparse.Namespace:

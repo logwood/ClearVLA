@@ -26,7 +26,10 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     serializable,
 )
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
-from clearvla.experiments.dynamic_world_lab.conditioning import build_dense_conditioner, infer_dense_geometry
+from clearvla.experiments.dynamic_world_lab.conditioning import (
+    build_dense_conditioner,
+    infer_dense_geometry,
+)
 from clearvla.experiments.legacy_v33.dynamic_world_lab.controllable_model import (
     ControllableDynamicWorld,
     ControllableWorldConfig,
@@ -82,7 +85,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--control-hz", type=float, default=30.0)
 
     p.add_argument(
-        "--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache"
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
     )
     p.add_argument("--dinov2-model", default="facebook/dinov2-base")
     p.add_argument("--dinov2-local-files-only", action="store_true")
@@ -207,7 +212,9 @@ def _pair_descriptors(
         )
         dynamic_descriptor = model.fixed_dynamic_descriptor(current).cpu().numpy()
         static = current.float()[:, -1].mean(dim=2) @ model.descriptor_projection.float()
-        static = torch.nn.functional.normalize(static, dim=-1).reshape(len(current), -1).cpu().numpy()
+        static = (
+            torch.nn.functional.normalize(static, dim=-1).reshape(len(current), -1).cpu().numpy()
+        )
         state = batch["state"].numpy().reshape(len(current), -1)
         condition_rows.append(np.concatenate([state, static, dynamic_descriptor], axis=1))
 
@@ -217,7 +224,12 @@ def _pair_descriptors(
         sampled = action[:, offsets]
         action_rows.append(
             np.concatenate(
-                [sampled.reshape(len(action), -1), velocity.mean(1), velocity.std(1), action[:, -1] - state],
+                [
+                    sampled.reshape(len(action), -1),
+                    velocity.mean(1),
+                    velocity.std(1),
+                    action[:, -1] - state,
+                ],
                 axis=1,
             )
         )
@@ -293,8 +305,13 @@ def _build_or_load_pairs(
         "gripper_midpoint": float(0.5 * (args.gripper_open_value + args.gripper_close_value)),
     }
     required = [
-        paths["train"], paths["val"], paths["test"], paths["val_support"],
-        paths["val_support_index"], paths["test_support"], paths["test_support_index"],
+        paths["train"],
+        paths["val"],
+        paths["test"],
+        paths["val_support"],
+        paths["val_support_index"],
+        paths["test_support"],
+        paths["test_support_index"],
         paths["manifest"],
     ]
     if not args.rebuild_pairs and all(path.exists() for path in required):
@@ -351,14 +368,25 @@ def _build_or_load_pairs(
     np.save(paths["test_support"], test_support)
     np.savez_compressed(
         paths["descriptors"],
-        train_condition=rows["train"][0], train_action=rows["train"][1], train_future=rows["train"][2],
-        val_condition=rows["val"][0], val_action=rows["val"][1], val_future=rows["val"][2],
-        test_condition=rows["test"][0], test_action=rows["test"][1], test_future=rows["test"][2],
+        train_condition=rows["train"][0],
+        train_action=rows["train"][1],
+        train_future=rows["train"][2],
+        val_condition=rows["val"][0],
+        val_action=rows["val"][1],
+        val_future=rows["val"][2],
+        test_condition=rows["test"][0],
+        test_action=rows["test"][1],
+        test_future=rows["test"][2],
     )
     paths["manifest"].write_text(json.dumps(expected, indent=2), encoding="utf-8")
     return (
-        tables["train"], tables["val"], tables["test"],
-        val_support_index, val_support, test_support_index, test_support,
+        tables["train"],
+        tables["val"],
+        tables["test"],
+        val_support_index,
+        val_support,
+        test_support_index,
+        test_support,
     )
 
 
@@ -397,8 +425,14 @@ def main() -> None:
     max_extent = max(args.action_horizon, max(future_offsets) - min(target_history_offsets))
     min_length = max_extent + abs(min(history_offsets)) + 2
     (
-        episodes, train_ids, val_ids, test_ids, action_normalizer, state_normalizer,
-        image_store, skipped,
+        episodes,
+        train_ids,
+        val_ids,
+        test_ids,
+        action_normalizer,
+        state_normalizer,
+        image_store,
+        skipped,
     ) = load_data(
         args,
         min_length=min_length,
@@ -409,18 +443,30 @@ def main() -> None:
     )
     bases = {
         "train": DynamicWorldWindowDataset(
-            episodes, train_ids, image_store=image_store, camera_names=cameras,
-            state_normalizer=state_normalizer, action_normalizer=action_normalizer,
+            episodes,
+            train_ids,
+            image_store=image_store,
+            camera_names=cameras,
+            state_normalizer=state_normalizer,
+            action_normalizer=action_normalizer,
             config=dataset_config,
         ),
         "val": DynamicWorldWindowDataset(
-            episodes, val_ids, image_store=image_store, camera_names=cameras,
-            state_normalizer=state_normalizer, action_normalizer=action_normalizer,
+            episodes,
+            val_ids,
+            image_store=image_store,
+            camera_names=cameras,
+            state_normalizer=state_normalizer,
+            action_normalizer=action_normalizer,
             config=dataset_config,
         ),
         "test": DynamicWorldWindowDataset(
-            episodes, test_ids, image_store=image_store, camera_names=cameras,
-            state_normalizer=state_normalizer, action_normalizer=action_normalizer,
+            episodes,
+            test_ids,
+            image_store=image_store,
+            camera_names=cameras,
+            state_normalizer=state_normalizer,
+            action_normalizer=action_normalizer,
             config=dataset_config,
         ),
     }
@@ -438,7 +484,9 @@ def main() -> None:
         dtype=dtype,
     )
     if patches is None:
-        latent_dim, patches = infer_dense_geometry(conditioner, bases["train"][0], camera_names=cameras)
+        latent_dim, patches = infer_dense_geometry(
+            conditioner, bases["train"][0], camera_names=cameras
+        )
 
     model_config = ControllableWorldConfig(
         latent_dim=latent_dim,
@@ -475,8 +523,13 @@ def main() -> None:
 
     pair_dir = args.pair_index_dir or (args.out_dir / "pair_index")
     (
-        train_pairs, val_pairs, test_pairs, val_support_index, val_support,
-        test_support_index, test_support,
+        train_pairs,
+        val_pairs,
+        test_pairs,
+        val_support_index,
+        val_support,
+        test_support_index,
+        test_support,
     ) = _build_or_load_pairs(
         pair_dir=pair_dir,
         train_dataset=bases["train"],
@@ -510,10 +563,18 @@ def main() -> None:
         support_index=val_support_index,
     )
     train_loader = make_loader(
-        train_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device
+        train_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=True,
+        device=device,
     )
     val_loader = make_loader(
-        val_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+        val_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=False,
+        device=device,
     )
 
     loss_config = ControllableWorldLossConfig(

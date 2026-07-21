@@ -10,12 +10,17 @@ from clearvla.experiments.classic_policy_lab.legacy_guard import require_legacy_
 import torch
 from torch import nn
 
-from clearvla.experiments.classic_policy_lab.rdt2_control_interface import ControlInterfaceRDT2FMConfig, RDT2ControlInterface
+from clearvla.experiments.classic_policy_lab.rdt2_control_interface import (
+    ControlInterfaceRDT2FMConfig,
+    RDT2ControlInterface,
+)
 from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import RDT, RDT2FMReference
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Profile v21 RDT2-FM control-interface parameter groups")
+    p = argparse.ArgumentParser(
+        description="Profile v21 RDT2-FM control-interface parameter groups"
+    )
     p.add_argument("--out-json", type=Path, default=None)
     return p.parse_args()
 
@@ -42,7 +47,10 @@ def reference_dense_condition_count(config: ControlInterfaceRDT2FMConfig) -> int
             horizon=config.prediction_horizon,
             output_size=config.action_dim,
             config=rdt_cfg,
-            x_pos_emb_config=[("action", config.prediction_horizon), ("register", config.num_register_tokens)],
+            x_pos_emb_config=[
+                ("action", config.prediction_horizon),
+                ("register", config.num_register_tokens),
+            ],
             dtype=torch.float32,
         )
         lang = RDT2FMReference._build_adapter("linear", config.dense_token_dim, config.hidden_size)
@@ -68,14 +76,16 @@ def main() -> None:
     total = model.parameter_count()
     rows = []
     for mode in ("static", "dynamic"):
-        rows.append({
-            "variant": mode,
-            "parameters_allocated": total,
-            "parameters_active": total - dynamic_specific if mode == "static" else total,
-            "parameter_groups": groups,
-            "dynamic_specific_parameters": dynamic_specific,
-            "model": replace(base, interface_mode=mode).__dict__,
-        })
+        rows.append(
+            {
+                "variant": mode,
+                "parameters_allocated": total,
+                "parameters_active": total - dynamic_specific if mode == "static" else total,
+                "parameter_groups": groups,
+                "dynamic_specific_parameters": dynamic_specific,
+                "model": replace(base, interface_mode=mode).__dict__,
+            }
+        )
     report = {
         "schema": "clearvla-rdt2-control-interface-profile-v1",
         "controlled_motor_core": {

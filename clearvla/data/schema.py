@@ -6,7 +6,16 @@ import h5py
 
 
 ACTION_ALIASES = ("action", "/action", "actions", "/actions")
-STATE_ALIASES = ("qpos", "/qpos", "observations/qpos", "observation/qpos", "observation.state", "observations/state", "state", "/state")
+STATE_ALIASES = (
+    "qpos",
+    "/qpos",
+    "observations/qpos",
+    "observation/qpos",
+    "observation.state",
+    "observations/state",
+    "state",
+    "/state",
+)
 TOP_ALIASES = (
     "observations/images/cam_high",
     "observations/images/top_camera",
@@ -38,6 +47,7 @@ CAMERA_ALIASES: dict[str, tuple[str, ...]] = {
 def list_hdf5_datasets(path: str) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     with h5py.File(path, "r") as f:
+
         def visit(name: str, obj: Any) -> None:
             if isinstance(obj, h5py.Dataset):
                 out[name] = {
@@ -46,6 +56,7 @@ def list_hdf5_datasets(path: str) -> dict[str, dict[str, Any]]:
                     "chunks": list(obj.chunks) if obj.chunks is not None else None,
                     "compression": obj.compression,
                 }
+
         f.visititems(visit)
     return out
 
@@ -59,7 +70,9 @@ def resolve_key(
 ) -> str | None:
     candidates: list[str] = []
     if requested:
-        candidates.extend((requested, requested.lstrip("/"), requested.replace(".", "/").lstrip("/")))
+        candidates.extend(
+            (requested, requested.lstrip("/"), requested.replace(".", "/").lstrip("/"))
+        )
     candidates.extend(x.lstrip("/") for x in aliases)
     candidates.extend(x.replace(".", "/").lstrip("/") for x in aliases)
 
@@ -72,5 +85,7 @@ def resolve_key(
 
     if required:
         available = "\n".join(sorted(datasets.keys())[:160])
-        raise KeyError(f"Could not resolve requested dataset {requested!r}. Available datasets:\n{available}")
+        raise KeyError(
+            f"Could not resolve requested dataset {requested!r}. Available datasets:\n{available}"
+        )
     return None

@@ -9,14 +9,27 @@ from torch.utils.data import DataLoader
 
 from clearvla.cli.common import load_and_normalize_episodes, resolve_device
 from clearvla.data.normalizer import ZScoreNormalizer
-from clearvla.experiments.residual_flow_lab.evaluation import evaluate_residual_flow_model, visual_dependency_report
-from clearvla.experiments.residual_flow_lab.model import ResidualFlowLabModel, ResidualFlowLabModelConfig
-from clearvla.experiments.vision_usage_lab.dataset import LabEventScoreConfig, LabVisualMode, VisionUsageLabDataset, compute_lab_event_scores
+from clearvla.experiments.residual_flow_lab.evaluation import (
+    evaluate_residual_flow_model,
+    visual_dependency_report,
+)
+from clearvla.experiments.residual_flow_lab.model import (
+    ResidualFlowLabModel,
+    ResidualFlowLabModelConfig,
+)
+from clearvla.experiments.vision_usage_lab.dataset import (
+    LabEventScoreConfig,
+    LabVisualMode,
+    VisionUsageLabDataset,
+    compute_lab_event_scores,
+)
 from clearvla.experiments.vision_usage_lab.latent_cache import VisionLatentCacheStore
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate residual-flow checkpoints under visual counterfactuals")
+    p = argparse.ArgumentParser(
+        description="Evaluate residual-flow checkpoints under visual counterfactuals"
+    )
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--glob", default="*.hdf5")
     p.add_argument("--latent-cache-dir", type=Path, required=True)
@@ -59,12 +72,17 @@ def main() -> None:
             "top": str(source_args.get("top_key", "observations/images/cam_high")),
             "wrist": str(source_args.get("wrist_key", "observations/images/cam_right_wrist")),
         },
-        min_length=max(model_config.past_len, model_config.obs_horizon - 1) + model_config.chunk_len,
+        min_length=max(model_config.past_len, model_config.obs_horizon - 1)
+        + model_config.chunk_len,
         train_frac=float(source_args.get("train_frac", 0.8)),
         val_frac=float(source_args.get("val_frac", 0.1)),
         seed=int(source_args.get("seed", 0)),
     )
-    if train_ids != list(context["train_ids"]) or val_ids != list(context["val_ids"]) or test_ids != list(context["test_ids"]):
+    if (
+        train_ids != list(context["train_ids"])
+        or val_ids != list(context["val_ids"])
+        or test_ids != list(context["test_ids"])
+    ):
         raise ValueError("episode split differs from training context")
     normalizer = ZScoreNormalizer.from_dict(dict(context["normalizer"]))
     for episode in episodes:
@@ -72,7 +90,10 @@ def main() -> None:
     ids = val_ids if args.split == "val" else test_ids
     store = VisionLatentCacheStore(args.latent_cache_dir, camera_names=cameras)
     latent_meta = store.validate_consistent(episodes)
-    if latent_meta.patch_grid != model_config.patch_grid or latent_meta.token_dim != model_config.teacher_dim:
+    if (
+        latent_meta.patch_grid != model_config.patch_grid
+        or latent_meta.token_dim != model_config.teacher_dim
+    ):
         raise ValueError("latent cache shape is incompatible with checkpoint")
     visual_pool = ids if len(ids) > 1 else list(range(len(episodes)))
     dataset_kwargs = dict(
@@ -96,12 +117,29 @@ def main() -> None:
     loaders: dict[str, DataLoader] = {}
     for mode in LabVisualMode:
         dataset = VisionUsageLabDataset(visual_mode=mode, **dataset_kwargs)
-        dataset.attach_event_scores(compute_lab_event_scores(dataset, LabEventScoreConfig(event_quantile=float(source_args.get("event_quantile", 0.70)))))
-        loaders[mode.value] = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
+        dataset.attach_event_scores(
+            compute_lab_event_scores(
+                dataset,
+                LabEventScoreConfig(event_quantile=float(source_args.get("event_quantile", 0.70))),
+            )
+        )
+        loaders[mode.value] = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+        )
     model = ResidualFlowLabModel(model_config).to(device)
     model.load_state_dict(payload["model_state_dict"], strict=True)
     metrics = {
-        mode: evaluate_residual_flow_model(model, loader, device=device, normalizer=normalizer, integration_steps=args.integration_steps)
+        mode: evaluate_residual_flow_model(
+            model,
+            loader,
+            device=device,
+            normalizer=normalizer,
+            integration_steps=args.integration_steps,
+        )
         for mode, loader in loaders.items()
     }
     report = {

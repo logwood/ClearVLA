@@ -1,0 +1,34 @@
+{
+  "include": [
+    "clearvla",
+    "tests"
+  ],
+  "exclude": [
+    ".agents",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".uv-bin",
+    ".uv-cache",
+    ".uv-tools",
+    ".venv",
+    ".worktrees",
+    "clearvla_before",
+    "data_test",
+    "docs",
+    "history_design",
+    "history_log",
+    "legacy",
+    "policy_semantic_map"
+  ],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "reportUnknownMemberType": "warning",
+  "reportUnknownVariableType": "warning",
+  "reportUnknownArgumentType": "warning",
+  "reportUnknownLambdaType": "warning",
+  "reportGeneralTypeIssues": "warning"
+}

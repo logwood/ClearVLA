@@ -23,9 +23,15 @@ from torch.utils.data import DataLoader
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import RDT2Conditioner
 from clearvla.experiments.observed_state_lab.alicia_urdf_fk import (
-    URDFFKChain, default_alicia_urdf_path, rotation_angle, vector_cosine,
+    URDFFKChain,
+    default_alicia_urdf_path,
+    rotation_angle,
+    vector_cosine,
 )
-from clearvla.experiments.observed_state_lab.policy_runtime_v36 import prepare_v36_policy_sample, decode
+from clearvla.experiments.observed_state_lab.policy_runtime_v36 import (
+    prepare_v36_policy_sample,
+    decode,
+)
 from clearvla.experiments.observed_state_lab.policy_v36 import V36PolicySystem
 from clearvla.experiments.observed_state_lab.world_runtime import autocast_context, jsonable
 
@@ -63,7 +69,7 @@ def _cosine_rows(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     dot = np.sum(a * b, axis=-1)
     out = dot / np.maximum(an * bn, 1e-9)
     both_small = (an < 1e-9) & (bn < 1e-9)
-    one_small = ((an < 1e-9) ^ (bn < 1e-9))
+    one_small = (an < 1e-9) ^ (bn < 1e-9)
     out = np.where(both_small, 1.0, out)
     out = np.where(one_small, 0.0, out)
     return np.clip(out, -1.0, 1.0).astype(np.float32)
@@ -86,7 +92,9 @@ def _angle_deg_from_cos(cosine: np.ndarray) -> np.ndarray:
     return np.degrees(np.arccos(cos)).astype(np.float32)
 
 
-def _vector_progress_lateral(pred: np.ndarray, target: np.ndarray, *, eps: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _vector_progress_lateral(
+    pred: np.ndarray, target: np.ndarray, *, eps: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Metrics for a predicted vector against a target vector.
 
     progress is the scalar projection of pred on target, normalized by
@@ -107,7 +115,12 @@ def _vector_progress_lateral(pred: np.ndarray, target: np.ndarray, *, eps: float
     angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
     lateral = np.where(valid, lateral, np.nan)
     ratio = np.where(valid, p_norm / np.maximum(t_norm, 1e-12), np.nan)
-    return progress.astype(np.float32), lateral.astype(np.float32), angle.astype(np.float32), ratio.astype(np.float32)
+    return (
+        progress.astype(np.float32),
+        lateral.astype(np.float32),
+        angle.astype(np.float32),
+        ratio.astype(np.float32),
+    )
 
 
 def _row_xyz(row: dict[str, Any], scope: str, role: str) -> np.ndarray | None:
@@ -177,7 +190,11 @@ def _resolve_arm_indices(action_dim: int, gripper_index: int) -> list[int]:
 def _make_fk(config: ArmMotionTableConfig) -> URDFFKChain | None:
     if not bool(config.enable_fk):
         return None
-    path = Path(config.urdf_path) if config.urdf_path else default_alicia_urdf_path(config.urdf_variant)
+    path = (
+        Path(config.urdf_path)
+        if config.urdf_path
+        else default_alicia_urdf_path(config.urdf_variant)
+    )
     return URDFFKChain(path, base_link=config.base_link, end_link=config.end_link)
 
 
@@ -206,12 +223,14 @@ def collect_arm_motion_predictions_for_episode(
     fk = _make_fk(config)
     fk_meta: dict[str, Any] = {"enabled": fk is not None}
     if fk is not None:
-        fk_meta.update({
-            "urdf_path": str(fk.urdf_path),
-            "base_link": fk.base_link,
-            "end_link": fk.end_link,
-            "active_joint_names": list(fk.active_joint_names),
-        })
+        fk_meta.update(
+            {
+                "urdf_path": str(fk.urdf_path),
+                "base_link": fk.base_link,
+                "end_link": fk.end_link,
+                "active_joint_names": list(fk.active_joint_names),
+            }
+        )
 
     sample_supports_action_state = "action_state" in inspect.signature(system.sample).parameters
     with torch.no_grad():
@@ -223,20 +242,29 @@ def collect_arm_motion_predictions_for_episode(
             if not bool(mask.any()):
                 continue
             sample = prepare_v36_policy_sample(
-                batch, conditioner=conditioner, system=system, camera_names=camera_names,
-                device=device, dtype=dtype,
+                batch,
+                conditioner=conditioner,
+                system=system,
+                camera_names=camera_names,
+                device=device,
+                dtype=dtype,
             )
             generator = torch.Generator(device=device)
             generator.manual_seed(36136 + batch_index)
             if bool(getattr(getattr(system, "codec", None), "uses_arm_manifold", False)):
                 noise = system.codec.sample_noise(
-                    sample["policy_action"].shape[0], generator=generator, device=device,
-                    dtype=sample["visual"].dtype, action_state=sample["action_state"],
+                    sample["policy_action"].shape[0],
+                    generator=generator,
+                    device=device,
+                    dtype=sample["visual"].dtype,
+                    action_state=sample["action_state"],
                 )
             else:
                 noise = torch.randn(
-                    sample["policy_action"].shape, generator=generator,
-                    device=device, dtype=sample["visual"].dtype,
+                    sample["policy_action"].shape,
+                    generator=generator,
+                    device=device,
+                    dtype=sample["visual"].dtype,
                 )
             with autocast_context(device, dtype):
                 sample_kwargs = {
@@ -248,8 +276,11 @@ def collect_arm_motion_predictions_for_episode(
                 if sample_supports_action_state:
                     sample_kwargs["action_state"] = sample["action_state"]
                 pred_pack = system.sample(
-                    sample["visual"], sample["history_state"], sample["executed_action_history"],
-                    sample["state"], **sample_kwargs,
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    **sample_kwargs,
                 )
             assert isinstance(pred_pack, dict)
             pred_raw = decode(action_normalizer, pred_pack["action"])
@@ -262,59 +293,81 @@ def collect_arm_motion_predictions_for_episode(
             target_arm = target_raw[..., arm_indices].astype(np.float32)
             current_arm = current_raw[..., arm_indices].astype(np.float32)
             pred_boundary = np.concatenate([current_arm[:, None, :], pred_arm[:, :-1, :]], axis=1)
-            target_boundary = np.concatenate([current_arm[:, None, :], target_arm[:, :-1, :]], axis=1)
+            target_boundary = np.concatenate(
+                [current_arm[:, None, :], target_arm[:, :-1, :]], axis=1
+            )
             pred_delta = pred_arm - pred_boundary
             target_delta = target_arm - target_boundary
             joint_error = pred_arm - target_arm
-            joint_rmse = np.sqrt(np.mean(joint_error.astype(np.float64) ** 2, axis=-1)).astype(np.float32)
+            joint_rmse = np.sqrt(np.mean(joint_error.astype(np.float64) ** 2, axis=-1)).astype(
+                np.float32
+            )
             target_delta_norm = _safe_norm(target_delta, axis=-1).astype(np.float32)
             pred_delta_norm = _safe_norm(pred_delta, axis=-1).astype(np.float32)
             joint_delta_cosine = _cosine_rows(pred_delta, target_delta)
-            joint_delta_norm_ratio = _safe_ratio(pred_delta_norm, target_delta_norm, eps=config.ratio_eps)
+            joint_delta_norm_ratio = _safe_ratio(
+                pred_delta_norm, target_delta_norm, eps=config.ratio_eps
+            )
             joint_delta_error = _safe_norm(pred_delta - target_delta, axis=-1).astype(np.float32)
-            joint_delta_progress, joint_delta_lateral, joint_delta_angle_deg, _ = _vector_progress_lateral(
-                pred_delta, target_delta, eps=config.ratio_eps
+            joint_delta_progress, joint_delta_lateral, joint_delta_angle_deg, _ = (
+                _vector_progress_lateral(pred_delta, target_delta, eps=config.ratio_eps)
             )
 
             ee_pack: dict[str, np.ndarray] = {}
             if fk is not None:
                 if pred_arm.shape[-1] != fk.dof:
-                    raise ValueError(f"FK chain expects {fk.dof} joints {fk.active_joint_names}, got arm dim {pred_arm.shape[-1]}")
+                    raise ValueError(
+                        f"FK chain expects {fk.dof} joints {fk.active_joint_names}, got arm dim {pred_arm.shape[-1]}"
+                    )
                 pred_ee, pred_R = _fk_sequences(fk, pred_arm)
                 target_ee, target_R = _fk_sequences(fk, target_arm)
                 current_ee, current_R = _fk_sequences(fk, current_arm)
-                pred_ee_boundary = np.concatenate([current_ee[:, None, :], pred_ee[:, :-1, :]], axis=1)
-                target_ee_boundary = np.concatenate([current_ee[:, None, :], target_ee[:, :-1, :]], axis=1)
+                pred_ee_boundary = np.concatenate(
+                    [current_ee[:, None, :], pred_ee[:, :-1, :]], axis=1
+                )
+                target_ee_boundary = np.concatenate(
+                    [current_ee[:, None, :], target_ee[:, :-1, :]], axis=1
+                )
                 pred_ee_delta = pred_ee - pred_ee_boundary
                 target_ee_delta = target_ee - target_ee_boundary
                 ee_pos_error = _safe_norm(pred_ee - target_ee, axis=-1).astype(np.float32)
                 target_ee_delta_norm = _safe_norm(target_ee_delta, axis=-1).astype(np.float32)
                 pred_ee_delta_norm = _safe_norm(pred_ee_delta, axis=-1).astype(np.float32)
                 ee_delta_cosine = _cosine_rows(pred_ee_delta, target_ee_delta)
-                ee_delta_norm_ratio = _safe_ratio(pred_ee_delta_norm, target_ee_delta_norm, eps=config.ratio_eps)
-                ee_delta_error = _safe_norm(pred_ee_delta - target_ee_delta, axis=-1).astype(np.float32)
-                ee_delta_progress, ee_delta_lateral, ee_delta_angle_deg, _ = _vector_progress_lateral(
-                    pred_ee_delta, target_ee_delta, eps=config.ratio_eps
+                ee_delta_norm_ratio = _safe_ratio(
+                    pred_ee_delta_norm, target_ee_delta_norm, eps=config.ratio_eps
+                )
+                ee_delta_error = _safe_norm(pred_ee_delta - target_ee_delta, axis=-1).astype(
+                    np.float32
+                )
+                ee_delta_progress, ee_delta_lateral, ee_delta_angle_deg, _ = (
+                    _vector_progress_lateral(pred_ee_delta, target_ee_delta, eps=config.ratio_eps)
                 )
                 pred_ee_disp = pred_ee - current_ee[:, None, :]
                 target_ee_disp = target_ee - current_ee[:, None, :]
                 target_ee_disp_norm = _safe_norm(target_ee_disp, axis=-1).astype(np.float32)
                 pred_ee_disp_norm = _safe_norm(pred_ee_disp, axis=-1).astype(np.float32)
-                ee_disp_error = _safe_norm(pred_ee_disp - target_ee_disp, axis=-1).astype(np.float32)
+                ee_disp_error = _safe_norm(pred_ee_disp - target_ee_disp, axis=-1).astype(
+                    np.float32
+                )
                 ee_disp_cosine = _cosine_rows(pred_ee_disp, target_ee_disp)
-                ee_disp_progress, ee_disp_lateral, ee_disp_angle_deg, ee_disp_norm_ratio = _vector_progress_lateral(
-                    pred_ee_disp, target_ee_disp, eps=config.ratio_eps
+                ee_disp_progress, ee_disp_lateral, ee_disp_angle_deg, ee_disp_norm_ratio = (
+                    _vector_progress_lateral(pred_ee_disp, target_ee_disp, eps=config.ratio_eps)
                 )
                 # Rotation error per horizon.
                 flat_pred_R = pred_R.reshape(-1, 3, 3)
                 flat_target_R = target_R.reshape(-1, 3, 3)
-                rot_err = np.asarray([
-                    rotation_angle(tR.T @ pR) for pR, tR in zip(flat_pred_R, flat_target_R)
-                ], dtype=np.float32).reshape(pred_R.shape[:-2])
+                rot_err = np.asarray(
+                    [rotation_angle(tR.T @ pR) for pR, tR in zip(flat_pred_R, flat_target_R)],
+                    dtype=np.float32,
+                ).reshape(pred_R.shape[:-2])
                 ee_pack = {
-                    "pred_ee": pred_ee, "target_ee": target_ee,
-                    "pred_ee_delta": pred_ee_delta, "target_ee_delta": target_ee_delta,
-                    "pred_ee_disp": pred_ee_disp, "target_ee_disp": target_ee_disp,
+                    "pred_ee": pred_ee,
+                    "target_ee": target_ee,
+                    "pred_ee_delta": pred_ee_delta,
+                    "target_ee_delta": target_ee_delta,
+                    "pred_ee_disp": pred_ee_disp,
+                    "target_ee_disp": target_ee_disp,
                     "ee_pos_error": ee_pos_error,
                     "ee_error_xyz": pred_ee - target_ee,
                     "target_ee_delta_norm": target_ee_delta_norm,
@@ -343,39 +396,93 @@ def collect_arm_motion_predictions_for_episode(
                     "episode_idx": int(episode_np[row_i]),
                     "center": center,
                     "arm_indices": [int(x) for x in arm_indices],
-                    "target_joint_delta_norm": [float(x) for x in target_delta_norm[row_i].tolist()],
+                    "target_joint_delta_norm": [
+                        float(x) for x in target_delta_norm[row_i].tolist()
+                    ],
                     "pred_joint_delta_norm": [float(x) for x in pred_delta_norm[row_i].tolist()],
                     "joint_delta_cosine": [float(x) for x in joint_delta_cosine[row_i].tolist()],
-                    "joint_delta_norm_ratio": [float(x) for x in joint_delta_norm_ratio[row_i].tolist()],
+                    "joint_delta_norm_ratio": [
+                        float(x) for x in joint_delta_norm_ratio[row_i].tolist()
+                    ],
                     "joint_delta_error": [float(x) for x in joint_delta_error[row_i].tolist()],
-                    "joint_delta_progress": [float(x) for x in joint_delta_progress[row_i].tolist()],
-                    "joint_delta_lateral_error": [float(x) for x in joint_delta_lateral[row_i].tolist()],
-                    "joint_delta_angle_deg": [float(x) for x in joint_delta_angle_deg[row_i].tolist()],
+                    "joint_delta_progress": [
+                        float(x) for x in joint_delta_progress[row_i].tolist()
+                    ],
+                    "joint_delta_lateral_error": [
+                        float(x) for x in joint_delta_lateral[row_i].tolist()
+                    ],
+                    "joint_delta_angle_deg": [
+                        float(x) for x in joint_delta_angle_deg[row_i].tolist()
+                    ],
                     "joint_rmse": [float(x) for x in joint_rmse[row_i].tolist()],
                 }
                 if fk is not None:
-                    window_record.update({
-                        "target_ee": [[float(v) for v in xyz] for xyz in ee_pack["target_ee"][row_i].tolist()],
-                        "pred_ee": [[float(v) for v in xyz] for xyz in ee_pack["pred_ee"][row_i].tolist()],
-                        "target_ee_delta_norm": [float(x) for x in ee_pack["target_ee_delta_norm"][row_i].tolist()],
-                        "pred_ee_delta_norm": [float(x) for x in ee_pack["pred_ee_delta_norm"][row_i].tolist()],
-                        "ee_delta_cosine": [float(x) for x in ee_pack["ee_delta_cosine"][row_i].tolist()],
-                        "ee_delta_norm_ratio": [float(x) for x in ee_pack["ee_delta_norm_ratio"][row_i].tolist()],
-                        "ee_delta_error": [float(x) for x in ee_pack["ee_delta_error"][row_i].tolist()],
-                        "ee_delta_progress": [float(x) for x in ee_pack["ee_delta_progress"][row_i].tolist()],
-                        "ee_delta_lateral_error": [float(x) for x in ee_pack["ee_delta_lateral_error"][row_i].tolist()],
-                        "ee_delta_angle_deg": [float(x) for x in ee_pack["ee_delta_angle_deg"][row_i].tolist()],
-                        "target_ee_disp_norm": [float(x) for x in ee_pack["target_ee_disp_norm"][row_i].tolist()],
-                        "pred_ee_disp_norm": [float(x) for x in ee_pack["pred_ee_disp_norm"][row_i].tolist()],
-                        "ee_disp_error": [float(x) for x in ee_pack["ee_disp_error"][row_i].tolist()],
-                        "ee_disp_cosine": [float(x) for x in ee_pack["ee_disp_cosine"][row_i].tolist()],
-                        "ee_disp_norm_ratio": [float(x) for x in ee_pack["ee_disp_norm_ratio"][row_i].tolist()],
-                        "ee_disp_progress": [float(x) for x in ee_pack["ee_disp_progress"][row_i].tolist()],
-                        "ee_disp_lateral_error": [float(x) for x in ee_pack["ee_disp_lateral_error"][row_i].tolist()],
-                        "ee_disp_angle_deg": [float(x) for x in ee_pack["ee_disp_angle_deg"][row_i].tolist()],
-                        "ee_pos_error": [float(x) for x in ee_pack["ee_pos_error"][row_i].tolist()],
-                        "ee_rot_error_rad": [float(x) for x in ee_pack["ee_rot_error_rad"][row_i].tolist()],
-                    })
+                    window_record.update(
+                        {
+                            "target_ee": [
+                                [float(v) for v in xyz]
+                                for xyz in ee_pack["target_ee"][row_i].tolist()
+                            ],
+                            "pred_ee": [
+                                [float(v) for v in xyz]
+                                for xyz in ee_pack["pred_ee"][row_i].tolist()
+                            ],
+                            "target_ee_delta_norm": [
+                                float(x) for x in ee_pack["target_ee_delta_norm"][row_i].tolist()
+                            ],
+                            "pred_ee_delta_norm": [
+                                float(x) for x in ee_pack["pred_ee_delta_norm"][row_i].tolist()
+                            ],
+                            "ee_delta_cosine": [
+                                float(x) for x in ee_pack["ee_delta_cosine"][row_i].tolist()
+                            ],
+                            "ee_delta_norm_ratio": [
+                                float(x) for x in ee_pack["ee_delta_norm_ratio"][row_i].tolist()
+                            ],
+                            "ee_delta_error": [
+                                float(x) for x in ee_pack["ee_delta_error"][row_i].tolist()
+                            ],
+                            "ee_delta_progress": [
+                                float(x) for x in ee_pack["ee_delta_progress"][row_i].tolist()
+                            ],
+                            "ee_delta_lateral_error": [
+                                float(x) for x in ee_pack["ee_delta_lateral_error"][row_i].tolist()
+                            ],
+                            "ee_delta_angle_deg": [
+                                float(x) for x in ee_pack["ee_delta_angle_deg"][row_i].tolist()
+                            ],
+                            "target_ee_disp_norm": [
+                                float(x) for x in ee_pack["target_ee_disp_norm"][row_i].tolist()
+                            ],
+                            "pred_ee_disp_norm": [
+                                float(x) for x in ee_pack["pred_ee_disp_norm"][row_i].tolist()
+                            ],
+                            "ee_disp_error": [
+                                float(x) for x in ee_pack["ee_disp_error"][row_i].tolist()
+                            ],
+                            "ee_disp_cosine": [
+                                float(x) for x in ee_pack["ee_disp_cosine"][row_i].tolist()
+                            ],
+                            "ee_disp_norm_ratio": [
+                                float(x) for x in ee_pack["ee_disp_norm_ratio"][row_i].tolist()
+                            ],
+                            "ee_disp_progress": [
+                                float(x) for x in ee_pack["ee_disp_progress"][row_i].tolist()
+                            ],
+                            "ee_disp_lateral_error": [
+                                float(x) for x in ee_pack["ee_disp_lateral_error"][row_i].tolist()
+                            ],
+                            "ee_disp_angle_deg": [
+                                float(x) for x in ee_pack["ee_disp_angle_deg"][row_i].tolist()
+                            ],
+                            "ee_pos_error": [
+                                float(x) for x in ee_pack["ee_pos_error"][row_i].tolist()
+                            ],
+                            "ee_rot_error_rad": [
+                                float(x) for x in ee_pack["ee_rot_error_rad"][row_i].tolist()
+                            ],
+                        }
+                    )
                 window_rows.append(window_record)
                 for h in range(min(config.policy_horizon, pred_arm.shape[1])):
                     abs_t = center + int(config.action_offset) + h
@@ -399,31 +506,53 @@ def collect_arm_motion_predictions_for_episode(
                     if fk is not None:
                         te = ee_pack["target_ee"][row_i, h]
                         pe = ee_pack["pred_ee"][row_i, h]
-                        values.update({
-                            "target_ee_x": float(te[0]), "target_ee_y": float(te[1]), "target_ee_z": float(te[2]),
-                            "pred_ee_x": float(pe[0]), "pred_ee_y": float(pe[1]), "pred_ee_z": float(pe[2]),
-                            "ee_error_x": float(ee_pack["ee_error_xyz"][row_i, h, 0]),
-                            "ee_error_y": float(ee_pack["ee_error_xyz"][row_i, h, 1]),
-                            "ee_error_z": float(ee_pack["ee_error_xyz"][row_i, h, 2]),
-                            "ee_pos_error": float(ee_pack["ee_pos_error"][row_i, h]),
-                            "target_ee_delta_norm": float(ee_pack["target_ee_delta_norm"][row_i, h]),
-                            "pred_ee_delta_norm": float(ee_pack["pred_ee_delta_norm"][row_i, h]),
-                            "ee_delta_cosine": float(ee_pack["ee_delta_cosine"][row_i, h]),
-                            "ee_delta_norm_ratio": float(ee_pack["ee_delta_norm_ratio"][row_i, h]),
-                            "ee_delta_error": float(ee_pack["ee_delta_error"][row_i, h]),
-                            "ee_delta_progress": float(ee_pack["ee_delta_progress"][row_i, h]),
-                            "ee_delta_lateral_error": float(ee_pack["ee_delta_lateral_error"][row_i, h]),
-                            "ee_delta_angle_deg": float(ee_pack["ee_delta_angle_deg"][row_i, h]),
-                            "target_ee_disp_norm": float(ee_pack["target_ee_disp_norm"][row_i, h]),
-                            "pred_ee_disp_norm": float(ee_pack["pred_ee_disp_norm"][row_i, h]),
-                            "ee_disp_error": float(ee_pack["ee_disp_error"][row_i, h]),
-                            "ee_disp_cosine": float(ee_pack["ee_disp_cosine"][row_i, h]),
-                            "ee_disp_norm_ratio": float(ee_pack["ee_disp_norm_ratio"][row_i, h]),
-                            "ee_disp_progress": float(ee_pack["ee_disp_progress"][row_i, h]),
-                            "ee_disp_lateral_error": float(ee_pack["ee_disp_lateral_error"][row_i, h]),
-                            "ee_disp_angle_deg": float(ee_pack["ee_disp_angle_deg"][row_i, h]),
-                            "ee_rot_error_rad": float(ee_pack["ee_rot_error_rad"][row_i, h]),
-                        })
+                        values.update(
+                            {
+                                "target_ee_x": float(te[0]),
+                                "target_ee_y": float(te[1]),
+                                "target_ee_z": float(te[2]),
+                                "pred_ee_x": float(pe[0]),
+                                "pred_ee_y": float(pe[1]),
+                                "pred_ee_z": float(pe[2]),
+                                "ee_error_x": float(ee_pack["ee_error_xyz"][row_i, h, 0]),
+                                "ee_error_y": float(ee_pack["ee_error_xyz"][row_i, h, 1]),
+                                "ee_error_z": float(ee_pack["ee_error_xyz"][row_i, h, 2]),
+                                "ee_pos_error": float(ee_pack["ee_pos_error"][row_i, h]),
+                                "target_ee_delta_norm": float(
+                                    ee_pack["target_ee_delta_norm"][row_i, h]
+                                ),
+                                "pred_ee_delta_norm": float(
+                                    ee_pack["pred_ee_delta_norm"][row_i, h]
+                                ),
+                                "ee_delta_cosine": float(ee_pack["ee_delta_cosine"][row_i, h]),
+                                "ee_delta_norm_ratio": float(
+                                    ee_pack["ee_delta_norm_ratio"][row_i, h]
+                                ),
+                                "ee_delta_error": float(ee_pack["ee_delta_error"][row_i, h]),
+                                "ee_delta_progress": float(ee_pack["ee_delta_progress"][row_i, h]),
+                                "ee_delta_lateral_error": float(
+                                    ee_pack["ee_delta_lateral_error"][row_i, h]
+                                ),
+                                "ee_delta_angle_deg": float(
+                                    ee_pack["ee_delta_angle_deg"][row_i, h]
+                                ),
+                                "target_ee_disp_norm": float(
+                                    ee_pack["target_ee_disp_norm"][row_i, h]
+                                ),
+                                "pred_ee_disp_norm": float(ee_pack["pred_ee_disp_norm"][row_i, h]),
+                                "ee_disp_error": float(ee_pack["ee_disp_error"][row_i, h]),
+                                "ee_disp_cosine": float(ee_pack["ee_disp_cosine"][row_i, h]),
+                                "ee_disp_norm_ratio": float(
+                                    ee_pack["ee_disp_norm_ratio"][row_i, h]
+                                ),
+                                "ee_disp_progress": float(ee_pack["ee_disp_progress"][row_i, h]),
+                                "ee_disp_lateral_error": float(
+                                    ee_pack["ee_disp_lateral_error"][row_i, h]
+                                ),
+                                "ee_disp_angle_deg": float(ee_pack["ee_disp_angle_deg"][row_i, h]),
+                                "ee_rot_error_rad": float(ee_pack["ee_rot_error_rad"][row_i, h]),
+                            }
+                        )
                     acc.add(abs_t, "all", values)
                     if h < int(config.first_k):
                         acc.add(abs_t, "first", values)
@@ -472,7 +601,9 @@ def find_motion_segments(
     return segments
 
 
-def _motion_segment(rows: Sequence[dict[str, Any]], source: str, threshold: float) -> dict[str, Any]:
+def _motion_segment(
+    rows: Sequence[dict[str, Any]], source: str, threshold: float
+) -> dict[str, Any]:
     peak = max(rows, key=lambda r: _motion_value(r, source))
     return {
         "motion_type": f"{source}_motion_peak",
@@ -502,12 +633,20 @@ def build_motion_centered_table(
             if row is None:
                 continue
             grouped.setdefault(rel, []).append(row)
-            numeric_keys.update(k for k, v in row.items() if isinstance(v, (int, float)) and k != "abs_t")
+            numeric_keys.update(
+                k for k, v in row.items() if isinstance(v, (int, float)) and k != "abs_t"
+            )
     out: list[dict[str, Any]] = []
     for rel, rows in sorted(grouped.items()):
-        record: dict[str, Any] = {"motion_type": "motion_peak", "rel_t": int(rel), "n_events": len(rows)}
+        record: dict[str, Any] = {
+            "motion_type": "motion_peak",
+            "rel_t": int(rel),
+            "n_events": len(rows),
+        }
         for key in sorted(numeric_keys):
-            vals = [float(row[key]) for row in rows if key in row and isinstance(row[key], (int, float))]
+            vals = [
+                float(row[key]) for row in rows if key in row and isinstance(row[key], (int, float))
+            ]
             if vals:
                 record[key] = float(np.mean(vals))
         out.append(record)
@@ -515,7 +654,9 @@ def build_motion_centered_table(
 
 
 def _sum_range(by_time: dict[int, dict[str, Any]], start: int, end: int, key: str) -> float:
-    return float(sum(float(by_time.get(t, {}).get(key, 0.0)) for t in range(int(start), int(end) + 1)))
+    return float(
+        sum(float(by_time.get(t, {}).get(key, 0.0)) for t in range(int(start), int(end) + 1))
+    )
 
 
 def _peak_in_window(
@@ -526,16 +667,25 @@ def _peak_in_window(
     scope: str,
     motion_window: int,
 ) -> tuple[float, int | str]:
-    key = f"{scope}_pred_{source}_delta_norm_mean" if source == "ee" else f"{scope}_pred_joint_delta_norm_mean"
-    best = -float("inf"); best_rel: int | None = None
+    key = (
+        f"{scope}_pred_{source}_delta_norm_mean"
+        if source == "ee"
+        else f"{scope}_pred_joint_delta_norm_mean"
+    )
+    best = -float("inf")
+    best_rel: int | None = None
     for rel in range(-int(motion_window), int(motion_window) + 1):
         row = by_time.get(event_t + rel)
         if row is None or key not in row:
             continue
         val = float(row[key])
         if val > best:
-            best = val; best_rel = rel
-    return (float(best) if best > -float("inf") else float("nan"), best_rel if best_rel is not None else "")
+            best = val
+            best_rel = rel
+    return (
+        float(best) if best > -float("inf") else float("nan"),
+        best_rel if best_rel is not None else "",
+    )
 
 
 def build_motion_phase_summary(
@@ -548,19 +698,30 @@ def build_motion_phase_summary(
 ) -> list[dict[str, Any]]:
     by_time = {int(row["abs_t"]): row for row in episode_rows}
     out: list[dict[str, Any]] = []
-    target_key = "all_target_ee_delta_norm_mean" if source == "ee" else "all_target_joint_delta_norm_mean"
+    target_key = (
+        "all_target_ee_delta_norm_mean" if source == "ee" else "all_target_joint_delta_norm_mean"
+    )
     pred_key = "all_pred_ee_delta_norm_mean" if source == "ee" else "all_pred_joint_delta_norm_mean"
-    first_pred_key = "first_pred_ee_delta_norm_mean" if source == "ee" else "first_pred_joint_delta_norm_mean"
+    first_pred_key = (
+        "first_pred_ee_delta_norm_mean" if source == "ee" else "first_pred_joint_delta_norm_mean"
+    )
     cosine_key = "all_ee_delta_cosine_mean" if source == "ee" else "all_joint_delta_cosine_mean"
-    first_cosine_key = "first_ee_delta_cosine_mean" if source == "ee" else "first_joint_delta_cosine_mean"
+    first_cosine_key = (
+        "first_ee_delta_cosine_mean" if source == "ee" else "first_joint_delta_cosine_mean"
+    )
     err_key = "all_ee_pos_error_mean" if source == "ee" else "all_joint_rmse_mean"
     first_err_key = "first_ee_pos_error_mean" if source == "ee" else "first_joint_rmse_mean"
     for event_id, event in enumerate(events):
         event_t = int(event["event_t"])
-        start = int(event["span_start"]); end = int(event["span_end"])
+        start = int(event["span_start"])
+        end = int(event["span_end"])
         row = by_time.get(event_t, {})
-        all_peak, all_rel = _peak_in_window(by_time, event_t, source=source, scope="all", motion_window=motion_window)
-        first_peak, first_rel = _peak_in_window(by_time, event_t, source=source, scope="first", motion_window=motion_window)
+        all_peak, all_rel = _peak_in_window(
+            by_time, event_t, source=source, scope="all", motion_window=motion_window
+        )
+        first_peak, first_rel = _peak_in_window(
+            by_time, event_t, source=source, scope="first", motion_window=motion_window
+        )
         target_sum = _sum_range(by_time, start, end, target_key)
         pred_sum = _sum_range(by_time, start, end, pred_key)
         first_pred_sum = _sum_range(by_time, start, end, first_pred_key)
@@ -570,8 +731,12 @@ def build_motion_phase_summary(
             "target_cumulative_motion": float(target_sum),
             "all_pred_cumulative_motion": float(pred_sum),
             "first_pred_cumulative_motion": float(first_pred_sum),
-            "all_cumulative_motion_ratio": float(pred_sum / target_sum) if target_sum >= float(ratio_eps) else float("nan"),
-            "first_cumulative_motion_ratio": float(first_pred_sum / target_sum) if target_sum >= float(ratio_eps) else float("nan"),
+            "all_cumulative_motion_ratio": float(pred_sum / target_sum)
+            if target_sum >= float(ratio_eps)
+            else float("nan"),
+            "first_cumulative_motion_ratio": float(first_pred_sum / target_sum)
+            if target_sum >= float(ratio_eps)
+            else float("nan"),
             "all_pred_peak_value": all_peak,
             "all_pred_peak_rel_t": all_rel,
             "first_pred_peak_value": first_peak,
@@ -582,14 +747,19 @@ def build_motion_phase_summary(
             "first_error_at_peak": float(row.get(first_err_key, float("nan"))),
         }
         if source == "ee":
-            record.update(_phase_net_metrics(by_time, start, end, pred_scope="all", eps=float(ratio_eps)))
-            record.update(_phase_net_metrics(by_time, start, end, pred_scope="first", eps=float(ratio_eps)))
+            record.update(
+                _phase_net_metrics(by_time, start, end, pred_scope="all", eps=float(ratio_eps))
+            )
+            record.update(
+                _phase_net_metrics(by_time, start, end, pred_scope="first", eps=float(ratio_eps))
+            )
         out.append(record)
     return out
 
 
-
-def merge_motion_segments(events: Sequence[dict[str, Any]], *, merge_gap: int) -> list[dict[str, Any]]:
+def merge_motion_segments(
+    events: Sequence[dict[str, Any]], *, merge_gap: int
+) -> list[dict[str, Any]]:
     """Merge nearby micro motion peaks into coarser motion phases."""
     ordered = sorted(events, key=lambda e: int(e["span_start"]))
     if not ordered:
@@ -602,18 +772,20 @@ def merge_motion_segments(events: Sequence[dict[str, Any]], *, merge_gap: int) -
         end = max(int(e["span_end"]) for e in cur_events)
         peak = max(cur_events, key=lambda e: float(e.get("target_peak_value", 0.0)))
         source = str(peak.get("motion_source", "unknown"))
-        merged.append({
-            "motion_type": f"{source}_motion_phase",
-            "event_t": int(peak["event_t"]),
-            "span_start": int(start),
-            "span_end": int(end),
-            "span_len": int(end - start + 1),
-            "motion_source": source,
-            "motion_threshold": float(peak.get("motion_threshold", float("nan"))),
-            "target_peak_value": float(peak.get("target_peak_value", float("nan"))),
-            "num_micro_segments": int(len(cur_events)),
-            "micro_event_ts": [int(e["event_t"]) for e in cur_events],
-        })
+        merged.append(
+            {
+                "motion_type": f"{source}_motion_phase",
+                "event_t": int(peak["event_t"]),
+                "span_start": int(start),
+                "span_end": int(end),
+                "span_len": int(end - start + 1),
+                "motion_source": source,
+                "motion_threshold": float(peak.get("motion_threshold", float("nan"))),
+                "target_peak_value": float(peak.get("target_peak_value", float("nan"))),
+                "num_micro_segments": int(len(cur_events)),
+                "micro_event_ts": [int(e["event_t"]) for e in cur_events],
+            }
+        )
 
     for event in ordered[1:]:
         gap = int(event["span_start"]) - max(int(e["span_end"]) for e in cur_events)
@@ -656,16 +828,29 @@ def _phase_net_metrics(
     if t_norm >= eps:
         progress = float(np.dot(pred_disp, target_disp) / max(t_norm * t_norm, 1e-12))
         lateral = float(np.linalg.norm(pred_disp - progress * target_disp))
-        cos = float(np.dot(pred_disp, target_disp) / max(p_norm * t_norm, 1e-12)) if p_norm >= eps else float("nan")
+        cos = (
+            float(np.dot(pred_disp, target_disp) / max(p_norm * t_norm, 1e-12))
+            if p_norm >= eps
+            else float("nan")
+        )
         out[f"{pred_scope}_phase_net_progress"] = progress
         out[f"{pred_scope}_phase_net_lateral_error"] = lateral
-        out[f"{pred_scope}_phase_net_angle_deg"] = float(math.degrees(math.acos(max(-1.0, min(1.0, cos))))) if math.isfinite(cos) else float("nan")
+        out[f"{pred_scope}_phase_net_angle_deg"] = (
+            float(math.degrees(math.acos(max(-1.0, min(1.0, cos)))))
+            if math.isfinite(cos)
+            else float("nan")
+        )
         out[f"{pred_scope}_phase_net_relative_error"] = float(e_norm / max(t_norm, 1e-12))
     return out
 
 
-def _series_stats(rows: Sequence[dict[str, Any]], key: str, *, scale: float = 1.0) -> dict[str, float]:
-    vals = np.asarray([float(r[key]) for r in rows if key in r and isinstance(r[key], (int, float))], dtype=np.float64)
+def _series_stats(
+    rows: Sequence[dict[str, Any]], key: str, *, scale: float = 1.0
+) -> dict[str, float]:
+    vals = np.asarray(
+        [float(r[key]) for r in rows if key in r and isinstance(r[key], (int, float))],
+        dtype=np.float64,
+    )
     vals = vals[np.isfinite(vals)] * float(scale)
     if vals.size == 0:
         return {}
@@ -735,14 +920,27 @@ def write_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     keys: list[str] = []
     seen: set[str] = set()
-    preferred = ["episode_idx", "event_id", "motion_type", "event_t", "abs_t", "rel_t", "span_start", "span_end", "span_len", "n_events"]
+    preferred = [
+        "episode_idx",
+        "event_id",
+        "motion_type",
+        "event_t",
+        "abs_t",
+        "rel_t",
+        "span_start",
+        "span_end",
+        "span_len",
+        "n_events",
+    ]
     for key in preferred:
         if any(key in row for row in rows) and key not in seen:
-            keys.append(key); seen.add(key)
+            keys.append(key)
+            seen.add(key)
     for row in rows:
         for key in row.keys():
             if key not in seen:
-                keys.append(key); seen.add(key)
+                keys.append(key)
+                seen.add(key)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore")
         writer.writeheader()
@@ -754,7 +952,9 @@ def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
-            handle.write(json.dumps(jsonable(row), ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.write(
+                json.dumps(jsonable(row), ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
 
 
 def write_arm_motion_tables(
@@ -767,16 +967,29 @@ def write_arm_motion_tables(
 ) -> dict[str, Any]:
     source = choose_motion_source(episode_rows, config.motion_source)
     events = find_motion_segments(
-        episode_rows, source=source, quantile=config.motion_quantile, min_value=config.motion_min_value,
+        episode_rows,
+        source=source,
+        quantile=config.motion_quantile,
+        min_value=config.motion_min_value,
     )
     centered = build_motion_centered_table(episode_rows, events, motion_window=config.motion_window)
     phase = build_motion_phase_summary(
-        episode_rows, events, source=source, motion_window=config.motion_window, ratio_eps=config.ratio_eps,
+        episode_rows,
+        events,
+        source=source,
+        motion_window=config.motion_window,
+        ratio_eps=config.ratio_eps,
     )
     merged_events = merge_motion_segments(events, merge_gap=config.phase_merge_gap)
-    merged_centered = build_motion_centered_table(episode_rows, merged_events, motion_window=config.motion_window)
+    merged_centered = build_motion_centered_table(
+        episode_rows, merged_events, motion_window=config.motion_window
+    )
     merged_phase = build_motion_phase_summary(
-        episode_rows, merged_events, source=source, motion_window=config.motion_window, ratio_eps=config.ratio_eps,
+        episode_rows,
+        merged_events,
+        source=source,
+        motion_window=config.motion_window,
+        ratio_eps=config.ratio_eps,
     )
     episode_summary = build_episode_summary(episode_rows)
     paths = {
@@ -784,8 +997,12 @@ def write_arm_motion_tables(
         "episode_summary_csv": str(out_prefix.with_suffix(".episode_summary.csv")),
         "arm_motion_centered_csv": str(out_prefix.with_suffix(".arm_motion_centered.csv")),
         "arm_phase_summary_csv": str(out_prefix.with_suffix(".arm_phase_summary.csv")),
-        "arm_merged_phase_centered_csv": str(out_prefix.with_suffix(".arm_merged_phase_centered.csv")),
-        "arm_merged_phase_summary_csv": str(out_prefix.with_suffix(".arm_merged_phase_summary.csv")),
+        "arm_merged_phase_centered_csv": str(
+            out_prefix.with_suffix(".arm_merged_phase_centered.csv")
+        ),
+        "arm_merged_phase_summary_csv": str(
+            out_prefix.with_suffix(".arm_merged_phase_summary.csv")
+        ),
         "window_arm_jsonl": str(out_prefix.with_suffix(".windows_arm.jsonl")),
         "meta_json": str(out_prefix.with_suffix(".arm_meta.json")),
     }
@@ -809,5 +1026,7 @@ def write_arm_motion_tables(
         "paths": paths,
     }
     Path(paths["meta_json"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(paths["meta_json"]).write_text(json.dumps(jsonable(summary), indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(paths["meta_json"]).write_text(
+        json.dumps(jsonable(summary), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return summary

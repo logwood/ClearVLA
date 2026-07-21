@@ -22,9 +22,9 @@ OUTPUT_DIR=$2
 PYTHON_BIN=${3:-python}
 
 case $VARIANT in
-  v76|v77|v78|v79|v80|v81|v82|v84) ;;
+  v76|v77|v78|v79|v80|v81|v82|v84|v88) ;;
   *)
-    echo "VARIANT must be v76, v77, v78, v79, v80, v81, v82, or v84" >&2
+    echo "VARIANT must be v76, v77, v78, v79, v80, v81, v82, v84, or v88" >&2
     exit 2
     ;;
 esac

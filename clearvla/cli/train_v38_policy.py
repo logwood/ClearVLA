@@ -19,7 +19,10 @@ from clearvla.experiments.classic_policy_lab.cli_common import (
     resolve_device,
 )
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
-from clearvla.experiments.dynamic_world_lab.conditioning import build_dense_conditioner, infer_dense_geometry
+from clearvla.experiments.dynamic_world_lab.conditioning import (
+    build_dense_conditioner,
+    infer_dense_geometry,
+)
 from clearvla.experiments.observed_state_lab.dataset import (
     CachedTokenPolicyWindowDataset,
     ObservedStateDatasetConfig,
@@ -27,7 +30,10 @@ from clearvla.experiments.observed_state_lab.dataset import (
     PolicyWindowDataset,
 )
 from clearvla.experiments.observed_state_lab.policy_v38 import V38PolicyConfig, V38PolicySystem
-from clearvla.experiments.observed_state_lab.policy_runtime_v38 import V38PolicyTrainerConfig, train_v38_policy
+from clearvla.experiments.observed_state_lab.policy_runtime_v38 import (
+    V38PolicyTrainerConfig,
+    train_v38_policy,
+)
 
 
 def _parse_offsets(text: str) -> tuple[int, ...]:
@@ -47,17 +53,33 @@ def _legacy_payload(path: Path | None) -> dict[str, Any] | None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train V38.6.2 action-centered controlled-residual latent dynamics temporal policy.")
+    parser = argparse.ArgumentParser(
+        description="Train V38.6.2 action-centered controlled-residual latent dynamics temporal policy."
+    )
     add_data_args(parser, default_resize=(336, 336))
-    parser.add_argument("--legacy-context-checkpoint", type=Path, default=None, help="Optional migration source for splits/normalizers only; not a model dependency.")
+    parser.add_argument(
+        "--legacy-context-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional migration source for splits/normalizers only; not a model dependency.",
+    )
     parser.add_argument("--normalizer", choices=["zscore", "limits", "identity"], default="zscore")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache")
+    parser.add_argument(
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
+    )
     parser.add_argument("--dinov2-model", default="facebook/dinov2-base")
     parser.add_argument("--dinov2-local-files-only", action="store_true")
     parser.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
-    parser.add_argument("--prefetch-dinov2-tokens", action=argparse.BooleanOptionalAction, default=True, help="For dinov2-cache mode, load current and compact future DINO tokens in DataLoader workers instead of the main training loop.")
+    parser.add_argument(
+        "--prefetch-dinov2-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For dinov2-cache mode, load current and compact future DINO tokens in DataLoader workers instead of the main training loop.",
+    )
     parser.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
 
     parser.add_argument("--world-horizon", type=int, default=48)
@@ -98,13 +120,17 @@ def parse_args() -> argparse.Namespace:
     defaults = V38PolicyTrainerConfig()
     for field in V38PolicyTrainerConfig.__dataclass_fields__:
         value = getattr(defaults, field)
-        parser.add_argument("--" + field.replace("_", "-"), dest=field, type=type(value), default=value)
+        parser.add_argument(
+            "--" + field.replace("_", "-"), dest=field, type=type(value), default=value
+        )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if args.torch_num_threads > 0:
         torch.set_num_threads(args.torch_num_threads)
     device = resolve_device(args.device)
@@ -128,14 +154,20 @@ def main() -> None:
         return_images=args.condition_mode != "dinov2-cache",
     )
     dataset_config.validate()
-    min_length = dataset_config.world_horizon + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets)) + 2
-    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = load_data(
-        args,
-        min_length=min_length,
-        normalizer_mode=(action_norm.mode if action_norm is not None else args.normalizer),
-        action_normalizer=action_norm,
-        state_normalizer=state_norm,
-        splits=legacy_splits,
+    min_length = (
+        dataset_config.world_horizon
+        + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets))
+        + 2
+    )
+    episodes, train_ids, val_ids, test_ids, action_norm, state_norm, image_store, skipped = (
+        load_data(
+            args,
+            min_length=min_length,
+            normalizer_mode=(action_norm.mode if action_norm is not None else args.normalizer),
+            action_normalizer=action_norm,
+            state_normalizer=state_norm,
+            splits=legacy_splits,
+        )
     )
     bases = {
         name: ObservedStateWindowDataset(
@@ -162,16 +194,36 @@ def main() -> None:
         device=device,
         dtype=dtype,
     )
-    use_token_prefetch = bool(args.prefetch_dinov2_tokens and args.condition_mode == "dinov2-cache" and hasattr(conditioner, "store"))
+    use_token_prefetch = bool(
+        args.prefetch_dinov2_tokens
+        and args.condition_mode == "dinov2-cache"
+        and hasattr(conditioner, "store")
+    )
     if use_token_prefetch:
         token_store = conditioner.store  # type: ignore[attr-defined]
-        train_dataset = CachedTokenPolicyWindowDataset(bases["train"], token_store=token_store, future_anchors=int(args.future_anchors))
-        val_dataset = CachedTokenPolicyWindowDataset(bases["val"], token_store=token_store, future_anchors=int(args.future_anchors))
+        train_dataset = CachedTokenPolicyWindowDataset(
+            bases["train"], token_store=token_store, future_anchors=int(args.future_anchors)
+        )
+        val_dataset = CachedTokenPolicyWindowDataset(
+            bases["val"], token_store=token_store, future_anchors=int(args.future_anchors)
+        )
     else:
         train_dataset = PolicyWindowDataset(bases["train"])
         val_dataset = PolicyWindowDataset(bases["val"])
-    train_loader = make_loader(train_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=True, device=device)
-    val_loader = make_loader(val_dataset, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
+    train_loader = make_loader(
+        train_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=True,
+        device=device,
+    )
+    val_loader = make_loader(
+        val_dataset,
+        batch_size=args.batch_size,
+        workers=args.num_workers,
+        shuffle=False,
+        device=device,
+    )
     if patches is None:
         probe_sample = bases["train"][0]
         latent_dim, patches = infer_dense_geometry(conditioner, probe_sample, camera_names=cameras)
@@ -223,11 +275,15 @@ def main() -> None:
         controlled_delta_dropout=args.controlled_delta_dropout,
     )
     system = V38PolicySystem(policy_config)
-    trainer = V38PolicyTrainerConfig(**{name: getattr(args, name) for name in V38PolicyTrainerConfig.__dataclass_fields__})
+    trainer = V38PolicyTrainerConfig(
+        **{name: getattr(args, name) for name in V38PolicyTrainerConfig.__dataclass_fields__}
+    )
     context = {
         "schema": "clearvla-v38-6-2-action-centered-controlled-residual-context-v1",
         "args": vars(args),
-        "legacy_context_checkpoint": None if args.legacy_context_checkpoint is None else str(args.legacy_context_checkpoint),
+        "legacy_context_checkpoint": None
+        if args.legacy_context_checkpoint is None
+        else str(args.legacy_context_checkpoint),
         "splits": {"train": train_ids, "val": val_ids, "test": test_ids},
         "dataset": asdict(dataset_config),
         "visual_geometry": visual_geometry,

@@ -38,13 +38,16 @@ def _grad_norm(parameters) -> float:
     return math.sqrt(total)
 
 
-def _scheduler(optimizer: torch.optim.Optimizer, *, total_steps: int, warmup_steps: int, min_lr_ratio: float):
+def _scheduler(
+    optimizer: torch.optim.Optimizer, *, total_steps: int, warmup_steps: int, min_lr_ratio: float
+):
     def scale(step: int) -> float:
         if warmup_steps > 0 and step < warmup_steps:
             return max((step + 1) / warmup_steps, 1e-4)
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         progress = min(max(progress, 0.0), 1.0)
         return min_lr_ratio + 0.5 * (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress))
+
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
 
 
@@ -81,9 +84,20 @@ def train_act(
     context: dict[str, Any],
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.lr, weight_decay=trainer.weight_decay)
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
-    lr_sched = _scheduler(optimizer, total_steps=trainer.epochs * steps_per_epoch, warmup_steps=trainer.warmup_steps, min_lr_ratio=trainer.min_lr_ratio)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=trainer.lr, weight_decay=trainer.weight_decay
+    )
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
+    lr_sched = _scheduler(
+        optimizer,
+        total_steps=trainer.epochs * steps_per_epoch,
+        warmup_steps=trainer.warmup_steps,
+        min_lr_ratio=trainer.min_lr_ratio,
+    )
     best_full = float("inf")
     best_arm_first = float("inf")
     history = []
@@ -104,12 +118,29 @@ def train_act(
             loss["loss"].backward()
             raw_grad = _grad_norm(model.parameters())
             clipped = float(torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.grad_clip))
-            optimizer.step(); lr_sched.step(); global_step += 1
-            rows.append({key: float(value.detach().cpu()) for key, value in loss.items()} | {"grad": raw_grad})
+            optimizer.step()
+            lr_sched.step()
+            global_step += 1
+            rows.append(
+                {key: float(value.detach().cpu()) for key, value in loss.items()}
+                | {"grad": raw_grad}
+            )
             if batch_index % trainer.log_every == 0:
-                mean = {key: float(np.mean([row[key] for row in rows[-trainer.log_every:]])) for key in rows[-1]}
-                print(f"[act] epoch={epoch:03d}/{trainer.epochs:03d} batch={batch_index:04d} loss={mean['loss']:.6f} l1={mean['l1']:.6f} kl={mean['kl']:.6f} grad={mean['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}", flush=True)
-        metrics = evaluate_act(model, val_loader, device=device, action_normalizer=action_normalizer, max_batches=trainer.max_val_batches)
+                mean = {
+                    key: float(np.mean([row[key] for row in rows[-trainer.log_every :]]))
+                    for key in rows[-1]
+                }
+                print(
+                    f"[act] epoch={epoch:03d}/{trainer.epochs:03d} batch={batch_index:04d} loss={mean['loss']:.6f} l1={mean['l1']:.6f} kl={mean['kl']:.6f} grad={mean['grad']:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",
+                    flush=True,
+                )
+        metrics = evaluate_act(
+            model,
+            val_loader,
+            device=device,
+            action_normalizer=action_normalizer,
+            max_batches=trainer.max_val_batches,
+        )
         record = {
             "epoch": epoch,
             "global_step": global_step,
@@ -118,16 +149,41 @@ def train_act(
             "val": metrics,
         }
         history.append(record)
-        print(f"[act] epoch={epoch:03d}/{trainer.epochs:03d} sec={record['seconds']:.2f} val_full={metrics['full_mse']:.6f} arm_first={metrics.get('arm_first_rmse', float('nan')):.6f} first4={metrics['first4_rmse']:.6f} prior={metrics['prior_full_mse']:.6f} replay={metrics['history_replay_full_mse']:.6f} l1={metrics['val_l1']:.6f} kl={metrics['val_kl']:.6f}", flush=True)
-        payload = {"schema": "clearvla-act-reference-checkpoint-v1", "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": lr_sched.state_dict(), "epoch": epoch, "global_step": global_step, "context": context, "action_normalizer": action_normalizer.to_dict(), "state_normalizer": state_normalizer.to_dict(), "history": history}
+        print(
+            f"[act] epoch={epoch:03d}/{trainer.epochs:03d} sec={record['seconds']:.2f} val_full={metrics['full_mse']:.6f} arm_first={metrics.get('arm_first_rmse', float('nan')):.6f} first4={metrics['first4_rmse']:.6f} prior={metrics['prior_full_mse']:.6f} replay={metrics['history_replay_full_mse']:.6f} l1={metrics['val_l1']:.6f} kl={metrics['val_kl']:.6f}",
+            flush=True,
+        )
+        payload = {
+            "schema": "clearvla-act-reference-checkpoint-v1",
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": lr_sched.state_dict(),
+            "epoch": epoch,
+            "global_step": global_step,
+            "context": context,
+            "action_normalizer": action_normalizer.to_dict(),
+            "state_normalizer": state_normalizer.to_dict(),
+            "history": history,
+        }
         _save(out_dir / "checkpoints/latest.pt", payload)
         if metrics["full_mse"] < best_full:
-            best_full = metrics["full_mse"]; _save(out_dir / "checkpoints/best_full.pt", payload)
+            best_full = metrics["full_mse"]
+            _save(out_dir / "checkpoints/best_full.pt", payload)
         arm_first = metrics.get("arm_first_rmse", metrics["first_rmse"])
         if arm_first < best_arm_first:
-            best_arm_first = arm_first; _save(out_dir / "checkpoints/best_arm_first.pt", payload)
-    summary = {"schema": "clearvla-act-reference-summary-v1", "parameter_count": model.parameter_count(), "best_full_mse": best_full, "best_arm_first_rmse": best_arm_first, "history": history, "context": context}
-    (out_dir / "act_reference_summary.json").write_text(json.dumps(_jsonable(summary), indent=2), encoding="utf-8")
+            best_arm_first = arm_first
+            _save(out_dir / "checkpoints/best_arm_first.pt", payload)
+    summary = {
+        "schema": "clearvla-act-reference-summary-v1",
+        "parameter_count": model.parameter_count(),
+        "best_full_mse": best_full,
+        "best_arm_first_rmse": best_arm_first,
+        "history": history,
+        "context": context,
+    }
+    (out_dir / "act_reference_summary.json").write_text(
+        json.dumps(_jsonable(summary), indent=2), encoding="utf-8"
+    )
     return summary
 
 
@@ -147,9 +203,24 @@ def train_dp(
     deterministic_sampling: bool = True,
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=trainer.lr, betas=(0.95, 0.999), eps=1e-8, weight_decay=trainer.weight_decay)
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
-    lr_sched = _scheduler(optimizer, total_steps=trainer.epochs * steps_per_epoch, warmup_steps=trainer.warmup_steps, min_lr_ratio=trainer.min_lr_ratio)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=trainer.lr,
+        betas=(0.95, 0.999),
+        eps=1e-8,
+        weight_decay=trainer.weight_decay,
+    )
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
+    lr_sched = _scheduler(
+        optimizer,
+        total_steps=trainer.epochs * steps_per_epoch,
+        warmup_steps=trainer.warmup_steps,
+        min_lr_ratio=trainer.min_lr_ratio,
+    )
     ema = EMAModel(model, decay=trainer.ema_decay) if use_ema else None
     best_full = float("inf")
     best_arm_first = float("inf")
@@ -170,28 +241,76 @@ def train_dp(
             loss.backward()
             raw_grad = _grad_norm(model.parameters())
             torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.grad_clip)
-            optimizer.step(); lr_sched.step(); global_step += 1
+            optimizer.step()
+            lr_sched.step()
+            global_step += 1
             if ema is not None:
                 ema.step(model)
             rows.append({"loss": float(loss.detach().cpu()), "grad": raw_grad})
             if batch_index % trainer.log_every == 0:
-                mean_loss = float(np.mean([row["loss"] for row in rows[-trainer.log_every:]]))
-                mean_grad = float(np.mean([row["grad"] for row in rows[-trainer.log_every:]]))
-                print(f"[dp] epoch={epoch:03d}/{trainer.epochs:03d} batch={batch_index:04d} noise_mse={mean_loss:.6f} grad={mean_grad:.3e} lr={optimizer.param_groups[0]['lr']:.3e}", flush=True)
+                mean_loss = float(np.mean([row["loss"] for row in rows[-trainer.log_every :]]))
+                mean_grad = float(np.mean([row["grad"] for row in rows[-trainer.log_every :]]))
+                print(
+                    f"[dp] epoch={epoch:03d}/{trainer.epochs:03d} batch={batch_index:04d} noise_mse={mean_loss:.6f} grad={mean_grad:.3e} lr={optimizer.param_groups[0]['lr']:.3e}",
+                    flush=True,
+                )
         eval_model = ema.averaged_model if ema is not None else model
-        metrics = evaluate_dp(eval_model, val_loader, device=device, action_normalizer=action_normalizer, inference_steps=inference_steps, max_batches=trainer.max_val_batches, deterministic=deterministic_sampling)
-        record = {"epoch": epoch, "global_step": global_step, "seconds": time.perf_counter() - start, "train": {"loss": float(np.mean([row["loss"] for row in rows])), "grad": float(np.mean([row["grad"] for row in rows]))}, "val": metrics}
+        metrics = evaluate_dp(
+            eval_model,
+            val_loader,
+            device=device,
+            action_normalizer=action_normalizer,
+            inference_steps=inference_steps,
+            max_batches=trainer.max_val_batches,
+            deterministic=deterministic_sampling,
+        )
+        record = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "seconds": time.perf_counter() - start,
+            "train": {
+                "loss": float(np.mean([row["loss"] for row in rows])),
+                "grad": float(np.mean([row["grad"] for row in rows])),
+            },
+            "val": metrics,
+        }
         history.append(record)
-        print(f"[dp] epoch={epoch:03d}/{trainer.epochs:03d} sec={record['seconds']:.2f} val_full={metrics['full_mse']:.6f} arm_first={metrics.get('arm_first_rmse', float('nan')):.6f} first4={metrics['first4_rmse']:.6f} prior={metrics['prior_full_mse']:.6f} replay={metrics['history_replay_full_mse']:.6f} denoise={metrics['val_denoise_loss']:.6f} sample_steps={inference_steps}", flush=True)
-        payload = {"schema": "clearvla-dp-reference-checkpoint-v1", "model": model.state_dict(), "ema_model": None if ema is None else ema.averaged_model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": lr_sched.state_dict(), "epoch": epoch, "global_step": global_step, "context": context, "action_normalizer": action_normalizer.to_dict(), "state_normalizer": state_normalizer.to_dict(), "history": history}
+        print(
+            f"[dp] epoch={epoch:03d}/{trainer.epochs:03d} sec={record['seconds']:.2f} val_full={metrics['full_mse']:.6f} arm_first={metrics.get('arm_first_rmse', float('nan')):.6f} first4={metrics['first4_rmse']:.6f} prior={metrics['prior_full_mse']:.6f} replay={metrics['history_replay_full_mse']:.6f} denoise={metrics['val_denoise_loss']:.6f} sample_steps={inference_steps}",
+            flush=True,
+        )
+        payload = {
+            "schema": "clearvla-dp-reference-checkpoint-v1",
+            "model": model.state_dict(),
+            "ema_model": None if ema is None else ema.averaged_model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": lr_sched.state_dict(),
+            "epoch": epoch,
+            "global_step": global_step,
+            "context": context,
+            "action_normalizer": action_normalizer.to_dict(),
+            "state_normalizer": state_normalizer.to_dict(),
+            "history": history,
+        }
         _save(out_dir / "checkpoints/latest.pt", payload)
         if metrics["full_mse"] < best_full:
-            best_full = metrics["full_mse"]; _save(out_dir / "checkpoints/best_full.pt", payload)
+            best_full = metrics["full_mse"]
+            _save(out_dir / "checkpoints/best_full.pt", payload)
         arm_first = metrics.get("arm_first_rmse", metrics["first_rmse"])
         if arm_first < best_arm_first:
-            best_arm_first = arm_first; _save(out_dir / "checkpoints/best_arm_first.pt", payload)
-    summary = {"schema": "clearvla-dp-reference-summary-v1", "parameter_count": model.parameter_count(), "best_full_mse": best_full, "best_arm_first_rmse": best_arm_first, "history": history, "context": context}
-    (out_dir / "dp_reference_summary.json").write_text(json.dumps(_jsonable(summary), indent=2), encoding="utf-8")
+            best_arm_first = arm_first
+            _save(out_dir / "checkpoints/best_arm_first.pt", payload)
+    summary = {
+        "schema": "clearvla-dp-reference-summary-v1",
+        "parameter_count": model.parameter_count(),
+        "best_full_mse": best_full,
+        "best_arm_first_rmse": best_arm_first,
+        "history": history,
+        "context": context,
+    }
+    (out_dir / "dp_reference_summary.json").write_text(
+        json.dumps(_jsonable(summary), indent=2), encoding="utf-8"
+    )
     return summary
 
 
@@ -226,8 +345,10 @@ def _rdt_scheduler(
     if scheduler == "constant":
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     if scheduler == "constant_with_warmup":
+
         def scale(step: int) -> float:
             return min((step + 1) / max(warmup_steps, 1), 1.0)
+
         return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
     if scheduler == "cosine":
         return _scheduler(
@@ -265,7 +386,11 @@ def train_rdt_small(
         eps=trainer.eps,
         weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     lr_sched = _rdt_scheduler(
         optimizer,
         scheduler=trainer.scheduler,
@@ -307,11 +432,13 @@ def train_rdt_small(
             loss.backward()
             raw_grad = _grad_norm(model.parameters())
             torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.grad_clip)
-            optimizer.step(); lr_sched.step(); global_step += 1
+            optimizer.step()
+            lr_sched.step()
+            global_step += 1
             rows.append({"loss": float(loss.detach().cpu()), "grad": raw_grad})
             if batch_index % trainer.log_every == 0:
-                mean_loss = float(np.mean([row["loss"] for row in rows[-trainer.log_every:]]))
-                mean_grad = float(np.mean([row["grad"] for row in rows[-trainer.log_every:]]))
+                mean_loss = float(np.mean([row["loss"] for row in rows[-trainer.log_every :]]))
+                mean_grad = float(np.mean([row["grad"] for row in rows[-trainer.log_every :]]))
                 print(
                     f"[rdt-small] epoch={epoch:03d}/{trainer.epochs:03d} "
                     f"batch={batch_index:04d} sample_mse={mean_loss:.6f} "
@@ -417,7 +544,11 @@ def train_rdt2_fm(
         eps=trainer.eps,
         weight_decay=trainer.weight_decay,
     )
-    steps_per_epoch = min(len(train_loader), trainer.max_train_batches) if trainer.max_train_batches else len(train_loader)
+    steps_per_epoch = (
+        min(len(train_loader), trainer.max_train_batches)
+        if trainer.max_train_batches
+        else len(train_loader)
+    )
     lr_sched = _rdt_scheduler(
         optimizer,
         scheduler=trainer.scheduler,
@@ -449,7 +580,9 @@ def train_rdt2_fm(
                     [instruction] * state.shape[0],
                     sample_keys=sample_keys,
                     image_ablation="normal",
-                    camera_names=tuple(getattr(train_loader.dataset, "camera_names", ("top", "wrist"))),
+                    camera_names=tuple(
+                        getattr(train_loader.dataset, "camera_names", ("top", "wrist"))
+                    ),
                 )
                 condition = condition.to(device=device, dtype=model_dtype)
             optimizer.zero_grad(set_to_none=True)
@@ -463,11 +596,13 @@ def train_rdt2_fm(
             loss.backward()
             raw_grad = _grad_norm(model.parameters())
             torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.grad_clip)
-            optimizer.step(); lr_sched.step(); global_step += 1
+            optimizer.step()
+            lr_sched.step()
+            global_step += 1
             rows.append({"loss": float(loss.detach().cpu()), "grad": raw_grad})
             if batch_index % trainer.log_every == 0:
-                mean_loss = float(np.mean([row["loss"] for row in rows[-trainer.log_every:]]))
-                mean_grad = float(np.mean([row["grad"] for row in rows[-trainer.log_every:]]))
+                mean_loss = float(np.mean([row["loss"] for row in rows[-trainer.log_every :]]))
+                mean_grad = float(np.mean([row["grad"] for row in rows[-trainer.log_every :]]))
                 print(
                     f"[rdt2-fm] epoch={epoch:03d}/{trainer.epochs:03d} "
                     f"batch={batch_index:04d} flow_mse={mean_loss:.6f} "

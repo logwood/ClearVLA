@@ -8,6 +8,7 @@ from PIL import Image
 
 try:
     import cv2
+
     cv2.setNumThreads(0)
 except Exception:  # optional dependency
     cv2 = None

@@ -8,8 +8,14 @@ import json
 import torch
 
 from clearvla.cli.train_rdt2_grounded_motor import PRESETS
-from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import RDT2FMReferenceConfig, estimate_rdt2_fm_parameter_count
-from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor import GroundedMotorRDT2FM, GroundedMotorRDT2FMConfig
+from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import (
+    RDT2FMReferenceConfig,
+    estimate_rdt2_fm_parameter_count,
+)
+from clearvla.experiments.classic_policy_lab.rdt2_grounded_motor import (
+    GroundedMotorRDT2FM,
+    GroundedMotorRDT2FMConfig,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,7 +68,8 @@ def main() -> None:
         "model_size": args.model_size,
         "parameters": model.parameter_count(),
         "reference_same_width_depth14_parameters": estimate_rdt2_fm_parameter_count(reference),
-        "ratio_vs_reference_same_width_depth14": model.parameter_count() / estimate_rdt2_fm_parameter_count(reference),
+        "ratio_vs_reference_same_width_depth14": model.parameter_count()
+        / estimate_rdt2_fm_parameter_count(reference),
         "config": model.config_dict(),
     }
     print(json.dumps(payload, indent=2))

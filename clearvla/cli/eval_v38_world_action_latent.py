@@ -15,10 +15,20 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from clearvla.experiments.classic_policy_lab.cli_common import add_data_args, load_data, make_loader, preprocessing_from_args, resolve_device
+from clearvla.experiments.classic_policy_lab.cli_common import (
+    add_data_args,
+    load_data,
+    make_loader,
+    preprocessing_from_args,
+    resolve_device,
+)
 from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
 from clearvla.experiments.dynamic_world_lab.conditioning import build_dense_conditioner
-from clearvla.experiments.observed_state_lab.dataset import ObservedStateDatasetConfig, ObservedStateWindowDataset, PolicyWindowDataset
+from clearvla.experiments.observed_state_lab.dataset import (
+    ObservedStateDatasetConfig,
+    ObservedStateWindowDataset,
+    PolicyWindowDataset,
+)
 from clearvla.experiments.observed_state_lab.policy_v38 import V38PolicyConfig, V38PolicySystem
 from clearvla.experiments.observed_state_lab.policy_runtime_v38 import (
     V38PolicyTrainerConfig,
@@ -31,11 +41,17 @@ from clearvla.experiments.observed_state_lab.world_runtime import autocast_conte
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate V38.6.2 action-centered controlled-residual rollout latent dynamics diagnostics.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate V38.6.2 action-centered controlled-residual rollout latent dynamics diagnostics."
+    )
     add_data_args(parser, default_resize=(336, 336))
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")
-    parser.add_argument("--condition-mode", choices=["dinov2", "dinov2-cache", "debug-dense"], default="dinov2-cache")
+    parser.add_argument(
+        "--condition-mode",
+        choices=["dinov2", "dinov2-cache", "debug-dense"],
+        default="dinov2-cache",
+    )
     parser.add_argument("--dinov2-model", default="facebook/dinov2-base")
     parser.add_argument("--dinov2-local-files-only", action="store_true")
     parser.add_argument("--dinov2-token-cache-dir", type=Path, default=None)
@@ -70,8 +86,15 @@ def _run(
         perm = torch.arange(b - 1, -1, -1, device=local["visual"].device)
         local["visual"] = local["visual"][perm]
     return system.flow_training_forward(
-        local["visual"], local["history_state"], local["executed_action_history"], local["state"], local["policy_action"],
-        action_state=local["action_state"], rollout_target_pack=fixed_rollout_pack, proposal_dropout=0.0, make_counterfactuals=False,
+        local["visual"],
+        local["history_state"],
+        local["executed_action_history"],
+        local["state"],
+        local["policy_action"],
+        action_state=local["action_state"],
+        rollout_target_pack=fixed_rollout_pack,
+        proposal_dropout=0.0,
+        make_counterfactuals=False,
     )
 
 
@@ -84,27 +107,58 @@ def main() -> None:
     if payload.get("schema") != "clearvla-v38-policy-checkpoint-v1":
         raise ValueError("--checkpoint must be a V38/V38.5/V38.6/V38.6.2 policy checkpoint")
     context = payload["context"]
-    dataset_config = ObservedStateDatasetConfig(**{**context["dataset"], "return_images": args.condition_mode != "dinov2-cache"})
+    dataset_config = ObservedStateDatasetConfig(
+        **{**context["dataset"], "return_images": args.condition_mode != "dinov2-cache"}
+    )
     geom = context.get("visual_geometry")
     if geom is None:
         raise ValueError("checkpoint context is missing visual geometry")
     action_norm = ArrayNormalizer.from_dict(payload["action_normalizer"])
     state_norm = ArrayNormalizer.from_dict(payload["state_normalizer"])
-    min_length = dataset_config.world_horizon + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets)) + 2
+    min_length = (
+        dataset_config.world_horizon
+        + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets))
+        + 2
+    )
     episodes, train_ids, val_ids, test_ids, _, _, image_store, skipped = load_data(
-        args, min_length=min_length, normalizer_mode=action_norm.mode,
-        action_normalizer=action_norm, state_normalizer=state_norm, splits=context["splits"],
+        args,
+        min_length=min_length,
+        normalizer_mode=action_norm.mode,
+        action_normalizer=action_norm,
+        state_normalizer=state_norm,
+        splits=context["splits"],
     )
     ids = {"train": train_ids, "val": val_ids, "test": test_ids}[args.split]
-    ds = PolicyWindowDataset(ObservedStateWindowDataset(episodes, ids, image_store=image_store, camera_names=cameras, state_normalizer=state_norm, action_normalizer=action_norm, config=dataset_config))
-    loader = make_loader(ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device)
-    conditioner, latent_dim, patches = build_dense_conditioner(
-        mode=args.condition_mode, episodes=episodes, camera_names=cameras, preprocessing=preprocessing_from_args(args),
-        dinov2_model=args.dinov2_model, dinov2_local_files_only=args.dinov2_local_files_only,
-        dinov2_token_cache_dir=args.dinov2_token_cache_dir, debug_token_dim=int(geom["latent_dim"]),
-        debug_patches_per_camera=int(geom["patches_per_camera"]), device=device, dtype=dtype,
+    ds = PolicyWindowDataset(
+        ObservedStateWindowDataset(
+            episodes,
+            ids,
+            image_store=image_store,
+            camera_names=cameras,
+            state_normalizer=state_norm,
+            action_normalizer=action_norm,
+            config=dataset_config,
+        )
     )
-    if latent_dim != int(geom["latent_dim"]) or (patches is not None and patches != int(geom["patches_per_camera"])):
+    loader = make_loader(
+        ds, batch_size=args.batch_size, workers=args.num_workers, shuffle=False, device=device
+    )
+    conditioner, latent_dim, patches = build_dense_conditioner(
+        mode=args.condition_mode,
+        episodes=episodes,
+        camera_names=cameras,
+        preprocessing=preprocessing_from_args(args),
+        dinov2_model=args.dinov2_model,
+        dinov2_local_files_only=args.dinov2_local_files_only,
+        dinov2_token_cache_dir=args.dinov2_token_cache_dir,
+        debug_token_dim=int(geom["latent_dim"]),
+        debug_patches_per_camera=int(geom["patches_per_camera"]),
+        device=device,
+        dtype=dtype,
+    )
+    if latent_dim != int(geom["latent_dim"]) or (
+        patches is not None and patches != int(geom["patches_per_camera"])
+    ):
         raise ValueError("conditioner geometry does not match checkpoint")
     system = V38PolicySystem(V38PolicyConfig(**payload["policy_config"]))
     system.load_state_dict(payload["model"], strict=True)
@@ -115,7 +169,15 @@ def main() -> None:
     for batch_idx, batch in enumerate(loader, start=1):
         if args.max_batches and batch_idx > args.max_batches:
             break
-        sample = prepare_v38_policy_sample(batch, conditioner=conditioner, system=system, camera_names=cameras, device=device, dtype=dtype, include_target_visual=True)
+        sample = prepare_v38_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=cameras,
+            device=device,
+            dtype=dtype,
+            include_target_visual=True,
+        )
         with autocast_context(device, dtype):
             fixed_pack = system.build_rollout_target_pack(sample["visual"], sample["target_visual"])
             for mode in modes:
@@ -124,13 +186,38 @@ def main() -> None:
                 diag = rollout_diagnostics(out)
                 row = {
                     "rollout_dynamics": float(rollout_dynamics_loss(out).detach().float().cpu()),
-                    "rollout_contrast": float(rollout_contrast_loss(out, margin=float(trainer.rollout_contrast_margin)).detach().float().cpu()),
-                    "rollout_mse": float(torch.mean((out["rollout_effect_pred"].float() - out["rollout_effect_target"].float()) ** 2).detach().cpu()),
+                    "rollout_contrast": float(
+                        rollout_contrast_loss(out, margin=float(trainer.rollout_contrast_margin))
+                        .detach()
+                        .float()
+                        .cpu()
+                    ),
+                    "rollout_mse": float(
+                        torch.mean(
+                            (
+                                out["rollout_effect_pred"].float()
+                                - out["rollout_effect_target"].float()
+                            )
+                            ** 2
+                        )
+                        .detach()
+                        .cpu()
+                    ),
                     "gate_self": float(out["gate_self"].detach().float().cpu()),
                     "gate_visual": float(out["gate_visual"].detach().float().cpu()),
-                    "gate_rollout": float(out.get("gate_rollout", torch.zeros((), device=device)).detach().float().cpu()),
+                    "gate_rollout": float(
+                        out.get("gate_rollout", torch.zeros((), device=device))
+                        .detach()
+                        .float()
+                        .cpu()
+                    ),
                     "gate_ffn": float(out["gate_ffn"].detach().float().cpu()),
-                    "mod_content_to_time": float(out.get("mod_content_to_time", torch.zeros((), device=device)).detach().float().cpu()),
+                    "mod_content_to_time": float(
+                        out.get("mod_content_to_time", torch.zeros((), device=device))
+                        .detach()
+                        .float()
+                        .cpu()
+                    ),
                 }
                 row.update({k: float(v.detach().float().cpu()) for k, v in diag.items()})
                 rows[mode].append(row)
@@ -139,9 +226,16 @@ def main() -> None:
         base = metrics["normal"]
         metrics["deltas_vs_normal"] = {
             mode: {k: float(v - base[k]) for k, v in vals.items() if k in base}
-            for mode, vals in metrics.items() if mode != "normal"
+            for mode, vals in metrics.items()
+            if mode != "normal"
         }
-    out = {"schema": "clearvla-v38-6-2-action-centered-residual-diagnostics-v1", "split": args.split, "checkpoint": str(args.checkpoint), "metrics": metrics, "skipped": skipped}
+    out = {
+        "schema": "clearvla-v38-6-2-action-centered-residual-diagnostics-v1",
+        "split": args.split,
+        "checkpoint": str(args.checkpoint),
+        "metrics": metrics,
+        "skipped": skipped,
+    }
     print(json.dumps(jsonable(out), indent=2), flush=True)
     if args.out_json is not None:
         args.out_json.parent.mkdir(parents=True, exist_ok=True)

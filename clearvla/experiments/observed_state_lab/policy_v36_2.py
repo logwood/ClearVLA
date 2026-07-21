@@ -37,7 +37,9 @@ class DiTPlannerBlock(nn.Module):
         super().__init__()
         h = config.hidden_size
         self.n1 = nn.LayerNorm(h, elementwise_affine=False)
-        self.self_attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.self_attn = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n2 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, config.ffn_expansion)
         self.drop = nn.Dropout(config.dropout)
@@ -50,7 +52,9 @@ class DiTPlannerBlock(nn.Module):
         return x * (1 + scale[:, None]) + shift[:, None]
 
     def forward(self, x: Tensor, time: Tensor) -> Tensor:
-        attn_shift, attn_scale, attn_gate, ffn_shift, ffn_scale, ffn_gate = self.mod(time).chunk(6, dim=-1)
+        attn_shift, attn_scale, attn_gate, ffn_shift, ffn_scale, ffn_gate = self.mod(time).chunk(
+            6, dim=-1
+        )
         value = self.n1(x)
         query = self.modulate(value, attn_shift, attn_scale)
         update, _ = self.self_attn(query, query, value, need_weights=False)
@@ -79,7 +83,11 @@ class PolicyLatentDiTPlannerV362(nn.Module):
         self.horizon_query = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
         self.event_query = nn.Parameter(torch.randn(1, config.event_tokens, h) * 0.02)
         self.event_type = nn.Parameter(torch.randn(1, config.event_tokens, h) * 0.02)
-        self.register_buffer("horizon_position", sinusoidal_positions(range(1, config.action_horizon + 1), h)[None], persistent=True)
+        self.register_buffer(
+            "horizon_position",
+            sinusoidal_positions(range(1, config.action_horizon + 1), h)[None],
+            persistent=True,
+        )
         self.time = TimeEmbedding(h)
         self.blocks = nn.ModuleList([DiTPlannerBlock(config) for _ in range(config.depth)])
         self.event_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 3))
@@ -100,15 +108,24 @@ class PolicyLatentDiTPlannerV362(nn.Module):
         world_tokens = self.world_proj(world) + self.world_type
         state_token = self.state_proj(state)[:, None] + self.state_type
         executed = self.executed_proj(executed_history) + self.executed_type
-        proposal = self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        proposal = (
+            self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        )
         role = self.role(batch, device=noisy_physical.device, dtype=noisy_physical.dtype)
-        horizon = self.horizon_query.expand(batch, -1, -1) + hpos + role + self.noisy_physical_lift(noisy_physical)
+        horizon = (
+            self.horizon_query.expand(batch, -1, -1)
+            + hpos
+            + role
+            + self.noisy_physical_lift(noisy_physical)
+        )
         event = self.event_query.expand(batch, -1, -1) + self.event_type
         prefix_len = 1 + world_tokens.shape[1] + 1 + executed.shape[1] + proposal.shape[1]
         action_slice = slice(prefix_len, prefix_len + self.config.action_horizon)
         event_start = prefix_len + self.config.action_horizon
         event_slice = slice(event_start, event_start + self.config.event_tokens)
-        tokens = torch.cat([task, world_tokens, state_token, executed, proposal, horizon, event], dim=1)
+        tokens = torch.cat(
+            [task, world_tokens, state_token, executed, proposal, horizon, event], dim=1
+        )
         return tokens, action_slice, event_slice
 
     def forward(
@@ -122,8 +139,12 @@ class PolicyLatentDiTPlannerV362(nn.Module):
         proposal_keep: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if proposal_keep is None:
-            proposal_keep = torch.ones(noisy_physical.shape[0], device=noisy_physical.device, dtype=noisy_physical.dtype)
-        tokens, action_slice, event_slice = self._tokens(noisy_physical, world, state, executed_history, proposal_tokens, proposal_keep)
+            proposal_keep = torch.ones(
+                noisy_physical.shape[0], device=noisy_physical.device, dtype=noisy_physical.dtype
+            )
+        tokens, action_slice, event_slice = self._tokens(
+            noisy_physical, world, state, executed_history, proposal_tokens, proposal_keep
+        )
         time_emb = self.time(time.to(dtype=tokens.dtype))
         for block in self.blocks:
             tokens = block(tokens, time_emb)
@@ -143,10 +164,14 @@ class ActionExpertBlock(nn.Module):
         super().__init__()
         h = config.hidden_size
         self.n1 = nn.LayerNorm(h, elementwise_affine=False)
-        self.self_attn = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.self_attn = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n2 = nn.LayerNorm(h, elementwise_affine=False)
         self.cn = nn.LayerNorm(h)
-        self.cross = nn.MultiheadAttention(h, config.num_heads, batch_first=True, dropout=config.dropout)
+        self.cross = nn.MultiheadAttention(
+            h, config.num_heads, batch_first=True, dropout=config.dropout
+        )
         self.n3 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, config.ffn_expansion)
         self.drop = nn.Dropout(config.dropout)
@@ -192,9 +217,15 @@ class PlannerConditionedPhysicalActionExpert(nn.Module):
         self.executed_type = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
         self.proposal_type = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
         self.planner_memory_type = nn.Parameter(torch.randn(1, 1, h) * 0.02)
-        self.register_buffer("action_position", sinusoidal_positions(range(1, config.action_horizon + 1), h)[None], persistent=True)
+        self.register_buffer(
+            "action_position",
+            sinusoidal_positions(range(1, config.action_horizon + 1), h)[None],
+            persistent=True,
+        )
         self.time = TimeEmbedding(h)
-        self.blocks = nn.ModuleList([ActionExpertBlock(config) for _ in range(config.action_decoder_depth)])
+        self.blocks = nn.ModuleList(
+            [ActionExpertBlock(config) for _ in range(config.action_decoder_depth)]
+        )
         self.out = PhysicalVelocityHead(config)
 
     def memory(
@@ -209,7 +240,9 @@ class PlannerConditionedPhysicalActionExpert(nn.Module):
         world_tokens = self.world_proj(world) + self.world_type
         state_token = self.state_proj(state)[:, None] + self.state_type
         executed = self.executed_proj(executed_history) + self.executed_type
-        proposal = self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        proposal = (
+            self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        )
         task = self.task_token.expand(world.shape[0], -1, -1)
         planner = planner_tokens + self.planner_memory_type
         return torch.cat([task, world_tokens, state_token, executed, proposal, planner], dim=1)
@@ -229,8 +262,14 @@ class PlannerConditionedPhysicalActionExpert(nn.Module):
         batch = noisy_physical.shape[0]
         position = self.action_position.to(device=noisy_physical.device, dtype=noisy_physical.dtype)
         role = self.role(batch, device=noisy_physical.device, dtype=noisy_physical.dtype)
-        x = self.noisy_physical_lift(noisy_physical) + self.planner_action_proj(planner_action_tokens) + role
-        memory = self.memory(world, state, executed_history, proposal_tokens, proposal_keep, planner_tokens)
+        x = (
+            self.noisy_physical_lift(noisy_physical)
+            + self.planner_action_proj(planner_action_tokens)
+            + role
+        )
+        memory = self.memory(
+            world, state, executed_history, proposal_tokens, proposal_keep, planner_tokens
+        )
         t = self.time(time.to(dtype=x.dtype))
         for block in self.blocks:
             x = block(x, memory, t, position)
@@ -252,8 +291,16 @@ class V362PolicySystem(nn.Module):
         self.world_encoder.eval()
         self.codec = PhysicalActionCodec(policy_config)
         self.proposal = RejectableHistoryProposal(policy_config)
-        self.planner = PolicyLatentDiTPlannerV362(policy_config, world_hidden=world_config.hidden_size, world_tokens=world_config.world_tokens)
-        self.decoder = PlannerConditionedPhysicalActionExpert(policy_config, world_hidden=world_config.hidden_size, world_tokens=world_config.world_tokens)
+        self.planner = PolicyLatentDiTPlannerV362(
+            policy_config,
+            world_hidden=world_config.hidden_size,
+            world_tokens=world_config.world_tokens,
+        )
+        self.decoder = PlannerConditionedPhysicalActionExpert(
+            policy_config,
+            world_hidden=world_config.hidden_size,
+            world_tokens=world_config.world_tokens,
+        )
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -261,7 +308,9 @@ class V362PolicySystem(nn.Module):
         return self
 
     @torch.no_grad()
-    def encode_world(self, visual: Tensor, state_history: Tensor, executed_history: Tensor) -> Tensor:
+    def encode_world(
+        self, visual: Tensor, state_history: Tensor, executed_history: Tensor
+    ) -> Tensor:
         return self.world_encoder(visual.float(), state_history.float(), executed_history.float())
 
     def _policy_forward(
@@ -274,7 +323,9 @@ class V362PolicySystem(nn.Module):
         proposal_tokens: Tensor,
         proposal_keep: Tensor,
     ) -> dict[str, Tensor]:
-        planner = self.planner(noisy_physical, time, world, state, executed_history, proposal_tokens, proposal_keep)
+        planner = self.planner(
+            noisy_physical, time, world, state, executed_history, proposal_tokens, proposal_keep
+        )
         pred_physical_velocity = self.decoder(
             noisy_physical,
             time,
@@ -302,14 +353,28 @@ class V362PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         target_physical = self.codec.encode(target_action, state)
-        noise = self.codec.sample_noise(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
-        t = torch.rand(target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype)
+        noise = self.codec.sample_noise(
+            target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype
+        )
+        t = torch.rand(
+            target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype
+        )
         noisy_physical = (1 - t[:, None, None]) * target_physical + t[:, None, None] * noise
         target_physical_velocity = noise - target_physical
-        drop = self.policy_config.proposal_dropout if proposal_dropout is None else float(proposal_dropout)
-        keep = (torch.rand(target_physical.shape[0], device=target_physical.device) >= drop).to(target_physical.dtype)
-        policy = self._policy_forward(noisy_physical, t, world, state, executed_history, proposal["tokens"].detach(), keep)
-        clean_physical_estimate = noisy_physical - t[:, None, None] * policy["pred_physical_velocity"]
+        drop = (
+            self.policy_config.proposal_dropout
+            if proposal_dropout is None
+            else float(proposal_dropout)
+        )
+        keep = (torch.rand(target_physical.shape[0], device=target_physical.device) >= drop).to(
+            target_physical.dtype
+        )
+        policy = self._policy_forward(
+            noisy_physical, t, world, state, executed_history, proposal["tokens"].detach(), keep
+        )
+        clean_physical_estimate = (
+            noisy_physical - t[:, None, None] * policy["pred_physical_velocity"]
+        )
         decoded_action = self.codec.decode(clean_physical_estimate, state)
         return {
             "pred_physical_velocity": policy["pred_physical_velocity"],
@@ -346,20 +411,42 @@ class V362PolicySystem(nn.Module):
         else:
             x = noise.clone()
             if x.shape[-1] == self.policy_config.action_dim:
-                x = self.codec.encode(x.to(device=visual.device, dtype=visual.dtype), state.to(device=visual.device, dtype=visual.dtype))
+                x = self.codec.encode(
+                    x.to(device=visual.device, dtype=visual.dtype),
+                    state.to(device=visual.device, dtype=visual.dtype),
+                )
             elif x.shape[-1] != self.policy_config.physical_action_dim:
                 raise ValueError("noise must have last dim action_dim or physical_action_dim")
-        keep = torch.full((visual.shape[0],), 1.0 if use_proposal else 0.0, device=visual.device, dtype=visual.dtype)
+        keep = torch.full(
+            (visual.shape[0],),
+            1.0 if use_proposal else 0.0,
+            device=visual.device,
+            dtype=visual.dtype,
+        )
         last: dict[str, Tensor] | None = None
         for index in range(steps, 0, -1):
-            t = torch.full((visual.shape[0],), float(index) / float(steps), device=visual.device, dtype=visual.dtype)
-            last = self._policy_forward(x, t, world, state, executed_history, proposal["tokens"], keep)
+            t = torch.full(
+                (visual.shape[0],),
+                float(index) / float(steps),
+                device=visual.device,
+                dtype=visual.dtype,
+            )
+            last = self._policy_forward(
+                x, t, world, state, executed_history, proposal["tokens"], keep
+            )
             x = x - last["pred_physical_velocity"] / float(steps)
         action = self.codec.decode(x, state)
         if return_event_logits:
             zero_t = torch.zeros((visual.shape[0],), device=visual.device, dtype=visual.dtype)
-            event = self._policy_forward(x, zero_t, world, state, executed_history, proposal["tokens"], keep)
-            return {"action": action, "physical_action": x, "event_logits": event["event_logits"], "motion_logits": event["motion_logits"]}
+            event = self._policy_forward(
+                x, zero_t, world, state, executed_history, proposal["tokens"], keep
+            )
+            return {
+                "action": action,
+                "physical_action": x,
+                "event_logits": event["event_logits"],
+                "motion_logits": event["motion_logits"],
+            }
         return action
 
     def parameter_report(self) -> dict[str, int]:

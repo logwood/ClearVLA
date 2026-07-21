@@ -31,23 +31,35 @@ class RDT2ConditionBatch:
         if (self.kv_cache is None) == (self.dense_tokens is None):
             raise ValueError("exactly one of kv_cache or dense_tokens must be supplied")
         if self.attention_mask.dim() != 2:
-            raise ValueError(f"attention_mask must be [B,L], got {tuple(self.attention_mask.shape)}")
+            raise ValueError(
+                f"attention_mask must be [B,L], got {tuple(self.attention_mask.shape)}"
+            )
         token_len = self.attention_mask.shape[1]
-        if self.dense_tokens is not None and self.dense_tokens.shape[:2] != self.attention_mask.shape:
+        if (
+            self.dense_tokens is not None
+            and self.dense_tokens.shape[:2] != self.attention_mask.shape
+        ):
             raise ValueError("dense token and mask lengths differ")
         if self.kv_cache is not None:
             for layer, (key, value) in enumerate(self.kv_cache):
                 if key.shape != value.shape or key.dim() != 4:
-                    raise ValueError(f"layer {layer}: KV tensors must match and have shape [B,Hkv,L,Dh]")
+                    raise ValueError(
+                        f"layer {layer}: KV tensors must match and have shape [B,Hkv,L,Dh]"
+                    )
                 if key.shape[0] != self.attention_mask.shape[0] or key.shape[2] != token_len:
                     raise ValueError(f"layer {layer}: KV cache is incompatible with attention mask")
 
     def to(self, *, device: torch.device, dtype: torch.dtype) -> "RDT2ConditionBatch":
         mask = self.attention_mask.to(device=device, dtype=torch.bool)
-        dense = None if self.dense_tokens is None else self.dense_tokens.to(device=device, dtype=dtype)
+        dense = (
+            None if self.dense_tokens is None else self.dense_tokens.to(device=device, dtype=dtype)
+        )
         kv = None
         if self.kv_cache is not None:
-            kv = [(key.to(device=device, dtype=dtype), value.to(device=device, dtype=dtype)) for key, value in self.kv_cache]
+            kv = [
+                (key.to(device=device, dtype=dtype), value.to(device=device, dtype=dtype))
+                for key, value in self.kv_cache
+            ]
         out = RDT2ConditionBatch(attention_mask=mask, kv_cache=kv, dense_tokens=dense)
         out.validate()
         return out
@@ -71,7 +83,9 @@ def _camera_keep_index(camera_names: Sequence[str] | None, target: str, cameras:
         return list(camera_names).index(target)
     fallback = {"top": 0, "wrist": 1}[target]
     if fallback >= cameras:
-        raise ValueError(f"cannot apply {target}-only ablation with cameras={cameras}, names={camera_names}")
+        raise ValueError(
+            f"cannot apply {target}-only ablation with cameras={cameras}, names={camera_names}"
+        )
     return fallback
 
 
@@ -160,7 +174,9 @@ class NullKVConditioner(nn.Module):
         batch = images.shape[0]
         device = images.device
         dtype = images.dtype if images.is_floating_point() else torch.float32
-        base = torch.zeros((batch, self.num_kv_heads, self.tokens, self.head_dim), device=device, dtype=dtype)
+        base = torch.zeros(
+            (batch, self.num_kv_heads, self.tokens, self.head_dim), device=device, dtype=dtype
+        )
         kv = [(base.clone(), base.clone()) for _ in range(self.depth)]
         mask = torch.ones((batch, self.tokens), dtype=torch.bool, device=device)
         out = RDT2ConditionBatch(attention_mask=mask, kv_cache=kv)
@@ -177,11 +193,21 @@ class DebugDenseConditioner(nn.Module):
         self.tokens_per_camera = int(tokens_per_camera)
 
     @torch.no_grad()
-    def encode(self, images: Tensor, instructions: Sequence[str] | None = None, *, sample_keys: Tensor | None = None, image_ablation: str = "normal", camera_names: Sequence[str] | None = None) -> RDT2ConditionBatch:
+    def encode(
+        self,
+        images: Tensor,
+        instructions: Sequence[str] | None = None,
+        *,
+        sample_keys: Tensor | None = None,
+        image_ablation: str = "normal",
+        camera_names: Sequence[str] | None = None,
+    ) -> RDT2ConditionBatch:
         images = apply_image_ablation(images, image_ablation, camera_names=camera_names)
         batch, cameras = images.shape[:2]
         pooled = images.float().mean(dim=(-1, -2, -3), keepdim=False)  # [B,Cam]
-        tokens = pooled[:, :, None, None].expand(batch, cameras, self.tokens_per_camera, self.token_dim)
+        tokens = pooled[:, :, None, None].expand(
+            batch, cameras, self.tokens_per_camera, self.token_dim
+        )
         tokens = tokens.reshape(batch, cameras * self.tokens_per_camera, self.token_dim)
         mask = torch.ones(tokens.shape[:2], dtype=torch.bool, device=tokens.device)
         out = RDT2ConditionBatch(attention_mask=mask, dense_tokens=tokens)
@@ -200,14 +226,24 @@ class DebugKVConditioner(nn.Module):
         self.tokens = int(tokens)
 
     @torch.no_grad()
-    def encode(self, images: Tensor, instructions: Sequence[str] | None = None, *, sample_keys: Tensor | None = None, image_ablation: str = "normal", camera_names: Sequence[str] | None = None) -> RDT2ConditionBatch:
+    def encode(
+        self,
+        images: Tensor,
+        instructions: Sequence[str] | None = None,
+        *,
+        sample_keys: Tensor | None = None,
+        image_ablation: str = "normal",
+        camera_names: Sequence[str] | None = None,
+    ) -> RDT2ConditionBatch:
         images = apply_image_ablation(images, image_ablation, camera_names=camera_names)
         batch = images.shape[0]
         device = images.device
         dtype = images.dtype if images.is_floating_point() else torch.float32
         # Make the token value depend weakly on the observation so the debug path is not silently constant.
         scalar = images.float().mean(dim=(1, 2, 3, 4)).to(device=device, dtype=dtype)
-        base = scalar[:, None, None, None].expand(batch, self.num_kv_heads, self.tokens, self.head_dim)
+        base = scalar[:, None, None, None].expand(
+            batch, self.num_kv_heads, self.tokens, self.head_dim
+        )
         kv = [(base.clone(), base.clone()) for _ in range(self.depth)]
         mask = torch.ones((batch, self.tokens), dtype=torch.bool, device=device)
         out = RDT2ConditionBatch(attention_mask=mask, kv_cache=kv)
@@ -223,14 +259,24 @@ class DinoV2DenseConditioner(nn.Module):
     ``lang_adaptor`` when the DINO token width is not 1024.
     """
 
-    def __init__(self, model_name_or_path: str = "facebook/dinov2-large", *, local_files_only: bool = False, drop_cls_token: bool = True) -> None:
+    def __init__(
+        self,
+        model_name_or_path: str = "facebook/dinov2-large",
+        *,
+        local_files_only: bool = False,
+        drop_cls_token: bool = True,
+    ) -> None:
         super().__init__()
         try:
             from transformers import AutoImageProcessor, AutoModel
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("DINOv2 plugin requires transformers") from exc
-        self.processor = AutoImageProcessor.from_pretrained(model_name_or_path, local_files_only=local_files_only)
-        self.encoder = AutoModel.from_pretrained(model_name_or_path, local_files_only=local_files_only)
+        self.processor = AutoImageProcessor.from_pretrained(
+            model_name_or_path, local_files_only=local_files_only
+        )
+        self.encoder = AutoModel.from_pretrained(
+            model_name_or_path, local_files_only=local_files_only
+        )
         self.encoder.requires_grad_(False).eval()
         self.drop_cls_token = bool(drop_cls_token)
         self.token_dim = int(self.encoder.config.hidden_size)
@@ -241,7 +287,15 @@ class DinoV2DenseConditioner(nn.Module):
         return self
 
     @torch.no_grad()
-    def encode(self, images: Tensor, instructions: Sequence[str] | None = None, *, sample_keys: Tensor | None = None, image_ablation: str = "normal", camera_names: Sequence[str] | None = None) -> RDT2ConditionBatch:
+    def encode(
+        self,
+        images: Tensor,
+        instructions: Sequence[str] | None = None,
+        *,
+        sample_keys: Tensor | None = None,
+        image_ablation: str = "normal",
+        camera_names: Sequence[str] | None = None,
+    ) -> RDT2ConditionBatch:
         images = apply_image_ablation(images, image_ablation, camera_names=camera_names)
         batch, cameras = images.shape[:2]
         flat = images.detach().float().cpu().reshape(-1, *images.shape[2:]).clamp(0, 1)
@@ -250,7 +304,9 @@ class DinoV2DenseConditioner(nn.Module):
         parameter = next(self.encoder.parameters())
         device, dtype = parameter.device, parameter.dtype
         encoded = {
-            key: value.to(device=device, dtype=dtype) if value.is_floating_point() else value.to(device=device)
+            key: value.to(device=device, dtype=dtype)
+            if value.is_floating_point()
+            else value.to(device=device)
             for key, value in encoded.items()
         }
         hidden = self.encoder(**encoded).last_hidden_state
@@ -273,9 +329,19 @@ class CachedDinoV2DenseConditioner(nn.Module):
         self.camera_names = tuple(store.camera_names)
 
     @torch.no_grad()
-    def encode(self, images: Tensor, instructions: Sequence[str] | None = None, *, sample_keys: Tensor | None = None, image_ablation: str = "normal", camera_names: Sequence[str] | None = None) -> RDT2ConditionBatch:
+    def encode(
+        self,
+        images: Tensor,
+        instructions: Sequence[str] | None = None,
+        *,
+        sample_keys: Tensor | None = None,
+        image_ablation: str = "normal",
+        camera_names: Sequence[str] | None = None,
+    ) -> RDT2ConditionBatch:
         if sample_keys is None:
-            raise ValueError("cached DINOv2 conditioner requires sample_keys=[episode_idx,image_index]")
+            raise ValueError(
+                "cached DINOv2 conditioner requires sample_keys=[episode_idx,image_index]"
+            )
         tokens = self.store.load_batch(sample_keys)
         tokens = apply_token_ablation(tokens, image_ablation, camera_names=self.camera_names)
         batch = tokens.shape[0]
@@ -303,12 +369,21 @@ class RDT2VQKVConditioner(nn.Module):
         try:
             from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
         except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError("RDT2-VQ plugin requires a transformers build with Qwen2.5-VL") from exc
+            raise RuntimeError(
+                "RDT2-VQ plugin requires a transformers build with Qwen2.5-VL"
+            ) from exc
         kwargs = {"torch_dtype": dtype, "local_files_only": local_files_only}
         if attn_implementation is not None:
             kwargs["attn_implementation"] = attn_implementation
-        self.processor = AutoProcessor.from_pretrained(processor_name_or_path, padding_side="left", use_fast=True, local_files_only=local_files_only)
-        self.encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
+        self.processor = AutoProcessor.from_pretrained(
+            processor_name_or_path,
+            padding_side="left",
+            use_fast=True,
+            local_files_only=local_files_only,
+        )
+        self.encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_name_or_path, **kwargs
+        )
         self.encoder.requires_grad_(False).eval()
         self.selected_layers = tuple(int(x) for x in selected_layers)
 
@@ -323,7 +398,15 @@ class RDT2VQKVConditioner(nn.Module):
         return Image.fromarray(np.asarray(np.rint(array * 255), dtype=np.uint8), mode="RGB")
 
     @torch.no_grad()
-    def encode(self, images: Tensor, instructions: Sequence[str] | None = None, *, sample_keys: Tensor | None = None, image_ablation: str = "normal", camera_names: Sequence[str] | None = None) -> RDT2ConditionBatch:
+    def encode(
+        self,
+        images: Tensor,
+        instructions: Sequence[str] | None = None,
+        *,
+        sample_keys: Tensor | None = None,
+        image_ablation: str = "normal",
+        camera_names: Sequence[str] | None = None,
+    ) -> RDT2ConditionBatch:
         images = apply_image_ablation(images, image_ablation, camera_names=camera_names)
         batch, cameras = images.shape[:2]
         if instructions is None:
@@ -335,7 +418,15 @@ class RDT2VQKVConditioner(nn.Module):
             camera_images = [self._pil_from_chw(images[row, cam]) for cam in range(cameras)]
             arrays = [np.asarray(image) for image in camera_images]
             merged = Image.fromarray(np.concatenate(arrays, axis=1), mode="RGB")
-            messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": str(instructions[row])}]}]
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": str(instructions[row])},
+                    ],
+                }
+            ]
             text = self.processor.apply_chat_template(messages, add_generation_prompt=False)
             text += "<|im_start|>assistant\n<|quad_start|>"
             texts.append(text)

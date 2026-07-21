@@ -47,7 +47,9 @@ class V35WorldLossConfig:
     variance_target: float = 0.05
 
 
-def component_huber(model: V35ObservedStateWorldModel, pred: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def component_huber(
+    model: V35ObservedStateWorldModel, pred: Tensor, target: Tensor
+) -> tuple[Tensor, Tensor, Tensor]:
     split_p = model.split_world(pred)
     split_t = model.split_world(target)
     global_loss = F.smooth_l1_loss(split_p["global"], split_t["global"])
@@ -66,7 +68,9 @@ def legacy_error(
 ) -> Tensor:
     split_p = model.split_world(pred)
     split_t = model.split_world(target)
-    global_e = F.smooth_l1_loss(split_p["global"], split_t["global"], reduction="none").mean(dim=(-1, -2))
+    global_e = F.smooth_l1_loss(split_p["global"], split_t["global"], reduction="none").mean(
+        dim=(-1, -2)
+    )
     dynamic_p = torch.cat([split_p["interaction"], split_p["motion"]], dim=-2)
     dynamic_t = torch.cat([split_t["interaction"], split_t["motion"]], dim=-2)
     dynamic_e = F.smooth_l1_loss(dynamic_p, dynamic_t, reduction="none").mean(dim=(-1, -2))
@@ -99,7 +103,9 @@ def gripper_classes(action_raw: Tensor, state_raw: Tensor, index: int, threshold
     return classes
 
 
-def gripper_segment_events(action_raw: Tensor, state_raw: Tensor, index: int, threshold: float, *, segment_length: int) -> Tensor:
+def gripper_segment_events(
+    action_raw: Tensor, state_raw: Tensor, index: int, threshold: float, *, segment_length: int
+) -> Tensor:
     classes = gripper_classes(action_raw, state_raw, index, threshold)
     return (classes != 0).reshape(action_raw.shape[0], -1, segment_length).any(dim=-1)
 
@@ -130,7 +136,9 @@ def overshoot_alignment_loss(
     if pred.numel() == 0:
         zero = target.new_zeros(())
         return zero, zero, zero, zero
-    per = legacy_error(model, pred[:, None], target[:, None], global_weight=global_weight, reduction="none")[:, 0]
+    per = legacy_error(
+        model, pred[:, None], target[:, None], global_weight=global_weight, reduction="none"
+    )[:, 0]
     depth = depth_index.to(device=per.device, dtype=per.dtype).clamp_min(1)
     weights = float(gamma) ** (depth - 1)
     huber = (per * weights).sum() / weights.sum().clamp_min(1e-6)
@@ -153,8 +161,6 @@ def transition_direction_loss(pred: Tensor, target: Tensor) -> tuple[Tensor, Ten
     return direction, amplitude, cosine.mean()
 
 
-
-
 def consequence_risk_features(
     model: V35ObservedStateWorldModel,
     pred: Tensor,
@@ -172,8 +178,12 @@ def consequence_risk_features(
     the upstream latent/dynamics path reduce risk by changing the diagnostic.
     """
     with torch.no_grad():
-        self_error = legacy_error(model, pred.detach(), target.detach(), global_weight=global_weight, reduction="none")
-        teacher_error = legacy_error(model, teacher.detach(), target.detach(), global_weight=global_weight, reduction="none")
+        self_error = legacy_error(
+            model, pred.detach(), target.detach(), global_weight=global_weight, reduction="none"
+        )
+        teacher_error = legacy_error(
+            model, teacher.detach(), target.detach(), global_weight=global_weight, reduction="none"
+        )
         gap = (self_error - teacher_error).relu()
         effect = action_effect.detach().float().flatten(2).square().mean(dim=-1).sqrt()
         event = segment_events.detach().float()
@@ -181,11 +191,15 @@ def consequence_risk_features(
         # A compact scalar target for attention supervision.  Normalize per
         # sample so the scorer learns relative consequence within the horizon.
         score = self_error + gap + 0.25 * effect + 0.5 * event
-        score = (score - score.mean(dim=-1, keepdim=True)) / score.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+        score = (score - score.mean(dim=-1, keepdim=True)) / score.std(
+            dim=-1, keepdim=True, unbiased=False
+        ).clamp_min(1e-6)
     return features, score
 
 
-def consequence_attention_regularizers(attention: Tensor, risk_score: Tensor, *, temperature: float) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def consequence_attention_regularizers(
+    attention: Tensor, risk_score: Tensor, *, temperature: float
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     if attention.numel() == 0:
         zero = risk_score.new_zeros(())
         return zero, zero, zero, zero
@@ -202,6 +216,7 @@ def consequence_attention_regularizers(attention: Tensor, risk_score: Tensor, *,
         diversity = attention.new_zeros(())
     peak = attention.max(dim=-1).values.mean()
     return risk_loss, entropy, diversity, peak
+
 
 def compute_v35_world_losses(
     model: V35ObservedStateWorldModel,
@@ -221,12 +236,17 @@ def compute_v35_world_losses(
     latent = motion_l + interaction_l + config.legacy_global_weight * global_l
     legacy = legacy_error(model, pred, target, global_weight=config.legacy_global_weight)
     teacher = legacy_error(
-        model, output["teacher_forced_world"], target,
+        model,
+        output["teacher_forced_world"],
+        target,
         global_weight=config.legacy_global_weight,
     )
     segment_events = gripper_segment_events(
-        sample["action_raw"], sample["state_raw"], model.config.gripper_index,
-        config.gripper_transition_threshold, segment_length=model.config.segment_length,
+        sample["action_raw"],
+        sample["state_raw"],
+        model.config.gripper_index,
+        config.gripper_transition_threshold,
+        segment_length=model.config.segment_length,
     )
     transition_weights = torch.where(
         segment_events,
@@ -237,7 +257,12 @@ def compute_v35_world_losses(
         model, pred, target, transition_weights, global_weight=config.legacy_global_weight
     )
     risk_features, risk_score = consequence_risk_features(
-        model, pred, target, output["teacher_forced_world"], segment_events, output["action_world_effect"],
+        model,
+        pred,
+        target,
+        output["teacher_forced_world"],
+        segment_events,
+        output["action_world_effect"],
         global_weight=config.legacy_global_weight,
     )
     overshoot_total = pred.new_zeros(())
@@ -263,8 +288,12 @@ def compute_v35_world_losses(
                 detach_start=True,
                 detach_target=True,
             )
-            consequence_risk, consequence_entropy, consequence_diversity, consequence_peak = consequence_attention_regularizers(
-                overshoot["consequence_attention"], risk_score, temperature=float(config.consequence_risk_temperature),
+            consequence_risk, consequence_entropy, consequence_diversity, consequence_peak = (
+                consequence_attention_regularizers(
+                    overshoot["consequence_attention"],
+                    risk_score,
+                    temperature=float(config.consequence_risk_temperature),
+                )
             )
             consequence_expected_start = overshoot["consequence_expected_start"].detach()
         elif mode in {"full", "dense", "all_start", "multi_start"}:
@@ -281,20 +310,30 @@ def compute_v35_world_losses(
         else:
             raise ValueError(f"unknown overshoot_mode: {config.overshoot_mode}")
         if overshoot is not None:
-            overshoot_total, overshoot_huber, overshoot_cosine, overshoot_depth_gap = overshoot_alignment_loss(
-                model, overshoot["overshoot_world"], overshoot["overshoot_target"], overshoot["overshoot_depth_index"],
-                gamma=float(config.overshoot_gamma), cosine_weight=float(config.overshoot_cosine_weight),
-                global_weight=config.legacy_global_weight,
+            overshoot_total, overshoot_huber, overshoot_cosine, overshoot_depth_gap = (
+                overshoot_alignment_loss(
+                    model,
+                    overshoot["overshoot_world"],
+                    overshoot["overshoot_target"],
+                    overshoot["overshoot_depth_index"],
+                    gamma=float(config.overshoot_gamma),
+                    cosine_weight=float(config.overshoot_cosine_weight),
+                    global_weight=config.legacy_global_weight,
+                )
             )
 
     pred_prev = torch.cat([output["initial_world"][:, None], pred[:, :-1]], dim=1)
     target_prev = torch.cat([output["target_initial_world"][:, None], target[:, :-1]], dim=1)
     pred_inc = pred - pred_prev
     target_inc = target - target_prev
-    increment_direction, increment_amplitude, increment_cosine = transition_direction_loss(pred_inc, target_inc)
+    increment_direction, increment_amplitude, increment_cosine = transition_direction_loss(
+        pred_inc, target_inc
+    )
 
     state_endpoint = F.smooth_l1_loss(output["pred_segment_state"], sample["segment_state"])
-    target_state_probe = F.smooth_l1_loss(output["target_segment_state_prediction"], sample["segment_state"])
+    target_state_probe = F.smooth_l1_loss(
+        output["target_segment_state_prediction"], sample["segment_state"]
+    )
 
     cfg = model.config
     action_segments = sample["action"].reshape(
@@ -303,33 +342,52 @@ def compute_v35_world_losses(
     pred_inverse = F.smooth_l1_loss(output["pred_inverse_action"], action_segments)
     target_inverse = F.smooth_l1_loss(output["target_inverse_action"], action_segments)
     classes = gripper_classes(
-        sample["action_raw"], sample["state_raw"], cfg.gripper_index,
+        sample["action_raw"],
+        sample["state_raw"],
+        cfg.gripper_index,
         config.gripper_transition_threshold,
     ).reshape(sample["action"].shape[0], cfg.num_segments, cfg.segment_length)
     class_weight = torch.tensor([0.25, 1.0, 1.0], device=pred.device, dtype=torch.float32)
     pred_gripper = F.cross_entropy(
-        output["pred_inverse_gripper_logits"].float().flatten(0, 2), classes.flatten(), weight=class_weight
+        output["pred_inverse_gripper_logits"].float().flatten(0, 2),
+        classes.flatten(),
+        weight=class_weight,
     )
     target_gripper = F.cross_entropy(
-        output["target_inverse_gripper_logits"].float().flatten(0, 2), classes.flatten(), weight=class_weight
+        output["target_inverse_gripper_logits"].float().flatten(0, 2),
+        classes.flatten(),
+        weight=class_weight,
     )
 
-    current_region = F.smooth_l1_loss(output["current_region_prediction"], output["current_region_target"])
-    future_region = F.smooth_l1_loss(output["pred_region_prediction"], output["future_region_target"])
-    masked_consistency = pred.new_zeros(()) if masked_world is None else F.smooth_l1_loss(
-        masked_world, output["initial_world"].detach()
+    current_region = F.smooth_l1_loss(
+        output["current_region_prediction"], output["current_region_target"]
+    )
+    future_region = F.smooth_l1_loss(
+        output["pred_region_prediction"], output["future_region_target"]
+    )
+    masked_consistency = (
+        pred.new_zeros(())
+        if masked_world is None
+        else F.smooth_l1_loss(masked_world, output["initial_world"].detach())
     )
     variance, covariance, diversity = variance_covariance(
         torch.cat([output["initial_world"][:, None], pred], dim=1), config.variance_target
     )
 
-    full_per = legacy_error(model, pred, target, global_weight=config.legacy_global_weight, reduction="none").mean(dim=1)
+    full_per = legacy_error(
+        model, pred, target, global_weight=config.legacy_global_weight, reduction="none"
+    ).mean(dim=1)
     hold_per = legacy_error(
-        model, output["hold_world"], target,
-        global_weight=config.legacy_global_weight, reduction="none",
+        model,
+        output["hold_world"],
+        target,
+        global_weight=config.legacy_global_weight,
+        reduction="none",
     ).mean(dim=1)
     utility_rank = F.relu(config.utility_margin + full_per - hold_per.detach()).mean()
-    relative_gain = ((hold_per.detach() - full_per.detach()) / hold_per.detach().clamp_min(1e-8)).mean()
+    relative_gain = (
+        (hold_per.detach() - full_per.detach()) / hold_per.detach().clamp_min(1e-8)
+    ).mean()
 
     pair_direction = pred.new_zeros(())
     local_effect_cosine = pred.new_zeros(())
@@ -339,7 +397,9 @@ def compute_v35_world_losses(
             pred_transition = pred - output["initial_world"][:, None]
             pair_transition = pair_output["pred_world"] - pair_output["initial_world"][:, None]
             target_transition = target - output["target_initial_world"][:, None]
-            pair_target_transition = pair_output["target_world"] - pair_output["target_initial_world"][:, None]
+            pair_target_transition = (
+                pair_output["target_world"] - pair_output["target_initial_world"][:, None]
+            )
             pred_diff = (pred_transition - pair_transition)[mask].flatten(2)
             target_diff = (target_transition - pair_target_transition)[mask].flatten(2)
             cosine = F.cosine_similarity(pred_diff, target_diff, dim=-1)
@@ -349,10 +409,17 @@ def compute_v35_world_losses(
     swap_rank = pred.new_zeros(())
     swap_correct = pred.new_zeros(())
     if swapped_output is not None:
-        swapped_per = legacy_error(
-            model, swapped_output["pred_world"], target.detach(),
-            global_weight=config.legacy_global_weight, reduction="none",
-        ).mean(dim=1).detach()
+        swapped_per = (
+            legacy_error(
+                model,
+                swapped_output["pred_world"],
+                target.detach(),
+                global_weight=config.legacy_global_weight,
+                reduction="none",
+            )
+            .mean(dim=1)
+            .detach()
+        )
         swap_rank = F.relu(config.swap_margin + full_per - swapped_per).mean()
         swap_correct = (full_per.detach() < swapped_per).float().mean()
 
@@ -371,12 +438,14 @@ def compute_v35_world_losses(
         + config.region_current_weight * current_region
         + config.region_future_weight * future_region
         + config.masked_consistency_weight * masked_consistency
-        + stability_scale * (
+        + stability_scale
+        * (
             config.variance_weight * variance
             + config.covariance_weight * covariance
             + config.token_diversity_weight * diversity
         )
-        + action_scale * (
+        + action_scale
+        * (
             config.utility_rank_weight * utility_rank
             + config.pair_direction_weight * pair_direction
             + config.swap_rank_weight * swap_rank
@@ -430,7 +499,11 @@ def compute_v35_world_losses(
         "transition_weighted_latent": transition_weighted_latent,
         "transition_event_rate": segment_events.float().mean().detach(),
         "teacher_self_gap": (legacy.detach() - teacher.detach()),
-        "embedding_std": torch.cat([output["initial_world"].detach()[:, None], pred.detach()], dim=1).float().std(),
+        "embedding_std": torch.cat(
+            [output["initial_world"].detach()[:, None], pred.detach()], dim=1
+        )
+        .float()
+        .std(),
         "action_effect_rms": output["action_world_effect"].detach().float().square().mean().sqrt(),
         "adaln_gate_abs_mean": output["adaln_gate_abs_mean"].detach(),
         "world_action_joint_rms": output["world_action_joint_rms"].detach(),

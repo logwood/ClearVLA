@@ -74,6 +74,7 @@ class EventBalancedBatchSampler(Sampler[list[int]]):
             rng.shuffle(batch)
             yield [int(x) for x in batch]
 
+
 @dataclass(frozen=True)
 class TrajectoryBlockSamplerConfig:
     block_size: int
@@ -140,14 +141,19 @@ class TrajectoryBlockBatchSampler(Sampler[list[int]]):
         indices, pos = self.index_to_group_pos[int(dataset_index)]
         size = min(self.config.block_size, len(indices))
         start = max(0, min(pos - size // 2, len(indices) - size))
-        return [int(value) for value in indices[start:start + size]]
+        return [int(value) for value in indices[start : start + size]]
 
     def __iter__(self) -> Iterator[list[int]]:
         rng = np.random.default_rng(self.config.seed + self.epoch * 1_000_003)
         for _ in range(len(self)):
-            pool = self.event_indices if rng.random() < self.config.event_fraction else self.regular_indices
+            pool = (
+                self.event_indices
+                if rng.random() < self.config.event_fraction
+                else self.regular_indices
+            )
             anchor = int(rng.choice(pool))
             yield self._block_around(anchor)
+
 
 @dataclass(frozen=True)
 class TrajectorySequentialSamplerConfig:
@@ -180,7 +186,9 @@ class TrajectorySequentialBatchSampler(Sampler[list[int]]):
         self.epoch = int(epoch)
 
     def __len__(self) -> int:
-        return sum(math.ceil(len(indices) / self.config.block_size) for indices in self.groups.values())
+        return sum(
+            math.ceil(len(indices) / self.config.block_size) for indices in self.groups.values()
+        )
 
     def __iter__(self) -> Iterator[list[int]]:
         rng = np.random.default_rng(self.config.seed + self.epoch * 1_000_003)
@@ -189,7 +197,8 @@ class TrajectorySequentialBatchSampler(Sampler[list[int]]):
         for episode in episodes:
             indices = self.groups[episode]
             for start in range(0, len(indices), self.config.block_size):
-                yield [int(value) for value in indices[start:start + self.config.block_size]]
+                yield [int(value) for value in indices[start : start + self.config.block_size]]
+
 
 @dataclass(frozen=True)
 class TrajectoryShuffledBlockSamplerConfig:
@@ -223,7 +232,9 @@ class TrajectoryShuffledBlockBatchSampler(Sampler[list[int]]):
         for episode in sorted(groups):
             indices = groups[episode]
             for start in range(0, len(indices), config.block_size):
-                blocks.append(tuple(int(value) for value in indices[start:start + config.block_size]))
+                blocks.append(
+                    tuple(int(value) for value in indices[start : start + config.block_size])
+                )
         self.blocks = tuple(blocks)
 
     def set_epoch(self, epoch: int) -> None:

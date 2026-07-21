@@ -33,7 +33,9 @@ class RDTLiteCodecs:
         action_dim = int(self.action_normalizer.mean.shape[-1])
         target_dim = int(self.target_normalizer.mean.shape[-1])
         if state_dim != action_dim or action_dim != target_dim:
-            raise ValueError(f"state/action/target dims must match, got {state_dim}/{action_dim}/{target_dim}")
+            raise ValueError(
+                f"state/action/target dims must match, got {state_dim}/{action_dim}/{target_dim}"
+            )
 
     @property
     def action_dim(self) -> int:
@@ -46,7 +48,9 @@ class RDTLiteCodecs:
     def encode_action_absolute(self, raw_action: np.ndarray) -> np.ndarray:
         return self.action_normalizer.encode(raw_action)
 
-    def encode_target(self, raw_future_action: np.ndarray, raw_current_state: np.ndarray) -> np.ndarray:
+    def encode_target(
+        self, raw_future_action: np.ndarray, raw_current_state: np.ndarray
+    ) -> np.ndarray:
         if self.action_representation == "absolute":
             target_raw = raw_future_action
         elif self.action_representation == "relative_to_current":
@@ -55,7 +59,9 @@ class RDTLiteCodecs:
             raise ValueError(self.action_representation)
         return self.target_normalizer.encode(np.asarray(target_raw, dtype=np.float32))
 
-    def decode_target_raw(self, encoded_target: np.ndarray, raw_current_state: np.ndarray) -> np.ndarray:
+    def decode_target_raw(
+        self, encoded_target: np.ndarray, raw_current_state: np.ndarray
+    ) -> np.ndarray:
         decoded = self.target_normalizer.decode(encoded_target)
         if self.action_representation == "absolute":
             return decoded
@@ -66,8 +72,12 @@ class RDTLiteCodecs:
             return (decoded + state).astype(np.float32)
         raise ValueError(self.action_representation)  # pragma: no cover
 
-    def decode_target_to_action_norm(self, encoded_target: np.ndarray, raw_current_state: np.ndarray) -> np.ndarray:
-        return self.action_normalizer.encode(self.decode_target_raw(encoded_target, raw_current_state))
+    def decode_target_to_action_norm(
+        self, encoded_target: np.ndarray, raw_current_state: np.ndarray
+    ) -> np.ndarray:
+        return self.action_normalizer.encode(
+            self.decode_target_raw(encoded_target, raw_current_state)
+        )
 
     def to_dict(self) -> dict[str, object]:
         self.validate()

@@ -35,10 +35,20 @@ class V35PolicyConfig:
     inference_steps: int = 5
 
     def validate(self) -> None:
-        if min(
-            self.action_dim, self.state_dim, self.action_horizon, self.executed_history_length,
-            self.hidden_size, self.num_heads, self.depth, self.proposal_depth, self.inference_steps,
-        ) <= 0:
+        if (
+            min(
+                self.action_dim,
+                self.state_dim,
+                self.action_horizon,
+                self.executed_history_length,
+                self.hidden_size,
+                self.num_heads,
+                self.depth,
+                self.proposal_depth,
+                self.inference_steps,
+            )
+            <= 0
+        ):
             raise ValueError("V35 policy dimensions must be positive")
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
@@ -49,7 +59,11 @@ class V35PolicyConfig:
 
     @property
     def gripper_index(self) -> int:
-        return self.gripper_dim_index if self.gripper_dim_index >= 0 else self.action_dim + self.gripper_dim_index
+        return (
+            self.gripper_dim_index
+            if self.gripper_dim_index >= 0
+            else self.action_dim + self.gripper_dim_index
+        )
 
 
 class ExpertBlock(nn.Module):
@@ -100,7 +114,11 @@ class UnifiedLatentActionExpert(nn.Module):
         self.state_type = nn.Parameter(torch.randn(1, 1, h) * 0.02)
         self.executed_type = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
         self.proposal_type = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
-        self.register_buffer("action_position", sinusoidal_positions(range(1, config.action_horizon + 1), h)[None], persistent=True)
+        self.register_buffer(
+            "action_position",
+            sinusoidal_positions(range(1, config.action_horizon + 1), h)[None],
+            persistent=True,
+        )
         self.time = TimeEmbedding(h)
         self.blocks = nn.ModuleList([ExpertBlock(config) for _ in range(config.depth)])
         self.out = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, config.action_dim))
@@ -116,7 +134,9 @@ class UnifiedLatentActionExpert(nn.Module):
         world = self.world_proj(world) + self.world_type
         state_token = self.state_proj(state)[:, None] + self.state_type
         executed = self.executed_proj(executed_history) + self.executed_type
-        proposal = self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        proposal = (
+            self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None] + self.proposal_type
+        )
         task = self.task_token.expand(world.shape[0], -1, -1)
         return torch.cat([task, world, state_token, executed, proposal], dim=1)
 
@@ -131,7 +151,9 @@ class UnifiedLatentActionExpert(nn.Module):
         proposal_keep: Tensor | None = None,
     ) -> Tensor:
         if proposal_keep is None:
-            proposal_keep = torch.ones(noisy_action.shape[0], device=noisy_action.device, dtype=noisy_action.dtype)
+            proposal_keep = torch.ones(
+                noisy_action.shape[0], device=noisy_action.device, dtype=noisy_action.dtype
+            )
         x = self.noisy_action_proj(noisy_action)
         position = self.action_position.to(device=x.device, dtype=x.dtype)
         memory = self.memory(world, state, executed_history, proposal_tokens, proposal_keep)
@@ -156,7 +178,9 @@ class V35PolicySystem(nn.Module):
         self.world_encoder.eval()
         self.proposal = RejectableHistoryProposal(policy_config)
         self.expert = UnifiedLatentActionExpert(
-            policy_config, world_hidden=world_config.hidden_size, world_tokens=world_config.world_tokens
+            policy_config,
+            world_hidden=world_config.hidden_size,
+            world_tokens=world_config.world_tokens,
         )
 
     def train(self, mode: bool = True):
@@ -165,7 +189,9 @@ class V35PolicySystem(nn.Module):
         return self
 
     @torch.no_grad()
-    def encode_world(self, visual: Tensor, state_history: Tensor, executed_history: Tensor) -> Tensor:
+    def encode_world(
+        self, visual: Tensor, state_history: Tensor, executed_history: Tensor
+    ) -> Tensor:
         return self.world_encoder(visual.float(), state_history.float(), executed_history.float())
 
     def flow_training_forward(
@@ -181,11 +207,19 @@ class V35PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         noise = torch.randn_like(target_action)
-        t = torch.rand(target_action.shape[0], device=target_action.device, dtype=target_action.dtype)
+        t = torch.rand(
+            target_action.shape[0], device=target_action.device, dtype=target_action.dtype
+        )
         noisy = (1 - t[:, None, None]) * target_action + t[:, None, None] * noise
         target_velocity = noise - target_action
-        drop = self.policy_config.proposal_dropout if proposal_dropout is None else float(proposal_dropout)
-        keep = (torch.rand(target_action.shape[0], device=target_action.device) >= drop).to(target_action.dtype)
+        drop = (
+            self.policy_config.proposal_dropout
+            if proposal_dropout is None
+            else float(proposal_dropout)
+        )
+        keep = (torch.rand(target_action.shape[0], device=target_action.device) >= drop).to(
+            target_action.dtype
+        )
         predicted = self.expert(
             noisy, t, world, state, executed_history, proposal["tokens"].detach(), keep
         )
@@ -213,13 +247,30 @@ class V35PolicySystem(nn.Module):
         world = self.encode_world(visual, state_history, executed_history)
         proposal = self.proposal(executed_history)
         steps = int(steps or self.policy_config.inference_steps)
-        x = torch.randn(
-            visual.shape[0], self.policy_config.action_horizon, self.policy_config.action_dim,
-            device=visual.device, dtype=visual.dtype,
-        ) if noise is None else noise.clone()
-        keep = torch.full((visual.shape[0],), 1.0 if use_proposal else 0.0, device=visual.device, dtype=visual.dtype)
+        x = (
+            torch.randn(
+                visual.shape[0],
+                self.policy_config.action_horizon,
+                self.policy_config.action_dim,
+                device=visual.device,
+                dtype=visual.dtype,
+            )
+            if noise is None
+            else noise.clone()
+        )
+        keep = torch.full(
+            (visual.shape[0],),
+            1.0 if use_proposal else 0.0,
+            device=visual.device,
+            dtype=visual.dtype,
+        )
         for index in range(steps, 0, -1):
-            t = torch.full((visual.shape[0],), float(index) / float(steps), device=visual.device, dtype=visual.dtype)
+            t = torch.full(
+                (visual.shape[0],),
+                float(index) / float(steps),
+                device=visual.device,
+                dtype=visual.dtype,
+            )
             velocity = self.expert(x, t, world, state, executed_history, proposal["tokens"], keep)
             x = x - velocity / float(steps)
         return x
@@ -236,5 +287,8 @@ class V35PolicySystem(nn.Module):
 
 
 __all__ = [
-    "V35PolicyConfig", "RejectableHistoryProposal", "UnifiedLatentActionExpert", "V35PolicySystem",
+    "V35PolicyConfig",
+    "RejectableHistoryProposal",
+    "UnifiedLatentActionExpert",
+    "V35PolicySystem",
 ]

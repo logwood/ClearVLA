@@ -8,17 +8,24 @@ from clearvla.experiments.classic_policy_lab.rdt2_fm_reference import (
     RDT2FMReferenceConfig,
     estimate_rdt2_fm_parameter_count,
 )
-from clearvla.experiments.classic_policy_lab.rdt2_mainline import MainlineRDT2FM, MainlineRDT2FMConfig
+from clearvla.experiments.classic_policy_lab.rdt2_mainline import (
+    MainlineRDT2FM,
+    MainlineRDT2FMConfig,
+)
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Profile a v29 RDT2 mainline preset with clean future-DINO residual dynamics")
+    p = argparse.ArgumentParser(
+        description="Profile a v29 RDT2 mainline preset with clean future-DINO residual dynamics"
+    )
     p.add_argument("--model-size", choices=["small", "medium", "official"], default="medium")
     p.add_argument("--action-dim", type=int, default=7)
     p.add_argument("--state-dim", type=int, default=7)
     p.add_argument("--dense-token-dim", type=int, default=768)
     p.add_argument("--visual-corrector", choices=["none", "query-latent"], default="none")
-    p.add_argument("--future-latent-variant", choices=["none", "world-only", "closed-loop"], default="none")
+    p.add_argument(
+        "--future-latent-variant", choices=["none", "world-only", "closed-loop"], default="none"
+    )
     p.add_argument("--future-latent-grid-size", type=int, default=8)
     p.add_argument("--future-latent-offsets", nargs="+", type=int, default=[8, 16, 24])
     p.add_argument("--future-latent-hidden-size", type=int, default=768)

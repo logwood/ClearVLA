@@ -54,7 +54,9 @@ def get_nd_sincos_pos_embed_from_grid(embed_dim: int, grid_sizes: tuple[int, ...
     return emb
 
 
-def get_multimodal_pos_embed(embed_dim: int, mm_lens: OrderedDict[str, int | tuple[int, ...]]) -> np.ndarray:
+def get_multimodal_pos_embed(
+    embed_dim: int, mm_lens: OrderedDict[str, int | tuple[int, ...]]
+) -> np.ndarray:
     total_len = 0
     for modality, cond_len in mm_lens.items():
         if modality == "image" and isinstance(cond_len, (tuple, list)):
@@ -77,7 +79,9 @@ def get_multimodal_pos_embed(embed_dim: int, mm_lens: OrderedDict[str, int | tup
             current = current.reshape(-1, embed_dim)
         else:
             length = int(cond_len)
-            cond = get_1d_sincos_pos_embed_from_grid(embed_dim, np.arange(length)) if length > 1 else 0
+            cond = (
+                get_1d_sincos_pos_embed_from_grid(embed_dim, np.arange(length)) if length > 1 else 0
+            )
             current = np.zeros((abs(length), embed_dim), dtype=np.float64)
             current += cond
         if modality_pos_embed is not None:
@@ -117,7 +121,9 @@ class Attention(nn.Module):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
         self.n_heads = int(config["num_heads"])
-        self.n_kv_heads = self.n_heads if config.get("num_kv_heads") is None else int(config["num_kv_heads"])
+        self.n_kv_heads = (
+            self.n_heads if config.get("num_kv_heads") is None else int(config["num_kv_heads"])
+        )
         if self.n_heads % self.n_kv_heads != 0:
             raise ValueError("num_heads must be divisible by num_kv_heads")
         self.n_rep = self.n_heads // self.n_kv_heads
@@ -150,7 +156,9 @@ class Attention(nn.Module):
         attn_mask = None
         if mask is not None:
             if is_causal:
-                raise ValueError("use either an explicit self-attention mask or is_causal, not both")
+                raise ValueError(
+                    "use either an explicit self-attention mask or is_causal, not both"
+                )
             mask = mask.to(device=x.device, dtype=torch.bool)
             if mask.ndim == 2:
                 if tuple(mask.shape) != (tokens, tokens):
@@ -168,14 +176,21 @@ class Attention(nn.Module):
                 raise ValueError("self-attention mask must be [Q,K] or [B,Q,K]")
         if self.use_flash_attn:
             out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, dropout_p=0.0,
-                is_causal=is_causal and attn_mask is None, scale=self.attn_scale,
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=is_causal and attn_mask is None,
+                scale=self.attn_scale,
             )
         else:
             scores = torch.matmul(q, k.transpose(2, 3)) * self.attn_scale
             if is_causal:
                 causal = torch.ones(tokens, tokens, dtype=torch.bool, device=x.device).tril()
-                scores = scores.masked_fill(causal.logical_not().reshape(1, 1, tokens, tokens), float("-inf"))
+                scores = scores.masked_fill(
+                    causal.logical_not().reshape(1, 1, tokens, tokens), float("-inf")
+                )
             if attn_mask is not None:
                 scores = scores.masked_fill(attn_mask.logical_not(), float("-inf"))
             probs = F.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
@@ -188,7 +203,9 @@ class CrossAttention(nn.Module):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
         self.n_heads = int(config["num_heads"])
-        self.n_kv_heads = self.n_heads if config.get("num_kv_heads") is None else int(config["num_kv_heads"])
+        self.n_kv_heads = (
+            self.n_heads if config.get("num_kv_heads") is None else int(config["num_kv_heads"])
+        )
         if self.n_heads % self.n_kv_heads != 0:
             raise ValueError("num_heads must be divisible by num_kv_heads")
         self.n_rep = self.n_heads // self.n_kv_heads
@@ -221,7 +238,9 @@ class CrossAttention(nn.Module):
             ck, cv = kv.unbind(-1)
             ck = self.norm_k(ck)
         if ck is None or cv is None:
-            raise ValueError("cross attention requires dense condition tokens or an external KV cache")
+            raise ValueError(
+                "cross attention requires dense condition tokens or an external KV cache"
+            )
         ck, cv = repeat_kv(ck, self.n_rep), repeat_kv(cv, self.n_rep)
         q, ck, cv = q.transpose(1, 2), ck.transpose(1, 2), cv.transpose(1, 2)
         attn_mask = None
@@ -242,7 +261,15 @@ class CrossAttention(nn.Module):
             else:
                 raise ValueError("cross-attention mask must be [B,K] or [B,Q,K]")
         if self.use_flash_attn:
-            out = F.scaled_dot_product_attention(q, ck, cv, attn_mask=attn_mask, dropout_p=0.0, is_causal=False, scale=self.attn_scale)
+            out = F.scaled_dot_product_attention(
+                q,
+                ck,
+                cv,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=self.attn_scale,
+            )
         else:
             scores = torch.matmul(q, ck.transpose(2, 3)) * self.attn_scale
             if attn_mask is not None:
@@ -254,7 +281,9 @@ class CrossAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, ffn_dim_multiplier: float | None) -> None:
+    def __init__(
+        self, dim: int, hidden_dim: int, multiple_of: int, ffn_dim_multiplier: float | None
+    ) -> None:
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
         if ffn_dim_multiplier is not None:
@@ -290,7 +319,12 @@ class Mlp(nn.Module):
 
 
 class TimestepEmbedder(nn.Module):
-    def __init__(self, hidden_size: int, frequency_embedding_size: int = 256, dtype: torch.dtype = torch.bfloat16) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        frequency_embedding_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
@@ -302,7 +336,9 @@ class TimestepEmbedder(nn.Module):
 
     def timestep_embedding(self, t: Tensor, dim: int, max_period: int = 10000) -> Tensor:
         half = dim // 2
-        freqs = torch.exp(-math.log(max_period) * torch.arange(half, dtype=torch.float32, device=t.device) / half)
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(half, dtype=torch.float32, device=t.device) / half
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
@@ -335,7 +371,9 @@ class RDTBlock(nn.Module):
             multiple_of=int(config["multiple_of"]),
             ffn_dim_multiplier=config.get("ffn_dim_multiplier"),
         )
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(2 * self.hidden_size, 9 * self.hidden_size, bias=True))
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(2 * self.hidden_size, 9 * self.hidden_size, bias=True)
+        )
 
     def forward(
         self,
@@ -347,15 +385,37 @@ class RDTBlock(nn.Module):
         mask: Tensor | None = None,
     ) -> Tensor:
         if t.shape[1] != 2 * self.hidden_size:
-            raise ValueError(f"expected modulation input [B,{2 * self.hidden_size}], got {tuple(t.shape)}")
-        shift_attn, scale_attn, gate_attn, shift_cross, scale_cross, gate_cross, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(t).chunk(9, dim=1)
-        h = x + gate_attn.unsqueeze(1) * self.attn(modulate(self.attn_norm(x), shift_attn, scale_attn))
+            raise ValueError(
+                f"expected modulation input [B,{2 * self.hidden_size}], got {tuple(t.shape)}"
+            )
+        (
+            shift_attn,
+            scale_attn,
+            gate_attn,
+            shift_cross,
+            scale_cross,
+            gate_cross,
+            shift_mlp,
+            scale_mlp,
+            gate_mlp,
+        ) = self.adaLN_modulation(t).chunk(9, dim=1)
+        h = x + gate_attn.unsqueeze(1) * self.attn(
+            modulate(self.attn_norm(x), shift_attn, scale_attn)
+        )
         if c is not None:
-            cross = self.cross_attn(modulate(self.cross_norm(h), shift_cross, scale_cross), c=self.cond_norm(c), mask=mask)
+            cross = self.cross_attn(
+                modulate(self.cross_norm(h), shift_cross, scale_cross),
+                c=self.cond_norm(c),
+                mask=mask,
+            )
         else:
-            cross = self.cross_attn(modulate(self.cross_norm(h), shift_cross, scale_cross), ck=ck, cv=cv, mask=mask)
+            cross = self.cross_attn(
+                modulate(self.cross_norm(h), shift_cross, scale_cross), ck=ck, cv=cv, mask=mask
+            )
         h = h + gate_cross.unsqueeze(1) * cross
-        return h + gate_mlp.unsqueeze(1) * self.ffn(modulate(self.ffn_norm(h), shift_mlp, scale_mlp))
+        return h + gate_mlp.unsqueeze(1) * self.ffn(
+            modulate(self.ffn_norm(h), shift_mlp, scale_mlp)
+        )
 
 
 class FinalLayer(nn.Module):
@@ -366,7 +426,9 @@ class FinalLayer(nn.Module):
         self.output_size = int(output_size)
         self.ffn_norm = RMSNorm(hidden_size, eps=float(config["norm_eps"]))
         self.ffn = Mlp(hidden_size, hidden_size * 4, self.output_size)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(2 * hidden_size, 2 * hidden_size, bias=True))
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(2 * hidden_size, 2 * hidden_size, bias=True)
+        )
 
     def forward(self, x: Tensor, t: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(t).chunk(2, dim=1)
@@ -394,15 +456,25 @@ class RDT(nn.Module):
         self.dtype = dtype
         self.t_embedder = TimestepEmbedder(self.hidden_size, dtype=dtype)
         self.depth = int(config["depth"])
-        self.blocks = nn.ModuleList([RDTBlock(layer_idx, config=config) for layer_idx in range(self.depth)])
+        self.blocks = nn.ModuleList(
+            [RDTBlock(layer_idx, config=config) for layer_idx in range(self.depth)]
+        )
         self.final_layer = FinalLayer(output_size, config=config)
         self.num_register_tokens = int(config.get("num_register_tokens", 4))
-        self.register_tokens = nn.Parameter(torch.randn(1, self.num_register_tokens, self.hidden_size))
+        self.register_tokens = nn.Parameter(
+            torch.randn(1, self.num_register_tokens, self.hidden_size)
+        )
         self.x_pos_emb_config = x_pos_emb_config
         self.img_pos_emb_config = img_pos_emb_config
-        self.img_pos_emb = nn.Parameter(torch.zeros(1, int(max_img_len), self.hidden_size)) if img_pos_emb_config is not None else None
+        self.img_pos_emb = (
+            nn.Parameter(torch.zeros(1, int(max_img_len), self.hidden_size))
+            if img_pos_emb_config is not None
+            else None
+        )
         self.state_pos_emb_config = [("state", 1)]
-        self.x_pos_emb = nn.Parameter(torch.zeros(1, self.horizon + self.num_register_tokens, self.hidden_size))
+        self.x_pos_emb = nn.Parameter(
+            torch.zeros(1, self.horizon + self.num_register_tokens, self.hidden_size)
+        )
         self.initialize_weights()
 
     def initialize_weights(self) -> None:
@@ -411,13 +483,18 @@ class RDT(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(basic_init)
         x_pos = get_multimodal_pos_embed(self.hidden_size, OrderedDict(self.x_pos_emb_config))
         self.x_pos_emb.data.copy_(torch.from_numpy(x_pos).float().unsqueeze(0))
         if self.img_pos_emb is not None and self.img_pos_emb_config is not None:
-            img_pos = get_multimodal_pos_embed(self.hidden_size, OrderedDict(self.img_pos_emb_config))
+            img_pos = get_multimodal_pos_embed(
+                self.hidden_size, OrderedDict(self.img_pos_emb_config)
+            )
             self.img_pos_emb.data.copy_(torch.from_numpy(img_pos).float().unsqueeze(0))
-        state_pos = get_multimodal_pos_embed(self.hidden_size, OrderedDict(self.state_pos_emb_config))
+        state_pos = get_multimodal_pos_embed(
+            self.hidden_size, OrderedDict(self.state_pos_emb_config)
+        )
         self.state_pos_emb = nn.Parameter(torch.from_numpy(state_pos).float().unsqueeze(0))
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -447,7 +524,9 @@ class RDT(nn.Module):
         if state_c is None:
             raise ValueError("state condition must be provided")
         state_c = state_c + self.state_pos_emb
-        modulation = torch.cat([t.unsqueeze(1), state_c], dim=1).reshape(x.shape[0], self.hidden_size * 2)
+        modulation = torch.cat([t.unsqueeze(1), state_c], dim=1).reshape(
+            x.shape[0], self.hidden_size * 2
+        )
         registers = self.register_tokens.expand(x.shape[0], -1, -1)
         x = torch.cat([x, registers], dim=1) + self.x_pos_emb
         if img_c is not None and self.img_pos_emb is not None:
@@ -471,7 +550,7 @@ class RDT(nn.Module):
                 cond = cond[:, layer_idx]
             x = block(x, modulation, c=cond, ck=ck, cv=cv, mask=mask)
         x = self.final_layer(x, modulation)
-        return x[:, :-self.num_register_tokens]
+        return x[:, : -self.num_register_tokens]
 
 
 # -----------------------------------------------------------------------------
@@ -500,7 +579,18 @@ class RDT2FMReferenceConfig:
     max_img_len: int | None = None
 
     def validate(self) -> None:
-        if min(self.action_dim, self.state_dim, self.prediction_horizon, self.hidden_size, self.depth, self.num_heads, self.num_kv_heads) <= 0:
+        if (
+            min(
+                self.action_dim,
+                self.state_dim,
+                self.prediction_horizon,
+                self.hidden_size,
+                self.depth,
+                self.num_heads,
+                self.num_kv_heads,
+            )
+            <= 0
+        ):
             raise ValueError("RDT2-FM dimensions must be positive")
         if self.hidden_size % self.num_heads != 0:
             raise ValueError("hidden_size must be divisible by num_heads")
@@ -534,7 +624,12 @@ class RDT2FMReferenceConfig:
 class RDT2FMReference(nn.Module):
     """Standalone RDT2-FM action expert with pluggable condition sources."""
 
-    def __init__(self, config: RDT2FMReferenceConfig = RDT2FMReferenceConfig(), *, dtype: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self,
+        config: RDT2FMReferenceConfig = RDT2FMReferenceConfig(),
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         super().__init__()
         config.validate()
         self.config = config
@@ -549,18 +644,27 @@ class RDT2FMReference(nn.Module):
             "ffn_dim_multiplier": config.ffn_dim_multiplier,
             "use_flash_attn": config.use_flash_attn,
         }
-        img_pos_emb_config = None if config.img_pos_emb_config is None else list(config.img_pos_emb_config)
+        img_pos_emb_config = (
+            None if config.img_pos_emb_config is None else list(config.img_pos_emb_config)
+        )
         self.model = RDT(
             horizon=config.prediction_horizon,
             output_size=config.action_dim,
             config=rdt_cfg,
-            x_pos_emb_config=[("action", config.prediction_horizon), ("register", config.num_register_tokens)],
+            x_pos_emb_config=[
+                ("action", config.prediction_horizon),
+                ("register", config.num_register_tokens),
+            ],
             img_pos_emb_config=img_pos_emb_config,
             max_img_len=config.max_img_len,
             dtype=dtype,
         )
-        self.lang_adaptor = self._build_adapter(config.lang_adaptor, config.lang_token_dim, config.hidden_size)
-        self.img_adaptor = self._build_adapter(config.img_adaptor, config.img_token_dim, config.hidden_size)
+        self.lang_adaptor = self._build_adapter(
+            config.lang_adaptor, config.lang_token_dim, config.hidden_size
+        )
+        self.img_adaptor = self._build_adapter(
+            config.img_adaptor, config.img_token_dim, config.hidden_size
+        )
         self.act_adaptor = self._build_adapter("mlp3x_silu", config.action_dim, config.hidden_size)
         self.state_adaptor = self._build_adapter("mlp3x_silu", config.state_dim, config.hidden_size)
         self.num_inference_timesteps = int(config.num_inference_timesteps)
@@ -570,7 +674,9 @@ class RDT2FMReference(nn.Module):
         self.to(dtype=dtype)
 
     @staticmethod
-    def _build_adapter(kind: str | None, in_features: int | None, out_features: int) -> nn.Module | None:
+    def _build_adapter(
+        kind: str | None, in_features: int | None, out_features: int
+    ) -> nn.Module | None:
         if kind is None:
             return None
         if in_features is None:
@@ -601,8 +707,16 @@ class RDT2FMReference(nn.Module):
         action_tokens: Tensor | None,
         state_tokens: Tensor,
     ) -> tuple[Tensor | None, Tensor | None, Tensor | None, Tensor]:
-        lang = self.lang_adaptor(lang_tokens) if self.lang_adaptor is not None and lang_tokens is not None else lang_tokens
-        img = self.img_adaptor(img_tokens) if self.img_adaptor is not None and img_tokens is not None else img_tokens
+        lang = (
+            self.lang_adaptor(lang_tokens)
+            if self.lang_adaptor is not None and lang_tokens is not None
+            else lang_tokens
+        )
+        img = (
+            self.img_adaptor(img_tokens)
+            if self.img_adaptor is not None and img_tokens is not None
+            else img_tokens
+        )
         action = self.act_adaptor(action_tokens) if action_tokens is not None else None
         state = self.state_adaptor(state_tokens)
         return lang, img, action, state
@@ -624,10 +738,20 @@ class RDT2FMReference(nn.Module):
         timesteps = self.sample_timesteps(batch, action_gt.device).to(dtype=action_gt.dtype)
         blend = timesteps.view(-1, 1, 1)
         noisy_action = action_gt * blend + noise * (1 - blend)
-        lang_cond, img_cond, action_traj, state_cond = self.adapt_conditions(lang_tokens, img_tokens, noisy_action, state_tokens)
+        lang_cond, img_cond, action_traj, state_cond = self.adapt_conditions(
+            lang_tokens, img_tokens, noisy_action, state_tokens
+        )
         if action_traj is None:
             raise AssertionError("action adaptor returned None")
-        pred = self.model(x=action_traj, t=timesteps, lang_c=lang_cond, lang_c_kv=lang_kv_cache, lang_mask=lang_attn_mask, img_c=img_cond, state_c=state_cond)
+        pred = self.model(
+            x=action_traj,
+            t=timesteps,
+            lang_c=lang_cond,
+            lang_c_kv=lang_kv_cache,
+            lang_mask=lang_attn_mask,
+            img_c=img_cond,
+            state_c=state_cond,
+        )
         return F.mse_loss(pred, action_gt - noise)
 
     def predict_velocity(
@@ -643,10 +767,20 @@ class RDT2FMReference(nn.Module):
     ) -> Tensor:
         if state_tokens.dim() == 2:
             state_tokens = state_tokens.unsqueeze(1)
-        lang_cond, img_cond, action_traj, state_cond = self.adapt_conditions(lang_tokens, img_tokens, noisy_action, state_tokens)
+        lang_cond, img_cond, action_traj, state_cond = self.adapt_conditions(
+            lang_tokens, img_tokens, noisy_action, state_tokens
+        )
         if action_traj is None:
             raise AssertionError("action adaptor returned None")
-        return self.model(x=action_traj, t=timesteps, lang_c=lang_cond, lang_c_kv=lang_kv_cache, lang_mask=lang_attn_mask, img_c=img_cond, state_c=state_cond)
+        return self.model(
+            x=action_traj,
+            t=timesteps,
+            lang_c=lang_cond,
+            lang_c_kv=lang_kv_cache,
+            lang_mask=lang_attn_mask,
+            img_c=img_cond,
+            state_c=state_cond,
+        )
 
     @torch.no_grad()
     def predict_action(
@@ -667,7 +801,12 @@ class RDT2FMReference(nn.Module):
         device = state_tokens.device
         dtype = state_tokens.dtype
         if noisy_action is None:
-            noisy_action = torch.randn((batch, self.pred_horizon, self.action_dim), device=device, dtype=dtype, generator=generator)
+            noisy_action = torch.randn(
+                (batch, self.pred_horizon, self.action_dim),
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
         steps = int(inference_steps or self.num_inference_timesteps)
         if steps <= 0:
             raise ValueError("inference_steps must be positive")
@@ -699,7 +838,11 @@ class RDT2FMReference(nn.Module):
             payload = torch.load(source, map_location="cpu", weights_only=False)
         else:
             payload = source
-        if isinstance(payload, dict) and "module" in payload and isinstance(payload["module"], dict):
+        if (
+            isinstance(payload, dict)
+            and "module" in payload
+            and isinstance(payload["module"], dict)
+        ):
             payload = payload["module"]
         if isinstance(payload, dict) and "model" in payload and isinstance(payload["model"], dict):
             payload = payload["model"]
@@ -707,10 +850,14 @@ class RDT2FMReference(nn.Module):
             raise TypeError("checkpoint must resolve to a state_dict")
         return {str(key).removeprefix("module."): value for key, value in payload.items()}
 
-    def load_upstream_state_dict(self, source: str | Path | dict[str, Tensor], *, strict: bool = True) -> None:
+    def load_upstream_state_dict(
+        self, source: str | Path | dict[str, Tensor], *, strict: bool = True
+    ) -> None:
         self.load_state_dict(self._resolve_state_dict(source), strict=strict)
 
-    def load_compatible_upstream_state_dict(self, source: str | Path | dict[str, Tensor]) -> dict[str, Any]:
+    def load_compatible_upstream_state_dict(
+        self, source: str | Path | dict[str, Tensor]
+    ) -> dict[str, Any]:
         """Load every released tensor whose key and shape still match.
 
         This is intended for controlled ablations: local 7-D action heads or a
@@ -728,7 +875,10 @@ class RDT2FMReference(nn.Module):
                 unexpected.append(key)
                 continue
             if tuple(value.shape) != tuple(target_state[key].shape):
-                skipped_shape[key] = {"source": list(value.shape), "target": list(target_state[key].shape)}
+                skipped_shape[key] = {
+                    "source": list(value.shape),
+                    "target": list(target_state[key].shape),
+                }
                 continue
             matched[key] = value
         missing = sorted(set(target_state) - set(matched))
@@ -743,7 +893,9 @@ class RDT2FMReference(nn.Module):
         }
 
 
-def estimate_rdt2_fm_parameter_count(config: RDT2FMReferenceConfig = RDT2FMReferenceConfig()) -> int:
+def estimate_rdt2_fm_parameter_count(
+    config: RDT2FMReferenceConfig = RDT2FMReferenceConfig(),
+) -> int:
     """Analytic parameter count without allocating the released 488M model."""
     config.validate()
     h = config.hidden_size
@@ -764,11 +916,21 @@ def estimate_rdt2_fm_parameter_count(config: RDT2FMReferenceConfig = RDT2FMRefer
     total += config.num_register_tokens * h
     total += (config.prediction_horizon + config.num_register_tokens) * h  # x pos
     total += h  # state pos
-    attention = linear(h, h, False) + linear(h, 2 * kv_heads * head_dim, False) + linear(h, h, False) + 2 * head_dim
+    attention = (
+        linear(h, h, False)
+        + linear(h, 2 * kv_heads * head_dim, False)
+        + linear(h, h, False)
+        + 2 * head_dim
+    )
     block = 0
     block += h + attention  # self-attn norm + attention
     block += h + h + attention  # cross norm + cond norm + cross attention
-    block += h + linear(h, ffn_hidden, False) + linear(ffn_hidden, h, False) + linear(h, ffn_hidden, False)
+    block += (
+        h
+        + linear(h, ffn_hidden, False)
+        + linear(ffn_hidden, h, False)
+        + linear(h, ffn_hidden, False)
+    )
     block += linear(2 * h, 9 * h)
     total += config.depth * block
     total += h  # final RMSNorm
@@ -793,6 +955,7 @@ def estimate_rdt2_fm_parameter_count(config: RDT2FMReferenceConfig = RDT2FMRefer
 def _estimate_adapter_count(kind: str, in_features: int, out_features: int) -> int:
     def linear(inp: int, out: int) -> int:
         return inp * out + out
+
     if kind == "linear":
         return linear(in_features, out_features)
     match = re.match(r"^mlp(\d+)x_silu$", kind)

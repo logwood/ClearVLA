@@ -79,7 +79,9 @@ def evaluate_dp(
         obs_state = batch["obs_state"].to(device, non_blocking=True)
         action = batch["action"].to(device, non_blocking=True)
         denoise_losses.append(float(model.compute_loss(obs_image, obs_state, action).cpu()))
-        trajectory = model.predict_trajectory(obs_image, obs_state, inference_steps=inference_steps, deterministic=deterministic)
+        trajectory = model.predict_trajectory(
+            obs_image, obs_state, inference_steps=inference_steps, deterministic=deterministic
+        )
         pred_norm.append(trajectory[:, start:end].cpu().numpy())
         target_norm.append(action[:, start:end].cpu().numpy())
         prior_norm.append(action_normalizer.encode(batch["prior_raw"].numpy()))
@@ -129,14 +131,20 @@ def evaluate_rdt_small(
         lang_tokens, lang_mask = language_conditioner.batch(
             state.shape[0], device=device, dtype=model_dtype
         )
-        denoise_losses.append(float(model.compute_loss(
-            state=state,
-            actions=actions,
-            lang_tokens=lang_tokens,
-            lang_mask=lang_mask,
-            img_tokens=img_tokens,
-            ctrl_freqs=ctrl_freqs,
-        ).detach().cpu()))
+        denoise_losses.append(
+            float(
+                model.compute_loss(
+                    state=state,
+                    actions=actions,
+                    lang_tokens=lang_tokens,
+                    lang_mask=lang_mask,
+                    img_tokens=img_tokens,
+                    ctrl_freqs=ctrl_freqs,
+                )
+                .detach()
+                .cpu()
+            )
+        )
         generator = torch.Generator(device=device.type)
         generator.manual_seed(int(eval_seed) + batch_index)
         pred = model.predict_action(
@@ -188,9 +196,19 @@ def evaluate_rdt2_fm(
     receive the same ablation request in token space.  ``shuffle-episode`` is
     dataset-aware, so it also works with evaluation batch size one.
     """
-    allowed = {"normal", "zero", "mean", "shuffle-batch", "shuffle-episode", "top-only", "wrist-only"}
+    allowed = {
+        "normal",
+        "zero",
+        "mean",
+        "shuffle-batch",
+        "shuffle-episode",
+        "top-only",
+        "wrist-only",
+    }
     if image_ablation not in allowed:
-        raise ValueError(f"unsupported image_ablation={image_ablation!r}; choices={sorted(allowed)}")
+        raise ValueError(
+            f"unsupported image_ablation={image_ablation!r}; choices={sorted(allowed)}"
+        )
     model.eval()
     if hasattr(conditioner, "eval"):
         conditioner.eval()
@@ -207,9 +225,15 @@ def evaluate_rdt2_fm(
         sample_keys = torch.stack([batch["episode_idx"], batch["image_index"]], dim=1)
         conditioner_ablation = image_ablation
         if image_ablation == "shuffle-episode":
-            if not hasattr(loader.dataset, "cross_episode_keys") or not hasattr(loader.dataset, "load_images_for_keys"):
-                raise TypeError("shuffle-episode requires an RDT2FMWindowDataset with explicit image-key loading")
-            sample_keys = loader.dataset.cross_episode_keys(sample_keys, seed=int(eval_seed) + batch_index)
+            if not hasattr(loader.dataset, "cross_episode_keys") or not hasattr(
+                loader.dataset, "load_images_for_keys"
+            ):
+                raise TypeError(
+                    "shuffle-episode requires an RDT2FMWindowDataset with explicit image-key loading"
+                )
+            sample_keys = loader.dataset.cross_episode_keys(
+                sample_keys, seed=int(eval_seed) + batch_index
+            )
             images = loader.dataset.load_images_for_keys(sample_keys).to(device, non_blocking=True)
             # The replacement was already performed at the dataset/cache key level.
             conditioner_ablation = "normal"
@@ -227,11 +251,17 @@ def evaluate_rdt2_fm(
             "lang_kv_cache": condition.kv_cache,
             "lang_attn_mask": condition.attention_mask,
         }
-        flow_losses.append(float(model.compute_loss(
-            state_tokens=state,
-            action_gt=actions,
-            **kwargs,
-        ).detach().cpu()))
+        flow_losses.append(
+            float(
+                model.compute_loss(
+                    state_tokens=state,
+                    action_gt=actions,
+                    **kwargs,
+                )
+                .detach()
+                .cpu()
+            )
+        )
         generator = torch.Generator(device=device.type)
         generator.manual_seed(int(eval_seed) + batch_index)
         noisy = torch.randn(
@@ -262,4 +292,3 @@ def evaluate_rdt2_fm(
     metrics["eval_seed"] = int(eval_seed)
     metrics["image_ablation"] = str(image_ablation)
     return metrics
-

@@ -29,7 +29,9 @@ def load_and_normalize_episodes(
     train_frac: float,
     val_frac: float,
     seed: int,
-) -> tuple[list[LoadedEpisode], list[tuple[str, str]], list[int], list[int], list[int], ZScoreNormalizer]:
+) -> tuple[
+    list[LoadedEpisode], list[tuple[str, str]], list[int], list[int], list[int], ZScoreNormalizer
+]:
     episodes, skipped = load_episodes(
         data_root,
         pattern,
