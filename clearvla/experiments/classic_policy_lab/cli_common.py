@@ -140,8 +140,24 @@ def load_data(
 
 
 def make_loader(
-    dataset, *, batch_size: int, workers: int, shuffle: bool, device: torch.device
+    dataset,
+    *,
+    batch_size: int,
+    workers: int,
+    shuffle: bool,
+    device: torch.device,
+    generator: torch.Generator | None = None,
+    batch_sampler=None,
 ) -> DataLoader:
+    if batch_sampler is not None:
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=workers > 0,
+            generator=generator,
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -149,6 +165,7 @@ def make_loader(
         num_workers=workers,
         pin_memory=device.type == "cuda",
         persistent_workers=workers > 0,
+        generator=generator,
     )
 
 

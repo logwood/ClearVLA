@@ -236,6 +236,239 @@ class V39PolicyConfig(V38PolicyConfig):
     # freedom without discarding the deep rollout representation.
     controlled_base_mode: str = "learned"
 
+    # Flow-DINO JEPA top representation.  The optical-flow core follows the
+    # SEA-RAFT design: direct initial flow, correlation-pyramid lookup,
+    # iterative refinement, and uncertainty.  V95/V96 retain the cached-DINO
+    # implementation.  The opt-in raw-grounding contract adds a full observed
+    # RGB pyramid and a 3+3+2 role hierarchy while keeping cached DINO as the
+    # semantic lane and future-only teacher.
+    flow_jepa_enabled: int = 0
+    flow_jepa_grid_size: int = 8
+    flow_jepa_feature_dim: int = 96
+    flow_jepa_flow_iters: int = 3
+    flow_jepa_corr_levels: int = 3
+    flow_jepa_corr_radius: int = 2
+    flow_jepa_mask_ratio: float = 0.375
+    flow_jepa_mask_block_size: int = 2
+    flow_jepa_motion_mask_fraction: float = 0.60
+    # Optional teacher-side target allocation for the historical absolute
+    # prediction path.  This changes only which predicted future patches
+    # receive JEPA loss: future teacher features never enter forward
+    # conditioning.  Predictive-change mode deliberately disables this option
+    # because its online context mask must be identical to its target mask.
+    flow_jepa_teacher_balanced_target_mask: int = 0
+    flow_jepa_teacher_mask_past_fraction: float = 0.25
+    flow_jepa_teacher_mask_change_fraction: float = 0.50
+    # Strict future-prediction contract for the raw V96+ path.  One
+    # observation-only spatial mask is reused across real horizons, hides the
+    # latest RGB/DINO chart before trainable cross-cell mixing during training,
+    # and selects the supervised future coordinates.  Deployment keeps the
+    # observation complete.  The prediction head emits a change in the frozen
+    # teacher chart rather than an absolute future token.  Cached final-layer
+    # DINO remains semantic evidence for the world path, so this does not
+    # falsely claim that its internal attention was masked before the frozen
+    # backbone.
+    flow_jepa_predictive_change_contract: int = 0
+    flow_jepa_uncertainty_floor: float = 0.03
+    flow_jepa_directed_canvas_attention: int = 1
+    flow_jepa_late_bottleneck: int = 0
+    flow_jepa_dense_depth: int = 2
+    flow_jepa_fine_radius: int = 2
+    flow_jepa_reader_radius: int = 1
+    flow_jepa_reader_heads: int = 2
+    flow_jepa_raw_image_enabled: int = 0
+    flow_jepa_role_hierarchy: int = 0
+    flow_jepa_raw_base_channels: int = 32
+    flow_jepa_raw_mid_radius: int = 2
+    flow_jepa_raw_high_radius: int = 1
+    flow_jepa_raw_reader_radius: int = 3
+    flow_jepa_raw_reader_heads: int = 4
+    flow_jepa_raw_activation_checkpoint: int = 1
+    # V99 anti-collapse contract. Legacy V98 remains constructible with zero
+    # for controlled reproduction; the current experiment wrapper enables it.
+    flow_jepa_zero_flow_guard: int = 0
+    # V100 removes the two remaining visual shortcuts.  Grounding/world blocks
+    # own raw evidence; policy blocks read the resulting world canvas, and the
+    # final decoder consumes only policy/world products rather than raw visual
+    # tokens a second time.  The complementary reader always adds a pooled
+    # low-frequency base and a flow-addressed high-frequency residual, so
+    # neither lane can win a router by suppressing the other.
+    flow_jepa_strict_role_visual_path: int = 0
+    flow_jepa_complementary_raw_detail: int = 0
+    # The forward-flow reader emits current raw detail in the preceding
+    # source-frame coordinate chart.  V101 fuses it with that matching source
+    # DINO chart, leaving latest DINO as a separate current-coordinate chart.
+    flow_jepa_source_aligned_raw_fusion: int = 0
+    flow_jepa_grounding_blocks: int = 3
+    flow_jepa_world_blocks: int = 3
+    flow_jepa_policy_blocks: int = 2
+    flow_jepa_policy_workspace_scale: float = 0.10
+    flow_jepa_policy_workspace_fixed_fusion: int = 0
+    # V102 separates temporal world organization from spatial observation
+    # detail. World blocks may write one residual per anchor/camera but cannot
+    # manufacture an xy-specific residual; the exact post-reader high-frequency
+    # raw residual is instead read once at the world -> policy boundary.
+    flow_jepa_world_anchor_write_only: int = 0
+    flow_jepa_late_policy_detail: int = 0
+    flow_jepa_late_policy_detail_scale: float = 0.25
+    # Post-V102 soft multi-resolution address lattice.  The observation-only
+    # compiler keeps several DINO hypotheses and continuous raw candidates;
+    # the world/policy query performs the final spatial/camera read.  Zero
+    # preserves the exact V102 compressed-detail path.
+    flow_jepa_soft_address_lattice: int = 0
+    flow_jepa_address_slots: int = 4
+    flow_jepa_address_route_dim: int = 32
+    flow_jepa_address_query_chunk: int = 4
+    # V107 makes ``flow_jepa_raw_reader_heads`` factual on the active soft
+    # lattice path.  Every glimpse owns an independent query/posterior and
+    # reads a narrow value before the per-glimpse results are concatenated.
+    # Zero preserves the single-expectation V106 reader exactly.
+    flow_jepa_policy_multi_glimpse_address: int = 0
+    # Positive values keep flow as a genuine soft geometric expert. Content
+    # may still override it through the posterior, but the model cannot remove
+    # the flow contribution by shrinking one learned scalar to zero.
+    flow_jepa_address_flow_prior_floor: float = 0.0
+    # Post-V103 geometry contract.  Every learned displacement is represented
+    # as an in-image source-relative coordinate by a smooth asymmetric chart.
+    # This prevents validity masks from becoming an optimization escape hatch
+    # while retaining continuous gradients and exact identity at zero flow.
+    flow_jepa_bounded_flow_coordinates: int = 0
+    # Long-horizon anchors are accumulated in chronological order from an
+    # observation-only perceptual history state.  Zero retains the historical
+    # parallel horizon queries for checkpoint-compatible reproduction.
+    flow_jepa_sequential_horizon_memory: int = 0
+    # V105 gives each real future horizon its own soft read over the existing
+    # observation-only multi-resolution bank.  The 8x8 W chart supplies
+    # queries; continuous raw candidates remain values, and no future teacher
+    # enters forward conditioning.  In V105-V107 the result is a small fixed
+    # residual into the JEPA prediction head only.
+    flow_jepa_horizon_soft_address: int = 0
+    flow_jepa_horizon_address_update_scale: float = 0.10
+    # Keep the target 8x8 query-cell identity through continuous fine-offset
+    # selection.  The implementation chunks target cells to bound memory.
+    # The same flag gives the bias-free value projection a variance-preserving
+    # initialization instead of the V105/V106 near-silent 1e-3 initialization.
+    flow_jepa_horizon_cell_fine_address: int = 0
+    # V108 moves the same owned soft-address read to the G3 -> W1 boundary and
+    # writes its bounded residual into the existing rollout carrier.  The
+    # final JEPA head then consumes the final rollout without rereading the
+    # bank.  Zero retains the exact V107 late auxiliary topology.
+    flow_jepa_online_horizon_address: int = 0
+    # V109 replaces the V108 single G3->W1 value read with a progressive clean
+    # selector state.  G1 updates complete-chart hypotheses, G2 rectifies
+    # geometry/fine support, and G3 compiles a canonical selector basis.  The
+    # first high-resolution value read remains at the existing W->P boundary.
+    # Zero preserves the exact V108 topology and checkpoint graph.
+    flow_jepa_progressive_grounding_address: int = 0
+    # V110 preserves literal current RGB, learned raw detail, DINO semantics,
+    # raw-pair appearance and flow geometry as distinct evidence types.  W
+    # predicts soft future transport from exact current anchors; P1 retains a
+    # local micro-grid and P2 performs the first typed local fusion.  Zero
+    # restores the V109 progressive graph exactly.
+    flow_jepa_coordinate_typed_raw_detail: int = 0
+    flow_jepa_raw_micro_grid: int = 3
+    # V111 turns the V110 typed evidence labels into functional ownership.
+    # G keeps public scene state separate from semantic/appearance/geometry
+    # sidecars, W represents chronological interval innovations, and P uses
+    # factorized source/fine addressing followed by typed local operations.
+    # Zero preserves the serialized and numerical V110 graph exactly.
+    flow_jepa_structured_ownership_bottleneck: int = 0
+    # V106 replaces normalize-after-cancellation routing with a
+    # zero-preserving variance-floor contract.  The complete numerical
+    # contract extends that same bounded-Jacobian rule through learned
+    # correlation features, the role-block normalization stack, and the
+    # continuous cycle-visibility evidence consumed by address/motion keys.
+    # Values themselves remain upper-bounded and are never expanded merely to
+    # manufacture a confident route.
+    flow_jepa_variance_safe_routing: int = 0
+    flow_jepa_complete_numerical_contract: int = 0
+    flow_jepa_routing_norm_floor: float = 0.25
+    # Learned correlation features have nominal RMS near one.  A 0.10 floor
+    # changes that regime by less than one percent while bounding a cancelled
+    # feature's inverse-norm derivative.  The floor is expressed in RMS units
+    # and converted to the matching width-aware L2 denominator.
+    flow_jepa_correlation_rms_floor: float = 0.10
+    # Cycle visibility transitions across this fraction of its local
+    # source-relative consistency threshold.  Hard visibility remains an
+    # audit metric only and never enters online address values.
+    flow_jepa_visibility_transition_fraction: float = 0.10
+    flow_jepa_horizon_value_max_rms: float = 0.50
+    # V106 interval-stage semantics.  ``window_offsets`` remain the four
+    # compact query labels, while boundaries/supports describe the real
+    # teacher frames.  The online organizer never receives these targets.
+    flow_jepa_interval_stage_delta: int = 0
+    flow_jepa_interval_boundaries: tuple[int, ...] = ()
+    flow_jepa_interval_support_offsets: tuple[int, ...] = ()
+    flow_jepa_interval_stage_update_scale: float = 0.10
+    # In addition to the coarse spatial W write, expose the bounded signed
+    # interval increment as a provenance-preserving W->P typed candidate.
+    flow_jepa_interval_stage_typed_value: int = 0
+    # Typed 3-3-2 delta bridges.  These route real per-block residual values
+    # at role boundaries while keeping the cumulative carrier, protected raw
+    # detail, clean semantic seed, and noisy action state outside softmax.
+    role_attnres_enabled: int = 0
+    role_attnres_key_dim: int = 32
+    role_attnres_ground_to_world: int = 0
+    role_attnres_world_to_policy: int = 0
+    role_attnres_policy_to_mmdit: int = 0
+    role_attnres_ground_to_world_scale: float = 0.10
+    role_attnres_world_to_policy_scale: float = 0.10
+    role_attnres_policy_to_mmdit_scale: float = 0.25
+    # Post-V103 residual stability contract.  Role blocks and typed AttnRes
+    # values use smooth RMS compression in the normalized hidden chart.  The
+    # carrier remains outside every route softmax and no gradient is detached.
+    role_residual_amplitude_contract: int = 0
+    role_residual_max_update_rms: float = 0.50
+    role_attnres_max_value_rms: float = 1.00
+    # Contract the actual gated proposal at the legal write boundary.  Zero
+    # retains V106's gate-after-contract arithmetic for matched ablation.
+    role_residual_contract_after_gate: int = 0
+    # Trajectory workspace tokens are laid out as [time, basis].  Pooling basis
+    # tokens inside each time step preserves event timing; generic interpolation
+    # across the flattened T*basis axis is retained only for old checkpoints.
+    flow_jepa_policy_workspace_horizon_pool: int = 0
+    flow_jepa_history_offsets: tuple[int, ...] = (-8, -4, 0)
+    # Window anchors remain inside the explicitly modelled action chunk.  The
+    # separate stage horizon is allowed to extend beyond it because its target
+    # is a single global representation delta rather than a deterministic
+    # patch-wise transition.  Empty/zero values retain a shape-safe fallback
+    # for small direct-construction tests and historical callers; production
+    # entry points always write the real dataset offsets into the config.
+    flow_jepa_window_offsets: tuple[int, ...] = ()
+    flow_jepa_stage_offset: int = 0
+    flow_jepa_stage_tokens: int = 1
+
+    # Clean conditioning memory.  The action path preserves recent executed
+    # actions verbatim and resamples the older prefix into a few summary tokens.
+    # Relative-time encodings are derived from the real dataset offsets, so
+    # changing history support does not create a new learned position table.
+    action_history_enabled: int = 0
+    executed_action_offsets: tuple[int, ...] = ()
+    action_history_recent_tokens: int = 4
+    action_history_summary_tokens: int = 3
+    action_history_condition_dropout: float = 0.0
+    action_history_condition_exact_null: int = 0
+    # Historical policies trained the future proposal only through its
+    # auxiliary action-regression head. Zero keeps this causal, deployment-time
+    # condition attached to the final action loss through ordinary autograd.
+    action_history_proposal_detach: int = 1
+
+    # Frozen language embeddings are resampled by a small trainable Perceiver
+    # into Goal Tokens.  Goal and action memory later share a condition mixer,
+    # but retain private stems and role embeddings so they are not identified.
+    goal_conditioning_enabled: int = 0
+    goal_token_count: int = 4
+    goal_language_dim: int = 768
+    goal_language_max_tokens: int = 32
+    goal_resampler_depth: int = 2
+    goal_condition_dropout: float = 0.0
+    goal_condition_exact_null: int = 0
+    # Stateless long-horizon phase belief.  It has no recurrent deployment
+    # state and is used only to perturb world/address selector queries.
+    stateless_phase_enabled: int = 0
+    stateless_phase_count: int = 4
+    stateless_phase_query_scale: float = 0.10
+
     # V39.1: optional multi-layer contract adapters.  When enabled, every DiT
     # block exposes a tiny side adapter and weak readout heads.  The adapters
     # are contract probes with a scaled gradient into the trunk, so we do not
@@ -642,10 +875,660 @@ class V39PolicyConfig(V38PolicyConfig):
     adaptive_cvae_micro_refine_block_scale: float = 0.30
     adaptive_cvae_micro_progress_distance_scale: float = 4.0
 
+    @property
+    def flow_jepa_effective_window_offsets(self) -> tuple[int, ...]:
+        explicit = tuple(int(value) for value in self.flow_jepa_window_offsets)
+        if explicit:
+            return explicit
+        anchors = int(self.future_anchors)
+        horizon = int(self.action_horizon)
+        return tuple(
+            max(1, int(round((index + 1) * horizon / float(anchors))))
+            for index in range(anchors)
+        )
+
+    @property
+    def flow_jepa_effective_stage_offset(self) -> int:
+        explicit = int(self.flow_jepa_stage_offset)
+        if explicit > 0:
+            return explicit
+        return int(self.flow_jepa_effective_window_offsets[-1]) + 1
+
+    @property
+    def flow_jepa_effective_interval_boundaries(self) -> tuple[int, ...]:
+        explicit = tuple(int(value) for value in self.flow_jepa_interval_boundaries)
+        if explicit:
+            return explicit
+        # V106 production defaults.  They are returned only as a shape-safe
+        # fallback; the formal validator requires explicit serialization.
+        return (4, 8, 16, 32, 48)
+
+    @property
+    def flow_jepa_effective_interval_support_offsets(self) -> tuple[int, ...]:
+        explicit = tuple(
+            int(value) for value in self.flow_jepa_interval_support_offsets
+        )
+        if explicit:
+            return explicit
+        return tuple(range(4, 49, 4))
+
+    @property
+    def flow_jepa_interval_windows(self) -> tuple[tuple[int, int], ...]:
+        boundaries = self.flow_jepa_effective_interval_boundaries
+        return tuple(
+            (int(boundaries[index]), int(boundaries[index + 1]))
+            for index in range(len(boundaries) - 1)
+        )
+
+    @property
+    def flow_jepa_target_offsets(self) -> tuple[int, ...]:
+        """Future teacher order for the active representation contract.
+
+        V95 uses local windows followed by one global stage target.  The
+        late-bottleneck contract has no separate stage object: every horizon,
+        including the far horizon, remains a spatial future-evidence chart.
+        """
+
+        if int(self.flow_jepa_interval_stage_delta):
+            return self.flow_jepa_effective_interval_support_offsets
+        windows = self.flow_jepa_effective_window_offsets
+        if int(self.flow_jepa_late_bottleneck):
+            return windows
+        return (*windows, int(self.flow_jepa_effective_stage_offset))
+
+    @property
+    def flow_jepa_action_offsets(self) -> tuple[int, ...]:
+        """Prefix of world horizons that partitions the deploy action chunk."""
+
+        offsets = tuple(
+            value
+            for value in self.flow_jepa_effective_window_offsets
+            if int(value) <= int(self.action_horizon)
+        )
+        if not offsets or int(offsets[-1]) != int(self.action_horizon):
+            raise ValueError(
+                "Flow-DINO horizons must contain action_horizon as the final action anchor"
+            )
+        return offsets
+
+    @property
+    def effective_executed_action_offsets(self) -> tuple[int, ...]:
+        explicit = tuple(int(value) for value in self.executed_action_offsets)
+        if explicit:
+            return explicit
+        return tuple(range(-int(self.executed_history_length), 0))
+
+    @property
+    def action_history_token_count(self) -> int:
+        if not int(self.action_history_enabled):
+            return int(self.executed_history_length)
+        recent = min(
+            int(self.action_history_recent_tokens),
+            int(self.executed_history_length),
+        )
+        summaries = (
+            int(self.action_history_summary_tokens)
+            if int(self.executed_history_length) > recent
+            else 0
+        )
+        return recent + summaries
+
     def validate(self) -> None:
         super().validate()
         if str(self.controlled_base_mode) not in {"learned", "fixed_zero"}:
             raise ValueError("controlled_base_mode must be learned or fixed_zero")
+        if int(self.flow_jepa_enabled) not in (0, 1):
+            raise ValueError("flow_jepa_enabled must be 0 or 1")
+        if int(self.action_history_enabled) not in (0, 1):
+            raise ValueError("action_history_enabled must be 0 or 1")
+        if int(self.goal_conditioning_enabled) not in (0, 1):
+            raise ValueError("goal_conditioning_enabled must be 0 or 1")
+        for name in (
+            "action_history_condition_exact_null",
+            "action_history_proposal_detach",
+            "goal_condition_exact_null",
+            "stateless_phase_enabled",
+        ):
+            if int(getattr(self, name)) not in (0, 1):
+                raise ValueError(f"{name} must be 0 or 1")
+        if int(self.action_history_condition_exact_null) and not int(
+            self.action_history_enabled
+        ):
+            raise ValueError(
+                "exact action-history null semantics require action_history_enabled"
+            )
+        if int(self.goal_condition_exact_null) and not int(
+            self.goal_conditioning_enabled
+        ):
+            raise ValueError("exact goal null semantics require goal conditioning")
+        if int(self.stateless_phase_count) < 2:
+            raise ValueError("stateless_phase_count must be at least two")
+        if not 0.0 < float(self.stateless_phase_query_scale) <= 1.0:
+            raise ValueError("stateless_phase_query_scale must be in (0,1]")
+        if int(self.stateless_phase_enabled) and not (
+            int(self.goal_conditioning_enabled)
+            or int(self.action_history_enabled)
+        ):
+            raise ValueError(
+                "stateless phase belief requires goal or action-history conditioning"
+            )
+        if int(self.stateless_phase_enabled) and not (
+            int(self.flow_jepa_strict_role_visual_path)
+            and int(self.flow_jepa_late_policy_detail)
+        ):
+            raise ValueError(
+                "stateless phase belief requires the strict late-detail selector path"
+            )
+        executed_offsets = self.effective_executed_action_offsets
+        if len(executed_offsets) != int(self.executed_history_length):
+            raise ValueError(
+                "executed_action_offsets must match executed_history_length"
+            )
+        if tuple(sorted(set(executed_offsets))) != executed_offsets or max(executed_offsets) >= 0:
+            raise ValueError(
+                "executed_action_offsets must be strictly increasing past offsets"
+            )
+        if int(self.action_history_enabled):
+            if not 1 <= int(self.action_history_recent_tokens) <= int(
+                self.executed_history_length
+            ):
+                raise ValueError(
+                    "action_history_recent_tokens must be in [1,executed_history_length]"
+                )
+            if int(self.action_history_summary_tokens) < 1:
+                raise ValueError("action_history_summary_tokens must be positive")
+        if int(self.goal_conditioning_enabled):
+            if min(
+                int(self.goal_token_count),
+                int(self.goal_language_dim),
+                int(self.goal_language_max_tokens),
+                int(self.goal_resampler_depth),
+            ) < 1:
+                raise ValueError("goal conditioning dimensions must be positive")
+        if not 0.0 <= float(self.action_history_condition_dropout) < 1.0:
+            raise ValueError("action_history_condition_dropout must be in [0,1)")
+        if not 0.0 <= float(self.goal_condition_dropout) < 1.0:
+            raise ValueError("goal_condition_dropout must be in [0,1)")
+        if int(self.flow_jepa_directed_canvas_attention) not in (0, 1):
+            raise ValueError("flow_jepa_directed_canvas_attention must be 0 or 1")
+        if int(self.flow_jepa_late_bottleneck) not in (0, 1):
+            raise ValueError("flow_jepa_late_bottleneck must be 0 or 1")
+        if int(self.flow_jepa_raw_image_enabled) not in (0, 1):
+            raise ValueError("flow_jepa_raw_image_enabled must be 0 or 1")
+        if int(self.flow_jepa_raw_image_enabled) and not int(self.flow_jepa_enabled):
+            raise ValueError("raw-image grounding requires Flow-DINO JEPA")
+        if int(self.flow_jepa_raw_image_enabled) and not int(
+            self.flow_jepa_late_bottleneck
+        ):
+            raise ValueError(
+                "raw-image grounding requires the late-bottleneck evidence layout"
+            )
+        if int(self.flow_jepa_raw_activation_checkpoint) not in (0, 1):
+            raise ValueError("flow_jepa_raw_activation_checkpoint must be 0 or 1")
+        if int(self.flow_jepa_zero_flow_guard) not in (0, 1):
+            raise ValueError("flow_jepa_zero_flow_guard must be 0 or 1")
+        if int(self.flow_jepa_zero_flow_guard) and not int(
+            self.flow_jepa_raw_image_enabled
+        ):
+            raise ValueError("flow_jepa_zero_flow_guard requires raw-image Flow-JEPA")
+        if int(self.flow_jepa_strict_role_visual_path) not in (0, 1):
+            raise ValueError("flow_jepa_strict_role_visual_path must be 0 or 1")
+        if int(self.flow_jepa_complementary_raw_detail) not in (0, 1):
+            raise ValueError("flow_jepa_complementary_raw_detail must be 0 or 1")
+        if int(self.flow_jepa_source_aligned_raw_fusion) not in (0, 1):
+            raise ValueError("flow_jepa_source_aligned_raw_fusion must be 0 or 1")
+        if int(self.flow_jepa_source_aligned_raw_fusion) and not int(
+            self.flow_jepa_complementary_raw_detail
+        ):
+            raise ValueError(
+                "source-aligned raw fusion requires complementary raw detail"
+            )
+        if int(self.flow_jepa_strict_role_visual_path) and not int(
+            self.flow_jepa_role_hierarchy
+        ):
+            raise ValueError(
+                "flow_jepa_strict_role_visual_path requires the role hierarchy"
+            )
+        if int(self.flow_jepa_complementary_raw_detail) and not (
+            int(self.flow_jepa_raw_image_enabled)
+            and int(self.flow_jepa_zero_flow_guard)
+        ):
+            raise ValueError(
+                "complementary raw detail requires raw-image Flow-JEPA and the zero-flow guard"
+            )
+        if int(self.flow_jepa_role_hierarchy) not in (0, 1):
+            raise ValueError("flow_jepa_role_hierarchy must be 0 or 1")
+        if bool(int(self.flow_jepa_raw_image_enabled)) != bool(
+            int(self.flow_jepa_role_hierarchy)
+        ):
+            raise ValueError(
+                "raw-image grounding and the 3-group DiT hierarchy must be enabled together"
+            )
+        if min(
+            int(self.flow_jepa_grid_size),
+            int(self.flow_jepa_feature_dim),
+            int(self.flow_jepa_flow_iters),
+            int(self.flow_jepa_corr_levels),
+            int(self.flow_jepa_corr_radius),
+            int(self.flow_jepa_mask_block_size),
+            int(self.flow_jepa_dense_depth),
+            int(self.flow_jepa_fine_radius),
+            int(self.flow_jepa_reader_radius),
+            int(self.flow_jepa_reader_heads),
+            int(self.flow_jepa_raw_base_channels),
+            int(self.flow_jepa_raw_mid_radius),
+            int(self.flow_jepa_raw_high_radius),
+            int(self.flow_jepa_raw_reader_radius),
+            int(self.flow_jepa_raw_reader_heads),
+        ) < 1:
+            raise ValueError("Flow-DINO JEPA dimensions and iteration counts must be positive")
+        if int(self.flow_jepa_feature_dim) % 8:
+            raise ValueError("flow_jepa_feature_dim must be divisible by 8")
+        if int(self.flow_jepa_raw_image_enabled) and (
+            int(self.hidden_size) % int(self.flow_jepa_raw_reader_heads)
+        ):
+            raise ValueError("hidden_size must be divisible by flow_jepa_raw_reader_heads")
+        if not 0.0 <= float(self.flow_jepa_mask_ratio) < 1.0:
+            raise ValueError("flow_jepa_mask_ratio must be in [0,1)")
+        if not 0.0 <= float(self.flow_jepa_motion_mask_fraction) <= 1.0:
+            raise ValueError("flow_jepa_motion_mask_fraction must be in [0,1]")
+        if int(self.flow_jepa_teacher_balanced_target_mask) not in (0, 1):
+            raise ValueError("flow_jepa_teacher_balanced_target_mask must be 0 or 1")
+        if int(self.flow_jepa_predictive_change_contract) not in (0, 1):
+            raise ValueError("flow_jepa_predictive_change_contract must be 0 or 1")
+        if int(self.flow_jepa_predictive_change_contract) and not (
+            int(self.flow_jepa_raw_image_enabled)
+            and int(self.flow_jepa_late_bottleneck)
+            and int(self.flow_jepa_zero_flow_guard)
+            and not int(self.flow_jepa_teacher_balanced_target_mask)
+            and float(self.flow_jepa_address_flow_prior_floor) > 0.0
+        ):
+            raise ValueError(
+                "predictive-change contract requires raw late-bottleneck Flow-JEPA, "
+                "the zero-flow guard, one shared online context/target mask "
+                "(teacher-balanced target selection disabled), and a positive "
+                "soft-address flow-prior floor"
+            )
+        teacher_past = float(self.flow_jepa_teacher_mask_past_fraction)
+        teacher_change = float(self.flow_jepa_teacher_mask_change_fraction)
+        if teacher_past < 0.0 or teacher_change < 0.0 or teacher_past + teacher_change > 1.0:
+            raise ValueError(
+                "teacher target-mask fractions must be non-negative and sum to at most 1"
+            )
+        if float(self.flow_jepa_uncertainty_floor) <= 0.0:
+            raise ValueError("flow_jepa_uncertainty_floor must be positive")
+        if not 0.0 < float(self.flow_jepa_policy_workspace_scale) <= 1.0:
+            raise ValueError("flow_jepa_policy_workspace_scale must be in (0,1]")
+        if int(self.flow_jepa_policy_workspace_fixed_fusion) not in (0, 1):
+            raise ValueError("flow_jepa_policy_workspace_fixed_fusion must be 0 or 1")
+        if int(self.flow_jepa_policy_workspace_fixed_fusion) and not int(
+            self.flow_jepa_strict_role_visual_path
+        ):
+            raise ValueError("fixed policy-workspace fusion requires the strict role visual path")
+        if int(self.flow_jepa_world_anchor_write_only) not in (0, 1):
+            raise ValueError("flow_jepa_world_anchor_write_only must be 0 or 1")
+        if int(self.flow_jepa_late_policy_detail) not in (0, 1):
+            raise ValueError("flow_jepa_late_policy_detail must be 0 or 1")
+        if int(self.flow_jepa_soft_address_lattice) not in (0, 1):
+            raise ValueError("flow_jepa_soft_address_lattice must be 0 or 1")
+        for name in (
+            "flow_jepa_bounded_flow_coordinates",
+            "flow_jepa_sequential_horizon_memory",
+            "flow_jepa_horizon_soft_address",
+            "flow_jepa_variance_safe_routing",
+            "flow_jepa_complete_numerical_contract",
+            "flow_jepa_interval_stage_delta",
+            "flow_jepa_policy_multi_glimpse_address",
+            "flow_jepa_horizon_cell_fine_address",
+            "flow_jepa_online_horizon_address",
+            "flow_jepa_progressive_grounding_address",
+            "flow_jepa_coordinate_typed_raw_detail",
+            "flow_jepa_structured_ownership_bottleneck",
+            "flow_jepa_interval_stage_typed_value",
+            "role_residual_amplitude_contract",
+            "role_residual_contract_after_gate",
+        ):
+            if int(getattr(self, name)) not in (0, 1):
+                raise ValueError(f"{name} must be 0 or 1")
+        if int(self.flow_jepa_bounded_flow_coordinates) and not int(
+            self.flow_jepa_raw_image_enabled
+        ):
+            raise ValueError(
+                "bounded flow coordinates require raw-image Flow-JEPA"
+            )
+        if int(self.flow_jepa_sequential_horizon_memory) and not (
+            int(self.flow_jepa_predictive_change_contract)
+            and int(self.flow_jepa_raw_image_enabled)
+        ):
+            raise ValueError(
+                "sequential horizon memory requires predictive raw Flow-JEPA"
+            )
+        if int(self.flow_jepa_horizon_soft_address) and not (
+            int(self.flow_jepa_sequential_horizon_memory)
+            and int(self.flow_jepa_soft_address_lattice)
+            and int(self.flow_jepa_predictive_change_contract)
+        ):
+            raise ValueError(
+                "horizon soft address requires sequential predictive JEPA and "
+                "the observation-only soft address lattice"
+            )
+        if int(self.flow_jepa_policy_multi_glimpse_address) and not (
+            int(self.flow_jepa_soft_address_lattice)
+            and int(self.flow_jepa_late_policy_detail)
+        ):
+            raise ValueError(
+                "multi-glimpse policy addressing requires the late soft-address reader"
+            )
+        if int(self.flow_jepa_horizon_cell_fine_address) and not int(
+            self.flow_jepa_horizon_soft_address
+        ):
+            raise ValueError(
+                "cell-specific horizon fine addressing requires horizon soft address"
+            )
+        if int(self.flow_jepa_online_horizon_address) and not (
+            int(self.flow_jepa_horizon_soft_address)
+            and int(self.flow_jepa_horizon_cell_fine_address)
+            and int(self.flow_jepa_role_hierarchy)
+            and int(self.flow_jepa_strict_role_visual_path)
+            and int(self.flow_jepa_late_policy_detail)
+            and int(self.flow_jepa_late_bottleneck)
+        ):
+            raise ValueError(
+                "online horizon address requires the cell-specific horizon reader, "
+                "strict role hierarchy, late observation bank, and late bottleneck"
+            )
+        if int(self.flow_jepa_progressive_grounding_address) and not (
+            int(self.flow_jepa_online_horizon_address)
+            and int(self.flow_jepa_soft_address_lattice)
+            and int(self.flow_jepa_horizon_cell_fine_address)
+            and int(self.flow_jepa_role_hierarchy)
+            and int(self.flow_jepa_strict_role_visual_path)
+            and int(self.flow_jepa_late_policy_detail)
+            and int(self.flow_jepa_grounding_blocks) == 3
+        ):
+            raise ValueError(
+                "progressive grounding address requires the complete V108 "
+                "soft-lattice path and exactly three grounding blocks"
+            )
+        if int(self.flow_jepa_coordinate_typed_raw_detail) and not (
+            int(self.flow_jepa_progressive_grounding_address)
+            and int(self.flow_jepa_complete_numerical_contract)
+            and int(self.flow_jepa_policy_multi_glimpse_address)
+        ):
+            raise ValueError(
+                "coordinate-typed raw detail requires the complete V109 "
+                "progressive graph, the finite-gain numerical contract, and "
+                "multi-glimpse policy addressing"
+            )
+        micro_grid = int(self.flow_jepa_raw_micro_grid)
+        if int(self.flow_jepa_coordinate_typed_raw_detail) and (
+            micro_grid < 3 or micro_grid % 2 == 0
+        ):
+            raise ValueError("flow_jepa_raw_micro_grid must be an odd integer >= 3")
+        if int(self.flow_jepa_structured_ownership_bottleneck) and not (
+            int(self.flow_jepa_coordinate_typed_raw_detail)
+            and int(self.flow_jepa_interval_stage_delta)
+            and int(self.flow_jepa_interval_stage_typed_value)
+            and int(self.flow_jepa_sequential_horizon_memory)
+        ):
+            raise ValueError(
+                "structured ownership requires the complete V110 typed path, "
+                "chronological horizon memory, and typed interval-delta supervision"
+            )
+        if not 0.0 < float(self.flow_jepa_horizon_address_update_scale) <= 1.0:
+            raise ValueError(
+                "flow_jepa_horizon_address_update_scale must be in (0,1]"
+            )
+        if not 0.0 < float(self.flow_jepa_routing_norm_floor) <= 1.0:
+            raise ValueError(
+                "flow_jepa_routing_norm_floor must be in (0,1]"
+            )
+        if not 0.0 < float(self.flow_jepa_correlation_rms_floor) <= 1.0:
+            raise ValueError(
+                "flow_jepa_correlation_rms_floor must be in (0,1]"
+            )
+        if not 0.0 < float(self.flow_jepa_visibility_transition_fraction) <= 1.0:
+            raise ValueError(
+                "flow_jepa_visibility_transition_fraction must be in (0,1]"
+            )
+        if float(self.flow_jepa_horizon_value_max_rms) <= 0.0:
+            raise ValueError("flow_jepa_horizon_value_max_rms must be positive")
+        if int(self.flow_jepa_variance_safe_routing) and not (
+            int(self.flow_jepa_horizon_soft_address)
+            and int(self.role_attnres_enabled)
+        ):
+            raise ValueError(
+                "variance-safe routing requires the horizon address and typed "
+                "role AttnRes paths"
+            )
+        if int(self.flow_jepa_complete_numerical_contract) and not (
+            int(self.flow_jepa_variance_safe_routing)
+            and int(self.flow_jepa_bounded_flow_coordinates)
+            and int(self.role_residual_amplitude_contract)
+        ):
+            raise ValueError(
+                "the complete numerical contract requires variance-safe "
+                "routing, bounded flow coordinates, and bounded role residuals"
+            )
+        if not 0.0 < float(self.flow_jepa_interval_stage_update_scale) <= 1.0:
+            raise ValueError(
+                "flow_jepa_interval_stage_update_scale must be in (0,1]"
+            )
+        if int(self.flow_jepa_interval_stage_delta):
+            if not (
+                int(self.flow_jepa_sequential_horizon_memory)
+                and int(self.flow_jepa_horizon_soft_address)
+                and int(self.flow_jepa_predictive_change_contract)
+                and int(self.flow_jepa_late_bottleneck)
+            ):
+                raise ValueError(
+                    "interval-stage delta requires the late-bottleneck "
+                    "sequential predictive horizon-address path"
+                )
+            boundaries = self.flow_jepa_effective_interval_boundaries
+            supports = self.flow_jepa_effective_interval_support_offsets
+            if len(boundaries) != int(self.future_anchors) + 1:
+                raise ValueError(
+                    "interval boundaries must contain future_anchors + 1 entries"
+                )
+            if (
+                tuple(sorted(set(boundaries))) != boundaries
+                or tuple(sorted(set(supports))) != supports
+                or boundaries[0] <= 0
+            ):
+                raise ValueError(
+                    "interval boundaries/support offsets must be strictly "
+                    "increasing and positive"
+                )
+            support_set = set(supports)
+            for start, end in self.flow_jepa_interval_windows:
+                interval_support = tuple(
+                    value for value in supports if start <= value <= end
+                )
+                if (
+                    start not in support_set
+                    or end not in support_set
+                    or len(interval_support) < 2
+                ):
+                    raise ValueError(
+                        "every interval stage requires both boundaries and at "
+                        "least two real support frames"
+                    )
+        if int(self.flow_jepa_interval_stage_typed_value) and not (
+            int(self.flow_jepa_interval_stage_delta)
+            and int(self.role_attnres_world_to_policy)
+        ):
+            raise ValueError(
+                "typed interval-stage value requires the interval organizer and W->P AttnRes"
+            )
+        if int(self.role_residual_amplitude_contract) and not (
+            int(self.role_attnres_enabled)
+            and int(self.flow_jepa_role_hierarchy)
+        ):
+            raise ValueError(
+                "role residual amplitude contract requires typed role AttnRes"
+            )
+        if int(self.role_residual_contract_after_gate) and not int(
+            self.role_residual_amplitude_contract
+        ):
+            raise ValueError(
+                "post-gate residual contract requires the role residual amplitude contract"
+            )
+        if float(self.role_residual_max_update_rms) <= 0.0:
+            raise ValueError("role_residual_max_update_rms must be positive")
+        if float(self.role_attnres_max_value_rms) <= 0.0:
+            raise ValueError("role_attnres_max_value_rms must be positive")
+        if min(
+            int(self.flow_jepa_address_slots),
+            int(self.flow_jepa_address_route_dim),
+            int(self.flow_jepa_address_query_chunk),
+        ) < 1:
+            raise ValueError("soft address lattice dimensions must be positive")
+        if not 0.0 <= float(self.flow_jepa_address_flow_prior_floor) < 4.0:
+            raise ValueError("address flow-prior floor must be in [0,4)")
+        if float(self.flow_jepa_address_flow_prior_floor) > 0.0 and not int(
+            self.flow_jepa_soft_address_lattice
+        ):
+            raise ValueError("address flow-prior floor requires the soft address lattice")
+        for name in (
+            "role_attnres_enabled",
+            "role_attnres_ground_to_world",
+            "role_attnres_world_to_policy",
+            "role_attnres_policy_to_mmdit",
+        ):
+            if int(getattr(self, name)) not in (0, 1):
+                raise ValueError(f"{name} must be 0 or 1")
+        if int(self.role_attnres_key_dim) < 1:
+            raise ValueError("role_attnres_key_dim must be positive")
+        for name in (
+            "role_attnres_ground_to_world_scale",
+            "role_attnres_world_to_policy_scale",
+            "role_attnres_policy_to_mmdit_scale",
+        ):
+            if not 0.0 < float(getattr(self, name)) <= 1.0:
+                raise ValueError(f"{name} must be in (0,1]")
+        enabled_role_bridges = (
+            int(self.role_attnres_ground_to_world)
+            or int(self.role_attnres_world_to_policy)
+            or int(self.role_attnres_policy_to_mmdit)
+        )
+        if enabled_role_bridges and not int(self.role_attnres_enabled):
+            raise ValueError("individual role AttnRes bridges require role_attnres_enabled=1")
+        if int(self.role_attnres_enabled) and not (
+            int(self.flow_jepa_role_hierarchy)
+            and int(self.flow_jepa_strict_role_visual_path)
+        ):
+            raise ValueError("role AttnRes requires the strict 3-3-2 role hierarchy")
+        if int(self.role_attnres_policy_to_mmdit) and int(
+            self.flow_jepa_policy_workspace_fixed_fusion
+        ):
+            raise ValueError(
+                "typed policy-to-MMDiT bridge replaces fixed policy-workspace fusion"
+            )
+        if int(self.flow_jepa_policy_workspace_horizon_pool) not in (0, 1):
+            raise ValueError("flow_jepa_policy_workspace_horizon_pool must be 0 or 1")
+        if not 0.0 < float(self.flow_jepa_late_policy_detail_scale) <= 1.0:
+            raise ValueError("flow_jepa_late_policy_detail_scale must be in (0,1]")
+        if int(self.flow_jepa_world_anchor_write_only) and not (
+            int(self.flow_jepa_strict_role_visual_path)
+            and int(self.flow_jepa_role_hierarchy)
+        ):
+            raise ValueError(
+                "anchor-only world writes require the strict role hierarchy"
+            )
+        if int(self.flow_jepa_policy_workspace_horizon_pool) and not int(
+            self.flow_jepa_role_hierarchy
+        ):
+            raise ValueError(
+                "policy workspace horizon pooling requires the role hierarchy"
+            )
+        if int(self.flow_jepa_late_policy_detail) and not (
+            int(self.flow_jepa_complementary_raw_detail)
+            and int(self.flow_jepa_policy_workspace_horizon_pool)
+        ):
+            raise ValueError(
+                "late policy detail requires complementary raw detail and "
+                "horizon-pooled policy workspace"
+            )
+        if int(self.flow_jepa_soft_address_lattice) and not (
+            int(self.flow_jepa_late_policy_detail)
+            and int(self.flow_jepa_strict_role_visual_path)
+            and int(self.flow_jepa_raw_image_enabled)
+        ):
+            raise ValueError(
+                "soft address lattice requires raw late-policy detail and the "
+                "strict visual ownership path"
+            )
+        if int(self.flow_jepa_enabled):
+            if int(self.visual_history_length) < 2:
+                raise ValueError("Flow-DINO JEPA requires at least two visual history frames")
+            history_offsets = tuple(int(value) for value in self.flow_jepa_history_offsets)
+            if len(history_offsets) != int(self.visual_history_length):
+                raise ValueError(
+                    "flow_jepa_history_offsets must match visual_history_length"
+                )
+            if tuple(sorted(set(history_offsets))) != history_offsets:
+                raise ValueError("flow_jepa_history_offsets must be strictly increasing")
+            if int(self.future_grid_size) != int(self.flow_jepa_grid_size):
+                raise ValueError(
+                    "Flow-DINO JEPA requires future_grid_size == flow_jepa_grid_size "
+                    "so queries, masks, and teacher targets share one spatial chart"
+                )
+            side = int(round(float(self.patches_per_camera) ** 0.5))
+            if side * side != int(self.patches_per_camera):
+                raise ValueError("Flow-DINO JEPA requires a square DINO patch grid")
+            window_offsets = self.flow_jepa_effective_window_offsets
+            if len(window_offsets) != int(self.future_anchors):
+                raise ValueError(
+                    "flow_jepa_window_offsets must contain exactly future_anchors entries"
+                )
+            if tuple(sorted(set(window_offsets))) != window_offsets or window_offsets[0] <= 0:
+                raise ValueError(
+                    "flow_jepa_window_offsets must be strictly increasing positive offsets"
+                )
+            if int(self.flow_jepa_late_bottleneck):
+                _ = self.flow_jepa_action_offsets
+                if int(self.flow_jepa_stage_offset) != 0:
+                    raise ValueError(
+                        "late-bottleneck Flow-DINO folds the far horizon into window offsets; "
+                        "flow_jepa_stage_offset must be 0"
+                    )
+                if int(self.flow_jepa_stage_tokens) != 0:
+                    raise ValueError(
+                        "late-bottleneck Flow-DINO has no separate stage token"
+                    )
+                native_side = int(round(float(self.patches_per_camera) ** 0.5))
+                if native_side < int(self.flow_jepa_grid_size):
+                    raise ValueError(
+                        "late-bottleneck reader grid cannot exceed the native DINO patch grid"
+                    )
+                if int(self.flow_jepa_raw_image_enabled):
+                    groups = (
+                        int(self.flow_jepa_grounding_blocks),
+                        int(self.flow_jepa_world_blocks),
+                        int(self.flow_jepa_policy_blocks),
+                    )
+                    if min(groups) < 1 or sum(groups) != int(self.depth):
+                        raise ValueError(
+                            "raw-grounding DiT groups must be positive and sum to depth"
+                        )
+            else:
+                if int(self.flow_jepa_raw_image_enabled):
+                    raise ValueError(
+                        "raw-image grounding requires the late-bottleneck future-chart contract"
+                    )
+                if window_offsets[-1] != int(self.action_horizon):
+                    raise ValueError(
+                        "the final flow_jepa_window_offset must equal action_horizon"
+                    )
+                if int(self.flow_jepa_effective_stage_offset) <= int(window_offsets[-1]):
+                    raise ValueError(
+                        "flow_jepa_stage_offset must be later than every window offset"
+                    )
+                if int(self.flow_jepa_stage_tokens) != 1:
+                    raise ValueError(
+                        "the hierarchical V95 Flow-DINO contract requires one global stage token"
+                    )
         if int(self.midcut_layer) < 1 or int(self.midcut_layer) > int(self.depth):
             raise ValueError("midcut_layer must be in [1, depth]")
         if float(self.midcut_future_gain_init) <= 0:
@@ -1310,12 +2193,17 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("latent_action_near_depth must be <= latent_action_mid_depth")
         if int(self.latent_action_mid_depth) > int(self.latent_action_decoder_depth):
             raise ValueError("latent_action_mid_depth cannot exceed latent_action_decoder_depth")
-        if int(self.layer_recurrent_consequence) and int(self.layer_consequence_steps) != int(
-            self.future_anchors
-        ):
-            raise ValueError(
-                "layer_consequence_steps must equal future_anchors while the milestone losses use one target per anchor"
+        if int(self.layer_recurrent_consequence):
+            expected_consequence_steps = (
+                len(self.flow_jepa_action_offsets)
+                if int(self.flow_jepa_enabled)
+                else int(self.future_anchors)
             )
+            if int(self.layer_consequence_steps) != expected_consequence_steps:
+                raise ValueError(
+                    "layer_consequence_steps must equal the number of action-aligned "
+                    f"future anchors ({expected_consequence_steps})"
+                )
         if int(self.layer_recurrent_consequence) and int(self.layer_consequence_steps) > int(
             self.action_horizon
         ):

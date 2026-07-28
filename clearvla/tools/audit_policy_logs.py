@@ -1,7 +1,8 @@
 """Audit ClearVLA training logs without importing the training stack.
 
-The parser accepts the historical ``[v39-layer]`` format, the compact V94
-three-line format, pretty-printed run contexts, and epoch JSON/JSONL records.
+The parser accepts the historical ``[v39-layer]`` format, the compact V94-V102
+formats (including representation-only V95 Stage1), pretty-printed run
+contexts, and epoch JSON/JSONL records.
 Its summaries deliberately separate raw metrics, weighted objective
 contributions, validation behavior, structural/controller gauges, gradients,
 and observability quality.
@@ -23,6 +24,9 @@ NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 TOKEN_RE = re.compile(r"(?P<key>[A-Za-z][A-Za-z0-9_.-]*)=(?P<value>[^\s]+)")
 HEADER_RE = re.compile(r"^\[(?P<name>v\d+(?:-[^\]]+)?)\]\s+(?P<body>.*)$")
 INIT_COUNT_RE = re.compile(r"^\[v39-init\]\s+(?P<label>.*?)(?:\s+count=(?P<count>\d+))$")
+UNHANDLED_EXCEPTION_RE = re.compile(
+    r"^(?P<type>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)):\s*(?P<message>.*)$"
+)
 
 
 # Only legacy slash groups that carry cross-version decision value are decoded
@@ -114,6 +118,7 @@ V94_ALIASES: dict[str, dict[str, str]] = {
     "train": {
         "loss": "loss",
         "loss_total": "loss",
+        "loss_representation": "loss",
         "pflow": "physical_flow",
         "flow_loss": "physical_flow",
         "pfn": "physical_flow_native",
@@ -177,6 +182,9 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "terminal_prior": "evidence_mmd_it_terminal_prior_weight",
         "terminal_probability": "evidence_mmd_it_terminal_probability",
         "hard_terminal_fraction": "evidence_mmd_it_hard_terminal_fraction",
+        "top_policy_scale": "evidence_top_policy_workspace_scale",
+        "top_policy_update": "evidence_top_policy_workspace_update_norm",
+        "top_policy_fixed_fusion": "evidence_top_policy_workspace_fixed_fusion",
         "operation_probability": "evidence_mmd_it_operation_probability",
         "value": "evidence_mmd_it_execution_value_loss",
         "value_loss": "evidence_mmd_it_execution_value_loss",
@@ -210,6 +218,7 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "evidence_reader": "grad_evidence_mmdit_evidence_reader",
         "state": "grad_evidence_mmdit_action_state",
         "action_state": "grad_evidence_mmdit_action_state",
+        "top_policy_lift": "grad_evidence_top_policy_workspace_lift",
         "blocks": "grad_evidence_mmdit_blocks",
         "mmdit_blocks": "grad_evidence_mmdit_blocks",
         "controller": "grad_evidence_mmdit_execution_controller",
@@ -226,6 +235,25 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "dynamics": "grad_controlled_dynamics",
         "dit": "grad_dit_blocks",
         "dit_blocks": "grad_dit_blocks",
+        "flow_dino": "grad_flow_dino_evidence",
+        "coarse_flow": "grad_flow_dino_coarse_flow",
+        "fine_flow": "grad_flow_dino_sparse_fine",
+        "detail_router": "grad_flow_dino_detail_router",
+        "address_reader": "grad_flow_dino_address_reader",
+        "future_predictor": "grad_flow_dino_future_predictor",
+        "raw_pyramid": "grad_flow_dino_raw_pyramid",
+        "raw_coarse_flow": "grad_flow_dino_raw_coarse_flow",
+        "semantic_coarse_flow": "grad_flow_dino_semantic_coarse_flow",
+        "raw_mid_flow": "grad_flow_dino_raw_mid_flow",
+        "raw_high_flow": "grad_flow_dino_raw_high_flow",
+        "raw_detail_router": "grad_flow_dino_raw_detail_router",
+        "raw_address_reader": "grad_flow_dino_raw_address_reader",
+        "late_detail_reader": "grad_late_raw_detail_reader",
+        "grounding_blocks": "grad_dit_grounding_blocks",
+        "world_blocks": "grad_dit_world_blocks",
+        "policy_blocks": "grad_dit_policy_blocks",
+        "goal_tokens": "grad_goal_resampler",
+        "action_history": "grad_action_history_encoder",
         "heads": "grad_final_policy_heads",
         "policy_heads": "grad_final_policy_heads",
         "global": "grad",
@@ -235,6 +263,54 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "sec_per_batch": "seconds_per_batch",
     },
     "val": {
+        "jepa_window": "flow_jepa_future_prediction",
+        "jepa_future": "flow_jepa_future_prediction",
+        "jepa_change": "flow_jepa_future_change_direction",
+        "change_obj": "flow_jepa_future_change",
+        "jepa_stage": "flow_jepa_stage_prediction",
+        "patch_warp": "flow_jepa_warp_loss",
+        "identity_adv": "flow_jepa_identity_advantage_loss",
+        "static_identity": "flow_jepa_static_identity_loss",
+        "patch_cycle": "flow_jepa_cycle_loss",
+        "patch_flow": "flow_jepa_patch_flow_magnitude",
+        "patch_conf": "flow_jepa_confidence_mean",
+        "patch_occ": "flow_jepa_occlusion_fraction",
+        "raw_high_grid": "flow_jepa_raw_high_grid_size",
+        "raw_flow": "flow_jepa_raw_flow_magnitude",
+        "raw_flow_grid": "flow_jepa_raw_flow_grid_magnitude",
+        "seed_reliability": "flow_jepa_raw_seed_reliability",
+        "raw_boundary": "flow_jepa_raw_boundary_penalty",
+        "raw_valid": "flow_jepa_raw_valid_fraction",
+        "zero_warp": "flow_jepa_raw_identity_warp_error",
+        "warp_gain": "flow_jepa_raw_warp_gain_over_zero",
+        "moving_gain": "flow_jepa_raw_moving_warp_gain",
+        "static_gain": "flow_jepa_raw_static_warp_gain",
+        "moving_corr_entropy": "flow_jepa_raw_moving_correlation_entropy",
+        "moving_corr_margin": "flow_jepa_raw_moving_correlation_margin",
+        "motion_visible": "flow_jepa_raw_observable_motion_fraction",
+        "raw_detail_gate": "flow_jepa_raw_detail_gate_mean",
+        "raw_emphasis": "flow_jepa_raw_detail_emphasis_mean",
+        "raw_precision": "flow_jepa_raw_detail_precision_mean",
+        "raw_address_flow": "flow_jepa_raw_address_flow_mass",
+        "raw_detail_share": "flow_jepa_raw_address_flow_mass",
+        "raw_address_fallback": "flow_jepa_raw_address_fallback_mass",
+        "raw_base_share": "flow_jepa_raw_address_fallback_mass",
+        "detail_address_entropy": "flow_jepa_raw_address_entropy",
+        "address_separation": "flow_jepa_raw_address_center_separation",
+        "address_value_delta": "flow_jepa_raw_address_lane_value_difference",
+        "address_logit_gain": "flow_jepa_raw_address_logit_advantage",
+        "detail_address_concentration": "flow_jepa_raw_address_logit_advantage",
+        "address_zero_delta": "flow_jepa_raw_address_zero_flow_value_delta",
+        "address_shuffle_delta": "flow_jepa_raw_address_shuffled_flow_value_delta",
+        "world_xy_residual": "flow_jepa_world_spatial_residual_norm",
+        "world_anchor_residual": "flow_jepa_world_anchor_camera_residual_norm",
+        "late_detail_entropy": "flow_jepa_late_detail_attention_entropy",
+        "late_detail_max": "flow_jepa_late_detail_attention_max",
+        "late_detail_update": "flow_jepa_late_detail_update_norm",
+        "late_detail_ratio": "flow_jepa_late_detail_trajectory_ratio",
+        "late_detail_scale": "flow_jepa_late_detail_fixed_scale",
+        "late_detail_tokens": "flow_jepa_late_detail_token_count",
+        "horizon_cos": "flow_jepa_horizon_adjacent_cosine",
         "rmse": "full_rmse",
         "action_rmse": "full_rmse",
         "first": "first_rmse",
@@ -299,12 +375,154 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "terminal_prior": "sample_evidence_mmd_it_terminal_prior_weight",
         "terminal_probability": "sample_evidence_mmd_it_terminal_probability",
         "hard_terminal_fraction": "sample_evidence_mmd_it_hard_terminal_fraction",
+        "late_detail_update": "sample_flow_jepa_late_detail_update_norm",
+        "late_detail_ratio": "sample_flow_jepa_late_detail_trajectory_ratio",
+        "late_detail_entropy": "sample_flow_jepa_late_detail_attention_entropy",
+        "late_detail_max": "sample_flow_jepa_late_detail_attention_max",
+        "late_detail_scale": "sample_flow_jepa_late_detail_fixed_scale",
+        "late_detail_tokens": "sample_flow_jepa_late_detail_token_count",
+        "world_xy_residual": "sample_flow_jepa_world_spatial_residual_norm",
+        "world_anchor_residual": "sample_flow_jepa_world_anchor_camera_residual_norm",
+    },
+    "balance": {
+        "flow_without_info_balance": "physical_flow_no_information_balance",
+        "trajectory_info": "trajectory_information_score",
+        "info_weight_min": "trajectory_information_weight_min",
+        "info_weight_max": "trajectory_information_weight_max",
+        "info_effective_fraction": "trajectory_information_effective_fraction",
+        "horizon_weight_first": "action_horizon_weight_first",
+        "horizon_weight_tail": "action_horizon_weight_tail",
+        "history_keep": "condition_action_history_keep",
+        "goal_keep": "condition_goal_keep",
+        "proposal_keep": "condition_proposal_keep",
+        "teacher_past_quota": "flow_jepa_teacher_mask_past_fraction",
+        "teacher_change_quota": "flow_jepa_teacher_mask_change_fraction",
+        "teacher_uniform_quota": "flow_jepa_teacher_mask_uniform_fraction",
+        "selected_change_ratio": "flow_jepa_teacher_mask_selected_change_ratio",
+        "action_h1_4": "action_band_1_4_physical_flow",
+        "action_h5_12": "action_band_5_12_physical_flow",
+        "action_h13_24": "action_band_13_24_physical_flow",
+    },
+    "repr": {
+        "window_pred": "flow_jepa_future_prediction",
+        "future_pred": "flow_jepa_future_prediction",
+        "change_dir": "flow_jepa_future_change_direction",
+        "change_obj": "flow_jepa_future_change",
+        "stage_pred": "flow_jepa_stage_prediction",
+        "warp": "flow_jepa_warp_loss",
+        "identity_adv": "flow_jepa_identity_advantage_loss",
+        "static_identity": "flow_jepa_static_identity_loss",
+        "cycle": "flow_jepa_cycle_loss",
+        "smooth": "flow_jepa_smoothness_loss",
+        "uncert_nll": "flow_jepa_uncertainty_nll",
+        "refine_seq": "flow_jepa_refinement_sequence_loss",
+        "flow_mag": "flow_jepa_patch_flow_magnitude",
+        "confidence": "flow_jepa_confidence_mean",
+        "occlusion": "flow_jepa_occlusion_fraction",
+        "corr_entropy": "flow_jepa_correlation_entropy",
+        "corr_margin": "flow_jepa_correlation_margin",
+        "context_drop": "flow_jepa_context_dropout_fraction",
+        "target_mask": "flow_jepa_future_target_fraction",
+        "window_hmax": "flow_jepa_window_horizon_max",
+        "stage_h": "flow_jepa_stage_horizon",
+        "stage_norm": "flow_jepa_stage_token_norm",
+        "stage_target_norm": "flow_jepa_stage_target_norm",
+        "stage_prediction_norm": "flow_jepa_stage_prediction_norm",
+        "stage_window_cos": "flow_jepa_stage_window_cosine",
+        "stage_window_gate": "flow_jepa_stage_to_window_gate",
+        "stage_window_update": "flow_jepa_stage_to_window_update_norm",
+        "goal_norm": "flow_jepa_goal_condition_norm",
+        "goal_pair_cos": "flow_jepa_goal_pair_cosine",
+        "action_mem_norm": "flow_jepa_action_condition_norm",
+        "goal_action_cos": "flow_jepa_goal_action_cosine",
+        "repr_batch_cov": "eval_representation_coverage",
+        "horizon_count": "flow_jepa_horizon_count",
+        "horizon_max": "flow_jepa_horizon_max",
+        "native_grid": "flow_jepa_native_grid_size",
+        "coarse_grid": "flow_jepa_coarse_grid_size",
+        "dino_grid": "flow_jepa_native_grid_size",
+        "reader_grid": "flow_jepa_coarse_grid_size",
+        "native_flow": "flow_jepa_native_flow_magnitude",
+        "detail_gate": "flow_jepa_detail_gate_mean",
+        "detail_gate_mean": "flow_jepa_detail_gate_mean",
+        "detail_cmp": "flow_jepa_detail_effective_comparisons",
+        "detail_weighted_cmp": "flow_jepa_detail_effective_comparisons",
+        "detail_candidates": "flow_jepa_detail_candidate_comparisons",
+        "detail_candidate_cmp": "flow_jepa_detail_candidate_comparisons",
+        "address_flow": "flow_jepa_address_flow_mass",
+        "address_flow_mass": "flow_jepa_address_flow_mass",
+        "address_fallback": "flow_jepa_address_fallback_mass",
+        "address_fallback_mass": "flow_jepa_address_fallback_mass",
+        "address_entropy": "flow_jepa_address_entropy",
+        "horizon_cos": "flow_jepa_horizon_adjacent_cosine",
+        "horizon_adj_cos": "flow_jepa_horizon_adjacent_cosine",
+        "far_norm": "flow_jepa_far_horizon_norm",
+        "far_horizon_norm": "flow_jepa_far_horizon_norm",
+        "raw_high_grid": "flow_jepa_raw_high_grid_size",
+        "raw_mid_grid": "flow_jepa_raw_mid_grid_size",
+        "raw_coarse_grid": "flow_jepa_raw_coarse_grid_size",
+        "raw_flow": "flow_jepa_raw_flow_magnitude",
+        "raw_flow_grid": "flow_jepa_raw_flow_grid_magnitude",
+        "seed_reliability": "flow_jepa_raw_seed_reliability",
+        "mid_residual": "flow_jepa_raw_mid_residual_magnitude",
+        "high_residual": "flow_jepa_raw_high_residual_magnitude",
+        "raw_cycle_core": "flow_jepa_raw_cycle_core",
+        "raw_boundary": "flow_jepa_raw_boundary_penalty",
+        "raw_valid": "flow_jepa_raw_valid_fraction",
+        "zero_warp": "flow_jepa_raw_identity_warp_error",
+        "warp_gain": "flow_jepa_raw_warp_gain_over_zero",
+        "moving_gain": "flow_jepa_raw_moving_warp_gain",
+        "static_gain": "flow_jepa_raw_static_warp_gain",
+        "moving_corr_entropy": "flow_jepa_raw_moving_correlation_entropy",
+        "moving_corr_margin": "flow_jepa_raw_moving_correlation_margin",
+        "motion_visible": "flow_jepa_raw_observable_motion_fraction",
+        "raw_conf": "flow_jepa_raw_confidence_mean",
+        "raw_occ": "flow_jepa_raw_occlusion_fraction",
+        "raw_detail_gate": "flow_jepa_raw_detail_gate_mean",
+        "raw_emphasis": "flow_jepa_raw_detail_emphasis_mean",
+        "raw_precision": "flow_jepa_raw_detail_precision_mean",
+        "raw_address_flow": "flow_jepa_raw_address_flow_mass",
+        "raw_detail_share": "flow_jepa_raw_address_flow_mass",
+        "raw_address_fallback": "flow_jepa_raw_address_fallback_mass",
+        "raw_base_share": "flow_jepa_raw_address_fallback_mass",
+        "raw_address_entropy": "flow_jepa_raw_address_entropy",
+        "detail_address_entropy": "flow_jepa_raw_address_entropy",
+        "address_separation": "flow_jepa_raw_address_center_separation",
+        "address_value_delta": "flow_jepa_raw_address_lane_value_difference",
+        "address_logit_gain": "flow_jepa_raw_address_logit_advantage",
+        "detail_address_concentration": "flow_jepa_raw_address_logit_advantage",
+        "address_zero_delta": "flow_jepa_raw_address_zero_flow_value_delta",
+        "address_shuffle_delta": "flow_jepa_raw_address_shuffled_flow_value_delta",
+        "raw_candidates": "flow_jepa_raw_candidates_per_cell",
+        "raw_detail_tokens": "flow_jepa_raw_detail_token_count",
+        "raw_dino_fused": "flow_jepa_raw_detail_fused_with_latest_dino",
+        "raw_source_dino_fused": "flow_jepa_raw_detail_fused_with_source_dino",
+        "world_xy_residual": "flow_jepa_world_spatial_residual_norm",
+        "world_anchor_residual": "flow_jepa_world_anchor_camera_residual_norm",
+        "late_detail_entropy": "flow_jepa_late_detail_attention_entropy",
+        "late_detail_max": "flow_jepa_late_detail_attention_max",
+        "late_detail_update": "flow_jepa_late_detail_update_norm",
+        "late_detail_ratio": "flow_jepa_late_detail_trajectory_ratio",
+        "late_detail_scale": "flow_jepa_late_detail_fixed_scale",
+        "late_detail_tokens": "flow_jepa_late_detail_token_count",
+        "refined_visual_tokens": "flow_jepa_refined_evidence_token_count",
+        "grounding_blocks": "flow_jepa_grounding_block_count",
+        "world_blocks": "flow_jepa_world_block_count",
+        "policy_blocks": "flow_jepa_policy_block_count",
     },
 }
 
 
 CORE_BATCH_KEYS = (
     "loss",
+    "flow_jepa_future_prediction",
+    "flow_jepa_future_change",
+    "flow_jepa_future_change_direction",
+    "flow_jepa_stage_prediction",
+    "flow_jepa_warp_loss",
+    "flow_jepa_identity_advantage_loss",
+    "flow_jepa_static_identity_loss",
+    "flow_jepa_cycle_loss",
     "physical_flow",
     "physical_flow_native",
     "arm_fm_per_dim",
@@ -344,6 +562,14 @@ STRUCTURE_KEYS = (
     "evidence_mmd_it_terminal_predicted_cost_margin",
     "evidence_mmd_it_terminal_target_preferred_fraction",
     "evidence_mmd_it_terminal_identity_velocity_error",
+    "flow_jepa_world_spatial_residual_norm",
+    "flow_jepa_world_anchor_camera_residual_norm",
+    "flow_jepa_late_detail_attention_entropy",
+    "flow_jepa_late_detail_attention_max",
+    "flow_jepa_late_detail_update_norm",
+    "flow_jepa_late_detail_trajectory_ratio",
+    "flow_jepa_late_detail_fixed_scale",
+    "flow_jepa_late_detail_token_count",
 )
 
 GRADIENT_KEYS = (
@@ -361,11 +587,28 @@ GRADIENT_KEYS = (
     "grad_layer_consequence_cell",
     "grad_controlled_dynamics",
     "grad_dit_blocks",
+    "grad_flow_dino_evidence",
+    "grad_flow_dino_coarse_flow",
+    "grad_flow_dino_sparse_fine",
+    "grad_flow_dino_detail_router",
+    "grad_flow_dino_address_reader",
+    "grad_flow_dino_future_predictor",
+    "grad_late_raw_detail_reader",
+    "grad_goal_resampler",
+    "grad_action_history_encoder",
     "grad_final_policy_heads",
     "grad",
 )
 
 VALIDATION_KEYS = (
+    "loss",
+    "flow_jepa_future_prediction",
+    "flow_jepa_stage_prediction",
+    "flow_jepa_warp_loss",
+    "flow_jepa_cycle_loss",
+    "flow_jepa_stage_window_cosine",
+    "flow_jepa_goal_pair_cosine",
+    "eval_representation_coverage",
     "full_rmse",
     "first_rmse",
     "first8_rmse",
@@ -431,6 +674,8 @@ class ParsedRun:
     epoch_records: list[dict[str, Any]] = field(default_factory=list)
     malformed_json: int = 0
     unclosed_json: int = 0
+    traceback_count: int = 0
+    fatal_errors: list[str] = field(default_factory=list)
 
 
 def _number(raw: Any) -> float | None:
@@ -526,7 +771,7 @@ def _parse_v94_tokens(line: str, family: str) -> dict[str, float]:
     for match in TOKEN_RE.finditer(line):
         key = match.group("key")
         raw = match.group("value").rstrip(",;")
-        if key in {"lossgrp", "loss_groups", "losscontrib", "top_contrib"}:
+        if key in {"lossgrp", "loss_groups", "losscontrib", "top_contrib", "contrib"}:
             for item in raw.split("/"):
                 if ":" not in item:
                     continue
@@ -551,6 +796,15 @@ def _parse_v94_tokens(line: str, family: str) -> dict[str, float]:
                 value = _number(value_raw)
                 if value is not None and name in component_names:
                     metrics[f"{prefix}_{component_names[name]}"] = value
+            continue
+        if family == "val" and key == "action_band_rmse":
+            for item in raw.split("/"):
+                if ":" not in item:
+                    continue
+                name, value_raw = item.split(":", 1)
+                value = _number(value_raw)
+                if value is not None:
+                    metrics[f"action_band_{name}_rmse"] = value
             continue
         if key in {"route", "dwell"} and "soft:" in raw:
             parsed: dict[str, float] = {}
@@ -578,7 +832,10 @@ def _parse_v94_tokens(line: str, family: str) -> dict[str, float]:
             continue
         value = _number(raw)
         if value is not None:
-            metrics[aliases.get(key, key)] = value
+            canonical = aliases.get(key, key)
+            if key.startswith("future_h") and key.removeprefix("future_h").isdigit():
+                canonical = f"flow_jepa_future_horizon_{key.removeprefix('future_h')}"
+            metrics[canonical] = value
     return metrics
 
 
@@ -620,6 +877,7 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
     json_depth = 0
     json_in_string = False
     json_escaped = False
+    traceback_active = False
 
     def flush_v94() -> None:
         nonlocal pending_v94
@@ -651,6 +909,19 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 continue
             if not line:
                 continue
+            if line.startswith("Traceback (most recent call last):"):
+                run.traceback_count += 1
+                traceback_active = True
+                continue
+            if traceback_active:
+                exception_match = UNHANDLED_EXCEPTION_RE.match(line)
+                if exception_match:
+                    error_text = (
+                        f"{exception_match.group('type')}: "
+                        f"{exception_match.group('message')}"
+                    )
+                    run.fatal_errors.append(error_text[:1000])
+                    traceback_active = False
             if line.startswith("{"):
                 flush_epoch()
                 try:
@@ -671,20 +942,136 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 if epoch or batch:
                     run.batch_points.append(BatchPoint(epoch, batch, metrics, "v39-layer"))
                 continue
-            if line.startswith("[v94-train]"):
+            if line.startswith(
+                (
+                    "[v94-train]",
+                    "[v95-train]",
+                    "[v96-train]",
+                    "[v97-train]",
+                    "[v98-train]",
+                    "[v99-train]",
+                    "[v100-train]",
+                    "[v101-train]",
+                    "[v102-train]",
+                    "[v95-stage1-train]",
+                )
+            ):
                 flush_v94()
                 metrics = _parse_v94_tokens(line, "train")
                 epoch = int(metrics.pop("epoch", 0.0))
                 batch = int(metrics.pop("batch", 0.0))
-                pending_v94 = BatchPoint(epoch, batch, metrics, "v94")
+                if line.startswith("[v95-stage1-train]") and "loss" in metrics:
+                    metrics.setdefault("loss_group_representation", metrics["loss"])
+                    source = "v95-stage1"
+                else:
+                    source = (
+                        "v102"
+                        if line.startswith("[v102-")
+                        else "v101"
+                        if line.startswith("[v101-")
+                        else "v100"
+                        if line.startswith("[v100-")
+                        else "v99"
+                        if line.startswith("[v99-")
+                        else "v98"
+                        if line.startswith("[v98-")
+                        else "v97"
+                        if line.startswith("[v97-")
+                        else "v96"
+                        if line.startswith("[v96-")
+                        else "v95"
+                        if line.startswith("[v95-")
+                        else "v94"
+                    )
+                pending_v94 = BatchPoint(epoch, batch, metrics, source)
                 continue
-            if line.startswith("[v94-exec]") and pending_v94 is not None:
+            if line.startswith(
+                (
+                    "[v94-exec]",
+                    "[v95-exec]",
+                    "[v96-exec]",
+                    "[v97-exec]",
+                    "[v98-exec]",
+                    "[v99-exec]",
+                    "[v100-exec]",
+                    "[v101-exec]",
+                    "[v102-exec]",
+                )
+            ) and pending_v94 is not None:
                 pending_v94.metrics.update(_parse_v94_tokens(line, "exec"))
                 continue
-            if line.startswith("[v94-grad]") and pending_v94 is not None:
+            if line.startswith(
+                (
+                    "[v94-grad]",
+                    "[v95-grad]",
+                    "[v96-grad]",
+                    "[v97-grad]",
+                    "[v98-grad]",
+                    "[v99-grad]",
+                    "[v100-grad]",
+                    "[v101-grad]",
+                    "[v102-grad]",
+                    "[v95-stage1-grad]",
+                )
+            ) and (
+                pending_v94 is not None
+            ):
                 pending_v94.metrics.update(_parse_v94_tokens(line, "grad"))
                 continue
-            if line.startswith("[v94-epoch]"):
+            if line.startswith(
+                (
+                    "[v95-repr]",
+                    "[v96-repr]",
+                    "[v97-repr]",
+                    "[v98-repr]",
+                    "[v99-repr]",
+                    "[v100-repr]",
+                    "[v101-repr]",
+                    "[v102-repr]",
+                    "[v95-stage1-repr]",
+                )
+            ) and (
+                pending_v94 is not None
+            ):
+                pending_v94.metrics.update(_parse_v94_tokens(line, "repr"))
+                continue
+            if line.startswith(("[v101-balance]", "[v102-balance]")) and pending_v94 is not None:
+                pending_v94.metrics.update(_parse_v94_tokens(line, "balance"))
+                continue
+            if line.startswith("[v95-stage1-epoch]"):
+                flush_epoch()
+                metrics = _parse_v94_tokens(line, "repr")
+                epoch = int(metrics.pop("epoch", 0.0))
+                global_step = int(metrics.pop("step", 0.0))
+                train_loss = metrics.pop("train_representation", None)
+                val_loss = metrics.pop("val_representation", None)
+                train_metrics: dict[str, float] = {}
+                if train_loss is not None:
+                    train_metrics["loss"] = train_loss
+                    train_metrics["loss_group_representation"] = train_loss
+                val_metrics = dict(metrics)
+                if val_loss is not None:
+                    val_metrics["loss"] = val_loss
+                pending_epoch = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "train": train_metrics,
+                    "val": val_metrics,
+                }
+                continue
+            if line.startswith(
+                (
+                    "[v94-epoch]",
+                    "[v95-epoch]",
+                    "[v96-epoch]",
+                    "[v97-epoch]",
+                    "[v98-epoch]",
+                    "[v99-epoch]",
+                    "[v100-epoch]",
+                    "[v101-epoch]",
+                    "[v102-epoch]",
+                )
+            ):
                 flush_epoch()
                 metrics = _parse_v94_tokens(line, "train")
                 epoch = int(metrics.pop("epoch", 0.0))
@@ -696,10 +1083,34 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                     "val": {},
                 }
                 continue
-            if line.startswith("[v94-val]") and pending_epoch is not None:
+            if line.startswith(
+                (
+                    "[v94-val]",
+                    "[v95-val]",
+                    "[v96-val]",
+                    "[v97-val]",
+                    "[v98-val]",
+                    "[v99-val]",
+                    "[v100-val]",
+                    "[v101-val]",
+                    "[v102-val]",
+                )
+            ) and pending_epoch is not None:
                 pending_epoch["val"].update(_parse_v94_tokens(line, "val"))
                 continue
-            if line.startswith("[v94-probe]") and pending_epoch is not None:
+            if line.startswith(
+                (
+                    "[v94-probe]",
+                    "[v95-probe]",
+                    "[v96-probe]",
+                    "[v97-probe]",
+                    "[v98-probe]",
+                    "[v99-probe]",
+                    "[v100-probe]",
+                    "[v101-probe]",
+                    "[v102-probe]",
+                )
+            ) and pending_epoch is not None:
                 pending_epoch["val"].update(_parse_v94_tokens(line, "probe"))
                 continue
             init_match = INIT_COUNT_RE.match(line)
@@ -707,7 +1118,20 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 run.init_counts[init_match.group("label")] = int(init_match.group("count"))
                 continue
             header_match = HEADER_RE.match(line)
-            if header_match and not line.startswith(("[v39-init]", "[v94-")):
+            if header_match and not line.startswith(
+                (
+                    "[v39-init]",
+                    "[v94-",
+                    "[v95-",
+                    "[v96-",
+                    "[v97-",
+                    "[v98-",
+                    "[v99-",
+                    "[v100-",
+                    "[v101-",
+                    "[v102-",
+                )
+            ):
                 run.headers.append(line)
                 config = _parse_header_body(header_match.group("body"))
                 for key, value in config.items():
@@ -940,7 +1364,13 @@ def _observability(run: ParsedRun) -> dict[str, Any]:
         if key not in all_zero
         and max(values) - min(values) <= max(1e-10, 1e-8 * max(abs(value) for value in values))
     )
-    missing_core = [key for key in ("loss", "physical_flow") if key not in by_key]
+    representation_stage = any(point.source == "v95-stage1" for point in run.batch_points)
+    required_core = (
+        ("loss", "flow_jepa_future_prediction", "flow_jepa_stage_prediction")
+        if representation_stage
+        else ("loss", "physical_flow")
+    )
+    missing_core = [key for key in required_core if key not in by_key]
     return {
         "batch_metric_count": len(by_key),
         "always_zero_count": len(all_zero),
@@ -951,6 +1381,8 @@ def _observability(run: ParsedRun) -> dict[str, Any]:
         "missing_core": missing_core,
         "malformed_json": run.malformed_json,
         "unclosed_json": run.unclosed_json,
+        "traceback_count": run.traceback_count,
+        "fatal_errors": run.fatal_errors[:8],
     }
 
 
@@ -1015,6 +1447,33 @@ def _find_duplicate_series(run: ParsedRun, findings: list[Finding]) -> None:
 
 def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[Finding]:
     findings: list[Finding] = []
+    if run.traceback_count:
+        nonfinite = [
+            error
+            for error in run.fatal_errors
+            if any(token in error.lower() for token in ("non-finite", "nan", "inf"))
+        ]
+        out_of_memory = [
+            error for error in run.fatal_errors if "outofmemoryerror" in error.lower()
+        ]
+        code = (
+            "non-finite-backward"
+            if nonfinite
+            else "out-of-memory"
+            if out_of_memory
+            else "unhandled-exception"
+        )
+        category = "numerics" if nonfinite else "memory" if out_of_memory else "runtime"
+        _add_finding(
+            findings,
+            "critical",
+            category,
+            code,
+            "The run terminated with an unhandled exception; trailing finite rows do not prove health.",
+            traceback_count=run.traceback_count,
+            errors=run.fatal_errors[:4],
+            exception_truncated=run.traceback_count > len(run.fatal_errors),
+        )
     if observability["malformed_json"] or observability["unclosed_json"]:
         _add_finding(
             findings,
@@ -1446,6 +1905,10 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
                     key: train[key]
                     for key in (
                         "loss",
+                        "flow_jepa_future_prediction",
+                        "flow_jepa_stage_prediction",
+                        "flow_jepa_warp_loss",
+                        "flow_jepa_cycle_loss",
                         "physical_flow",
                         "physical_flow_native",
                         "rollout_dynamics",
@@ -1467,6 +1930,8 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
             "headers": run.headers,
             "init_counts": run.init_counts,
             "context_schema": run.context.get("schema"),
+            "traceback_count": run.traceback_count,
+            "fatal_errors": run.fatal_errors[:8],
             "batch_range": (
                 {
                     "first": [run.batch_points[0].epoch, run.batch_points[0].batch],
@@ -1478,7 +1943,7 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
         },
         "manifest": {
             "decoder": _config_value(run, "decoder", "final_action_decoder"),
-            "training_stage": _config_value(run, "training_stage"),
+            "training_stage": _config_value(run, "training_stage", "experiment_stage"),
             "seed": _config_value(run, "seed"),
             "batch_size": _config_value(run, "batch_size"),
             "data_root": _config_value(run, "data_root"),
@@ -1571,6 +2036,12 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
         for record in summary["epochs"]:
             val = record["val"]
             selected = (
+                "loss",
+                "flow_jepa_future_prediction",
+                "flow_jepa_stage_prediction",
+                "flow_jepa_stage_window_cosine",
+                "flow_jepa_goal_pair_cosine",
+                "eval_representation_coverage",
                 "full_rmse",
                 "arm_full_rmse",
                 "gripper_full_rmse",
@@ -1665,6 +2136,8 @@ def _merge_runs(runs: Sequence[ParsedRun], *, path: Path, label: str) -> ParsedR
         merged.epoch_records.extend(run.epoch_records)
         merged.malformed_json += run.malformed_json
         merged.unclosed_json += run.unclosed_json
+        merged.traceback_count += run.traceback_count
+        merged.fatal_errors.extend(run.fatal_errors)
     unique_points: dict[tuple[int, int, str], BatchPoint] = {}
     for point in merged.batch_points:
         unique_points[(point.epoch, point.batch, point.source)] = point

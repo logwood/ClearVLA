@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 from dataclasses import asdict
 from pathlib import Path
@@ -11,6 +12,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from clearvla.data.samplers import (
+    InformationBalancedBatchSampler,
+    InformationBalancedSamplerConfig,
+)
 from clearvla.experiments.classic_policy_lab.cli_common import (
     add_data_args,
     load_data,
@@ -33,9 +38,19 @@ from clearvla.experiments.observed_state_lab.dataset import (
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     POLICY_CHECKPOINT_SCHEMAS,
     V39PolicyTrainerConfig,
+    _validate_complete_v103_model_probe_contract,
+    _validate_complete_v104_model_contract,
+    _validate_complete_v105_model_contract,
+    _validate_complete_v106_model_contract,
+    _validate_complete_v107_model_contract,
+    _validate_complete_v108_model_contract,
+    _validate_complete_v109_model_contract,
+    _validate_complete_v110_model_contract,
+    _validate_complete_v111_model_contract,
     train_v39_policy,
 )
 from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.goal_conditioning import load_precomputed_t5_condition
 from clearvla.policy.system import V39PolicySystem
 
 
@@ -67,17 +82,102 @@ def _normalizer_fingerprint(normalizer: ArrayNormalizer) -> str:
     return hashlib.md5(payload.encode("utf-8")).hexdigest()[:12]
 
 
+def _validate_required_model_contract(
+    required_contract: str | None,
+    policy_config: V39PolicyConfig,
+    trainer: V39PolicyTrainerConfig,
+) -> str | None:
+    """Fail before training when a formal launcher resolves to another graph."""
+
+    normalized = (
+        ""
+        if required_contract is None
+        else str(required_contract).strip().lower().replace("-", "_")
+    )
+    if not normalized:
+        return None
+    if normalized not in {
+        "v103",
+        "v104",
+        "v105",
+        "v106",
+        "v107",
+        "v108",
+        "v109",
+        "v110",
+        "v111",
+    }:
+        raise ValueError(f"unknown required model contract: {required_contract!r}")
+    if normalized == "v111":
+        _validate_complete_v111_model_contract(policy_config, trainer)
+    elif normalized == "v110":
+        _validate_complete_v110_model_contract(policy_config, trainer)
+    elif normalized == "v109":
+        _validate_complete_v109_model_contract(policy_config, trainer)
+    elif normalized == "v108":
+        _validate_complete_v108_model_contract(policy_config, trainer)
+    elif normalized == "v107":
+        _validate_complete_v107_model_contract(policy_config, trainer)
+    elif normalized == "v106":
+        _validate_complete_v106_model_contract(policy_config, trainer)
+    elif normalized == "v105":
+        _validate_complete_v105_model_contract(policy_config, trainer)
+    elif normalized == "v104":
+        _validate_complete_v104_model_contract(policy_config, trainer)
+    else:
+        _validate_complete_v103_model_probe_contract(policy_config, trainer)
+    return normalized
+
+
 def _source_fingerprint() -> dict[str, str]:
     """Hash the source surface that defines the current experiment contract."""
 
     root = Path(__file__).resolve().parents[2]
     relative_paths = (
         "clearvla/cli/train_v40_policy.py",
+        "clearvla/data/samplers.py",
+        "clearvla/experiments/classic_policy_lab/cli_common.py",
+        "clearvla/experiments/observed_state_lab/dataset.py",
+        "clearvla/experiments/observed_state_lab/policy_runtime_v36_3.py",
         "clearvla/experiments/observed_state_lab/policy_runtime_v39.py",
+        "clearvla/policy/codec.py",
         "clearvla/policy/config.py",
         "clearvla/policy/controller.py",
+        "clearvla/policy/flow_dino_evidence.py",
+        "clearvla/policy/goal_conditioning.py",
+        "clearvla/policy/proposal.py",
+        "clearvla/policy/role_delta_attnres.py",
+        "clearvla/policy/system.py",
         "clearvla/policy/time_domain_mmdit.py",
+        "clearvla/policy/trunk.py",
+        "clearvla/policy/trunk_primitives.py",
         "scripts/current_v94_latent_ownership_execution.sh",
+        "scripts/current_v95_flow_dino_jepa.sh",
+        "scripts/current_v95_flow_dino_jepa_stage1.sh",
+        "scripts/current_v95_flow_dino_jepa_policy.sh",
+        "scripts/current_v96_late_bottleneck_jepa.sh",
+        "scripts/current_v97_raw_flow_332_jepa.sh",
+        "scripts/current_v98_dino_seeded_raw_flow_332_jepa.sh",
+        "scripts/current_v99_observable_raw_flow_332_jepa.sh",
+        "scripts/current_v100_strict_complementary_flow_jepa.sh",
+        "scripts/current_v101_information_balanced_long_horizon.sh",
+        "scripts/current_v102_anchor_world_late_raw_detail.sh",
+        "scripts/current_v103_typed_predictive_flow_jepa.sh",
+        "scripts/current_v104_sequential_bounded_flow_jepa.sh",
+        "scripts/current_v105_horizon_addressed_flow_jepa.sh",
+        "scripts/current_v106_interval_stage_flow_jepa.sh",
+        "scripts/current_v107_complete_top_path_flow_jepa.sh",
+        "scripts/run_v107_model_path_probe.sh",
+        "scripts/current_v108_online_horizon_address_flow_jepa.sh",
+        "scripts/run_v108_model_path_probe.sh",
+        "scripts/current_v109_progressive_grounding_address_flow_jepa.sh",
+        "scripts/run_v109_model_path_probe.sh",
+        "scripts/current_v110_coordinate_typed_raw_jepa.sh",
+        "scripts/current_v110_coordinate_typed_raw_jepa_smoke.sh",
+        "scripts/run_v110_model_path_probe.sh",
+        "scripts/current_v111_structured_ownership_bottleneck.sh",
+        "scripts/current_v111_structured_ownership_bottleneck_smoke.sh",
+        "scripts/run_v111_model_path_probe.sh",
     )
     result: dict[str, str] = {}
     for relative in relative_paths:
@@ -180,6 +280,255 @@ def _filter_v74_time_controller_state_dict(
     return {key: value for key, value in state.items() if key not in skipped_set}, skipped
 
 
+def _validate_flow_jepa_stage1_checkpoint(
+    payload: dict[str, Any],
+    *,
+    policy_config: V39PolicyConfig,
+    goal_language_metadata: dict[str, Any] | None,
+) -> None:
+    """Reject an old/foreign Stage1 before a V95 policy run can consume it."""
+
+    contract = payload.get("stage1_contract")
+    if not isinstance(contract, dict) or contract.get("kind") != (
+        "flow_dino_jepa_representation_v1"
+    ):
+        raise ValueError(
+            "V95 policy requires a checkpoint produced by the new Flow-DINO/JEPA "
+            "Stage1 experiment; an old best_contract.pt is not valid"
+        )
+    saved_trainer = payload.get("trainer_config") or {}
+    saved_stage = str(saved_trainer.get("training_stage", "")).lower().replace("-", "_")
+    if saved_stage not in {"contract", "stage1"}:
+        raise ValueError(
+            f"V95 Stage1 checkpoint has wrong training_stage={saved_stage!r}"
+        )
+    required_contract_flags = {
+        "target_action_conditioned": False,
+        "final_action_decoder_executed": False,
+        "layer_contracts_executed": False,
+    }
+    for key, expected in required_contract_flags.items():
+        if contract.get(key) is not expected:
+            raise ValueError(
+                f"V95 Stage1 checkpoint has an unsafe {key} contract: "
+                f"checkpoint={contract.get(key)!r}, required={expected!r}"
+            )
+    saved_policy = payload.get("policy_config") or {}
+    expected_fields = {
+        "flow_jepa_enabled": int(policy_config.flow_jepa_enabled),
+        "flow_jepa_grid_size": int(policy_config.flow_jepa_grid_size),
+        "flow_jepa_feature_dim": int(policy_config.flow_jepa_feature_dim),
+        "flow_jepa_flow_iters": int(policy_config.flow_jepa_flow_iters),
+        "flow_jepa_corr_levels": int(policy_config.flow_jepa_corr_levels),
+        "flow_jepa_corr_radius": int(policy_config.flow_jepa_corr_radius),
+        "flow_jepa_late_bottleneck": int(policy_config.flow_jepa_late_bottleneck),
+        "flow_jepa_dense_depth": int(policy_config.flow_jepa_dense_depth),
+        "flow_jepa_fine_radius": int(policy_config.flow_jepa_fine_radius),
+        "flow_jepa_reader_radius": int(policy_config.flow_jepa_reader_radius),
+        "flow_jepa_reader_heads": int(policy_config.flow_jepa_reader_heads),
+        "flow_jepa_raw_image_enabled": int(policy_config.flow_jepa_raw_image_enabled),
+        "flow_jepa_role_hierarchy": int(policy_config.flow_jepa_role_hierarchy),
+        "flow_jepa_raw_base_channels": int(policy_config.flow_jepa_raw_base_channels),
+        "flow_jepa_raw_mid_radius": int(policy_config.flow_jepa_raw_mid_radius),
+        "flow_jepa_raw_high_radius": int(policy_config.flow_jepa_raw_high_radius),
+        "flow_jepa_raw_reader_radius": int(policy_config.flow_jepa_raw_reader_radius),
+        "flow_jepa_raw_reader_heads": int(policy_config.flow_jepa_raw_reader_heads),
+        "flow_jepa_raw_activation_checkpoint": int(
+            policy_config.flow_jepa_raw_activation_checkpoint
+        ),
+        "flow_jepa_zero_flow_guard": int(policy_config.flow_jepa_zero_flow_guard),
+        "flow_jepa_strict_role_visual_path": int(
+            policy_config.flow_jepa_strict_role_visual_path
+        ),
+        "flow_jepa_complementary_raw_detail": int(
+            policy_config.flow_jepa_complementary_raw_detail
+        ),
+        "flow_jepa_source_aligned_raw_fusion": int(
+            policy_config.flow_jepa_source_aligned_raw_fusion
+        ),
+        "flow_jepa_teacher_balanced_target_mask": int(
+            policy_config.flow_jepa_teacher_balanced_target_mask
+        ),
+        "flow_jepa_predictive_change_contract": int(
+            policy_config.flow_jepa_predictive_change_contract
+        ),
+        "flow_jepa_grounding_blocks": int(policy_config.flow_jepa_grounding_blocks),
+        "flow_jepa_world_blocks": int(policy_config.flow_jepa_world_blocks),
+        "flow_jepa_policy_blocks": int(policy_config.flow_jepa_policy_blocks),
+        "flow_jepa_policy_workspace_scale": float(
+            policy_config.flow_jepa_policy_workspace_scale
+        ),
+        "flow_jepa_policy_workspace_fixed_fusion": int(
+            policy_config.flow_jepa_policy_workspace_fixed_fusion
+        ),
+        "flow_jepa_world_anchor_write_only": int(
+            policy_config.flow_jepa_world_anchor_write_only
+        ),
+        "flow_jepa_late_policy_detail": int(
+            policy_config.flow_jepa_late_policy_detail
+        ),
+        "flow_jepa_late_policy_detail_scale": float(
+            policy_config.flow_jepa_late_policy_detail_scale
+        ),
+        "flow_jepa_soft_address_lattice": int(
+            policy_config.flow_jepa_soft_address_lattice
+        ),
+        "flow_jepa_horizon_soft_address": int(
+            policy_config.flow_jepa_horizon_soft_address
+        ),
+        "flow_jepa_horizon_address_update_scale": float(
+            policy_config.flow_jepa_horizon_address_update_scale
+        ),
+        "flow_jepa_variance_safe_routing": int(
+            policy_config.flow_jepa_variance_safe_routing
+        ),
+        "flow_jepa_complete_numerical_contract": int(
+            policy_config.flow_jepa_complete_numerical_contract
+        ),
+        "flow_jepa_routing_norm_floor": float(
+            policy_config.flow_jepa_routing_norm_floor
+        ),
+        "flow_jepa_correlation_rms_floor": float(
+            policy_config.flow_jepa_correlation_rms_floor
+        ),
+        "flow_jepa_visibility_transition_fraction": float(
+            policy_config.flow_jepa_visibility_transition_fraction
+        ),
+        "flow_jepa_address_slots": int(policy_config.flow_jepa_address_slots),
+        "flow_jepa_address_route_dim": int(
+            policy_config.flow_jepa_address_route_dim
+        ),
+        "flow_jepa_address_query_chunk": int(
+            policy_config.flow_jepa_address_query_chunk
+        ),
+        "flow_jepa_address_flow_prior_floor": float(
+            policy_config.flow_jepa_address_flow_prior_floor
+        ),
+        "role_attnres_enabled": int(policy_config.role_attnres_enabled),
+        "role_attnres_key_dim": int(policy_config.role_attnres_key_dim),
+        "role_attnres_ground_to_world": int(
+            policy_config.role_attnres_ground_to_world
+        ),
+        "role_attnres_world_to_policy": int(
+            policy_config.role_attnres_world_to_policy
+        ),
+        "role_attnres_policy_to_mmdit": int(
+            policy_config.role_attnres_policy_to_mmdit
+        ),
+        "role_attnres_ground_to_world_scale": float(
+            policy_config.role_attnres_ground_to_world_scale
+        ),
+        "role_attnres_world_to_policy_scale": float(
+            policy_config.role_attnres_world_to_policy_scale
+        ),
+        "role_attnres_policy_to_mmdit_scale": float(
+            policy_config.role_attnres_policy_to_mmdit_scale
+        ),
+        "flow_jepa_policy_workspace_horizon_pool": int(
+            policy_config.flow_jepa_policy_workspace_horizon_pool
+        ),
+        "flow_jepa_window_offsets": tuple(policy_config.flow_jepa_window_offsets),
+        "flow_jepa_stage_offset": int(policy_config.flow_jepa_stage_offset),
+        "action_history_enabled": int(policy_config.action_history_enabled),
+        "action_history_condition_dropout": float(
+            policy_config.action_history_condition_dropout
+        ),
+        "action_history_condition_exact_null": int(
+            policy_config.action_history_condition_exact_null
+        ),
+        "action_history_proposal_detach": int(
+            policy_config.action_history_proposal_detach
+        ),
+        "goal_conditioning_enabled": int(policy_config.goal_conditioning_enabled),
+        "goal_token_count": int(policy_config.goal_token_count),
+        "goal_language_dim": int(policy_config.goal_language_dim),
+        "goal_condition_dropout": float(policy_config.goal_condition_dropout),
+        "goal_condition_exact_null": int(policy_config.goal_condition_exact_null),
+        "stateless_phase_enabled": int(policy_config.stateless_phase_enabled),
+        "stateless_phase_count": int(policy_config.stateless_phase_count),
+        "stateless_phase_query_scale": float(
+            policy_config.stateless_phase_query_scale
+        ),
+    }
+    # The scale is semantically inactive when the late-detail path is off.
+    # Historical Stage1 checkpoints predate this field, so requiring the new
+    # nonzero default (0.25) would reject otherwise compatible V95-V101
+    # checkpoints even though their graph is unchanged.
+    if not int(policy_config.flow_jepa_late_policy_detail):
+        expected_fields.pop("flow_jepa_late_policy_detail_scale", None)
+    if not int(policy_config.flow_jepa_soft_address_lattice):
+        expected_fields.pop("flow_jepa_soft_address_lattice", None)
+        for field in (
+            "flow_jepa_address_slots",
+            "flow_jepa_address_route_dim",
+            "flow_jepa_address_query_chunk",
+            "flow_jepa_address_flow_prior_floor",
+        ):
+            expected_fields.pop(field, None)
+    if not int(policy_config.flow_jepa_horizon_soft_address):
+        expected_fields.pop("flow_jepa_horizon_soft_address", None)
+        expected_fields.pop(
+            "flow_jepa_horizon_address_update_scale",
+            None,
+        )
+    if not int(policy_config.flow_jepa_variance_safe_routing):
+        expected_fields.pop("flow_jepa_variance_safe_routing", None)
+        expected_fields.pop("flow_jepa_routing_norm_floor", None)
+    if not int(policy_config.flow_jepa_complete_numerical_contract):
+        expected_fields.pop("flow_jepa_complete_numerical_contract", None)
+        expected_fields.pop("flow_jepa_correlation_rms_floor", None)
+        expected_fields.pop(
+            "flow_jepa_visibility_transition_fraction", None
+        )
+    if not int(policy_config.role_attnres_enabled):
+        for field in (
+            "role_attnres_enabled",
+            "role_attnres_key_dim",
+            "role_attnres_ground_to_world",
+            "role_attnres_world_to_policy",
+            "role_attnres_policy_to_mmdit",
+            "role_attnres_ground_to_world_scale",
+            "role_attnres_world_to_policy_scale",
+            "role_attnres_policy_to_mmdit_scale",
+        ):
+            expected_fields.pop(field, None)
+    if not int(policy_config.stateless_phase_enabled):
+        expected_fields.pop("stateless_phase_count", None)
+        expected_fields.pop("stateless_phase_query_scale", None)
+    if not int(policy_config.flow_jepa_predictive_change_contract):
+        expected_fields.pop("flow_jepa_predictive_change_contract", None)
+    for field, current in expected_fields.items():
+        saved: Any = saved_policy.get(field)
+        if field == "flow_jepa_window_offsets":
+            saved = tuple(saved or ())
+        elif field == "action_history_proposal_detach":
+            # Checkpoints written before this explicit switch used the
+            # historical detached proposal path.
+            saved = int(saved_policy.get(field, 1))
+        elif isinstance(current, int):
+            saved = int(saved or 0)
+        elif isinstance(current, float):
+            saved = float(saved or 0.0)
+        if saved != current:
+            raise ValueError(
+                f"V95 Stage1 checkpoint mismatch for {field}: "
+                f"checkpoint={saved!r}, current={current!r}"
+            )
+    saved_goal = (payload.get("context") or {}).get("goal_language") or {}
+    current_goal = goal_language_metadata or {}
+    if saved_goal.get("embedding_sha256") != current_goal.get("embedding_sha256"):
+        raise ValueError(
+            "V95 Stage1 language embedding hash does not match the policy run"
+        )
+    saved_source = (payload.get("context") or {}).get("source_fingerprint")
+    current_source = _source_fingerprint()
+    if saved_source != current_source:
+        raise ValueError(
+            "V95 Stage1 source fingerprint differs from the current policy source; "
+            "rerun Stage1 with this implementation"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train V40 layer-role causal/latent temporal policy."
@@ -201,10 +550,27 @@ def parse_args() -> argparse.Namespace:
         help="Load a V39 contract-stage checkpoint as model initialization before policy-stage finetuning.",
     )
     parser.add_argument(
+        "--stage1-initialization-enabled",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help=(
+            "Honor --stage1-checkpoint. Set to 0 for a true single-stage run even when "
+            "an inherited launcher supplies a historical checkpoint path."
+        ),
+    )
+    parser.add_argument(
         "--stage1-reset-dirty-adapters",
         type=int,
         default=0,
         help="Skip old layer adapter/consequence interface weights when migrating from a pre-fix stage1 checkpoint.",
+    )
+    parser.add_argument(
+        "--require-flow-jepa-stage1-checkpoint",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Require --stage1-checkpoint to be produced by the new V95 representation Stage1.",
     )
     parser.add_argument(
         "--condition-mode",
@@ -227,8 +593,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segment-length", type=int, default=4)
     parser.add_argument("--history-offsets", type=_parse_offsets, default=(-8, -4, 0))
     parser.add_argument("--executed-action-offsets", type=_parse_offsets, default=(-8, -4, -1))
+    parser.add_argument("--action-history-enabled", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--action-history-recent-tokens", type=int, default=4)
+    parser.add_argument("--action-history-summary-tokens", type=int, default=3)
+    parser.add_argument("--action-history-condition-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--action-history-condition-exact-null", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--action-history-proposal-detach",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help=(
+            "Detach history-derived proposal tokens before the policy. "
+            "Use 0 for end-to-end action-gradient conditioning; 1 reproduces "
+            "the historical auxiliary-only proposal path."
+        ),
+    )
+    parser.add_argument("--goal-conditioning-enabled", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--goal-token-count", type=int, default=4)
+    parser.add_argument("--goal-resampler-depth", type=int, default=2)
+    parser.add_argument("--goal-language-max-tokens", type=int, default=32)
+    parser.add_argument("--goal-condition-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--goal-condition-exact-null", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--stateless-phase-enabled", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--stateless-phase-count", type=int, default=4)
+    parser.add_argument("--stateless-phase-query-scale", type=float, default=0.10)
+    parser.add_argument(
+        "--t5-condition-path",
+        "--goal-language-condition-path",
+        dest="t5_condition_path",
+        type=Path,
+        default=None,
+        help=(
+            "Precomputed T5 condition .pt/.pth. Accepts [L,D], [1,L,D], or "
+            "a dict containing embeddings/tokens and an optional attention mask."
+        ),
+    )
     parser.add_argument("--target-history-offsets", type=_parse_offsets, default=(-8, -4, 0))
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument(
+        "--information-balanced-sampling", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--information-uniform-fraction", type=float, default=0.50)
+    parser.add_argument("--information-event-fraction", type=float, default=0.125)
+    parser.add_argument("--information-motion-quantile", type=float, default=0.70)
 
     parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--heads", type=int, default=8)
@@ -350,6 +764,235 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--role-dropout", type=float, default=0.10)
     parser.add_argument("--visual-memory-dropout", type=float, default=0.0)
     parser.add_argument("--canvas-dropout", type=float, default=0.0)
+    parser.add_argument("--flow-jepa-enabled", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--flow-jepa-grid-size", type=int, default=8)
+    parser.add_argument("--flow-jepa-feature-dim", type=int, default=96)
+    parser.add_argument("--flow-jepa-flow-iters", type=int, default=3)
+    parser.add_argument("--flow-jepa-corr-levels", type=int, default=3)
+    parser.add_argument("--flow-jepa-corr-radius", type=int, default=2)
+    parser.add_argument("--flow-jepa-mask-ratio", type=float, default=0.375)
+    parser.add_argument("--flow-jepa-mask-block-size", type=int, default=2)
+    parser.add_argument("--flow-jepa-motion-mask-fraction", type=float, default=0.60)
+    parser.add_argument(
+        "--flow-jepa-teacher-balanced-target-mask", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--flow-jepa-teacher-mask-past-fraction", type=float, default=0.25)
+    parser.add_argument("--flow-jepa-teacher-mask-change-fraction", type=float, default=0.50)
+    parser.add_argument(
+        "--flow-jepa-predictive-change-contract",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--flow-jepa-uncertainty-floor", type=float, default=0.03)
+    parser.add_argument(
+        "--flow-jepa-late-bottleneck", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--flow-jepa-dense-depth", type=int, default=2)
+    parser.add_argument("--flow-jepa-fine-radius", type=int, default=2)
+    parser.add_argument("--flow-jepa-reader-radius", type=int, default=1)
+    parser.add_argument("--flow-jepa-reader-heads", type=int, default=2)
+    parser.add_argument("--flow-jepa-raw-image-enabled", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--flow-jepa-role-hierarchy", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--flow-jepa-raw-base-channels", type=int, default=32)
+    parser.add_argument("--flow-jepa-raw-mid-radius", type=int, default=2)
+    parser.add_argument("--flow-jepa-raw-high-radius", type=int, default=1)
+    parser.add_argument("--flow-jepa-raw-reader-radius", type=int, default=3)
+    parser.add_argument("--flow-jepa-raw-reader-heads", type=int, default=4)
+    parser.add_argument(
+        "--flow-jepa-raw-activation-checkpoint", type=int, choices=[0, 1], default=1
+    )
+    parser.add_argument("--flow-jepa-zero-flow-guard", type=int, choices=[0, 1], default=0)
+    parser.add_argument(
+        "--flow-jepa-strict-role-visual-path", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--flow-jepa-complementary-raw-detail", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--flow-jepa-source-aligned-raw-fusion", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--flow-jepa-grounding-blocks", type=int, default=3)
+    parser.add_argument("--flow-jepa-world-blocks", type=int, default=3)
+    parser.add_argument("--flow-jepa-policy-blocks", type=int, default=2)
+    parser.add_argument("--flow-jepa-policy-workspace-scale", type=float, default=0.10)
+    parser.add_argument(
+        "--flow-jepa-policy-workspace-fixed-fusion", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--flow-jepa-world-anchor-write-only", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--flow-jepa-late-policy-detail", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--flow-jepa-late-policy-detail-scale", type=float, default=0.25)
+    parser.add_argument(
+        "--flow-jepa-soft-address-lattice", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--flow-jepa-address-slots", type=int, default=4)
+    parser.add_argument("--flow-jepa-address-route-dim", type=int, default=32)
+    parser.add_argument("--flow-jepa-address-query-chunk", type=int, default=4)
+    parser.add_argument(
+        "--flow-jepa-policy-multi-glimpse-address",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--flow-jepa-address-flow-prior-floor", type=float, default=0.0)
+    parser.add_argument(
+        "--flow-jepa-bounded-flow-coordinates",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-sequential-horizon-memory",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-horizon-soft-address",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-horizon-address-update-scale",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--flow-jepa-horizon-cell-fine-address",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-online-horizon-address",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-progressive-grounding-address",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-coordinate-typed-raw-detail",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-structured-ownership-bottleneck",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--flow-jepa-raw-micro-grid", type=int, default=3)
+    parser.add_argument(
+        "--flow-jepa-variance-safe-routing",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-complete-numerical-contract",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--flow-jepa-routing-norm-floor", type=float, default=0.25)
+    parser.add_argument(
+        "--flow-jepa-correlation-rms-floor", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--flow-jepa-visibility-transition-fraction",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--flow-jepa-horizon-value-max-rms", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--flow-jepa-interval-stage-delta",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-interval-boundaries",
+        type=_parse_offsets,
+        default=(4, 8, 16, 32, 48),
+    )
+    parser.add_argument(
+        "--flow-jepa-interval-support-offsets",
+        type=_parse_offsets,
+        default=tuple(range(4, 49, 4)),
+    )
+    parser.add_argument(
+        "--flow-jepa-interval-stage-update-scale",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--flow-jepa-interval-stage-typed-value",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--role-attnres-enabled", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--role-attnres-key-dim", type=int, default=32)
+    parser.add_argument(
+        "--role-attnres-ground-to-world", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--role-attnres-world-to-policy", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument(
+        "--role-attnres-policy-to-mmdit", type=int, choices=[0, 1], default=0
+    )
+    parser.add_argument("--role-attnres-ground-to-world-scale", type=float, default=0.10)
+    parser.add_argument("--role-attnres-world-to-policy-scale", type=float, default=0.10)
+    parser.add_argument("--role-attnres-policy-to-mmdit-scale", type=float, default=0.25)
+    parser.add_argument(
+        "--role-residual-amplitude-contract",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--role-residual-max-update-rms", type=float, default=0.50)
+    parser.add_argument("--role-attnres-max-value-rms", type=float, default=1.00)
+    parser.add_argument(
+        "--role-residual-contract-after-gate",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-policy-workspace-horizon-pool",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-window-offsets",
+        type=_parse_offsets,
+        default=(4, 12, 24),
+        help="Sparse patch-level JEPA horizons, all inside policy_horizon.",
+    )
+    parser.add_argument(
+        "--flow-jepa-stage-offset",
+        type=int,
+        default=48,
+        help="Far global DINO-delta horizon used only for stage supervision.",
+    )
+    parser.add_argument(
+        "--flow-jepa-directed-canvas-attention", type=int, choices=[0, 1], default=1
+    )
     parser.add_argument("--inference-steps", type=int, default=5)
     parser.add_argument("--gripper-dim-index", type=int, default=-1)
     parser.add_argument("--first-execution-steps", type=int, default=4)
@@ -991,6 +1634,95 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    identity_advantage_weight = float(args.flow_jepa_identity_advantage_loss_weight)
+    static_identity_weight = float(args.flow_jepa_static_identity_loss_weight)
+    if int(args.flow_jepa_zero_flow_guard) and identity_advantage_weight <= 0.0:
+        raise ValueError(
+            "zero-flow guard requires an active --flow-jepa-identity-advantage-loss-weight"
+        )
+    if identity_advantage_weight > 0.0 and not int(args.flow_jepa_zero_flow_guard):
+        raise ValueError(
+            "identity-advantage supervision requires --flow-jepa-zero-flow-guard 1"
+        )
+    if static_identity_weight > 0.0 and not int(args.flow_jepa_zero_flow_guard):
+        raise ValueError(
+            "static-identity supervision requires --flow-jepa-zero-flow-guard 1"
+        )
+    if int(args.flow_jepa_complementary_raw_detail) and static_identity_weight <= 0.0:
+        raise ValueError(
+            "complementary raw detail requires an active "
+            "--flow-jepa-static-identity-loss-weight"
+        )
+    if int(args.flow_jepa_predictive_change_contract):
+        if float(args.flow_jepa_future_loss_weight) <= 0.0:
+            raise ValueError(
+                "predictive-change contract requires an active future JEPA loss"
+            )
+        if int(args.flow_jepa_teacher_balanced_target_mask):
+            raise ValueError(
+                "predictive-change contract requires the same observation-only "
+                "mask for online context and future targets; disable the "
+                "teacher-balanced target mask"
+            )
+        if float(args.flow_jepa_future_change_loss_weight) > 0.0:
+            raise ValueError(
+                "predictive-change contract already makes change the primary future "
+                "objective; disable the duplicate future-change auxiliary weight"
+            )
+    interval_stage_weight = float(args.flow_jepa_interval_stage_loss_weight)
+    if int(args.flow_jepa_interval_stage_delta) and interval_stage_weight <= 0.0:
+        raise ValueError(
+            "interval-stage delta requires an active "
+            "--flow-jepa-interval-stage-loss-weight"
+        )
+    if interval_stage_weight > 0.0 and not int(
+        args.flow_jepa_interval_stage_delta
+    ):
+        raise ValueError(
+            "interval-stage supervision requires "
+            "--flow-jepa-interval-stage-delta 1"
+        )
+    if int(args.flow_jepa_raw_image_enabled) and str(args.final_action_decoder) != (
+        "evidence_latent_mmdit_action"
+    ):
+        raise ValueError(
+            "raw 3+3+2 Flow-JEPA requires the evidence_latent_mmdit_action final decoder"
+        )
+    requested_stage = str(args.training_stage).lower().replace("-", "_")
+    if int(args.single_stage_role_lr):
+        if requested_stage not in {"policy", "stage2"}:
+            raise ValueError("single-stage role LR requires policy/stage2 training")
+        if not int(args.flow_jepa_role_hierarchy):
+            raise ValueError("single-stage role LR requires the Flow-JEPA role hierarchy")
+        if int(args.stage1_initialization_enabled):
+            raise ValueError("single-stage role LR requires Stage1 initialization to be off")
+    if int(args.flow_jepa_raw_image_enabled):
+        if requested_stage not in {"policy", "stage2"}:
+            raise ValueError("raw 3+3+2 Flow-JEPA is a single-stage policy experiment")
+        if int(args.stage1_initialization_enabled) and args.stage1_checkpoint is not None:
+            raise ValueError(
+                "raw 3+3+2 Flow-JEPA must not initialize from a historical Stage1 checkpoint"
+            )
+    flow_jepa_stage1 = bool(
+        int(args.flow_jepa_enabled) and requested_stage in {"contract", "stage1"}
+    )
+    if flow_jepa_stage1 and int(args.flow_jepa_late_policy_detail):
+        raise ValueError(
+            "late policy detail is a single-stage action path and cannot run "
+            "inside the representation-only Flow-JEPA Stage1 objective"
+        )
+    if flow_jepa_stage1:
+        if int(args.future_latent_loss_start_epoch) != 1:
+            raise ValueError("V95 Stage1 requires --future-latent-loss-start-epoch 1")
+        if int(args.future_latent_max_batches) != 0:
+            raise ValueError("V95 Stage1 requires future teacher targets on every batch")
+        if max(
+            float(args.flow_jepa_future_loss_weight),
+            float(args.flow_jepa_future_change_loss_weight),
+            float(args.flow_jepa_interval_stage_loss_weight),
+            float(args.flow_jepa_stage_loss_weight),
+        ) <= 0.0:
+            raise ValueError("V95 Stage1 requires an active future or stage JEPA target")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -1014,9 +1746,50 @@ def main() -> None:
         executed_action_offsets=tuple(args.executed_action_offsets),
         target_history_offsets=tuple(args.target_history_offsets),
         stride=args.stride,
-        return_images=args.condition_mode != "dinov2-cache",
+        return_images=(
+            args.condition_mode != "dinov2-cache"
+            or bool(int(args.flow_jepa_raw_image_enabled))
+        ),
+        return_target_images=args.condition_mode != "dinov2-cache",
     )
     dataset_config.validate()
+    if int(args.flow_jepa_enabled):
+        window_offsets = tuple(int(value) for value in args.flow_jepa_window_offsets)
+        if len(window_offsets) != int(args.future_anchors):
+            raise ValueError(
+                "--future-anchors must equal the number of --flow-jepa-window-offsets"
+            )
+        if int(args.flow_jepa_interval_stage_delta):
+            if not int(args.flow_jepa_late_bottleneck):
+                raise ValueError(
+                    "interval-stage targets require the late-bottleneck path"
+                )
+            requested_future_offsets = tuple(
+                int(value)
+                for value in args.flow_jepa_interval_support_offsets
+            )
+        else:
+            requested_future_offsets = (
+                window_offsets
+                if int(args.flow_jepa_late_bottleneck)
+                else (*window_offsets, int(args.flow_jepa_stage_offset))
+            )
+        available_lookup = {
+            int(offset): index for index, offset in enumerate(dataset_config.future_offsets)
+        }
+        missing_offsets = [
+            offset for offset in requested_future_offsets if offset not in available_lookup
+        ]
+        if missing_offsets:
+            raise ValueError(
+                "Flow-DINO requested offsets are not on the dataset future grid: "
+                f"{missing_offsets}; available={dataset_config.future_offsets}"
+            )
+        target_future_indices = tuple(
+            available_lookup[offset] for offset in requested_future_offsets
+        )
+    else:
+        target_future_indices = tuple(range(int(args.future_anchors)))
     min_length = (
         dataset_config.world_horizon
         + abs(min(dataset_config.history_offsets + dataset_config.executed_action_offsets))
@@ -1065,20 +1838,51 @@ def main() -> None:
     if use_token_prefetch:
         token_store = conditioner.store  # type: ignore[attr-defined]
         train_dataset = CachedTokenPolicyWindowDataset(
-            bases["train"], token_store=token_store, future_anchors=int(args.future_anchors)
+            bases["train"],
+            token_store=token_store,
+            future_anchors=int(args.future_anchors),
+            future_indices=target_future_indices,
         )
         val_dataset = CachedTokenPolicyWindowDataset(
-            bases["val"], token_store=token_store, future_anchors=int(args.future_anchors)
+            bases["val"],
+            token_store=token_store,
+            future_anchors=int(args.future_anchors),
+            future_indices=target_future_indices,
         )
     else:
         train_dataset = PolicyWindowDataset(bases["train"])
         val_dataset = PolicyWindowDataset(bases["val"])
+    train_batch_sampler = None
+    information_sampling_summary: dict[str, float | int] | None = None
+    if int(args.information_balanced_sampling):
+        motion_score, is_event = bases["train"].training_information_signals(
+            gripper_index=int(args.gripper_dim_index),
+            event_threshold=float(args.gripper_event_threshold),
+        )
+        train_batch_sampler = InformationBalancedBatchSampler(
+            motion_score,
+            is_event,
+            InformationBalancedSamplerConfig(
+                batch_size=int(args.batch_size),
+                uniform_fraction=float(args.information_uniform_fraction),
+                event_fraction=float(args.information_event_fraction),
+                motion_quantile=float(args.information_motion_quantile),
+                seed=int(args.seed),
+            ),
+        )
+        information_sampling_summary = train_batch_sampler.summary
+    train_loader_generator = torch.Generator()
+    train_loader_generator.manual_seed(int(args.seed))
+    val_loader_generator = torch.Generator()
+    val_loader_generator.manual_seed(int(args.seed) + 1)
     train_loader = make_loader(
         train_dataset,
         batch_size=args.batch_size,
         workers=args.num_workers,
-        shuffle=True,
+        shuffle=train_batch_sampler is None,
         device=device,
+        generator=train_loader_generator,
+        batch_sampler=train_batch_sampler,
     )
     val_loader = make_loader(
         val_dataset,
@@ -1086,6 +1890,7 @@ def main() -> None:
         workers=args.num_workers,
         shuffle=False,
         device=device,
+        generator=val_loader_generator,
     )
     if patches is None:
         probe_sample = bases["train"][0]
@@ -1099,11 +1904,55 @@ def main() -> None:
         "future_count": len(dataset_config.future_offsets),
     }
 
+    goal_language_tokens: torch.Tensor | None = None
+    goal_language_mask: torch.Tensor | None = None
+    goal_language_metadata: dict[str, Any] | None = None
+    goal_language_dim = 768
+    if int(args.goal_conditioning_enabled):
+        if args.t5_condition_path is None:
+            raise ValueError(
+                "--t5-condition-path is required when goal conditioning is enabled"
+            )
+        goal_language_tokens, goal_language_mask, goal_language_metadata = (
+            load_precomputed_t5_condition(
+                condition_path=args.t5_condition_path,
+                max_tokens=args.goal_language_max_tokens,
+            )
+        )
+        goal_language_dim = int(goal_language_tokens.shape[-1])
+        goal_language_metadata = {
+            **goal_language_metadata,
+            "embedding_dim": goal_language_dim,
+            "valid_tokens": int(goal_language_mask.sum().item()),
+            "embedding_sha256": hashlib.sha256(
+                goal_language_tokens.contiguous().numpy().tobytes()
+            ).hexdigest(),
+        }
+
     policy_config = V39PolicyConfig(
         action_dim=int(action_norm.scale.shape[-1]),
         state_dim=int(state_norm.scale.shape[-1]),
         action_horizon=dataset_config.policy_horizon,
         executed_history_length=len(dataset_config.executed_action_offsets),
+        action_history_enabled=args.action_history_enabled,
+        executed_action_offsets=tuple(dataset_config.executed_action_offsets),
+        action_history_recent_tokens=args.action_history_recent_tokens,
+        action_history_summary_tokens=args.action_history_summary_tokens,
+        action_history_condition_dropout=args.action_history_condition_dropout,
+        action_history_condition_exact_null=(
+            args.action_history_condition_exact_null
+        ),
+        action_history_proposal_detach=args.action_history_proposal_detach,
+        goal_conditioning_enabled=args.goal_conditioning_enabled,
+        goal_token_count=args.goal_token_count,
+        goal_language_dim=goal_language_dim,
+        goal_language_max_tokens=args.goal_language_max_tokens,
+        goal_resampler_depth=args.goal_resampler_depth,
+        goal_condition_dropout=args.goal_condition_dropout,
+        goal_condition_exact_null=args.goal_condition_exact_null,
+        stateless_phase_enabled=args.stateless_phase_enabled,
+        stateless_phase_count=args.stateless_phase_count,
+        stateless_phase_query_scale=args.stateless_phase_query_scale,
         hidden_size=args.hidden_size,
         num_heads=args.heads,
         depth=args.depth,
@@ -1138,6 +1987,156 @@ def main() -> None:
         role_dropout=args.role_dropout,
         action_basis_tokens=args.action_basis_tokens,
         future_grid_size=args.future_grid_size,
+        flow_jepa_enabled=args.flow_jepa_enabled,
+        flow_jepa_grid_size=args.flow_jepa_grid_size,
+        flow_jepa_feature_dim=args.flow_jepa_feature_dim,
+        flow_jepa_flow_iters=args.flow_jepa_flow_iters,
+        flow_jepa_corr_levels=args.flow_jepa_corr_levels,
+        flow_jepa_corr_radius=args.flow_jepa_corr_radius,
+        flow_jepa_mask_ratio=args.flow_jepa_mask_ratio,
+        flow_jepa_mask_block_size=args.flow_jepa_mask_block_size,
+        flow_jepa_motion_mask_fraction=args.flow_jepa_motion_mask_fraction,
+        flow_jepa_teacher_balanced_target_mask=(
+            args.flow_jepa_teacher_balanced_target_mask
+        ),
+        flow_jepa_teacher_mask_past_fraction=(
+            args.flow_jepa_teacher_mask_past_fraction
+        ),
+        flow_jepa_teacher_mask_change_fraction=(
+            args.flow_jepa_teacher_mask_change_fraction
+        ),
+        flow_jepa_predictive_change_contract=(
+            args.flow_jepa_predictive_change_contract
+        ),
+        flow_jepa_uncertainty_floor=args.flow_jepa_uncertainty_floor,
+        flow_jepa_late_bottleneck=args.flow_jepa_late_bottleneck,
+        flow_jepa_dense_depth=args.flow_jepa_dense_depth,
+        flow_jepa_fine_radius=args.flow_jepa_fine_radius,
+        flow_jepa_reader_radius=args.flow_jepa_reader_radius,
+        flow_jepa_reader_heads=args.flow_jepa_reader_heads,
+        flow_jepa_raw_image_enabled=args.flow_jepa_raw_image_enabled,
+        flow_jepa_role_hierarchy=args.flow_jepa_role_hierarchy,
+        flow_jepa_raw_base_channels=args.flow_jepa_raw_base_channels,
+        flow_jepa_raw_mid_radius=args.flow_jepa_raw_mid_radius,
+        flow_jepa_raw_high_radius=args.flow_jepa_raw_high_radius,
+        flow_jepa_raw_reader_radius=args.flow_jepa_raw_reader_radius,
+        flow_jepa_raw_reader_heads=args.flow_jepa_raw_reader_heads,
+        flow_jepa_raw_activation_checkpoint=args.flow_jepa_raw_activation_checkpoint,
+        flow_jepa_zero_flow_guard=args.flow_jepa_zero_flow_guard,
+        flow_jepa_strict_role_visual_path=args.flow_jepa_strict_role_visual_path,
+        flow_jepa_complementary_raw_detail=args.flow_jepa_complementary_raw_detail,
+        flow_jepa_source_aligned_raw_fusion=(
+            args.flow_jepa_source_aligned_raw_fusion
+        ),
+        flow_jepa_grounding_blocks=args.flow_jepa_grounding_blocks,
+        flow_jepa_world_blocks=args.flow_jepa_world_blocks,
+        flow_jepa_policy_blocks=args.flow_jepa_policy_blocks,
+        flow_jepa_policy_workspace_scale=args.flow_jepa_policy_workspace_scale,
+        flow_jepa_policy_workspace_fixed_fusion=(
+            args.flow_jepa_policy_workspace_fixed_fusion
+        ),
+        flow_jepa_world_anchor_write_only=args.flow_jepa_world_anchor_write_only,
+        flow_jepa_late_policy_detail=args.flow_jepa_late_policy_detail,
+        flow_jepa_late_policy_detail_scale=args.flow_jepa_late_policy_detail_scale,
+        flow_jepa_soft_address_lattice=args.flow_jepa_soft_address_lattice,
+        flow_jepa_address_slots=args.flow_jepa_address_slots,
+        flow_jepa_address_route_dim=args.flow_jepa_address_route_dim,
+        flow_jepa_address_query_chunk=args.flow_jepa_address_query_chunk,
+        flow_jepa_policy_multi_glimpse_address=(
+            args.flow_jepa_policy_multi_glimpse_address
+        ),
+        flow_jepa_address_flow_prior_floor=(
+            args.flow_jepa_address_flow_prior_floor
+        ),
+        flow_jepa_bounded_flow_coordinates=(
+            args.flow_jepa_bounded_flow_coordinates
+        ),
+        flow_jepa_sequential_horizon_memory=(
+            args.flow_jepa_sequential_horizon_memory
+        ),
+        flow_jepa_horizon_soft_address=(
+            args.flow_jepa_horizon_soft_address
+        ),
+        flow_jepa_horizon_address_update_scale=(
+            args.flow_jepa_horizon_address_update_scale
+        ),
+        flow_jepa_horizon_cell_fine_address=(
+            args.flow_jepa_horizon_cell_fine_address
+        ),
+        flow_jepa_online_horizon_address=(
+            args.flow_jepa_online_horizon_address
+        ),
+        flow_jepa_progressive_grounding_address=(
+            args.flow_jepa_progressive_grounding_address
+        ),
+        flow_jepa_coordinate_typed_raw_detail=(
+            args.flow_jepa_coordinate_typed_raw_detail
+        ),
+        flow_jepa_structured_ownership_bottleneck=(
+            args.flow_jepa_structured_ownership_bottleneck
+        ),
+        flow_jepa_raw_micro_grid=args.flow_jepa_raw_micro_grid,
+        flow_jepa_variance_safe_routing=(
+            args.flow_jepa_variance_safe_routing
+        ),
+        flow_jepa_complete_numerical_contract=(
+            args.flow_jepa_complete_numerical_contract
+        ),
+        flow_jepa_routing_norm_floor=args.flow_jepa_routing_norm_floor,
+        flow_jepa_correlation_rms_floor=(
+            args.flow_jepa_correlation_rms_floor
+        ),
+        flow_jepa_visibility_transition_fraction=(
+            args.flow_jepa_visibility_transition_fraction
+        ),
+        flow_jepa_horizon_value_max_rms=(
+            args.flow_jepa_horizon_value_max_rms
+        ),
+        flow_jepa_interval_stage_delta=(
+            args.flow_jepa_interval_stage_delta
+        ),
+        flow_jepa_interval_boundaries=tuple(
+            args.flow_jepa_interval_boundaries
+        ),
+        flow_jepa_interval_support_offsets=tuple(
+            args.flow_jepa_interval_support_offsets
+        ),
+        flow_jepa_interval_stage_update_scale=(
+            args.flow_jepa_interval_stage_update_scale
+        ),
+        flow_jepa_interval_stage_typed_value=(
+            args.flow_jepa_interval_stage_typed_value
+        ),
+        role_attnres_enabled=args.role_attnres_enabled,
+        role_attnres_key_dim=args.role_attnres_key_dim,
+        role_attnres_ground_to_world=args.role_attnres_ground_to_world,
+        role_attnres_world_to_policy=args.role_attnres_world_to_policy,
+        role_attnres_policy_to_mmdit=args.role_attnres_policy_to_mmdit,
+        role_attnres_ground_to_world_scale=(
+            args.role_attnres_ground_to_world_scale
+        ),
+        role_attnres_world_to_policy_scale=(
+            args.role_attnres_world_to_policy_scale
+        ),
+        role_attnres_policy_to_mmdit_scale=(
+            args.role_attnres_policy_to_mmdit_scale
+        ),
+        role_residual_amplitude_contract=(
+            args.role_residual_amplitude_contract
+        ),
+        role_residual_max_update_rms=args.role_residual_max_update_rms,
+        role_attnres_max_value_rms=args.role_attnres_max_value_rms,
+        role_residual_contract_after_gate=(
+            args.role_residual_contract_after_gate
+        ),
+        flow_jepa_policy_workspace_horizon_pool=(
+            args.flow_jepa_policy_workspace_horizon_pool
+        ),
+        flow_jepa_directed_canvas_attention=args.flow_jepa_directed_canvas_attention,
+        flow_jepa_history_offsets=tuple(dataset_config.history_offsets),
+        flow_jepa_window_offsets=tuple(args.flow_jepa_window_offsets),
+        flow_jepa_stage_offset=args.flow_jepa_stage_offset,
+        flow_jepa_stage_tokens=0 if int(args.flow_jepa_late_bottleneck) else 1,
         rollout_tail_start_step=args.rollout_tail_start_step,
         rollout_tail_full_step=args.rollout_tail_full_step,
         controlled_delta_rank=args.controlled_delta_rank,
@@ -1395,10 +2394,25 @@ def main() -> None:
         adaptive_cvae_micro_progress_distance_scale=args.adaptive_cvae_micro_progress_distance_scale,
     )
     system = V39PolicySystem(policy_config)
-    if args.stage1_checkpoint is not None:
-        stage_payload = torch.load(args.stage1_checkpoint, map_location="cpu", weights_only=False)
+    if goal_language_tokens is not None and goal_language_mask is not None:
+        system.set_default_goal_language(goal_language_tokens, goal_language_mask)
+    stage1_checkpoint = (
+        args.stage1_checkpoint if int(args.stage1_initialization_enabled) else None
+    )
+    if int(args.require_flow_jepa_stage1_checkpoint) and stage1_checkpoint is None:
+        raise ValueError(
+            "--require-flow-jepa-stage1-checkpoint=1 requires --stage1-checkpoint"
+        )
+    if stage1_checkpoint is not None:
+        stage_payload = torch.load(stage1_checkpoint, map_location="cpu", weights_only=False)
         if stage_payload.get("schema") not in POLICY_CHECKPOINT_SCHEMAS:
             raise ValueError("--stage1-checkpoint must be a V39/V40 checkpoint")
+        if int(args.require_flow_jepa_stage1_checkpoint):
+            _validate_flow_jepa_stage1_checkpoint(
+                stage_payload,
+                policy_config=policy_config,
+                goal_language_metadata=goal_language_metadata,
+            )
         stage_state, skipped_stage_keys = _filter_stage1_state_dict(
             stage_payload["model"],
             reset_dirty_adapters=bool(args.stage1_reset_dirty_adapters),
@@ -1481,6 +2495,11 @@ def main() -> None:
     trainer = V39PolicyTrainerConfig(
         **{name: getattr(args, name) for name in V39PolicyTrainerConfig.__dataclass_fields__}
     )
+    required_model_contract = _validate_required_model_contract(
+        os.environ.get("CLEARVLA_REQUIRED_MODEL_CONTRACT"),
+        policy_config,
+        trainer,
+    )
     context = {
         "schema": "clearvla-v40-1-unified-intervention-latent-context-v1",
         "source_fingerprint": _source_fingerprint(),
@@ -1488,24 +2507,291 @@ def main() -> None:
         "legacy_context_checkpoint": None
         if args.legacy_context_checkpoint is None
         else str(args.legacy_context_checkpoint),
-        "stage1_checkpoint": None
-        if args.stage1_checkpoint is None
-        else str(args.stage1_checkpoint),
+        "stage1_checkpoint": None if stage1_checkpoint is None else str(stage1_checkpoint),
+        "stage1_initialization_enabled": bool(int(args.stage1_initialization_enabled)),
+        "required_model_contract": required_model_contract,
         "splits": {"train": train_ids, "val": val_ids, "test": test_ids},
         "dataset": asdict(dataset_config),
         "visual_geometry": visual_geometry,
+        "goal_language": goal_language_metadata,
         "policy_model": asdict(policy_config),
         "trainer": asdict(trainer),
         "parameter_report": system.parameter_report(),
         "performance_contract": {
+            "v95_experiment_stage": str(args.training_stage),
+            "flow_jepa_stage1_objective": flow_jepa_stage1,
+            "forward_contract": (
+                "representation_only" if flow_jepa_stage1 else "action_policy"
+            ),
+            "target_action_conditioned": not flow_jepa_stage1,
+            "final_action_decoder_executed": not flow_jepa_stage1,
+            "layer_contracts_executed": not flow_jepa_stage1,
             "prefetch_dinov2_tokens": bool(use_token_prefetch),
-            "target_future_encoding": "future_anchors_last_history_only",
+            "information_balanced_sampling": information_sampling_summary,
+            "target_future_encoding": (
+                "multihorizon_spatial_evidence_last_history_only"
+                if int(args.flow_jepa_enabled) and int(args.flow_jepa_late_bottleneck)
+                else "sparse_window_offsets_then_stage_last_history_only"
+                if int(args.flow_jepa_enabled)
+                else "future_anchors_last_history_only"
+            ),
             "future_target_is_input": False,
+            "flow_jepa_enabled": bool(int(args.flow_jepa_enabled)),
+            "action_history_enabled": bool(int(args.action_history_enabled)),
+            "action_history_offsets": list(dataset_config.executed_action_offsets),
+            "action_history_tokens": int(policy_config.action_history_token_count),
+            "action_history_condition_dropout": float(
+                policy_config.action_history_condition_dropout
+            ),
+            "action_history_condition_exact_null": bool(
+                int(policy_config.action_history_condition_exact_null)
+            ),
+            "action_history_proposal_detach": bool(
+                int(policy_config.action_history_proposal_detach)
+            ),
+            "goal_conditioning_enabled": bool(int(args.goal_conditioning_enabled)),
+            "goal_token_count": int(args.goal_token_count),
+            "goal_condition_dropout": float(args.goal_condition_dropout),
+            "goal_condition_exact_null": bool(
+                int(policy_config.goal_condition_exact_null)
+            ),
+            "stateless_phase_enabled": bool(
+                int(policy_config.stateless_phase_enabled)
+            ),
+            "stateless_phase_count": int(policy_config.stateless_phase_count),
+            "stateless_phase_query_scale": float(
+                policy_config.stateless_phase_query_scale
+            ),
+            "goal_language_source": "precomputed_t5_condition",
+            "goal_encoder_resident_during_training": False,
+            "flow_jepa_future_only_teacher": bool(int(args.flow_jepa_enabled)),
+            "flow_jepa_directed_canvas_attention": bool(
+                int(args.flow_jepa_directed_canvas_attention)
+            ),
+            "flow_jepa_selector_value_separated": bool(int(args.flow_jepa_enabled)),
+            "flow_jepa_late_bottleneck": bool(int(args.flow_jepa_late_bottleneck)),
+            "flow_jepa_coarse_to_fine": bool(int(args.flow_jepa_late_bottleneck)),
+            "flow_jepa_fine_radius": int(args.flow_jepa_fine_radius),
+            "flow_jepa_reader_radius": int(args.flow_jepa_reader_radius),
+            "flow_jepa_reader_heads": int(args.flow_jepa_reader_heads),
+            "flow_jepa_rgb_backbone": bool(int(args.flow_jepa_raw_image_enabled)),
+            "flow_jepa_raw_image_enabled": bool(int(args.flow_jepa_raw_image_enabled)),
+            "flow_jepa_raw_pyramid_channels": int(args.flow_jepa_raw_base_channels),
+            "flow_jepa_raw_flow_dino_to_local": bool(
+                int(args.flow_jepa_raw_image_enabled)
+            ),
+            "flow_jepa_raw_detail_read_after_grounding": bool(
+                int(args.flow_jepa_raw_image_enabled)
+            ),
+            "flow_jepa_raw_reader_radius": int(args.flow_jepa_raw_reader_radius),
+            "flow_jepa_raw_reader_heads": int(args.flow_jepa_raw_reader_heads),
+            "flow_jepa_raw_activation_checkpoint": bool(
+                int(args.flow_jepa_raw_activation_checkpoint)
+            ),
+            "flow_jepa_zero_flow_guard": bool(int(args.flow_jepa_zero_flow_guard)),
+            "flow_jepa_strict_role_visual_path": bool(
+                int(args.flow_jepa_strict_role_visual_path)
+            ),
+            "flow_jepa_complementary_raw_detail": bool(
+                int(args.flow_jepa_complementary_raw_detail)
+            ),
+            "flow_jepa_source_aligned_raw_fusion": bool(
+                int(args.flow_jepa_source_aligned_raw_fusion)
+            ),
+            "flow_jepa_teacher_balanced_target_mask": bool(
+                int(args.flow_jepa_teacher_balanced_target_mask)
+            ),
+            "flow_jepa_predictive_change_contract": bool(
+                int(args.flow_jepa_predictive_change_contract)
+            ),
+            "flow_jepa_horizon_soft_address": bool(
+                int(args.flow_jepa_horizon_soft_address)
+            ),
+            "flow_jepa_horizon_address_update_scale": float(
+                args.flow_jepa_horizon_address_update_scale
+            ),
+            "flow_jepa_future_reliable_normalization": bool(
+                int(args.flow_jepa_future_reliable_normalization)
+            ),
+            "flow_jepa_horizon_address_loss_weight": float(
+                args.flow_jepa_horizon_address_loss_weight
+            ),
+            "flow_jepa_teacher_target_mask_quotas": {
+                "past": float(args.flow_jepa_teacher_mask_past_fraction),
+                "future_change": float(args.flow_jepa_teacher_mask_change_fraction),
+                "uniform": float(
+                    1.0
+                    - args.flow_jepa_teacher_mask_past_fraction
+                    - args.flow_jepa_teacher_mask_change_fraction
+                ),
+            },
+            "flow_jepa_horizon_balance_mode": str(
+                args.flow_jepa_horizon_balance_mode
+            ),
+            "action_horizon_weight_mode": str(args.horizon_weight_mode),
+            "flow_jepa_single_stage_uniform_role_lr": bool(
+                int(args.single_stage_role_lr)
+            ),
+            "flow_jepa_raw_motion_evidence": (
+                "fixed_rgb_census"
+                if int(args.flow_jepa_zero_flow_guard)
+                else "predicted_flow_reliability"
+            ),
+            "flow_jepa_raw_fallback": (
+                "additive_low_frequency_content"
+                if int(args.flow_jepa_complementary_raw_detail)
+                else "pooled_content"
+                if int(args.flow_jepa_zero_flow_guard)
+                else "identity_local_candidates"
+            ),
+            "flow_jepa_raw_seed_source": (
+                "dino_identity_centered"
+                if int(args.flow_jepa_raw_image_enabled)
+                else None
+            ),
+            "flow_jepa_raw_value_amplitude_gate": False,
+            "flow_jepa_single_stage_end_to_end": bool(
+                int(args.flow_jepa_raw_image_enabled)
+                and not int(args.stage1_initialization_enabled)
+            ),
+            "flow_jepa_role_groups": (
+                [
+                    int(args.flow_jepa_grounding_blocks),
+                    int(args.flow_jepa_world_blocks),
+                    int(args.flow_jepa_policy_blocks),
+                ]
+                if int(args.flow_jepa_role_hierarchy)
+                else None
+            ),
+            "flow_jepa_policy_workspace_scale": float(
+                args.flow_jepa_policy_workspace_scale
+            ),
+            "flow_jepa_policy_workspace_fixed_fusion": bool(
+                int(args.flow_jepa_policy_workspace_fixed_fusion)
+            ),
+            "flow_jepa_world_anchor_write_only": bool(
+                int(args.flow_jepa_world_anchor_write_only)
+            ),
+            "flow_jepa_late_policy_detail": bool(
+                int(args.flow_jepa_late_policy_detail)
+            ),
+            "flow_jepa_late_policy_detail_scale": float(
+                args.flow_jepa_late_policy_detail_scale
+            ),
+            "flow_jepa_soft_address_lattice": bool(
+                int(args.flow_jepa_soft_address_lattice)
+            ),
+            "flow_jepa_address_slots": int(args.flow_jepa_address_slots),
+            "flow_jepa_address_route_dim": int(
+                args.flow_jepa_address_route_dim
+            ),
+            "flow_jepa_address_query_chunk": int(
+                args.flow_jepa_address_query_chunk
+            ),
+            "flow_jepa_policy_multi_glimpse_address": bool(
+                int(args.flow_jepa_policy_multi_glimpse_address)
+            ),
+            "flow_jepa_address_flow_prior_floor": float(
+                args.flow_jepa_address_flow_prior_floor
+            ),
+            "flow_jepa_bounded_flow_coordinates": bool(
+                int(args.flow_jepa_bounded_flow_coordinates)
+            ),
+            "flow_jepa_sequential_horizon_memory": bool(
+                int(args.flow_jepa_sequential_horizon_memory)
+            ),
+            "flow_jepa_horizon_cell_fine_address": bool(
+                int(args.flow_jepa_horizon_cell_fine_address)
+            ),
+            "flow_jepa_online_horizon_address": bool(
+                int(args.flow_jepa_online_horizon_address)
+            ),
+            "flow_jepa_progressive_grounding_address": bool(
+                int(args.flow_jepa_progressive_grounding_address)
+            ),
+            "flow_jepa_coordinate_typed_raw_detail": bool(
+                int(args.flow_jepa_coordinate_typed_raw_detail)
+            ),
+            "flow_jepa_structured_ownership_bottleneck": bool(
+                int(args.flow_jepa_structured_ownership_bottleneck)
+            ),
+            "flow_jepa_raw_micro_grid": int(args.flow_jepa_raw_micro_grid),
+            "flow_jepa_variance_safe_routing": bool(
+                int(args.flow_jepa_variance_safe_routing)
+            ),
+            "flow_jepa_complete_numerical_contract": bool(
+                int(args.flow_jepa_complete_numerical_contract)
+            ),
+            "flow_jepa_routing_norm_floor": float(
+                args.flow_jepa_routing_norm_floor
+            ),
+            "flow_jepa_correlation_rms_floor": float(
+                args.flow_jepa_correlation_rms_floor
+            ),
+            "flow_jepa_visibility_transition_fraction": float(
+                args.flow_jepa_visibility_transition_fraction
+            ),
+            "flow_jepa_interval_stage_typed_value": bool(
+                int(args.flow_jepa_interval_stage_typed_value)
+            ),
+            "role_attnres_enabled": bool(int(args.role_attnres_enabled)),
+            "role_attnres_key_dim": int(args.role_attnres_key_dim),
+            "role_attnres_ground_to_world": bool(
+                int(args.role_attnres_ground_to_world)
+            ),
+            "role_attnres_world_to_policy": bool(
+                int(args.role_attnres_world_to_policy)
+            ),
+            "role_attnres_policy_to_mmdit": bool(
+                int(args.role_attnres_policy_to_mmdit)
+            ),
+            "role_attnres_ground_to_world_scale": float(
+                args.role_attnres_ground_to_world_scale
+            ),
+            "role_attnres_world_to_policy_scale": float(
+                args.role_attnres_world_to_policy_scale
+            ),
+            "role_attnres_policy_to_mmdit_scale": float(
+                args.role_attnres_policy_to_mmdit_scale
+            ),
+            "role_residual_amplitude_contract": bool(
+                int(args.role_residual_amplitude_contract)
+            ),
+            "role_residual_max_update_rms": float(
+                args.role_residual_max_update_rms
+            ),
+            "role_attnres_max_value_rms": float(
+                args.role_attnres_max_value_rms
+            ),
+            "role_residual_contract_after_gate": bool(
+                int(args.role_residual_contract_after_gate)
+            ),
+            "flow_jepa_policy_workspace_horizon_pool": bool(
+                int(args.flow_jepa_policy_workspace_horizon_pool)
+            ),
+            "flow_jepa_policy_workspace_is_action_stream": bool(
+                int(args.flow_jepa_role_hierarchy)
+            ),
+            "flow_jepa_history_offsets": list(dataset_config.history_offsets),
+            "flow_jepa_window_offsets": list(policy_config.flow_jepa_effective_window_offsets),
+            "flow_jepa_stage_offset": (
+                0
+                if int(args.flow_jepa_late_bottleneck)
+                else int(policy_config.flow_jepa_effective_stage_offset)
+            ),
+            "flow_jepa_stage_target": (
+                "none_far_horizon_is_spatial_evidence"
+                if int(args.flow_jepa_late_bottleneck)
+                else "camera_2x2_frozen_dino_delta_no_grad"
+            ),
+            "flow_jepa_stage_conditions_window": not bool(
+                int(args.flow_jepa_late_bottleneck)
+            ),
             "rollout_dynamics_bound": True,
             "controlled_residual_dynamics": True,
             "weak_visual_base_plus_action_delta": True,
-            "counterfactual_delta_contrast": True,
-            "tail_action_reads_controlled_delta": True,
+            "counterfactual_delta_contrast": not flow_jepa_stage1,
+            "tail_action_reads_controlled_delta": not flow_jepa_stage1,
             "final_action_decoder": str(args.final_action_decoder),
             "gripper_field_mode": str(args.gripper_field_mode),
             "gripper_field_dim": int(args.gripper_field_dim),
@@ -1970,6 +3256,8 @@ def main() -> None:
             "v40_causal_feedback_depth": int(args.layer_causal_feedback_depth),
             "metric_sync": "log_every_and_epoch_end",
             "dino_cache_reads": "episode_grouped_mmap",
+            "data_loader_seed": int(args.seed),
+            "training_rng_reset_after_initialization": not bool(args.resume),
         },
         "skipped": skipped,
         "policy_contract": (
@@ -1979,6 +3267,17 @@ def main() -> None:
         ),
     }
     print_context(context)
+    if not args.resume:
+        # Model construction and architecture-specific preflight setup consume
+        # different numbers of random draws.  Resetting here makes fresh V96/
+        # V98 controls share the same dropout, flow-time and noise stream; the
+        # DataLoader has its own generator and therefore cannot be perturbed by
+        # either architecture.
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(args.seed)
     train_v39_policy(
         system=system,
         train_loader=train_loader,

@@ -1,21 +1,28 @@
-from __future__ import annotations
-
 """Shared world/action trunk components used by V38 and the current policy."""
+
+from __future__ import annotations
 
 from typing import Protocol
 
 import torch
-from torch import Tensor, nn
 import torch.nn.functional as F
+from torch import Tensor, nn
 
 from .codec import PhysicalActionTokenLift
 from .primitives import BiasFreeFFN, sinusoidal_positions
+from .role_delta_attnres import (
+    smooth_absolute_contract,
+    smooth_rms_contract,
+    variance_floored_centered_norm,
+)
 
 
 class TrunkPrimitiveConfig(Protocol):
     action_basis_tokens: int
     action_dim: int
     action_horizon: int
+    action_history_enabled: int
+    action_history_token_count: int
     arm_dim: int
     base_effect_hidden: int
     canvas_dropout: float
@@ -29,9 +36,13 @@ class TrunkPrimitiveConfig(Protocol):
     first_execution_steps: int
     future_anchors: int
     future_grid_size: int
+    flow_jepa_complete_numerical_contract: int
+    flow_jepa_routing_norm_floor: float
     gripper_field_dim: int
     gripper_field_mode: str
     hidden_size: int
+    goal_conditioning_enabled: int
+    goal_token_count: int
     latent_action_tokens: int
     mid_execution_steps: int
     neutral_action_tokens: int
@@ -46,6 +57,9 @@ class TrunkPrimitiveConfig(Protocol):
     visual_history_length: int
     visual_memory_dropout: float
     visual_token_dim: int
+    role_residual_amplitude_contract: int
+    role_residual_contract_after_gate: int
+    role_residual_max_update_rms: float
 
 
 class HorizonRoleEmbedding(nn.Module):
@@ -217,6 +231,46 @@ class UnifiedCanvasSeed(nn.Module):
         self.role_embed = nn.Parameter(torch.randn(8, h) * 0.02)
         self.role_drop = nn.Dropout(config.role_dropout)
         self.task_token = nn.Parameter(torch.randn(1, 1, h) * 0.02)
+        sibling_conditioning = bool(
+            int(getattr(config, "action_history_enabled", 0))
+            or int(getattr(config, "goal_conditioning_enabled", 0))
+        )
+        self.goal_private_condition = (
+            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            if int(getattr(config, "goal_conditioning_enabled", 0))
+            else None
+        )
+        self.action_private_condition = (
+            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
+            if int(getattr(config, "action_history_enabled", 0))
+            else None
+        )
+        self.shared_condition_mixer = (
+            nn.Sequential(
+                nn.LayerNorm(h),
+                nn.Linear(h, 2 * h),
+                nn.SiLU(),
+                nn.Linear(2 * h, h),
+            )
+            if sibling_conditioning
+            else None
+        )
+        exact_sibling_nulls = (
+            (
+                not int(getattr(config, "goal_conditioning_enabled", 0))
+                or int(getattr(config, "goal_condition_exact_null", 0))
+            )
+            and (
+                not int(getattr(config, "action_history_enabled", 0))
+                or int(getattr(config, "action_history_condition_exact_null", 0))
+            )
+        )
+        if self.shared_condition_mixer is not None and exact_sibling_nulls:
+            # Every active sibling condition is represented as
+            # f(condition)-f(0). The final affine bias cancels identically in
+            # that exact-null difference, so it is an unidentifiable degree
+            # of freedom rather than a learnable condition parameter.
+            self.shared_condition_mixer[-1].bias.requires_grad_(False)
         self.rollout_anchor_type = nn.Parameter(torch.randn(1, config.future_anchors, 1, h) * 0.02)
         self.rollout_grid_type = nn.Parameter(
             torch.randn(
@@ -224,9 +278,18 @@ class UnifiedCanvasSeed(nn.Module):
             )
             * 0.02
         )
+        self.stage_type = (
+            nn.Parameter(torch.randn(1, 1, h) * 0.02)
+            if int(getattr(config, "flow_jepa_enabled", 0))
+            and not int(getattr(config, "flow_jepa_late_bottleneck", 0))
+            else None
+        )
         self.registers = nn.Parameter(torch.randn(1, config.canvas_registers, h) * 0.02)
         self.proposal_type = nn.Parameter(torch.randn(1, config.action_horizon, h) * 0.02)
         self.executed_type = nn.Parameter(torch.randn(1, config.executed_history_length, h) * 0.02)
+        if int(getattr(config, "action_history_enabled", 0)):
+            self.executed_proj.requires_grad_(False)
+            self.executed_type.requires_grad_(False)
         self.state_history_type = nn.Parameter(
             torch.randn(1, config.visual_history_length, h) * 0.02
         )
@@ -244,29 +307,106 @@ class UnifiedCanvasSeed(nn.Module):
         state: Tensor,
         state_history: Tensor,
         executed_history: Tensor,
+        executed_memory: Tensor | None = None,
         proposal_tokens: Tensor,
         proposal_keep: Tensor,
         rollout_init: Tensor,
+        stage_init: Tensor | None = None,
+        goal_tokens: Tensor | None = None,
+        goal_condition_keep: Tensor | None = None,
+        action_history_condition_keep: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, slice]]:
         cfg = self.config
         b = noisy_physical.shape[0]
         device = noisy_physical.device
         dtype = noisy_physical.dtype
         role = self.role_drop(self.role_embed.to(device=device, dtype=dtype))
-        task = (
-            self.task_token.expand(b, -1, -1).to(device=device, dtype=dtype) + role[self.ROLE_TASK]
-        )
+        if int(getattr(cfg, "goal_conditioning_enabled", 0)):
+            if goal_tokens is None or self.goal_private_condition is None:
+                raise ValueError("goal_tokens are required when goal conditioning is enabled")
+            expected_goal = int(getattr(cfg, "goal_token_count", 1))
+            if tuple(goal_tokens.shape) != (b, expected_goal, cfg.hidden_size):
+                raise ValueError(
+                    f"goal_tokens must be [B,{expected_goal},{cfg.hidden_size}], got "
+                    f"{tuple(goal_tokens.shape)}"
+                )
+            if self.shared_condition_mixer is None:
+                raise RuntimeError("shared condition mixer is missing")
+            goal_content = self.shared_condition_mixer(
+                self.goal_private_condition(goal_tokens.to(device=device, dtype=dtype))
+            )
+            if int(getattr(cfg, "goal_condition_exact_null", 0)):
+                if (
+                    goal_condition_keep is None
+                    or tuple(goal_condition_keep.shape) != (b,)
+                ):
+                    raise ValueError(
+                        "exact goal null semantics require goal_condition_keep [B]"
+                    )
+                null_goal = self.shared_condition_mixer(
+                    self.goal_private_condition(torch.zeros_like(goal_tokens))
+                )
+                goal_content = (goal_content - null_goal) * goal_condition_keep.to(
+                    device=device, dtype=dtype
+                )[:, None, None]
+            task = (
+                goal_content
+                + self.task_token.to(device=device, dtype=dtype)
+                + role[self.ROLE_TASK]
+            )
+        else:
+            task = (
+                self.task_token.expand(b, -1, -1).to(device=device, dtype=dtype)
+                + role[self.ROLE_TASK]
+            )
         state_tok = self.state_proj(state)[:, None] + role[self.ROLE_STATE]
         hist = (
             self.state_history_proj(state_history)
             + self.state_history_type.to(device=device, dtype=dtype)
             + role[self.ROLE_STATE_HISTORY]
         )
-        executed = (
-            self.executed_proj(executed_history)
-            + self.executed_type.to(device=device, dtype=dtype)
-            + role[self.ROLE_EXECUTED]
-        )
+        if int(getattr(cfg, "action_history_enabled", 0)):
+            if executed_memory is None or self.action_private_condition is None:
+                raise ValueError(
+                    "executed_memory is required when action history compression is enabled"
+                )
+            expected_history = int(getattr(cfg, "action_history_token_count"))
+            if tuple(executed_memory.shape) != (b, expected_history, cfg.hidden_size):
+                raise ValueError(
+                    f"executed_memory must be [B,{expected_history},{cfg.hidden_size}], got "
+                    f"{tuple(executed_memory.shape)}"
+                )
+            if self.shared_condition_mixer is None:
+                raise RuntimeError("shared condition mixer is missing")
+            action_content = self.shared_condition_mixer(
+                self.action_private_condition(
+                    executed_memory.to(device=device, dtype=dtype)
+                )
+            )
+            if int(getattr(cfg, "action_history_condition_exact_null", 0)):
+                if (
+                    action_history_condition_keep is None
+                    or tuple(action_history_condition_keep.shape) != (b,)
+                ):
+                    raise ValueError(
+                        "exact history null semantics require "
+                        "action_history_condition_keep [B]"
+                    )
+                null_action = self.shared_condition_mixer(
+                    self.action_private_condition(torch.zeros_like(executed_memory))
+                )
+                action_content = (
+                    action_content - null_action
+                ) * action_history_condition_keep.to(
+                    device=device, dtype=dtype
+                )[:, None, None]
+            executed = action_content + role[self.ROLE_EXECUTED]
+        else:
+            executed = (
+                self.executed_proj(executed_history)
+                + self.executed_type.to(device=device, dtype=dtype)
+                + role[self.ROLE_EXECUTED]
+            )
         proposal = (
             self.proposal_proj(proposal_tokens) * proposal_keep[:, None, None]
             + self.proposal_type.to(device=device, dtype=dtype)
@@ -299,36 +439,115 @@ class UnifiedCanvasSeed(nn.Module):
         rollout = (
             rollout.reshape(b, cfg.future_token_count, cfg.hidden_size) + role[self.ROLE_ROLLOUT]
         )
+        if stage_init is None:
+            stage = rollout.new_empty(b, 0, cfg.hidden_size)
+        else:
+            if self.stage_type is None:
+                raise ValueError("stage_init was supplied while hierarchical Flow-DINO is disabled")
+            if tuple(stage_init.shape) != (b, 1, cfg.hidden_size):
+                raise ValueError(
+                    f"stage_init must be [B,1,{cfg.hidden_size}], got {tuple(stage_init.shape)}"
+                )
+            stage = (
+                stage_init.to(device=device, dtype=dtype)
+                + self.stage_type.to(device=device, dtype=dtype)
+                + role[self.ROLE_ROLLOUT]
+            )
         registers = (
             self.registers.expand(b, -1, -1).to(device=device, dtype=dtype)
             + role[self.ROLE_REGISTER]
         )
-        parts = [task, state_tok, hist, executed, proposal, noisy, rollout, registers]
-        starts = []
+        # Goal and executed-action memory are adjacent sibling conditions.
+        # State remains in the same directed context region, but no longer
+        # physically separates the two modalities on the serialized canvas.
+        named_parts = [
+            ("state", state_tok),
+            ("state_history", hist),
+            ("task", task),
+            ("executed", executed),
+            ("proposal", proposal),
+            ("trajectory", noisy),
+            ("stage", stage),
+            ("rollout", rollout),
+            ("registers", registers),
+        ]
+        starts: dict[str, int] = {}
         offset = 0
-        for part in parts:
-            starts.append(offset)
+        for name, part in named_parts:
+            starts[name] = offset
             offset += part.shape[1]
         slices = {
-            "task": slice(starts[0], starts[0] + 1),
-            "state": slice(starts[1], starts[1] + 1),
-            "state_history": slice(starts[2], starts[2] + cfg.visual_history_length),
-            "executed": slice(starts[3], starts[3] + cfg.executed_history_length),
-            "proposal": slice(starts[4], starts[4] + cfg.action_horizon),
-            "trajectory": slice(
-                starts[5], starts[5] + cfg.action_horizon * cfg.action_basis_tokens
+            "task": slice(starts["task"], starts["task"] + task.shape[1]),
+            "state": slice(starts["state"], starts["state"] + 1),
+            "state_history": slice(
+                starts["state_history"],
+                starts["state_history"] + cfg.visual_history_length,
             ),
-            "rollout": slice(starts[6], starts[6] + cfg.future_token_count),
-            "registers": slice(starts[7], starts[7] + cfg.canvas_registers),
+            "executed": slice(
+                starts["executed"], starts["executed"] + executed.shape[1]
+            ),
+            "proposal": slice(
+                starts["proposal"], starts["proposal"] + cfg.action_horizon
+            ),
+            "trajectory": slice(
+                starts["trajectory"],
+                starts["trajectory"] + cfg.action_horizon * cfg.action_basis_tokens,
+            ),
+            "stage": slice(starts["stage"], starts["stage"] + stage.shape[1]),
+            "rollout": slice(
+                starts["rollout"], starts["rollout"] + cfg.future_token_count
+            ),
+            "registers": slice(
+                starts["registers"], starts["registers"] + cfg.canvas_registers
+            ),
         }
-        return self.drop(torch.cat(parts, dim=1)), slices
+        return self.drop(torch.cat([part for _, part in named_parts], dim=1)), slices
 
 
 class TemporalDynamicsBoundDiTBlock(nn.Module):
     """Canvas block with explicit action-to-rollout transition sublayer."""
 
-    def __init__(self, config: TrunkPrimitiveConfig) -> None:
+    def __init__(self, config: TrunkPrimitiveConfig, *, role: str = "shared") -> None:
         super().__init__()
+        if role not in {"shared", "grounding", "world", "policy"}:
+            raise ValueError(f"unsupported DiT block role: {role}")
+        self.role = role
+        self.residual_amplitude_contract = bool(
+            int(getattr(config, "role_residual_amplitude_contract", 0))
+        )
+        self.residual_max_update_rms = float(
+            getattr(config, "role_residual_max_update_rms", 0.50)
+        )
+        self.residual_contract_after_gate = bool(
+            int(getattr(config, "role_residual_contract_after_gate", 0))
+        )
+        self.complete_numerical_contract = bool(
+            int(getattr(config, "flow_jepa_complete_numerical_contract", 0))
+            and role in {"grounding", "world", "policy"}
+        )
+        self.normalization_floor = float(
+            getattr(config, "flow_jepa_routing_norm_floor", 0.25)
+        )
+        # LayerNorm's learned affine is useful for memory K/V, but an
+        # unconstrained scale would reopen the Jacobian bound established by
+        # the variance floor. This smooth eighth-order bound is effectively
+        # identity near the initialized scale of one and asymptotes to four.
+        self.normalization_affine_max = 4.0
+        self.directed_canvas_attention = bool(
+            int(getattr(config, "flow_jepa_enabled", 0))
+            and int(getattr(config, "flow_jepa_directed_canvas_attention", 0))
+        )
+        self.visual_cross_enabled = not (
+            role == "policy"
+            and bool(int(getattr(config, "flow_jepa_strict_role_visual_path", 0)))
+        )
+        self.world_anchor_write_only = bool(
+            role == "world"
+            and int(getattr(config, "flow_jepa_world_anchor_write_only", 0))
+        )
+        self.future_anchors = int(config.future_anchors)
+        self.num_cameras = int(config.num_cameras)
+        self.future_grid_size = int(config.future_grid_size)
         h = config.hidden_size
         self.n1 = nn.LayerNorm(h, elementwise_affine=False)
         self.self_attn = nn.MultiheadAttention(
@@ -339,63 +558,595 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         self.cross = nn.MultiheadAttention(
             h, config.num_heads, batch_first=True, dropout=config.dropout
         )
+        if (
+            not self.visual_cross_enabled
+            and bool(int(getattr(config, "flow_jepa_late_policy_detail", 0)))
+        ):
+            # V102 policy blocks read observation detail only through the
+            # explicit late reader. Preserve legacy modules in the state dict,
+            # but do not advertise the disabled visual bypass as trainable.
+            self.mem_norm.requires_grad_(False)
+            self.cross.requires_grad_(False)
         self.n_dyn_q = nn.LayerNorm(h, elementwise_affine=False)
         self.n_dyn_kv = nn.LayerNorm(h)
         self.rollout_cross = nn.MultiheadAttention(
             h, config.num_heads, batch_first=True, dropout=config.dropout
         )
+        if role == "policy":
+            # Policy blocks own trajectory writes only. Their stage/rollout
+            # transition branch is therefore unreachable by construction
+            # (see the role guards in forward). Keep the modules for old
+            # checkpoint layouts, but never present dead parameters to the
+            # V96+ optimizer.
+            self.n_dyn_kv.requires_grad_(False)
+            self.rollout_cross.requires_grad_(False)
+        # A single stage key would otherwise compete with O(100) context/action
+        # keys in one softmax.  This dedicated residual bridge gives the
+        # coarse stage prediction an explicit, measurable influence on every
+        # spatial window token while retaining direct visual evidence for fine
+        # patch detail.
+        if int(getattr(config, "flow_jepa_enabled", 0)) and not int(
+            getattr(config, "flow_jepa_late_bottleneck", 0)
+        ):
+            self.stage_to_window = nn.Sequential(
+                nn.LayerNorm(h, elementwise_affine=False), nn.Linear(h, 2 * h, bias=False)
+            )
+            self.stage_window_norm = nn.LayerNorm(h, elementwise_affine=False)
+            self.stage_to_window_gate_logit = nn.Parameter(torch.tensor(-2.0))
+            nn.init.normal_(self.stage_to_window[-1].weight, mean=0.0, std=3e-3)
+        else:
+            self.stage_to_window = None
+            self.stage_window_norm = None
+            self.register_parameter("stage_to_window_gate_logit", None)
         self.n3 = nn.LayerNorm(h, elementwise_affine=False)
         self.ffn = BiasFreeFFN(h, config.ffn_expansion)
         self.drop = nn.Dropout(config.dropout)
         self.mod = nn.Linear(h, 12 * h)
+        if role == "shared":
+            self.register_parameter("role_embedding", None)
+        else:
+            self.role_embedding = nn.Parameter(torch.randn(1, h) * 0.02)
         nn.init.normal_(self.mod.weight, mean=0.0, std=3e-3)
         nn.init.zeros_(self.mod.bias)
         with torch.no_grad():
             for idx in (2, 5, 8, 11):
                 self.mod.bias[idx * h : (idx + 1) * h].fill_(-2.0)
 
+    def _contract_residual(self, update: Tensor) -> tuple[Tensor, Tensor]:
+        if not self.residual_amplitude_contract:
+            return update, update.new_ones(
+                (*update.shape[:-1], 1), dtype=torch.float32
+            )
+        return smooth_rms_contract(update, self.residual_max_update_rms)
+
     @staticmethod
     def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
         return x * (1 + scale[:, None]) + shift[:, None]
 
+    @staticmethod
+    def _directed_attention_mask(
+        length: int,
+        slices: dict[str, slice],
+        *,
+        device: torch.device,
+        role: str = "shared",
+    ) -> Tensor:
+        """Enforce clean-context -> action -> future ownership.
+
+        Clean context/register queries cannot read noisy-action, stage, or
+        future-query regions.  Action queries cannot read stage/future.  The
+        stage query can read current/action context but not window predictions;
+        window queries can read the stage.  This establishes the serial
+        context -> action -> stage -> window direction without a recurrent
+        hidden state or a second training pass.
+        """
+
+        mask = torch.zeros(length, length, device=device, dtype=torch.bool)
+        action = slices["trajectory"]
+        stage = slices.get("stage", slice(slices["rollout"].start, slices["rollout"].start))
+        future = slices["rollout"]
+        forbidden_start = int(action.start)
+        forbidden_stop = int(future.stop)
+        for name in ("task", "state", "state_history", "executed", "proposal", "registers"):
+            query = slices[name]
+            mask[query, forbidden_start:forbidden_stop] = True
+        mask[action, int(stage.start) : int(future.stop)] = True
+        if role == "grounding":
+            # G1-G3 own observation alignment/canonicalization.  Their
+            # spatial rollout must not become a second action-denoising path:
+            # the current x_t trajectory and history-derived proposal first
+            # enter future/consequence organization at the W boundary.
+            mask[future, action] = True
+            mask[future, slices["proposal"]] = True
+            # Grounding modulation/dynamics reuse the clean context slices on
+            # the next block. Keep those slices from becoming an indirect
+            # proposal carrier (proposal -> context -> rollout).
+            for name in (
+                "task",
+                "state",
+                "state_history",
+                "executed",
+                "registers",
+            ):
+                mask[slices[name], slices["proposal"]] = True
+        if role == "policy":
+            # World/future tokens are online predictions, not teacher targets.
+            # The policy group may read them, while the write mask below keeps
+            # the policy group from modifying the world state in return.
+            mask[action, future] = False
+        if int(stage.stop) > int(stage.start):
+            mask[stage, future] = True
+        return mask
+
+    def _role_write_mask(
+        self, canvas: Tensor, slices: dict[str, slice]
+    ) -> Tensor:
+        if self.role == "shared":
+            return torch.ones(
+                1, int(canvas.shape[1]), 1, device=canvas.device, dtype=canvas.dtype
+            )
+        allowed = {
+            "grounding": (
+                "task",
+                "state",
+                "state_history",
+                "executed",
+                "proposal",
+                "registers",
+                "stage",
+                "rollout",
+            ),
+            "world": ("stage", "rollout"),
+            "policy": ("trajectory",),
+        }[self.role]
+        mask = torch.zeros(
+            1, int(canvas.shape[1]), 1, device=canvas.device, dtype=canvas.dtype
+        )
+        for name in allowed:
+            region = slices.get(name)
+            if region is not None and int(region.stop) > int(region.start):
+                mask[:, region] = 1.0
+        return mask
+
+    def _structure_world_rollout_update(self, update: Tensor) -> Tensor:
+        """Restrict a world write to one vector per anchor and camera.
+
+        Grounding owns xy-specific observations.  World blocks may aggregate
+        those cells when deciding a temporal/camera update, but cannot write a
+        different residual into each xy slot.  Broadcasting is applied after
+        dropout, so stochastic training cannot accidentally reintroduce a
+        cell-specific world residual.
+        """
+
+        if not self.world_anchor_write_only:
+            return update
+        batch, tokens, hidden = update.shape
+        expected = (
+            self.future_anchors
+            * self.num_cameras
+            * self.future_grid_size
+            * self.future_grid_size
+        )
+        if int(tokens) != expected:
+            raise ValueError(
+                "world rollout update does not match "
+                f"anchors*cameras*grid^2={expected}: got {tokens}"
+            )
+        grouped = update.reshape(
+            batch,
+            self.future_anchors,
+            self.num_cameras,
+            self.future_grid_size,
+            self.future_grid_size,
+            hidden,
+        )
+        pooled = grouped.mean(dim=(3, 4), keepdim=True)
+        return pooled.expand_as(grouped).reshape_as(update)
+
+    def _structure_world_canvas_update(
+        self, update: Tensor, slices: dict[str, slice]
+    ) -> Tensor:
+        if not self.world_anchor_write_only:
+            return update
+        rollout_slice = slices["rollout"]
+        rollout_update = self._structure_world_rollout_update(
+            update[:, rollout_slice]
+        )
+        return torch.cat(
+            (
+                update[:, : int(rollout_slice.start)],
+                rollout_update,
+                update[:, int(rollout_slice.stop) :],
+            ),
+            dim=1,
+        )
+
     def forward(
-        self, canvas: Tensor, visual_memory: Tensor, mod_embed: Tensor, slices: dict[str, slice]
+        self,
+        canvas: Tensor,
+        visual_memory: Tensor,
+        mod_embed: Tensor,
+        slices: dict[str, slice],
+        *,
+        visual_value_memory: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
+        role_mod = (
+            0.0
+            if self.role_embedding is None
+            else self.role_embedding.to(device=mod_embed.device, dtype=mod_embed.dtype)
+        )
         sa_s, sa_c, sa_g, ca_s, ca_c, ca_g, dy_s, dy_c, dy_g, ff_s, ff_c, ff_g = self.mod(
-            mod_embed
+            mod_embed + role_mod
         ).chunk(12, dim=-1)
-        value = self.n1(canvas)
+        write_mask = self._role_write_mask(canvas, slices)
+        residual_contract_metrics: dict[str, Tensor] = {}
+        residual_raw_rows: list[Tensor] = []
+        residual_proposed_rows: list[Tensor] = []
+        residual_bounded_rows: list[Tensor] = []
+        residual_written_rows: list[Tensor] = []
+        residual_compression_rows: list[Tensor] = []
+        normalization_denominator_rows: list[Tensor] = []
+        normalization_gain_rows: list[Tensor] = []
+
+        def normalize(module: nn.LayerNorm, value: Tensor) -> Tensor:
+            if not self.complete_numerical_contract:
+                return module(value)
+            normalized, denominator = variance_floored_centered_norm(
+                value, self.normalization_floor
+            )
+            gain = normalized.new_tensor(
+                1.0 / self.normalization_floor, dtype=torch.float32
+            )
+            if module.elementwise_affine:
+                if module.weight is None or module.bias is None:
+                    raise RuntimeError("affine LayerNorm is missing weight or bias")
+                bounded_weight = smooth_absolute_contract(
+                    module.weight, self.normalization_affine_max
+                ).float()
+                normalized = (
+                    normalized.float()
+                    * bounded_weight.to(
+                        device=normalized.device, dtype=normalized.dtype
+                    )
+                    + module.bias.to(
+                        device=normalized.device, dtype=normalized.dtype
+                    )
+                )
+                gain = (
+                    bounded_weight.abs().amax() / self.normalization_floor
+                ).detach()
+            normalization_denominator_rows.append(
+                denominator.detach().float().amin()
+            )
+            normalization_gain_rows.append(gain.detach().float())
+            return normalized.to(dtype=value.dtype)
+
+        def stabilize(
+            name: str,
+            residual: Tensor,
+            metric_mask: Tensor | None = None,
+            *,
+            gate: Tensor | None = None,
+            write_mask: Tensor | None = None,
+        ) -> Tensor:
+            raw_token_rms = (
+                residual.detach().float().square().mean(dim=-1).sqrt()
+            )
+            proposal = residual
+            if self.residual_contract_after_gate:
+                if gate is not None:
+                    proposal = proposal * gate[:, None]
+                if write_mask is not None:
+                    proposal = proposal * write_mask
+            proposed_token_rms = (
+                proposal.detach().float().square().mean(dim=-1).sqrt()
+            )
+            bounded, scale = self._contract_residual(proposal)
+            bounded_token_rms = (
+                bounded.detach().float().square().mean(dim=-1).sqrt()
+            )
+            written = bounded
+            if not self.residual_contract_after_gate:
+                if gate is not None:
+                    written = written * gate[:, None]
+                if write_mask is not None:
+                    written = written * write_mask
+            written_token_rms = (
+                written.detach().float().square().mean(dim=-1).sqrt()
+            )
+            compression_token = 1.0 - scale.detach().float()[..., 0]
+            if metric_mask is None:
+                raw_rms = raw_token_rms.mean()
+                proposed_rms = proposed_token_rms.mean()
+                bounded_rms = bounded_token_rms.mean()
+                written_rms = written_token_rms.mean()
+                compression = compression_token.mean()
+            else:
+                weight = metric_mask.detach().float()[..., 0].expand_as(
+                    raw_token_rms
+                )
+                denominator = weight.sum().clamp_min(1.0)
+                raw_rms = (raw_token_rms * weight).sum() / denominator
+                proposed_rms = (
+                    proposed_token_rms * weight
+                ).sum() / denominator
+                bounded_rms = (
+                    bounded_token_rms * weight
+                ).sum() / denominator
+                written_rms = (
+                    written_token_rms * weight
+                ).sum() / denominator
+                compression = (
+                    compression_token * weight
+                ).sum() / denominator
+            residual_contract_metrics[f"residual_{name}_raw_rms"] = raw_rms
+            residual_contract_metrics[
+                f"residual_{name}_proposed_rms"
+            ] = proposed_rms
+            residual_contract_metrics[
+                f"residual_{name}_bounded_rms"
+            ] = bounded_rms
+            residual_contract_metrics[
+                f"residual_{name}_compression"
+            ] = compression
+            residual_contract_metrics[
+                f"residual_{name}_written_rms"
+            ] = written_rms
+            residual_raw_rows.append(raw_rms)
+            residual_proposed_rows.append(proposed_rms)
+            residual_bounded_rows.append(bounded_rms)
+            residual_written_rows.append(written_rms)
+            residual_compression_rows.append(compression)
+            return written
+
+        value = normalize(self.n1, canvas)
         qk = self.modulate(value, sa_s, sa_c)
-        update, _ = self.self_attn(qk, qk, value, need_weights=False)
+        attention_mask = (
+            self._directed_attention_mask(
+                int(canvas.shape[1]), slices, device=canvas.device, role=self.role
+            )
+            if self.directed_canvas_attention
+            else None
+        )
+        update, _ = self.self_attn(
+            qk, qk, value, attn_mask=attention_mask, need_weights=False
+        )
         g_sa = torch.sigmoid(sa_g)
-        canvas = canvas + g_sa[:, None] * self.drop(update)
+        update = self._structure_world_canvas_update(self.drop(update), slices)
+        if self.residual_contract_after_gate:
+            update = stabilize(
+                "self",
+                update,
+                write_mask,
+                gate=g_sa,
+                write_mask=write_mask,
+            )
+            canvas = canvas + update
+        else:
+            update = stabilize("self", update, write_mask)
+            canvas = canvas + write_mask * g_sa[:, None] * update
 
-        query = self.modulate(self.n2(canvas), ca_s, ca_c)
-        mem = self.mem_norm(visual_memory)
-        update, _ = self.cross(query, mem, mem, need_weights=False)
         g_ca = torch.sigmoid(ca_g)
-        canvas = canvas + g_ca[:, None] * self.drop(update)
+        if self.visual_cross_enabled:
+            query = self.modulate(normalize(self.n2, canvas), ca_s, ca_c)
+            memory_key = normalize(self.mem_norm, visual_memory)
+            memory_value = normalize(
+                self.mem_norm,
+                visual_memory if visual_value_memory is None else visual_value_memory
+            )
+            if tuple(memory_key.shape) != tuple(memory_value.shape):
+                raise ValueError("visual selector and value memories must be shape-aligned")
+            update, _ = self.cross(query, memory_key, memory_value, need_weights=False)
+            update = self._structure_world_canvas_update(self.drop(update), slices)
+            if self.residual_contract_after_gate:
+                update = stabilize(
+                    "visual",
+                    update,
+                    write_mask,
+                    gate=g_ca,
+                    write_mask=write_mask,
+                )
+                canvas = canvas + update
+            else:
+                update = stabilize("visual", update, write_mask)
+                canvas = canvas + write_mask * g_ca[:, None] * update
+            effective_visual_gate = g_ca.mean()
+        else:
+            # In the strict role path the policy group can read the world
+            # rollout through directed canvas self-attention, but it cannot
+            # re-read raw/DINO memory and bypass the grounding/world owners.
+            effective_visual_gate = g_ca.mean() * 0.0
 
-        rollout = canvas[:, slices["rollout"]]
-        kv_parts = [
-            canvas[:, slices[name]]
-            for name in ("state", "state_history", "executed", "proposal", "trajectory")
+        context_names = [
+            "task",
+            "state",
+            "state_history",
+            "executed",
         ]
-        kv = self.n_dyn_kv(torch.cat(kv_parts, dim=1))
-        q = self.modulate(self.n_dyn_q(rollout), dy_s, dy_c)
-        update, _ = self.rollout_cross(q, kv, kv, need_weights=False)
+        if self.role != "grounding":
+            context_names.extend(("proposal", "trajectory"))
+        context_parts = [
+            canvas[:, slices[name]] for name in context_names
+        ]
+        context_kv = normalize(
+            self.n_dyn_kv, torch.cat(context_parts, dim=1)
+        )
+        stage_slice = slices.get("stage")
+        has_stage = stage_slice is not None and int(stage_slice.stop) > int(stage_slice.start)
         g_dyn = torch.sigmoid(dy_g)
-        canvas = canvas.clone()
-        canvas[:, slices["rollout"]] = rollout + g_dyn[:, None] * self.drop(update)
+        if has_stage and self.role != "policy":
+            stage = canvas[:, stage_slice]
+            stage_q = self.modulate(
+                normalize(self.n_dyn_q, stage), dy_s, dy_c
+            )
+            stage_update, _ = self.rollout_cross(
+                stage_q, context_kv, context_kv, need_weights=False
+            )
+            stage_update = self.drop(stage_update)
+            if self.residual_contract_after_gate:
+                stage_update = stabilize(
+                    "stage", stage_update, gate=g_dyn
+                )
+                stage = stage + stage_update
+            else:
+                stage_update = stabilize("stage", stage_update)
+                stage = stage + g_dyn[:, None] * stage_update
+        rollout = canvas[:, slices["rollout"]]
+        if has_stage and self.role != "policy":
+            if (
+                self.stage_to_window is None
+                or self.stage_window_norm is None
+                or self.stage_to_window_gate_logit is None
+            ):
+                raise RuntimeError("stage canvas tokens require the hierarchical stage bridge")
+            stage_gamma, stage_beta = self.stage_to_window(stage).chunk(2, dim=-1)
+            stage_window_gate = torch.sigmoid(
+                self.stage_to_window_gate_logit.to(device=rollout.device, dtype=rollout.dtype)
+            )
+            stage_window_update = stage_window_gate * (
+                torch.tanh(stage_gamma)
+                * normalize(self.stage_window_norm, rollout)
+                + stage_beta
+            )
+            stage_window_update = self._structure_world_rollout_update(
+                self.drop(stage_window_update)
+            )
+            stage_window_update = stabilize(
+                "stage_to_window", stage_window_update
+            )
+            rollout = rollout + stage_window_update
+        else:
+            stage_window_gate = rollout.new_zeros(())
+            stage_window_update = rollout.new_zeros(rollout.shape)
+        if self.role != "policy":
+            rollout_parts = context_parts + ([stage] if has_stage else [])
+            kv = normalize(
+                self.n_dyn_kv, torch.cat(rollout_parts, dim=1)
+            )
+            q = self.modulate(
+                normalize(self.n_dyn_q, rollout), dy_s, dy_c
+            )
+            update, _ = self.rollout_cross(q, kv, kv, need_weights=False)
+            update = self._structure_world_rollout_update(self.drop(update))
+            if self.residual_contract_after_gate:
+                update = stabilize("rollout", update, gate=g_dyn)
+                rollout = rollout + update
+            else:
+                update = stabilize("rollout", update)
+                rollout = rollout + g_dyn[:, None] * update
+        # Reassemble functionally.  In-place assignment into canvas views
+        # invalidates autograd because the updated stage is also consumed by
+        # the rollout branch in this same block.
+        if has_stage and self.role != "policy":
+            canvas = torch.cat(
+                (
+                    canvas[:, : int(stage_slice.start)],
+                    stage,
+                    canvas[:, int(stage_slice.stop) : int(slices["rollout"].start)],
+                    rollout,
+                    canvas[:, int(slices["rollout"].stop) :],
+                ),
+                dim=1,
+            )
+        else:
+            canvas = torch.cat(
+                (
+                    canvas[:, : int(slices["rollout"].start)],
+                    rollout,
+                    canvas[:, int(slices["rollout"].stop) :],
+                ),
+                dim=1,
+            )
 
-        update = self.ffn(self.modulate(self.n3(canvas), ff_s, ff_c))
+        update = self.ffn(
+            self.modulate(normalize(self.n3, canvas), ff_s, ff_c)
+        )
         g_ff = torch.sigmoid(ff_g)
-        canvas = canvas + g_ff[:, None] * self.drop(update)
+        update = self._structure_world_canvas_update(self.drop(update), slices)
+        if self.residual_contract_after_gate:
+            update = stabilize(
+                "ffn",
+                update,
+                write_mask,
+                gate=g_ff,
+                write_mask=write_mask,
+            )
+            canvas = canvas + update
+        else:
+            update = stabilize("ffn", update, write_mask)
+            canvas = canvas + write_mask * g_ff[:, None] * update
+        summary_zero = canvas.new_zeros((), dtype=torch.float32)
+        residual_contract_metrics.update(
+            {
+                "residual_contract_enabled": canvas.new_tensor(
+                    float(self.residual_amplitude_contract),
+                    dtype=torch.float32,
+                ),
+                "residual_contract_max_rms": canvas.new_tensor(
+                    self.residual_max_update_rms,
+                    dtype=torch.float32,
+                ),
+                "residual_contract_after_gate": canvas.new_tensor(
+                    float(self.residual_contract_after_gate),
+                    dtype=torch.float32,
+                ),
+                "residual_raw_rms": (
+                    torch.stack(residual_raw_rows).mean()
+                    if residual_raw_rows
+                    else summary_zero
+                ),
+                "residual_proposed_rms": (
+                    torch.stack(residual_proposed_rows).mean()
+                    if residual_proposed_rows
+                    else summary_zero
+                ),
+                "residual_bounded_rms": (
+                    torch.stack(residual_bounded_rows).mean()
+                    if residual_bounded_rows
+                    else summary_zero
+                ),
+                "residual_written_rms": (
+                    torch.stack(residual_written_rows).mean()
+                    if residual_written_rows
+                    else summary_zero
+                ),
+                "residual_compression": (
+                    torch.stack(residual_compression_rows).mean()
+                    if residual_compression_rows
+                    else summary_zero
+                ),
+                "normalization_contract_enabled": canvas.new_tensor(
+                    float(self.complete_numerical_contract),
+                    dtype=torch.float32,
+                ),
+                "normalization_denominator_min": (
+                    torch.stack(normalization_denominator_rows).amin()
+                    if normalization_denominator_rows
+                    else canvas.new_ones((), dtype=torch.float32)
+                ),
+                "normalization_gain_max": (
+                    torch.stack(normalization_gain_rows).amax()
+                    if normalization_gain_rows
+                    else canvas.new_ones((), dtype=torch.float32)
+                ),
+            }
+        )
         return canvas, {
             "gate_self": g_sa.mean(),
-            "gate_visual": g_ca.mean(),
+            "gate_visual": effective_visual_gate,
+            "visual_cross_enabled": canvas.new_tensor(float(self.visual_cross_enabled)),
+            "gate_stage": g_dyn.mean() if has_stage else g_dyn.mean() * 0.0,
+            "gate_stage_to_window": stage_window_gate,
+            "stage_to_window_update_norm": stage_window_update.detach().float().norm(dim=-1).mean(),
             "gate_rollout": g_dyn.mean(),
             "gate_ffn": g_ff.mean(),
+            "role_grounding": canvas.new_tensor(float(self.role == "grounding")),
+            "role_world": canvas.new_tensor(float(self.role == "world")),
+            "role_policy": canvas.new_tensor(float(self.role == "policy")),
+            "world_anchor_write_only": canvas.new_tensor(
+                float(self.world_anchor_write_only)
+            ),
+            **residual_contract_metrics,
         }
 
 

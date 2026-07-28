@@ -921,7 +921,12 @@ class PhysicalActionCodec(nn.Module):
         return self.join_action(arm, grip)
 
     def delta_consistency_loss(
-        self, physical: Tensor, action_state: Tensor, decoded_action: Tensor
+        self,
+        physical: Tensor,
+        action_state: Tensor,
+        decoded_action: Tensor,
+        *,
+        reduction: str = "mean",
     ) -> Tensor:
         """Consistency between physical delta channels and decoded action deltas."""
         boundary = self.boundary(
@@ -932,11 +937,23 @@ class PhysicalActionCodec(nn.Module):
         actual_delta = torch.cat([arm - prev_arm, grip - prev_grip], dim=-1)
         parts = self.split_physical(physical)
         if self.uses_parseval_gripper_field:
-            return torch.nn.functional.smooth_l1_loss(
-                actual_delta[..., : self.arm_dim], parts["arm_delta"]
-            )
-        physical_delta = torch.cat([parts["arm_delta"], parts["gripper_delta"]], dim=-1)
-        return torch.nn.functional.smooth_l1_loss(actual_delta, physical_delta)
+            error = torch.nn.functional.smooth_l1_loss(
+                actual_delta[..., : self.arm_dim],
+                parts["arm_delta"],
+                reduction="none",
+            ).mean(dim=-1)
+        else:
+            physical_delta = torch.cat([parts["arm_delta"], parts["gripper_delta"]], dim=-1)
+            error = torch.nn.functional.smooth_l1_loss(
+                actual_delta,
+                physical_delta,
+                reduction="none",
+            ).mean(dim=-1)
+        if reduction == "none":
+            return error
+        if reduction == "mean":
+            return error.mean()
+        raise ValueError(f"unknown delta consistency reduction: {reduction!r}")
 
 
 class DCTFlowCodec(nn.Module):

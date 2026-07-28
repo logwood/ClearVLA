@@ -128,9 +128,9 @@ if rank % groups:
     raise SystemExit(f"[v94] operator rank must be divisible by groups, got {rank}/{groups}")
 if warmup < 0 or transition < 1:
     raise SystemExit(f"[v94] warmup must be >=0 and transition >=1, got {warmup}/{transition}")
-if not math.isfinite(layer_aux_weight) or layer_aux_weight <= 0.0:
+if not math.isfinite(layer_aux_weight) or layer_aux_weight < 0.0:
     raise SystemExit(
-        "[v94] layer contract auxiliary weight must be finite and positive, "
+        "[v94] layer contract auxiliary weight must be finite and non-negative, "
         f"got {layer_aux_weight}"
     )
 if identity_candidate != 1:
@@ -228,11 +228,11 @@ exec bash "${SCRIPT_DIR}/current_v91_time_domain_evidence_mmdit.sh" \
   --eval-execution-ablation-batches "${EVAL_EXECUTION_ABLATION_BATCHES:-8}" \
   --rollout-delta-loss-weight 0 \
   --midcut-rollout-delta-loss-weight 0 \
-  --rollout-dynamics-loss-weight 0.02 \
-  --rollout-contrast-loss-weight 0.03 \
-  --rollout-variance-loss-weight 0.03 \
-  --rollout-norm-loss-weight 0.01 \
-  --rollout-milestone-delta-match-weight 0.08 \
+  --rollout-dynamics-loss-weight "${ROLLOUT_DYNAMICS_WEIGHT:-0.02}" \
+  --rollout-contrast-loss-weight "${ROLLOUT_CONTRAST_WEIGHT:-0.03}" \
+  --rollout-variance-loss-weight "${ROLLOUT_VARIANCE_WEIGHT:-0.03}" \
+  --rollout-norm-loss-weight "${ROLLOUT_NORM_WEIGHT:-0.01}" \
+  --rollout-milestone-delta-match-weight "${ROLLOUT_MILESTONE_WEIGHT:-0.08}" \
   --first-weight 1.20 \
   --first4-weight 1.15 \
   --first8-weight 1.10 \

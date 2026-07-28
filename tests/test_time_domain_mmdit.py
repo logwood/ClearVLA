@@ -105,6 +105,44 @@ def test_time_domain_mmdit_does_not_write_condition_tokens():
     assert torch.equal(evidence, evidence_before)
 
 
+def test_time_domain_mmdit_uses_selector_for_keys_and_value_lane_for_values():
+    config = _config()
+    block = TimeDomainMMDiTBlock(config).eval()
+    h = int(config.hidden_size)
+    with torch.no_grad():
+        block.action_mod.bias[2 * h : 3 * h].fill_(1.0)
+    torch.manual_seed(31)
+    action = torch.randn(2, 4, h)
+    selector = torch.randn(2, 7, h)
+    values = torch.randn(2, 7, h)
+    condition = torch.randn(2, h)
+    kwargs = {"evidence_key_bias": torch.zeros(7)}
+    with torch.no_grad():
+        reference, _ = block(
+            action,
+            selector,
+            condition,
+            evidence_value_tokens=values,
+            **kwargs,
+        )
+        changed_selector, _ = block(
+            action,
+            selector.flip(1),
+            condition,
+            evidence_value_tokens=values,
+            **kwargs,
+        )
+        changed_value, _ = block(
+            action,
+            selector,
+            condition,
+            evidence_value_tokens=values.roll(1, dims=1),
+            **kwargs,
+        )
+    assert not torch.allclose(reference, changed_selector)
+    assert not torch.allclose(reference, changed_value)
+
+
 def test_flow_state_is_ingested_by_the_action_stream():
     config = _config()
     decoder = EvidenceLatentMMDiTActionDecoder(config).eval()
@@ -271,6 +309,40 @@ def test_native_controller_value_reader_mask_follows_query_dtype():
     assert torch.isfinite(output["pred_velocity"]).all()
 
 
+def test_native_dynamic_soft_eval_keeps_policy_state_fp32_under_bfloat16_autocast():
+    config = V39PolicyConfig(
+        **{
+            **_config().__dict__,
+            "latent_cvae_mmdit_operator_capacity": 1,
+            "latent_cvae_mmdit_operator_rank": 32,
+            "latent_cvae_mmdit_operator_groups": 4,
+            "latent_cvae_mmdit_execution_controller": 1,
+            "latent_cvae_mmdit_dynamic_block_route": 1,
+            "latent_cvae_mmdit_dwell_mode": "learned",
+            "latent_cvae_mmdit_max_dwell": 2,
+            "latent_cvae_mmdit_execution_eval_policy": "soft",
+        }
+    )
+    # Match production AMP: parameters remain FP32 while the deploy flow state
+    # follows the BF16 visual/noise dtype.
+    decoder = EvidenceLatentMMDiTActionDecoder(config).eval()
+    decoder.set_execution_training_step(1200)
+    inputs = _inputs(config)
+    inputs["noisy_physical"] = inputs["noisy_physical"].to(torch.bfloat16)
+    for policy in ("soft", "hard", "neutral"):
+        decoder.set_execution_eval_ablation(policy=policy)
+        try:
+            with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+                output = decoder(**inputs)
+        finally:
+            decoder.clear_execution_eval_ablation()
+        assert torch.isfinite(output["pred_velocity"]).all()
+        assert output["evidence_mmd_it_execution_candidate_value_field"].dtype in {
+            torch.bfloat16,
+            torch.float32,
+        }
+
+
 def test_native_candidate_probe_reuses_autocast_velocity_dtype():
     config = V39PolicyConfig(
         **{
@@ -290,6 +362,12 @@ def test_native_candidate_probe_reuses_autocast_velocity_dtype():
     candidates = output["evidence_mmd_it_dwell_candidate_pred_velocity"]
     assert candidates.dtype == output["pred_velocity"].dtype
     assert torch.isfinite(candidates).all()
+    torch.testing.assert_close(
+        candidates[:, :, -1],
+        output["evidence_mmd_it_execution_baseline_pred_velocity"],
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_native_execution_progress_survives_checkpoint_reload():
@@ -720,6 +798,57 @@ def test_native_terminal_candidate_is_identity_with_a_smaller_differentiable_pri
     )
     assert output["evidence_mmd_it_terminal_prior_weight"] == 0.25
     assert output["evidence_mmd_it_terminal_probability"] > 0
+
+
+def test_native_mean_field_policy_accepts_the_sampled_bf16_pointer_fp32_value_split():
+    config = V39PolicyConfig(
+        **{
+            **_config().__dict__,
+            "latent_cvae_mmdit_operator_capacity": 1,
+            "latent_cvae_mmdit_operator_rank": 32,
+            "latent_cvae_mmdit_operator_groups": 4,
+            "latent_cvae_mmdit_execution_controller": 1,
+            "latent_cvae_mmdit_dynamic_block_route": 1,
+            "latent_cvae_mmdit_dwell_mode": "learned",
+            "latent_cvae_mmdit_max_dwell": 2,
+        }
+    )
+    decoder = EvidenceLatentMMDiTActionDecoder(config).train()
+    candidate_count = config.depth * config.latent_cvae_mmdit_max_dwell + 1
+    value = torch.randn(
+        2,
+        candidate_count,
+        config.action_horizon,
+        2,
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    pointer = torch.zeros(2, config.depth + 1, dtype=torch.bfloat16)
+    pointer[:, 0] = 1.0
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        outputs = decoder._mean_field_execution_policy(value, pointer)
+
+    probabilities, next_pointer, entropy, skipped, terminal = outputs
+    assert all(tensor.dtype == torch.float32 for tensor in outputs)
+    torch.testing.assert_close(
+        probabilities.sum(dim=-1),
+        torch.ones(2),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        next_pointer.sum(dim=-1),
+        torch.ones(2),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert torch.isfinite(entropy).all()
+    assert torch.isfinite(skipped).all()
+    assert torch.isfinite(terminal).all()
+    probabilities.square().mean().backward()
+    assert value.grad is not None
+    assert torch.isfinite(value.grad).all()
 
 
 def test_native_eval_ablation_reports_continuous_32_to_29_basis_reduction_honestly():

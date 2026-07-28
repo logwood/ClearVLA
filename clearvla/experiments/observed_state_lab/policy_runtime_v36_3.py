@@ -43,6 +43,19 @@ class V363PolicyTrainerConfig:
     first4_weight: float = 1.3
     first8_weight: float = 1.15
     tail_weight: float = 1.10
+    # The historical step weights favour the first action even though sampled
+    # validation shows the far horizon learning much more slowly.  New
+    # single-stage experiments can opt into a smooth (not banded) tail ramp.
+    # Defaults preserve every pre-V101 experiment exactly.
+    horizon_weight_mode: str = "legacy"
+    horizon_tail_emphasis: float = 0.0
+    horizon_first_step_protection: float = 0.0
+    # Continuous, target-derived reweighting across windows.  This does not
+    # discard static samples or force motion; weights are detached, bounded and
+    # renormalized to unit mean inside each batch.
+    trajectory_information_weight: float = 0.0
+    trajectory_information_min: float = 0.75
+    trajectory_information_max: float = 1.50
     event_loss_weight: float = 0.08
     event_positive_weight: float = 6.0
     event_focal_gamma: float = 1.0
@@ -114,11 +127,86 @@ def prepare_v363_policy_sample(
 
 
 def position_weights(config, trainer: V363PolicyTrainerConfig, device: torch.device) -> Tensor:
-    weight = torch.full((config.action_horizon,), float(trainer.tail_weight), device=device)
-    weight[:8] = float(trainer.first8_weight)
-    weight[:4] = float(trainer.first4_weight)
-    weight[0] = float(trainer.first_weight)
+    mode = str(getattr(trainer, "horizon_weight_mode", "legacy")).strip().lower().replace(
+        "-", "_"
+    )
+    if mode == "legacy":
+        weight = torch.full((config.action_horizon,), float(trainer.tail_weight), device=device)
+        weight[:8] = float(trainer.first8_weight)
+        weight[:4] = float(trainer.first4_weight)
+        weight[0] = float(trainer.first_weight)
+    elif mode == "smooth_tail":
+        emphasis = float(getattr(trainer, "horizon_tail_emphasis", 0.0))
+        if emphasis < 0.0:
+            raise ValueError("horizon_tail_emphasis must be non-negative")
+        if int(config.action_horizon) <= 1:
+            progress = torch.zeros((int(config.action_horizon),), device=device)
+        else:
+            progress = torch.linspace(0.0, 1.0, int(config.action_horizon), device=device)
+        # Smoothstep has no discontinuity at first4/first8 and preserves the
+        # high-precision near horizon while gradually allocating more gradient
+        # to the part that plateaued in validation.
+        ramp = progress.square() * (3.0 - 2.0 * progress)
+        weight = 1.0 + emphasis * ramp
+    elif mode == "anchor_bands":
+        emphasis = float(getattr(trainer, "horizon_tail_emphasis", 0.0))
+        first_protection = float(getattr(trainer, "horizon_first_step_protection", 0.0))
+        if emphasis < 0.0 or first_protection < 0.0:
+            raise ValueError("anchor-band emphasis and first-step protection must be non-negative")
+        boundaries = tuple(int(value) for value in config.flow_jepa_action_offsets)
+        if not boundaries or boundaries[-1] != int(config.action_horizon):
+            raise ValueError("anchor_bands requires Flow-JEPA action offsets ending at action_horizon")
+        weight = torch.ones((int(config.action_horizon),), device=device)
+        start = 0
+        denominator = max(len(boundaries) - 1, 1)
+        for index, end in enumerate(boundaries):
+            band_gain = emphasis * float(index) / float(denominator)
+            weight[start:end] = 1.0 + band_gain
+            start = end
+        weight[0] = weight[0] + first_protection
+    else:
+        raise ValueError(
+            "unknown horizon_weight_mode="
+            f"{mode!r}; expected 'legacy', 'smooth_tail', or 'anchor_bands'"
+        )
     return weight / weight.mean()
+
+
+def trajectory_information_weights(
+    sample: dict[str, Tensor],
+    trainer: V363PolicyTrainerConfig,
+    *,
+    device: torch.device,
+) -> tuple[Tensor, Tensor]:
+    """Return bounded continuous window weights and their motion score.
+
+    The score is the normalized-action RMS change over the policy window.  It
+    is a supervision-side sampling statistic only: no model prediction enters
+    it and gradients cannot use the weight as a shortcut.  A zero strength (the
+    compatibility default) returns exact ones.
+    """
+
+    target = sample["policy_action"].to(device=device).detach().float()
+    current = sample["action_state"].to(device=device).detach().float()
+    if target.ndim != 3 or current.ndim != 2 or target.shape[0] != current.shape[0]:
+        raise ValueError("trajectory information expects policy_action [B,T,D] and action_state [B,D]")
+    boundary = torch.cat([current[:, None], target[:, :-1]], dim=1)
+    score = (target - boundary).square().mean(dim=(1, 2)).clamp_min(0.0).sqrt()
+    strength = float(getattr(trainer, "trajectory_information_weight", 0.0))
+    if strength <= 0.0:
+        return torch.ones_like(score), score
+    lower = float(getattr(trainer, "trajectory_information_min", 0.75))
+    upper = float(getattr(trainer, "trajectory_information_max", 1.50))
+    if lower <= 0.0 or upper < lower:
+        raise ValueError("trajectory information bounds require 0 < min <= max")
+    relative = score / score.mean().clamp_min(1e-8)
+    weight = 1.0 + strength * (relative - 1.0)
+    weight = weight.clamp(min=lower, max=upper)
+    # Clipping changes the mean; restore a stable objective scale.  Detaching
+    # makes the contract explicit even if future datasets expose learnable
+    # preprocessing tensors.
+    weight = (weight / weight.mean().clamp_min(1e-8)).detach()
+    return weight, score
 
 
 def gripper_event_labels(
@@ -266,6 +354,11 @@ def flow_losses(
     cfg = system.policy_config
     device = output["pred_physical_velocity"].device
     weight = position_weights(cfg, trainer, device)
+    information_weight, information_score = trajectory_information_weights(
+        sample,
+        trainer,
+        device=device,
+    )
     labels = gripper_event_labels(
         target_raw=sample["policy_action_raw"].to(device=device),
         current_raw=sample["state_raw"].to(device=device),
@@ -381,8 +474,10 @@ def flow_losses(
     uniform_physical_error = (
         physical_error if system.codec.uses_parseval_gripper_field else velocity_error.mean(dim=-1)
     )
-    flow_weight = weight.to(dtype=physical_error.dtype)[None]
+    horizon_weight = weight.to(dtype=physical_error.dtype)[None]
+    flow_weight = horizon_weight * information_weight.to(dtype=physical_error.dtype)[:, None]
     flow = (physical_error * flow_weight).mean()
+    flow_without_information_balance = (physical_error * horizon_weight).mean()
     uniform_flow = (
         uniform_physical_error * weight.to(dtype=uniform_physical_error.dtype)[None]
     ).mean()
@@ -437,6 +532,24 @@ def flow_losses(
     gripper_arm_flow_ratio = (gripper_field_flow / target_grip_energy) / (
         arm_flow_per_dim / target_arm_energy
     ).detach().clamp_min(1e-6)
+    action_band_metrics: dict[str, Tensor] = {}
+    band_start = 0
+    action_band_offsets = (
+        tuple(int(value) for value in cfg.flow_jepa_action_offsets)
+        if int(getattr(cfg, "flow_jepa_enabled", 0))
+        else ()
+    )
+    for band_end in action_band_offsets:
+        if band_end <= band_start or band_end > int(physical_error.shape[1]):
+            continue
+        label = f"{band_start + 1}_{band_end}"
+        action_band_metrics[f"action_band_{label}_physical_flow"] = physical_error[
+            :, band_start:band_end
+        ].mean()
+        action_band_metrics[f"action_band_{label}_weight"] = weight[
+            band_start:band_end
+        ].mean().detach()
+        band_start = band_end
     grip_value_flow = (gripper_native_component * flow_weight).mean()
     grip_delta_flow = (gripper_delta_component * flow_weight).mean()
     gripper_null_flow = (gripper_null_component * flow_weight).mean()
@@ -486,7 +599,26 @@ def flow_losses(
     gripper_hold_flow = (
         gripper_native_error_raw * hold_mask_for_flow * weight.to(dtype=physical_error.dtype)[None]
     ).sum() / hold_denom
-    proposal = F.smooth_l1_loss(output["proposal_action"], sample["policy_action"])
+    temporal_balance_active = (
+        str(getattr(trainer, "horizon_weight_mode", "legacy"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        != "legacy"
+        or float(getattr(trainer, "trajectory_information_weight", 0.0)) > 0.0
+    )
+    auxiliary_step_weight = (
+        flow_weight
+        if temporal_balance_active
+        else torch.ones_like(flow_weight)
+    )
+
+    proposal_rows = F.smooth_l1_loss(
+        output["proposal_action"],
+        sample["policy_action"],
+        reduction="none",
+    ).mean(dim=-1)
+    proposal = (proposal_rows * auxiliary_step_weight).mean()
 
     flat_labels = labels.reshape(-1)
     flat_logits = output["event_logits"].reshape(-1, 3)
@@ -494,7 +626,12 @@ def flow_losses(
     event_weights = event_weights + (flat_labels != 0).to(flat_logits.dtype) * float(
         trainer.event_positive_weight
     )
-    event = _focal_cross_entropy(flat_logits, flat_labels, event_weights, trainer.event_focal_gamma)
+    event = _focal_cross_entropy(
+        flat_logits,
+        flat_labels,
+        event_weights * auxiliary_step_weight.reshape(-1).to(dtype=event_weights.dtype),
+        trainer.event_focal_gamma,
+    )
 
     motion_target = arm_motion_labels(
         system,
@@ -502,16 +639,19 @@ def flow_losses(
         sample["action_state"].to(device=device),
         trainer.arm_motion_threshold,
     )
-    motion = F.binary_cross_entropy_with_logits(
-        output["motion_logits"].float(), motion_target.float()
+    motion_rows = F.binary_cross_entropy_with_logits(
+        output["motion_logits"].float(), motion_target.float(), reduction="none"
     )
+    motion = (motion_rows * auxiliary_step_weight).mean()
 
     transition_mask = transition_mask.to(output["pred_action_estimate"].dtype)
     grip_idx = cfg.gripper_index
     pred_g = output["pred_action_estimate"][..., grip_idx]
     target_g = sample["policy_action"].to(device=device)[..., grip_idx]
     transition_l1 = (
-        F.smooth_l1_loss(pred_g, target_g, reduction="none") * (1.0 + transition_mask * 8.0)
+        F.smooth_l1_loss(pred_g, target_g, reduction="none")
+        * (1.0 + transition_mask * 8.0)
+        * auxiliary_step_weight
     ).mean()
 
     pred_boundary = torch.cat(
@@ -527,22 +667,33 @@ def flow_losses(
     )
     pred_delta = output["pred_action_estimate"] - pred_boundary
     target_delta = sample["policy_action"].to(device=device) - target_boundary
-    smooth_delta = F.smooth_l1_loss(pred_delta, target_delta)
-    decoded_action = F.smooth_l1_loss(
-        output["pred_action_estimate"], sample["policy_action"].to(device=device)
-    )
-    physical_delta_consistency = system.codec.delta_consistency_loss(
+    smooth_delta_rows = F.smooth_l1_loss(
+        pred_delta, target_delta, reduction="none"
+    ).mean(dim=-1)
+    smooth_delta = (smooth_delta_rows * auxiliary_step_weight).mean()
+    decoded_action_rows = F.smooth_l1_loss(
+        output["pred_action_estimate"],
+        sample["policy_action"].to(device=device),
+        reduction="none",
+    ).mean(dim=-1)
+    decoded_action = (decoded_action_rows * auxiliary_step_weight).mean()
+    physical_delta_consistency_rows = system.codec.delta_consistency_loss(
         output["clean_physical_estimate"],
         sample["action_state"].to(device=device),
         output["pred_action_estimate"],
+        reduction="none",
     )
+    physical_delta_consistency = (
+        physical_delta_consistency_rows * auxiliary_step_weight
+    ).mean()
 
     # V36.3 latent-coupling losses.  These losses supervise the existing final
     # decoded action and the existing typed velocity tensor; they do not create
     # a separate gripper command path.
+    transition_gripper_weight = transition_mask * auxiliary_step_weight
     transition_gripper_flow = (
-        gripper_native_error_raw * transition_mask
-    ).sum() / transition_mask.sum().clamp(min=1.0)
+        gripper_native_error_raw * transition_gripper_weight
+    ).sum() / transition_gripper_weight.sum().clamp(min=1.0)
 
     pred_delta_g = pred_delta[..., grip_idx]
     target_delta_g = target_delta[..., grip_idx].detach()
@@ -554,18 +705,19 @@ def flow_losses(
     signed_event = event_prob[..., 2] - event_prob[..., 1]
     # Same-latent readout/action closure: event readout and final decoded
     # gripper delta must agree in sign on true transitions.
+    target_event_weight = target_event.float() * auxiliary_step_weight
     event_delta_consistency = (
         F.softplus(-(signed_event * pred_delta_g.float() * target_sign.float()))
-        * target_event.float()
-    ).sum() / target_event.float().sum().clamp(min=1.0)
+        * target_event_weight
+    ).sum() / target_event_weight.sum().clamp(min=1.0)
     # Prevent the smooth channel from swallowing target transitions.  The target
     # magnitude is adaptive because training actions are normalized while event
     # labels are computed in raw Alicia-D units.
     event_magnitude = (
-        F.relu(0.70 * target_delta_g.abs() - pred_delta_g.abs()) * target_event.float()
-    ).sum() / target_event.float().sum().clamp(min=1.0)
+        F.relu(0.70 * target_delta_g.abs() - pred_delta_g.abs()) * target_event_weight
+    ).sum() / target_event_weight.sum().clamp(min=1.0)
     # Hold regions should not get event-sized decoded gripper deltas.
-    hold_mask = (~target_event).float()
+    hold_mask = (~target_event).float() * auxiliary_step_weight
     event_off_delta = (pred_delta_g.abs() * hold_mask).sum() / hold_mask.sum().clamp(min=1.0)
 
     total = (
@@ -598,8 +750,10 @@ def flow_losses(
     motion_precision = mtp / torch.clamp(mtp + mfp, min=1.0)
     motion_recall = mtp / torch.clamp(mtp + mfn, min=1.0)
     return {
+        **action_band_metrics,
         "loss": total,
         "physical_flow": flow,
+        "physical_flow_no_information_balance": flow_without_information_balance.detach(),
         "physical_flow_uniform": uniform_flow,
         "physical_flow_native": physical_flow_native.detach(),
         "physical_flow_native_uniform": physical_flow_native_uniform.detach(),
@@ -633,6 +787,18 @@ def flow_losses(
         "gripper_fm_hold": gripper_hold_flow,
         "gripper_fm_event_rate": transition_mask.float().mean(),
         "gripper_fm_weight_mean": flow_weight.detach().float().mean(),
+        "trajectory_information_score": information_score.detach().float().mean(),
+        "trajectory_information_weight_min": information_weight.detach().float().min(),
+        "trajectory_information_weight_max": information_weight.detach().float().max(),
+        "trajectory_information_effective_fraction": (
+            information_weight.detach().float().sum().square()
+            / (
+                float(information_weight.numel())
+                * information_weight.detach().float().square().sum().clamp_min(1e-8)
+            )
+        ),
+        "action_horizon_weight_first": weight.detach().float()[0],
+        "action_horizon_weight_tail": weight.detach().float()[-1],
         "gripper_fm_event_loss_mass": event_loss_mass.detach().float(),
         "gripper_fm_event_emphasis_mean": event_weight_mean.detach().float(),
         "gripper_fm_hold_emphasis_mean": hold_weight_mean.detach().float(),

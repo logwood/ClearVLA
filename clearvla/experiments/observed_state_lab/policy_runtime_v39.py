@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 import random
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -38,9 +39,7 @@ from .policy_runtime_v36_3 import (
     position_weights,
     semantic_physical_velocity_error,
 )
-from .policy_runtime_v36_3 import (
-    flow_losses as v363_flow_losses,
-)
+from .policy_runtime_v36_3 import flow_losses as v363_flow_losses
 from .world_runtime import autocast_context, jsonable, scheduler
 
 POLICY_CHECKPOINT_SCHEMAS = frozenset(
@@ -133,6 +132,38 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     action_effect_loss_weight: float = 0.0
     future_latent_loss_start_epoch: int = 1
     future_latent_max_batches: int = 0
+    # V95 future-only JEPA and semantic patch-correspondence objectives.  These
+    # names stay separate from action ``physical_flow`` so logs cannot confuse
+    # optical patch motion with the policy's flow-matching field.
+    flow_jepa_future_loss_weight: float = 0.0
+    # Legacy continuous future-change auxiliary for absolute-prediction runs.
+    # The predictive-change contract makes delta prediction primary and
+    # therefore requires this duplicate weight to be zero.
+    flow_jepa_future_change_loss_weight: float = 0.0
+    # ``global`` preserves V100: target-change magnitudes across every offset
+    # share one denominator. ``per_horizon`` first normalizes each real offset
+    # and then averages them, preventing +48 from swallowing +4/+12/+24.
+    flow_jepa_horizon_balance_mode: str = "global"
+    # V105 retains an unnormalized delta anchor and applies relative
+    # normalization only where the frozen teacher change is reliable. This
+    # prevents tiny teacher jitter from dominating the normalized objective.
+    flow_jepa_future_reliable_normalization: int = 0
+    # Teacher change supervises only the observation-derived horizon address
+    # posterior. It is never an input to the forward address reader.
+    flow_jepa_horizon_address_loss_weight: float = 0.0
+    # V106 supervises the bounded W->P interval-stage delta with signed
+    # progression and a weak endpoint-consistency term.  The target is
+    # teacher-only and spatially aligned; zero preserves the V105 objective.
+    flow_jepa_interval_stage_loss_weight: float = 0.0
+    flow_jepa_stage_loss_weight: float = 0.0
+    flow_jepa_warp_loss_weight: float = 0.0
+    flow_jepa_identity_advantage_loss_weight: float = 0.0
+    flow_jepa_static_identity_loss_weight: float = 0.0
+    flow_jepa_cycle_loss_weight: float = 0.0
+    flow_jepa_smoothness_loss_weight: float = 0.0
+    flow_jepa_uncertainty_nll_weight: float = 0.0
+    flow_jepa_refinement_sequence_loss_weight: float = 0.0
+    flow_jepa_lr_scale: float = 1.0
 
     # Full action/event validation still covers every validation batch. These
     # budgets apply only to the expensive sampling gauge fan-out and the second
@@ -142,6 +173,9 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     eval_proposal_ablation_batches: int = 16
     # Matched-noise structural probes for the Evidence execution plane.
     eval_execution_ablation_batches: int = 8
+    # Teacher-forced representation validation is separate from deploy action
+    # sampling and is spread across a bounded subset by default.
+    eval_representation_batches: int = 16
 
     # Lightweight CUDA memory accounting. Disabled by default. Set
     # --memory-report-every N to emit a [cuda-mem] line and append JSONL rows
@@ -158,6 +192,9 @@ class V39PolicyTrainerConfig(V363PolicyTrainerConfig):
     # mid-cut preservation loss.
     training_stage: str = "contract"
     upper_lr_scale: float = 0.20
+    # Scratch single-stage role hierarchies must not inherit the old Stage2
+    # "protect the upper trunk" learning-rate ladder.
+    single_stage_role_lr: int = 0
     midcut_head_lr_scale: float = 1.0
     midcut_aux_loss_weight: float = 0.05
     midcut_aux_final_ratio: float = 0.20
@@ -304,10 +341,236 @@ def _validate_target_anchor_token_tensor(tokens: Tensor, *, system: V39PolicySys
         raise ValueError(
             f"target_future_dinov2_tokens must be [B,F,{expected_tail}], got {tuple(tokens.shape)}"
         )
-    if int(tokens.shape[1]) < int(cfg.future_anchors):
+    required = (
+        len(cfg.flow_jepa_target_offsets)
+        if int(getattr(cfg, "flow_jepa_enabled", 0))
+        else int(cfg.future_anchors)
+    )
+    if int(tokens.shape[1]) < required:
         raise ValueError(
-            f"target_future_dinov2_tokens has only {tokens.shape[1]} anchors; need {cfg.future_anchors}"
+            f"target_future_dinov2_tokens has only {tokens.shape[1]} targets; need {required}"
         )
+
+
+def _selected_future_indices(sample: dict[str, Tensor], model_config) -> tuple[int, ...]:
+    anchors = int(getattr(model_config, "future_anchors", getattr(model_config, "num_future", 1)))
+    if not int(getattr(model_config, "flow_jepa_enabled", 0)):
+        return tuple(range(anchors))
+    expected = tuple(int(value) for value in model_config.flow_jepa_target_offsets)
+    available = sample.get("future_offsets")
+    if not torch.is_tensor(available):
+        raise ValueError("hierarchical Flow-DINO target selection requires future_offsets")
+    if available.ndim == 2:
+        if not torch.equal(available, available[:1].expand_as(available)):
+            raise ValueError("batched future_offsets must be identical across samples")
+        available = available[0]
+    if available.ndim != 1:
+        raise ValueError("future_offsets must be [F] or [B,F]")
+    lookup = {int(value): index for index, value in enumerate(available.tolist())}
+    missing = [offset for offset in expected if offset not in lookup]
+    if missing:
+        raise ValueError(f"requested Flow-DINO future offsets are unavailable: {missing}")
+    return tuple(lookup[offset] for offset in expected)
+
+
+def _saved_flow_jepa_hierarchy(
+    saved_policy: dict[str, Any],
+) -> tuple[tuple[int, ...], int]:
+    """Resolve checkpoint hierarchy fields with the policy-config fallbacks."""
+
+    window_offsets = tuple(
+        int(value) for value in saved_policy.get("flow_jepa_window_offsets", ())
+    )
+    if not window_offsets:
+        anchors = int(saved_policy.get("future_anchors", 0))
+        horizon = int(saved_policy.get("action_horizon", 0))
+        if anchors <= 0 or horizon <= 0:
+            raise ValueError(
+                "checkpoint cannot derive Flow-DINO window offsets without positive "
+                "future_anchors and action_horizon"
+            )
+        window_offsets = tuple(
+            max(1, int(round((index + 1) * horizon / float(anchors))))
+            for index in range(anchors)
+        )
+    stage_offset = int(saved_policy.get("flow_jepa_stage_offset", 0))
+    if stage_offset <= 0:
+        stage_offset = int(window_offsets[-1]) + 1
+    return window_offsets, stage_offset
+
+
+def _validate_v102_resume_contract(
+    saved_policy: dict[str, Any],
+    current_policy: Any,
+) -> None:
+    """Reject shape-compatible resumes that change V102 routing semantics."""
+
+    for field in (
+        "flow_jepa_world_anchor_write_only",
+        "flow_jepa_late_policy_detail",
+        "flow_jepa_soft_address_lattice",
+        "flow_jepa_horizon_soft_address",
+        "flow_jepa_variance_safe_routing",
+        "flow_jepa_complete_numerical_contract",
+        "flow_jepa_interval_stage_delta",
+        "flow_jepa_policy_multi_glimpse_address",
+        "flow_jepa_horizon_cell_fine_address",
+        "flow_jepa_online_horizon_address",
+        "flow_jepa_progressive_grounding_address",
+        "flow_jepa_coordinate_typed_raw_detail",
+        "flow_jepa_structured_ownership_bottleneck",
+        "flow_jepa_interval_stage_typed_value",
+        "flow_jepa_policy_workspace_horizon_pool",
+        "role_attnres_enabled",
+        "role_attnres_ground_to_world",
+        "role_attnres_world_to_policy",
+        "role_attnres_policy_to_mmdit",
+        "role_residual_contract_after_gate",
+        "action_history_condition_exact_null",
+        "goal_condition_exact_null",
+        "stateless_phase_enabled",
+    ):
+        saved_value = int(saved_policy.get(field, 0))
+        current_value = int(getattr(current_policy, field))
+        if saved_value != current_value:
+            raise ValueError(
+                f"resume {field} mismatch: checkpoint={saved_value}, "
+                f"current={current_value}"
+            )
+    if int(getattr(current_policy, "flow_jepa_late_policy_detail", 0)):
+        saved_detail_scale = float(
+            saved_policy.get("flow_jepa_late_policy_detail_scale", 0.25)
+        )
+        current_detail_scale = float(
+            current_policy.flow_jepa_late_policy_detail_scale
+        )
+        if saved_detail_scale != current_detail_scale:
+            raise ValueError(
+                "resume flow_jepa_late_policy_detail_scale mismatch: "
+                f"checkpoint={saved_detail_scale}, current={current_detail_scale}"
+            )
+    if int(getattr(current_policy, "flow_jepa_soft_address_lattice", 0)):
+        for field in (
+            "flow_jepa_address_slots",
+            "flow_jepa_address_route_dim",
+            "flow_jepa_address_query_chunk",
+        ):
+            saved_value = int(saved_policy.get(field, 0))
+            current_value = int(getattr(current_policy, field))
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, "
+                    f"current={current_value}"
+                )
+    if int(getattr(current_policy, "flow_jepa_coordinate_typed_raw_detail", 0)):
+        saved_micro_grid = int(saved_policy.get("flow_jepa_raw_micro_grid", 0))
+        current_micro_grid = int(current_policy.flow_jepa_raw_micro_grid)
+        if saved_micro_grid != current_micro_grid:
+            raise ValueError(
+                "resume flow_jepa_raw_micro_grid mismatch: "
+                f"checkpoint={saved_micro_grid}, current={current_micro_grid}"
+            )
+    if int(getattr(current_policy, "flow_jepa_horizon_soft_address", 0)):
+        saved_scale = float(
+            saved_policy.get("flow_jepa_horizon_address_update_scale", 0.0)
+        )
+        current_scale = float(
+            current_policy.flow_jepa_horizon_address_update_scale
+        )
+        if saved_scale != current_scale:
+            raise ValueError(
+                "resume flow_jepa_horizon_address_update_scale mismatch: "
+                f"checkpoint={saved_scale}, current={current_scale}"
+            )
+    if int(getattr(current_policy, "flow_jepa_variance_safe_routing", 0)):
+        for field in (
+            "flow_jepa_routing_norm_floor",
+            "flow_jepa_horizon_value_max_rms",
+        ):
+            saved_value = float(saved_policy.get(field, float("nan")))
+            current_value = float(getattr(current_policy, field))
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, "
+                    f"current={current_value}"
+                )
+    if int(
+        getattr(current_policy, "flow_jepa_complete_numerical_contract", 0)
+    ):
+        for field in (
+            "flow_jepa_correlation_rms_floor",
+            "flow_jepa_visibility_transition_fraction",
+        ):
+            saved_value = float(saved_policy.get(field, float("nan")))
+            current_value = float(getattr(current_policy, field))
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, "
+                    f"current={current_value}"
+                )
+    if int(getattr(current_policy, "flow_jepa_interval_stage_delta", 0)):
+        for field in (
+            "flow_jepa_interval_stage_update_scale",
+        ):
+            saved_value = float(saved_policy.get(field, float("nan")))
+            current_value = float(getattr(current_policy, field))
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, "
+                    f"current={current_value}"
+                )
+        for field in (
+            "flow_jepa_interval_boundaries",
+            "flow_jepa_interval_support_offsets",
+        ):
+            saved_value = tuple(
+                int(value) for value in saved_policy.get(field, ())
+            )
+            current_value = tuple(
+                int(value) for value in getattr(current_policy, field)
+            )
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, "
+                    f"current={current_value}"
+                )
+    if int(getattr(current_policy, "role_attnres_enabled", 0)):
+        saved_key_dim = int(saved_policy.get("role_attnres_key_dim", 0))
+        if saved_key_dim != int(current_policy.role_attnres_key_dim):
+            raise ValueError(
+                "resume role_attnres_key_dim mismatch: "
+                f"checkpoint={saved_key_dim}, "
+                f"current={int(current_policy.role_attnres_key_dim)}"
+            )
+        for field in (
+            "role_attnres_ground_to_world_scale",
+            "role_attnres_world_to_policy_scale",
+            "role_attnres_policy_to_mmdit_scale",
+        ):
+            saved_value = float(saved_policy.get(field, float("nan")))
+            current_value = float(getattr(current_policy, field))
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, "
+                    f"current={current_value}"
+                )
+    if int(getattr(current_policy, "stateless_phase_enabled", 0)):
+        saved_count = int(saved_policy.get("stateless_phase_count", 0))
+        if saved_count != int(current_policy.stateless_phase_count):
+            raise ValueError(
+                "resume stateless_phase_count mismatch: "
+                f"checkpoint={saved_count}, "
+                f"current={int(current_policy.stateless_phase_count)}"
+            )
+        saved_scale = float(
+            saved_policy.get("stateless_phase_query_scale", float("nan"))
+        )
+        if saved_scale != float(current_policy.stateless_phase_query_scale):
+            raise ValueError(
+                "resume stateless_phase_query_scale mismatch: "
+                f"checkpoint={saved_scale}, "
+                f"current={float(current_policy.stateless_phase_query_scale)}"
+            )
 
 
 @torch.no_grad()
@@ -320,28 +583,38 @@ def encode_target_anchor_tokens(
     device: torch.device,
     dtype: torch.dtype,
 ) -> Tensor:
-    """Encode only V38's required future-anchor target tokens.
-
-    V38's residual future-flow target only consumes the last target-history
-    frame for the first ``future_anchors`` offsets.  The legacy helper encoded
-    all ``num_future × history`` targets; with the default 12 future offsets and
-    3 history frames that read 36 frames while V38 needed only 4.  This helper
-    returns [B,F,1,C,P,D] so it stays compatible with
-    ``TemporalWorldActionDiT.target_future_latent`` without over-reading.
-    """
+    """Encode the configured future teacher sequence in exact contract order."""
     batch = int(sample["state"].shape[0])
-    anchors = int(getattr(model_config, "future_anchors", getattr(model_config, "num_future", 1)))
+    indices = _selected_future_indices(sample, model_config)
+    target_count = len(indices)
     if "target_future_dinov2_tokens" in sample:
-        tokens = sample["target_future_dinov2_tokens"][:, :anchors]
+        tokens = sample["target_future_dinov2_tokens"][:, :target_count]
+        cached_offsets = sample.get("target_future_offsets")
+        if int(getattr(model_config, "flow_jepa_enabled", 0)):
+            expected_offsets = torch.as_tensor(
+                model_config.flow_jepa_target_offsets, dtype=torch.long
+            )
+            if not torch.is_tensor(cached_offsets):
+                raise ValueError("cached hierarchical targets must carry target_future_offsets")
+            if cached_offsets.ndim == 2:
+                expected_offsets = expected_offsets[None].expand_as(cached_offsets)
+            if not torch.equal(cached_offsets.cpu().long(), expected_offsets):
+                raise ValueError(
+                    "cached target token order does not match the Flow-JEPA horizon contract"
+                )
         _validate_target_anchor_token_tensor(tokens, system=model_config_owner(model_config))
         return tokens.to(device=device, dtype=dtype, non_blocking=True)[:, :, None]
     if "target_history_obs_image" in sample:
-        images = sample["target_history_obs_image"][:, :anchors, -1]
-        flat = images.reshape(batch * anchors, *images.shape[2:])
+        images = sample["target_history_obs_image"][:, list(indices), -1]
+        flat = images.reshape(batch * target_count, *images.shape[2:])
         condition = conditioner.encode(flat, camera_names=camera_names)
     else:
-        keys = sample["target_history_keys"][:, :anchors, -1, :].reshape(batch * anchors, 2)
-        dummy = torch.zeros(batch * anchors, model_config.num_cameras, 3, 1, 1, dtype=torch.float32)
+        keys = sample["target_history_keys"][:, list(indices), -1, :].reshape(
+            batch * target_count, 2
+        )
+        dummy = torch.zeros(
+            batch * target_count, model_config.num_cameras, 3, 1, 1, dtype=torch.float32
+        )
         condition = conditioner.encode(dummy, sample_keys=keys, camera_names=camera_names)
     if condition.dense_tokens is None:
         raise ValueError("V38 future target requires dense DINO tokens")
@@ -349,17 +622,17 @@ def encode_target_anchor_tokens(
     expected_tokens = model_config.num_cameras * model_config.patches_per_camera
     if (
         dense.ndim != 3
-        or dense.shape[0] != batch * anchors
+        or dense.shape[0] != batch * target_count
         or dense.shape[1] != expected_tokens
         or dense.shape[2] != model_config.latent_dim
     ):
         raise ValueError(
             "DINO target-anchor geometry mismatch: "
-            f"got {tuple(dense.shape)}, expected ({batch * anchors},{expected_tokens},{model_config.latent_dim})"
+            f"got {tuple(dense.shape)}, expected ({batch * target_count},{expected_tokens},{model_config.latent_dim})"
         )
     return dense.reshape(
         batch,
-        anchors,
+        target_count,
         model_config.num_cameras,
         model_config.patches_per_camera,
         model_config.latent_dim,
@@ -391,8 +664,18 @@ def prepare_v39_policy_sample(
         _validate_current_token_tensor(visual, system=system)
         visual = visual.to(device=device, dtype=dtype, non_blocking=True)
     else:
+        conditioning_sample = sample
+        if (
+            "history_obs_image" in sample
+            and "history_keys" in sample
+            and hasattr(conditioner, "store")
+        ):
+            # Raw images are still required by V98 Flow-JEPA, but the cached
+            # DINO conditioner must be addressed by episode/image keys.
+            conditioning_sample = dict(sample)
+            conditioning_sample.pop("history_obs_image")
         visual = encode_current_tokens(
-            sample,
+            conditioning_sample,
             conditioner=conditioner,
             model_config=system.policy_config,
             camera_names=camera_names,
@@ -420,6 +703,30 @@ def prepare_v39_policy_sample(
         out[key] = out[key].float()
     compute_dtype = dtype if device.type == "cuda" else torch.float32
     out["visual"] = visual.to(dtype=compute_dtype)
+    if int(getattr(system.policy_config, "flow_jepa_raw_image_enabled", 0)):
+        raw_visual = sample.get("history_obs_image")
+        if not torch.is_tensor(raw_visual):
+            raise RuntimeError(
+                "raw-image Flow-JEPA requires history_obs_image beside cached DINO tokens"
+            )
+        expected_prefix = (
+            int(visual.shape[0]),
+            int(system.policy_config.visual_history_length),
+            int(system.policy_config.num_cameras),
+            3,
+        )
+        if raw_visual.ndim != 6 or tuple(raw_visual.shape[:4]) != expected_prefix:
+            raise ValueError(
+                "history_obs_image must be [B,H,C,3,R,R] for raw-image Flow-JEPA; "
+                f"got {tuple(raw_visual.shape)}"
+            )
+        if int(raw_visual.shape[-2]) != int(raw_visual.shape[-1]):
+            raise ValueError("raw-image Flow-JEPA currently requires square RGB frames")
+        if int(raw_visual.shape[-1]) < 32 or int(raw_visual.shape[-1]) % 16:
+            raise ValueError("raw RGB side must be >=32 and divisible by 16")
+        out["raw_visual"] = raw_visual.to(
+            device=device, dtype=compute_dtype, non_blocking=True
+        )
     if include_target_visual:
         target_visual = encode_target_anchor_tokens(
             sample,
@@ -581,6 +888,1122 @@ def rollout_delta_loss(output: dict[str, Tensor]) -> Tensor:
     target_n = F.normalize(target, dim=-1)
     cosine = (1.0 - (pred_n * target_n).sum(dim=-1)).mean()
     return smooth + 0.10 * cosine
+
+
+def _future_horizon_charts(
+    output: dict[str, Tensor],
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Align concatenated future tokens as [B,K,N,H] without copying."""
+
+    pred = output["flow_jepa_future_pred"]
+    target = output["flow_jepa_future_target"]
+    current = output.get("flow_jepa_current_target")
+    mask = output["flow_jepa_future_target_mask"]
+    if pred.ndim != 3 or tuple(pred.shape) != tuple(target.shape):
+        raise ValueError("future JEPA prediction and target must align as [B,K*N,H]")
+    if tuple(mask.shape) != tuple(pred.shape[:2]):
+        raise ValueError("future JEPA target mask must be [B,K*N]")
+    batch, tokens, hidden = pred.shape
+    if torch.is_tensor(current):
+        if current.ndim != 3 or int(current.shape[0]) != int(pred.shape[0]) or int(
+            current.shape[2]
+        ) != int(pred.shape[2]):
+            raise ValueError("current JEPA chart must align with future batch/hidden axes")
+        if int(pred.shape[1]) % int(current.shape[1]) != 0:
+            raise ValueError("future JEPA token count must be a multiple of the current chart")
+        per_horizon = int(current.shape[1])
+        horizons = tokens // per_horizon
+        current_chart = current
+    else:
+        offsets = output.get("flow_jepa_future_offsets")
+        if not isinstance(offsets, (tuple, list)) or not offsets:
+            raise ValueError(
+                "per-horizon JEPA reduction requires current chart or real future offsets"
+            )
+        horizons = len(offsets)
+        if tokens % horizons:
+            raise ValueError("future JEPA tokens must divide across real horizon offsets")
+        per_horizon = tokens // horizons
+        # Absolute prediction does not consume this placeholder. Change losses
+        # validate and require a real current teacher chart before calling here.
+        current_chart = pred.new_zeros(batch, per_horizon, hidden)
+    return (
+        pred.reshape(batch, horizons, per_horizon, hidden),
+        target.reshape(batch, horizons, per_horizon, hidden),
+        current_chart[:, None].expand(-1, horizons, -1, -1),
+        mask.reshape(batch, horizons, per_horizon),
+    )
+
+
+def _mean_valid_horizon_rows(values: Tensor, counts: Tensor) -> Tensor:
+    """Average horizon rows without device-synchronizing Python branches."""
+
+    valid = (counts > 0).to(dtype=values.dtype)
+    return (values * valid).sum() / valid.sum().clamp_min(1.0)
+
+
+def _future_delta_charts(
+    output: dict[str, Tensor],
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Return predicted/teacher changes and the selected-token chart."""
+
+    pred_h, target_h, current_h, mask_h = _future_horizon_charts(output)
+    explicit_delta = output.get("flow_jepa_future_delta_pred")
+    if torch.is_tensor(explicit_delta):
+        if tuple(explicit_delta.shape) != tuple(output["flow_jepa_future_pred"].shape):
+            raise ValueError("explicit future delta must align with flow_jepa_future_pred")
+        pred_delta_h = explicit_delta.float().reshape_as(pred_h)
+    else:
+        pred_delta_h = pred_h.float() - current_h.detach().float()
+    target_delta_h = target_h.detach().float() - current_h.detach().float()
+    return pred_delta_h, target_delta_h, current_h.detach().float(), mask_h
+
+
+_FUTURE_CHANGE_REFERENCE_FRACTION = 0.05
+
+
+def _future_change_weighting(
+    target_delta_h: Tensor,
+    current_h: Tensor,
+    selected_h: Tensor,
+    *,
+    reliable_normalization: bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Build a continuous, absolute-scale-aware future-change weight.
+
+    Legacy V104 normalizes by the future delta's own RMS.  That ratio is
+    invariant when an entire weak/noisy teacher delta shrinks, so it cannot
+    decide whether normalization is trustworthy.  V105 instead adds a smooth
+    floor equal to five percent of the current teacher-chart RMS.  This keeps
+    fine changes continuous while preventing arbitrarily weak change from
+    receiving scale-invariant normalized gradients.
+    """
+
+    selected_h = selected_h.to(
+        device=target_delta_h.device,
+        dtype=torch.float32,
+    )
+    counts_h = selected_h.sum(dim=(0, 2))
+    target_energy_h = target_delta_h.square().mean(dim=-1)
+    delta_scale_h = torch.sqrt(
+        (target_energy_h * selected_h).sum(dim=(0, 2))
+        / counts_h.clamp_min(1.0)
+    ).detach().clamp_min(1e-3)
+    current_energy_h = current_h.square().mean(dim=-1)
+    current_scale_h = torch.sqrt(
+        (current_energy_h * selected_h).sum(dim=(0, 2))
+        / counts_h.clamp_min(1.0)
+    ).detach()
+    if reliable_normalization:
+        normalization_scale_h = torch.sqrt(
+            delta_scale_h.square()
+            + (
+                _FUTURE_CHANGE_REFERENCE_FRACTION * current_scale_h
+            ).square()
+        ).clamp_min(1e-3)
+    else:
+        # Preserve the serialized V104 objective exactly when the V105
+        # reliability contract is disabled.
+        normalization_scale_h = delta_scale_h
+    hidden = int(target_delta_h.shape[-1])
+    strength_h = target_delta_h.norm(dim=-1).detach() / math.sqrt(
+        float(hidden)
+    )
+    reliability_h = strength_h / (
+        strength_h
+        + normalization_scale_h[None, :, None].clamp_min(1e-3)
+    )
+    return (
+        counts_h,
+        delta_scale_h,
+        current_scale_h,
+        normalization_scale_h,
+        reliability_h,
+    )
+
+
+def _scale_floored_direction_rows(
+    prediction_h: Tensor,
+    target_h: Tensor,
+    normalization_scale_h: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Signed alignment with a teacher-scale, zero-safe denominator.
+
+    Near-zero delta predictors are an intentional initialization state.  A
+    conventional cosine normalization has an inverse-norm derivative there.
+    This form retains signed alignment while bounding both prediction and
+    target normalization by a detached scale already owned by the reliable
+    future-target contract.
+    """
+
+    if tuple(prediction_h.shape) != tuple(target_h.shape):
+        raise ValueError("direction prediction and target charts must align")
+    if prediction_h.ndim != 4:
+        raise ValueError("direction charts must be [B,A,N,H]")
+    if tuple(normalization_scale_h.shape) != (int(prediction_h.shape[1]),):
+        raise ValueError("direction scale must contain one value per horizon")
+    floor_h = (
+        0.25 * normalization_scale_h.detach().float()
+    ).clamp_min(1e-3)
+    floor = floor_h[None, :, None, None]
+    prediction_direction = prediction_h.float() / torch.sqrt(
+        prediction_h.float().square().mean(dim=-1, keepdim=True)
+        + floor.square()
+    )
+    target_direction = target_h.detach().float() / torch.sqrt(
+        target_h.detach().float().square().mean(dim=-1, keepdim=True)
+        + floor.square()
+    )
+    return (
+        1.0
+        - (prediction_direction * target_direction).mean(dim=-1),
+        floor_h,
+    )
+
+
+def _flow_jepa_predictive_change_contract_loss(
+    output: dict[str, Tensor],
+    *,
+    balance_horizons: bool,
+    reliable_normalization: bool = False,
+) -> Tensor:
+    """Predict a teacher-chart delta without rewarding an absolute copy.
+
+    Smooth-L1 on every selected token keeps genuinely static cells stable.
+    Direction is weighted continuously by teacher change strength, so visible
+    changes matter more without introducing a hard motion threshold.  The
+    scale is estimated per real horizon and detached; horizons are either
+    averaged equally or reduced globally according to the existing contract.
+    """
+
+    pred_delta_h, target_delta_h, current_h, mask_h = _future_delta_charts(
+        output
+    )
+    selected_h = mask_h.to(device=pred_delta_h.device, dtype=torch.float32)
+    (
+        counts_h,
+        _,
+        _,
+        normalization_scale_h,
+        reliability_h,
+    ) = _future_change_weighting(
+        target_delta_h,
+        current_h,
+        selected_h,
+        reliable_normalization=reliable_normalization,
+    )
+    raw_error_h = F.smooth_l1_loss(
+        pred_delta_h,
+        target_delta_h,
+        reduction="none",
+    ).mean(dim=-1)
+    raw_h = (raw_error_h * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(
+        1.0
+    )
+    normalized_error_h = F.smooth_l1_loss(
+        pred_delta_h / normalization_scale_h[None, :, None, None],
+        target_delta_h / normalization_scale_h[None, :, None, None],
+        reduction="none",
+    ).mean(dim=-1)
+
+    if reliable_normalization:
+        normalized_weight_h = selected_h * reliability_h
+        smooth_h = (
+            normalized_error_h * normalized_weight_h
+        ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+        magnitude_h = raw_h + smooth_h
+    else:
+        normalized_weight_h = selected_h
+        smooth_h = (
+            normalized_error_h * selected_h
+        ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+        magnitude_h = smooth_h
+    direction_weight_h = selected_h * reliability_h
+    direction_denominator_h = direction_weight_h.sum(dim=(0, 2))
+    if torch.is_tensor(output.get("flow_jepa_variance_safe_routing")):
+        direction_rows_h, _ = _scale_floored_direction_rows(
+            pred_delta_h,
+            target_delta_h,
+            normalization_scale_h,
+        )
+    else:
+        # Exact V105 compatibility when the V106 variance-safe contract is
+        # absent from the real forward output.
+        direction_rows_h = 1.0 - (
+            F.normalize(pred_delta_h, dim=-1)
+            * F.normalize(target_delta_h, dim=-1)
+        ).sum(dim=-1)
+    direction_h = (
+        direction_rows_h * direction_weight_h
+    ).sum(dim=(0, 2)) / (
+        counts_h.clamp_min(1.0)
+        if reliable_normalization
+        else direction_denominator_h.clamp_min(1e-12)
+    )
+    per_horizon = magnitude_h + 0.10 * direction_h
+    if balance_horizons:
+        return _mean_valid_horizon_rows(per_horizon, counts_h)
+
+    total_count = counts_h.sum().clamp_min(1.0)
+    if reliable_normalization:
+        raw = (raw_h * counts_h).sum() / total_count
+        smooth = raw + (smooth_h * counts_h).sum() / total_count
+    else:
+        smooth = (smooth_h * counts_h).sum() / total_count
+    if reliable_normalization:
+        direction = (direction_h * counts_h).sum() / total_count
+    else:
+        direction_denominator = direction_denominator_h.sum().clamp_min(1e-12)
+        direction = (
+            direction_h * direction_denominator_h
+        ).sum() / direction_denominator
+    return smooth + 0.10 * direction
+
+
+def flow_jepa_future_prediction_loss(
+    output: dict[str, Tensor],
+    *,
+    balance_horizons: bool = False,
+    reliable_normalization: bool = False,
+) -> Tensor:
+    """Future-only masked latent prediction on frozen DINO teacher tokens."""
+
+    pred = output.get("flow_jepa_future_pred")
+    target = output.get("flow_jepa_future_target")
+    mask = output.get("flow_jepa_future_target_mask")
+    if not all(torch.is_tensor(value) for value in (pred, target, mask)):
+        reference = output["pred_physical_velocity"]
+        return torch.zeros((), device=reference.device, dtype=reference.dtype)
+    if pred.ndim != 3 or tuple(pred.shape) != tuple(target.shape):
+        raise ValueError("Flow-DINO JEPA prediction and teacher must align as [B,N,H]")
+    if tuple(mask.shape) != tuple(pred.shape[:2]):
+        raise ValueError("Flow-DINO JEPA target mask must be [B,N]")
+    selected = mask.to(device=pred.device, dtype=torch.bool)
+    if not bool(selected.any()):
+        return pred.sum() * 0.0
+    if torch.is_tensor(output.get("flow_jepa_future_delta_pred")):
+        if not torch.is_tensor(output.get("flow_jepa_current_target")):
+            raise ValueError(
+                "predictive-change JEPA requires a frozen current teacher chart"
+            )
+        return _flow_jepa_predictive_change_contract_loss(
+            output,
+            balance_horizons=balance_horizons,
+            reliable_normalization=reliable_normalization,
+        )
+    if balance_horizons:
+        pred_h, target_h, _, mask_h = _future_horizon_charts(output)
+        weight_h = mask_h.to(device=pred.device, dtype=torch.float32)
+        count_h = weight_h.sum(dim=(0, 2))
+        smooth_rows = F.smooth_l1_loss(
+            pred_h.float(), target_h.detach().float(), reduction="none"
+        ).mean(dim=-1)
+        cosine_rows = 1.0 - (
+            F.normalize(pred_h.float(), dim=-1)
+            * F.normalize(target_h.detach().float(), dim=-1)
+        ).sum(dim=-1)
+        loss_h = ((smooth_rows + 0.10 * cosine_rows) * weight_h).sum(dim=(0, 2))
+        loss_h = loss_h / count_h.clamp_min(1.0)
+        base = _mean_valid_horizon_rows(loss_h, count_h)
+    else:
+        pred_f = pred.float()[selected]
+        target_f = target.detach().float()[selected]
+        smooth = F.smooth_l1_loss(pred_f, target_f)
+        cosine = 1.0 - (
+            F.normalize(pred_f, dim=-1) * F.normalize(target_f, dim=-1)
+        ).sum(dim=-1).mean()
+        base = smooth + 0.10 * cosine
+    change_direction = flow_jepa_future_change_direction_loss(
+        output,
+        balance_horizons=balance_horizons,
+    )
+    return base + 0.10 * change_direction
+
+
+def flow_jepa_future_reliable_diagnostics(
+    output: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    """Expose why reliable normalization accepts or rejects each horizon."""
+
+    if not torch.is_tensor(output.get("flow_jepa_future_delta_pred")):
+        return {}
+    pred_delta_h, target_delta_h, current_h, mask_h = _future_delta_charts(
+        output
+    )
+    selected_h = mask_h.to(device=pred_delta_h.device, dtype=torch.float32)
+    (
+        counts_h,
+        delta_scale_h,
+        current_scale_h,
+        normalization_scale_h,
+        reliability_h,
+    ) = _future_change_weighting(
+        target_delta_h,
+        current_h,
+        selected_h,
+        reliable_normalization=True,
+    )
+    reliability_weight = selected_h * reliability_h
+    raw_rows = F.smooth_l1_loss(
+        pred_delta_h,
+        target_delta_h,
+        reduction="none",
+    ).mean(dim=-1)
+    normalized_rows = F.smooth_l1_loss(
+        pred_delta_h / normalization_scale_h[None, :, None, None],
+        target_delta_h / normalization_scale_h[None, :, None, None],
+        reduction="none",
+    ).mean(dim=-1)
+    raw_h = (raw_rows * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    reliable_h = (
+        normalized_rows * reliability_weight
+    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    reliability_mean_h = reliability_weight.sum(dim=(0, 2)) / counts_h.clamp_min(
+        1.0
+    )
+    offsets = tuple(int(value) for value in output.get("flow_jepa_future_offsets", ()))
+    diagnostics: dict[str, Tensor] = {
+        "flow_jepa_future_target_delta_scale": delta_scale_h.mean().detach(),
+        "flow_jepa_future_current_reference_scale": (
+            current_scale_h.mean().detach()
+        ),
+        "flow_jepa_future_normalization_scale": (
+            normalization_scale_h.mean().detach()
+        ),
+        "flow_jepa_future_raw_delta_loss": raw_h.mean().detach(),
+        "flow_jepa_future_reliable_normalized_loss": reliable_h.mean().detach(),
+        "flow_jepa_future_change_reliability": reliability_mean_h.mean().detach(),
+    }
+    if torch.is_tensor(output.get("flow_jepa_variance_safe_routing")):
+        diagnostics["flow_jepa_future_direction_floor_min"] = (
+            0.25 * normalization_scale_h.detach().float()
+        ).clamp_min(1e-3).amin()
+    if len(offsets) == int(delta_scale_h.shape[0]):
+        for index, offset in enumerate(offsets):
+            diagnostics[f"flow_jepa_future_horizon_{offset}_target_scale"] = (
+                delta_scale_h[index].detach()
+            )
+            diagnostics[f"flow_jepa_future_horizon_{offset}_normalization_scale"] = (
+                normalization_scale_h[index].detach()
+            )
+            diagnostics[f"flow_jepa_future_horizon_{offset}_raw_delta"] = (
+                raw_h[index].detach()
+            )
+            diagnostics[
+                f"flow_jepa_future_horizon_{offset}_reliable_normalized"
+            ] = reliable_h[index].detach()
+            diagnostics[f"flow_jepa_future_horizon_{offset}_reliability"] = (
+                reliability_mean_h[index].detach()
+            )
+    return diagnostics
+
+
+def _flow_jepa_horizon_address_terms(
+    output: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    """Teacher-only supervision for the horizon-specific soft address."""
+
+    logits = output.get("flow_jepa_horizon_address_logits")
+    future = output.get("flow_jepa_future_target")
+    current = output.get("flow_jepa_current_target")
+    if not all(torch.is_tensor(value) for value in (logits, future, current)):
+        reference = output["pred_physical_velocity"]
+        return {
+            "flow_jepa_horizon_address": reference.float().sum() * 0.0,
+        }
+    if logits.ndim != 5:
+        raise ValueError("horizon address logits must be [B,A,C,G,G]")
+    batch, anchors, cameras, grid, grid_b = logits.shape
+    if grid != grid_b:
+        raise ValueError("horizon address logits require a square query chart")
+    positions = cameras * grid * grid
+    if tuple(future.shape[:2]) != (batch, anchors * positions):
+        raise ValueError("future teacher does not align with horizon address logits")
+    if tuple(current.shape[:2]) != (batch, positions):
+        raise ValueError("current teacher does not align with horizon address logits")
+    future_h = future.detach().float().reshape(
+        batch, anchors, positions, int(future.shape[-1])
+    )
+    current_h = current.detach().float()[:, None].expand(
+        -1, anchors, -1, -1
+    )
+    strength = (
+        future_h - current_h
+    ).square().mean(dim=-1).clamp_min(0.0).sqrt()
+    interval_progress = output.get("flow_jepa_interval_progress_target")
+    if torch.is_tensor(interval_progress):
+        if tuple(interval_progress.shape) != tuple(future.shape):
+            raise ValueError(
+                "interval progression teacher must align with future address targets"
+            )
+        progression_strength = interval_progress.detach().float().reshape(
+            batch,
+            anchors,
+            positions,
+            int(interval_progress.shape[-1]),
+        ).square().mean(dim=-1).clamp_min(0.0).sqrt()
+        # Stage progression may change spatial relevance, but it does not
+        # replace the content-change teacher or enter the online reader.
+        strength = torch.sqrt(
+            strength.square() + 0.25 * progression_strength.square()
+        )
+    mean_strength = strength.mean(dim=-1)
+    spatial_std = strength.std(dim=-1, unbiased=False)
+    spatial_contrast = spatial_std / (
+        mean_strength + spatial_std + 1e-8
+    )
+    current_scale = current.detach().float().square().mean(dim=-1).sqrt().mean(
+        dim=-1
+    )
+    temporal_reliability = mean_strength / (
+        mean_strength + current_scale[:, None].clamp_min(1e-6)
+    )
+    reliability = (spatial_contrast * temporal_reliability).detach()
+    teacher_scale = strength.mean(dim=-1, keepdim=True).detach().clamp_min(1e-6)
+    teacher_probability = torch.softmax(
+        (strength / teacher_scale).detach(),
+        dim=-1,
+    )
+    log_predicted = F.log_softmax(
+        logits.float().reshape(batch, anchors, positions),
+        dim=-1,
+    )
+    teacher_log = teacher_probability.clamp_min(1e-8).log()
+    kl_h = (
+        teacher_probability * (teacher_log - log_predicted)
+    ).sum(dim=-1)
+    loss = (kl_h * reliability).mean()
+    predicted_probability = log_predicted.exp()
+    entropy_denominator = math.log(float(max(positions, 2)))
+    teacher_entropy = -(
+        teacher_probability.clamp_min(1e-8) * teacher_log
+    ).sum(dim=-1) / entropy_denominator
+    predicted_entropy = -(
+        predicted_probability.clamp_min(1e-8) * log_predicted
+    ).sum(dim=-1) / entropy_denominator
+    result = {
+        "flow_jepa_horizon_address": loss,
+        "flow_jepa_horizon_address_kl": kl_h.mean().detach(),
+        "flow_jepa_horizon_address_teacher_entropy": teacher_entropy.mean().detach(),
+        "flow_jepa_horizon_address_predicted_entropy": (
+            predicted_entropy.mean().detach()
+        ),
+        "flow_jepa_horizon_address_teacher_max": teacher_probability.max(
+            dim=-1
+        ).values.mean().detach(),
+        "flow_jepa_horizon_address_predicted_max": predicted_probability.max(
+            dim=-1
+        ).values.mean().detach(),
+        "flow_jepa_horizon_address_teacher_contrast": spatial_contrast.mean().detach(),
+        "flow_jepa_horizon_address_teacher_reliability": reliability.mean().detach(),
+        "flow_jepa_horizon_address_teacher_change": mean_strength.mean().detach(),
+    }
+    offsets = tuple(int(value) for value in output.get("flow_jepa_future_offsets", ()))
+    if len(offsets) == anchors:
+        for index, offset in enumerate(offsets):
+            result[f"flow_jepa_horizon_address_{offset}_kl"] = (
+                kl_h[:, index].mean().detach()
+            )
+            result[f"flow_jepa_horizon_address_{offset}_reliability"] = (
+                reliability[:, index].mean().detach()
+            )
+    return result
+
+
+def flow_jepa_horizon_address_loss(output: dict[str, Tensor]) -> Tensor:
+    return _flow_jepa_horizon_address_terms(output)["flow_jepa_horizon_address"]
+
+
+def flow_jepa_future_change_direction_loss(
+    output: dict[str, Tensor],
+    *,
+    balance_horizons: bool = False,
+) -> Tensor:
+    """Continuously weight future direction by observed teacher change."""
+
+    pred = output.get("flow_jepa_future_pred")
+    target = output.get("flow_jepa_future_target")
+    current = output.get("flow_jepa_current_target")
+    mask = output.get("flow_jepa_future_target_mask")
+    if not all(torch.is_tensor(value) for value in (pred, target, current, mask)):
+        reference = pred if torch.is_tensor(pred) else output.get("pred_physical_velocity")
+        if not torch.is_tensor(reference):
+            raise ValueError("future change direction loss requires a tensor reference")
+        return reference.sum() * 0.0
+    if pred.ndim != 3 or tuple(pred.shape) != tuple(target.shape):
+        raise ValueError("future change direction requires aligned [B,N,H] prediction/target")
+    if tuple(mask.shape) != tuple(pred.shape[:2]):
+        raise ValueError("future change direction mask must be [B,N]")
+    if (
+        current.ndim != 3
+        or int(current.shape[0]) != int(pred.shape[0])
+        or int(current.shape[2]) != int(pred.shape[2])
+    ):
+        raise ValueError("current JEPA teacher chart must align with future batch/hidden axes")
+    if int(pred.shape[1]) % int(current.shape[1]) != 0:
+        raise ValueError("future JEPA token count must be a multiple of the current chart")
+    horizons = int(pred.shape[1]) // int(current.shape[1])
+    current_expanded = current[:, None].expand(-1, horizons, -1, -1).reshape_as(pred)
+    selected = mask.to(device=pred.device, dtype=torch.bool)
+    explicit_delta = output.get("flow_jepa_future_delta_pred")
+    pred_delta = (
+        explicit_delta.float()
+        if torch.is_tensor(explicit_delta)
+        else pred.float() - current_expanded.detach().float()
+    )
+    target_delta = target.detach().float() - current_expanded.detach().float()
+    target_strength = target_delta.norm(dim=-1).detach()
+    if balance_horizons:
+        pred_h, target_h, current_h, mask_h = _future_horizon_charts(output)
+        pred_delta_h = (
+            explicit_delta.float().reshape_as(pred_h)
+            if torch.is_tensor(explicit_delta)
+            else pred_h.float() - current_h.detach().float()
+        )
+        target_delta_h = target_h.detach().float() - current_h.detach().float()
+        strength_h = target_delta_h.norm(dim=-1).detach()
+        weights_h = mask_h.to(dtype=strength_h.dtype) * strength_h
+        denominator_h = weights_h.sum(dim=(0, 2))
+        direction_h = 1.0 - (
+            F.normalize(pred_delta_h, dim=-1)
+            * F.normalize(target_delta_h, dim=-1)
+        ).sum(dim=-1)
+        loss_h = (direction_h * weights_h).sum(dim=(0, 2)) / denominator_h.clamp_min(
+            1e-12
+        )
+        return _mean_valid_horizon_rows(loss_h, denominator_h)
+    weights = selected.float() * target_strength
+    denominator = weights.sum().clamp_min(1e-12)
+    direction = 1.0 - (
+        F.normalize(pred_delta, dim=-1)
+        * F.normalize(target_delta, dim=-1)
+    ).sum(dim=-1)
+    return (direction * weights).sum() / denominator
+
+
+def flow_jepa_future_change_loss(
+    output: dict[str, Tensor],
+    *,
+    balance_horizons: bool = False,
+) -> Tensor:
+    """Supervise change direction and scale without a hard motion threshold.
+
+    Absolute JEPA prediction is dominated by static semantic content.  This
+    objective reweights every selected token continuously by the teacher's
+    observed change magnitude, then matches both direction and delta scale.
+    Target deltas and weights are detached; gradients flow only into the
+    prediction route.
+    """
+
+    pred = output.get("flow_jepa_future_pred")
+    target = output.get("flow_jepa_future_target")
+    current = output.get("flow_jepa_current_target")
+    mask = output.get("flow_jepa_future_target_mask")
+    if not all(torch.is_tensor(value) for value in (pred, target, current, mask)):
+        reference = pred if torch.is_tensor(pred) else output.get("pred_physical_velocity")
+        if not torch.is_tensor(reference):
+            raise ValueError("future change loss requires a tensor reference")
+        return reference.sum() * 0.0
+    if pred.ndim != 3 or tuple(pred.shape) != tuple(target.shape):
+        raise ValueError("future change loss requires aligned [B,N,H] prediction/target")
+    if tuple(mask.shape) != tuple(pred.shape[:2]):
+        raise ValueError("future change loss mask must be [B,N]")
+    if (
+        current.ndim != 3
+        or int(current.shape[0]) != int(pred.shape[0])
+        or int(current.shape[2]) != int(pred.shape[2])
+        or int(pred.shape[1]) % int(current.shape[1]) != 0
+    ):
+        raise ValueError("current JEPA chart does not align with future prediction")
+    horizons = int(pred.shape[1]) // int(current.shape[1])
+    current_expanded = current[:, None].expand(-1, horizons, -1, -1).reshape_as(pred)
+    explicit_delta = output.get("flow_jepa_future_delta_pred")
+    pred_delta = (
+        explicit_delta.float()
+        if torch.is_tensor(explicit_delta)
+        else pred.float() - current_expanded.detach().float()
+    )
+    target_delta = target.detach().float() - current_expanded.detach().float()
+    selected = mask.to(device=pred.device, dtype=torch.bool)
+    target_strength = target_delta.norm(dim=-1).detach()
+    if balance_horizons:
+        pred_h, target_h, current_h, mask_h = _future_horizon_charts(output)
+        pred_delta_h = (
+            explicit_delta.float().reshape_as(pred_h)
+            if torch.is_tensor(explicit_delta)
+            else pred_h.float() - current_h.detach().float()
+        )
+        target_delta_h = target_h.detach().float() - current_h.detach().float()
+        selected_h = mask_h.to(device=pred.device, dtype=torch.float32)
+        strength_h = target_delta_h.norm(dim=-1).detach()
+        weights_h = selected_h * strength_h
+        denominator_h = weights_h.sum(dim=(0, 2))
+        selected_count_h = selected_h.sum(dim=(0, 2)).clamp_min(1.0)
+        delta_scale_h = (denominator_h / selected_count_h).detach().clamp_min(1e-3)
+        direction_h = 1.0 - (
+            F.normalize(pred_delta_h, dim=-1)
+            * F.normalize(target_delta_h, dim=-1)
+        ).sum(dim=-1)
+        scale = delta_scale_h[None, :, None, None]
+        delta_match_h = F.smooth_l1_loss(
+            pred_delta_h / scale,
+            target_delta_h / scale,
+            reduction="none",
+        ).mean(dim=-1)
+        loss_h = (
+            (direction_h + 0.25 * delta_match_h) * weights_h
+        ).sum(dim=(0, 2)) / denominator_h.clamp_min(1e-12)
+        return _mean_valid_horizon_rows(loss_h, denominator_h)
+    weights = selected.float() * target_strength
+    denominator = weights.sum().clamp_min(1e-12)
+    direction = 1.0 - (
+        F.normalize(pred_delta, dim=-1) * F.normalize(target_delta, dim=-1)
+    ).sum(dim=-1)
+    selected_count = selected.float().sum().clamp_min(1.0)
+    delta_scale = (weights.sum() / selected_count).detach().clamp_min(1e-3)
+    delta_match = F.smooth_l1_loss(
+        pred_delta / delta_scale,
+        target_delta / delta_scale,
+        reduction="none",
+    ).mean(dim=-1)
+    return ((direction + 0.25 * delta_match) * weights).sum() / denominator
+
+
+def flow_jepa_future_horizon_diagnostics(
+    output: dict[str, Tensor],
+) -> dict[int, Tensor]:
+    """Expose masked JEPA quality at each real frame offset.
+
+    These values are diagnostics only.  In ``per_horizon`` mode the training
+    objective averages the same real horizons equally; legacy/global runs
+    retain the historical token-count aggregate.
+    """
+
+    pred = output.get("flow_jepa_future_pred")
+    target = output.get("flow_jepa_future_target")
+    mask = output.get("flow_jepa_future_target_mask")
+    offsets = output.get("flow_jepa_future_offsets")
+    if not all(torch.is_tensor(value) for value in (pred, target, mask)):
+        return {}
+    if not isinstance(offsets, (tuple, list)) or not offsets:
+        return {}
+    if pred.ndim != 3 or tuple(pred.shape) != tuple(target.shape):
+        raise ValueError("per-horizon JEPA diagnostics require aligned [B,N,H] tensors")
+    horizon_count = len(offsets)
+    if int(pred.shape[1]) % horizon_count:
+        raise ValueError("future token count must divide evenly across real horizon offsets")
+    tokens = int(pred.shape[1]) // horizon_count
+    pred_h = pred.float().reshape(int(pred.shape[0]), horizon_count, tokens, int(pred.shape[2]))
+    target_h = target.detach().float().reshape_as(pred_h)
+    explicit_delta = output.get("flow_jepa_future_delta_pred")
+    if torch.is_tensor(explicit_delta):
+        current = output.get("flow_jepa_current_target")
+        if not torch.is_tensor(current):
+            raise ValueError(
+                "predictive-change diagnostics require a current teacher chart"
+            )
+        if int(current.shape[1]) != tokens:
+            raise ValueError("current teacher chart does not align with horizon tokens")
+        current_h = current.detach().float()[:, None].expand(
+            -1, horizon_count, -1, -1
+        )
+        pred_h = explicit_delta.float().reshape_as(pred_h)
+        target_h = target_h - current_h
+    mask_h = mask.to(device=pred.device, dtype=torch.bool).reshape(
+        int(pred.shape[0]), horizon_count, tokens
+    )
+    rows: dict[int, Tensor] = {}
+    for index, offset in enumerate(offsets):
+        weight = mask_h[:, index].float()
+        denominator = weight.sum().clamp_min(1.0)
+        smooth_rows = F.smooth_l1_loss(
+            pred_h[:, index], target_h[:, index], reduction="none"
+        ).mean(dim=-1)
+        cosine_rows = 1.0 - (
+            F.normalize(pred_h[:, index], dim=-1)
+            * F.normalize(target_h[:, index], dim=-1)
+        ).sum(dim=-1)
+        smooth = (smooth_rows * weight).sum() / denominator
+        cosine = (cosine_rows * weight).sum() / denominator
+        rows[int(offset)] = smooth + 0.10 * cosine
+    return rows
+
+
+def _flow_jepa_balance_horizons(trainer: V39PolicyTrainerConfig) -> bool:
+    mode = str(getattr(trainer, "flow_jepa_horizon_balance_mode", "global"))
+    mode = mode.strip().lower().replace("-", "_")
+    if mode not in {"global", "per_horizon"}:
+        raise ValueError(
+            "flow_jepa_horizon_balance_mode must be 'global' or 'per_horizon', "
+            f"got {mode!r}"
+        )
+    return mode == "per_horizon"
+
+
+def _flow_jepa_uses_reliable_normalization(
+    trainer: V39PolicyTrainerConfig,
+) -> bool:
+    value = int(
+        getattr(trainer, "flow_jepa_future_reliable_normalization", 0)
+    )
+    if value not in (0, 1):
+        raise ValueError(
+            "flow_jepa_future_reliable_normalization must be 0 or 1"
+        )
+    return bool(value)
+
+
+def flow_jepa_stage_prediction_loss(output: dict[str, Tensor]) -> Tensor:
+    """Coarse far-horizon DINO-delta prediction without static-delta amplification."""
+
+    pred = output.get("flow_jepa_stage_pred")
+    target = output.get("flow_jepa_stage_target")
+    if not all(torch.is_tensor(value) for value in (pred, target)):
+        reference = output["pred_physical_velocity"]
+        return torch.zeros((), device=reference.device, dtype=reference.dtype)
+    if pred.ndim != 3 or tuple(pred.shape) != tuple(target.shape) or int(pred.shape[1]) != 1:
+        raise ValueError("Flow-DINO stage prediction and target must align as [B,1,H]")
+    pred_f = pred.float()
+    target_f = target.detach().float()
+    smooth = F.smooth_l1_loss(pred_f, target_f)
+    target_norm = target_f.norm(dim=-1)
+    informative = target_norm > 1e-3
+    if bool(informative.any()):
+        cosine_rows = 1.0 - (
+            F.normalize(pred_f, dim=-1) * F.normalize(target_f, dim=-1)
+        ).sum(dim=-1)
+        cosine = cosine_rows[informative].mean()
+    else:
+        cosine = smooth * 0.0
+    return smooth + 0.10 * cosine
+
+
+def flow_jepa_interval_stage_terms(
+    output: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    """Supervise one signed, spatial interval increment per W horizon.
+
+    The primary target is a least-squares temporal progression.  A weak
+    endpoint term prevents a transient sequence from matching the slope while
+    missing the actual interval displacement.  Reliability uses the same
+    current-chart-relative floor as V105, so weak teacher jitter cannot regain
+    a scale-invariant gradient through normalization.
+    """
+
+    pred = output.get("flow_jepa_interval_progress_pred")
+    target = output.get("flow_jepa_interval_progress_target")
+    endpoint = output.get("flow_jepa_interval_endpoint_target")
+    current = output.get("flow_jepa_current_target")
+    mask = output.get("flow_jepa_future_target_mask")
+    if not all(
+        torch.is_tensor(value)
+        for value in (pred, target, endpoint, current, mask)
+    ):
+        reference = output["pred_physical_velocity"]
+        zero = reference.float().sum() * 0.0
+        return {"flow_jepa_interval_stage": zero}
+    if (
+        pred.ndim != 3
+        or tuple(pred.shape) != tuple(target.shape)
+        or tuple(pred.shape) != tuple(endpoint.shape)
+        or tuple(mask.shape) != tuple(pred.shape[:2])
+    ):
+        raise ValueError(
+            "interval progression prediction/targets/mask must align as "
+            "[B,A*N,H]/[B,A*N]"
+        )
+    batch, tokens, hidden = pred.shape
+    if current.ndim != 3 or int(current.shape[0]) != batch or int(
+        current.shape[-1]
+    ) != hidden:
+        raise ValueError("interval current teacher chart has invalid geometry")
+    per_horizon = int(current.shape[1])
+    if tokens % per_horizon:
+        raise ValueError("interval token count must divide by the current chart")
+    anchors = tokens // per_horizon
+    pred_h = pred.float().reshape(batch, anchors, per_horizon, hidden)
+    target_h = target.detach().float().reshape_as(pred_h)
+    endpoint_h = endpoint.detach().float().reshape_as(pred_h)
+    current_h = current.detach().float()[:, None].expand(
+        -1, anchors, -1, -1
+    )
+    selected_h = mask.reshape(batch, anchors, per_horizon).to(
+        device=pred.device,
+        dtype=torch.float32,
+    )
+    (
+        counts_h,
+        target_scale_h,
+        _,
+        normalization_scale_h,
+        reliability_h,
+    ) = _future_change_weighting(
+        target_h,
+        current_h,
+        selected_h,
+        reliable_normalization=True,
+    )
+    raw_rows = F.smooth_l1_loss(
+        pred_h,
+        target_h,
+        reduction="none",
+    ).mean(dim=-1)
+    normalized_rows = F.smooth_l1_loss(
+        pred_h / normalization_scale_h[None, :, None, None],
+        target_h / normalization_scale_h[None, :, None, None],
+        reduction="none",
+    ).mean(dim=-1)
+    endpoint_rows = F.smooth_l1_loss(
+        pred_h,
+        endpoint_h,
+        reduction="none",
+    ).mean(dim=-1)
+    reliability_weight = selected_h * reliability_h
+    raw_h = (raw_rows * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    normalized_h = (
+        normalized_rows * reliability_weight
+    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    endpoint_h_loss = (
+        endpoint_rows * selected_h
+    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    # The interval organizer is deliberately initialized near zero.  A plain
+    # cosine/F.normalize objective would therefore have a 1/||prediction||
+    # backward singularity and could recreate the V105 address-gradient
+    # explosion in a new loss term.  Use the frozen teacher normalization
+    # scale as a smooth denominator floor.  The loss still rewards signed
+    # alignment, while its Jacobian stays bounded at a zero prediction.
+    direction_rows, direction_floor_h = _scale_floored_direction_rows(
+        pred_h,
+        target_h,
+        normalization_scale_h,
+    )
+    direction_h = (
+        direction_rows * reliability_weight
+    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    loss_h = (
+        raw_h
+        + normalized_h
+        + 0.10 * direction_h
+        + 0.25 * endpoint_h_loss
+    )
+    loss = _mean_valid_horizon_rows(loss_h, counts_h)
+    reliability_mean_h = reliability_weight.sum(
+        dim=(0, 2)
+    ) / counts_h.clamp_min(1.0)
+    result = {
+        "flow_jepa_interval_stage": loss,
+        "flow_jepa_interval_stage_raw": raw_h.mean().detach(),
+        "flow_jepa_interval_stage_normalized": normalized_h.mean().detach(),
+        "flow_jepa_interval_stage_direction": direction_h.mean().detach(),
+        "flow_jepa_interval_stage_endpoint": endpoint_h_loss.mean().detach(),
+        "flow_jepa_interval_stage_target_scale": target_scale_h.mean().detach(),
+        "flow_jepa_interval_stage_reliability": reliability_mean_h.mean().detach(),
+        "flow_jepa_interval_stage_direction_floor_min": (
+            direction_floor_h.amin().detach()
+        ),
+    }
+    offsets = tuple(
+        int(value) for value in output.get("flow_jepa_future_offsets", ())
+    )
+    if len(offsets) == anchors:
+        for index, offset in enumerate(offsets):
+            result[f"flow_jepa_interval_stage_horizon_{offset}_loss"] = (
+                loss_h[index].detach()
+            )
+            result[
+                f"flow_jepa_interval_stage_horizon_{offset}_target_scale"
+            ] = target_scale_h[index].detach()
+            result[
+                f"flow_jepa_interval_stage_horizon_{offset}_reliability"
+            ] = reliability_mean_h[index].detach()
+    return result
+
+
+def flow_jepa_stage1_losses(
+    output: dict[str, Tensor],
+    trainer: V39PolicyTrainerConfig,
+    *,
+    enable_future_loss: bool = True,
+) -> dict[str, Tensor]:
+    """V95 Stage1 objective for the new top representation.
+
+    Stage1 must train the Flow-DINO/JEPA representation itself rather than the
+    historical layer-contract rollout surrogate.  The frozen future DINO
+    targets supervise the far stage and masked window predictions directly;
+    flow correspondence terms remain auxiliary geometry constraints.  No
+    deploy action or execution-controller loss is part of this objective.
+    """
+
+    if not enable_future_loss:
+        raise RuntimeError("V95 Stage1 requires frozen future targets on every training batch")
+
+    pred = output.get("flow_jepa_future_pred")
+    if not torch.is_tensor(pred):
+        raise RuntimeError("V95 Stage1 requires flow_jepa_future_pred")
+    total = pred.float().sum() * 0.0
+    losses: dict[str, Tensor] = {}
+    balance_horizons = _flow_jepa_balance_horizons(trainer)
+    losses["flow_jepa_horizon_balance_active"] = torch.as_tensor(
+        float(balance_horizons),
+        device=pred.device,
+    )
+    reliable_normalization = _flow_jepa_uses_reliable_normalization(trainer)
+    losses["flow_jepa_future_reliable_normalization"] = torch.as_tensor(
+        float(reliable_normalization),
+        device=pred.device,
+    )
+    for key, value in output.items():
+        if key.startswith("flow_jepa_") and torch.is_tensor(value) and value.numel() == 1:
+            losses[key] = value.detach().float().reshape(())
+
+    def add(name: str, value: Tensor, weight: float) -> None:
+        nonlocal total
+        effective_weight = max(float(weight), 0.0)
+        losses[name] = value.detach().float().reshape(())
+        contribution = effective_weight * value
+        losses[f"loss_contrib_{name}"] = contribution.detach().float().reshape(())
+        if enable_future_loss and effective_weight > 0.0:
+            total = total + contribution
+
+    add(
+        "flow_jepa_future_prediction",
+        flow_jepa_future_prediction_loss(
+            output,
+            balance_horizons=balance_horizons,
+            reliable_normalization=reliable_normalization,
+        ),
+        float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)),
+    )
+    for key, value in flow_jepa_future_reliable_diagnostics(output).items():
+        losses[key] = value.detach().float().reshape(())
+    address_weight = float(
+        getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)
+    )
+    losses["flow_jepa_horizon_address_supervision_active"] = torch.as_tensor(
+        float(address_weight > 0.0),
+        device=pred.device,
+    )
+    if address_weight > 0.0 and not all(
+        torch.is_tensor(output.get(name))
+        for name in (
+            "flow_jepa_horizon_address_logits",
+            "flow_jepa_future_target",
+            "flow_jepa_current_target",
+        )
+    ):
+        raise RuntimeError(
+            "active horizon-address supervision requires forward logits and "
+            "current/future frozen teacher charts"
+        )
+    address_terms = _flow_jepa_horizon_address_terms(output)
+    for key, value in address_terms.items():
+        if key != "flow_jepa_horizon_address":
+            losses[key] = value.detach().float().reshape(())
+    add(
+        "flow_jepa_horizon_address",
+        address_terms["flow_jepa_horizon_address"],
+        address_weight,
+    )
+    interval_terms = flow_jepa_interval_stage_terms(output)
+    for key, value in interval_terms.items():
+        if key != "flow_jepa_interval_stage":
+            losses[key] = value.detach().float().reshape(())
+    add(
+        "flow_jepa_interval_stage",
+        interval_terms["flow_jepa_interval_stage"],
+        float(
+            getattr(
+                trainer,
+                "flow_jepa_interval_stage_loss_weight",
+                0.0,
+            )
+        ),
+    )
+    future_change_weight = float(
+        getattr(trainer, "flow_jepa_future_change_loss_weight", 0.0)
+    )
+    if future_change_weight > 0.0 and not all(
+        torch.is_tensor(output.get(name))
+        for name in (
+            "flow_jepa_future_pred",
+            "flow_jepa_future_target",
+            "flow_jepa_current_target",
+            "flow_jepa_future_target_mask",
+        )
+    ):
+        raise RuntimeError("active future-change supervision requires current/future JEPA charts")
+    add(
+        "flow_jepa_future_change",
+        flow_jepa_future_change_loss(output, balance_horizons=balance_horizons),
+        future_change_weight,
+    )
+    for offset, value in flow_jepa_future_horizon_diagnostics(output).items():
+        losses[f"flow_jepa_future_horizon_{offset}"] = value.detach().float().reshape(())
+    losses["flow_jepa_future_change_direction"] = (
+        flow_jepa_future_change_direction_loss(
+            output,
+            balance_horizons=balance_horizons,
+        )
+        .detach()
+        .float()
+        .reshape(())
+    )
+    add(
+        "flow_jepa_stage_prediction",
+        flow_jepa_stage_prediction_loss(output),
+        float(getattr(trainer, "flow_jepa_stage_loss_weight", 0.0)),
+    )
+    for loss_name, weight_name in (
+        ("flow_jepa_warp_loss", "flow_jepa_warp_loss_weight"),
+        ("flow_jepa_cycle_loss", "flow_jepa_cycle_loss_weight"),
+        ("flow_jepa_smoothness_loss", "flow_jepa_smoothness_loss_weight"),
+        ("flow_jepa_uncertainty_nll", "flow_jepa_uncertainty_nll_weight"),
+        (
+            "flow_jepa_refinement_sequence_loss",
+            "flow_jepa_refinement_sequence_loss_weight",
+        ),
+    ):
+        value = output.get(loss_name)
+        if not torch.is_tensor(value) or value.numel() != 1:
+            raise RuntimeError(f"V95 Stage1 did not expose {loss_name}")
+        add(loss_name, value, float(getattr(trainer, weight_name, 0.0)))
+    identity_weight = float(
+        getattr(trainer, "flow_jepa_identity_advantage_loss_weight", 0.0)
+    )
+    identity_value = output.get("flow_jepa_identity_advantage_loss")
+    if torch.is_tensor(identity_value) and identity_value.numel() == 1:
+        add("flow_jepa_identity_advantage_loss", identity_value, identity_weight)
+    elif identity_weight > 0.0:
+        raise RuntimeError(
+            "identity-advantage supervision requires raw-image zero-flow guard output"
+        )
+    static_identity_weight = float(
+        getattr(trainer, "flow_jepa_static_identity_loss_weight", 0.0)
+    )
+    static_identity_value = output.get("flow_jepa_static_identity_loss")
+    if torch.is_tensor(static_identity_value) and static_identity_value.numel() == 1:
+        add(
+            "flow_jepa_static_identity_loss",
+            static_identity_value,
+            static_identity_weight,
+        )
+    elif static_identity_weight > 0.0:
+        raise RuntimeError(
+            "static-identity supervision requires raw-image zero-flow guard output"
+        )
+
+    if torch.is_grad_enabled() and not total.requires_grad:
+        raise RuntimeError("V95 Stage1 objective has no active differentiable term")
+    losses["loss"] = total
+    losses["loss_group_representation"] = total.detach().float().reshape(())
+    losses["loss_ledger_sum"] = total.detach().float().reshape(())
+    losses["loss_ledger_residual"] = total.detach().float().reshape(()) - losses[
+        "loss_ledger_sum"
+    ]
+    losses["flow_jepa_stage1_objective"] = torch.ones_like(
+        losses["loss_group_representation"]
+    )
+    return losses
 
 
 def rollout_dynamics_loss(output: dict[str, Tensor]) -> Tensor:
@@ -1263,13 +2686,186 @@ def flow_losses(
     global_step: int | None = None,
 ) -> dict[str, Tensor]:
     losses = v363_flow_losses(system, sample, output, trainer)  # type: ignore[arg-type]
+    balance_horizons = _flow_jepa_balance_horizons(trainer)
+    temporal_balance_active = bool(
+        balance_horizons
+        or str(getattr(trainer, "horizon_weight_mode", "legacy"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        != "legacy"
+        or float(getattr(trainer, "trajectory_information_weight", 0.0)) > 0.0
+    )
+    reference = losses["loss"]
+    losses["flow_jepa_horizon_balance_active"] = torch.as_tensor(
+        float(balance_horizons),
+        device=reference.device,
+    )
+    reliable_normalization = _flow_jepa_uses_reliable_normalization(trainer)
+    losses["flow_jepa_future_reliable_normalization"] = torch.as_tensor(
+        float(reliable_normalization),
+        device=reference.device,
+    )
+    losses["temporal_balance_active"] = torch.as_tensor(
+        float(temporal_balance_active),
+        device=reference.device,
+    )
     for key, value in output.items():
         if (
-            (key.startswith("arm_source_") or key.startswith("evidence_"))
+            (
+                key.startswith("arm_source_")
+                or key.startswith("condition_")
+                or key.startswith("evidence_")
+                or key.startswith("flow_jepa_")
+                or key.startswith("role_")
+                or key.startswith("attnres_")
+            )
             and torch.is_tensor(value)
             and value.numel() == 1
         ):
             losses[key] = value.detach().float().reshape(())
+    if "flow_jepa_future_pred" in output:
+        future_jepa = flow_jepa_future_prediction_loss(
+            output,
+            balance_horizons=balance_horizons,
+            reliable_normalization=reliable_normalization,
+        )
+        losses["flow_jepa_future_prediction"] = future_jepa.detach().float()
+        losses["flow_jepa_future_change_direction"] = (
+            flow_jepa_future_change_direction_loss(
+                output,
+                balance_horizons=balance_horizons,
+            )
+            .detach()
+            .float()
+        )
+        future_change = flow_jepa_future_change_loss(
+            output,
+            balance_horizons=balance_horizons,
+        )
+        losses["flow_jepa_future_change"] = future_change.detach().float()
+        for offset, value in flow_jepa_future_horizon_diagnostics(output).items():
+            losses[f"flow_jepa_future_horizon_{offset}"] = value.detach().float().reshape(())
+        for key, value in flow_jepa_future_reliable_diagnostics(output).items():
+            losses[key] = value.detach().float().reshape(())
+        future_weight = max(float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)), 0.0)
+        future_contribution = future_weight * future_jepa
+        losses["loss_contrib_flow_jepa_future"] = future_contribution.detach().float()
+        if enable_future_loss and future_weight > 0.0:
+            losses["loss"] = losses["loss"] + future_contribution
+        future_change_weight = max(
+            float(getattr(trainer, "flow_jepa_future_change_loss_weight", 0.0)),
+            0.0,
+        )
+        if future_change_weight > 0.0 and not torch.is_tensor(
+            output.get("flow_jepa_current_target")
+        ):
+            raise RuntimeError(
+                "active future-change supervision requires the current JEPA teacher chart"
+            )
+        future_change_contribution = future_change_weight * future_change
+        losses["loss_contrib_flow_jepa_future_change"] = (
+            future_change_contribution.detach().float()
+        )
+        if enable_future_loss and future_change_weight > 0.0:
+            losses["loss"] = losses["loss"] + future_change_contribution
+        address_weight = max(
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_horizon_address_loss_weight",
+                    0.0,
+                )
+            ),
+            0.0,
+        )
+        losses["flow_jepa_horizon_address_supervision_active"] = torch.as_tensor(
+            float(address_weight > 0.0),
+            device=reference.device,
+        )
+        if address_weight > 0.0 and not all(
+            torch.is_tensor(output.get(name))
+            for name in (
+                "flow_jepa_horizon_address_logits",
+                "flow_jepa_future_target",
+                "flow_jepa_current_target",
+            )
+        ):
+            raise RuntimeError(
+                "active horizon-address supervision requires forward logits "
+                "and current/future frozen teacher charts"
+            )
+        address_terms = _flow_jepa_horizon_address_terms(output)
+        address_loss = address_terms["flow_jepa_horizon_address"]
+        losses["flow_jepa_horizon_address"] = address_loss.detach().float()
+        for key, value in address_terms.items():
+            if key != "flow_jepa_horizon_address":
+                losses[key] = value.detach().float().reshape(())
+        address_contribution = address_weight * address_loss
+        losses["loss_contrib_flow_jepa_horizon_address"] = (
+            address_contribution.detach().float()
+        )
+        if enable_future_loss and address_weight > 0.0:
+            losses["loss"] = losses["loss"] + address_contribution
+        interval_terms = flow_jepa_interval_stage_terms(output)
+        interval_loss = interval_terms["flow_jepa_interval_stage"]
+        for key, value in interval_terms.items():
+            losses[key] = value.detach().float().reshape(())
+        interval_weight = max(
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_interval_stage_loss_weight",
+                    0.0,
+                )
+            ),
+            0.0,
+        )
+        interval_contribution = interval_weight * interval_loss
+        losses["loss_contrib_flow_jepa_interval_stage"] = (
+            interval_contribution.detach().float()
+        )
+        if enable_future_loss and interval_weight > 0.0:
+            losses["loss"] = losses["loss"] + interval_contribution
+        stage_jepa = flow_jepa_stage_prediction_loss(output)
+        losses["flow_jepa_stage_prediction"] = stage_jepa.detach().float()
+        stage_weight = max(float(getattr(trainer, "flow_jepa_stage_loss_weight", 0.0)), 0.0)
+        stage_contribution = stage_weight * stage_jepa
+        losses["loss_contrib_flow_jepa_stage"] = stage_contribution.detach().float()
+        if enable_future_loss and stage_weight > 0.0:
+            losses["loss"] = losses["loss"] + stage_contribution
+        auxiliary_terms = (
+            ("flow_jepa_warp_loss", "flow_jepa_warp_loss_weight"),
+            (
+                "flow_jepa_identity_advantage_loss",
+                "flow_jepa_identity_advantage_loss_weight",
+            ),
+            (
+                "flow_jepa_static_identity_loss",
+                "flow_jepa_static_identity_loss_weight",
+            ),
+            ("flow_jepa_cycle_loss", "flow_jepa_cycle_loss_weight"),
+            ("flow_jepa_smoothness_loss", "flow_jepa_smoothness_loss_weight"),
+            ("flow_jepa_uncertainty_nll", "flow_jepa_uncertainty_nll_weight"),
+            (
+                "flow_jepa_refinement_sequence_loss",
+                "flow_jepa_refinement_sequence_loss_weight",
+            ),
+        )
+        for loss_name, weight_name in auxiliary_terms:
+            term = output.get(loss_name)
+            weight = max(float(getattr(trainer, weight_name, 0.0)), 0.0)
+            if not torch.is_tensor(term) or term.numel() != 1:
+                if loss_name in {
+                    "flow_jepa_identity_advantage_loss",
+                    "flow_jepa_static_identity_loss",
+                } and weight <= 0.0:
+                    continue
+                raise RuntimeError(f"enabled Flow-DINO path did not expose {loss_name}")
+            contribution = weight * term
+            losses[f"loss_contrib_{loss_name}"] = contribution.detach().float().reshape(())
+            if weight > 0.0:
+                losses["loss"] = losses["loss"] + contribution
     execution_cost = output.get("evidence_mmd_it_execution_cost")
     if torch.is_tensor(execution_cost) and execution_cost.numel() == 1:
         # The native controller exposes this as an audit-only statistic.  It
@@ -2676,6 +4272,93 @@ def _uses_layer_adapter_contract(trainer: V39PolicyTrainerConfig) -> bool:
     raise ValueError(f"unknown contract_mode: {trainer.contract_mode!r}")
 
 
+def _needs_future_targets(trainer: V39PolicyTrainerConfig, epoch: int) -> bool:
+    """Whether this epoch has an active objective that reads future observations."""
+
+    if epoch < int(trainer.future_latent_loss_start_epoch):
+        return False
+    direct_weights = (
+        "flow_jepa_future_loss_weight",
+        "flow_jepa_future_change_loss_weight",
+        "flow_jepa_horizon_address_loss_weight",
+        "flow_jepa_interval_stage_loss_weight",
+        "flow_jepa_stage_loss_weight",
+        "rollout_dynamics_loss_weight",
+        "rollout_delta_loss_weight",
+        "rollout_contrast_loss_weight",
+        "rollout_variance_loss_weight",
+        "rollout_norm_loss_weight",
+        "rollout_milestone_delta_match_weight",
+        "future_latent_loss_weight",
+        "action_effect_loss_weight",
+    )
+    if any(float(getattr(trainer, name, 0.0)) > 0.0 for name in direct_weights):
+        return True
+    layer_mode = _uses_layer_adapter_contract(trainer)
+    contract_stage = _is_contract_stage(trainer)
+    if contract_stage and layer_mode:
+        return any(
+            float(getattr(trainer, name, 0.0)) > 0.0
+            for name in (
+                "layer_latent_loss_weight",
+                "layer_contrast_loss_weight",
+                "layer_variance_loss_weight",
+                "layer_norm_loss_weight",
+                "layer_delta_match_loss_weight",
+            )
+        )
+    if contract_stage:
+        return False
+    aux_scale = (
+        _layer_contract_aux_scale(trainer, epoch)
+        if layer_mode
+        else _midcut_aux_scale(trainer, epoch)
+    )
+    if aux_scale <= 0.0:
+        return False
+    names = (
+        (
+            "layer_latent_loss_weight",
+            "layer_contrast_loss_weight",
+            "layer_variance_loss_weight",
+            "layer_norm_loss_weight",
+            "layer_delta_match_loss_weight",
+        )
+        if layer_mode
+        else (
+            "midcut_rollout_dynamics_loss_weight",
+            "midcut_rollout_delta_loss_weight",
+            "midcut_rollout_contrast_loss_weight",
+        )
+    )
+    return any(float(getattr(trainer, name, 0.0)) > 0.0 for name in names)
+
+
+def _needs_action_counterfactuals(trainer: V39PolicyTrainerConfig, epoch: int) -> bool:
+    """Whether hold/shuffle predictions contribute to this epoch's backward scalar."""
+
+    if epoch < int(trainer.future_latent_loss_start_epoch):
+        return False
+    if float(getattr(trainer, "rollout_contrast_loss_weight", 0.0)) > 0.0:
+        return True
+    layer_mode = _uses_layer_adapter_contract(trainer)
+    contract_stage = _is_contract_stage(trainer)
+    if contract_stage:
+        return bool(
+            layer_mode
+            and float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0.0
+        )
+    if layer_mode:
+        return bool(
+            _layer_contract_aux_scale(trainer, epoch) > 0.0
+            and float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0.0
+        )
+    return bool(
+        _midcut_aux_scale(trainer, epoch) > 0.0
+        and float(getattr(trainer, "midcut_rollout_contrast_loss_weight", 0.0)) > 0.0
+    )
+
+
 def _layer_contract_weight(index: int, count: int) -> float:
     if count <= 1:
         return 1.0
@@ -2970,6 +4653,81 @@ def motion_head_metrics(
 
 
 @torch.no_grad()
+def evaluate_flow_jepa_stage1(
+    *,
+    system: V39PolicySystem,
+    loader: DataLoader,
+    conditioner: RDT2Conditioner,
+    device: torch.device,
+    dtype: torch.dtype,
+    camera_names: Sequence[str],
+    trainer: V39PolicyTrainerConfig,
+    max_batches: int = 0,
+    memory_reporter: CudaMemoryReporter | None = None,
+    epoch: int | None = None,
+    global_step: int | None = None,
+) -> dict[str, float]:
+    """Teacher-forced validation for the new V95 representation Stage1.
+
+    A Stage1 checkpoint is selected only by its frozen-DINO representation
+    objective.  Deploy action sampling belongs to Stage2 and would evaluate a
+    deliberately untrained final decoder here.
+    """
+
+    system.eval()
+    sums: dict[str, float] = {}
+    count = 0
+    for batch_index, batch in enumerate(loader, start=1):
+        if max_batches and batch_index > int(max_batches):
+            break
+        report_mem = memory_reporter is not None and memory_reporter.should_report(batch_index)
+        if report_mem:
+            memory_reporter.reset_peak()
+        sample = prepare_v39_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+            include_target_visual=True,
+        )
+        with autocast_context(device, dtype):
+            output = system.flow_jepa_stage1_forward(
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                sample["target_visual"],
+                raw_visual=sample.get("raw_visual"),
+            )
+            losses = flow_jepa_stage1_losses(output, trainer, enable_future_loss=True)
+        for key, value in losses.items():
+            if torch.is_tensor(value) and value.numel() == 1:
+                sums[key] = sums.get(key, 0.0) + float(value.detach().float().cpu())
+        count += 1
+        if report_mem:
+            memory_reporter.snapshot(
+                tag="stage1_eval_batch_end",
+                phase="eval",
+                epoch=epoch,
+                batch=batch_index,
+                global_step=global_step,
+                print_line=True,
+            )
+    if count <= 0:
+        raise RuntimeError("V95 Stage1 validation loader produced no batches")
+    metrics = {key: value / float(count) for key, value in sums.items()}
+    metrics["eval_batches"] = float(count)
+    metrics["eval_representation_batches"] = float(count)
+    metrics["eval_representation_coverage"] = 1.0
+    metrics["eval_teacher_forced"] = 1.0
+    metrics["eval_uses_target_action"] = 0.0
+    metrics["flow_jepa_stage1_validation"] = 1.0
+    return metrics
+
+
+@torch.no_grad()
 def evaluate_v39_policy(
     *,
     system: V39PolicySystem,
@@ -3010,6 +4768,18 @@ def evaluate_v39_policy(
     eval_arm_noise_projection_sse = 0.0
     eval_arm_noise_projection_count = 0
     contract_eval = _is_contract_stage(trainer) and _uses_layer_adapter_contract(trainer)
+    representation_eval = bool(int(getattr(system.policy_config, "flow_jepa_enabled", 0))) and (
+        float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)) > 0.0
+        or float(
+            getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)
+        )
+        > 0.0
+        or float(
+            getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)
+        )
+        > 0.0
+        or float(getattr(trainer, "flow_jepa_stage_loss_weight", 0.0)) > 0.0
+    )
     contract_metric_sums: dict[str, float] = {}
     contract_metric_count = 0
     sampling_diagnostic_sums: dict[str, float] = {}
@@ -3019,6 +4789,7 @@ def evaluate_v39_policy(
     proposal_ablation_batches = 0
     proposal_ablation_samples = 0
     execution_ablation_batches = 0
+    representation_eval_batches = 0
     eval_started_at = time.perf_counter()
     primary_sample_seconds = 0.0
     proposal_ablation_seconds = 0.0
@@ -3046,6 +4817,11 @@ def evaluate_v39_policy(
     execution_ablation_indices = diagnostic_batch_indices(
         int(trainer.eval_execution_ablation_batches)
     )
+    representation_eval_indices = (
+        diagnostic_batch_indices(int(trainer.eval_representation_batches))
+        if representation_eval
+        else set()
+    )
     evidence_execution_decoder = getattr(
         system.planner, "evidence_latent_mmdit_action_decoder", None
     )
@@ -3065,6 +4841,7 @@ def evaluate_v39_policy(
             evidence_execution_decoder is not None
             and batch_index in execution_ablation_indices
         )
+        run_representation_eval = batch_index in representation_eval_indices
         report_mem = memory_reporter is not None and memory_reporter.should_report(batch_index)
         if report_mem:
             memory_reporter.reset_peak()
@@ -3083,7 +4860,7 @@ def evaluate_v39_policy(
             camera_names=camera_names,
             device=device,
             dtype=dtype,
-            include_target_visual=contract_eval,
+            include_target_visual=contract_eval or run_representation_eval,
         )
         if report_mem and memory_reporter.detail:
             memory_reporter.snapshot(
@@ -3124,6 +4901,7 @@ def evaluate_v39_policy(
                 sample["history_state"],
                 sample["executed_action_history"],
                 sample["state"],
+                raw_visual=sample.get("raw_visual"),
                 action_state=sample["action_state"],
                 steps=trainer.eval_inference_steps,
                 noise=noise,
@@ -3181,6 +4959,7 @@ def evaluate_v39_policy(
                     sample["history_state"],
                     sample["executed_action_history"],
                     sample["state"],
+                    raw_visual=sample.get("raw_visual"),
                     action_state=sample["action_state"],
                     steps=trainer.eval_inference_steps,
                     noise=noise,
@@ -3220,6 +4999,7 @@ def evaluate_v39_policy(
                             sample["history_state"],
                             sample["executed_action_history"],
                             sample["state"],
+                            raw_visual=sample.get("raw_visual"),
                             action_state=sample["action_state"],
                             steps=trainer.eval_inference_steps,
                             noise=noise,
@@ -3246,6 +5026,7 @@ def evaluate_v39_policy(
                         sample["executed_action_history"],
                         sample["state"],
                         sample["policy_action"],
+                        raw_visual=sample.get("raw_visual"),
                         action_state=sample["action_state"],
                         proposal_dropout=0.0,
                         make_counterfactuals=False,
@@ -3301,25 +5082,45 @@ def evaluate_v39_policy(
                 eval_arm_field_null_sse += float(pred_arm_null.float().square().sum().cpu())
                 eval_arm_field_energy += float(pred_arm.float().square().sum().cpu())
                 eval_arm_field_null_count += int(pred_arm_null.numel())
-            if contract_eval:
+            if contract_eval or run_representation_eval:
+                representation_eval_batches += int(representation_eval)
+                representation_time = torch.rand(
+                    int(sample["policy_action"].shape[0]),
+                    generator=generator,
+                    device=device,
+                    dtype=sample["policy_action"].dtype,
+                )
                 contract_output = system.flow_training_forward(
                     sample["visual"],
                     sample["history_state"],
                     sample["executed_action_history"],
                     sample["state"],
                     sample["policy_action"],
+                    raw_visual=sample.get("raw_visual"),
                     action_state=sample["action_state"],
                     target_visual=sample["target_visual"],
-                    make_counterfactuals=True,
+                    training_noise=noise,
+                    training_time=representation_time,
+                    proposal_keep=torch.ones_like(representation_time),
+                    make_counterfactuals=contract_eval,
                     stop_at_midcut=False,
                 )
-                contract_losses = layer_contract_losses(
-                    system,
-                    sample,
-                    contract_output,
-                    trainer,
-                    enable_future_loss=True,
-                )
+                if contract_eval:
+                    contract_losses = layer_contract_losses(
+                        system,
+                        sample,
+                        contract_output,
+                        trainer,
+                        enable_future_loss=True,
+                    )
+                else:
+                    contract_losses = flow_losses(
+                        system,
+                        sample,
+                        contract_output,
+                        trainer,
+                        enable_future_loss=True,
+                    )
         if report_mem and memory_reporter.detail:
             memory_reporter.snapshot(
                 tag="eval_after_sample",
@@ -3376,6 +5177,12 @@ def evaluate_v39_policy(
                 "rollout_delta",
                 "rollout_contrast",
                 "milestone_delta_match",
+                "flow_jepa_future_prediction",
+                "flow_jepa_stage_prediction",
+                "flow_jepa_stage_target_norm",
+                "flow_jepa_stage_prediction_norm",
+                "flow_jepa_stage_to_window_gate",
+                "flow_jepa_stage_to_window_update_norm",
             ):
                 value = contract_losses.get(key)
                 if torch.is_tensor(value):
@@ -3422,6 +5229,17 @@ def evaluate_v39_policy(
         if gripper_squared.shape[1] > 8
         else float("nan"),
     }
+    if int(getattr(system.policy_config, "flow_jepa_enabled", 0)):
+        band_start = 0
+        for band_end in system.policy_config.flow_jepa_action_offsets:
+            band_end = int(band_end)
+            if band_end <= band_start or band_end > int(squared.shape[1]):
+                continue
+            label = f"{band_start + 1}_{band_end}"
+            metrics[f"action_band_{label}_rmse"] = float(
+                np.sqrt(squared[:, band_start:band_end].mean())
+            )
+            band_start = band_end
     if no_proposal_rows:
         no_proposal = np.concatenate(no_proposal_rows)
         no_proposal_target = np.concatenate(no_proposal_target_rows)
@@ -3445,6 +5263,10 @@ def evaluate_v39_policy(
     metrics["eval_execution_ablation_batches"] = float(execution_ablation_batches)
     metrics["eval_execution_ablation_coverage"] = float(
         execution_ablation_batches / max(completed_batches, 1)
+    )
+    metrics["eval_representation_batches"] = float(representation_eval_batches)
+    metrics["eval_representation_coverage"] = float(
+        representation_eval_batches / max(completed_batches, 1)
     )
     if execution_ablation_target_rows:
         ablation_target = np.concatenate(execution_ablation_target_rows)
@@ -3541,10 +5363,2931 @@ def evaluate_v39_policy(
     if contract_metric_count:
         for key, value in contract_metric_sums.items():
             metrics[f"contract_{key}"] = value / float(contract_metric_count)
+            if key.startswith("flow_jepa_"):
+                metrics[key] = value / float(contract_metric_count)
     for key, value in sampling_diagnostic_sums.items():
         metrics[key] = value / float(max(sampling_diagnostic_counts.get(key, 0), 1))
     metrics["eval_sampling_diagnostic_count"] = float(len(sampling_diagnostic_sums))
     return metrics
+
+
+def _flow_address_action_metrics(
+    pred: np.ndarray,
+    target: np.ndarray,
+    current: np.ndarray,
+    *,
+    gripper_index: int,
+    gripper_event_threshold: float,
+    action_offsets: Sequence[int] | None = None,
+) -> dict[str, float]:
+    squared = (pred - target) ** 2
+    arm_squared = squared[..., :-1]
+    gripper_squared = squared[..., -1]
+    first_rmse = float(np.sqrt(squared[:, 0].mean()))
+    tail_rmse = (
+        float(np.sqrt(squared[:, 8:].mean()))
+        if squared.shape[1] > 8
+        else float("nan")
+    )
+    metrics = {
+        "full_rmse": float(np.sqrt(squared.mean())),
+        "first_rmse": first_rmse,
+        "first8_rmse": float(np.sqrt(squared[:, :8].mean())),
+        "tail_rmse": tail_rmse,
+        "tail_first_ratio": float(tail_rmse / max(first_rmse, 1e-8)),
+        "arm_full_rmse": float(np.sqrt(arm_squared.mean())),
+        "gripper_full_rmse": float(np.sqrt(gripper_squared.mean())),
+    }
+    if action_offsets is not None:
+        band_start = 0
+        for band_end in action_offsets:
+            band_end = int(band_end)
+            if band_end <= band_start or band_end > int(squared.shape[1]):
+                raise ValueError(
+                    "action intervention offsets must be increasing and within the horizon"
+                )
+            label = f"{band_start + 1}_{band_end}"
+            metrics[f"action_band_{label}_rmse"] = float(
+                np.sqrt(squared[:, band_start:band_end].mean())
+            )
+            band_start = band_end
+        if band_start != int(squared.shape[1]):
+            raise ValueError("action intervention offsets must end at action_horizon")
+    gripper = gripper_transition_metrics(
+        pred,
+        target,
+        current,
+        gripper_index=gripper_index,
+        threshold=gripper_event_threshold,
+        tolerance=2,
+    )
+    for key in (
+        "gripper_precision",
+        "gripper_recall",
+        "gripper_f1",
+        "gripper_pred_events",
+        "gripper_target_events",
+    ):
+        metrics[key] = float(gripper[key])
+    return metrics
+
+
+def _paired_bootstrap_interval(
+    values: np.ndarray,
+    *,
+    seed: int,
+    reps: int,
+) -> dict[str, float | int]:
+    flat = np.asarray(values, dtype=np.float64).reshape(-1)
+    if flat.size == 0:
+        raise ValueError("paired bootstrap requires at least one sample")
+    if reps < 1000:
+        raise ValueError("paired bootstrap requires at least 1000 resamples")
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, flat.size, size=(reps, flat.size))
+    means = flat[indices].mean(axis=1)
+    lo, hi = np.quantile(means, (0.025, 0.975))
+    return {
+        "mean": float(flat.mean()),
+        "ci95_low": float(lo),
+        "ci95_high": float(hi),
+        "samples": int(flat.size),
+        "bootstrap_reps": int(reps),
+        "seed": int(seed),
+    }
+
+
+def _paired_cluster_bootstrap_interval(
+    values: np.ndarray,
+    groups: np.ndarray,
+    *,
+    seed: int,
+    reps: int,
+) -> dict[str, float | int | str]:
+    """Paired interval with trajectory/episode, not window, as the IID unit."""
+
+    flat = np.asarray(values, dtype=np.float64).reshape(-1)
+    group_rows = np.asarray(groups).reshape(-1)
+    if flat.size == 0 or group_rows.shape != flat.shape:
+        raise ValueError("cluster bootstrap requires aligned non-empty values/groups")
+    if reps < 1000:
+        raise ValueError("cluster bootstrap requires at least 1000 resamples")
+    unique, inverse = np.unique(group_rows, return_inverse=True)
+    cluster_sums = np.bincount(inverse, weights=flat, minlength=len(unique))
+    cluster_counts = np.bincount(inverse, minlength=len(unique)).astype(np.float64)
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, len(unique), size=(reps, len(unique)))
+    means = cluster_sums[indices].sum(axis=1) / cluster_counts[indices].sum(axis=1)
+    lo, hi = np.quantile(means, (0.025, 0.975))
+    return {
+        "mean": float(flat.mean()),
+        "ci95_low": float(lo),
+        "ci95_high": float(hi),
+        "samples": int(flat.size),
+        "clusters": int(len(unique)),
+        "bootstrap_reps": int(reps),
+        "seed": int(seed),
+        "bootstrap_unit": "episode",
+    }
+
+
+@torch.no_grad()
+def evaluate_flow_address_intervention(
+    *,
+    system: V39PolicySystem,
+    loader: DataLoader,
+    conditioner: RDT2Conditioner,
+    device: torch.device,
+    dtype: torch.dtype,
+    camera_names: Sequence[str],
+    action_normalizer: ArrayNormalizer,
+    trainer: V39PolicyTrainerConfig,
+    intervention_batches: int,
+    max_batches: int = 0,
+    bootstrap_reps: int = 2000,
+    bootstrap_seed: int = 0,
+) -> dict[str, Any]:
+    """Paired action probe that changes raw-reader coordinates only.
+
+    This applies to V98 and all later anti-collapse contracts.  The shuffled
+    control is deliberately spatial rather than a one-sample batch roll, so
+    stride-1 neighbouring windows cannot provide an almost identical donor.
+    """
+
+    if intervention_batches <= 0:
+        raise ValueError("intervention_batches must be positive")
+    if not int(getattr(system.policy_config, "flow_jepa_raw_image_enabled", 0)):
+        raise ValueError("V98 flow-address probe requires raw-image Flow-JEPA")
+    encoder = getattr(system.planner, "flow_dino_evidence", None)
+    if encoder is None or not hasattr(encoder, "set_raw_address_eval_intervention"):
+        raise RuntimeError("Flow-DINO encoder lacks the transient address intervention")
+
+    planned_batches = len(loader)
+    if max_batches:
+        planned_batches = min(planned_batches, int(max_batches))
+    if planned_batches <= 0:
+        raise ValueError("validation loader is empty")
+    budget = min(int(intervention_batches), planned_batches)
+    if budget == 1:
+        selected_indices = {1 + (planned_batches - 1) // 2}
+    else:
+        selected_indices = {
+            1 + round(index * (planned_batches - 1) / float(budget - 1))
+            for index in range(budget)
+        }
+
+    system.eval()
+    predictions: dict[str, list[np.ndarray]] = {
+        mode: [] for mode in ("baseline", "zero", "shuffle")
+    }
+    target_rows: list[np.ndarray] = []
+    current_rows: list[np.ndarray] = []
+    episode_rows: list[np.ndarray] = []
+    representation_sums: dict[str, float] = {}
+    representation_weight = 0
+    finished_batches = 0
+    intervention_samples = 0
+    baseline_identity_max_abs_delta = 0.0
+    verified_ordinary_baseline = False
+    spatial_shuffle_fallback_batches = 0
+
+    for batch_index, batch in enumerate(loader, start=1):
+        if batch_index > planned_batches:
+            break
+        if batch_index not in selected_indices:
+            continue
+        sample = prepare_v39_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+            include_target_visual=False,
+        )
+        sample_count = int(sample["policy_action"].shape[0])
+        generator = torch.Generator(device=device)
+        generator.manual_seed(37237 + batch_index)
+        noise = system.codec.sample_noise(
+            sample_count,
+            generator=generator,
+            device=device,
+            dtype=sample["visual"].dtype,
+            action_state=sample["action_state"],
+        )
+        stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(
+            trainer
+        )
+
+        if not verified_ordinary_baseline:
+            encoder.clear_raw_address_eval_intervention()
+            with autocast_context(device, dtype):
+                ordinary = system.sample(
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    raw_visual=sample.get("raw_visual"),
+                    action_state=sample["action_state"],
+                    steps=trainer.eval_inference_steps,
+                    noise=noise,
+                    use_proposal=True,
+                    stop_at_midcut=stop_midcut_eval,
+                    collect_diagnostics=False,
+                )
+            if not torch.is_tensor(ordinary):
+                raise TypeError("ordinary V98 baseline did not return an action tensor")
+        else:
+            ordinary = None
+
+        for mode, output_name in (
+            ("none", "baseline"),
+            ("zero", "zero"),
+            ("spatial_shuffle", "shuffle"),
+        ):
+            encoder.set_raw_address_eval_intervention(mode)
+            try:
+                with autocast_context(device, dtype):
+                    action = system.sample(
+                        sample["visual"],
+                        sample["history_state"],
+                        sample["executed_action_history"],
+                        sample["state"],
+                        raw_visual=sample.get("raw_visual"),
+                        action_state=sample["action_state"],
+                        steps=trainer.eval_inference_steps,
+                        noise=noise,
+                        use_proposal=True,
+                        stop_at_midcut=stop_midcut_eval,
+                        collect_diagnostics=False,
+                    )
+                if not torch.is_tensor(action):
+                    raise TypeError("V98 address intervention did not return an action tensor")
+                reader_metrics = encoder.raw_address_eval_metrics()
+            finally:
+                encoder.clear_raw_address_eval_intervention()
+            if output_name == "baseline":
+                for key, value in reader_metrics.items():
+                    if key == "flow_jepa_raw_address_intervention_code":
+                        continue
+                    representation_sums[key] = (
+                        representation_sums.get(key, 0.0) + float(value) * sample_count
+                    )
+                representation_weight += sample_count
+            if mode == "spatial_shuffle" and reader_metrics.get(
+                "flow_jepa_raw_address_shuffle_spatial_fallback", 0.0
+            ) > 0.5:
+                spatial_shuffle_fallback_batches += 1
+            if ordinary is not None and output_name == "baseline":
+                baseline_identity_max_abs_delta = max(
+                    baseline_identity_max_abs_delta,
+                    float((ordinary - action).detach().float().abs().max().cpu()),
+                )
+                verified_ordinary_baseline = True
+            predictions[output_name].append(decode(action_normalizer, action))
+
+        target_rows.append(sample["policy_action_raw"].cpu().numpy())
+        current_rows.append(sample["state_raw"].cpu().numpy())
+        episode = batch.get("episode_idx")
+        if not torch.is_tensor(episode) or int(episode.numel()) != sample_count:
+            raise ValueError("flow-address probe requires one episode_idx per sample")
+        episode_rows.append(episode.detach().cpu().numpy().reshape(-1))
+        finished_batches += 1
+        intervention_samples += sample_count
+
+    if finished_batches != len(selected_indices):
+        raise RuntimeError(
+            "flow-address probe finished "
+            f"{finished_batches}/{len(selected_indices)} selected batches"
+        )
+    target = np.concatenate(target_rows)
+    current = np.concatenate(current_rows)
+    episode_ids = np.concatenate(episode_rows)
+    joined = {mode: np.concatenate(rows) for mode, rows in predictions.items()}
+    mode_metrics = {
+        mode: _flow_address_action_metrics(
+            pred,
+            target,
+            current,
+            gripper_index=system.policy_config.gripper_index,
+            gripper_event_threshold=trainer.gripper_event_threshold,
+            action_offsets=system.policy_config.flow_jepa_action_offsets,
+        )
+        for mode, pred in joined.items()
+    }
+    baseline_sample_mse = ((joined["baseline"] - target) ** 2).mean(axis=(1, 2))
+    zero_sample_mse = ((joined["zero"] - target) ** 2).mean(axis=(1, 2))
+    shuffle_sample_mse = ((joined["shuffle"] - target) ** 2).mean(axis=(1, 2))
+    zero_delta = zero_sample_mse - baseline_sample_mse
+    shuffle_delta = shuffle_sample_mse - baseline_sample_mse
+    paired = {
+        "zero_action_delta_rmse": float(
+            np.sqrt(((joined["zero"] - joined["baseline"]) ** 2).mean())
+        ),
+        "shuffle_action_delta_rmse": float(
+            np.sqrt(((joined["shuffle"] - joined["baseline"]) ** 2).mean())
+        ),
+        "zero_mse_delta_vs_baseline": float(zero_delta.mean()),
+        "shuffle_mse_delta_vs_baseline": float(shuffle_delta.mean()),
+        "zero_relative_mse_delta": float(
+            zero_delta.mean() / max(float(baseline_sample_mse.mean()), 1e-12)
+        ),
+        "shuffle_relative_mse_delta": float(
+            shuffle_delta.mean() / max(float(baseline_sample_mse.mean()), 1e-12)
+        ),
+        "zero_mse_delta_ci": _paired_cluster_bootstrap_interval(
+            zero_delta,
+            episode_ids,
+            seed=bootstrap_seed,
+            reps=bootstrap_reps,
+        ),
+        "shuffle_mse_delta_ci": _paired_cluster_bootstrap_interval(
+            shuffle_delta,
+            episode_ids,
+            seed=bootstrap_seed + 1,
+            reps=bootstrap_reps,
+        ),
+        "per_sample_zero_mse_delta": zero_delta.astype(float).tolist(),
+        "per_sample_shuffle_mse_delta": shuffle_delta.astype(float).tolist(),
+    }
+    representation = {
+        key: value / float(max(representation_weight, 1))
+        for key, value in representation_sums.items()
+    }
+    if "flow_jepa_raw_seed_reliability" in representation:
+        representation["flow_jepa_seed_reliability"] = representation[
+            "flow_jepa_raw_seed_reliability"
+        ]
+    return {
+        "schema": "clearvla-flow-address-intervention-v2",
+        "planned_batches": int(planned_batches),
+        "selected_batch_indices": sorted(selected_indices),
+        "finished_intervention_batches": int(finished_batches),
+        "intervention_samples": int(intervention_samples),
+        "intervention_coverage": float(finished_batches / planned_batches),
+        "shuffle_spatial_fallback_batches": int(spatial_shuffle_fallback_batches),
+        "patched_baseline_max_abs_delta": float(baseline_identity_max_abs_delta),
+        "representation": representation,
+        "modes": mode_metrics,
+        "paired": paired,
+    }
+
+
+# Compatibility name used by the existing evaluation CLI and V98 research
+# scripts.  The implementation itself is version-agnostic from V98 onward.
+evaluate_v98_flow_address_intervention = evaluate_flow_address_intervention
+
+
+def _action_path_paired_metrics(
+    *,
+    joined: dict[str, np.ndarray],
+    target: np.ndarray,
+    episode_ids: np.ndarray,
+    action_offsets: Sequence[int],
+    bootstrap_reps: int,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    baseline = joined["baseline"]
+    baseline_sample_mse = ((baseline - target) ** 2).mean(axis=(1, 2))
+    rows: dict[str, Any] = {}
+    for mode_index, (mode, prediction) in enumerate(
+        (item for item in joined.items() if item[0] != "baseline")
+    ):
+        sample_mse = ((prediction - target) ** 2).mean(axis=(1, 2))
+        mse_delta = sample_mse - baseline_sample_mse
+        band_rows: dict[str, Any] = {}
+        band_start = 0
+        for band_index, band_end_value in enumerate(action_offsets):
+            band_end = int(band_end_value)
+            label = f"{band_start + 1}_{band_end}"
+            baseline_band_mse = (
+                (baseline[:, band_start:band_end] - target[:, band_start:band_end]) ** 2
+            ).mean(axis=(1, 2))
+            mode_band_mse = (
+                (prediction[:, band_start:band_end] - target[:, band_start:band_end]) ** 2
+            ).mean(axis=(1, 2))
+            band_delta = mode_band_mse - baseline_band_mse
+            band_rows[label] = {
+                "action_delta_rmse": float(
+                    np.sqrt(
+                        (
+                            (
+                                prediction[:, band_start:band_end]
+                                - baseline[:, band_start:band_end]
+                            )
+                            ** 2
+                        ).mean()
+                    )
+                ),
+                "mse_delta_vs_baseline": float(band_delta.mean()),
+                "relative_mse_delta": float(
+                    band_delta.mean()
+                    / max(float(baseline_band_mse.mean()), 1e-12)
+                ),
+                "mse_delta_ci": _paired_cluster_bootstrap_interval(
+                    band_delta,
+                    episode_ids,
+                    seed=bootstrap_seed + 100 * mode_index + band_index + 1,
+                    reps=bootstrap_reps,
+                ),
+            }
+            band_start = band_end
+        rows[mode] = {
+            "action_delta_rmse": float(np.sqrt(((prediction - baseline) ** 2).mean())),
+            "mse_delta_vs_baseline": float(mse_delta.mean()),
+            "relative_mse_delta": float(
+                mse_delta.mean() / max(float(baseline_sample_mse.mean()), 1e-12)
+            ),
+            "mse_delta_ci": _paired_cluster_bootstrap_interval(
+                mse_delta,
+                episode_ids,
+                seed=bootstrap_seed + 100 * mode_index,
+                reps=bootstrap_reps,
+            ),
+            "bands": band_rows,
+            "per_sample_mse_delta": mse_delta.astype(float).tolist(),
+        }
+    return rows
+
+
+def _model_path_acceptance_matrix(
+    *,
+    joined: dict[str, np.ndarray],
+    paired: dict[str, Any],
+    verification_counts: dict[str, int],
+    boundary_diagnostics: dict[str, dict[str, float]],
+    baseline_identity_max_abs_delta: float,
+    representation: dict[str, float] | None = None,
+    numerical_tolerance: float = 1e-8,
+) -> dict[str, Any]:
+    """Compile factual model-path gates without inventing a utility threshold."""
+
+    rows: dict[str, Any] = {}
+    for mode, paired_row in paired.items():
+        diagnostics = boundary_diagnostics.get(mode, {})
+        delta_components = {
+            key: float(value)
+            for key, value in diagnostics.items()
+            if "delta" in key and not key.endswith("_fallback")
+        }
+        boundary_delta_l2 = math.sqrt(
+            sum(value * value for value in delta_components.values())
+        )
+        interval = paired_row["mse_delta_ci"]
+        ci_low = float(interval["ci95_low"])
+        ci_high = float(interval["ci95_high"])
+        utility_direction = (
+            "ablation_harmful_path_helpful"
+            if ci_low > 0.0
+            else "ablation_helpful_path_harmful"
+            if ci_high < 0.0
+            else "inconclusive"
+        )
+        action_delta_rmse = float(paired_row["action_delta_rmse"])
+        rows[mode] = {
+            "boundary_verified_batches": int(verification_counts.get(mode, 0)),
+            "boundary_delta_l2": float(boundary_delta_l2),
+            "boundary_changed": bool(boundary_delta_l2 > numerical_tolerance),
+            "action_delta_rmse": action_delta_rmse,
+            "action_changed": bool(action_delta_rmse > numerical_tolerance),
+            "mse_delta_ci95_low": ci_low,
+            "mse_delta_ci95_high": ci_high,
+            "utility_direction": utility_direction,
+        }
+
+    def action_observed(modes: Sequence[str]) -> bool | None:
+        available = [rows[mode] for mode in modes if mode in rows]
+        if not available:
+            return None
+        return bool(any(row["action_changed"] for row in available))
+
+    def boundary_observed(modes: Sequence[str]) -> bool | None:
+        available = [rows[mode] for mode in modes if mode in rows]
+        if not available:
+            return None
+        return bool(any(row["boundary_changed"] for row in available))
+
+    far_pairwise: dict[str, float | bool] = {}
+    if {
+        "w2p_far_context_zero",
+        "bottom_far_rollout_zero",
+        "all_far_context_zero",
+    }.issubset(joined):
+        joint = joined["all_far_context_zero"]
+        typed_only = joined["w2p_far_context_zero"]
+        bottom_only = joined["bottom_far_rollout_zero"]
+        joint_vs_typed = float(np.sqrt(((joint - typed_only) ** 2).mean()))
+        joint_vs_bottom = float(np.sqrt(((joint - bottom_only) ** 2).mean()))
+        far_pairwise = {
+            "joint_vs_typed_only_action_delta_rmse": joint_vs_typed,
+            "joint_vs_bottom_only_action_delta_rmse": joint_vs_bottom,
+            "joint_distinguishable_from_each_single_path": bool(
+                joint_vs_typed > numerical_tolerance
+                and joint_vs_bottom > numerical_tolerance
+            ),
+        }
+
+    spatial_modes = (
+        "flow_zero",
+        "flow_episode_shuffle",
+        "flow_spatial_shuffle",
+        "dino_key_spatial_shuffle",
+        "source_raw_match_zero",
+        "source_raw_match_spatial_shuffle",
+        "joint_address_key_spatial_shuffle",
+        "address_posterior_uniform",
+        "world_address_query_zero",
+        "world_address_query_spatial_shuffle",
+        "future_transport_neutral",
+        "future_transport_spatial_shuffle",
+        "address_g1_zero",
+        "address_g1_episode_shuffle",
+        "address_g2_zero",
+        "address_g2_episode_shuffle",
+        "address_g3_zero",
+        "address_g3_episode_shuffle",
+    )
+    detail_modes = (
+        "raw_value_zero",
+        "raw_value_spatial_shuffle",
+        "literal_current_rgb_zero",
+        "literal_current_rgb_spatial_shuffle",
+        "protected_detail_zero",
+        "protected_detail_episode_shuffle",
+    )
+    representation = {} if representation is None else representation
+    slot_count = representation.get("flow_jepa_address_slot_count")
+    slot_center_distance = representation.get(
+        "flow_jepa_address_slot_pair_distance_normalized"
+    )
+    slot_posterior_distance = representation.get(
+        "flow_jepa_address_slot_posterior_hellinger"
+    )
+    slot_effective_count = representation.get(
+        "flow_jepa_address_policy_slot_effective_count"
+    )
+    slot_query_variation = representation.get(
+        "flow_jepa_address_policy_slot_query_variation"
+    )
+    slot_observed = all(
+        value is not None
+        for value in (
+            slot_count,
+            slot_center_distance,
+            slot_posterior_distance,
+            slot_effective_count,
+            slot_query_variation,
+        )
+    )
+    address_slot_structure = {
+        "observed": bool(slot_observed),
+        "configured_slot_count": (
+            None if slot_count is None else float(slot_count)
+        ),
+        "coarse_center_pair_distance_normalized": (
+            None
+            if slot_center_distance is None
+            else float(slot_center_distance)
+        ),
+        "coarse_posterior_pair_hellinger": (
+            None
+            if slot_posterior_distance is None
+            else float(slot_posterior_distance)
+        ),
+        "policy_slot_effective_count": (
+            None
+            if slot_effective_count is None
+            else float(slot_effective_count)
+        ),
+        "policy_slot_query_variation": (
+            None
+            if slot_query_variation is None
+            else float(slot_query_variation)
+        ),
+        # These are numerical-identity checks, not practical utility
+        # thresholds. They prevent a nominal M-slot tensor whose hypotheses
+        # are exact copies from being reported as a working multi-slot path.
+        "coarse_centers_numerically_distinct": (
+            None
+            if slot_center_distance is None
+            else bool(float(slot_center_distance) > numerical_tolerance)
+        ),
+        "coarse_posteriors_numerically_distinct": (
+            None
+            if slot_posterior_distance is None
+            else bool(float(slot_posterior_distance) > numerical_tolerance)
+        ),
+        "policy_uses_multiple_slots_numerically": (
+            None
+            if slot_effective_count is None
+            else bool(float(slot_effective_count) > 1.0 + numerical_tolerance)
+        ),
+        "policy_slot_route_varies_by_query": (
+            None
+            if slot_query_variation is None
+            else bool(float(slot_query_variation) > numerical_tolerance)
+        ),
+    }
+    typed_route_specs = {
+        "ground_to_world": {
+            "source_effective_count": (
+                "attnres_ground_to_world_source_effective_count"
+            ),
+            "anchor_route_std": (
+                "attnres_ground_to_world_anchor_route_std"
+            ),
+            "camera_route_std": (
+                "attnres_ground_to_world_camera_route_std"
+            ),
+        },
+        "world_to_policy": {
+            "source_effective_count": (
+                "attnres_world_to_policy_source_effective_count"
+            ),
+            "horizon_route_std": (
+                "attnres_world_to_policy_horizon_route_std"
+            ),
+            "basis_route_std": (
+                "attnres_world_to_policy_basis_route_std"
+            ),
+        },
+        "policy_to_mmdit": {
+            "source_effective_count": (
+                "evidence_policy_delta_attnres_source_effective_count"
+            ),
+            "horizon_route_std": (
+                "evidence_policy_delta_attnres_horizon_route_std"
+            ),
+        },
+        "protected_detail_basis": {
+            "source_effective_count": (
+                "evidence_protected_detail_basis_source_effective_count"
+            ),
+            "horizon_route_std": (
+                "evidence_protected_detail_basis_horizon_route_std"
+            ),
+        },
+    }
+    typed_route_structure: dict[str, Any] = {}
+    for route_name, fields in typed_route_specs.items():
+        observed_values = {
+            name: representation.get(metric_name)
+            for name, metric_name in fields.items()
+        }
+        observed = all(value is not None for value in observed_values.values())
+        axis_values = [
+            float(value)
+            for name, value in observed_values.items()
+            if name.endswith("_route_std") and value is not None
+        ]
+        effective_count = observed_values["source_effective_count"]
+        typed_route_structure[route_name] = {
+            "observed": bool(observed),
+            **{
+                name: None if value is None else float(value)
+                for name, value in observed_values.items()
+            },
+            "uses_multiple_sources_numerically": (
+                None
+                if effective_count is None
+                else bool(
+                    float(effective_count) > 1.0 + numerical_tolerance
+                )
+            ),
+            "query_axes_vary_numerically": (
+                None
+                if not axis_values
+                else bool(
+                    all(value > numerical_tolerance for value in axis_values)
+                )
+            ),
+        }
+    return {
+        "numerical_tolerance": float(numerical_tolerance),
+        "replay": {
+            "baseline_max_abs_delta": float(baseline_identity_max_abs_delta),
+            "numerically_identical": bool(
+                baseline_identity_max_abs_delta <= numerical_tolerance
+            ),
+        },
+        "aggregate": {
+            "spatial_boundary_changed": boundary_observed(spatial_modes),
+            "spatial_path_reaches_action": action_observed(spatial_modes),
+            "detail_boundary_changed": boundary_observed(detail_modes),
+            "detail_path_reaches_action": action_observed(detail_modes),
+            "goal_path_reaches_action": action_observed(
+                ("goal_zero", "goal_episode_shuffle")
+            ),
+            "history_path_reaches_action": action_observed(
+                (
+                    "action_history_zero",
+                    "action_history_condition_zero",
+                    "action_history_proposal_zero",
+                    "action_history_proposal_episode_shuffle",
+                    "action_history_episode_shuffle",
+                    "action_history_truncate",
+                )
+            ),
+            "history_condition_boundary_changed": boundary_observed(
+                ("action_history_condition_zero",)
+            ),
+            "history_condition_path_reaches_action": action_observed(
+                ("action_history_condition_zero",)
+            ),
+            "history_proposal_boundary_changed": boundary_observed(
+                (
+                    "action_history_proposal_zero",
+                    "action_history_proposal_episode_shuffle",
+                )
+            ),
+            "history_proposal_path_reaches_action": action_observed(
+                (
+                    "action_history_proposal_zero",
+                    "action_history_proposal_episode_shuffle",
+                )
+            ),
+            "phase_path_reaches_action": action_observed(
+                (
+                    "phase_belief_zero",
+                    "phase_belief_episode_shuffle",
+                    "condition_query_zero",
+                )
+            ),
+            "online_horizon_address_boundary_changed": boundary_observed(
+                (
+                    "horizon_address_zero",
+                    "horizon_address_episode_shuffle",
+                )
+            ),
+            "online_horizon_address_reaches_action": action_observed(
+                (
+                    "horizon_address_zero",
+                    "horizon_address_episode_shuffle",
+                )
+            ),
+            "progressive_grounding_boundary_changed": boundary_observed(
+                (
+                    "address_g1_zero",
+                    "address_g1_episode_shuffle",
+                    "address_g2_zero",
+                    "address_g2_episode_shuffle",
+                    "address_g3_zero",
+                    "address_g3_episode_shuffle",
+                )
+            ),
+            "progressive_grounding_reaches_action": action_observed(
+                (
+                    "address_g1_zero",
+                    "address_g1_episode_shuffle",
+                    "address_g2_zero",
+                    "address_g2_episode_shuffle",
+                    "address_g3_zero",
+                    "address_g3_episode_shuffle",
+                )
+            ),
+            "interval_stage_boundary_changed": boundary_observed(
+                (
+                    "interval_stage_zero",
+                    "interval_stage_episode_shuffle",
+                )
+            ),
+            "interval_stage_reaches_action": action_observed(
+                (
+                    "interval_stage_zero",
+                    "interval_stage_episode_shuffle",
+                )
+            ),
+        },
+        "address_slot_structure": address_slot_structure,
+        "typed_route_structure": typed_route_structure,
+        "long_horizon_pairwise": far_pairwise,
+        "modes": rows,
+        "interpretation": (
+            "boundary/action booleans test causal accessibility only; utility "
+            "requires the paired error interval and is not inferred from a "
+            "nonzero action change"
+        ),
+    }
+
+
+def _evenly_spaced_probe_indices(
+    candidates: Sequence[int],
+    count: int,
+) -> list[int]:
+    """Choose deterministic, approximately evenly spaced values."""
+
+    values = [int(value) for value in candidates]
+    if count <= 0 or not values:
+        return []
+    if count >= len(values):
+        return values
+    if count == 1:
+        return [values[(len(values) - 1) // 2]]
+    selected: list[int] = []
+    for index in range(count):
+        position = round(index * (len(values) - 1) / float(count - 1))
+        value = values[position]
+        if value not in selected:
+            selected.append(value)
+    if len(selected) < count:
+        selected.extend(value for value in values if value not in selected)
+    return selected[:count]
+
+
+def _action_path_probe_batch_selection(
+    *,
+    loader: DataLoader,
+    planned_batches: int,
+    budget: int,
+    gripper_index: int,
+    event_threshold: float,
+) -> tuple[set[int], dict[str, Any]]:
+    """Mix validation-wide coverage with action-only gripper-event coverage."""
+
+    all_indices = list(range(1, int(planned_batches) + 1))
+    if budget <= 0 or budget > len(all_indices):
+        raise ValueError("action-path probe budget must be within planned batches")
+
+    dataset: Any = loader.dataset
+    seen: set[int] = set()
+    while (
+        not hasattr(dataset, "training_information_signals")
+        and hasattr(dataset, "base")
+        and id(dataset) not in seen
+    ):
+        seen.add(id(dataset))
+        dataset = dataset.base
+    batch_size = getattr(loader, "batch_size", None)
+    if batch_size is None:
+        batch_size = getattr(getattr(loader, "batch_sampler", None), "batch_size", None)
+
+    event_batches: set[int] = set()
+    event_samples_array: np.ndarray | None = None
+    signal_available = bool(
+        hasattr(dataset, "training_information_signals")
+        and isinstance(batch_size, int)
+        and batch_size > 0
+    )
+    if signal_available:
+        _, event_samples = dataset.training_information_signals(
+            gripper_index=int(gripper_index),
+            event_threshold=float(event_threshold),
+        )
+        limit = min(len(event_samples), int(planned_batches) * int(batch_size))
+        event_samples_array = np.asarray(event_samples[:limit], dtype=bool)
+        event_batches = {
+            1 + int(sample_index) // int(batch_size)
+            for sample_index in np.flatnonzero(event_samples_array)
+        }
+        event_batches = {
+            index for index in event_batches if 1 <= index <= int(planned_batches)
+        }
+
+    episode_batches: dict[int, set[int]] = {}
+    event_episode_batches: dict[int, set[int]] = {}
+    refs = getattr(dataset, "refs", None)
+    if (
+        isinstance(refs, Sequence)
+        and isinstance(batch_size, int)
+        and batch_size > 0
+    ):
+        sample_limit = min(len(refs), int(planned_batches) * int(batch_size))
+        for sample_index in range(sample_limit):
+            episode_id = getattr(refs[sample_index], "episode_idx", None)
+            if episode_id is None:
+                episode_batches = {}
+                event_episode_batches = {}
+                break
+            episode_id = int(episode_id)
+            batch_index = 1 + sample_index // int(batch_size)
+            episode_batches.setdefault(episode_id, set()).add(batch_index)
+            if (
+                event_samples_array is not None
+                and sample_index < len(event_samples_array)
+                and bool(event_samples_array[sample_index])
+            ):
+                event_episode_batches.setdefault(episode_id, set()).add(batch_index)
+
+    event_quota = min((int(budget) + 1) // 2, len(event_batches))
+    selected: set[int] = set()
+    episode_aware = bool(episode_batches)
+    if episode_aware:
+        # First spread event batches across trajectories.  Adjacent windows from
+        # one episode are not independent evidence, so global spacing alone is
+        # insufficient for the episode-cluster bootstrap used below.
+        event_episode_ids = [
+            episode_id
+            for episode_id in sorted(episode_batches)
+            if event_episode_batches.get(episode_id)
+        ]
+        for episode_id in _evenly_spaced_probe_indices(
+            event_episode_ids,
+            min(event_quota, len(event_episode_ids)),
+        ):
+            selected.update(
+                _evenly_spaced_probe_indices(
+                    sorted(event_episode_batches[episode_id]),
+                    1,
+                )
+            )
+        if len(selected) < event_quota:
+            selected.update(
+                _evenly_spaced_probe_indices(
+                    sorted(event_batches.difference(selected)),
+                    event_quota - len(selected),
+                )
+            )
+
+        # Guarantee as much episode coverage as the budget permits, then add a
+        # second within-episode view in round-robin order.  With the recommended
+        # ten batches and five validation trajectories this yields one event and
+        # one general batch per trajectory whenever those candidates exist.
+        episode_ids = sorted(episode_batches)
+        for episode_id in _evenly_spaced_probe_indices(
+            episode_ids,
+            min(int(budget), len(episode_ids)),
+        ):
+            if len(selected) >= int(budget):
+                break
+            if selected.intersection(episode_batches[episode_id]):
+                continue
+            candidates = sorted(episode_batches[episode_id].difference(selected))
+            selected.update(_evenly_spaced_probe_indices(candidates, 1))
+        while len(selected) < int(budget):
+            changed = False
+            for episode_id in episode_ids:
+                if len(selected) >= int(budget):
+                    break
+                candidates = sorted(episode_batches[episode_id].difference(selected))
+                if not candidates:
+                    continue
+                selected.update(_evenly_spaced_probe_indices(candidates, 1))
+                changed = True
+            if not changed:
+                break
+    else:
+        event_selected = _evenly_spaced_probe_indices(
+            sorted(event_batches),
+            event_quota,
+        )
+        selected.update(event_selected)
+    if len(selected) < int(budget):
+        uniform_pool = [index for index in all_indices if index not in selected]
+        selected.update(
+            _evenly_spaced_probe_indices(
+                uniform_pool,
+                int(budget) - len(selected),
+            )
+        )
+    if len(selected) != int(budget):
+        raise RuntimeError(
+            f"action-path batch selection produced {len(selected)}/{int(budget)} batches"
+        )
+    selected_event = sorted(selected.intersection(event_batches))
+    selected_episode_ids = sorted(
+        episode_id
+        for episode_id, batches in episode_batches.items()
+        if selected.intersection(batches)
+    )
+    selected_event_episode_ids = sorted(
+        episode_id
+        for episode_id, batches in event_episode_batches.items()
+        if selected.intersection(batches)
+    )
+    return selected, {
+        "selection_strategy": (
+            "episode_stratified_uniform_plus_gripper_event"
+            if episode_aware and signal_available and event_batches
+            else "episode_stratified_uniform_no_event_candidates"
+            if episode_aware and signal_available
+            else "episode_stratified_uniform_event_signal_unavailable"
+            if episode_aware
+            else "uniform_plus_gripper_event"
+            if signal_available and event_batches
+            else "uniform_no_event_candidates"
+            if signal_available
+            else "uniform_event_signal_unavailable"
+        ),
+        "event_signal_available": bool(signal_available),
+        "event_candidate_batches": int(len(event_batches)),
+        "selected_event_batches": int(len(selected_event)),
+        "selected_event_batch_indices": selected_event,
+        "episode_signal_available": bool(episode_aware),
+        "candidate_episode_ids": sorted(episode_batches),
+        "selected_episode_ids": selected_episode_ids,
+        "selected_episode_count": int(len(selected_episode_ids)),
+        "selected_event_episode_ids": selected_event_episode_ids,
+    }
+
+
+def _validate_complete_v103_model_probe_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Reject checkpoints that only resemble, but are not, the V103 graph."""
+
+    required_flags = {
+        "flow_jepa_enabled": 1,
+        "flow_jepa_late_bottleneck": 1,
+        "flow_jepa_raw_image_enabled": 1,
+        "flow_jepa_role_hierarchy": 1,
+        "flow_jepa_zero_flow_guard": 1,
+        "flow_jepa_complementary_raw_detail": 1,
+        "flow_jepa_strict_role_visual_path": 1,
+        "flow_jepa_source_aligned_raw_fusion": 1,
+        "flow_jepa_policy_workspace_fixed_fusion": 0,
+        "flow_jepa_world_anchor_write_only": 0,
+        "flow_jepa_late_policy_detail": 1,
+        "flow_jepa_policy_workspace_horizon_pool": 1,
+        "flow_jepa_soft_address_lattice": 1,
+        "flow_jepa_directed_canvas_attention": 1,
+        "role_attnres_enabled": 1,
+        "role_attnres_ground_to_world": 1,
+        "role_attnres_world_to_policy": 1,
+        "role_attnres_policy_to_mmdit": 1,
+        "layer_contract_adapters": 1,
+        "layer_shared_fm_probe": 0,
+        "layer_recurrent_consequence": 0,
+        "action_history_enabled": 1,
+        "action_history_condition_exact_null": 1,
+        "action_history_proposal_detach": 0,
+        "goal_conditioning_enabled": 1,
+        "goal_condition_exact_null": 1,
+        "stateless_phase_enabled": 1,
+        "flow_jepa_teacher_balanced_target_mask": 0,
+        "flow_jepa_predictive_change_contract": 1,
+        "latent_cvae_layer_memory": 1,
+        "latent_cvae_transition_memory": 1,
+        "latent_cvae_layer_detach": 0,
+        "latent_cvae_transition_detach": 0,
+        "latent_cvae_mmdit_operator_capacity": 1,
+        "latent_cvae_mmdit_execution_controller": 1,
+        "latent_cvae_mmdit_dynamic_block_route": 1,
+        "latent_cvae_mmdit_identity_candidate": 1,
+        "latent_cvae_workspace_trajectory_source": 1,
+        "latent_cvae_workspace_global_sources": 1,
+        "latent_cvae_workspace_layer_source": 1,
+        "latent_cvae_workspace_progress_value": 1,
+        "latent_cvae_workspace_slot_time_state": 1,
+        "latent_cvae_workspace_time_state": 0,
+        "latent_cvae_workspace_controller": 0,
+        "latent_cvae_hierarchical_workspace": 0,
+        "action_consequence_self_condition": 0,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in required_flags.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    expected_values = {
+        "depth": 8,
+        "flow_jepa_grounding_blocks": 3,
+        "flow_jepa_world_blocks": 3,
+        "flow_jepa_policy_blocks": 2,
+        "future_anchors": 4,
+        "flow_jepa_stage_tokens": 0,
+        "latent_cvae_mmdit_depth": 3,
+    }
+    violations.extend(
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in expected_values.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    )
+    if tuple(int(value) for value in cfg.flow_jepa_window_offsets) != (
+        4,
+        12,
+        24,
+        48,
+    ):
+        violations.append(
+            "flow_jepa_window_offsets must be exactly (4,12,24,48)"
+        )
+    if tuple(int(value) for value in cfg.flow_jepa_action_offsets) != (
+        4,
+        12,
+        24,
+    ):
+        violations.append(
+            "flow_jepa_action_offsets must be exactly (4,12,24)"
+        )
+    if float(getattr(cfg, "flow_jepa_address_flow_prior_floor", 0.0)) <= 0.0:
+        violations.append("flow_jepa_address_flow_prior_floor must be positive")
+    if int(getattr(cfg, "flow_jepa_address_slots", 0)) < 2:
+        violations.append("flow_jepa_address_slots must preserve at least two hypotheses")
+    for name in (
+        "flow_jepa_address_route_dim",
+        "flow_jepa_address_query_chunk",
+        "goal_token_count",
+        "action_history_token_count",
+        "stateless_phase_count",
+    ):
+        if int(getattr(cfg, name, 0)) < 1:
+            violations.append(f"{name} must be positive")
+    for name in (
+        "flow_jepa_late_policy_detail_scale",
+        "role_attnres_ground_to_world_scale",
+        "role_attnres_world_to_policy_scale",
+        "role_attnres_policy_to_mmdit_scale",
+        "stateless_phase_query_scale",
+        "layer_contract_grad_scale",
+        "latent_cvae_layer_grad_scale",
+    ):
+        if float(getattr(cfg, name, 0.0)) <= 0.0:
+            violations.append(f"{name} must be positive")
+    if str(getattr(cfg, "final_action_decoder", "")) != (
+        "evidence_latent_mmdit_action"
+    ):
+        violations.append(
+            "final_action_decoder must be evidence_latent_mmdit_action"
+        )
+    if str(getattr(cfg, "latent_cvae_mmdit_dwell_mode", "")) != "learned":
+        violations.append("latent_cvae_mmdit_dwell_mode must be learned")
+    if (
+        str(getattr(cfg, "latent_cvae_mmdit_execution_eval_policy", ""))
+        != "soft"
+    ):
+        violations.append("latent_cvae_mmdit_execution_eval_policy must be soft")
+    operator_rank = int(getattr(cfg, "latent_cvae_mmdit_operator_rank", 0))
+    operator_groups = int(getattr(cfg, "latent_cvae_mmdit_operator_groups", 0))
+    if operator_rank < 1 or operator_groups < 1 or operator_rank % operator_groups:
+        violations.append(
+            "latent_cvae_mmdit_operator_rank/groups must be positive and divisible"
+        )
+
+    if str(trainer.training_stage).strip().lower().replace("-", "_") not in {
+        "policy",
+        "stage2",
+    }:
+        violations.append("training_stage must be policy/stage2")
+    if not _uses_layer_adapter_contract(trainer):
+        violations.append("contract_mode must be layer_adapter")
+    if not int(getattr(trainer, "single_stage_role_lr", 0)):
+        violations.append("single_stage_role_lr must be enabled")
+    if float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)) <= 0.0:
+        violations.append("flow_jepa_future_loss_weight must be positive")
+    if str(getattr(trainer, "latent_cvae_mmdit_dwell_mode", "")) != "learned":
+        violations.append("trainer latent_cvae_mmdit_dwell_mode must be learned")
+    if (
+        float(
+            getattr(
+                trainer,
+                "latent_cvae_mmdit_execution_value_loss_weight",
+                0.0,
+            )
+        )
+        <= 0.0
+    ):
+        violations.append(
+            "latent_cvae_mmdit_execution_value_loss_weight must be positive"
+        )
+    if (
+        str(getattr(trainer, "flow_jepa_horizon_balance_mode", ""))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        != "per_horizon"
+    ):
+        violations.append("flow_jepa_horizon_balance_mode must be per_horizon")
+    for name in (
+        "flow_jepa_warp_loss_weight",
+        "flow_jepa_identity_advantage_loss_weight",
+        "flow_jepa_static_identity_loss_weight",
+        "flow_jepa_cycle_loss_weight",
+        "flow_jepa_smoothness_loss_weight",
+        "flow_jepa_uncertainty_nll_weight",
+        "flow_jepa_refinement_sequence_loss_weight",
+    ):
+        if float(getattr(trainer, name, 0.0)) <= 0.0:
+            violations.append(f"{name} must be positive")
+    disabled_objectives = (
+        "flow_jepa_future_change_loss_weight",
+        "flow_jepa_stage_loss_weight",
+        "rollout_dynamics_loss_weight",
+        "rollout_delta_loss_weight",
+        "rollout_contrast_loss_weight",
+        "rollout_variance_loss_weight",
+        "rollout_norm_loss_weight",
+        "rollout_milestone_delta_match_weight",
+        "future_latent_loss_weight",
+        "action_effect_loss_weight",
+        "layer_contract_aux_loss_weight",
+    )
+    violations.extend(
+        f"{name}={float(getattr(trainer, name, 0.0))}, expected 0"
+        for name in disabled_objectives
+        if abs(float(getattr(trainer, name, 0.0))) > 1e-12
+    )
+    if violations:
+        raise ValueError(
+            "V103 model-path probe requires the complete serialized model "
+            "contract; " + "; ".join(violations)
+        )
+
+
+def _validate_complete_v104_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V103 plus the geometry, residual, and sequential-memory repair."""
+
+    _validate_complete_v103_model_probe_contract(cfg, trainer)
+    required_flags = {
+        "flow_jepa_bounded_flow_coordinates": 1,
+        "flow_jepa_sequential_horizon_memory": 1,
+        "role_residual_amplitude_contract": 1,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in required_flags.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    for name in (
+        "role_residual_max_update_rms",
+        "role_attnres_max_value_rms",
+    ):
+        if float(getattr(cfg, name, 0.0)) <= 0.0:
+            violations.append(f"{name} must be positive")
+    if violations:
+        raise ValueError(
+            "V104 model contract requires the complete V103 graph plus "
+            "bounded flow coordinates, sequential horizon memory, and the "
+            "role residual amplitude contract; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_complete_v105_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V104 plus horizon-address ownership and reliable delta scaling."""
+
+    _validate_complete_v104_model_contract(cfg, trainer)
+    violations: list[str] = []
+    if int(getattr(cfg, "flow_jepa_horizon_soft_address", -1)) != 1:
+        violations.append("flow_jepa_horizon_soft_address must be enabled")
+    if not 0.0 < float(
+        getattr(cfg, "flow_jepa_horizon_address_update_scale", 0.0)
+    ) <= 1.0:
+        violations.append(
+            "flow_jepa_horizon_address_update_scale must be in (0,1]"
+        )
+    if int(
+        getattr(trainer, "flow_jepa_future_reliable_normalization", -1)
+    ) != 1:
+        violations.append(
+            "flow_jepa_future_reliable_normalization must be enabled"
+        )
+    if float(
+        getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)
+    ) <= 0.0:
+        violations.append("flow_jepa_horizon_address_loss_weight must be positive")
+    if violations:
+        raise ValueError(
+            "V105 model contract requires the complete V104 graph plus a "
+            "horizon-specific observation-only soft address, reliable future "
+            "delta normalization, and teacher-only address supervision; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_complete_v106_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V105 plus interval ownership and the complete numerical graph."""
+
+    _validate_complete_v105_model_contract(cfg, trainer)
+    required_flags = {
+        "flow_jepa_interval_stage_delta": 1,
+        "flow_jepa_variance_safe_routing": 1,
+        "flow_jepa_complete_numerical_contract": 1,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in required_flags.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    expected_boundaries = (4, 8, 16, 32, 48)
+    boundaries = tuple(
+        int(value)
+        for value in getattr(
+            cfg,
+            "flow_jepa_effective_interval_boundaries",
+            getattr(cfg, "flow_jepa_interval_boundaries", ()),
+        )
+    )
+    if boundaries != expected_boundaries:
+        violations.append(
+            "flow_jepa_interval_boundaries must resolve to exactly "
+            "(4,8,16,32,48)"
+        )
+    supports = tuple(
+        int(value)
+        for value in getattr(
+            cfg,
+            "flow_jepa_effective_interval_support_offsets",
+            getattr(cfg, "flow_jepa_interval_support_offsets", ()),
+        )
+    )
+    expected_supports = (
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28,
+        32,
+        36,
+        40,
+        44,
+        48,
+    )
+    if supports != expected_supports:
+        violations.append(
+            "flow_jepa_interval_support_offsets must resolve to exactly "
+            "(4,8,12,16,20,24,28,32,36,40,44,48)"
+        )
+    minimum_numerical_floors = {
+        "flow_jepa_routing_norm_floor": 0.25,
+        "flow_jepa_correlation_rms_floor": 0.10,
+        "flow_jepa_visibility_transition_fraction": 0.10,
+    }
+    for name, minimum in minimum_numerical_floors.items():
+        value = float(getattr(cfg, name, 0.0))
+        if value < minimum or value > 1.0:
+            violations.append(
+                f"{name}={value:.6g}, requires [{minimum:.6g},1]"
+            )
+    for start, end in zip(expected_boundaries[:-1], expected_boundaries[1:]):
+        interval_supports = tuple(
+            value for value in supports if start <= value <= end
+        )
+        if len(interval_supports) < 2 or interval_supports[0] != start or interval_supports[-1] != end:
+            violations.append(
+                f"interval [{start},{end}] must include both boundaries and "
+                "at least two teacher support observations"
+            )
+    for name in (
+        "flow_jepa_routing_norm_floor",
+        "flow_jepa_horizon_value_max_rms",
+        "flow_jepa_interval_stage_update_scale",
+    ):
+        if float(getattr(cfg, name, 0.0)) <= 0.0:
+            violations.append(f"{name} must be positive")
+    if float(
+        getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)
+    ) <= 0.0:
+        violations.append("flow_jepa_interval_stage_loss_weight must be positive")
+    if violations:
+        raise ValueError(
+            "V106 model contract requires the complete V105 graph plus a "
+            "spatially aligned interval-stage delta at W->P, bounded "
+            "variance-safe routing, bounded learned-correlation/visibility/"
+            "role normalization, and explicit interval progression supervision; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_complete_v107_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V106 plus the complete top-to-bottom address/write repair."""
+
+    _validate_complete_v106_model_contract(cfg, trainer)
+    required_flags = {
+        "flow_jepa_policy_multi_glimpse_address": 1,
+        "flow_jepa_horizon_cell_fine_address": 1,
+        "flow_jepa_interval_stage_typed_value": 1,
+        "role_residual_contract_after_gate": 1,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in required_flags.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    if int(getattr(cfg, "flow_jepa_raw_reader_heads", 0)) < 2:
+        violations.append(
+            "flow_jepa_raw_reader_heads must be at least two for V107 glimpses"
+        )
+    if int(getattr(cfg, "flow_jepa_address_query_chunk", 0)) < 1:
+        violations.append("flow_jepa_address_query_chunk must be positive")
+    if violations:
+        raise ValueError(
+            "V107 model contract requires the complete V106 graph plus factual "
+            "multi-glimpse policy addressing, target-cell-specific horizon "
+            "fine addressing, a typed interval-stage W->P value, and the "
+            "post-gate role residual write contract; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_complete_v108_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V107 plus the single online G3 -> W1 address topology."""
+
+    _validate_complete_v107_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_online_horizon_address", -1)) != 1:
+        raise ValueError(
+            "V108 model contract requires the complete V107 graph plus "
+            "flow_jepa_online_horizon_address=1 so the owned address write "
+            "precedes W/P/action decoding"
+        )
+
+
+def _validate_complete_v109_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V108 ancestry plus typed progressive G1/G2/G3 addressing."""
+
+    _validate_complete_v108_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_progressive_grounding_address", -1)) != 1:
+        raise ValueError(
+            "V109 model contract requires the complete V108 graph plus "
+            "flow_jepa_progressive_grounding_address=1 so G1/G2/G3 own "
+            "hypothesis alignment, geometric rectification, and canonical "
+            "handoff while P retains the first high-resolution value read"
+        )
+
+
+def _validate_complete_v110_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V109 plus coordinate-typed current/future raw ownership."""
+
+    _validate_complete_v109_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_coordinate_typed_raw_detail", -1)) != 1:
+        raise ValueError(
+            "V110 model contract requires the complete V109 graph plus "
+            "flow_jepa_coordinate_typed_raw_detail=1 so exact current RGB, "
+            "typed address evidence, future transport and P1/P2 local "
+            "refinement form one deployed path"
+        )
+    if int(getattr(cfg, "flow_jepa_raw_micro_grid", -1)) != 3:
+        raise ValueError("V110 model contract requires flow_jepa_raw_micro_grid=3")
+
+
+def _validate_complete_v111_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V110 plus functional G/W/P evidence ownership."""
+
+    _validate_complete_v110_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_structured_ownership_bottleneck", -1)) != 1:
+        raise ValueError(
+            "V111 model contract requires the complete V110 graph plus "
+            "flow_jepa_structured_ownership_bottleneck=1 so public scene state, "
+            "typed evidence sidecars, interval innovations and factorized P reads "
+            "remain distinct until action-ready local fusion"
+        )
+
+
+@torch.no_grad()
+def evaluate_v101_action_path_intervention(
+    *,
+    system: V39PolicySystem,
+    loader: DataLoader,
+    conditioner: RDT2Conditioner,
+    device: torch.device,
+    dtype: torch.dtype,
+    camera_names: Sequence[str],
+    action_normalizer: ArrayNormalizer,
+    trainer: V39PolicyTrainerConfig,
+    intervention_batches: int,
+    max_batches: int = 0,
+    bootstrap_reps: int = 2000,
+    bootstrap_seed: int = 0,
+    require_complete_v103_contract: bool = False,
+    require_complete_v104_contract: bool = False,
+    require_complete_v105_contract: bool = False,
+    require_complete_v106_contract: bool = False,
+    require_complete_v107_contract: bool = False,
+    require_complete_v108_contract: bool = False,
+    require_complete_v109_contract: bool = False,
+    require_complete_v110_contract: bool = False,
+    require_complete_v111_contract: bool = False,
+) -> dict[str, Any]:
+    """Paired deployed-action probe for V101 and typed V103 boundaries.
+
+    Every mode uses the same frozen checkpoint, validation batch, initial
+    action noise, inference-step count and execution policy. Non-targeted
+    inputs and the proposal are fixed; full-history zero/shuffle/truncate modes
+    intentionally alter the history-derived proposal as part of that path,
+    while ``action_history_condition_zero`` isolates the attached condition
+    lane with the proposal retained. World and policy interventions are
+    transient planner state; world modes retain the grounding/position seed
+    and alter only the world-block residual. Raw modes separately test
+    coordinate use, source/target fine-key matching and the exact
+    high-frequency residual after address-bank compilation.
+    """
+
+    if intervention_batches <= 0:
+        raise ValueError("intervention_batches must be positive")
+    cfg = system.policy_config
+    formal_contract_count = sum(
+        int(value)
+        for value in (
+            require_complete_v103_contract,
+            require_complete_v104_contract,
+            require_complete_v105_contract,
+            require_complete_v106_contract,
+            require_complete_v107_contract,
+            require_complete_v108_contract,
+            require_complete_v109_contract,
+            require_complete_v110_contract,
+            require_complete_v111_contract,
+        )
+    )
+    if formal_contract_count > 1:
+        raise ValueError("choose exactly one formal model-path contract")
+    if require_complete_v111_contract:
+        _validate_complete_v111_model_contract(cfg, trainer)
+    elif require_complete_v110_contract:
+        _validate_complete_v110_model_contract(cfg, trainer)
+    elif require_complete_v109_contract:
+        _validate_complete_v109_model_contract(cfg, trainer)
+    elif require_complete_v108_contract:
+        _validate_complete_v108_model_contract(cfg, trainer)
+    elif require_complete_v107_contract:
+        _validate_complete_v107_model_contract(cfg, trainer)
+    elif require_complete_v106_contract:
+        _validate_complete_v106_model_contract(cfg, trainer)
+    elif require_complete_v105_contract:
+        _validate_complete_v105_model_contract(cfg, trainer)
+    elif require_complete_v104_contract:
+        _validate_complete_v104_model_contract(cfg, trainer)
+    elif require_complete_v103_contract:
+        _validate_complete_v103_model_probe_contract(cfg, trainer)
+    strict_role = bool(
+        int(getattr(cfg, "flow_jepa_role_hierarchy", 0))
+        and int(getattr(cfg, "flow_jepa_strict_role_visual_path", 0))
+    )
+    fixed_policy_fusion = bool(
+        int(getattr(cfg, "flow_jepa_policy_workspace_fixed_fusion", 0))
+    )
+    typed_policy_fusion = bool(
+        int(getattr(cfg, "role_attnres_enabled", 0))
+        and int(getattr(cfg, "role_attnres_ground_to_world", 0))
+        and int(getattr(cfg, "role_attnres_world_to_policy", 0))
+        and int(getattr(cfg, "role_attnres_policy_to_mmdit", 0))
+        and not fixed_policy_fusion
+    )
+    if not strict_role or not (fixed_policy_fusion or typed_policy_fusion):
+        raise ValueError(
+            "model-path probe requires strict role ownership and either the "
+            "V101 fixed policy fusion or the typed V103 G->W->P->MMDiT bridges"
+        )
+    if not int(getattr(cfg, "flow_jepa_raw_image_enabled", 0)):
+        raise ValueError("V101 action-path probe requires the raw-image evidence path")
+    if not int(getattr(cfg, "flow_jepa_complementary_raw_detail", 0)):
+        raise ValueError(
+            "V101 action-path probe requires complementary raw detail "
+            "for the post-reader intervention"
+        )
+    planner = system.planner
+    encoder = getattr(planner, "flow_dino_evidence", None)
+    late_reader = getattr(planner, "late_raw_detail_reader", None)
+    soft_address = bool(
+        int(getattr(cfg, "flow_jepa_soft_address_lattice", 0))
+    )
+    if not hasattr(planner, "set_action_path_eval_intervention"):
+        raise RuntimeError("planner lacks the transient action-path intervention")
+    if encoder is None or not hasattr(encoder, "set_raw_address_eval_intervention"):
+        raise RuntimeError("Flow-DINO encoder lacks the transient address intervention")
+    if soft_address and (
+        late_reader is None
+        or not hasattr(late_reader, "set_address_eval_intervention")
+    ):
+        raise RuntimeError(
+            "late raw reader lacks the transient address-posterior intervention"
+        )
+    if not hasattr(system, "set_condition_eval_intervention"):
+        raise RuntimeError("policy system lacks transient condition interventions")
+
+    planned_batches = len(loader)
+    if max_batches:
+        planned_batches = min(planned_batches, int(max_batches))
+    if planned_batches <= 0:
+        raise ValueError("validation loader is empty")
+    budget = min(int(intervention_batches), planned_batches)
+    selected_indices, selection_metadata = _action_path_probe_batch_selection(
+        loader=loader,
+        planned_batches=planned_batches,
+        budget=budget,
+        gripper_index=cfg.gripper_index,
+        event_threshold=trainer.gripper_event_threshold,
+    )
+    probe_prefix = (
+        "[v111-model-path-probe]"
+        if require_complete_v111_contract
+        else "[v110-model-path-probe]"
+        if require_complete_v110_contract
+        else "[v109-model-path-probe]"
+        if require_complete_v109_contract
+        else "[v108-model-path-probe]"
+        if require_complete_v108_contract
+        else "[v107-model-path-probe]"
+        if require_complete_v107_contract
+        else "[v106-model-path-probe]"
+        if require_complete_v106_contract
+        else "[v105-model-path-probe]"
+        if require_complete_v105_contract
+        else "[v104-model-path-probe]"
+        if require_complete_v104_contract
+        else "[v103-model-path-probe]"
+        if typed_policy_fusion
+        else "[v101-action-path-probe]"
+    )
+    print(
+        f"{probe_prefix} "
+        f"selection={selection_metadata['selection_strategy']} "
+        f"selected={','.join(str(index) for index in sorted(selected_indices))} "
+        f"event_batches={selection_metadata['selected_event_batches']}/"
+        f"{selection_metadata['event_candidate_batches']} "
+        f"episodes={selection_metadata['selected_episode_count']}/"
+        f"{len(selection_metadata['candidate_episode_ids'])}",
+        flush=True,
+    )
+
+    # output name, planner mode, encoder mode, condition mode, posterior mode
+    mode_contract: list[
+        tuple[str, str | None, str | None, str | None, str | None]
+    ] = [
+        (
+            "baseline",
+            "none",
+            "none",
+            None,
+            "none" if soft_address else None,
+        ),
+        ("policy_zero", "policy_zero", None, None, None),
+        (
+            "policy_temporal_shuffle",
+            "policy_temporal_shuffle",
+            None,
+            None,
+            None,
+        ),
+        ("world_residual_zero", "world_residual_zero", None, None, None),
+        (
+            "world_residual_anchor_shuffle",
+            "world_residual_anchor_shuffle",
+            None,
+            None,
+            None,
+        ),
+        (
+            "world_residual_spatial_shuffle",
+            "world_residual_spatial_shuffle",
+            None,
+            None,
+            None,
+        ),
+        (
+            "world_residual_spatiotemporal_shuffle",
+            "world_residual_spatiotemporal_shuffle",
+            None,
+            None,
+            None,
+        ),
+        ("flow_zero", None, "zero", None, None),
+        ("flow_episode_shuffle", None, "shuffle", None, None),
+        ("flow_spatial_shuffle", None, "spatial_shuffle", None, None),
+        ("raw_value_zero", None, "detail_zero", None, None),
+        (
+            "raw_value_spatial_shuffle",
+            None,
+            "detail_spatial_shuffle",
+            None,
+            None,
+        ),
+    ]
+    if soft_address:
+        mode_contract.extend(
+            (
+                (
+                    "source_raw_match_zero",
+                    None,
+                    "source_raw_key_zero",
+                    None,
+                    None,
+                ),
+                (
+                    "source_raw_match_spatial_shuffle",
+                    None,
+                    "source_raw_key_spatial_shuffle",
+                    None,
+                    None,
+                ),
+                (
+                    "dino_key_spatial_shuffle",
+                    None,
+                    "dino_key_spatial_shuffle",
+                    None,
+                    None,
+                ),
+                (
+                    "joint_address_key_spatial_shuffle",
+                    None,
+                    "joint_address_key_spatial_shuffle",
+                    None,
+                    None,
+                ),
+                (
+                    "address_posterior_uniform",
+                    None,
+                    None,
+                    None,
+                    "address_posterior_uniform",
+                ),
+                (
+                    "fine_offset_zero",
+                    None,
+                    None,
+                    None,
+                    "fine_offset_zero",
+                ),
+                (
+                    "camera_posterior_uniform",
+                    None,
+                    None,
+                    None,
+                    "camera_posterior_uniform",
+                ),
+                ("camera_swap", None, None, None, "camera_swap"),
+                (
+                    "world_address_query_zero",
+                    None,
+                    None,
+                    None,
+                    "world_query_zero",
+                ),
+                (
+                    "world_address_query_spatial_shuffle",
+                    None,
+                    None,
+                    None,
+                    "world_query_spatial_shuffle",
+                ),
+            )
+        )
+    if require_complete_v110_contract or require_complete_v111_contract:
+        mode_contract.extend(
+            (
+                (
+                    "literal_current_rgb_zero",
+                    None,
+                    "literal_rgb_zero",
+                    None,
+                    None,
+                ),
+                (
+                    "literal_current_rgb_spatial_shuffle",
+                    None,
+                    "literal_rgb_spatial_shuffle",
+                    None,
+                    None,
+                ),
+                (
+                    "future_transport_neutral",
+                    None,
+                    None,
+                    None,
+                    "future_transport_neutral",
+                ),
+                (
+                    "future_transport_spatial_shuffle",
+                    None,
+                    None,
+                    None,
+                    "future_transport_spatial_shuffle",
+                ),
+            )
+        )
+    if require_complete_v111_contract:
+        mode_contract.extend(
+            (
+                (
+                    "semantic_owner_zero",
+                    None,
+                    None,
+                    None,
+                    "semantic_owner_zero",
+                ),
+                (
+                    "semantic_owner_shuffle",
+                    None,
+                    None,
+                    None,
+                    "semantic_owner_shuffle",
+                ),
+                (
+                    "appearance_owner_zero",
+                    None,
+                    None,
+                    None,
+                    "appearance_owner_zero",
+                ),
+                (
+                    "appearance_owner_shuffle",
+                    None,
+                    None,
+                    None,
+                    "appearance_owner_shuffle",
+                ),
+                (
+                    "geometry_owner_zero",
+                    None,
+                    None,
+                    None,
+                    "geometry_owner_zero",
+                ),
+                (
+                    "geometry_owner_shuffle",
+                    None,
+                    None,
+                    None,
+                    "geometry_owner_shuffle",
+                ),
+            )
+        )
+    if bool(int(getattr(cfg, "goal_conditioning_enabled", 0))):
+        if bool(int(getattr(cfg, "goal_condition_exact_null", 0))):
+            mode_contract.append(
+                ("goal_zero", None, None, "goal_zero", None)
+            )
+        mode_contract.append(
+            (
+                "goal_episode_shuffle",
+                None,
+                None,
+                "goal_batch_shuffle",
+                None,
+            )
+        )
+    if bool(int(getattr(cfg, "action_history_enabled", 0))):
+        mode_contract.extend(
+            (
+                ("action_history_zero", None, None, "history_zero", None),
+                (
+                    "action_history_episode_shuffle",
+                    None,
+                    None,
+                    "history_batch_shuffle",
+                    None,
+                ),
+                (
+                    "action_history_truncate",
+                    None,
+                    None,
+                    "history_truncate",
+                    None,
+                ),
+            )
+        )
+        if bool(
+            int(getattr(cfg, "action_history_condition_exact_null", 0))
+        ):
+            mode_contract.append(
+                (
+                    "action_history_condition_zero",
+                    None,
+                    None,
+                    "history_condition_zero",
+                    None,
+                )
+            )
+        if typed_policy_fusion:
+            # V103 attaches the causal proposal to action loss. Probe that
+            # lane independently: direct compressed history remains fixed.
+            mode_contract.extend(
+                (
+                    (
+                        "action_history_proposal_zero",
+                        None,
+                        None,
+                        "history_proposal_zero",
+                        None,
+                    ),
+                    (
+                        "action_history_proposal_episode_shuffle",
+                        None,
+                        None,
+                        "history_proposal_batch_shuffle",
+                        None,
+                    ),
+                )
+            )
+    if bool(int(getattr(cfg, "stateless_phase_enabled", 0))):
+        mode_contract.extend(
+            (
+                ("phase_belief_zero", "phase_zero", None, None, None),
+                (
+                    "phase_belief_episode_shuffle",
+                    "phase_batch_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "condition_query_zero",
+                    "condition_query_zero",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        )
+    progressive_address = bool(
+        int(getattr(cfg, "flow_jepa_progressive_grounding_address", 0))
+    )
+    if bool(int(getattr(cfg, "flow_jepa_online_horizon_address", 0))) and not progressive_address:
+        mode_contract.extend(
+            (
+                (
+                    "horizon_address_zero",
+                    "horizon_address_zero",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "horizon_address_episode_shuffle",
+                    "horizon_address_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        )
+    if progressive_address:
+        for stage in (1, 2, 3):
+            mode_contract.extend(
+                (
+                    (
+                        f"address_g{stage}_zero",
+                        f"address_g{stage}_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        f"address_g{stage}_episode_shuffle",
+                        f"address_g{stage}_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+    if bool(int(getattr(cfg, "flow_jepa_interval_stage_delta", 0))):
+        mode_contract.extend(
+            (
+                (
+                    "interval_stage_zero",
+                    "interval_stage_zero",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "interval_stage_episode_shuffle",
+                    "interval_stage_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        )
+    if typed_policy_fusion:
+        grounding_sources = tuple(
+            f"g{index + 1}"
+            for index in range(int(cfg.flow_jepa_grounding_blocks))
+        )
+        world_sources = (
+            "grounding_entry",
+            *(
+                f"w{index + 1}"
+                for index in range(int(cfg.flow_jepa_world_blocks))
+            ),
+        )
+        policy_sources = (
+            "world_to_policy",
+            *(
+                f"p{index + 1}"
+                for index in range(int(cfg.flow_jepa_policy_blocks))
+            ),
+        )
+        for source in (*grounding_sources, *world_sources, *policy_sources):
+            mode_contract.append(
+                (f"{source}_delta_zero", f"{source}_zero", None, None, None)
+            )
+            mode_contract.append(
+                (
+                    f"{source}_delta_episode_shuffle",
+                    f"{source}_shuffle",
+                    None,
+                    None,
+                    None,
+                )
+            )
+        mode_contract.extend(
+            (
+                (
+                    "w2p_far_context_zero",
+                    "w2p_far_context_zero",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "w2p_far_context_episode_shuffle",
+                    "w2p_far_context_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "bottom_far_rollout_zero",
+                    "bottom_far_rollout_zero",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "bottom_far_rollout_episode_shuffle",
+                    "bottom_far_rollout_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "all_far_context_zero",
+                    "all_far_context_zero",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "all_far_context_episode_shuffle",
+                    "all_far_context_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "protected_detail_zero",
+                    "protected_detail_zero",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "protected_detail_episode_shuffle",
+                    "protected_detail_shuffle",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        )
+    system.eval()
+    predictions: dict[str, list[np.ndarray]] = {
+        output_name: [] for output_name, _, _, _, _ in mode_contract
+    }
+    target_rows: list[np.ndarray] = []
+    current_rows: list[np.ndarray] = []
+    episode_rows: list[np.ndarray] = []
+    representation_sums: dict[str, float] = {}
+    representation_weight = 0
+    reader_diagnostic_keys = (
+        "flow_jepa_raw_post_reader_detail_selector_residual_norm",
+        "flow_jepa_raw_post_reader_detail_value_residual_norm",
+        "flow_jepa_raw_post_reader_detail_selector_intervention_delta",
+        "flow_jepa_raw_post_reader_detail_value_intervention_delta",
+    )
+    mode_reader_sums: dict[str, dict[str, float]] = {
+        output_name: {} for output_name, _, _, _, _ in mode_contract
+    }
+    mode_reader_weights = {
+        output_name: 0 for output_name, _, _, _, _ in mode_contract
+    }
+    verification_counts = {
+        output_name: 0 for output_name, _, _, _, _ in mode_contract
+    }
+    boundary_diagnostics: dict[str, dict[str, float]] = {
+        output_name: {} for output_name, _, _, _, _ in mode_contract
+    }
+    boundary_diagnostic_weights: dict[str, dict[str, int]] = {
+        output_name: {} for output_name, _, _, _, _ in mode_contract
+    }
+    finished_batches = 0
+    intervention_samples = 0
+    baseline_identity_max_abs_delta = 0.0
+    verified_ordinary_baseline = False
+
+    for batch_index, batch in enumerate(loader, start=1):
+        if batch_index > planned_batches:
+            break
+        if batch_index not in selected_indices:
+            continue
+        sample = prepare_v39_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+            include_target_visual=False,
+        )
+        sample_count = int(sample["policy_action"].shape[0])
+        generator = torch.Generator(device=device)
+        generator.manual_seed(37237 + batch_index)
+        noise = system.codec.sample_noise(
+            sample_count,
+            generator=generator,
+            device=device,
+            dtype=sample["visual"].dtype,
+            action_state=sample["action_state"],
+        )
+        stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(
+            trainer
+        )
+
+        if not verified_ordinary_baseline:
+            planner.clear_action_path_eval_intervention()
+            encoder.clear_raw_address_eval_intervention()
+            system.clear_condition_eval_intervention()
+            if late_reader is not None:
+                late_reader.clear_address_eval_intervention()
+            with autocast_context(device, dtype):
+                ordinary = system.sample(
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    raw_visual=sample.get("raw_visual"),
+                    action_state=sample["action_state"],
+                    steps=trainer.eval_inference_steps,
+                    noise=noise,
+                    use_proposal=True,
+                    stop_at_midcut=stop_midcut_eval,
+                    collect_diagnostics=False,
+                )
+            if not torch.is_tensor(ordinary):
+                raise TypeError("ordinary V101 baseline did not return an action tensor")
+        else:
+            ordinary = None
+
+        baseline_address_signature: dict[str, float] | None = None
+        baseline_fine_signature: dict[str, float] | None = None
+        baseline_detail_signature: dict[str, float] | None = None
+        for (
+            output_name,
+            planner_mode,
+            address_mode,
+            condition_mode,
+            posterior_mode,
+        ) in mode_contract:
+            if planner_mode is not None:
+                planner.set_action_path_eval_intervention(planner_mode)
+            else:
+                planner.clear_action_path_eval_intervention()
+            if address_mode is not None:
+                encoder.set_raw_address_eval_intervention(address_mode)
+            else:
+                encoder.clear_raw_address_eval_intervention()
+            if condition_mode is not None:
+                system.set_condition_eval_intervention(condition_mode)
+            else:
+                system.clear_condition_eval_intervention()
+            if posterior_mode is not None:
+                assert late_reader is not None
+                late_reader.set_address_eval_intervention(posterior_mode)
+            elif soft_address:
+                assert late_reader is not None
+                # ``none`` changes no model value; it only captures a compact
+                # posterior/detail signature so every upstream intervention
+                # can be compared at the same late-read boundary.
+                late_reader.set_address_eval_intervention("none")
+            elif late_reader is not None:
+                late_reader.clear_address_eval_intervention()
+            try:
+                with autocast_context(device, dtype):
+                    action = system.sample(
+                        sample["visual"],
+                        sample["history_state"],
+                        sample["executed_action_history"],
+                        sample["state"],
+                        raw_visual=sample.get("raw_visual"),
+                        action_state=sample["action_state"],
+                        steps=trainer.eval_inference_steps,
+                        noise=noise,
+                        use_proposal=True,
+                        stop_at_midcut=stop_midcut_eval,
+                        collect_diagnostics=False,
+                    )
+                if not torch.is_tensor(action):
+                    raise TypeError(
+                        f"model-path mode {output_name!r} did not return an action tensor"
+                    )
+                planner_state = planner.action_path_eval_intervention_state()
+                reader_metrics = encoder.raw_address_eval_metrics()
+                condition_state = system.condition_eval_intervention_state()
+                posterior_state = (
+                    late_reader.address_eval_intervention_state()
+                    if late_reader is not None
+                    else {"mode": "disabled", "apply_count": 0}
+                )
+            finally:
+                planner.clear_action_path_eval_intervention()
+                encoder.clear_raw_address_eval_intervention()
+                system.clear_condition_eval_intervention()
+                if late_reader is not None:
+                    late_reader.clear_address_eval_intervention()
+
+            if planner_mode not in {None, "none"}:
+                apply_count = int(planner_state["apply_count"])
+                if apply_count <= 0:
+                    raise RuntimeError(
+                        f"model-path mode {output_name!r} never reached its boundary"
+                    )
+                verification_counts[output_name] += 1
+            if condition_mode not in {None, "none"}:
+                apply_count = int(condition_state["apply_count"])
+                if apply_count <= 0:
+                    raise RuntimeError(
+                        f"condition mode {output_name!r} never reached its boundary"
+                    )
+                verification_counts[output_name] += 1
+            if posterior_mode not in {None, "none"}:
+                apply_count = int(posterior_state["apply_count"])
+                if apply_count <= 0:
+                    raise RuntimeError(
+                        f"posterior mode {output_name!r} never reached its boundary"
+                    )
+                verification_counts[output_name] += 1
+            if address_mode is not None:
+                code = reader_metrics.get("flow_jepa_raw_address_intervention_code")
+                if code is None:
+                    raise RuntimeError(
+                        f"raw mode {output_name!r} never reached the reader"
+                    )
+                expected_code = {
+                    "none": 0.0,
+                    "zero": 1.0,
+                    "shuffle": 2.0,
+                    "spatial_shuffle": 3.0,
+                    "detail_zero": 4.0,
+                    "detail_spatial_shuffle": 5.0,
+                    "dino_key_spatial_shuffle": 6.0,
+                    "source_raw_key_zero": 7.0,
+                    "source_raw_key_spatial_shuffle": 8.0,
+                    "joint_address_key_spatial_shuffle": 9.0,
+                    "literal_rgb_zero": 10.0,
+                    "literal_rgb_spatial_shuffle": 11.0,
+                }[address_mode]
+                if not math.isclose(float(code), expected_code, abs_tol=1e-6):
+                    raise RuntimeError(
+                        f"raw mode {output_name!r} reported code {code}, "
+                        f"expected {expected_code}"
+                    )
+                verification_counts[output_name] += 1
+            for state in (planner_state, condition_state, posterior_state):
+                for key, value in state.items():
+                    if key in {"mode", "apply_count"}:
+                        continue
+                    if "_signature_" in key:
+                        continue
+                    if isinstance(value, (int, float)):
+                        boundary_diagnostics[output_name][key] = (
+                            boundary_diagnostics[output_name].get(key, 0.0)
+                            + float(value) * sample_count
+                        )
+                        boundary_diagnostic_weights[output_name][key] = (
+                            boundary_diagnostic_weights[output_name].get(key, 0)
+                            + sample_count
+                        )
+            if soft_address:
+                address_signature = {
+                    key: float(value)
+                    for key, value in posterior_state.items()
+                    if key.startswith("address_posterior_signature_")
+                }
+                detail_signature = {
+                    key: float(value)
+                    for key, value in posterior_state.items()
+                    if key.startswith("detail_update_signature_")
+                }
+                fine_signature = {
+                    key: float(value)
+                    for key, value in posterior_state.items()
+                    if key.startswith("fine_posterior_signature_")
+                }
+            else:
+                address_signature = {}
+                detail_signature = {}
+                fine_signature = {}
+            if soft_address and output_name == "baseline":
+                baseline_address_signature = address_signature
+                baseline_fine_signature = fine_signature
+                baseline_detail_signature = detail_signature
+            elif soft_address:
+                if (
+                    not baseline_address_signature
+                    or not baseline_fine_signature
+                    or not baseline_detail_signature
+                ):
+                    raise RuntimeError(
+                        "model-path mode ran before its paired baseline signatures"
+                    )
+                address_signature_delta = math.sqrt(
+                    sum(
+                        (
+                            address_signature[key]
+                            - baseline_address_signature[key]
+                        )
+                        ** 2
+                        for key in baseline_address_signature
+                    )
+                )
+                detail_signature_delta = math.sqrt(
+                    sum(
+                        (
+                            detail_signature[key]
+                            - baseline_detail_signature[key]
+                        )
+                        ** 2
+                        for key in baseline_detail_signature
+                    )
+                )
+                fine_signature_delta = math.sqrt(
+                    sum(
+                        (
+                            fine_signature[key]
+                            - baseline_fine_signature[key]
+                        )
+                        ** 2
+                        for key in baseline_fine_signature
+                    )
+                )
+                for key, value in (
+                    (
+                        "address_posterior_signature_l2_delta",
+                        address_signature_delta,
+                    ),
+                    (
+                        "fine_posterior_signature_l2_delta",
+                        fine_signature_delta,
+                    ),
+                    (
+                        "detail_update_signature_l2_delta",
+                        detail_signature_delta,
+                    ),
+                ):
+                    boundary_diagnostics[output_name][key] = (
+                        boundary_diagnostics[output_name].get(key, 0.0)
+                        + float(value) * sample_count
+                    )
+                    boundary_diagnostic_weights[output_name][key] = (
+                        boundary_diagnostic_weights[output_name].get(key, 0)
+                        + sample_count
+                    )
+            for key, value in reader_metrics.items():
+                if (
+                    key.endswith("_intervention_delta_norm")
+                    or key.endswith("_intervention_delta")
+                ):
+                    boundary_diagnostics[output_name][key] = (
+                        boundary_diagnostics[output_name].get(key, 0.0)
+                        + float(value) * sample_count
+                    )
+                    boundary_diagnostic_weights[output_name][key] = (
+                        boundary_diagnostic_weights[output_name].get(key, 0)
+                        + sample_count
+                    )
+            for key in reader_diagnostic_keys:
+                if key not in reader_metrics:
+                    continue
+                mode_reader_sums[output_name][key] = (
+                    mode_reader_sums[output_name].get(key, 0.0)
+                    + float(reader_metrics[key]) * sample_count
+                )
+            if any(key in reader_metrics for key in reader_diagnostic_keys):
+                mode_reader_weights[output_name] += sample_count
+            if output_name == "baseline":
+                baseline_representation = {
+                    key: value
+                    for key, value in reader_metrics.items()
+                    if key != "flow_jepa_raw_address_intervention_code"
+                }
+                baseline_representation.update(
+                    {
+                        key: value
+                        for key, value in planner_state.items()
+                        if (
+                            key not in {"mode", "apply_count"}
+                            and isinstance(value, (int, float))
+                        )
+                    }
+                )
+                baseline_representation.update(
+                    {
+                        key: value
+                        for key, value in posterior_state.items()
+                        if (
+                            key not in {"mode", "apply_count"}
+                            and "_signature_" not in key
+                            and isinstance(value, (int, float))
+                        )
+                    }
+                )
+                for key, value in baseline_representation.items():
+                    if key == "flow_jepa_raw_address_intervention_code":
+                        continue
+                    representation_sums[key] = (
+                        representation_sums.get(key, 0.0) + float(value) * sample_count
+                    )
+                representation_weight += sample_count
+                if ordinary is not None:
+                    baseline_identity_max_abs_delta = max(
+                        baseline_identity_max_abs_delta,
+                        float((ordinary - action).detach().float().abs().max().cpu()),
+                    )
+                    verified_ordinary_baseline = True
+            predictions[output_name].append(decode(action_normalizer, action))
+
+        target_rows.append(sample["policy_action_raw"].cpu().numpy())
+        current_rows.append(sample["state_raw"].cpu().numpy())
+        episode = batch.get("episode_idx")
+        if not torch.is_tensor(episode) or int(episode.numel()) != sample_count:
+            raise ValueError("action-path probe requires one episode_idx per sample")
+        episode_rows.append(episode.detach().cpu().numpy().reshape(-1))
+        finished_batches += 1
+        intervention_samples += sample_count
+        print(
+            f"{probe_prefix} "
+            f"batch={batch_index}/{planned_batches} "
+            f"selected={finished_batches}/{len(selected_indices)} "
+            f"samples={intervention_samples}",
+            flush=True,
+        )
+
+    if finished_batches != len(selected_indices):
+        raise RuntimeError(
+            "action-path probe finished "
+            f"{finished_batches}/{len(selected_indices)} selected batches"
+        )
+    target = np.concatenate(target_rows)
+    current = np.concatenate(current_rows)
+    episode_ids = np.concatenate(episode_rows)
+    joined = {mode: np.concatenate(rows) for mode, rows in predictions.items()}
+    action_offsets = tuple(int(value) for value in cfg.flow_jepa_action_offsets)
+    mode_metrics = {
+        mode: _flow_address_action_metrics(
+            pred,
+            target,
+            current,
+            gripper_index=cfg.gripper_index,
+            gripper_event_threshold=trainer.gripper_event_threshold,
+            action_offsets=action_offsets,
+        )
+        for mode, pred in joined.items()
+    }
+    paired = _action_path_paired_metrics(
+        joined=joined,
+        target=target,
+        episode_ids=episode_ids,
+        action_offsets=action_offsets,
+        bootstrap_reps=bootstrap_reps,
+        bootstrap_seed=bootstrap_seed,
+    )
+    representation = {
+        key: value / float(max(representation_weight, 1))
+        for key, value in representation_sums.items()
+    }
+    if "flow_jepa_raw_seed_reliability" in representation:
+        representation["flow_jepa_seed_reliability"] = representation[
+            "flow_jepa_raw_seed_reliability"
+        ]
+    reader_intervention_diagnostics = {
+        mode: {
+            key: value / float(max(mode_reader_weights[mode], 1))
+            for key, value in values.items()
+        }
+        for mode, values in mode_reader_sums.items()
+        if values
+    }
+    averaged_boundary_diagnostics = {
+        mode: {
+            key: value
+            / float(max(boundary_diagnostic_weights[mode].get(key, 0), 1))
+            for key, value in values.items()
+        }
+        for mode, values in boundary_diagnostics.items()
+        if values
+    }
+    acceptance_matrix = _model_path_acceptance_matrix(
+        joined=joined,
+        paired=paired,
+        verification_counts=verification_counts,
+        boundary_diagnostics=averaged_boundary_diagnostics,
+        baseline_identity_max_abs_delta=baseline_identity_max_abs_delta,
+        representation=representation,
+    )
+    mode_semantics = {
+        "policy_zero": (
+            "remove the complete typed policy bank (or the legacy fixed "
+            "policy workspace) entering the final decoder"
+        ),
+        "policy_temporal_shuffle": (
+            "misalign that policy input across the action horizon"
+        ),
+        "world_residual_zero": (
+            "keep the grounding output at every slot and remove only the "
+            "residual written by the world blocks"
+        ),
+        "world_residual_anchor_shuffle": (
+            "keep grounding/position slots fixed and roll only the world-block "
+            "residual across future anchors"
+        ),
+        "world_residual_spatial_shuffle": (
+            "keep grounding/position slots and camera identity fixed and roll "
+            "only the world-block residual across xy coordinates"
+        ),
+        "world_residual_spatiotemporal_shuffle": (
+            "keep grounding/position slots fixed and misalign only the "
+            "world-block residual across anchors and xy"
+        ),
+        "flow_zero": "zero only learned flow entering the soft address compiler",
+        "flow_episode_shuffle": (
+            "attach each sample's learned flow to another sample while keeping "
+            "DINO, RGB, camera identity, and action noise fixed"
+        ),
+        "flow_spatial_shuffle": (
+            "spatially misalign only learned flow entering the address compiler"
+        ),
+        "dino_key_spatial_shuffle": (
+            "misalign target DINO address keys while raw values and flow remain fixed"
+        ),
+        "source_raw_match_zero": (
+            "remove only the source-side raw appearance used by the learned "
+            "source/target fine-address pair key; target keys, target "
+            "high-frequency values, DINO, flow, and camera identity remain fixed"
+        ),
+        "source_raw_match_spatial_shuffle": (
+            "spatially misalign only source-side raw appearance in the learned "
+            "fine-address pair key while target keys/values, DINO, flow, and "
+            "camera identity remain fixed"
+        ),
+        "joint_address_key_spatial_shuffle": (
+            "jointly spatially misalign learned flow, target-DINO keys, and "
+            "source-side raw pair evidence while target raw keys/values and "
+            "camera identity remain fixed"
+        ),
+        "raw_value_zero": (
+            "remove only high-frequency raw values after address-bank compilation"
+        ),
+        "raw_value_spatial_shuffle": (
+            "misalign only high-frequency raw values while address keys stay fixed"
+        ),
+        "literal_current_rgb_zero": (
+            "remove only exact current coordinate-sampled RGB values while learned "
+            "detail, DINO, geometry, routing, and future transport stay fixed"
+        ),
+        "literal_current_rgb_spatial_shuffle": (
+            "spatially misalign only exact current RGB values while every selector "
+            "key and learned-detail value stays fixed"
+        ),
+        "future_transport_neutral": (
+            "replace only P's learned future transport by the current anchor, "
+            "unit scale and neutral visibility while retaining W source priors"
+        ),
+        "future_transport_spatial_shuffle": (
+            "spatially misalign only the future transport consumed by P while "
+            "current RGB/detail values and W source priors remain fixed"
+        ),
+        "semantic_owner_zero": (
+            "remove P's semantic fine/coarse keys and semantic W sidecar while "
+            "retaining appearance, geometry, public W state and precision values"
+        ),
+        "semantic_owner_shuffle": (
+            "misalign only P's semantic keys and semantic W sidecar"
+        ),
+        "appearance_owner_zero": (
+            "remove P's appearance verifier keys and appearance W sidecar while "
+            "retaining semantic source ownership, geometry and precision values"
+        ),
+        "appearance_owner_shuffle": (
+            "misalign only P's appearance keys and appearance W sidecar"
+        ),
+        "geometry_owner_zero": (
+            "remove P's geometry keys and geometry W sidecar while retaining "
+            "semantic relevance, appearance and precision values"
+        ),
+        "geometry_owner_shuffle": (
+            "misalign only P's geometry keys and geometry W sidecar"
+        ),
+        "address_posterior_uniform": (
+            "replace the learned joint camera/slot/xy posterior by a valid-state uniform posterior"
+        ),
+        "fine_offset_zero": (
+            "force every coarse hypothesis to read its zero-offset fine candidate"
+        ),
+        "camera_posterior_uniform": (
+            "retain within-camera routing but force equal posterior mass across valid cameras"
+        ),
+        "camera_swap": (
+            "swap complete camera-owned key/value banks while world camera queries remain fixed"
+        ),
+        "world_address_query_zero": (
+            "zero only the W-organized per-horizon/per-camera/per-xy chart "
+            "entering late address compatibility; action queries and the "
+            "observation-owned key/value bank remain fixed"
+        ),
+        "world_address_query_spatial_shuffle": (
+            "spatially misalign only the W-organized chart entering late "
+            "address compatibility while action queries, camera identity, "
+            "and the observation-owned key/value bank remain fixed"
+        ),
+        "goal_zero": (
+            "apply the exact goal-null contract without changing state/history/vision"
+        ),
+        "goal_episode_shuffle": (
+            "permute per-sample goal tensors before goal resampling"
+        ),
+        "action_history_zero": (
+            "zero executed-action history before both proposal and condition memory"
+        ),
+        "action_history_condition_zero": (
+            "null only the explicit history-condition lane while retaining the proposal"
+        ),
+        "action_history_proposal_zero": (
+            "null only history-derived proposal content at the seed keep "
+            "boundary while retaining direct executed-history condition memory "
+            "and the proposal slot/type identity"
+        ),
+        "action_history_proposal_episode_shuffle": (
+            "episode-shuffle only history-derived proposal tokens while "
+            "retaining direct executed-history condition memory"
+        ),
+        "action_history_episode_shuffle": (
+            "permute executed-action history before proposal and condition encoding"
+        ),
+        "action_history_truncate": (
+            "retain only the configured recent history and remove the older prefix"
+        ),
+        "phase_belief_zero": (
+            "zero only the stateless phase selector context"
+        ),
+        "phase_belief_episode_shuffle": (
+            "permute only the stateless phase selector context"
+        ),
+        "condition_query_zero": (
+            "zero the separate goal/history selector context used by W blocks, W->P, and detail reads"
+        ),
+        "horizon_address_zero": (
+            "remove only the bounded online G3-to-W1 horizon-address write"
+        ),
+        "horizon_address_episode_shuffle": (
+            "episode-shuffle only the online G3-to-W1 address write; for a "
+            "one-sample smoke, rotate its horizon axis deterministically"
+        ),
+        "address_g1_zero": (
+            "remove the learned G1 candidate-chart logit update while retaining "
+            "the observation prior and all later soft selection"
+        ),
+        "address_g1_episode_shuffle": (
+            "misalign only the G1 candidate-hypothesis update across episodes"
+        ),
+        "address_g2_zero": (
+            "replace the learned G2 fine posterior by the valid uniform support "
+            "without changing raw values"
+        ),
+        "address_g2_episode_shuffle": (
+            "misalign only the G2 rectified fine posterior across episodes"
+        ),
+        "address_g3_zero": (
+            "remove only the G3 canonical selector priors and low-rank handoff; "
+            "the observation bank and final P read remain intact"
+        ),
+        "address_g3_episode_shuffle": (
+            "misalign only the G3 canonical priors and selector summary"
+        ),
+        "interval_stage_zero": (
+            "remove only the bounded per-camera/per-xy interval-stage delta "
+            "at W->P while retaining the W carrier and precision bank"
+        ),
+        "interval_stage_episode_shuffle": (
+            "episode-shuffle only the bounded interval-stage delta at W->P; "
+            "for a one-sample smoke, rotate the horizon axis deterministically"
+        ),
+    }
+    if typed_policy_fusion:
+        for source in (*grounding_sources, *world_sources, *policy_sources):
+            mode_semantics[f"{source}_delta_zero"] = (
+                f"zero only the typed {source} residual candidate at its next role bridge"
+            )
+            mode_semantics[f"{source}_delta_episode_shuffle"] = (
+                f"episode-shuffle only the typed {source} residual candidate at its next role bridge"
+            )
+        mode_semantics["protected_detail_zero"] = (
+            "zero only the protected precision-detail candidate entering bottom MMDiT"
+        )
+        mode_semantics["protected_detail_episode_shuffle"] = (
+            "episode-shuffle only the protected precision-detail candidate entering bottom MMDiT"
+        )
+        mode_semantics["w2p_far_context_zero"] = (
+            "zero only the non-action (+48) typed context candidates at W->P; "
+            "the 4/12/24 action alignment and full bottom rollout evidence remain fixed"
+        )
+        mode_semantics["w2p_far_context_episode_shuffle"] = (
+            "episode-shuffle only the non-action (+48) typed context candidates at W->P; "
+            "the 4/12/24 action alignment and full bottom rollout evidence remain fixed"
+        )
+        mode_semantics["bottom_far_rollout_zero"] = (
+            "zero only the +48 chart entering bottom Evidence MMDiT; the typed "
+            "W->P far candidate and 4/12/24 rollout charts remain fixed"
+        )
+        mode_semantics["bottom_far_rollout_episode_shuffle"] = (
+            "episode-shuffle only the +48 chart entering bottom Evidence MMDiT; "
+            "the typed W->P far candidate and 4/12/24 rollout charts remain fixed"
+        )
+        mode_semantics["all_far_context_zero"] = (
+            "jointly zero the typed W->P +48 candidates and the +48 bottom "
+            "rollout chart while retaining every 4/12/24 path"
+        )
+        mode_semantics["all_far_context_episode_shuffle"] = (
+            "jointly episode-shuffle the typed W->P +48 candidates and the +48 "
+            "bottom rollout chart while retaining every 4/12/24 path"
+        )
+    schema = "clearvla-v101-action-path-intervention-v3"
+    if typed_policy_fusion:
+        schema = "clearvla-v103-model-path-intervention-v3"
+        for enabled, candidate in (
+            (
+                require_complete_v104_contract,
+                "clearvla-v104-model-path-intervention-v3",
+            ),
+            (
+                require_complete_v105_contract,
+                "clearvla-v105-model-path-intervention-v4",
+            ),
+            (
+                require_complete_v106_contract,
+                "clearvla-v106-model-path-intervention-v5",
+            ),
+            (
+                require_complete_v107_contract,
+                "clearvla-v107-model-path-intervention-v6",
+            ),
+            (
+                require_complete_v108_contract,
+                "clearvla-v108-model-path-intervention-v7",
+            ),
+            (
+                require_complete_v109_contract,
+                "clearvla-v109-model-path-intervention-v8",
+            ),
+            (
+                require_complete_v110_contract,
+                "clearvla-v110-model-path-intervention-v9",
+            ),
+            (
+                require_complete_v111_contract,
+                "clearvla-v111-model-path-intervention-v10",
+            ),
+        ):
+            if enabled:
+                schema = candidate
+    return {
+        "schema": schema,
+        "complete_v103_contract_verified": bool(
+            require_complete_v103_contract
+            or require_complete_v104_contract
+            or require_complete_v105_contract
+            or require_complete_v106_contract
+            or require_complete_v107_contract
+            or require_complete_v108_contract
+            or require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v104_contract_verified": bool(
+            require_complete_v104_contract
+            or require_complete_v105_contract
+            or require_complete_v106_contract
+            or require_complete_v107_contract
+            or require_complete_v108_contract
+            or require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v105_contract_verified": bool(
+            require_complete_v105_contract
+            or require_complete_v106_contract
+            or require_complete_v107_contract
+            or require_complete_v108_contract
+            or require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v106_contract_verified": bool(
+            require_complete_v106_contract
+            or require_complete_v107_contract
+            or require_complete_v108_contract
+            or require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v107_contract_verified": bool(
+            require_complete_v107_contract
+            or require_complete_v108_contract
+            or require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v108_contract_verified": bool(
+            require_complete_v108_contract
+            or require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v109_contract_verified": bool(
+            require_complete_v109_contract
+            or require_complete_v110_contract
+            or require_complete_v111_contract
+        ),
+        "complete_v110_contract_verified": bool(
+            require_complete_v110_contract or require_complete_v111_contract
+        ),
+        "complete_v111_contract_verified": bool(
+            require_complete_v111_contract
+        ),
+        "planned_batches": int(planned_batches),
+        "selected_batch_indices": sorted(selected_indices),
+        **selection_metadata,
+        "finished_intervention_batches": int(finished_batches),
+        "intervention_samples": int(intervention_samples),
+        "intervention_coverage": float(finished_batches / planned_batches),
+        "patched_baseline_max_abs_delta": float(baseline_identity_max_abs_delta),
+        "inference_steps": int(trainer.eval_inference_steps),
+        "action_offsets": list(action_offsets),
+        "mode_semantics": mode_semantics,
+        "scope_limits": {
+            "policy": (
+                "policy modes do not remove decoder evidence, noisy action state, "
+                "state/history, language, proposal, or terminal policy-layer contracts"
+            ),
+            "world": (
+                "world modes preserve the rollout chart entering the world blocks and "
+                "intervene only on the world-block residual; all other conditions remain"
+            ),
+            "raw_address": (
+                "raw-address modes alter reader coordinates only; RGB/DINO value content "
+                "and camera identity remain intact"
+            ),
+            "raw_detail": (
+                "raw-detail modes intervene after reader output projection; DINO, "
+                "base-only reader output, raw-detail amplitude, and camera identity "
+                "remain fixed except that zero removes detail amplitude by design"
+            ),
+            "history_proposal": (
+                "proposal-only modes alter only proposal content/identity pairing; "
+                "the direct compressed history condition, vision, goal, phase, "
+                "state, and action noise remain fixed"
+            ),
+        },
+        "pairing_contract": (
+            "same checkpoint, validation samples, initial action noise, inference "
+            "steps, execution policy, and all non-targeted inputs; the proposal "
+            "is also fixed except when a full-history or proposal-only "
+            "intervention intentionally tests the history-derived proposal path; "
+            "proposal-only modes keep the direct history-condition memory fixed"
+        ),
+        "intervention_verified_batches": verification_counts,
+        "episode_ids": episode_ids.astype(int).tolist(),
+        "observed_episode_ids": sorted(int(value) for value in np.unique(episode_ids)),
+        "episode_clusters": int(len(np.unique(episode_ids))),
+        "representation": representation,
+        "boundary_diagnostics": averaged_boundary_diagnostics,
+        "acceptance_matrix": acceptance_matrix,
+        "reader_intervention_diagnostics": reader_intervention_diagnostics,
+        "modes": mode_metrics,
+        "paired": paired,
+    }
+
+
+# Version-neutral name for the V103 launcher; retain the historical function
+# for existing V101 scripts and serialized evaluation workflows.
+evaluate_model_path_intervention = evaluate_v101_action_path_intervention
 
 
 def rng_state() -> dict[str, Any]:
@@ -3564,6 +8307,433 @@ def restore_rng(state: dict[str, Any] | None) -> None:
     torch.set_rng_state(state["torch"])
     if torch.cuda.is_available() and state.get("cuda") is not None:
         torch.cuda.set_rng_state_all(state["cuda"])
+
+
+@torch.no_grad()
+def _validate_v106_preflight_target_pack(
+    pack: dict[str, Tensor],
+    *,
+    config: Any,
+    batch_size: int,
+) -> None:
+    """Validate the formal interval teacher before the first training batch."""
+
+    positions = (
+        int(config.num_cameras)
+        * int(config.flow_jepa_grid_size)
+        * int(config.flow_jepa_grid_size)
+    )
+    anchors = int(config.future_anchors)
+    hidden = int(config.hidden_size)
+    future_shape = (int(batch_size), anchors * positions, hidden)
+    current_shape = (int(batch_size), positions, hidden)
+    for key in (
+        "flow_jepa_future_target",
+        "flow_jepa_interval_progress_target",
+        "flow_jepa_interval_endpoint_target",
+    ):
+        value = pack.get(key)
+        if not torch.is_tensor(value) or tuple(value.shape) != future_shape:
+            raise ValueError(
+                f"V106 preflight {key} must be {future_shape}, "
+                f"got {None if value is None else tuple(value.shape)}"
+            )
+        if value.dtype != torch.float32:
+            raise TypeError(
+                f"V106 preflight {key} must remain float32, got {value.dtype}"
+            )
+        if not bool(torch.isfinite(value).all()):
+            raise FloatingPointError(f"V106 preflight {key} is non-finite")
+    current = pack.get("flow_jepa_current_target")
+    if not torch.is_tensor(current) or tuple(current.shape) != current_shape:
+        raise ValueError(
+            "V106 preflight flow_jepa_current_target must be "
+            f"{current_shape}, got "
+            f"{None if current is None else tuple(current.shape)}"
+        )
+    if current.dtype != torch.float32:
+        raise TypeError(
+            "V106 preflight flow_jepa_current_target must remain float32, "
+            f"got {current.dtype}"
+        )
+    if not bool(torch.isfinite(current).all()):
+        raise FloatingPointError(
+            "V106 preflight flow_jepa_current_target is non-finite"
+        )
+    mask = pack.get("flow_jepa_future_target_mask")
+    expected_mask_shape = future_shape[:2]
+    if not torch.is_tensor(mask) or tuple(mask.shape) != expected_mask_shape:
+        raise ValueError(
+            "V106 preflight flow_jepa_future_target_mask must be "
+            f"{expected_mask_shape}, got "
+            f"{None if mask is None else tuple(mask.shape)}"
+        )
+    if mask.dtype != torch.bool:
+        raise TypeError(
+            "V106 preflight flow_jepa_future_target_mask must be bool, "
+            f"got {mask.dtype}"
+        )
+    expected_support_count = len(
+        tuple(config.flow_jepa_effective_interval_support_offsets)
+    )
+    support_count = pack.get("flow_jepa_interval_support_count")
+    if (
+        not torch.is_tensor(support_count)
+        or int(support_count.numel()) != 1
+        or not bool(torch.isfinite(support_count).all())
+        or float(support_count.detach().cpu()) != float(expected_support_count)
+    ):
+        raise ValueError(
+            "V106 preflight interval support count does not match the "
+            f"serialized contract ({expected_support_count})"
+        )
+    effective_support = pack.get("flow_jepa_interval_effective_support")
+    max_interval_supports = max(
+        sum(
+            int(start) <= int(offset) <= int(end)
+            for offset in config.flow_jepa_effective_interval_support_offsets
+        )
+        for start, end in config.flow_jepa_interval_windows
+    )
+    support_tolerance = 1e-4
+    if (
+        not torch.is_tensor(effective_support)
+        or int(effective_support.numel()) != 1
+        or not bool(torch.isfinite(effective_support).all())
+        or not (
+            1.0 - support_tolerance
+            <= float(effective_support.detach().cpu())
+            <= float(max_interval_supports) + support_tolerance
+        )
+    ):
+        raise ValueError(
+            "V106 preflight effective interval support is outside the "
+            f"valid [1,{max_interval_supports}] range"
+        )
+
+
+@torch.no_grad()
+def _preflight_evidence_dynamic_sampling(
+    *,
+    system: V39PolicySystem,
+    loader: DataLoader,
+    conditioner: RDT2Conditioner,
+    device: torch.device,
+    dtype: torch.dtype,
+    camera_names: Sequence[str],
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Exercise the real AMP deploy path before paying for a training epoch.
+
+    Dynamic Evidence execution combines an autocast action stream with an FP32
+    controller/policy plane.  Unit tests cover that contract, but only a real
+    prepared validation batch reproduces the production input dtypes and
+    iterative sampler.  Preserve RNG and model mode so this fail-fast check has
+    no effect on the experiment trajectory.
+    """
+
+    decoder = getattr(
+        system.planner, "evidence_latent_mmdit_action_decoder", None
+    )
+    interval_stage = bool(
+        int(getattr(system.policy_config, "flow_jepa_interval_stage_delta", 0))
+    )
+    run_deploy_preflight = bool(
+        decoder is not None
+        and bool(getattr(decoder, "dynamic_block_route_enabled", False))
+        and device.type == "cuda"
+        and dtype in (torch.float16, torch.bfloat16)
+    )
+    if not run_deploy_preflight and not interval_stage:
+        return
+
+    saved_rng = rng_state()
+    was_training = bool(system.training)
+    system.eval()
+    try:
+        try:
+            batch = next(iter(loader))
+        except StopIteration as exc:
+            raise ValueError("validation loader is empty during deploy preflight") from exc
+        sample = prepare_v39_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+            include_target_visual=interval_stage,
+        )
+        deploy_sampling_passed = False
+        if run_deploy_preflight:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(37238)
+            noise = system.codec.sample_noise(
+                sample["policy_action"].shape[0],
+                generator=generator,
+                device=device,
+                dtype=sample["visual"].dtype,
+                action_state=sample["action_state"],
+            )
+            stop_midcut_eval = _is_contract_stage(
+                trainer
+            ) and not _uses_layer_adapter_contract(trainer)
+            with autocast_context(device, dtype):
+                prediction_pack = system.sample(
+                    sample["visual"],
+                    sample["history_state"],
+                    sample["executed_action_history"],
+                    sample["state"],
+                    raw_visual=sample.get("raw_visual"),
+                    action_state=sample["action_state"],
+                    steps=trainer.eval_inference_steps,
+                    noise=noise,
+                    use_proposal=True,
+                    return_event_logits=True,
+                    stop_at_midcut=stop_midcut_eval,
+                    collect_diagnostics=False,
+                )
+            if not isinstance(prediction_pack, dict) or not isinstance(
+                prediction_pack.get("action"), Tensor
+            ):
+                raise TypeError("deploy preflight expected a sampled action pack")
+            prediction = prediction_pack["action"]
+            if not bool(torch.isfinite(prediction).all()):
+                raise FloatingPointError(
+                    "non-finite action in deploy sampling preflight"
+                )
+            deploy_sampling_passed = True
+
+        interval_teacher_passed = False
+        if interval_stage:
+            if "target_visual" not in sample:
+                raise RuntimeError(
+                    "V106 preflight did not prepare interval teacher observations"
+                )
+            with autocast_context(device, dtype):
+                visual_context = system.planner.encode_visual_context(
+                    sample["visual"],
+                    raw_visual=sample.get("raw_visual"),
+                )
+                if visual_context is None:
+                    raise RuntimeError(
+                        "V106 preflight could not compile online visual context"
+                    )
+                target_pack = system.build_rollout_target_pack(
+                    sample["visual"],
+                    sample["target_visual"],
+                    visual_context=visual_context,
+                )
+            _validate_v106_preflight_target_pack(
+                target_pack,
+                config=system.policy_config,
+                batch_size=int(sample["visual"].shape[0]),
+            )
+            interval_teacher_passed = True
+        preflight_version = (
+            "v111"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_structured_ownership_bottleneck",
+                    0,
+                )
+            )
+            else "v110"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_coordinate_typed_raw_detail",
+                    0,
+                )
+            )
+            else "v109"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_progressive_grounding_address",
+                    0,
+                )
+            )
+            else
+            "v108"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_online_horizon_address",
+                    0,
+                )
+            )
+            else "v107"
+            if all(
+                int(getattr(system.policy_config, name, 0)) == 1
+                for name in (
+                    "flow_jepa_policy_multi_glimpse_address",
+                    "flow_jepa_horizon_cell_fine_address",
+                    "flow_jepa_interval_stage_typed_value",
+                    "role_residual_contract_after_gate",
+                )
+            )
+            else "v106"
+            if (
+                interval_stage
+                and int(
+                    getattr(
+                        system.policy_config,
+                        "flow_jepa_variance_safe_routing",
+                        0,
+                    )
+                )
+                and int(
+                    getattr(
+                        system.policy_config,
+                        "flow_jepa_complete_numerical_contract",
+                        0,
+                    )
+                )
+                and float(
+                    getattr(
+                        trainer,
+                        "flow_jepa_interval_stage_loss_weight",
+                        0.0,
+                    )
+                )
+                > 0.0
+            )
+            else "v105"
+            if (
+                int(
+                    getattr(
+                        system.policy_config,
+                        "flow_jepa_horizon_soft_address",
+                        0,
+                    )
+                )
+                and int(
+                    getattr(
+                        trainer,
+                        "flow_jepa_future_reliable_normalization",
+                        0,
+                    )
+                )
+                and float(
+                    getattr(
+                        trainer,
+                        "flow_jepa_horizon_address_loss_weight",
+                        0.0,
+                    )
+                )
+                > 0.0
+            )
+            else "v104"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_sequential_horizon_memory",
+                    0,
+                )
+            )
+            else "v103"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_predictive_change_contract",
+                    0,
+                )
+            )
+            else "v99"
+            if int(getattr(system.policy_config, "flow_jepa_zero_flow_guard", 0))
+            else "v98"
+            if int(getattr(system.policy_config, "flow_jepa_raw_image_enabled", 0))
+            else "v96"
+            if int(getattr(system.policy_config, "flow_jepa_late_bottleneck", 0))
+            else "v95"
+            if int(getattr(system.policy_config, "flow_jepa_enabled", 0))
+            else "v94"
+        )
+        status_parts: list[str] = []
+        if deploy_sampling_passed:
+            status_parts.append(
+                "deploy_sampling=pass "
+                f"dtype={str(dtype).removeprefix('torch.')} "
+                f"steps={int(trainer.eval_inference_steps)}"
+            )
+        if interval_teacher_passed:
+            status_parts.append(
+                "interval_teacher=pass "
+                "supports="
+                f"{len(system.policy_config.flow_jepa_effective_interval_support_offsets)}"
+            )
+        if int(
+            getattr(
+                system.policy_config,
+                "flow_jepa_complete_numerical_contract",
+                0,
+            )
+        ):
+            status_parts.append(
+                "numerical_contract=pass "
+                f"role_floor={float(system.policy_config.flow_jepa_routing_norm_floor):.3f} "
+                f"corr_floor={float(system.policy_config.flow_jepa_correlation_rms_floor):.3f} "
+                "visibility_width="
+                f"{float(system.policy_config.flow_jepa_visibility_transition_fraction):.3f}"
+            )
+        print(
+            f"[{preflight_version}-preflight] " + " ".join(status_parts),
+            flush=True,
+        )
+    finally:
+        restore_rng(saved_rng)
+        system.train(was_training)
+
+
+@torch.no_grad()
+def _preflight_flow_jepa_stage1(
+    *,
+    system: V39PolicySystem,
+    loader: DataLoader,
+    conditioner: RDT2Conditioner,
+    device: torch.device,
+    dtype: torch.dtype,
+    camera_names: Sequence[str],
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Fail fast on the actual V95 Stage1 teacher path without deploy sampling."""
+
+    saved_rng = rng_state()
+    was_training = system.training
+    try:
+        system.eval()
+        batch = next(iter(loader))
+        sample = prepare_v39_policy_sample(
+            batch,
+            conditioner=conditioner,
+            system=system,
+            camera_names=camera_names,
+            device=device,
+            dtype=dtype,
+            include_target_visual=True,
+        )
+        with autocast_context(device, dtype):
+            output = system.flow_jepa_stage1_forward(
+                sample["visual"],
+                sample["history_state"],
+                sample["executed_action_history"],
+                sample["state"],
+                sample["target_visual"],
+                raw_visual=sample.get("raw_visual"),
+            )
+            losses = flow_jepa_stage1_losses(output, trainer, enable_future_loss=True)
+        if not bool(torch.isfinite(losses["loss"]).all()):
+            raise FloatingPointError("non-finite V95 Stage1 representation objective")
+        print(
+            f"[v95-stage1-preflight] representation_forward=pass "
+            f"dtype={str(dtype).removeprefix('torch.')} teacher=frozen_dino_no_grad",
+            flush=True,
+        )
+    finally:
+        restore_rng(saved_rng)
+        system.train(was_training)
 
 
 def _bytes_to_gib(value: int | float) -> float:
@@ -3739,6 +8909,7 @@ def _attach_v94_loss_ledger(
         "execution": [],
         "latent": [],
         "layer": [],
+        "representation": [],
     }
 
     def add(name: str, metric: str, weight: float, group: str) -> None:
@@ -3751,6 +8922,36 @@ def _attach_v94_loss_ledger(
         grouped[group].append(contribution)
 
     add("flow", "physical_flow", 1.0, "action")
+    for name, metric, weight_name in (
+        ("flow_jepa_warp_loss", "flow_jepa_warp_loss", "flow_jepa_warp_loss_weight"),
+        (
+            "flow_jepa_identity_advantage_loss",
+            "flow_jepa_identity_advantage_loss",
+            "flow_jepa_identity_advantage_loss_weight",
+        ),
+        (
+            "flow_jepa_static_identity_loss",
+            "flow_jepa_static_identity_loss",
+            "flow_jepa_static_identity_loss_weight",
+        ),
+        ("flow_jepa_cycle_loss", "flow_jepa_cycle_loss", "flow_jepa_cycle_loss_weight"),
+        (
+            "flow_jepa_smoothness_loss",
+            "flow_jepa_smoothness_loss",
+            "flow_jepa_smoothness_loss_weight",
+        ),
+        (
+            "flow_jepa_uncertainty_nll",
+            "flow_jepa_uncertainty_nll",
+            "flow_jepa_uncertainty_nll_weight",
+        ),
+        (
+            "flow_jepa_refinement_sequence_loss",
+            "flow_jepa_refinement_sequence_loss",
+            "flow_jepa_refinement_sequence_loss_weight",
+        ),
+    ):
+        add(name, metric, float(getattr(trainer, weight_name, 0.0)), "representation")
     for name, metric, weight_name in (
         ("proposal", "proposal", "proposal_loss_weight"),
         ("event", "event", "event_loss_weight"),
@@ -3779,6 +8980,48 @@ def _attach_v94_loss_ledger(
         add(name, metric, float(getattr(trainer, weight_name, 0.0)), "action")
 
     if enable_future_loss:
+        add(
+            "flow_jepa_future",
+            "flow_jepa_future_prediction",
+            float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)),
+            "representation",
+        )
+        add(
+            "flow_jepa_future_change",
+            "flow_jepa_future_change",
+            float(getattr(trainer, "flow_jepa_future_change_loss_weight", 0.0)),
+            "representation",
+        )
+        add(
+            "flow_jepa_horizon_address",
+            "flow_jepa_horizon_address",
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_horizon_address_loss_weight",
+                    0.0,
+                )
+            ),
+            "representation",
+        )
+        add(
+            "flow_jepa_interval_stage",
+            "flow_jepa_interval_stage",
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_interval_stage_loss_weight",
+                    0.0,
+                )
+            ),
+            "representation",
+        )
+        add(
+            "flow_jepa_stage",
+            "flow_jepa_stage_prediction",
+            float(getattr(trainer, "flow_jepa_stage_loss_weight", 0.0)),
+            "representation",
+        )
         for name, metric, weight_name in (
             ("rollout_dynamics", "rollout_dynamics", "rollout_dynamics_loss_weight"),
             ("rollout_delta", "rollout_delta", "rollout_delta_loss_weight"),
@@ -3870,6 +9113,131 @@ def _attach_v94_loss_ledger(
     losses["loss_ledger_residual"] = reference - ledger_sum
 
 
+_FLOW_JEPA_LOG_VERSIONS = frozenset(
+    {
+        "v95",
+        "v96",
+        "v97",
+        "v98",
+        "v99",
+        "v100",
+        "v101",
+        "v102",
+        "v103",
+        "v104",
+        "v105",
+        "v106",
+        "v107",
+        "v108",
+        "v109",
+        "v110",
+        "v111",
+    }
+)
+_RAW_FLOW_JEPA_LOG_VERSIONS = frozenset(
+    {"v97", "v98", "v99", "v100", "v101", "v102", "v103", "v104", "v105", "v106", "v107", "v108", "v109", "v110", "v111"}
+)
+_COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS = frozenset(
+    {"v100", "v101", "v102", "v103", "v104", "v105", "v106", "v107", "v108", "v109", "v110", "v111"}
+)
+_BALANCED_FLOW_JEPA_LOG_VERSIONS = frozenset(
+    {"v101", "v102", "v103", "v104", "v105", "v106", "v107", "v108", "v109", "v110", "v111"}
+)
+
+
+def _evidence_log_version(*rows: dict[str, float]) -> str:
+    def maximum(*keys: str) -> float:
+        return max(
+            (
+                float(row.get(key, 0.0))
+                for row in rows
+                for key in keys
+            ),
+            default=0.0,
+        )
+
+    if maximum("flow_jepa_structured_ownership_bottleneck") > 0.5:
+        return "v111"
+    if maximum("flow_jepa_coordinate_typed_raw_detail") > 0.5:
+        return "v110"
+    if maximum("flow_jepa_progressive_grounding_address") > 0.5:
+        return "v109"
+    if maximum("flow_jepa_online_horizon_address") > 0.5:
+        return "v108"
+    if all(
+        maximum(key) > 0.5
+        for key in (
+            "flow_jepa_policy_multi_glimpse_address",
+            "flow_jepa_horizon_cell_fine_address",
+            "flow_jepa_interval_stage_typed_value",
+            "role_residual_contract_after_gate",
+        )
+    ):
+        return "v107"
+    if all(
+        maximum(key) > 0.5
+        for key in (
+            "flow_jepa_interval_stage_enabled",
+            "flow_jepa_variance_safe_routing",
+            "flow_jepa_complete_numerical_contract",
+        )
+    ):
+        return "v106"
+    if all(
+        maximum(key) > 0.5
+        for key in (
+            "flow_jepa_bounded_flow_coordinates",
+            "flow_jepa_sequential_horizon_memory",
+            "role_residual_contract_enabled",
+            "flow_jepa_horizon_soft_address",
+            "flow_jepa_future_reliable_normalization",
+            "flow_jepa_horizon_address_supervision_active",
+        )
+    ):
+        return "v105"
+    if all(
+        maximum(key) > 0.5
+        for key in (
+            "flow_jepa_bounded_flow_coordinates",
+            "flow_jepa_sequential_horizon_memory",
+            "role_residual_contract_enabled",
+        )
+    ):
+        return "v104"
+    if maximum(
+        "flow_jepa_predictive_change_contract",
+        "flow_jepa_soft_address_lattice",
+        "evidence_policy_delta_bridge_enabled",
+    ) > 0.5:
+        return "v103"
+    if maximum(
+        "flow_jepa_raw_detail_deferred_to_policy",
+        "flow_jepa_world_anchor_write_only",
+        "evidence_top_policy_workspace_horizon_pool",
+    ) > 0.5:
+        return "v102"
+    if maximum(
+        "temporal_balance_active",
+        "flow_jepa_teacher_balanced_target_mask",
+        "evidence_top_policy_workspace_fixed_fusion",
+    ) > 0.5:
+        return "v101"
+    if maximum(
+        "flow_jepa_strict_role_visual_path",
+        "flow_jepa_raw_additive_detail_path",
+    ) > 0.5:
+        return "v100"
+    if maximum("flow_jepa_zero_flow_guard") > 0.5:
+        return "v99"
+    if maximum("flow_jepa_raw_image_enabled") > 0.5:
+        return "v98"
+    if maximum("flow_jepa_late_bottleneck") > 0.5:
+        return "v96"
+    if any(key.startswith("flow_jepa_") for row in rows for key in row):
+        return "v95"
+    return "v94"
+
+
 def _evidence_serial_log_line(
     row: dict[str, float],
     *,
@@ -3885,6 +9253,18 @@ def _evidence_serial_log_line(
     it is evidence; fields from inactive decoder families are never fabricated.
     """
 
+    if (
+        "role_residual_written_rms" not in row
+        and "role_residual_bounded_rms" in row
+    ):
+        # V104-V106 reported the pre-gate bounded tensor under the historical
+        # write label.  Preserve old-log readability while V107 prefers the
+        # factual post-gate write metric whenever it exists.
+        row = {
+            **row,
+            "role_residual_written_rms": row["role_residual_bounded_rms"],
+        }
+
     def append(
         parts: list[str],
         label: str,
@@ -3896,8 +9276,9 @@ def _evidence_serial_log_line(
         if key in row and (keep_zero or abs(float(row[key])) > 1e-12):
             parts.append(f"{label}={format(row[key], spec)}")
 
+    log_version = _evidence_log_version(row)
     loss_parts = [
-        f"[v94-train] epoch={epoch:03d}",
+        f"[{log_version}-train] epoch={epoch:03d}",
         f"batch={batch_index:04d}",
         f"loss_total={row['loss']:.6f}",
         f"flow_loss={row['physical_flow']:.6f}",
@@ -3919,7 +9300,7 @@ def _evidence_serial_log_line(
         ("step_norm_ratio", "rollout_milestone_delta_norm_ratio", ".3f"),
     ):
         append(loss_parts, label, key, spec)
-    group_keys = ("action", "rollout", "execution", "latent", "layer")
+    group_keys = ("action", "representation", "rollout", "execution", "latent", "layer")
     present_groups = [
         name
         for name in group_keys
@@ -3951,7 +9332,776 @@ def _evidence_serial_log_line(
         )
     append(loss_parts, "ledger_gap", "loss_ledger_residual", "+.2e")
 
-    execution_parts = ["[v94-exec]"]
+    representation_parts: list[str] = []
+    if log_version in _FLOW_JEPA_LOG_VERSIONS:
+        representation_parts.append(f"[{log_version}-repr]")
+        future_prediction_label = (
+            "future_pred"
+            if log_version != "v95"
+            else "window_pred"
+        )
+        for label, key, spec in (
+            (future_prediction_label, "flow_jepa_future_prediction", ".5f"),
+            ("change_dir", "flow_jepa_future_change_direction", ".5f"),
+            ("change_obj", "flow_jepa_future_change", ".5f"),
+            ("stage_pred", "flow_jepa_stage_prediction", ".5f"),
+            ("warp", "flow_jepa_warp_loss", ".5f"),
+            ("identity_adv", "flow_jepa_identity_advantage_loss", ".5f"),
+            ("static_identity", "flow_jepa_static_identity_loss", ".5f"),
+            ("cycle", "flow_jepa_cycle_loss", ".5f"),
+            ("smooth", "flow_jepa_smoothness_loss", ".5f"),
+            ("uncert_nll", "flow_jepa_uncertainty_nll", ".5f"),
+            ("refine_seq", "flow_jepa_refinement_sequence_loss", ".5f"),
+            ("flow_mag", "flow_jepa_patch_flow_magnitude", ".3f"),
+            ("confidence", "flow_jepa_confidence_mean", ".3f"),
+            ("occlusion", "flow_jepa_occlusion_fraction", ".3f"),
+            ("corr_entropy", "flow_jepa_correlation_entropy", ".3f"),
+            ("corr_margin", "flow_jepa_correlation_margin", ".3f"),
+            ("context_drop", "flow_jepa_context_dropout_fraction", ".3f"),
+            ("target_mask", "flow_jepa_future_target_fraction", ".3f"),
+            ("window_hmax", "flow_jepa_window_horizon_max", ".0f"),
+            ("stage_h", "flow_jepa_stage_horizon", ".0f"),
+            ("stage_norm", "flow_jepa_stage_token_norm", ".3f"),
+            ("stage_target_norm", "flow_jepa_stage_target_norm", ".3f"),
+            ("stage_prediction_norm", "flow_jepa_stage_prediction_norm", ".3f"),
+            ("stage_window_cos", "flow_jepa_stage_window_cosine", ".3f"),
+            ("stage_window_gate", "flow_jepa_stage_to_window_gate", ".3f"),
+            ("stage_window_update", "flow_jepa_stage_to_window_update_norm", ".3f"),
+            ("goal_norm", "flow_jepa_goal_condition_norm", ".3f"),
+            ("goal_pair_cos", "flow_jepa_goal_pair_cosine", ".3f"),
+            ("action_mem_norm", "flow_jepa_action_condition_norm", ".3f"),
+            ("goal_action_cos", "flow_jepa_goal_action_cosine", ".3f"),
+            (
+                "future_raw_delta",
+                "flow_jepa_future_raw_delta_loss",
+                ".5f",
+            ),
+            (
+                "future_reliable_norm",
+                "flow_jepa_future_reliable_normalized_loss",
+                ".5f",
+            ),
+            (
+                "future_reliability",
+                "flow_jepa_future_change_reliability",
+                ".3f",
+            ),
+            (
+                "future_reference_scale",
+                "flow_jepa_future_current_reference_scale",
+                ".3f",
+            ),
+            (
+                "future_normalization_scale",
+                "flow_jepa_future_normalization_scale",
+                ".3f",
+            ),
+            (
+                "future_direction_floor",
+                "flow_jepa_future_direction_floor_min",
+                ".3e",
+            ),
+            (
+                "horizon_address_loss",
+                "flow_jepa_horizon_address",
+                ".5f",
+            ),
+            (
+                "horizon_address_teacher_rel",
+                "flow_jepa_horizon_address_teacher_reliability",
+                ".3f",
+            ),
+            (
+                "horizon_address_teacher_entropy",
+                "flow_jepa_horizon_address_teacher_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_pred_entropy",
+                "flow_jepa_horizon_address_predicted_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_update",
+                "flow_jepa_horizon_address_update_rms",
+                ".3f",
+            ),
+            (
+                "horizon_address_ratio",
+                "flow_jepa_horizon_address_update_ratio",
+                ".3f",
+            ),
+            (
+                "horizon_address_route_entropy",
+                "flow_jepa_horizon_address_route_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_route_max",
+                "flow_jepa_horizon_address_route_max",
+                ".3f",
+            ),
+            (
+                "horizon_address_fine_entropy",
+                "flow_jepa_horizon_address_fine_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_variation",
+                "flow_jepa_horizon_address_variation",
+                ".3f",
+            ),
+            (
+                "horizon_address_cross_cell",
+                "flow_jepa_horizon_address_cross_cell_distance",
+                ".3f",
+            ),
+            (
+                "horizon_fine_cell_specific",
+                "flow_jepa_horizon_cell_fine_address",
+                ".0f",
+            ),
+            (
+                "online_horizon_address",
+                "flow_jepa_online_horizon_address",
+                ".0f",
+            ),
+            (
+                "online_address_write",
+                "flow_jepa_online_horizon_address_write_rms",
+                ".3f",
+            ),
+            (
+                "progressive_address",
+                "flow_jepa_progressive_grounding_address",
+                ".0f",
+            ),
+            (
+                "g1_coarse_entropy",
+                "flow_jepa_progressive_g1_coarse_entropy",
+                ".3f",
+            ),
+            (
+                "g1_coarse_max",
+                "flow_jepa_progressive_g1_coarse_max",
+                ".3f",
+            ),
+            (
+                "g2_fine_entropy",
+                "flow_jepa_progressive_g2_fine_entropy",
+                ".3f",
+            ),
+            (
+                "g2_center_shift",
+                "flow_jepa_progressive_g2_center_shift",
+                ".3f",
+            ),
+            (
+                "g3_coarse_prior",
+                "flow_jepa_progressive_g3_coarse_bias_rms",
+                ".3f",
+            ),
+            (
+                "g3_summary",
+                "flow_jepa_progressive_g3_summary_rms",
+                ".3f",
+            ),
+            (
+                "g3_sem_summary",
+                "flow_jepa_progressive_g3_semantic_summary_rms",
+                ".3f",
+            ),
+            (
+                "g3_app_summary",
+                "flow_jepa_progressive_g3_appearance_summary_rms",
+                ".3f",
+            ),
+            (
+                "g3_geo_summary",
+                "flow_jepa_progressive_g3_geometry_summary_rms",
+                ".3f",
+            ),
+            (
+                "world_address_entropy",
+                "flow_jepa_progressive_world_posterior_entropy",
+                ".3f",
+            ),
+            (
+                "world_horizon_variation",
+                "flow_jepa_progressive_world_horizon_variation",
+                ".3f",
+            ),
+            (
+                "world_source_max",
+                "flow_jepa_progressive_world_source_prior_max",
+                ".3f",
+            ),
+            (
+                "world_source_variation",
+                "flow_jepa_progressive_world_source_horizon_variation",
+                ".3f",
+            ),
+            (
+                "policy_address_prior",
+                "flow_jepa_progressive_policy_prior_active",
+                ".0f",
+            ),
+            (
+                "policy_world_prior",
+                "flow_jepa_progressive_policy_world_prior_rms",
+                ".3f",
+            ),
+            ("typed_raw", "flow_jepa_coordinate_typed_raw_detail", ".0f"),
+            (
+                "structured_ownership",
+                "flow_jepa_structured_ownership_bottleneck",
+                ".0f",
+            ),
+            (
+                "g2_owner_sem_app_l1",
+                "flow_jepa_progressive_g2_semantic_appearance_posterior_l1",
+                ".3f",
+            ),
+            (
+                "g2_owner_app_geo_l1",
+                "flow_jepa_progressive_g2_appearance_geometry_posterior_l1",
+                ".3f",
+            ),
+            (
+                "g3_owner_sem_app_l1",
+                "flow_jepa_progressive_g3_semantic_appearance_slot_l1",
+                ".3f",
+            ),
+            (
+                "g3_sem_owner_rms",
+                "flow_jepa_progressive_g3_semantic_owner_sidecar_rms",
+                ".3f",
+            ),
+            (
+                "g3_app_owner_rms",
+                "flow_jepa_progressive_g3_appearance_owner_sidecar_rms",
+                ".3f",
+            ),
+            (
+                "g3_geo_owner_rms",
+                "flow_jepa_progressive_g3_geometry_owner_sidecar_rms",
+                ".3f",
+            ),
+            (
+                "g3_public_tokens",
+                "flow_jepa_progressive_g3_summary_token_count",
+                ".0f",
+            ),
+            (
+                "g3_owner_tokens",
+                "flow_jepa_progressive_g3_owner_sidecar_token_count",
+                ".0f",
+            ),
+            (
+                "world_public_ratio",
+                "flow_jepa_progressive_world_public_ratio",
+                ".3f",
+            ),
+            (
+                "world_innovation",
+                "flow_jepa_progressive_world_horizon_innovation_rms",
+                ".3f",
+            ),
+            (
+                "world_owner_sem_geo_l1",
+                "flow_jepa_progressive_world_semantic_geometry_source_l1",
+                ".3f",
+            ),
+            (
+                "world_owner_slot_contract_min",
+                "flow_jepa_progressive_world_owner_slot_contract_min",
+                ".3f",
+            ),
+            (
+                "world_owner_source_contract_min",
+                "flow_jepa_progressive_world_owner_source_contract_min",
+                ".3f",
+            ),
+            (
+                "p1_owner_fine_l1",
+                "flow_jepa_typed_p1_appearance_geometry_fine_l1",
+                ".3f",
+            ),
+            (
+                "p1_owner_route_l1",
+                "flow_jepa_typed_p1_semantic_appearance_route_l1",
+                ".3f",
+            ),
+            ("literal_rgb", "flow_jepa_literal_rgb_chart_rms", ".3f"),
+            (
+                "future_transport_offset",
+                "flow_jepa_progressive_future_transport_offset_rms",
+                ".3f",
+            ),
+            (
+                "future_visibility",
+                "flow_jepa_progressive_future_transport_visibility_mean",
+                ".3f",
+            ),
+            (
+                "future_transport_variation",
+                "flow_jepa_progressive_future_transport_horizon_variation",
+                ".3f",
+            ),
+            (
+                "future_transport_spatial_logit",
+                "flow_jepa_progressive_future_transport_spatial_logit_rms",
+                ".3f",
+            ),
+            (
+                "p1_future_transport_logit",
+                "flow_jepa_typed_p1_future_transport_logit_rms",
+                ".3f",
+            ),
+            ("p1_micro_value", "flow_jepa_typed_p1_micro_value_rms", ".3f"),
+            (
+                "p1_spatial_variation",
+                "flow_jepa_typed_p1_spatial_variation",
+                ".3f",
+            ),
+            ("p2_detail_output", "flow_jepa_typed_p2_output_rms", ".3f"),
+            (
+                "horizon_cos_seed",
+                "flow_jepa_online_address_boundary_seed_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_g3",
+                "flow_jepa_online_address_boundary_post_g3_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_address",
+                "flow_jepa_online_address_boundary_post_address_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_w1",
+                "flow_jepa_online_address_boundary_post_w1_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_w2",
+                "flow_jepa_online_address_boundary_post_w2_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_w3",
+                "flow_jepa_online_address_boundary_post_w3_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_interval",
+                "flow_jepa_online_address_boundary_post_interval_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "address_projection_w3",
+                "flow_jepa_online_address_boundary_post_w3_cumulative_address_projection",
+                ".3f",
+            ),
+            (
+                "address_projection_interval",
+                "flow_jepa_online_address_boundary_post_interval_cumulative_address_projection",
+                ".3f",
+            ),
+            (
+                "interval_stage_loss",
+                "flow_jepa_interval_stage",
+                ".5f",
+            ),
+            (
+                "interval_stage_raw",
+                "flow_jepa_interval_stage_raw",
+                ".5f",
+            ),
+            (
+                "interval_stage_reliable",
+                "flow_jepa_interval_stage_normalized",
+                ".5f",
+            ),
+            (
+                "interval_stage_direction",
+                "flow_jepa_interval_stage_direction",
+                ".5f",
+            ),
+            (
+                "interval_stage_direction_floor",
+                "flow_jepa_interval_stage_direction_floor_min",
+                ".3e",
+            ),
+            (
+                "interval_stage_endpoint",
+                "flow_jepa_interval_stage_endpoint",
+                ".5f",
+            ),
+            (
+                "interval_stage_target_scale",
+                "flow_jepa_interval_stage_target_scale",
+                ".3f",
+            ),
+            (
+                "interval_stage_reliability",
+                "flow_jepa_interval_stage_reliability",
+                ".3f",
+            ),
+            (
+                "interval_stage_write",
+                "flow_jepa_interval_stage_written_delta_rms",
+                ".3f",
+            ),
+            (
+                "interval_stage_carrier_ratio",
+                "flow_jepa_interval_stage_carrier_ratio",
+                ".3f",
+            ),
+            (
+                "interval_stage_typed_mass",
+                "attnres_world_to_policy_interval_stage_source_mass",
+                ".3f",
+            ),
+            (
+                "interval_stage_norm_floor_seen",
+                "flow_jepa_interval_stage_norm_denominator_min",
+                ".3f",
+            ),
+            (
+                "horizon_address_value_rms",
+                "flow_jepa_horizon_address_value_precontract_rms",
+                ".3f",
+            ),
+            (
+                "horizon_address_value_contract",
+                "flow_jepa_horizon_address_value_contraction",
+                ".3f",
+            ),
+            (
+                "horizon_address_value_channel_std",
+                "flow_jepa_horizon_address_value_channel_std",
+                ".3f",
+            ),
+        ):
+            append(representation_parts, label, key, spec)
+        horizon_keys = sorted(
+            (
+                key
+                for key in row
+                if key.startswith("flow_jepa_future_horizon_")
+                and key.removeprefix("flow_jepa_future_horizon_").isdigit()
+            ),
+            key=lambda key: int(key.rsplit("_", 1)[-1]),
+        )
+        for key in horizon_keys:
+            append(
+                representation_parts,
+                f"future_h{key.rsplit('_', 1)[-1]}",
+                key,
+                ".5f",
+            )
+        reliable_offsets = sorted(
+            {
+                int(match.group(1))
+                for key in row
+                for match in (
+                    re.fullmatch(
+                        r"flow_jepa_future_horizon_(\d+)_target_scale",
+                        key,
+                    ),
+                )
+                if match is not None
+            }
+        )
+        for label, suffix, spec in (
+            ("future_scale", "target_scale", ".3f"),
+            ("future_norm_scale", "normalization_scale", ".3f"),
+            ("future_rel", "reliability", ".3f"),
+            ("address_kl", "address_kl", ".3f"),
+            ("address_rel", "address_reliability", ".3f"),
+        ):
+            entries: list[str] = []
+            for offset in reliable_offsets:
+                if suffix == "address_kl":
+                    key = f"flow_jepa_horizon_address_{offset}_kl"
+                elif suffix == "address_reliability":
+                    key = (
+                        f"flow_jepa_horizon_address_{offset}_reliability"
+                    )
+                else:
+                    key = f"flow_jepa_future_horizon_{offset}_{suffix}"
+                if key in row:
+                    entries.append(f"{offset}:{format(row[key], spec)}")
+            if entries:
+                representation_parts.append(
+                    f"{label}=" + "/".join(entries)
+                )
+        interval_offsets = sorted(
+            {
+                int(match.group(1))
+                for key in row
+                for match in (
+                    re.fullmatch(
+                        r"flow_jepa_interval_stage_horizon_(\d+)_loss",
+                        key,
+                    ),
+                )
+                if match is not None
+            }
+        )
+        for offset in interval_offsets:
+            parts: list[str] = []
+            for label, suffix, spec in (
+                ("l", "loss", ".4f"),
+                ("r", "reliability", ".3f"),
+                ("w", "write_rms", ".3f"),
+            ):
+                key = f"flow_jepa_interval_stage_horizon_{offset}_{suffix}"
+                if key in row:
+                    parts.append(f"{label}:{format(row[key], spec)}")
+            if parts:
+                representation_parts.append(
+                    f"interval_h{offset}=" + "/".join(parts)
+                )
+        if log_version == "v96":
+            for label, key, spec in (
+                ("horizon_count", "flow_jepa_horizon_count", ".0f"),
+                ("horizon_max", "flow_jepa_horizon_max", ".0f"),
+                ("native_grid", "flow_jepa_native_grid_size", ".0f"),
+                ("coarse_grid", "flow_jepa_coarse_grid_size", ".0f"),
+                ("native_flow", "flow_jepa_native_flow_magnitude", ".3f"),
+                ("detail_gate_mean", "flow_jepa_detail_gate_mean", ".3f"),
+                ("detail_weighted_cmp", "flow_jepa_detail_effective_comparisons", ".0f"),
+                ("detail_candidate_cmp", "flow_jepa_detail_candidate_comparisons", ".0f"),
+                ("address_flow_mass", "flow_jepa_address_flow_mass", ".3f"),
+                ("address_fallback_mass", "flow_jepa_address_fallback_mass", ".3f"),
+                ("address_entropy", "flow_jepa_address_entropy", ".3f"),
+                ("horizon_adj_cos", "flow_jepa_horizon_adjacent_cosine", ".3f"),
+                ("far_horizon_norm", "flow_jepa_far_horizon_norm", ".3f"),
+            ):
+                append(representation_parts, label, key, spec)
+        if log_version in _RAW_FLOW_JEPA_LOG_VERSIONS:
+            for label, key, spec in (
+                ("horizon_count", "flow_jepa_horizon_count", ".0f"),
+                ("horizon_max", "flow_jepa_horizon_max", ".0f"),
+                ("dino_grid", "flow_jepa_native_grid_size", ".0f"),
+                ("reader_grid", "flow_jepa_coarse_grid_size", ".0f"),
+                ("raw_high_grid", "flow_jepa_raw_high_grid_size", ".0f"),
+                ("raw_mid_grid", "flow_jepa_raw_mid_grid_size", ".0f"),
+                ("raw_coarse_grid", "flow_jepa_raw_coarse_grid_size", ".0f"),
+                ("raw_flow", "flow_jepa_raw_flow_magnitude", ".3f"),
+                ("raw_flow_grid", "flow_jepa_raw_flow_grid_magnitude", ".3f"),
+                ("seed_reliability", "flow_jepa_raw_seed_reliability", ".3f"),
+                ("mid_residual", "flow_jepa_raw_mid_residual_magnitude", ".3f"),
+                ("high_residual", "flow_jepa_raw_high_residual_magnitude", ".3f"),
+                (
+                    "mid_bound_compress",
+                    "flow_jepa_raw_mid_boundary_compression",
+                    ".3f",
+                ),
+                (
+                    "high_bound_compress",
+                    "flow_jepa_raw_high_boundary_compression",
+                    ".3f",
+                ),
+                (
+                    "motion_flow_norm",
+                    "flow_jepa_motion_evidence_flow_magnitude",
+                    ".3f",
+                ),
+                ("raw_cycle_core", "flow_jepa_raw_cycle_core", ".4f"),
+                ("raw_boundary", "flow_jepa_raw_boundary_penalty", ".4f"),
+                ("raw_valid", "flow_jepa_raw_valid_fraction", ".3f"),
+                ("raw_conf", "flow_jepa_raw_confidence_mean", ".3f"),
+                ("raw_occ", "flow_jepa_raw_occlusion_fraction", ".3f"),
+                (
+                    "hard_occ_audit",
+                    "flow_jepa_raw_hard_occlusion_fraction",
+                    ".3f",
+                ),
+                (
+                    "visibility_width_min",
+                    "flow_jepa_visibility_transition_width_min",
+                    ".3f",
+                ),
+                (
+                    "visibility_gain_bound",
+                    "flow_jepa_visibility_gain_bound_max",
+                    ".2f",
+                ),
+                (
+                    "corr_feature_rms_min",
+                    "flow_jepa_correlation_feature_rms_min",
+                    ".3e",
+                ),
+                (
+                    "corr_norm_denom_min",
+                    "flow_jepa_correlation_norm_denominator_min",
+                    ".3f",
+                ),
+                (
+                    "corr_norm_gain_max",
+                    "flow_jepa_correlation_norm_gain_max",
+                    ".2f",
+                ),
+                ("zero_warp", "flow_jepa_raw_identity_warp_error", ".4f"),
+                ("warp_gain", "flow_jepa_raw_warp_gain_over_zero", "+.4f"),
+                ("moving_gain", "flow_jepa_raw_moving_warp_gain", "+.4f"),
+                ("static_gain", "flow_jepa_raw_static_warp_gain", "+.4f"),
+                (
+                    "moving_corr_entropy",
+                    "flow_jepa_raw_moving_correlation_entropy",
+                    ".3f",
+                ),
+                (
+                    "moving_corr_margin",
+                    "flow_jepa_raw_moving_correlation_margin",
+                    ".3f",
+                ),
+                ("motion_visible", "flow_jepa_raw_observable_motion_fraction", ".3f"),
+                ("raw_precision", "flow_jepa_raw_detail_precision_mean", ".3f"),
+                (
+                    "raw_detail_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_flow",
+                    "flow_jepa_raw_address_flow_mass",
+                    ".3f",
+                ),
+                (
+                    "raw_base_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_fallback",
+                    "flow_jepa_raw_address_fallback_mass",
+                    ".3f",
+                ),
+                (
+                    "detail_address_entropy" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_entropy",
+                    "flow_jepa_raw_address_entropy",
+                    ".3f",
+                ),
+                (
+                    "address_separation",
+                    "flow_jepa_raw_address_center_separation",
+                    ".3f",
+                ),
+                (
+                    "address_value_delta",
+                    "flow_jepa_raw_address_lane_value_difference",
+                    ".3f",
+                ),
+                (
+                    "detail_address_concentration"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "address_logit_gain",
+                    "flow_jepa_raw_address_logit_advantage",
+                    "+.3f",
+                ),
+                (
+                    "address_zero_delta",
+                    "flow_jepa_raw_address_zero_flow_value_delta",
+                    ".3f",
+                ),
+                (
+                    "address_shuffle_delta",
+                    "flow_jepa_raw_address_shuffled_flow_value_delta",
+                    ".3f",
+                ),
+                ("raw_candidates", "flow_jepa_raw_candidates_per_cell", ".0f"),
+                ("raw_detail_tokens", "flow_jepa_raw_detail_token_count", ".0f"),
+                (
+                    "raw_dino_fused",
+                    "flow_jepa_raw_detail_fused_with_latest_dino",
+                    ".0f",
+                ),
+                (
+                    "raw_source_dino_fused",
+                    "flow_jepa_raw_detail_fused_with_source_dino",
+                    ".0f",
+                ),
+                (
+                    "refined_visual_tokens",
+                    "flow_jepa_refined_evidence_token_count",
+                    ".0f",
+                ),
+                ("grounding_blocks", "flow_jepa_grounding_block_count", ".0f"),
+                ("world_blocks", "flow_jepa_world_block_count", ".0f"),
+                ("policy_blocks", "flow_jepa_policy_block_count", ".0f"),
+                ("horizon_adj_cos", "flow_jepa_horizon_adjacent_cosine", ".3f"),
+                (
+                    "query_adj_cos",
+                    "flow_jepa_future_query_adjacent_cosine",
+                    ".3f",
+                ),
+                (
+                    "history_entropy",
+                    "flow_jepa_perceptual_history_entropy",
+                    ".3f",
+                ),
+                (
+                    "history_latest",
+                    "flow_jepa_perceptual_history_latest_mass",
+                    ".3f",
+                ),
+                (
+                    "horizon_step_update",
+                    "flow_jepa_horizon_transition_update_rms",
+                    ".3f",
+                ),
+                (
+                    "horizon_state_delta",
+                    "flow_jepa_horizon_transition_state_delta",
+                    ".3f",
+                ),
+                ("far_horizon_norm", "flow_jepa_far_horizon_norm", ".3f"),
+                ("world_xy_residual", "flow_jepa_world_spatial_residual_norm", ".3e"),
+                (
+                    "world_anchor_residual",
+                    "flow_jepa_world_anchor_camera_residual_norm",
+                    ".3f",
+                ),
+                (
+                    "late_detail_entropy",
+                    "flow_jepa_late_detail_attention_entropy",
+                    ".3f",
+                ),
+                (
+                    "late_detail_max",
+                    "flow_jepa_late_detail_attention_max",
+                    ".3f",
+                ),
+                (
+                    "late_detail_update",
+                    "flow_jepa_late_detail_update_norm",
+                    ".3f",
+                ),
+                (
+                    "late_detail_ratio",
+                    "flow_jepa_late_detail_trajectory_ratio",
+                    ".3f",
+                ),
+                (
+                    "late_detail_scale",
+                    "flow_jepa_late_detail_fixed_scale",
+                    ".3f",
+                ),
+                (
+                    "late_detail_tokens",
+                    "flow_jepa_late_detail_token_count",
+                    ".0f",
+                ),
+                (
+                    "late_detail_glimpses",
+                    "flow_jepa_address_policy_glimpse_count",
+                    ".0f",
+                ),
+                (
+                    "late_detail_glimpse_var",
+                    "flow_jepa_address_policy_glimpse_route_variation",
+                    ".3f",
+                ),
+            ):
+                append(representation_parts, label, key, spec)
+
+    execution_parts = [f"[{log_version}-exec]"]
     for label, key, spec in (
         ("exec_progress", "evidence_mmd_it_execution_progress", ".2f"),
         ("capacity_gate_mass", "evidence_mmd_it_capacity_gate_mass", ".5f"),
@@ -3964,6 +10114,88 @@ def _evidence_serial_log_line(
         ("terminal_prior", "evidence_mmd_it_terminal_prior_weight", ".3f"),
         ("terminal_probability", "evidence_mmd_it_terminal_probability", ".3f"),
         ("hard_terminal_fraction", "evidence_mmd_it_hard_terminal_fraction", ".3f"),
+        ("top_policy_scale", "evidence_top_policy_workspace_scale", ".3f"),
+        ("top_policy_update", "evidence_top_policy_workspace_update_norm", ".3f"),
+        ("top_policy_fixed_fusion", "evidence_top_policy_workspace_fixed_fusion", ".0f"),
+        ("role_raw_rms", "role_residual_raw_rms", ".3f"),
+        ("role_proposal_rms", "role_residual_proposed_rms", ".3f"),
+        ("role_write_rms", "role_residual_written_rms", ".3f"),
+        ("role_compress", "role_residual_compression", ".3f"),
+        (
+            "role_write_max_g",
+            "role_residual_grounding_written_rms_max",
+            ".3f",
+        ),
+        (
+            "role_write_max_w",
+            "role_residual_world_written_rms_max",
+            ".3f",
+        ),
+        (
+            "role_write_max_p",
+            "role_residual_policy_written_rms_max",
+            ".3f",
+        ),
+        (
+            "role_norm_denom_min",
+            "role_normalization_denominator_min",
+            ".3f",
+        ),
+        (
+            "role_norm_gain_max",
+            "role_normalization_gain_max",
+            ".2f",
+        ),
+        (
+            "w2p_raw_value_rms",
+            "attnres_world_to_policy_raw_value_rms",
+            ".3f",
+        ),
+        (
+            "w2p_value_rms",
+            "attnres_world_to_policy_value_rms",
+            ".3f",
+        ),
+        (
+            "w2p_value_compress",
+            "attnres_world_to_policy_value_compression",
+            ".3f",
+        ),
+        (
+            "g2w_query_norm_denom",
+            "attnres_ground_to_world_query_norm_denominator_min",
+            ".3f",
+        ),
+        (
+            "w2p_query_norm_denom",
+            "attnres_world_to_policy_query_norm_denominator_min",
+            ".3f",
+        ),
+        (
+            "bottom_raw_value_rms",
+            "evidence_policy_delta_attnres_raw_value_rms",
+            ".3f",
+        ),
+        (
+            "bottom_value_rms",
+            "evidence_policy_delta_attnres_value_rms",
+            ".3f",
+        ),
+        (
+            "bottom_value_compress",
+            "evidence_policy_delta_attnres_value_compression",
+            ".3f",
+        ),
+        (
+            "bottom_query_norm_denom",
+            "evidence_policy_delta_attnres_query_norm_denominator_min",
+            ".3f",
+        ),
+        (
+            "detail_query_norm_denom",
+            "evidence_protected_detail_basis_query_norm_denominator_min",
+            ".3f",
+        ),
     ):
         append(execution_parts, label, key, spec)
     for label, soft_key, hard_key in (
@@ -4037,12 +10269,13 @@ def _evidence_serial_log_line(
             "layer_losses=" + "/".join(f"{row[key]:.4f}" for key in layer_contract_keys)
         )
 
-    grad_parts = ["[v94-grad]"]
+    grad_parts = [f"[{log_version}-grad]"]
     for label, key in (
         ("view_adapter", "grad_evidence_view_adapter"),
         ("organizer", "grad_evidence_condition_organizer"),
         ("evidence_reader", "grad_evidence_mmdit_evidence_reader"),
         ("action_state", "grad_evidence_mmdit_action_state"),
+        ("top_policy_lift", "grad_evidence_top_policy_workspace_lift"),
         ("mmdit_blocks", "grad_evidence_mmdit_blocks"),
         ("exec_controller", "grad_evidence_mmdit_execution_controller"),
         ("capacity_control", "grad_evidence_mmdit_capacity_control"),
@@ -4052,13 +10285,200 @@ def _evidence_serial_log_line(
         ("layer_adapter", "grad_layer_contract_adapters"),
         ("consequence", "grad_layer_consequence_cell"),
         ("dynamics", "grad_controlled_dynamics"),
+        ("flow_dino", "grad_flow_dino_evidence"),
+        ("coarse_flow", "grad_flow_dino_coarse_flow"),
+        ("fine_flow", "grad_flow_dino_sparse_fine"),
+        ("detail_router", "grad_flow_dino_detail_router"),
+        ("address_reader", "grad_flow_dino_address_reader"),
+        ("future_predictor", "grad_flow_dino_future_predictor"),
+        ("raw_pyramid", "grad_flow_dino_raw_pyramid"),
+        ("early_raw_context", "grad_flow_dino_early_masked_raw_context"),
+        ("soft_address", "grad_flow_dino_soft_address_compiler"),
+        ("semantic_coarse_flow", "grad_flow_dino_semantic_coarse_flow"),
+        ("raw_mid_flow", "grad_flow_dino_raw_mid_flow"),
+        ("raw_high_flow", "grad_flow_dino_raw_high_flow"),
+        ("raw_detail_router", "grad_flow_dino_raw_detail_router"),
+        ("raw_address_reader", "grad_flow_dino_raw_address_reader"),
+        ("horizon_address", "grad_flow_dino_horizon_address"),
+        ("address_g1", "grad_flow_dino_progressive_g1"),
+        ("address_g2", "grad_flow_dino_progressive_g2"),
+        ("address_g3", "grad_flow_dino_progressive_g3"),
+        ("address_world_query", "grad_flow_dino_progressive_world_query"),
+        ("future_transport", "grad_flow_dino_progressive_future_transport"),
+        ("interval_stage", "grad_flow_dino_interval_stage"),
+        ("attnres_g2w", "grad_attnres_ground_to_world"),
+        ("attnres_w2p", "grad_attnres_world_to_policy"),
+        ("attnres_p2bottom", "grad_attnres_policy_to_mmdit"),
+        ("protected_detail_route", "grad_protected_detail_basis_reader"),
+        ("late_detail_reader", "grad_late_raw_detail_reader"),
+        ("typed_p1_selector", "grad_late_raw_detail_typed_p1_selector"),
+        ("literal_rgb_value", "grad_late_raw_detail_literal_rgb_value"),
+        ("learned_detail_value", "grad_late_raw_detail_learned_detail_value"),
+        ("typed_p2_condition", "grad_late_raw_detail_typed_p2_condition"),
+        ("typed_p2_refiner", "grad_late_raw_detail_typed_p2"),
+        ("goal_tokens", "grad_goal_resampler"),
+        ("action_history", "grad_action_history_encoder"),
         ("dit_blocks", "grad_dit_blocks"),
+        ("grounding_blocks", "grad_dit_grounding_blocks"),
+        ("world_blocks", "grad_dit_world_blocks"),
+        ("policy_blocks", "grad_dit_policy_blocks"),
         ("policy_heads", "grad_final_policy_heads"),
         ("global_preclip", "grad"),
     ):
         append(grad_parts, label, key, ".2e", keep_zero=True)
     grad_parts.extend((f"lr={learning_rate:.3e}", f"sec_per_batch={seconds_per_batch:.3f}"))
-    return "\n".join((" ".join(loss_parts), " ".join(execution_parts), " ".join(grad_parts)))
+    lines = [" ".join(loss_parts)]
+    if representation_parts:
+        lines.append(" ".join(representation_parts))
+    if log_version in _BALANCED_FLOW_JEPA_LOG_VERSIONS:
+        balance_parts = [f"[{log_version}-balance]"]
+        for label, key, spec in (
+            ("flow_without_info_balance", "physical_flow_no_information_balance", ".6f"),
+            ("trajectory_info", "trajectory_information_score", ".4f"),
+            ("info_weight_min", "trajectory_information_weight_min", ".3f"),
+            ("info_weight_max", "trajectory_information_weight_max", ".3f"),
+            ("info_effective_fraction", "trajectory_information_effective_fraction", ".3f"),
+            ("horizon_weight_first", "action_horizon_weight_first", ".3f"),
+            ("horizon_weight_tail", "action_horizon_weight_tail", ".3f"),
+            ("history_keep", "condition_action_history_keep", ".3f"),
+            ("goal_keep", "condition_goal_keep", ".3f"),
+            ("proposal_keep", "condition_proposal_keep", ".3f"),
+            ("teacher_past_quota", "flow_jepa_teacher_mask_past_fraction", ".3f"),
+            ("teacher_change_quota", "flow_jepa_teacher_mask_change_fraction", ".3f"),
+            ("teacher_uniform_quota", "flow_jepa_teacher_mask_uniform_fraction", ".3f"),
+            ("selected_change_ratio", "flow_jepa_teacher_mask_selected_change_ratio", ".3f"),
+        ):
+            append(balance_parts, label, key, spec, keep_zero=True)
+        for key in sorted(
+            key
+            for key in row
+            if key.startswith("action_band_") and key.endswith("_physical_flow")
+        ):
+            label = key.removeprefix("action_band_").removesuffix("_physical_flow")
+            append(balance_parts, f"action_h{label}", key, ".6f", keep_zero=True)
+        lines.append(" ".join(balance_parts))
+    lines.extend((" ".join(execution_parts), " ".join(grad_parts)))
+    if log_version == "v111":
+        owner_grad_parts = ["[v111-owner-grad]"]
+        for label, key in (
+            ("g2_sem", "grad_flow_dino_progressive_g2_semantic_owner"),
+            ("g2_app", "grad_flow_dino_progressive_g2_appearance_owner"),
+            ("g2_geo", "grad_flow_dino_progressive_g2_geometry_owner"),
+            ("g3_sem", "grad_flow_dino_progressive_g3_semantic_owner"),
+            ("g3_app", "grad_flow_dino_progressive_g3_appearance_owner"),
+            ("g3_geo", "grad_flow_dino_progressive_g3_geometry_owner"),
+            ("w_sem", "grad_flow_dino_progressive_world_semantic_owner"),
+            ("w_app", "grad_flow_dino_progressive_world_appearance_owner"),
+            ("w_geo", "grad_flow_dino_progressive_world_geometry_owner"),
+            ("p2_policy", "grad_late_raw_detail_typed_p2_policy_owner"),
+            ("p2_sem", "grad_late_raw_detail_typed_p2_semantic_owner"),
+            ("p2_app", "grad_late_raw_detail_typed_p2_appearance_owner"),
+            ("p2_geo", "grad_late_raw_detail_typed_p2_geometry_owner"),
+            ("p2_horizon", "grad_late_raw_detail_typed_p2_horizon_owner"),
+        ):
+            append(owner_grad_parts, label, key, ".2e", keep_zero=True)
+        lines.append(" ".join(owner_grad_parts))
+    return "\n".join(lines)
+
+
+def _flow_jepa_stage1_serial_log_line(
+    row: dict[str, float],
+    *,
+    epoch: int,
+    batch_index: int,
+    learning_rate: float,
+    seconds_per_batch: float,
+) -> str:
+    """Compact log for the representation-only V95 Stage1 experiment."""
+
+    def append(parts: list[str], label: str, key: str, spec: str = ".4f") -> None:
+        if key in row:
+            parts.append(f"{label}={format(row[key], spec)}")
+
+    train = [
+        f"[v95-stage1-train] epoch={epoch:03d}",
+        f"batch={batch_index:04d}",
+        f"loss_representation={row['loss']:.6f}",
+    ]
+    contributions = sorted(
+        (
+            key
+            for key in row
+            if key.startswith("loss_contrib_") and abs(float(row[key])) > 1e-12
+        ),
+        key=lambda key: abs(float(row[key])),
+        reverse=True,
+    )
+    if contributions:
+        train.append(
+            "contrib="
+            + "/".join(
+                f"{key.removeprefix('loss_contrib_')}:{row[key]:.5f}"
+                for key in contributions
+            )
+        )
+    append(train, "ledger_gap", "loss_ledger_residual", "+.2e")
+
+    representation = ["[v95-stage1-repr]"]
+    for label, key, spec in (
+        ("window_pred", "flow_jepa_future_prediction", ".5f"),
+        ("change_dir", "flow_jepa_future_change_direction", ".5f"),
+        ("stage_pred", "flow_jepa_stage_prediction", ".5f"),
+        ("warp", "flow_jepa_warp_loss", ".5f"),
+        ("cycle", "flow_jepa_cycle_loss", ".5f"),
+        ("smooth", "flow_jepa_smoothness_loss", ".5f"),
+        ("uncert_nll", "flow_jepa_uncertainty_nll", ".5f"),
+        ("refine_seq", "flow_jepa_refinement_sequence_loss", ".5f"),
+        ("flow_mag", "flow_jepa_patch_flow_magnitude", ".3f"),
+        ("confidence", "flow_jepa_confidence_mean", ".3f"),
+        ("occlusion", "flow_jepa_occlusion_fraction", ".3f"),
+        ("corr_entropy", "flow_jepa_correlation_entropy", ".3f"),
+        ("corr_margin", "flow_jepa_correlation_margin", ".3f"),
+        ("target_mask", "flow_jepa_future_target_fraction", ".3f"),
+        ("stage_target_norm", "flow_jepa_stage_target_norm", ".3f"),
+        ("stage_prediction_norm", "flow_jepa_stage_prediction_norm", ".3f"),
+        ("stage_window_cos", "flow_jepa_stage_window_cosine", ".3f"),
+        ("stage_window_gate", "flow_jepa_stage_to_window_gate", ".3f"),
+        ("stage_window_update", "flow_jepa_stage_to_window_update_norm", ".3f"),
+        ("goal_norm", "flow_jepa_goal_condition_norm", ".3f"),
+        ("goal_pair_cos", "flow_jepa_goal_pair_cosine", ".3f"),
+        ("action_mem_norm", "flow_jepa_action_condition_norm", ".3f"),
+        ("goal_action_cos", "flow_jepa_goal_action_cosine", ".3f"),
+    ):
+        append(representation, label, key, spec)
+
+    gradients = ["[v95-stage1-grad]"]
+    for label, key in (
+        ("view_adapter", "grad_evidence_view_adapter"),
+        ("organizer", "grad_evidence_condition_organizer"),
+        ("flow_dino", "grad_flow_dino_evidence"),
+        ("goal_tokens", "grad_goal_resampler"),
+        ("action_history", "grad_action_history_encoder"),
+        ("dit_blocks", "grad_dit_blocks"),
+        ("global_preclip", "grad"),
+    ):
+        append(gradients, label, key, ".2e")
+    gradients.extend((f"lr={learning_rate:.3e}", f"sec_per_batch={seconds_per_batch:.3f}"))
+    return "\n".join((" ".join(train), " ".join(representation), " ".join(gradients)))
+
+
+def _flow_jepa_stage1_epoch_log_line(
+    *,
+    epoch: int,
+    global_step: int,
+    train: dict[str, float],
+    val: dict[str, float],
+) -> str:
+    return (
+        f"[v95-stage1-epoch] epoch={epoch:03d} step={global_step} "
+        f"train_representation={train.get('loss', float('nan')):.6f} "
+        f"val_representation={val.get('loss', float('nan')):.6f} "
+        f"window_pred={val.get('flow_jepa_future_prediction', float('nan')):.5f} "
+        f"stage_pred={val.get('flow_jepa_stage_prediction', float('nan')):.5f} "
+        f"stage_window_cos={val.get('flow_jepa_stage_window_cosine', float('nan')):.3f} "
+        f"goal_pair_cos={val.get('flow_jepa_goal_pair_cosine', float('nan')):.3f} "
+        f"repr_batch_cov={val.get('eval_representation_coverage', 0.0):.2f}"
+    )
 
 
 def _filter_inactive_evidence_epoch_metrics(
@@ -4116,17 +10536,19 @@ def _evidence_epoch_log_line(
     train: dict[str, float],
     val: dict[str, float],
 ) -> str:
-    """Human-readable V94 epoch summary; the JSONL remains the full record."""
+    """Human-readable epoch summary; the JSONL remains the full record."""
+
+    log_version = _evidence_log_version(train, val)
 
     train_parts = [
-        f"[v94-epoch] epoch={epoch:03d}",
+        f"[{log_version}-epoch] epoch={epoch:03d}",
         f"step={global_step}",
         f"loss_total={train.get('loss', float('nan')):.6f}",
         f"flow_loss={train.get('physical_flow', float('nan')):.6f}",
     ]
     groups = [
         name
-        for name in ("action", "rollout", "execution", "latent", "layer")
+        for name in ("action", "representation", "rollout", "execution", "latent", "layer")
         if f"loss_group_{name}" in train
         and abs(float(train[f"loss_group_{name}"])) > 1e-12
     ]
@@ -4139,7 +10561,7 @@ def _evidence_epoch_log_line(
         train_parts.append(f"ledger_gap={train['loss_ledger_residual']:+.2e}")
 
     val_parts = [
-        "[v94-val]",
+        f"[{log_version}-val]",
         f"action_rmse={val.get('full_rmse', float('nan')):.5f}",
         f"first_rmse={val.get('first_rmse', float('nan')):.5f}",
         f"first8_rmse={val.get('first8_rmse', float('nan')):.5f}",
@@ -4170,6 +10592,25 @@ def _evidence_epoch_log_line(
         f"balanced_score={val.get('balanced_score', float('nan')):.5f}",
         f"deploy_gate={val.get('deploy_eligible', 0.0):.0f}",
     ]
+    if log_version in _BALANCED_FLOW_JEPA_LOG_VERSIONS:
+        action_band_keys = sorted(
+            (
+                key
+                for key in val
+                if key.startswith("action_band_") and key.endswith("_rmse")
+            ),
+            key=lambda key: int(
+                key.removeprefix("action_band_").split("_", 1)[0]
+            ),
+        )
+        if action_band_keys:
+            val_parts.append(
+                "action_band_rmse="
+                + "/".join(
+                    f"{key.removeprefix('action_band_').removesuffix('_rmse')}:{val[key]:.5f}"
+                    for key in action_band_keys
+                )
+            )
     execution_ablation_names = (
         "hard",
         "neutral",
@@ -4193,7 +10634,490 @@ def _evidence_epoch_log_line(
             f"execution_ablation_cov={val.get('eval_execution_ablation_coverage', 0.0):.2f}"
         )
 
-    probe_parts = ["[v94-probe]"]
+    if log_version in _FLOW_JEPA_LOG_VERSIONS:
+        future_validation_label = (
+            "jepa_future"
+            if log_version != "v95"
+            else "jepa_window"
+        )
+        for label, key, spec in (
+            (future_validation_label, "flow_jepa_future_prediction", ".5f"),
+            ("jepa_change", "flow_jepa_future_change_direction", ".5f"),
+            ("change_obj", "flow_jepa_future_change", ".5f"),
+            ("jepa_stage", "flow_jepa_stage_prediction", ".5f"),
+            ("patch_warp", "flow_jepa_warp_loss", ".5f"),
+            ("identity_adv", "flow_jepa_identity_advantage_loss", ".5f"),
+            ("static_identity", "flow_jepa_static_identity_loss", ".5f"),
+            ("patch_cycle", "flow_jepa_cycle_loss", ".5f"),
+            ("patch_flow", "flow_jepa_patch_flow_magnitude", ".3f"),
+            ("patch_conf", "flow_jepa_confidence_mean", ".3f"),
+            ("patch_occ", "flow_jepa_occlusion_fraction", ".3f"),
+            ("future_raw_delta", "flow_jepa_future_raw_delta_loss", ".5f"),
+            (
+                "future_reliable_norm",
+                "flow_jepa_future_reliable_normalized_loss",
+                ".5f",
+            ),
+            (
+                "future_reliability",
+                "flow_jepa_future_change_reliability",
+                ".3f",
+            ),
+            (
+                "future_reference_scale",
+                "flow_jepa_future_current_reference_scale",
+                ".3f",
+            ),
+            (
+                "future_normalization_scale",
+                "flow_jepa_future_normalization_scale",
+                ".3f",
+            ),
+            (
+                "future_direction_floor",
+                "flow_jepa_future_direction_floor_min",
+                ".3e",
+            ),
+            (
+                "horizon_address",
+                "flow_jepa_horizon_address",
+                ".5f",
+            ),
+            (
+                "horizon_address_teacher_rel",
+                "flow_jepa_horizon_address_teacher_reliability",
+                ".3f",
+            ),
+            (
+                "horizon_address_teacher_entropy",
+                "flow_jepa_horizon_address_teacher_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_pred_entropy",
+                "flow_jepa_horizon_address_predicted_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_update",
+                "flow_jepa_horizon_address_update_rms",
+                ".3f",
+            ),
+            (
+                "horizon_address_ratio",
+                "flow_jepa_horizon_address_update_ratio",
+                ".3f",
+            ),
+            (
+                "horizon_address_route_entropy",
+                "flow_jepa_horizon_address_route_entropy",
+                ".3f",
+            ),
+            (
+                "horizon_address_variation",
+                "flow_jepa_horizon_address_variation",
+                ".3f",
+            ),
+            (
+                "online_address_write",
+                "flow_jepa_online_horizon_address_write_rms",
+                ".3f",
+            ),
+            (
+                "progressive_address",
+                "flow_jepa_progressive_grounding_address",
+                ".0f",
+            ),
+            (
+                "g1_coarse_entropy",
+                "flow_jepa_progressive_g1_coarse_entropy",
+                ".3f",
+            ),
+            (
+                "g2_fine_entropy",
+                "flow_jepa_progressive_g2_fine_entropy",
+                ".3f",
+            ),
+            (
+                "g3_summary",
+                "flow_jepa_progressive_g3_summary_rms",
+                ".3f",
+            ),
+            (
+                "g3_sem_summary",
+                "flow_jepa_progressive_g3_semantic_summary_rms",
+                ".3f",
+            ),
+            (
+                "g3_app_summary",
+                "flow_jepa_progressive_g3_appearance_summary_rms",
+                ".3f",
+            ),
+            (
+                "g3_geo_summary",
+                "flow_jepa_progressive_g3_geometry_summary_rms",
+                ".3f",
+            ),
+            (
+                "world_address_entropy",
+                "flow_jepa_progressive_world_posterior_entropy",
+                ".3f",
+            ),
+            (
+                "world_horizon_variation",
+                "flow_jepa_progressive_world_horizon_variation",
+                ".3f",
+            ),
+            (
+                "world_source_max",
+                "flow_jepa_progressive_world_source_prior_max",
+                ".3f",
+            ),
+            (
+                "world_source_variation",
+                "flow_jepa_progressive_world_source_horizon_variation",
+                ".3f",
+            ),
+            (
+                "policy_world_prior",
+                "flow_jepa_progressive_policy_world_prior_rms",
+                ".3f",
+            ),
+            ("typed_raw", "flow_jepa_coordinate_typed_raw_detail", ".0f"),
+            (
+                "structured_ownership",
+                "flow_jepa_structured_ownership_bottleneck",
+                ".0f",
+            ),
+            (
+                "g2_owner_sem_app_l1",
+                "flow_jepa_progressive_g2_semantic_appearance_posterior_l1",
+                ".3f",
+            ),
+            (
+                "g2_owner_app_geo_l1",
+                "flow_jepa_progressive_g2_appearance_geometry_posterior_l1",
+                ".3f",
+            ),
+            (
+                "g3_owner_sem_app_l1",
+                "flow_jepa_progressive_g3_semantic_appearance_slot_l1",
+                ".3f",
+            ),
+            (
+                "g3_sem_owner_rms",
+                "flow_jepa_progressive_g3_semantic_owner_sidecar_rms",
+                ".3f",
+            ),
+            (
+                "g3_app_owner_rms",
+                "flow_jepa_progressive_g3_appearance_owner_sidecar_rms",
+                ".3f",
+            ),
+            (
+                "g3_geo_owner_rms",
+                "flow_jepa_progressive_g3_geometry_owner_sidecar_rms",
+                ".3f",
+            ),
+            (
+                "world_public_ratio",
+                "flow_jepa_progressive_world_public_ratio",
+                ".3f",
+            ),
+            (
+                "world_innovation",
+                "flow_jepa_progressive_world_horizon_innovation_rms",
+                ".3f",
+            ),
+            (
+                "world_owner_slot_contract_min",
+                "flow_jepa_progressive_world_owner_slot_contract_min",
+                ".3f",
+            ),
+            (
+                "world_owner_source_contract_min",
+                "flow_jepa_progressive_world_owner_source_contract_min",
+                ".3f",
+            ),
+            (
+                "p1_owner_fine_l1",
+                "flow_jepa_typed_p1_appearance_geometry_fine_l1",
+                ".3f",
+            ),
+            (
+                "p1_owner_route_l1",
+                "flow_jepa_typed_p1_semantic_appearance_route_l1",
+                ".3f",
+            ),
+            ("literal_rgb", "flow_jepa_literal_rgb_chart_rms", ".3f"),
+            (
+                "future_transport_offset",
+                "flow_jepa_progressive_future_transport_offset_rms",
+                ".3f",
+            ),
+            (
+                "future_visibility",
+                "flow_jepa_progressive_future_transport_visibility_mean",
+                ".3f",
+            ),
+            (
+                "future_transport_variation",
+                "flow_jepa_progressive_future_transport_horizon_variation",
+                ".3f",
+            ),
+            (
+                "future_transport_spatial_logit",
+                "flow_jepa_progressive_future_transport_spatial_logit_rms",
+                ".3f",
+            ),
+            (
+                "p1_future_transport_logit",
+                "flow_jepa_typed_p1_future_transport_logit_rms",
+                ".3f",
+            ),
+            ("p1_micro_value", "flow_jepa_typed_p1_micro_value_rms", ".3f"),
+            (
+                "p1_spatial_variation",
+                "flow_jepa_typed_p1_spatial_variation",
+                ".3f",
+            ),
+            ("p2_detail_output", "flow_jepa_typed_p2_output_rms", ".3f"),
+            (
+                "horizon_cos_seed",
+                "flow_jepa_online_address_boundary_seed_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_g3",
+                "flow_jepa_online_address_boundary_post_g3_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_address",
+                "flow_jepa_online_address_boundary_post_address_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_w3",
+                "flow_jepa_online_address_boundary_post_w3_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "horizon_cos_interval",
+                "flow_jepa_online_address_boundary_post_interval_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "interval_stage",
+                "flow_jepa_interval_stage",
+                ".5f",
+            ),
+            (
+                "interval_stage_raw",
+                "flow_jepa_interval_stage_raw",
+                ".5f",
+            ),
+            (
+                "interval_stage_reliable",
+                "flow_jepa_interval_stage_normalized",
+                ".5f",
+            ),
+            (
+                "interval_stage_direction",
+                "flow_jepa_interval_stage_direction",
+                ".5f",
+            ),
+            (
+                "interval_stage_direction_floor",
+                "flow_jepa_interval_stage_direction_floor_min",
+                ".3e",
+            ),
+            (
+                "interval_stage_endpoint",
+                "flow_jepa_interval_stage_endpoint",
+                ".5f",
+            ),
+            (
+                "interval_stage_target_scale",
+                "flow_jepa_interval_stage_target_scale",
+                ".3f",
+            ),
+            (
+                "interval_stage_reliability",
+                "flow_jepa_interval_stage_reliability",
+                ".3f",
+            ),
+        ):
+            source = val if key in val else train
+            if key in source:
+                val_parts.append(f"{label}={format(source[key], spec)}")
+        horizon_keys = sorted(
+            {
+                key
+                for source in (val, train)
+                for key in source
+                if key.startswith("flow_jepa_future_horizon_")
+                and key.removeprefix("flow_jepa_future_horizon_").isdigit()
+            },
+            key=lambda key: int(key.rsplit("_", 1)[-1]),
+        )
+        for key in horizon_keys:
+            source = val if key in val else train
+            val_parts.append(
+                f"future_h{key.rsplit('_', 1)[-1]}={source[key]:.5f}"
+            )
+        interval_offsets = sorted(
+            {
+                int(match.group(1))
+                for source in (val, train)
+                for key in source
+                for match in (
+                    re.fullmatch(
+                        r"flow_jepa_interval_stage_horizon_(\d+)_loss",
+                        key,
+                    ),
+                )
+                if match is not None
+            }
+        )
+        for offset in interval_offsets:
+            parts: list[str] = []
+            for label, suffix, spec in (
+                ("l", "loss", ".4f"),
+                ("r", "reliability", ".3f"),
+                ("w", "write_rms", ".3f"),
+            ):
+                key = f"flow_jepa_interval_stage_horizon_{offset}_{suffix}"
+                source = val if key in val else train
+                if key in source:
+                    parts.append(f"{label}:{format(source[key], spec)}")
+            if parts:
+                val_parts.append(f"interval_h{offset}=" + "/".join(parts))
+        if log_version == "v96":
+            for label, key, spec in (
+                ("detail_gate", "flow_jepa_detail_gate_mean", ".3f"),
+                ("address_flow", "flow_jepa_address_flow_mass", ".3f"),
+                ("address_fallback", "flow_jepa_address_fallback_mass", ".3f"),
+                ("horizon_cos", "flow_jepa_horizon_adjacent_cosine", ".3f"),
+            ):
+                source = val if key in val else train
+                if key in source:
+                    val_parts.append(f"{label}={format(source[key], spec)}")
+        if log_version in _RAW_FLOW_JEPA_LOG_VERSIONS:
+            for label, key, spec in (
+                ("raw_high_grid", "flow_jepa_raw_high_grid_size", ".0f"),
+                ("raw_flow", "flow_jepa_raw_flow_magnitude", ".3f"),
+                ("raw_flow_grid", "flow_jepa_raw_flow_grid_magnitude", ".3f"),
+                ("seed_reliability", "flow_jepa_raw_seed_reliability", ".3f"),
+                (
+                    "mid_bound_compress",
+                    "flow_jepa_raw_mid_boundary_compression",
+                    ".3f",
+                ),
+                (
+                    "high_bound_compress",
+                    "flow_jepa_raw_high_boundary_compression",
+                    ".3f",
+                ),
+                ("raw_boundary", "flow_jepa_raw_boundary_penalty", ".4f"),
+                ("raw_valid", "flow_jepa_raw_valid_fraction", ".3f"),
+                ("zero_warp", "flow_jepa_raw_identity_warp_error", ".4f"),
+                ("warp_gain", "flow_jepa_raw_warp_gain_over_zero", "+.4f"),
+                ("moving_gain", "flow_jepa_raw_moving_warp_gain", "+.4f"),
+                ("static_gain", "flow_jepa_raw_static_warp_gain", "+.4f"),
+                (
+                    "moving_corr_entropy",
+                    "flow_jepa_raw_moving_correlation_entropy",
+                    ".3f",
+                ),
+                (
+                    "moving_corr_margin",
+                    "flow_jepa_raw_moving_correlation_margin",
+                    ".3f",
+                ),
+                ("motion_visible", "flow_jepa_raw_observable_motion_fraction", ".3f"),
+                ("raw_precision", "flow_jepa_raw_detail_precision_mean", ".3f"),
+                (
+                    "raw_detail_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_flow",
+                    "flow_jepa_raw_address_flow_mass",
+                    ".3f",
+                ),
+                (
+                    "raw_base_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_fallback",
+                    "flow_jepa_raw_address_fallback_mass",
+                    ".3f",
+                ),
+                (
+                    "address_separation",
+                    "flow_jepa_raw_address_center_separation",
+                    ".3f",
+                ),
+                (
+                    "detail_address_concentration"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "address_logit_gain",
+                    "flow_jepa_raw_address_logit_advantage",
+                    "+.3f",
+                ),
+                (
+                    "address_zero_delta",
+                    "flow_jepa_raw_address_zero_flow_value_delta",
+                    ".3f",
+                ),
+                (
+                    "address_shuffle_delta",
+                    "flow_jepa_raw_address_shuffled_flow_value_delta",
+                    ".3f",
+                ),
+                ("horizon_cos", "flow_jepa_horizon_adjacent_cosine", ".3f"),
+                (
+                    "query_horizon_cos",
+                    "flow_jepa_future_query_adjacent_cosine",
+                    ".3f",
+                ),
+                (
+                    "history_entropy",
+                    "flow_jepa_perceptual_history_entropy",
+                    ".3f",
+                ),
+                (
+                    "horizon_step_update",
+                    "flow_jepa_horizon_transition_update_rms",
+                    ".3f",
+                ),
+                (
+                    "horizon_state_delta",
+                    "flow_jepa_horizon_transition_state_delta",
+                    ".3f",
+                ),
+                ("world_xy_residual", "flow_jepa_world_spatial_residual_norm", ".3e"),
+                (
+                    "world_anchor_residual",
+                    "flow_jepa_world_anchor_camera_residual_norm",
+                    ".3f",
+                ),
+                ("late_detail_update", "flow_jepa_late_detail_update_norm", ".3f"),
+                (
+                    "late_detail_ratio",
+                    "flow_jepa_late_detail_trajectory_ratio",
+                    ".3f",
+                ),
+                (
+                    "late_detail_scale",
+                    "flow_jepa_late_detail_fixed_scale",
+                    ".3f",
+                ),
+                (
+                    "late_detail_tokens",
+                    "flow_jepa_late_detail_token_count",
+                    ".0f",
+                ),
+            ):
+                source = val if key in val else train
+                if key in source:
+                    val_parts.append(f"{label}={format(source[key], spec)}")
+
+    probe_parts = [f"[{log_version}-probe]"]
     for label, key, spec in (
         ("z_zero_cond_delta", "sample_evidence_z_zero_condition_delta", ".4e"),
         ("z_shuffle_cond_delta", "sample_evidence_z_shuffle_condition_delta", ".4e"),
@@ -4207,7 +11131,48 @@ def _evidence_epoch_log_line(
         ("terminal_probability", "sample_evidence_mmd_it_terminal_probability", ".3f"),
         ("hard_terminal_fraction", "sample_evidence_mmd_it_hard_terminal_fraction", ".3f"),
         ("nonexp_violation", "sample_evidence_mmd_it_nonexpansive_violation", ".1e"),
+        (
+            "late_detail_update",
+            "sample_flow_jepa_late_detail_update_norm",
+            ".3f",
+        ),
+        (
+            "late_detail_ratio",
+            "sample_flow_jepa_late_detail_trajectory_ratio",
+            ".3f",
+        ),
+        (
+            "late_detail_entropy",
+            "sample_flow_jepa_late_detail_attention_entropy",
+            ".3f",
+        ),
+        (
+            "late_detail_max",
+            "sample_flow_jepa_late_detail_attention_max",
+            ".3f",
+        ),
+        (
+            "late_detail_scale",
+            "sample_flow_jepa_late_detail_fixed_scale",
+            ".3f",
+        ),
+        (
+            "late_detail_tokens",
+            "sample_flow_jepa_late_detail_token_count",
+            ".0f",
+        ),
+        (
+            "world_xy_residual",
+            "sample_flow_jepa_world_spatial_residual_norm",
+            ".2e",
+        ),
+        (
+            "world_anchor_residual",
+            "sample_flow_jepa_world_anchor_camera_residual_norm",
+            ".3f",
+        ),
         ("probe_batch_cov", "eval_sampling_diagnostic_coverage", ".2f"),
+        ("repr_batch_cov", "eval_representation_coverage", ".2f"),
     ):
         if key in val and abs(float(val[key])) > 1e-12:
             probe_parts.append(f"{label}={format(val[key], spec)}")
@@ -4602,6 +11567,71 @@ def _linear_row_grad_norm(
     return total.sqrt()
 
 
+@torch.no_grad()
+def _nonfinite_gradient_report(
+    module: torch.nn.Module, *, limit: int = 12
+) -> str:
+    """Identify corrupt parameter gradients only after a clip failure."""
+
+    rows: list[str] = []
+    omitted = 0
+    for name, parameter in module.named_parameters():
+        gradient = parameter.grad
+        if gradient is None:
+            continue
+        values = gradient.detach()
+        if values.is_sparse:
+            values = values.coalesce().values()
+        values = values.float()
+        finite = torch.isfinite(values)
+        if bool(finite.all()):
+            continue
+        if len(rows) >= max(int(limit), 1):
+            omitted += 1
+            continue
+        finite_values = values[finite]
+        finite_max = (
+            float(finite_values.abs().max()) if int(finite_values.numel()) else 0.0
+        )
+        rows.append(
+            f"{name}[shape={tuple(parameter.shape)},nan={int(torch.isnan(values).sum())},"
+            f"+inf={int(torch.isposinf(values).sum())},-inf={int(torch.isneginf(values).sum())},"
+            f"finite_max={finite_max:.3e}]"
+        )
+    if not rows:
+        return "no individual non-finite parameter gradient found"
+    suffix = f"; ... {omitted} more" if omitted else ""
+    return "; ".join(rows) + suffix
+
+
+def _clip_grad_norm_or_report(
+    parameters: Iterable[torch.nn.Parameter],
+    max_norm: float,
+    *,
+    system: V39PolicySystem,
+    epoch: int,
+    batch: int,
+    label: str,
+) -> Tensor:
+    """Clip normally, but turn the generic PyTorch error into code evidence."""
+
+    rows = list(parameters)
+    try:
+        return torch.nn.utils.clip_grad_norm_(
+            rows,
+            max_norm,
+            error_if_nonfinite=True,
+        )
+    except RuntimeError as error:
+        if "non-finite" not in str(error).lower():
+            raise
+        report = _nonfinite_gradient_report(system)
+        raise FloatingPointError(
+            "non-finite gradients after backward "
+            f"at epoch={epoch} batch={batch} clip={label}: {report}"
+        ) from error
+
+
 def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem) -> None:
     """Log whether the contract objective reaches the intended modules.
 
@@ -4611,6 +11641,33 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     reference = losses["loss"]
     planner = system.planner
     losses["grad_dit_blocks"] = _module_grad_norm(planner.blocks, reference=reference)
+    if bool(int(getattr(system.policy_config, "flow_jepa_role_hierarchy", 0))):
+        grounding_stop = int(system.policy_config.flow_jepa_grounding_blocks)
+        world_stop = grounding_stop + int(system.policy_config.flow_jepa_world_blocks)
+        losses["grad_dit_grounding_blocks"] = _parameter_grad_norm(
+            (
+                parameter
+                for block in planner.blocks[:grounding_stop]
+                for parameter in block.parameters()
+            ),
+            reference=reference,
+        )
+        losses["grad_dit_world_blocks"] = _parameter_grad_norm(
+            (
+                parameter
+                for block in planner.blocks[grounding_stop:world_stop]
+                for parameter in block.parameters()
+            ),
+            reference=reference,
+        )
+        losses["grad_dit_policy_blocks"] = _parameter_grad_norm(
+            (
+                parameter
+                for block in planner.blocks[world_stop:]
+                for parameter in block.parameters()
+            ),
+            reference=reference,
+        )
     losses["grad_layer_contract_adapters"] = _module_grad_norm(
         planner.layer_contract_heads, reference=reference
     )
@@ -4626,6 +11683,220 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     losses["grad_controlled_dynamics"] = _module_grad_norm(
         planner.controlled_dynamics, reference=reference
     )
+    if getattr(planner, "flow_dino_evidence", None) is not None:
+        flow_dino = planner.flow_dino_evidence
+        losses["grad_flow_dino_evidence"] = _module_grad_norm(
+            flow_dino, reference=reference
+        )
+        if bool(getattr(flow_dino, "raw_enabled", False)):
+            raw_flow = flow_dino.raw_flow
+            if raw_flow is None:
+                raise RuntimeError("raw Flow-DINO diagnostics have no raw flow module")
+            losses["grad_flow_dino_raw_pyramid"] = _module_grad_norm(
+                raw_flow.pyramid, reference=reference
+            )
+            if flow_dino.early_masked_raw_context is not None:
+                losses["grad_flow_dino_early_masked_raw_context"] = _module_grad_norm(
+                    flow_dino.early_masked_raw_context, reference=reference
+                )
+            if flow_dino.soft_address_compiler is not None:
+                losses["grad_flow_dino_soft_address_compiler"] = _module_grad_norm(
+                    flow_dino.soft_address_compiler, reference=reference
+                )
+            losses["grad_flow_dino_semantic_coarse_flow"] = _module_grad_norm(
+                flow_dino.flow, reference=reference
+            )
+            losses["grad_flow_dino_raw_mid_flow"] = _module_grad_norm(
+                raw_flow.mid, reference=reference
+            )
+            losses["grad_flow_dino_raw_high_flow"] = _module_grad_norm(
+                raw_flow.high, reference=reference
+            )
+            losses["grad_flow_dino_raw_detail_router"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (flow_dino.raw_detail_query, flow_dino.raw_detail_motion)
+                    if module is not None
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            if flow_dino.raw_address_reader is None:
+                raise RuntimeError("raw Flow-DINO diagnostics have no address reader")
+            losses["grad_flow_dino_raw_address_reader"] = _module_grad_norm(
+                flow_dino.raw_address_reader, reference=reference
+            )
+            losses["grad_flow_dino_future_predictor"] = _module_grad_norm(
+                flow_dino.future_prediction, reference=reference
+            )
+            if flow_dino.horizon_address_jepa is not None:
+                losses["grad_flow_dino_horizon_address"] = _module_grad_norm(
+                    flow_dino.horizon_address_jepa,
+                    reference=reference,
+                )
+            progressive = flow_dino.progressive_grounding_address
+            if progressive is not None:
+                losses["grad_flow_dino_progressive_g1"] = _parameter_grad_norm(
+                    (
+                        *progressive.query_norms[0].parameters(),
+                        *progressive.query_projections[0].parameters(),
+                        progressive.slot_identity,
+                    ),
+                    reference=reference,
+                )
+                losses["grad_flow_dino_progressive_g2"] = _parameter_grad_norm(
+                    (
+                        *progressive.query_norms[1].parameters(),
+                        *progressive.query_projections[1].parameters(),
+                        *progressive.g2_rectifier.parameters(),
+                        *(
+                            progressive.g2_typed_rectifier.parameters()
+                            if progressive.g2_typed_rectifier is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.g2_typed_query.parameters()
+                            if progressive.g2_typed_query is not None
+                            else ()
+                        ),
+                    ),
+                    reference=reference,
+                )
+                if progressive.g2_typed_query is not None:
+                    for owner_name in ("semantic", "appearance", "geometry"):
+                        losses[
+                            f"grad_flow_dino_progressive_g2_{owner_name}_owner"
+                        ] = _module_grad_norm(
+                            progressive.g2_typed_query[owner_name],
+                            reference=reference,
+                        )
+                losses["grad_flow_dino_progressive_g3"] = _parameter_grad_norm(
+                    (
+                        *progressive.query_norms[2].parameters(),
+                        *progressive.query_projections[2].parameters(),
+                        *progressive.g3_slot_score.parameters(),
+                        *progressive.g3_summary_out.parameters(),
+                        *(
+                            progressive.g3_typed_slot_score.parameters()
+                            if progressive.g3_typed_slot_score is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.g3_typed_summary_out.parameters()
+                            if progressive.g3_typed_summary_out is not None
+                            else ()
+                        ),
+                    ),
+                    reference=reference,
+                )
+                if progressive.g3_typed_slot_score is not None:
+                    for owner_name in ("semantic", "appearance", "geometry"):
+                        losses[
+                            f"grad_flow_dino_progressive_g3_{owner_name}_owner"
+                        ] = _module_grad_norm(
+                            progressive.g3_typed_slot_score[owner_name],
+                            reference=reference,
+                        )
+                losses[
+                    "grad_flow_dino_progressive_world_query"
+                ] = _parameter_grad_norm(
+                    (
+                        *progressive.horizon_query_norm.parameters(),
+                        *progressive.horizon_query_proj.parameters(),
+                        *(
+                            progressive.world_typed_query.parameters()
+                            if progressive.world_typed_query is not None
+                            else ()
+                        ),
+                    ),
+                    reference=reference,
+                )
+                if progressive.world_typed_query is not None:
+                    for owner_name in ("semantic", "appearance", "geometry"):
+                        losses[
+                            f"grad_flow_dino_progressive_world_{owner_name}_owner"
+                        ] = _module_grad_norm(
+                            progressive.world_typed_query[owner_name],
+                            reference=reference,
+                        )
+                if progressive.future_transport is not None:
+                    losses[
+                        "grad_flow_dino_progressive_future_transport"
+                    ] = _module_grad_norm(
+                        progressive.future_transport,
+                        reference=reference,
+                    )
+            if flow_dino.interval_stage_organizer is not None:
+                losses["grad_flow_dino_interval_stage"] = _module_grad_norm(
+                    flow_dino.interval_stage_organizer,
+                    reference=reference,
+                )
+        elif bool(getattr(flow_dino, "late_bottleneck", False)):
+            losses["grad_flow_dino_coarse_flow"] = _module_grad_norm(
+                flow_dino.flow, reference=reference
+            )
+            losses["grad_flow_dino_sparse_fine"] = _module_grad_norm(
+                flow_dino.sparse_fine_flow, reference=reference
+            )
+            losses["grad_flow_dino_detail_router"] = _module_grad_norm(
+                flow_dino.detail_router, reference=reference
+            )
+            losses["grad_flow_dino_address_reader"] = _module_grad_norm(
+                flow_dino.address_reader, reference=reference
+            )
+            losses["grad_flow_dino_future_predictor"] = _module_grad_norm(
+                flow_dino.future_prediction, reference=reference
+            )
+    if getattr(planner, "goal_resampler", None) is not None:
+        losses["grad_goal_resampler"] = _module_grad_norm(
+            planner.goal_resampler, reference=reference
+        )
+    if getattr(planner, "stateless_phase_adapter", None) is not None:
+        losses["grad_stateless_phase_adapter"] = _module_grad_norm(
+            planner.stateless_phase_adapter, reference=reference
+        )
+        if getattr(planner, "phase_world_query_proj", None) is not None:
+            losses["grad_stateless_phase_world_query"] = _module_grad_norm(
+                planner.phase_world_query_proj, reference=reference
+            )
+            losses["grad_condition_world_query"] = _module_grad_norm(
+                planner.condition_world_query_proj, reference=reference
+            )
+        phase_world_blocks = getattr(
+            planner, "phase_world_block_query_proj", None
+        )
+        condition_world_blocks = getattr(
+            planner, "condition_world_block_query_proj", None
+        )
+        if phase_world_blocks is not None and condition_world_blocks is not None:
+            losses["grad_stateless_phase_world_blocks"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        *list(phase_world_blocks),
+                        *list(condition_world_blocks),
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+    if getattr(planner, "ground_to_world_attnres", None) is not None:
+        losses["grad_attnres_ground_to_world"] = _module_grad_norm(
+            planner.ground_to_world_attnres, reference=reference
+        )
+    if getattr(planner, "world_to_policy_attnres", None) is not None:
+        losses["grad_attnres_world_to_policy"] = _module_grad_norm(
+            planner.world_to_policy_attnres, reference=reference
+        )
+    if bool(getattr(system.proposal, "history_enabled", False)):
+        losses["grad_action_history_encoder"] = _parameter_grad_norm(
+            (
+                parameter
+                for name, parameter in system.proposal.named_parameters()
+                if name.startswith("history_")
+            ),
+            reference=reference,
+        )
     final_modules = [
         planner.final_norm,
         planner.direct_physical_head,
@@ -4634,6 +11905,107 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         planner.event_probe,
         planner.motion_probe,
     ]
+    if getattr(planner, "late_raw_detail_reader", None) is not None:
+        losses["grad_late_raw_detail_reader"] = _module_grad_norm(
+            planner.late_raw_detail_reader, reference=reference
+        )
+        typed_refiners = getattr(
+            planner.late_raw_detail_reader, "typed_local_refiners", None
+        )
+        if typed_refiners is not None:
+            reader = planner.late_raw_detail_reader
+            p1_modules = tuple(
+                module
+                for module in (
+                    getattr(reader, "lattice_query_proj", None),
+                    getattr(reader, "lattice_world_key_proj", None),
+                    getattr(reader, "typed_fine_query", None),
+                    getattr(reader, "typed_coarse_query", None),
+                )
+                if module is not None
+            )
+            losses[
+                "grad_late_raw_detail_typed_p1_selector"
+            ] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in p1_modules
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses[
+                "grad_late_raw_detail_literal_rgb_value"
+            ] = _parameter_grad_norm(
+                (
+                    parameter
+                    for refiner in typed_refiners
+                    for parameter in refiner.rgb_value.parameters()
+                ),
+                reference=reference,
+            )
+            losses[
+                "grad_late_raw_detail_learned_detail_value"
+            ] = _parameter_grad_norm(
+                (
+                    parameter
+                    for refiner in typed_refiners
+                    for parameter in refiner.detail_value.parameters()
+                ),
+                reference=reference,
+            )
+            losses[
+                "grad_late_raw_detail_typed_p2_condition"
+            ] = _parameter_grad_norm(
+                (
+                    parameter
+                    for refiner in typed_refiners
+                    for module in (
+                        (
+                            refiner.coordinate_key,
+                            refiner.geometry_key,
+                            refiner.owner_conditions,
+                        )
+                        if hasattr(refiner, "owner_conditions")
+                        else (
+                            refiner.coordinate_key,
+                            refiner.query_condition,
+                            refiner.semantic_condition,
+                            refiner.appearance_condition,
+                            refiner.geometry_condition,
+                            refiner.future_condition,
+                        )
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            if all(hasattr(refiner, "owner_conditions") for refiner in typed_refiners):
+                for owner_name in (
+                    "policy",
+                    "semantic",
+                    "appearance",
+                    "geometry",
+                    "horizon",
+                ):
+                    losses[
+                        f"grad_late_raw_detail_typed_p2_{owner_name}_owner"
+                    ] = _parameter_grad_norm(
+                        (
+                            parameter
+                            for refiner in typed_refiners
+                            for module in (
+                                refiner.owner_conditions[owner_name],
+                                refiner.owner_outputs[owner_name],
+                            )
+                            for parameter in module.parameters()
+                        ),
+                        reference=reference,
+                    )
+            losses["grad_late_raw_detail_typed_p2"] = _module_grad_norm(
+                typed_refiners, reference=reference
+            )
+        final_modules.append(planner.late_raw_detail_reader)
     if getattr(planner, "residual_action_flow_denoiser", None) is not None:
         losses["grad_residual_action_flow"] = _module_grad_norm(
             planner.residual_action_flow_denoiser, reference=reference
@@ -4866,6 +12238,21 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
             decoder.noisy_lift,
             reference=reference,
         )
+        if decoder.top_policy_workspace_lift is not None:
+            losses["grad_evidence_top_policy_workspace_lift"] = _module_grad_norm(
+                decoder.top_policy_workspace_lift,
+                reference=reference,
+            )
+        if decoder.policy_delta_attnres is not None:
+            losses["grad_attnres_policy_to_mmdit"] = _module_grad_norm(
+                decoder.policy_delta_attnres,
+                reference=reference,
+            )
+        if decoder.protected_detail_basis_attnres is not None:
+            losses["grad_protected_detail_basis_reader"] = _module_grad_norm(
+                decoder.protected_detail_basis_attnres,
+                reference=reference,
+            )
         if decoder.execution_controller is not None:
             controller = decoder.execution_controller
             losses["grad_evidence_mmdit_execution_controller"] = _module_grad_norm(
@@ -4924,8 +12311,21 @@ def _optimizer_groups(
     stage = str(getattr(trainer, "training_stage", "contract")).lower().replace("-", "_")
     if stage not in {"contract", "stage1", "policy", "stage2"}:
         raise ValueError("training_stage must be contract/stage1 or policy/stage2")
+    if bool(int(getattr(trainer, "single_stage_role_lr", 0))) and (
+        stage not in {"policy", "stage2"}
+        or not int(getattr(system.policy_config, "flow_jepa_role_hierarchy", 0))
+    ):
+        raise ValueError(
+            "single_stage_role_lr requires policy/stage2 and the Flow-JEPA role hierarchy"
+        )
     cut = int(system.policy_config.midcut_layer)
     planner = system.planner
+    phase_world_block_modules = [
+        *list(getattr(planner, "phase_world_block_query_proj", None) or ()),
+        *list(
+            getattr(planner, "condition_world_block_query_proj", None) or ()
+        ),
+    ]
     groups: list[dict[str, Any]] = []
     complete_latent_decoder = (
         getattr(planner, "latent_cvae_action_decoder", None) is not None
@@ -5073,6 +12473,85 @@ def _optimizer_groups(
                 }
             )
 
+    if stage in {"contract", "stage1"} and int(
+        getattr(system.policy_config, "flow_jepa_enabled", 0)
+    ):
+        # V95 Stage1 has its own representation graph.  Its optimizer must not
+        # inherit the legacy layer-contract ownership map: those heads are not
+        # executed, while final_norm is on the actual JEPA prediction path.
+        shared_modules = [
+            planner.seed,
+            planner.time,
+            planner.content_mod,
+            planner.content_mod_scale,
+            planner.final_norm,
+        ]
+        if getattr(planner, "goal_resampler", None) is not None:
+            shared_modules.append(planner.goal_resampler)
+        if getattr(planner, "stateless_phase_adapter", None) is not None:
+            shared_modules.append(planner.stateless_phase_adapter)
+            if getattr(planner, "phase_world_query_proj", None) is not None:
+                shared_modules.extend(
+                    [
+                        planner.phase_world_query_proj,
+                        planner.condition_world_query_proj,
+                    ]
+                )
+            shared_modules.extend(phase_world_block_modules)
+        for bridge_name in (
+            "ground_to_world_attnres",
+            "world_to_policy_attnres",
+        ):
+            bridge = getattr(planner, bridge_name, None)
+            if bridge is not None:
+                shared_modules.append(bridge)
+        groups.append(
+            {
+                "params": _unique_params(shared_modules),
+                "lr": trainer.lr * 0.5,
+                "name": "flow_jepa_stage1_inputs_and_final_norm",
+            }
+        )
+        depth = len(planner.blocks)
+        min_scale = float(getattr(trainer, "layerwise_lr_min_scale", 0.30))
+        min_scale = min(max(min_scale, 0.01), 1.0)
+        for index, block in enumerate(planner.blocks):
+            fraction = 0.0 if depth <= 1 else float(index) / float(depth - 1)
+            scale = min_scale + (1.0 - min_scale) * fraction
+            groups.append(
+                {
+                    "params": _unique_params([block]),
+                    "lr": trainer.lr * scale,
+                    "name": f"flow_jepa_stage1_dit_block_{index}_lr{scale:.2f}",
+                }
+            )
+        history_parameters = [
+            parameter
+            for name, parameter in system.proposal.named_parameters()
+            if name.startswith("history_") and parameter.requires_grad
+        ]
+        if history_parameters:
+            groups.append(
+                {
+                    "params": history_parameters,
+                    "lr": trainer.proposal_lr,
+                    "name": "flow_jepa_stage1_action_history",
+                }
+            )
+        flow_dino = getattr(planner, "flow_dino_evidence", None)
+        if flow_dino is None:
+            raise RuntimeError("V95 Stage1 optimizer has no Flow-DINO evidence owner")
+        groups.append(
+            {
+                "params": [
+                    parameter for parameter in flow_dino.parameters() if parameter.requires_grad
+                ],
+                "lr": trainer.lr * float(getattr(trainer, "flow_jepa_lr_scale", 1.0)),
+                "name": "flow_jepa_stage1_evidence",
+            }
+        )
+        return [group for group in groups if len(group["params"]) > 0]
+
     if (
         _uses_layer_adapter_contract(trainer)
         and len(getattr(planner, "layer_contract_heads", [])) > 0
@@ -5085,6 +12564,25 @@ def _optimizer_groups(
             planner.content_mod,
             planner.content_mod_scale,
         ]
+        if getattr(planner, "goal_resampler", None) is not None:
+            shared_modules.append(planner.goal_resampler)
+        if getattr(planner, "stateless_phase_adapter", None) is not None:
+            shared_modules.append(planner.stateless_phase_adapter)
+            if getattr(planner, "phase_world_query_proj", None) is not None:
+                shared_modules.extend(
+                    [
+                        planner.phase_world_query_proj,
+                        planner.condition_world_query_proj,
+                    ]
+                )
+            shared_modules.extend(phase_world_block_modules)
+        for bridge_name in (
+            "ground_to_world_attnres",
+            "world_to_policy_attnres",
+        ):
+            bridge = getattr(planner, bridge_name, None)
+            if bridge is not None:
+                shared_modules.append(bridge)
         depth = len(planner.blocks)
         min_scale = float(getattr(trainer, "layerwise_lr_min_scale", 0.30))
         min_scale = min(max(min_scale, 0.01), 1.0)
@@ -5101,7 +12599,7 @@ def _optimizer_groups(
                 scale = min_scale + (1.0 - min_scale) * frac
                 groups.append(
                     {
-                        "params": list(block.parameters()),
+                        "params": _unique_params([block]),
                         "lr": trainer.lr * scale,
                         "name": f"dit_block_{i}_lr{scale:.2f}",
                     }
@@ -5134,6 +12632,8 @@ def _optimizer_groups(
                 planner.controlled_dynamics,
                 *legacy_motion_readers,
             ]
+            if getattr(planner, "late_raw_detail_reader", None) is not None:
+                final_modules.append(planner.late_raw_detail_reader)
             if not event_probe_in_contract:
                 final_modules.append(planner.event_probe)
             if getattr(planner, "residual_action_flow_denoiser", None) is not None:
@@ -5163,37 +12663,68 @@ def _optimizer_groups(
                 )
             groups.append(
                 {
-                    "params": list(system.proposal.parameters()),
+                    "params": [
+                        parameter
+                        for parameter in system.proposal.parameters()
+                        if parameter.requires_grad
+                    ],
                     "lr": trainer.proposal_lr,
                     "name": "proposal",
                 }
             )
         else:
             upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
+            single_stage_role_lr = bool(
+                int(getattr(trainer, "single_stage_role_lr", 0))
+            )
+            shared_lr = trainer.lr if single_stage_role_lr else upper_lr * 0.5
             groups.append(
                 {
                     "params": _unique_params(shared_modules),
-                    "lr": upper_lr * 0.5,
-                    "name": "shared_input_low_lr",
+                    "lr": shared_lr,
+                    "name": (
+                        "single_stage_shared_input"
+                        if single_stage_role_lr
+                        else "shared_input_low_lr"
+                    ),
                 }
             )
             for i, block in enumerate(planner.blocks):
                 frac = 0.0 if depth <= 1 else float(i) / float(depth - 1)
-                lr = upper_lr + (trainer.lr - upper_lr) * frac
-                lr = max(lr, trainer.lr * min_scale * 0.25)
+                lr = (
+                    trainer.lr
+                    if single_stage_role_lr
+                    else max(
+                        upper_lr + (trainer.lr - upper_lr) * frac,
+                        trainer.lr * min_scale * 0.25,
+                    )
+                )
                 groups.append(
                     {
-                        "params": list(block.parameters()),
+                        "params": _unique_params([block]),
                         "lr": lr,
-                        "name": f"dit_block_{i}_policy_layerwise",
+                        "name": (
+                            f"dit_block_{i}_single_stage"
+                            if single_stage_role_lr
+                            else f"dit_block_{i}_policy_layerwise"
+                        ),
                     }
                 )
-            inherited_contract_lr = upper_lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0))
+            inherited_contract_lr = (
+                trainer.lr
+                if single_stage_role_lr
+                else upper_lr
+                * float(getattr(trainer, "midcut_head_lr_scale", 1.0))
+            )
             groups.append(
                 {
                     "params": _unique_params([planner.midcut_norm, planner.midcut_heads]),
                     "lr": inherited_contract_lr,
-                    "name": "midcut_contract_heads_low_lr",
+                    "name": (
+                        "midcut_contract_heads_single_stage"
+                        if single_stage_role_lr
+                        else "midcut_contract_heads_low_lr"
+                    ),
                 }
             )
             adapter_modules = [planner.layer_contract_heads]
@@ -5205,10 +12736,16 @@ def _optimizer_groups(
                 getattr(trainer, "layer_contract_adapter_policy_lr_scale", 0.0)
             )
             adapter_lr = (
-                trainer.lr * adapter_lr_scale if adapter_lr_scale > 0 else inherited_contract_lr
+                trainer.lr
+                if single_stage_role_lr
+                else trainer.lr * adapter_lr_scale
+                if adapter_lr_scale > 0
+                else inherited_contract_lr
             )
             adapter_name = (
-                "layer_contract_adapters_reset_lr"
+                "layer_contract_adapters_single_stage"
+                if single_stage_role_lr
+                else "layer_contract_adapters_reset_lr"
                 if adapter_lr_scale > 0
                 else "layer_contract_adapters_low_lr"
             )
@@ -5222,6 +12759,8 @@ def _optimizer_groups(
                 planner.event_probe,
                 *legacy_motion_readers,
             ]
+            if getattr(planner, "late_raw_detail_reader", None) is not None:
+                final_modules.append(planner.late_raw_detail_reader)
             groups.append(
                 {
                     "params": _unique_params(final_modules),
@@ -5270,9 +12809,22 @@ def _optimizer_groups(
                 )
             groups.append(
                 {
-                    "params": list(system.proposal.parameters()),
+                    "params": [
+                        parameter
+                        for parameter in system.proposal.parameters()
+                        if parameter.requires_grad
+                    ],
                     "lr": trainer.proposal_lr,
                     "name": "proposal",
+                }
+            )
+        flow_dino = getattr(planner, "flow_dino_evidence", None)
+        if flow_dino is not None:
+            groups.append(
+                {
+                    "params": [parameter for parameter in flow_dino.parameters() if parameter.requires_grad],
+                    "lr": trainer.lr * float(getattr(trainer, "flow_jepa_lr_scale", 1.0)),
+                    "name": "flow_dino_evidence",
                 }
             )
         return [group for group in groups if len(group["params"]) > 0]
@@ -5287,6 +12839,13 @@ def _optimizer_groups(
         *list(planner.blocks[:cut]),
         planner.midcut_norm,
     ]
+    if getattr(planner, "goal_resampler", None) is not None:
+        pre_modules.append(planner.goal_resampler)
+    if getattr(planner, "stateless_phase_adapter", None) is not None:
+        pre_modules.append(planner.stateless_phase_adapter)
+        pre_modules.extend(phase_world_block_modules)
+    if getattr(planner, "ground_to_world_attnres", None) is not None:
+        pre_modules.append(planner.ground_to_world_attnres)
     mid_modules = [planner.midcut_heads]
     post_modules = [
         *list(planner.blocks[cut:]),
@@ -5296,6 +12855,14 @@ def _optimizer_groups(
         planner.event_probe,
         *legacy_motion_readers,
     ]
+    if getattr(planner, "late_raw_detail_reader", None) is not None:
+        post_modules.append(planner.late_raw_detail_reader)
+    if getattr(planner, "world_to_policy_attnres", None) is not None:
+        post_modules.append(planner.world_to_policy_attnres)
+    if getattr(planner, "phase_world_query_proj", None) is not None:
+        post_modules.append(planner.phase_world_query_proj)
+    if getattr(planner, "condition_world_query_proj", None) is not None:
+        post_modules.append(planner.condition_world_query_proj)
     if stage in {"contract", "stage1"}:
         groups.append(
             {"params": _unique_params(pre_modules), "lr": trainer.lr, "name": "pre_midcut_trunk"}
@@ -5309,7 +12876,11 @@ def _optimizer_groups(
         )
         groups.append(
             {
-                "params": list(system.proposal.parameters()),
+                "params": [
+                    parameter
+                    for parameter in system.proposal.parameters()
+                    if parameter.requires_grad
+                ],
                 "lr": trainer.proposal_lr,
                 "name": "proposal",
             }
@@ -5372,9 +12943,22 @@ def _optimizer_groups(
             )
         groups.append(
             {
-                "params": list(system.proposal.parameters()),
+                "params": [
+                    parameter
+                    for parameter in system.proposal.parameters()
+                    if parameter.requires_grad
+                ],
                 "lr": trainer.proposal_lr,
                 "name": "proposal",
+            }
+        )
+    flow_dino = getattr(planner, "flow_dino_evidence", None)
+    if flow_dino is not None:
+        groups.append(
+            {
+                "params": [parameter for parameter in flow_dino.parameters() if parameter.requires_grad],
+                "lr": trainer.lr * float(getattr(trainer, "flow_jepa_lr_scale", 1.0)),
+                "name": "flow_dino_evidence",
             }
         )
     return [group for group in groups if len(group["params"]) > 0]
@@ -5385,6 +12969,15 @@ def _is_contract_stage(trainer: V39PolicyTrainerConfig) -> bool:
         "contract",
         "stage1",
     }
+
+
+def _is_flow_jepa_stage1(
+    system: V39PolicySystem, trainer: V39PolicyTrainerConfig
+) -> bool:
+    return bool(
+        _is_contract_stage(trainer)
+        and int(getattr(system.policy_config, "flow_jepa_enabled", 0))
+    )
 
 
 def _stable_json_fingerprint(value: Any) -> str:
@@ -5416,6 +13009,7 @@ def _run_contract_manifest(
         "dataset": context.get("dataset"),
         "splits": context.get("splits"),
         "visual_geometry": context.get("visual_geometry"),
+        "goal_language": context.get("goal_language"),
         "performance_contract": context.get("performance_contract"),
         "source_fingerprint": context.get("source_fingerprint"),
     }
@@ -5540,6 +13134,7 @@ def train_v39_policy(
         "balanced": float("inf"),
         "deploy_full_rmse": float("inf"),
         "layer_contract": float("inf"),
+        "stage1_representation": float("inf"),
     }
     if resume is not None:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
@@ -5553,6 +13148,189 @@ def train_v39_policy(
                 "resume final-action-decoder mismatch: "
                 f"checkpoint={saved_final_decoder!r}, current={current_final_decoder!r}"
             )
+        saved_flow_jepa = int(saved_policy.get("flow_jepa_enabled", 0))
+        current_flow_jepa = int(getattr(system.policy_config, "flow_jepa_enabled", 0))
+        if saved_flow_jepa != current_flow_jepa:
+            raise ValueError(
+                "resume Flow-DINO JEPA architecture mismatch: "
+                f"checkpoint={saved_flow_jepa}, current={current_flow_jepa}; "
+                "an old V94 checkpoint may be used only as --stage1-checkpoint"
+            )
+        if current_flow_jepa:
+            for field in (
+                "future_grid_size",
+                "flow_jepa_grid_size",
+                "flow_jepa_feature_dim",
+                "flow_jepa_flow_iters",
+                "flow_jepa_corr_levels",
+                "flow_jepa_corr_radius",
+                "flow_jepa_directed_canvas_attention",
+                "flow_jepa_late_bottleneck",
+                "flow_jepa_dense_depth",
+                "flow_jepa_fine_radius",
+                "flow_jepa_reader_radius",
+                "flow_jepa_reader_heads",
+                "flow_jepa_raw_image_enabled",
+                "flow_jepa_role_hierarchy",
+                "flow_jepa_zero_flow_guard",
+                "future_anchors",
+                "flow_jepa_stage_tokens",
+            ):
+                default_value = 0 if field in {
+                    "flow_jepa_raw_image_enabled",
+                    "flow_jepa_role_hierarchy",
+                    "flow_jepa_zero_flow_guard",
+                } else -1
+                saved_value = int(saved_policy.get(field, default_value))
+                current_value = int(getattr(system.policy_config, field))
+                if saved_value != current_value:
+                    raise ValueError(
+                        f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
+                    )
+            if int(getattr(system.policy_config, "flow_jepa_raw_image_enabled", 0)):
+                for field in (
+                    "depth",
+                    "midcut_layer",
+                    "flow_jepa_raw_base_channels",
+                    "flow_jepa_raw_mid_radius",
+                    "flow_jepa_raw_high_radius",
+                    "flow_jepa_raw_reader_radius",
+                    "flow_jepa_raw_reader_heads",
+                    "flow_jepa_raw_activation_checkpoint",
+                    "flow_jepa_strict_role_visual_path",
+                    "flow_jepa_complementary_raw_detail",
+                    "flow_jepa_source_aligned_raw_fusion",
+                    "flow_jepa_grounding_blocks",
+                    "flow_jepa_world_blocks",
+                    "flow_jepa_policy_blocks",
+                    "flow_jepa_policy_workspace_fixed_fusion",
+                ):
+                    saved_value = int(saved_policy.get(field, -1))
+                    current_value = int(getattr(system.policy_config, field))
+                    if saved_value != current_value:
+                        raise ValueError(
+                            f"resume {field} mismatch: checkpoint={saved_value}, "
+                            f"current={current_value}"
+                        )
+                saved_workspace_scale = float(
+                    saved_policy.get("flow_jepa_policy_workspace_scale", float("nan"))
+                )
+                current_workspace_scale = float(
+                    system.policy_config.flow_jepa_policy_workspace_scale
+                )
+                if saved_workspace_scale != current_workspace_scale:
+                    raise ValueError(
+                        "resume flow_jepa_policy_workspace_scale mismatch: "
+                        f"checkpoint={saved_workspace_scale}, current={current_workspace_scale}"
+                    )
+                # V102 routing switches can change experiment semantics without
+                # changing tensor shapes, so strict state-dict loading cannot
+                # detect a mismatched resume. Missing fields mean "off" for
+                # historical V98-V101 checkpoints.
+                _validate_v102_resume_contract(
+                    saved_policy,
+                    system.policy_config,
+                )
+            saved_offsets = tuple(
+                int(value) for value in saved_policy.get("flow_jepa_history_offsets", ())
+            )
+            current_offsets = tuple(
+                int(value) for value in system.policy_config.flow_jepa_history_offsets
+            )
+            if saved_offsets != current_offsets:
+                raise ValueError(
+                    "resume flow_jepa_history_offsets mismatch: "
+                    f"checkpoint={saved_offsets}, current={current_offsets}"
+                )
+            saved_window_offsets, saved_stage_offset = _saved_flow_jepa_hierarchy(
+                saved_policy
+            )
+            current_window_offsets = tuple(
+                int(value) for value in system.policy_config.flow_jepa_effective_window_offsets
+            )
+            if saved_window_offsets != current_window_offsets:
+                raise ValueError(
+                    "resume flow_jepa_window_offsets mismatch: "
+                    f"checkpoint={saved_window_offsets}, current={current_window_offsets}; "
+                    "pre-hierarchy V95 checkpoints may be used only as --stage1-checkpoint"
+                )
+            current_stage_offset = (
+                0
+                if int(system.policy_config.flow_jepa_late_bottleneck)
+                else int(system.policy_config.flow_jepa_effective_stage_offset)
+            )
+            if int(system.policy_config.flow_jepa_late_bottleneck):
+                saved_stage_offset = int(saved_policy.get("flow_jepa_stage_offset", 0))
+            if saved_stage_offset != current_stage_offset:
+                raise ValueError(
+                    "resume flow_jepa_stage_offset mismatch: "
+                    f"checkpoint={saved_stage_offset}, current={current_stage_offset}; "
+                    "pre-hierarchy V95 checkpoints may be used only as --stage1-checkpoint"
+                )
+        saved_action_history = int(saved_policy.get("action_history_enabled", 0))
+        current_action_history = int(
+            getattr(system.policy_config, "action_history_enabled", 0)
+        )
+        if saved_action_history != current_action_history:
+            raise ValueError(
+                "resume action-history architecture mismatch: "
+                f"checkpoint={saved_action_history}, current={current_action_history}; "
+                "use the checkpoint only as --stage1-checkpoint"
+            )
+        if current_action_history:
+            for field in (
+                "executed_history_length",
+                "action_history_recent_tokens",
+                "action_history_summary_tokens",
+            ):
+                saved_value = int(saved_policy.get(field, -1))
+                current_value = int(getattr(system.policy_config, field))
+                if saved_value != current_value:
+                    raise ValueError(
+                        f"resume {field} mismatch: checkpoint={saved_value}, "
+                        f"current={current_value}"
+                    )
+            saved_action_offsets = tuple(
+                int(value) for value in saved_policy.get("executed_action_offsets", ())
+            )
+            current_action_offsets = tuple(
+                int(value) for value in system.policy_config.executed_action_offsets
+            )
+            if saved_action_offsets != current_action_offsets:
+                raise ValueError(
+                    "resume executed_action_offsets mismatch: "
+                    f"checkpoint={saved_action_offsets}, current={current_action_offsets}"
+                )
+        saved_goal = int(saved_policy.get("goal_conditioning_enabled", 0))
+        current_goal = int(getattr(system.policy_config, "goal_conditioning_enabled", 0))
+        if saved_goal != current_goal:
+            raise ValueError(
+                "resume goal-conditioning architecture mismatch: "
+                f"checkpoint={saved_goal}, current={current_goal}; "
+                "use the checkpoint only as --stage1-checkpoint"
+            )
+        if current_goal:
+            for field in (
+                "goal_token_count",
+                "goal_language_dim",
+                "goal_language_max_tokens",
+                "goal_resampler_depth",
+            ):
+                saved_value = int(saved_policy.get(field, -1))
+                current_value = int(getattr(system.policy_config, field))
+                if saved_value != current_value:
+                    raise ValueError(
+                        f"resume {field} mismatch: checkpoint={saved_value}, "
+                        f"current={current_value}"
+                    )
+            saved_goal_meta = payload.get("context", {}).get("goal_language") or {}
+            current_goal_meta = context.get("goal_language") or {}
+            for field in ("embedding_sha256",):
+                if saved_goal_meta.get(field) != current_goal_meta.get(field):
+                    raise ValueError(
+                        f"resume goal-language {field} mismatch; use the same T5 condition "
+                        "or start a new run"
+                    )
         if current_final_decoder == "hierarchical_mmdit_action":
             saved_architecture = str(
                 saved_policy.get("hierarchical_mmdit_architecture_version", "competitive_v1")
@@ -5681,25 +13459,43 @@ def train_v39_policy(
         best.update(payload.get("best", {}))
         restore_rng(payload.get("rng"))
 
+    flow_jepa_stage1 = _is_flow_jepa_stage1(system, trainer)
+    if flow_jepa_stage1:
+        _preflight_flow_jepa_stage1(
+            system=system,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            trainer=trainer,
+        )
+    else:
+        _preflight_evidence_dynamic_sampling(
+            system=system,
+            loader=val_loader,
+            conditioner=conditioner,
+            device=device,
+            dtype=dtype,
+            camera_names=camera_names,
+            trainer=trainer,
+        )
+
     for epoch in range(start_epoch, trainer.epochs + 1):
         system.train()
+        train_batch_sampler = getattr(train_loader, "batch_sampler", None)
+        if hasattr(train_batch_sampler, "set_epoch"):
+            train_batch_sampler.set_epoch(epoch)
         metric_sums: dict[str, Tensor] = {}
         metric_count = 0
         throughput_start = time.perf_counter()
         throughput_batch = 0
-        include_future = (
-            float(trainer.rollout_dynamics_loss_weight) > 0
-            or float(trainer.rollout_delta_loss_weight) > 0
-            or float(trainer.rollout_contrast_loss_weight) > 0
-            or float(trainer.rollout_variance_loss_weight) > 0
-            or float(trainer.rollout_norm_loss_weight) > 0
-            or float(trainer.rollout_milestone_delta_match_weight) > 0
-            or float(trainer.future_latent_loss_weight) > 0
-            or float(trainer.action_effect_loss_weight) > 0
-            or float(getattr(trainer, "latent_cvae_mmdit_execution_value_loss_weight", 0.0)) > 0
-            or float(getattr(trainer, "layer_latent_loss_weight", 0.0)) > 0
-            or float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0
-        ) and epoch >= int(trainer.future_latent_loss_start_epoch)
+        include_future = _needs_future_targets(trainer, epoch)
+        include_counterfactuals = (
+            False
+            if flow_jepa_stage1
+            else _needs_action_counterfactuals(trainer, epoch)
+        )
         for batch_index, batch in enumerate(train_loader, start=1):
             if trainer.max_train_batches and batch_index > trainer.max_train_batches:
                 break
@@ -5742,10 +13538,10 @@ def train_v39_policy(
             hierarchical_decoder = getattr(
                 system.planner, "hierarchical_mmdit_action_decoder", None
             )
-            if hierarchical_decoder is not None:
+            if hierarchical_decoder is not None and not flow_jepa_stage1:
                 hierarchical_decoder.set_operator_contraction_training_step(global_step)
             evidence_decoder = getattr(system.planner, "evidence_latent_mmdit_action_decoder", None)
-            if evidence_decoder is not None:
+            if evidence_decoder is not None and not flow_jepa_stage1:
                 evidence_decoder.set_execution_training_step(global_step)
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(
@@ -5760,18 +13556,47 @@ def train_v39_policy(
             stop_midcut = contract_stage and not layer_mode
             layer_aux_contribution: Tensor | None = None
             with autocast_context(device, dtype):
-                output = system.flow_training_forward(
-                    sample["visual"],
-                    sample["history_state"],
-                    sample["executed_action_history"],
-                    sample["state"],
-                    sample["policy_action"],
-                    action_state=sample["action_state"],
-                    target_visual=sample.get("target_visual"),
-                    make_counterfactuals=use_future,
-                    stop_at_midcut=stop_midcut,
-                )
-                if contract_stage and layer_mode:
+                if flow_jepa_stage1:
+                    target_visual = sample.get("target_visual")
+                    if target_visual is None:
+                        raise RuntimeError("V95 Stage1 batch is missing its future visual target")
+                    output = system.flow_jepa_stage1_forward(
+                        sample["visual"],
+                        sample["history_state"],
+                        sample["executed_action_history"],
+                        sample["state"],
+                        target_visual,
+                        raw_visual=sample.get("raw_visual"),
+                    )
+                    losses = flow_jepa_stage1_losses(
+                        output,
+                        trainer,
+                        enable_future_loss=use_future,
+                    )
+                    losses["stage_contract"] = losses["loss"].detach()
+                else:
+                    output = system.flow_training_forward(
+                        sample["visual"],
+                        sample["history_state"],
+                        sample["executed_action_history"],
+                        sample["state"],
+                        sample["policy_action"],
+                        raw_visual=sample.get("raw_visual"),
+                        action_state=sample["action_state"],
+                        target_visual=sample.get("target_visual"),
+                        # Future teacher targets and action counterfactuals are
+                        # different requirements.  V95 needs frozen future DINO
+                        # targets, but its zero-weight legacy contrast objectives
+                        # must not retain two extra full policy graphs.
+                        make_counterfactuals=bool(use_future and include_counterfactuals),
+                        stop_at_midcut=stop_midcut,
+                    )
+                if flow_jepa_stage1:
+                    # The dedicated branch above already owns the complete
+                    # representation objective.  Do not fall through into an
+                    # old contract or policy action loss.
+                    pass
+                elif contract_stage and layer_mode:
                     losses = layer_contract_losses(
                         system, sample, output, trainer, enable_future_loss=use_future
                     )
@@ -5812,48 +13637,54 @@ def train_v39_policy(
                         enable_future_loss=use_future,
                         global_step=global_step,
                     )
-                    if layer_mode:
-                        aux_losses = layer_contract_losses(
-                            system, sample, output, trainer, enable_future_loss=use_future
-                        )
-                        aux_key = "layer_contract"
-                        aux_scale = _layer_contract_aux_scale(trainer, epoch)
-                        # ``loss`` is the weighted layer-contract objective.
-                        # Using the raw ``layer_contract`` here silently made
-                        # layer_contract_loss_weight ineffective in Stage 2.
-                        aux_objective = aux_losses["loss"]
-                    else:
-                        aux_losses = midcut_contract_losses(
-                            system, sample, output, trainer, enable_future_loss=use_future
-                        )
-                        aux_key = "midcut_contract"
-                        aux_scale = _midcut_aux_scale(trainer, epoch)
-                        aux_objective = aux_losses[aux_key]
                     total_loss = losses["loss"]
+                    aux_key = "layer_contract" if layer_mode else "midcut_contract"
+                    aux_scale = (
+                        _layer_contract_aux_scale(trainer, epoch)
+                        if layer_mode
+                        else _midcut_aux_scale(trainer, epoch)
+                    )
                     if aux_scale > 0:
+                        if layer_mode:
+                            aux_losses = layer_contract_losses(
+                                system,
+                                sample,
+                                output,
+                                trainer,
+                                enable_future_loss=use_future,
+                            )
+                            # ``loss`` is the weighted layer-contract objective.
+                            # Using the raw ``layer_contract`` here silently made
+                            # layer_contract_loss_weight ineffective in Stage 2.
+                            aux_objective = aux_losses["loss"]
+                        else:
+                            aux_losses = midcut_contract_losses(
+                                system,
+                                sample,
+                                output,
+                                trainer,
+                                enable_future_loss=use_future,
+                            )
+                            aux_objective = aux_losses[aux_key]
                         scaled_aux_objective = aux_scale * aux_objective
                         total_loss = total_loss + scaled_aux_objective
                         if layer_mode:
                             layer_aux_contribution = scaled_aux_objective.detach()
-                    # Merge auxiliary logs without overwriting the deployable
-                    # policy loss.  The previous implementation used
-                    # losses.update(aux_losses), which could replace
-                    # losses["loss"] with a detached/no-grad auxiliary scalar
-                    # and crash backward at the start of Stage 2.  Keep other
-                    # deployable-policy diagnostics under their original names
-                    # as well; layer/midcut auxiliary diagnostics get prefixed
-                    # when names collide so pflow remains the deploy path.
-                    for key, value in aux_losses.items():
-                        if key == "loss":
-                            losses[f"aux_{aux_key}_loss"] = (
-                                value.detach() if torch.is_tensor(value) else value
-                            )
-                        elif key in losses:
-                            losses[f"aux_{aux_key}_{key}"] = (
-                                value.detach() if torch.is_tensor(value) else value
-                            )
-                        else:
-                            losses[key] = value
+                        # Merge auxiliary logs without overwriting the deployable
+                        # policy loss.  Zero-scale objectives are not evaluated:
+                        # computing them only for logging used memory and exposed
+                        # semantics that did not participate in optimization.
+                        for key, value in aux_losses.items():
+                            if key == "loss":
+                                losses[f"aux_{aux_key}_loss"] = (
+                                    value.detach() if torch.is_tensor(value) else value
+                                )
+                            elif key in losses:
+                                losses[f"aux_{aux_key}_{key}"] = (
+                                    value.detach() if torch.is_tensor(value) else value
+                                )
+                            else:
+                                losses[key] = value
                     losses["loss"] = total_loss
                     aux_scale_key = "layer_contract_aux_scale" if layer_mode else "midcut_aux_scale"
                     losses[aux_scale_key] = torch.as_tensor(
@@ -5944,10 +13775,13 @@ def train_v39_policy(
                     for parameter in decoder_for_local_clip.parameters()
                     if id(parameter) not in exit_controller_ids
                 ]
-                torch.nn.utils.clip_grad_norm_(
+                _clip_grad_norm_or_report(
                     local_clip_params,
                     latent_clip,
-                    error_if_nonfinite=True,
+                    system=system,
+                    epoch=epoch,
+                    batch=batch_index,
+                    label="decoder-local",
                 )
                 clip_key = (
                     "grad_hierarchical_mmdit_action_post_clip"
@@ -5965,16 +13799,22 @@ def train_v39_policy(
                 for parameter in system.parameters()
                 if id(parameter) not in exit_controller_ids
             ]
-            grad = torch.nn.utils.clip_grad_norm_(
+            grad = _clip_grad_norm_or_report(
                 main_clip_params,
                 trainer.grad_clip,
-                error_if_nonfinite=True,
+                system=system,
+                epoch=epoch,
+                batch=batch_index,
+                label="main",
             )
             if exit_controller_params:
-                torch.nn.utils.clip_grad_norm_(
+                _clip_grad_norm_or_report(
                     exit_controller_params,
                     trainer.grad_clip,
-                    error_if_nonfinite=True,
+                    system=system,
+                    epoch=epoch,
+                    batch=batch_index,
+                    label="exit-controller",
                 )
                 losses["grad_hierarchical_mmdit_exit_controller_post_clip"] = _parameter_grad_norm(
                     exit_controller_params,
@@ -6010,7 +13850,15 @@ def train_v39_policy(
                 throughput_start = throughput_now
                 throughput_batch = batch_index
                 print(
-                    _owned_serial_log_line(
+                    _flow_jepa_stage1_serial_log_line(
+                        row,
+                        epoch=epoch,
+                        batch_index=batch_index,
+                        learning_rate=float(optimizer.param_groups[0]["lr"]),
+                        seconds_per_batch=seconds_per_batch,
+                    )
+                    if flow_jepa_stage1
+                    else _owned_serial_log_line(
                         row,
                         epoch=epoch,
                         batch_index=batch_index,
@@ -6484,22 +14332,39 @@ def train_v39_policy(
         )
         if evidence_epoch:
             train_metrics = _filter_inactive_evidence_epoch_metrics(train_metrics)
-        val_metrics = evaluate_v39_policy(
-            system=system,
-            loader=val_loader,
-            conditioner=conditioner,
-            device=device,
-            dtype=dtype,
-            camera_names=camera_names,
-            action_normalizer=action_normalizer,
-            trainer=trainer,
-            max_batches=trainer.max_val_batches,
-            memory_reporter=memory_reporter,
-            epoch=epoch,
-            global_step=global_step,
-        )
-        score = balanced_score(val_metrics, trainer)  # type: ignore[arg-type]
-        deploy_eligible = is_deploy_eligible(val_metrics, trainer)  # type: ignore[arg-type]
+        if flow_jepa_stage1:
+            val_metrics = evaluate_flow_jepa_stage1(
+                system=system,
+                loader=val_loader,
+                conditioner=conditioner,
+                device=device,
+                dtype=dtype,
+                camera_names=camera_names,
+                trainer=trainer,
+                max_batches=trainer.max_val_batches,
+                memory_reporter=memory_reporter,
+                epoch=epoch,
+                global_step=global_step,
+            )
+            score = float(val_metrics["loss"])
+            deploy_eligible = False
+        else:
+            val_metrics = evaluate_v39_policy(
+                system=system,
+                loader=val_loader,
+                conditioner=conditioner,
+                device=device,
+                dtype=dtype,
+                camera_names=camera_names,
+                action_normalizer=action_normalizer,
+                trainer=trainer,
+                max_batches=trainer.max_val_batches,
+                memory_reporter=memory_reporter,
+                epoch=epoch,
+                global_step=global_step,
+            )
+            score = balanced_score(val_metrics, trainer)  # type: ignore[arg-type]
+            deploy_eligible = is_deploy_eligible(val_metrics, trainer)  # type: ignore[arg-type]
         val_metrics["balanced_score"] = score
         val_metrics["deploy_eligible"] = float(deploy_eligible)
         record = {
@@ -6511,12 +14376,17 @@ def train_v39_policy(
         history.append(record)
         with (out_dir / "v39_policy_epochs.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(jsonable(record), separators=(",", ":")) + "\n")
-        full = float(val_metrics["full_mse"])
+        full = float(val_metrics.get("full_mse", float("inf")))
         f1 = float(val_metrics.get("gripper_f1", 0.0))
         recall = float(val_metrics.get("gripper_recall", 0.0))
         save = []
         select_contract = _is_contract_stage(trainer) and _uses_layer_adapter_contract(trainer)
-        if select_contract:
+        if flow_jepa_stage1:
+            representation_value = float(val_metrics["loss"])
+            if representation_value < best["stage1_representation"]:
+                best["stage1_representation"] = representation_value
+                save.append("best_stage1_representation.pt")
+        elif select_contract:
             contract_value = float(val_metrics.get("contract_layer_contract", float("inf")))
             if contract_value < best["layer_contract"]:
                 best["layer_contract"] = contract_value
@@ -6539,6 +14409,19 @@ def train_v39_policy(
                 save.append("best_deploy.pt")
         payload = {
             "schema": "clearvla-v40-policy-checkpoint-v1",
+            "stage1_contract": (
+                {
+                    "kind": "flow_dino_jepa_representation_v1",
+                    "teacher": "frozen_dino_no_grad",
+                    "target_action_conditioned": False,
+                    "final_action_decoder_executed": False,
+                    "layer_contracts_executed": False,
+                    "window_offsets": list(system.policy_config.flow_jepa_effective_window_offsets),
+                    "stage_offset": int(system.policy_config.flow_jepa_effective_stage_offset),
+                }
+                if flow_jepa_stage1
+                else None
+            ),
             "epoch": epoch,
             "global_step": global_step,
             "model": system.state_dict(),
@@ -6565,7 +14448,17 @@ def train_v39_policy(
             ),
             encoding="utf-8",
         )
-        if evidence_epoch:
+        if flow_jepa_stage1:
+            print(
+                _flow_jepa_stage1_epoch_log_line(
+                    epoch=epoch,
+                    global_step=global_step,
+                    train=train_metrics,
+                    val=val_metrics,
+                ),
+                flush=True,
+            )
+        elif evidence_epoch:
             print(
                 _evidence_epoch_log_line(
                     epoch=epoch,
@@ -6590,9 +14483,21 @@ __all__ = [
     "rollout_dynamics_loss",
     "rollout_delta_loss",
     "rollout_contrast_loss",
+    "flow_jepa_stage1_losses",
+    "flow_jepa_interval_stage_terms",
     "flow_losses",
     "layer_contract_losses",
+    "evaluate_flow_jepa_stage1",
     "evaluate_v39_policy",
     "CudaMemoryReporter",
     "train_v39_policy",
+    "_validate_complete_v103_model_probe_contract",
+    "_validate_complete_v104_model_contract",
+    "_validate_complete_v105_model_contract",
+    "_validate_complete_v106_model_contract",
+    "_validate_complete_v107_model_contract",
+    "_validate_complete_v108_model_contract",
+    "_validate_complete_v109_model_contract",
+    "_validate_complete_v110_model_contract",
+    "_validate_complete_v111_model_contract",
 ]

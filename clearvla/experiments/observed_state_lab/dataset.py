@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """V35 observed-state datasets.
 
 The current world observation contains image/state history and *executed* action
 history only. Candidate future actions are returned separately and never enter
 perception. Dense future targets are aligned to the recurrent segment grid.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Mapping, Sequence
@@ -32,6 +32,10 @@ class ObservedStateDatasetConfig:
     action_offset: int = 0
     stride: int = 1
     return_images: bool = True
+    # Cached-DINO + raw-observation training needs only the online history
+    # images.  Future supervision remains cached DINO, so decoding every
+    # future RGB frame would multiply worker I/O without entering the model.
+    return_target_images: bool = True
 
     def validate(self) -> None:
         if min(self.world_horizon, self.policy_horizon, self.segment_length, self.stride) <= 0:
@@ -174,6 +178,50 @@ class ObservedStateWindowDataset(Dataset):
             ).astype(np.float32),
         }
 
+    def training_information_signals(
+        self,
+        *,
+        gripper_index: int,
+        event_threshold: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Precompute action-only sampling strata without image/cache reads."""
+
+        motion = np.empty((len(self.refs),), dtype=np.float32)
+        event = np.zeros((len(self.refs),), dtype=bool)
+        cfg = self.config
+        grip_index = int(gripper_index)
+        action_dim = int(self.action_normalizer.minimum.shape[-1])
+        if grip_index < 0:
+            grip_index += action_dim
+        if not 0 <= grip_index < action_dim:
+            raise ValueError("gripper_index is outside the action normalizer dimension")
+        if float(event_threshold) < 0.0:
+            raise ValueError("event_threshold must be non-negative")
+        for index, ref in enumerate(self.refs):
+            episode = self.episodes[ref.episode_idx]
+            state_raw = np.asarray(
+                episode.states_raw[ref.center + cfg.state_offset],
+                dtype=np.float32,
+            )
+            action_raw = np.asarray(
+                episode.actions_raw[
+                    ref.center
+                    + cfg.action_offset : ref.center
+                    + cfg.action_offset
+                    + cfg.policy_horizon
+                ],
+                dtype=np.float32,
+            )
+            action = self.action_normalizer.encode(action_raw).astype(np.float32)
+            state = self.action_normalizer.encode(state_raw).astype(np.float32)
+            boundary = np.concatenate([state[None], action[:-1]], axis=0)
+            delta = action - boundary
+            motion[index] = float(np.sqrt(np.mean(np.square(delta), dtype=np.float64)))
+            raw_boundary = np.concatenate([state_raw[None], action_raw[:-1]], axis=0)
+            grip_delta = action_raw[:, grip_index] - raw_boundary[:, grip_index]
+            event[index] = bool(np.any(np.abs(grip_delta) >= float(event_threshold)))
+        return motion, event
+
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         ref = self.refs[int(index)]
         episode = self.episodes[ref.episode_idx]
@@ -273,13 +321,14 @@ class ObservedStateWindowDataset(Dataset):
         if cfg.return_images:
             current_frames = self.image_store.load_window(episode, history_indices)
             current = _camera_stack(current_frames, self.camera_names).float() / 255.0
-            flat_target = target_indices.reshape(-1)
-            target_frames = self.image_store.load_window(episode, flat_target)
-            target = _camera_stack(target_frames, self.camera_names).float() / 255.0
             sample["history_obs_image"] = current
-            sample["target_history_obs_image"] = target.reshape(
-                len(cfg.future_offsets), len(cfg.target_history_offsets), *target.shape[1:]
-            )
+            if cfg.return_target_images:
+                flat_target = target_indices.reshape(-1)
+                target_frames = self.image_store.load_window(episode, flat_target)
+                target = _camera_stack(target_frames, self.camera_names).float() / 255.0
+                sample["target_history_obs_image"] = target.reshape(
+                    len(cfg.future_offsets), len(cfg.target_history_offsets), *target.shape[1:]
+                )
         return sample
 
 
@@ -335,6 +384,7 @@ class PolicyWindowDataset(Dataset):
             "executed_action_history_raw",
             "policy_action",
             "policy_action_raw",
+            "future_offsets",
             "history_keys",
             "history_obs_image",
             "target_history_keys",
@@ -354,35 +404,53 @@ class CachedTokenPolicyWindowDataset(PolicyWindowDataset):
     current and compact future-token loading into ``__getitem__`` so worker
     prefetch and pinned-memory transfer can hide most token I/O.
 
-    Only the future anchors actually used by V38 are loaded, and only the last
-    target-history frame for each future offset is needed by the residual
-    future-flow objective.
+    Only explicitly selected future offsets are loaded, and only their final
+    target-history frame is needed.  Hierarchical Flow-DINO uses sparse local
+    window offsets followed by one far stage offset, so assuming "the first K"
+    here would silently supervise the wrong horizons.
     """
 
     def __init__(
-        self, base: ObservedStateWindowDataset, *, token_store, future_anchors: int
+        self,
+        base: ObservedStateWindowDataset,
+        *,
+        token_store,
+        future_anchors: int,
+        future_indices: Sequence[int] | None = None,
     ) -> None:
         super().__init__(base)
         self.token_store = token_store
         self.future_anchors = int(future_anchors)
         if self.future_anchors <= 0:
             raise ValueError("future_anchors must be positive")
+        self.future_indices = (
+            tuple(range(self.future_anchors))
+            if future_indices is None
+            else tuple(int(value) for value in future_indices)
+        )
+        if not self.future_indices or min(self.future_indices) < 0:
+            raise ValueError("future_indices must contain non-negative indices")
+        if len(set(self.future_indices)) != len(self.future_indices):
+            raise ValueError("future_indices must be unique")
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = super().__getitem__(index)
-        if "history_obs_image" in sample:
-            return sample
         history_keys = sample["history_keys"]
-        sample["history_dinov2_tokens"] = self.token_store.load_batch(history_keys).reshape(
-            history_keys.shape[0],
-            len(self.base.camera_names),
-            self.token_store.tokens_per_camera,
-            self.token_store.token_dim,
-        )
+        if "history_dinov2_tokens" not in sample:
+            sample["history_dinov2_tokens"] = self.token_store.load_batch(history_keys).reshape(
+                history_keys.shape[0],
+                len(self.base.camera_names),
+                self.token_store.tokens_per_camera,
+                self.token_store.token_dim,
+            )
         if "target_history_keys" in sample:
             target_keys = sample["target_history_keys"]
-            anchors = min(self.future_anchors, int(target_keys.shape[0]))
-            compact_keys = target_keys[:anchors, -1, :]
+            if max(self.future_indices) >= int(target_keys.shape[0]):
+                raise IndexError(
+                    "future target index exceeds the available dataset offsets"
+                )
+            compact_keys = target_keys[list(self.future_indices), -1, :]
+            anchors = len(self.future_indices)
             sample["target_future_dinov2_tokens"] = self.token_store.load_batch(
                 compact_keys
             ).reshape(
@@ -391,6 +459,10 @@ class CachedTokenPolicyWindowDataset(PolicyWindowDataset):
                 self.token_store.tokens_per_camera,
                 self.token_store.token_dim,
             )
+            if "future_offsets" in sample:
+                sample["target_future_offsets"] = sample["future_offsets"][
+                    list(self.future_indices)
+                ]
         return sample
 
 

@@ -76,6 +76,181 @@ class EventBalancedBatchSampler(Sampler[list[int]]):
 
 
 @dataclass(frozen=True)
+class InformationBalancedSamplerConfig:
+    batch_size: int
+    uniform_fraction: float = 0.50
+    event_fraction: float = 0.125
+    motion_quantile: float = 0.70
+    batches_per_epoch: int | None = None
+    seed: int = 0
+    drop_last: bool = False
+
+    def validate(self) -> None:
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if not 0.0 <= self.uniform_fraction <= 1.0:
+            raise ValueError("uniform_fraction must be in [0,1]")
+        if not 0.0 <= self.event_fraction <= 1.0:
+            raise ValueError("event_fraction must be in [0,1]")
+        if self.uniform_fraction + self.event_fraction > 1.0:
+            raise ValueError("uniform_fraction + event_fraction cannot exceed 1")
+        if not 0.0 <= self.motion_quantile <= 1.0:
+            raise ValueError("motion_quantile must be in [0,1]")
+        if self.batches_per_epoch is not None and self.batches_per_epoch <= 0:
+            raise ValueError("batches_per_epoch must be positive when set")
+
+
+class InformationBalancedBatchSampler(Sampler[list[int]]):
+    """Mix uniform coverage with bounded motion/event strata.
+
+    The uniform lane is drawn without replacement from a shuffled permutation.
+    Informative lanes may repeat rare windows, but never replace the uniform
+    lane.  If no informative distinction exists, the sampler becomes an exact
+    ordinary shuffled traversal of the dataset.
+    """
+
+    def __init__(
+        self,
+        motion_score: np.ndarray,
+        is_event: np.ndarray,
+        config: InformationBalancedSamplerConfig,
+    ) -> None:
+        config.validate()
+        score = np.asarray(motion_score, dtype=np.float64)
+        events = np.asarray(is_event, dtype=bool)
+        if score.ndim != 1 or len(score) == 0 or events.shape != score.shape:
+            raise ValueError("motion_score and is_event must be aligned non-empty vectors")
+        if not np.isfinite(score).all() or (score < 0.0).any():
+            raise ValueError("motion_score must be finite and non-negative")
+        self.motion_score = score
+        self.is_event = events
+        self.config = config
+        self.epoch = 0
+        threshold = float(np.quantile(score, config.motion_quantile))
+        spread = float(score.max() - score.min())
+        self.motion_indices = (
+            np.flatnonzero(score >= threshold)
+            if spread > max(1e-12, abs(float(score.mean())) * 1e-8)
+            else np.empty((0,), dtype=np.int64)
+        )
+        self.event_indices = np.flatnonzero(events)
+        self.all_indices = np.arange(len(score), dtype=np.int64)
+        self.informative = bool(len(self.motion_indices) or len(self.event_indices))
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("epoch must be non-negative")
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        if self.config.batches_per_epoch is not None:
+            return int(self.config.batches_per_epoch)
+        if self.config.drop_last:
+            return len(self.all_indices) // self.config.batch_size
+        return math.ceil(len(self.all_indices) / self.config.batch_size)
+
+    @property
+    def summary(self) -> dict[str, float | int]:
+        return {
+            "windows": int(len(self.all_indices)),
+            "motion_windows": int(len(self.motion_indices)),
+            "event_windows": int(len(self.event_indices)),
+            "motion_threshold": float(
+                np.quantile(self.motion_score, self.config.motion_quantile)
+            ),
+            "uniform_fraction": float(self.config.uniform_fraction),
+            "event_fraction": float(self.config.event_fraction),
+            "motion_fraction": float(
+                1.0 - self.config.uniform_fraction - self.config.event_fraction
+            ),
+            "fallback_uniform": int(not self.informative),
+        }
+
+    @staticmethod
+    def _choice(
+        rng: np.random.Generator,
+        pool: np.ndarray,
+        count: int,
+        selected: set[int],
+        fallback: np.ndarray,
+    ) -> list[int]:
+        if count <= 0:
+            return []
+        available = np.asarray(
+            [int(x) for x in pool if int(x) not in selected], dtype=np.int64
+        )
+        primary_count = min(count, len(available))
+        rows: list[int] = []
+        if primary_count:
+            rows.extend(
+                int(value)
+                for value in rng.choice(available, size=primary_count, replace=False)
+            )
+        remaining = count - len(rows)
+        if remaining:
+            occupied = selected | set(rows)
+            fallback_available = np.asarray(
+                [int(x) for x in fallback if int(x) not in occupied], dtype=np.int64
+            )
+            if len(fallback_available) == 0:
+                fallback_available = fallback
+            rows.extend(
+                int(value)
+                for value in rng.choice(
+                    fallback_available,
+                    size=remaining,
+                    replace=len(fallback_available) < remaining,
+                )
+            )
+        return rows
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = np.random.default_rng(self.config.seed + self.epoch * 1_000_003)
+        permutation = self.all_indices.copy()
+        rng.shuffle(permutation)
+        if not self.informative:
+            for start in range(0, len(permutation), self.config.batch_size):
+                batch = permutation[start : start + self.config.batch_size]
+                if len(batch) < self.config.batch_size and self.config.drop_last:
+                    break
+                yield [int(value) for value in batch]
+            return
+
+        uniform_count = int(round(self.config.batch_size * self.config.uniform_fraction))
+        event_count = int(round(self.config.batch_size * self.config.event_fraction))
+        uniform_count = min(max(uniform_count, 1), self.config.batch_size)
+        event_count = min(max(event_count, 0), self.config.batch_size - uniform_count)
+        motion_count = self.config.batch_size - uniform_count - event_count
+        cursor = 0
+        for _ in range(len(self)):
+            if cursor + uniform_count > len(permutation):
+                rng.shuffle(permutation)
+                cursor = 0
+            batch = [int(value) for value in permutation[cursor : cursor + uniform_count]]
+            cursor += uniform_count
+            selected = set(batch)
+            event_rows = self._choice(
+                rng,
+                self.event_indices,
+                event_count,
+                selected,
+                self.all_indices,
+            )
+            batch.extend(event_rows)
+            selected.update(event_rows)
+            motion_rows = self._choice(
+                rng,
+                self.motion_indices,
+                motion_count,
+                selected,
+                self.all_indices,
+            )
+            batch.extend(motion_rows)
+            rng.shuffle(batch)
+            yield batch
+
+
+@dataclass(frozen=True)
 class TrajectoryBlockSamplerConfig:
     block_size: int
     event_fraction: float = 0.50

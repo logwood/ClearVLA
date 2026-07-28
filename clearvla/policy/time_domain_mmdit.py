@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .codec import NativeTimePhysicalActionTokenLift
@@ -23,6 +24,7 @@ from .evidence import OwnedEvidenceMemoryBank
 from .gauges import deterministic_module_probe, select_centered_candidate
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .refinement import NestedLowRankContractionBank
+from .role_delta_attnres import PolicyRoleDeltaBank, RoleDeltaAttnRes
 
 
 @dataclass
@@ -56,6 +58,9 @@ class EvidenceViewAdapter(nn.Module):
         super().__init__()
         h = int(config.hidden_size)
         self.hidden_size = h
+        self.allow_terminal_layer_subset = bool(
+            int(getattr(config, "flow_jepa_strict_role_visual_path", 0))
+        )
         self.bank = OwnedEvidenceMemoryBank(config)
         self.layer_field_proj = nn.ModuleDict(
             {name: nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)) for name in self._LAYER_FIELDS}
@@ -84,6 +89,11 @@ class EvidenceViewAdapter(nn.Module):
                 for name in self.intent_source_names
             }
         )
+        if self.allow_terminal_layer_subset:
+            # Strict G->W->P ownership removes raw visual intent before this
+            # adapter is called. Preserve the key for compatible state dicts,
+            # but do not optimize a projection that can never receive input.
+            self.intent_proj["visual"].requires_grad_(False)
         self.intent_type_embed = nn.Parameter(
             torch.randn(1, len(self.intent_source_names), h) * 0.02
         )
@@ -118,11 +128,16 @@ class EvidenceViewAdapter(nn.Module):
         return torch.cat(parts, dim=1) if parts else None
 
     def _layer_rows(self, layer_contracts: list[dict[str, Tensor]], reference: Tensor) -> Tensor:
-        if len(layer_contracts) != int(self.layer_depth_embed.shape[1]):
+        depth = int(self.layer_depth_embed.shape[1])
+        subset_allowed = self.allow_terminal_layer_subset and 0 < len(layer_contracts) <= depth
+        if len(layer_contracts) != depth and not subset_allowed:
             raise RuntimeError(
-                f"evidence layer depth mismatch: expected {int(self.layer_depth_embed.shape[1])}, "
+                f"evidence layer depth mismatch: expected {depth}, "
                 f"got {len(layer_contracts)}"
             )
+        # A strict role hierarchy exposes only the terminal policy contracts to
+        # the final decoder.  They retain their original depth identities.
+        depth_offset = depth - len(layer_contracts)
         rows: list[Tensor] = []
         for index, entry in enumerate(layer_contracts):
             fields: list[Tensor] = []
@@ -142,7 +157,9 @@ class EvidenceViewAdapter(nn.Module):
             if not fields:
                 raise RuntimeError(f"layer contract {index} has no deploy-safe evidence field")
             row = torch.stack(fields, dim=1).mean(dim=1)
-            row = row + self.layer_depth_embed[:, index].to(device=row.device, dtype=row.dtype)
+            row = row + self.layer_depth_embed[:, depth_offset + index].to(
+                device=row.device, dtype=row.dtype
+            )
             rows.append(row)
         return torch.stack(rows, dim=1)
 
@@ -156,6 +173,9 @@ class EvidenceViewAdapter(nn.Module):
         state_memory: Tensor | list[Tensor] | tuple[Tensor, ...],
         layer_contracts: list[dict[str, Tensor]],
         intent_memory: dict[str, Tensor] | None = None,
+        visual_selector_tokens: Tensor | None = None,
+        visual_value_tokens: Tensor | None = None,
+        visual_key_bias: Tensor | None = None,
     ) -> EvidenceView:
         if trajectory_tokens.ndim != 3 or int(trajectory_tokens.shape[-1]) != self.hidden_size:
             raise ValueError(f"trajectory_tokens must be [B,N,{self.hidden_size}]")
@@ -237,7 +257,8 @@ class EvidenceViewAdapter(nn.Module):
         # values are compiled from pre-attention intent memory.  Thus mixed
         # canvas/noisy content may choose which clean intent evidence is read,
         # but cannot become an evidence value by itself.
-        layer_query = self.clean_layer_queries.to(
+        layer_count = int(layer_tokens.shape[1])
+        layer_query = self.clean_layer_queries[:, -layer_count:].to(
             device=layer_tokens.device, dtype=layer_tokens.dtype
         ).expand(batch, -1, -1)
         layer_value_tokens, _ = self.layer_intent_attention(
@@ -260,14 +281,54 @@ class EvidenceViewAdapter(nn.Module):
             name: torch.ones(value.shape[:2], device=value.device, dtype=torch.bool)
             for name, value in source_tokens.items()
         }
+        selector_tokens = prepared_selector.tokens
+        value_tokens = prepared_values.tokens
+        key_bias = prepared_selector.key_bias
+        ranges = dict(prepared_selector.ranges)
+        if visual_selector_tokens is not None or visual_value_tokens is not None:
+            if visual_selector_tokens is None or visual_value_tokens is None:
+                raise ValueError("Flow-DINO selector and value lanes must be provided together")
+            expected_prefix = (batch,)
+            if (
+                visual_selector_tokens.ndim != 3
+                or visual_value_tokens.ndim != 3
+                or tuple(visual_selector_tokens.shape) != tuple(visual_value_tokens.shape)
+                or tuple(visual_selector_tokens.shape[:1]) != expected_prefix
+                or int(visual_selector_tokens.shape[-1]) != self.hidden_size
+            ):
+                raise ValueError("Flow-DINO selector/value lanes must align as [B,N,H]")
+            visual_selector_tokens = visual_selector_tokens.to(
+                device=reference.device, dtype=reference.dtype
+            )
+            visual_value_tokens = visual_value_tokens.to(
+                device=reference.device, dtype=reference.dtype
+            )
+            start = int(selector_tokens.shape[1])
+            stop = start + int(visual_selector_tokens.shape[1])
+            selector_tokens = torch.cat((selector_tokens, visual_selector_tokens), dim=1)
+            value_tokens = torch.cat((value_tokens, visual_value_tokens), dim=1)
+            if visual_key_bias is None:
+                visual_key_bias = torch.zeros(
+                    stop - start, device=reference.device, dtype=key_bias.dtype
+                )
+            if tuple(visual_key_bias.shape) != (stop - start,):
+                raise ValueError("Flow-DINO key bias must be the global [N] evidence prior")
+            key_bias = torch.cat(
+                (
+                    key_bias,
+                    visual_key_bias.to(device=reference.device, dtype=key_bias.dtype),
+                ),
+                dim=0,
+            )
+            ranges["flow_dino"] = (start, stop)
         return EvidenceView(
             source_tokens=source_tokens,
             layer_tokens=layer_tokens,
-            tokens=prepared_selector.tokens,
-            value_tokens=prepared_values.tokens,
+            tokens=selector_tokens,
+            value_tokens=value_tokens,
             intent_tokens=intent_tokens,
-            key_bias=prepared_selector.key_bias,
-            ranges=prepared_selector.ranges,
+            key_bias=key_bias,
+            ranges=ranges,
             summaries=summaries,
             masks=masks,
         )
@@ -451,6 +512,24 @@ class TimeDomainMMDiTBlock(nn.Module):
         self.drop = nn.Dropout(float(config.dropout))
         nn.init.zeros_(self.action_mod.weight)
         nn.init.zeros_(self.action_mod.bias)
+        if int(getattr(config, "flow_jepa_role_hierarchy", 0)):
+            # A strictly zero native-MMDiT residual makes the first action-loss
+            # backward stop at this gate: grounding/world/policy evidence can
+            # only receive gradients after an optimizer step has opened it.
+            # The role-hierarchical path instead starts from the same small
+            # forward residual used by the hierarchical decoder.  This is an
+            # ordinary forward connection, not a gradient surrogate.
+            initial_residual = float(
+                getattr(config, "hierarchical_mmdit_residual_scale_init", 0.05)
+            )
+            gate_ratio = min(
+                max(initial_residual / max(self.residual_scale_max, 1e-6), 1e-4),
+                0.95,
+            )
+            gate_bias = math.atanh(gate_ratio)
+            with torch.no_grad():
+                self.action_mod.bias[2 * h : 3 * h].fill_(gate_bias)
+                self.action_mod.bias[5 * h : 6 * h].fill_(gate_bias)
 
     def _split(self, value: Tensor) -> Tensor:
         b, n, h = value.shape
@@ -544,9 +623,30 @@ class TimeDomainMMDiTBlock(nn.Module):
             evidence_value_tokens = evidence_tokens
         if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
             raise ValueError("evidence selector and value tokens must be shape-aligned")
+        evidence_selector = self.evidence_norm(evidence_tokens)
         evidence_value = self.evidence_norm(evidence_value_tokens)
         eq = self._split(self.evidence_query(modulated_action))
-        ek, ev = (self._split(part) for part in self.evidence_kv(evidence_value).chunk(2, dim=-1))
+        # The two halves of the shared projection have stable semantics across
+        # every block: selector -> K and value -> V.  Previously both halves
+        # were fed from ``evidence_value_tokens``, so the selector lane was only
+        # shape-checked and never participated in retrieval.
+        # Slice the checkpoint-compatible shared projection instead of running
+        # the full 2H projection twice and discarding half of each result.
+        h = self.hidden_size
+        ek = self._split(
+            F.linear(
+                evidence_selector,
+                self.evidence_kv.weight[:h],
+                None if self.evidence_kv.bias is None else self.evidence_kv.bias[:h],
+            )
+        )
+        ev = self._split(
+            F.linear(
+                evidence_value,
+                self.evidence_kv.weight[h:],
+                None if self.evidence_kv.bias is None else self.evidence_kv.bias[h:],
+            )
+        )
         evidence_attended, evidence_weights = self._attention(
             eq,
             ek,
@@ -618,6 +718,59 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # Retain the legacy module name for checkpoint compatibility.  The
         # proposal is evidence, not a second direct action writer.
         self.trajectory_lift.requires_grad_(False)
+        self.policy_delta_bridge_enabled = bool(
+            int(getattr(config, "role_attnres_policy_to_mmdit", 0))
+        )
+        role_value_rms = (
+            float(getattr(config, "role_attnres_max_value_rms", 1.0))
+            if int(getattr(config, "role_residual_amplitude_contract", 0))
+            else None
+        )
+        role_norm_floor = (
+            float(getattr(config, "flow_jepa_routing_norm_floor", 0.25))
+            if int(getattr(config, "flow_jepa_variance_safe_routing", 0))
+            else None
+        )
+        self.top_policy_workspace_lift = (
+            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h, bias=False))
+            if (
+                int(getattr(config, "flow_jepa_role_hierarchy", 0))
+                and not self.policy_delta_bridge_enabled
+            )
+            else None
+        )
+        self.policy_delta_attnres = (
+            RoleDeltaAttnRes(
+                h,
+                int(getattr(config, "role_attnres_key_dim", 32)),
+                max_sources=(
+                    (int(getattr(config, "flow_jepa_policy_blocks", 2)) + 1)
+                    * int(getattr(config, "action_basis_tokens", 1))
+                ),
+                max_value_rms=role_value_rms,
+                normalization_floor=role_norm_floor,
+            )
+            if self.policy_delta_bridge_enabled
+            else None
+        )
+        self.protected_detail_basis_attnres = (
+            RoleDeltaAttnRes(
+                h,
+                int(getattr(config, "role_attnres_key_dim", 32)),
+                max_sources=int(getattr(config, "action_basis_tokens", 1)),
+                include_null=False,
+                max_value_rms=role_value_rms,
+                normalization_floor=role_norm_floor,
+            )
+            if self.policy_delta_bridge_enabled
+            else None
+        )
+        self.top_policy_workspace_fixed_fusion = bool(
+            int(getattr(config, "flow_jepa_policy_workspace_fixed_fusion", 0))
+        )
+        self.top_policy_workspace_horizon_pool = bool(
+            int(getattr(config, "flow_jepa_policy_workspace_horizon_pool", 0))
+        )
         self.intent_seed_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.context_seed_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.context_seed_norm.requires_grad_(False)
@@ -840,6 +993,206 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         right = positions.ceil().long().clamp_max(int(value.shape[1]) - 1)
         weight = (positions - left.float()).view(1, -1, 1).to(dtype=value.dtype)
         return value[:, left] * (1.0 - weight) + value[:, right] * weight
+
+    def _lift_policy_workspace(self, policy_tokens: Tensor) -> Tensor:
+        if self.top_policy_workspace_lift is None:
+            raise RuntimeError("policy workspace lift is disabled")
+        if self.top_policy_workspace_horizon_pool:
+            basis = int(getattr(self.config, "action_basis_tokens", 1))
+            expected = self.horizon * basis
+            if int(policy_tokens.shape[1]) != expected:
+                raise ValueError(
+                    "horizon-pooled policy workspace requires "
+                    f"T*basis={expected} tokens, got {policy_tokens.shape[1]}"
+                )
+            # Lift each basis token before pooling so LayerNorm cannot mix the
+            # basis average into a new, untyped feature. The lift is bias-free
+            # and shared across basis roles.
+            return self.top_policy_workspace_lift(policy_tokens).reshape(
+                policy_tokens.shape[0],
+                self.horizon,
+                basis,
+                self.hidden_size,
+            ).mean(dim=2)
+        aligned_policy = self._align_tokens(policy_tokens, self.horizon)
+        return self.top_policy_workspace_lift(aligned_policy)
+
+    def _read_policy_delta_bank(
+        self,
+        action_query: Tensor,
+        bank: PolicyRoleDeltaBank,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        if self.policy_delta_attnres is None:
+            raise RuntimeError("typed policy-delta reader is disabled")
+        bank.validate(hidden_size=self.hidden_size, horizon=self.horizon)
+        values = bank.values.to(
+            device=action_query.device, dtype=action_query.dtype
+        )
+        batch, sources, horizon, basis, hidden = values.shape
+        candidates = values.permute(0, 2, 1, 3, 4).reshape(
+            int(batch), int(horizon), int(sources) * int(basis), int(hidden)
+        )
+        routed, route_metrics = self.policy_delta_attnres(
+            action_query, candidates
+        )
+        scale = routed.new_tensor(
+            float(
+                getattr(
+                    self.config,
+                    "role_attnres_policy_to_mmdit_scale",
+                    0.25,
+                )
+            )
+        )
+        routed_update = scale * routed
+        protected_route_metrics: dict[str, Tensor] | None = None
+        if bank.protected_detail is None:
+            protected_update = torch.zeros_like(routed_update)
+        else:
+            # The W->P detail reader has already applied its fixed scale.
+            # Preserve its basis-specific reads until the bottom action query
+            # chooses among them.  This route is independent of the G/W/P
+            # depth softmax and has no null candidate or learned amplitude
+            # gate, so high-frequency detail cannot disappear through an
+            # accidental basis mean or source competition.
+            if self.protected_detail_basis_attnres is None:
+                raise RuntimeError("protected detail has no basis reader")
+            protected_values = bank.protected_detail.to(
+                device=action_query.device, dtype=action_query.dtype
+            )
+            protected_update, protected_route_metrics = (
+                self.protected_detail_basis_attnres(
+                    action_query,
+                    protected_values,
+                )
+            )
+        metrics = {
+            "evidence_policy_delta_attnres_entropy": route_metrics["entropy"],
+            "evidence_policy_delta_attnres_max": route_metrics["max"],
+            "evidence_policy_delta_attnres_null_mass": route_metrics["null_mass"],
+            "evidence_policy_delta_attnres_query_rms": route_metrics["query_rms"],
+            "evidence_policy_delta_attnres_value_rms": route_metrics["value_rms"],
+            "evidence_policy_delta_attnres_raw_value_rms": route_metrics[
+                "raw_value_rms"
+            ],
+            "evidence_policy_delta_attnres_value_compression": route_metrics[
+                "value_compression"
+            ],
+            "evidence_policy_delta_attnres_value_contract_enabled": route_metrics[
+                "value_contract_enabled"
+            ],
+            "evidence_policy_delta_attnres_variance_safe_norm": route_metrics[
+                "variance_safe_norm"
+            ],
+            "evidence_policy_delta_attnres_query_norm_denominator_min": (
+                route_metrics["query_norm_denominator_min"]
+            ),
+            "evidence_policy_delta_attnres_value_norm_denominator_min": (
+                route_metrics["value_norm_denominator_min"]
+            ),
+            "evidence_policy_delta_attnres_update_rms": route_metrics["update_rms"],
+            "evidence_policy_delta_attnres_carrier_ratio": route_metrics[
+                "carrier_ratio"
+            ],
+            "evidence_policy_delta_attnres_source_mass_max": route_metrics[
+                "source_mass_max"
+            ],
+            "evidence_policy_delta_attnres_source_effective_count": (
+                route_metrics["source_effective_count"]
+            ),
+            "evidence_policy_delta_attnres_candidate_effective_count": (
+                route_metrics["candidate_effective_count"]
+            ),
+            "evidence_policy_delta_attnres_sample_route_std": route_metrics[
+                "sample_route_std"
+            ],
+            "evidence_policy_delta_attnres_horizon_route_std": route_metrics[
+                "query_axis_1_route_std"
+            ],
+            "evidence_policy_delta_attnres_fixed_scale": scale.detach().float(),
+            "evidence_policy_delta_attnres_routed_update_norm": (
+                routed_update.detach().float().norm(dim=-1).mean()
+            ),
+            "evidence_policy_delta_protected_detail_update_norm": (
+                protected_update.detach().float().norm(dim=-1).mean()
+            ),
+        }
+        if protected_route_metrics is not None:
+            metrics.update(
+                {
+                    "evidence_protected_detail_basis_entropy": (
+                        protected_route_metrics["entropy"]
+                    ),
+                    "evidence_protected_detail_basis_max": (
+                        protected_route_metrics["max"]
+                    ),
+                    "evidence_protected_detail_basis_query_rms": (
+                        protected_route_metrics["query_rms"]
+                    ),
+                    "evidence_protected_detail_basis_value_rms": (
+                        protected_route_metrics["value_rms"]
+                    ),
+                    "evidence_protected_detail_basis_raw_value_rms": (
+                        protected_route_metrics["raw_value_rms"]
+                    ),
+                    "evidence_protected_detail_basis_value_compression": (
+                        protected_route_metrics["value_compression"]
+                    ),
+                    "evidence_protected_detail_basis_update_rms": (
+                        protected_route_metrics["update_rms"]
+                    ),
+                    "evidence_protected_detail_basis_variance_safe_norm": (
+                        protected_route_metrics["variance_safe_norm"]
+                    ),
+                    "evidence_protected_detail_basis_query_norm_denominator_min": (
+                        protected_route_metrics[
+                            "query_norm_denominator_min"
+                        ]
+                    ),
+                    "evidence_protected_detail_basis_value_norm_denominator_min": (
+                        protected_route_metrics[
+                            "value_norm_denominator_min"
+                        ]
+                    ),
+                    "evidence_protected_detail_basis_source_mass_max": (
+                        protected_route_metrics["source_mass_max"]
+                    ),
+                    "evidence_protected_detail_basis_source_effective_count": (
+                        protected_route_metrics["source_effective_count"]
+                    ),
+                    "evidence_protected_detail_basis_candidate_effective_count": (
+                        protected_route_metrics["candidate_effective_count"]
+                    ),
+                    "evidence_protected_detail_basis_sample_route_std": (
+                        protected_route_metrics["sample_route_std"]
+                    ),
+                    "evidence_protected_detail_basis_horizon_route_std": (
+                        protected_route_metrics["query_axis_1_route_std"]
+                    ),
+                }
+            )
+            protected_source_mass = protected_route_metrics["source_mass"]
+            if int(protected_source_mass.numel()) != int(basis):
+                raise RuntimeError(
+                    "protected detail basis reader lost basis identity"
+                )
+            for basis_index in range(int(basis)):
+                metrics[
+                    f"evidence_protected_detail_basis_mass_{basis_index}"
+                ] = protected_source_mass[basis_index]
+        source_mass = route_metrics["source_mass"]
+        expanded_names = tuple(
+            f"{name}_basis{basis_index}"
+            for name in bank.source_names
+            for basis_index in range(int(basis))
+        )
+        if int(source_mass.numel()) != len(expanded_names):
+            raise RuntimeError("typed policy-delta route lost source identity")
+        for index, name in enumerate(expanded_names):
+            metrics[
+                f"evidence_policy_delta_attnres_source_mass_{name}"
+            ] = source_mass[index]
+        return routed_update, protected_update, metrics
 
     @staticmethod
     def _time_bin_mean(
@@ -1132,6 +1485,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         self,
         action: Tensor,
         *,
+        baseline_velocity: Tensor,
         candidate_blocks: Tensor,
         candidate_repeats: Tensor,
         candidate_mask: Tensor,
@@ -1202,6 +1556,18 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             self.horizon,
             int(self.config.physical_action_dim),
         )
+        # The terminal/no-op candidate is semantically the already committed
+        # prefix. Re-evaluating the same action through a differently shaped
+        # BF16 LayerNorm/Linear batch produced ~1e-3 numerical drift in V96/97,
+        # so the value target no longer compared an exact identity candidate.
+        # Reuse the existing prefix tensor: this changes no operation candidate
+        # and preserves its original gradient path exactly.
+        terminal = candidate_blocks == len(self.blocks)
+        candidate_velocity = torch.where(
+            terminal[:, :, None, None],
+            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
+            candidate_velocity,
+        )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
     def _soft_execution_probabilities(
@@ -1210,8 +1576,18 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         candidate_mask: Tensor,
         candidate_blocks: Tensor,
     ) -> Tensor:
-        """Convert attached candidate values into a differentiable policy."""
-        scores = self._execution_value_score(value_field, arm_dim=self.arm_dim)
+        """Convert attached candidate values into an FP32 policy distribution.
+
+        Action features follow the surrounding autocast dtype, but execution
+        probabilities are recurrent state: they are accumulated across
+        decisions and meet FP32 controller/value-reader islands.  Owning that
+        state in FP32 prevents its dtype from depending on whether the current
+        action came from teacher-forced training (FP32) or deploy sampling
+        (usually BF16).
+        """
+        scores = self._execution_value_score(
+            value_field.float(), arm_dim=self.arm_dim
+        )
         temperature = max(
             float(
                 getattr(
@@ -1306,7 +1682,16 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         if tuple(pointer_mass.shape) != (batch, depth + 1):
             raise ValueError("execution pointer mass must be [B,depth+1]")
 
-        scores = self._execution_value_score(value_field, arm_dim=self.arm_dim)
+        # The policy plane owns probabilities, entropy and pointer occupancy in
+        # FP32.  Do not inherit their dtype from the action stream: sampling
+        # seeds actions from BF16 visual/noise tensors while training seeds them
+        # from FP32 target actions.  Letting ``pointer_mass`` follow that split
+        # makes ordinary arithmetic silently promote to FP32 and then fail at
+        # strict indexed accumulations such as ``index_add``.
+        policy_pointer_mass = pointer_mass.float()
+        scores = self._execution_value_score(
+            value_field.float(), arm_dim=self.arm_dim
+        )
         temperature = max(
             float(
                 getattr(
@@ -1332,7 +1717,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             local_logits = -scores.index_select(1, index) / temperature
             local_logits[:, -1] = local_logits[:, -1] + math.log(prior_weight)
             local_probabilities = torch.softmax(local_logits, dim=-1)
-            source_mass = pointer_mass[:, pointer_index]
+            source_mass = policy_pointer_mass[:, pointer_index]
             contribution = source_mass[:, None] * local_probabilities
             global_probabilities = global_probabilities.index_add(1, index, contribution)
             conditional_entropy = conditional_entropy + source_mass * (
@@ -1347,9 +1732,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 skip_probability = skip_probability + contribution[:, :-1][:, skip_mask].sum(dim=-1)
             terminal_probability = terminal_probability + contribution[:, -1]
 
-        terminal_mass = pointer_mass[:, depth]
-        next_pointer_mass = pointer_mass.new_zeros(batch, depth + 1)
-        terminal_index = torch.as_tensor([depth], device=pointer_mass.device)
+        terminal_mass = policy_pointer_mass[:, depth]
+        next_pointer_mass = scores.new_zeros(batch, depth + 1)
+        terminal_index = torch.as_tensor([depth], device=scores.device)
         next_pointer_mass = next_pointer_mass.index_add(
             1, terminal_index, (terminal_mass + terminal_probability)[:, None]
         )
@@ -1358,7 +1743,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 :, block_index * dwell : (block_index + 1) * dwell
             ].sum(dim=-1)
             destination = torch.as_tensor(
-                [block_index + 1], device=pointer_mass.device
+                [block_index + 1], device=scores.device
             )
             next_pointer_mass = next_pointer_mass.index_add(
                 1, destination, block_mass[:, None]
@@ -1465,7 +1850,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             else tuple(bank.prepare_factors() for bank in self.operator_contractions)
         )
         if soft_contract:
-            pointer_mass = action.new_zeros(batch, depth + 1)
+            # Pointer occupancy is policy state, not an action feature.  Keep it
+            # FP32 across every decision even when the sampled action is BF16.
+            pointer_mass = torch.zeros(
+                batch, depth + 1, device=device, dtype=torch.float32
+            )
             pointer_mass[:, 0] = 1.0
         else:
             hard_pointer = torch.zeros(batch, device=device, dtype=torch.long)
@@ -1591,6 +1980,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
                         self._run_differentiable_native_candidates(
                             block_input,
+                            baseline_velocity=prefix_velocity_rows[-1],
                             candidate_blocks=candidate_blocks,
                             candidate_repeats=candidate_repeats,
                             candidate_mask=legal_candidate_mask,
@@ -1617,18 +2007,27 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 learned_action = self._mix_candidate_actions(
                     candidate_action_stack, learned_probabilities
                 ) + terminal_mass[:, None, None].to(dtype=block_input.dtype) * block_input
-                progress = self.execution_progress.to(
+                action_progress = self.execution_progress.to(
                     device=action.device, dtype=action.dtype
                 )
+                policy_progress = self.execution_progress.to(
+                    device=action.device, dtype=torch.float32
+                )
                 if eval_policy == "neutral":
-                    progress = torch.zeros_like(progress)
-                action = (1.0 - progress) * neutral_action + progress * learned_action
+                    action_progress = torch.zeros_like(action_progress)
+                    policy_progress = torch.zeros_like(policy_progress)
+                action = (
+                    (1.0 - action_progress) * neutral_action
+                    + action_progress * learned_action
+                )
 
-                neutral_pointer = action.new_zeros(batch, depth + 1)
+                neutral_pointer = torch.zeros(
+                    batch, depth + 1, device=device, dtype=torch.float32
+                )
                 neutral_pointer[:, decision_index + 1] = 1.0
                 pointer_mass = (
-                    (1.0 - progress) * neutral_pointer
-                    + progress * learned_next_pointer.to(dtype=action.dtype)
+                    (1.0 - policy_progress) * neutral_pointer
+                    + policy_progress * learned_next_pointer
                 )
 
                 neutral_candidate = decision_index * dwell
@@ -1639,13 +2038,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     num_classes=candidate_count,
                 ).to(dtype=learned_probabilities.dtype)
                 executed_probabilities = (
-                    (1.0 - progress) * neutral_probability
-                    + progress * learned_probabilities
+                    (1.0 - policy_progress) * neutral_probability
+                    + policy_progress * learned_probabilities
                 )
                 complete_probabilities = executed_probabilities.clone()
                 complete_probabilities[:, terminal_candidate] = (
                     complete_probabilities[:, terminal_candidate]
-                    + progress * terminal_mass
+                    + policy_progress * terminal_mass
                 )
                 selection_entropy_rows.append(
                     -(
@@ -1689,7 +2088,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         * repeat_count
                     ).sum(dim=-1).mean()
                 )
-                route_rows.append((progress.float() * learned_skip.float()).mean())
+                route_rows.append((policy_progress * learned_skip).mean())
                 terminal_probability_rows.append(
                     complete_probabilities[:, terminal_candidate].detach().float().mean()
                 )
@@ -2160,12 +2559,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         time: Tensor,
         trajectory_tokens: Tensor,
         trajectory_workspace_tokens: Tensor | None = None,
+        policy_action_tokens: Tensor | None = None,
+        policy_role_delta_bank: PolicyRoleDeltaBank | None = None,
         rollout_tokens: Tensor,
         transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         event_evidence: Tensor,
         state_memory: Tensor | list[Tensor] | tuple[Tensor, ...],
         layer_contracts: list[dict[str, Tensor]],
         intent_memory: dict[str, Tensor] | None = None,
+        visual_selector_tokens: Tensor | None = None,
+        visual_value_tokens: Tensor | None = None,
+        visual_key_bias: Tensor | None = None,
         collect_diagnostics: bool = True,
         evidence_scale: float | Tensor = 1.0,
         noisy_scale: float | Tensor = 1.0,
@@ -2183,6 +2587,42 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError(f"noisy_physical must be [B,{self.horizon},P]")
         if time.ndim != 1 or int(time.shape[0]) != int(noisy_physical.shape[0]):
             raise ValueError("time must be [B] aligned with noisy_physical")
+        if self.policy_delta_bridge_enabled:
+            if policy_action_tokens is not None:
+                raise ValueError(
+                    "typed policy-delta bridge cannot also consume the legacy workspace"
+                )
+            if policy_role_delta_bank is None:
+                raise ValueError(
+                    "typed policy-to-MMDiT bridge requires a policy role-delta bank"
+                )
+            policy_role_delta_bank.validate(
+                hidden_size=self.hidden_size, horizon=self.horizon
+            )
+        elif self.top_policy_workspace_lift is None:
+            if policy_action_tokens is not None:
+                raise ValueError(
+                    "policy action workspace was supplied while the role hierarchy is disabled"
+                )
+            if policy_role_delta_bank is not None:
+                raise ValueError(
+                    "policy role-delta bank was supplied while its bridge is disabled"
+                )
+        else:
+            if policy_role_delta_bank is not None:
+                raise ValueError(
+                    "legacy policy workspace and typed policy deltas are mutually exclusive"
+                )
+            if policy_action_tokens is None:
+                raise ValueError("the role hierarchy requires policy action workspace tokens")
+            if (
+                policy_action_tokens.ndim != 3
+                or int(policy_action_tokens.shape[0]) != int(noisy_physical.shape[0])
+                or int(policy_action_tokens.shape[-1]) != self.hidden_size
+            ):
+                raise ValueError(
+                    f"policy_action_tokens must be [B,N,{self.hidden_size}]"
+                )
         # The workspace projection is the typed trajectory source when it is
         # available. Keep the fallback for callers that have not exposed the
         # workspace view, but never feed both copies into the evidence bank.
@@ -2199,6 +2639,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             state_memory=state_memory,
             layer_contracts=layer_contracts,
             intent_memory=intent_memory,
+            visual_selector_tokens=visual_selector_tokens,
+            visual_value_tokens=visual_value_tokens,
+            visual_key_bias=visual_key_bias,
         )
         organized = self.organizer(view, time)
         global_condition = organized["global_condition"]
@@ -2228,6 +2671,52 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             noisy_scale, action_state_tokens
         )
         action = action + action_state_tokens * action_state_factor
+        policy_delta_metrics: dict[str, Tensor] = {}
+        if self.policy_delta_bridge_enabled:
+            assert policy_role_delta_bank is not None
+            policy_workspace_update, protected_detail_update, policy_delta_metrics = (
+                self._read_policy_delta_bank(action, policy_role_delta_bank)
+            )
+            policy_workspace_scale = action.new_tensor(
+                float(
+                    getattr(
+                        self.config,
+                        "role_attnres_policy_to_mmdit_scale",
+                        0.25,
+                    )
+                )
+            )
+            action = action + policy_workspace_update + protected_detail_update
+        elif self.top_policy_workspace_lift is None:
+            policy_workspace_update = action.new_zeros(action.shape)
+            protected_detail_update = action.new_zeros(action.shape)
+            policy_workspace_scale = action.new_zeros(())
+        else:
+            assert policy_action_tokens is not None
+            protected_detail_update = action.new_zeros(action.shape)
+            policy_tokens = policy_action_tokens.to(
+                device=action.device, dtype=action.dtype
+            )
+            lifted_policy = self._lift_policy_workspace(policy_tokens)
+            if self.top_policy_workspace_fixed_fusion:
+                # Both branches have a complete path.  Fixed variance-preserving
+                # fusion removes the arbitrary 0.10 bottleneck without adding a
+                # learned amplitude gate that could collapse either source.
+                policy_workspace_scale = action.new_tensor(math.sqrt(0.5))
+                workspace_direction = F.layer_norm(
+                    lifted_policy.float(),
+                    (int(lifted_policy.shape[-1]),),
+                ).to(dtype=action.dtype)
+                action_rms = action.detach().float().square().mean(dim=-1, keepdim=True).sqrt()
+                workspace_direction = workspace_direction * action_rms.to(dtype=action.dtype)
+                policy_workspace_update = policy_workspace_scale * workspace_direction
+                action = policy_workspace_scale * action + policy_workspace_update
+            else:
+                policy_workspace_scale = action.new_tensor(
+                    float(getattr(self.config, "flow_jepa_policy_workspace_scale", 0.10))
+                )
+                policy_workspace_update = policy_workspace_scale * lifted_policy
+                action = action + policy_workspace_update
         if (
             self.dynamic_block_route_enabled
             and self.dwell_mode != "learned_shadow"
@@ -2241,7 +2730,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_bias=evidence_bias,
                 evidence_scale=evidence_scale,
             )
-            return self._finalize_dynamic_output(
+            dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,
                 organized=organized,
                 semantic_seed=semantic_seed,
@@ -2250,6 +2739,26 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_tokens=evidence_tokens,
                 evidence_scale=evidence_scale,
             )
+            dynamic_output["evidence_top_policy_workspace_scale"] = (
+                policy_workspace_scale.detach().float()
+            )
+            dynamic_output["evidence_top_policy_workspace_update_norm"] = (
+                policy_workspace_update.detach().float().norm(dim=-1).mean()
+            )
+            dynamic_output[
+                "evidence_top_policy_protected_detail_update_norm"
+            ] = protected_detail_update.detach().float().norm(dim=-1).mean()
+            dynamic_output["evidence_top_policy_workspace_fixed_fusion"] = action.new_tensor(
+                float(self.top_policy_workspace_fixed_fusion)
+            )
+            dynamic_output[
+                "evidence_top_policy_workspace_horizon_pool"
+            ] = action.new_tensor(float(self.top_policy_workspace_horizon_pool))
+            dynamic_output["evidence_policy_delta_bridge_enabled"] = action.new_tensor(
+                float(self.policy_delta_bridge_enabled)
+            )
+            dynamic_output.update(policy_delta_metrics)
+            return dynamic_output
         block_rows: list[dict[str, Tensor]] = []
         controller_state: Tensor | None = None
         feedback: Tensor | None = None
@@ -2398,6 +2907,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
                     self._run_differentiable_native_candidates(
                         block_input,
+                        baseline_velocity=prefix_velocity_rows[-1],
                         candidate_blocks=candidate_blocks,
                         candidate_repeats=candidate_repeats,
                         candidate_mask=candidate_mask,
@@ -2493,11 +3003,34 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             "evidence_action_token_norm": action.detach().float().norm(dim=-1).mean(),
             "evidence_action_state_token_norm": action_state_tokens.detach().float().norm(dim=-1).mean(),
             "evidence_mmd_it_action_state_token_norm": action_state_tokens.detach().float().norm(dim=-1).mean(),
+            "evidence_top_policy_workspace_scale": policy_workspace_scale.detach().float(),
+            "evidence_top_policy_workspace_update_norm": policy_workspace_update.detach().float().norm(
+                dim=-1
+            ).mean(),
+            "evidence_top_policy_protected_detail_update_norm": (
+                protected_detail_update.detach().float().norm(dim=-1).mean()
+            ),
+            "evidence_top_policy_workspace_fixed_fusion": torch.as_tensor(
+                float(self.top_policy_workspace_fixed_fusion),
+                device=action.device,
+                dtype=torch.float32,
+            ),
+            "evidence_top_policy_workspace_horizon_pool": torch.as_tensor(
+                float(self.top_policy_workspace_horizon_pool),
+                device=action.device,
+                dtype=torch.float32,
+            ),
             "evidence_condition_token_norm": evidence_tokens.detach().float().norm(dim=-1).mean(),
             "evidence_mmd_it_block_count": torch.tensor(
                 float(len(self.blocks)), device=action.device
             ),
+            "evidence_policy_delta_bridge_enabled": torch.as_tensor(
+                float(self.policy_delta_bridge_enabled),
+                device=action.device,
+                dtype=torch.float32,
+            ),
         }
+        out.update(policy_delta_metrics)
 
         scalar_metric_names = (
             "action_update_norm",
