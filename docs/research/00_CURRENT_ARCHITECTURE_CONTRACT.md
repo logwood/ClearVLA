@@ -1,20 +1,21 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-01
+Updated: 2026-08-08
 
-This file is the compact source of truth for the active top representation.
-Run labels describe experiments; they do not select source semantics. Historical
-details belong in Git history and focused research notes, not in this contract.
+This is the compact source of truth for the active top representation. Run
+labels identify experiments; they do not select source semantics. Historical
+reasoning belongs in Git history and the focused issue ledger.
 
 ## Agent quick contract
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        2
-default run label:      v120
+manifest schema:        3
+default run label:      v121
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
+global object slots:    K=4 plus an explicit null
 formal language:        precomputed T5 .pt required
 bottom compatibility:   evidence_mmdit_cvae_workspace_v1
 launcher:               scripts/current_object_intent_dynamics_323.sh
@@ -22,242 +23,266 @@ smoke launcher:         scripts/current_object_intent_dynamics_323_smoke.sh
 required capability:    object_intent_dynamics_323
 ```
 
-`v120` is only the default log/run label. V119 remains reproducible ancestry.
-The new top starts fresh; unchanged bottom migration is allowed only through an
-explicit migration report. Direct `--resume` is rejected by the launcher.
-
-The serialized `ArchitectureManifest` contains only capability, schema,
-topology, intervals, language requirement, and bottom compatibility. Do not add
-another version-wide `_validate_vXXX_*` contract.
+`v121` is only a log and output-directory label. The source is selected by the
+capability name. Schema 3 is incompatible with schema-2 top weights and must
+start fresh. The small serialized `ArchitectureManifest` owns only identity,
+topology, intervals, object count, language requirement and bottom
+compatibility; executable types own shapes and semantics. Do not add a new
+version-wide `_validate_vXXX_*` contract.
 
 ## Active graph
 
 ```text
 current RGB / DINO / raw pair / learned flow
-  -> unchanged Pre-G observation bank
-  -> G1-G3: dense current facts -> K=4 competitive global objects
-  -> S: stateless object-intent organizer
-       full T5 + ordered state/executed-action history + typed G objects
-       zero-centred observed state/transport change (not completion/progress)
-  -> online CoarseActionIntent
-       online evidence only; its sole exit is W
-  -> W1: object effects for 4-8 and 8-16
-  -> W2: object effects for 16-32 and 32-48
-       reads the full two-token W1 interval sequence
+  -> unchanged Pre-G observation bank and local [C,8,8,M] chart
+  -> G1-G3 DenseObjectGrounder
+       one physical K+null assignment
+       semantic / appearance / geometry bounded verification reads
+       reversible K -> [C,8,8,M] correspondence
+  -> S StatelessObjectIntentOrganizer
+       factorized T5, ordered state/action history, typed K-object memories
+       four interval identities and 24 temporal queries
+       zero-centred observable state-change evidence
+  -> CoarseActionIntent
+       online evidence only; its only consumer is W
+  -> W1: 4-8 and 8-16 object effects
+  -> W2: 16-32 and 32-48 object effects
+       separate near/far output heads; W2 reads the ordered W1 sequence
   -> FutureObjectDynamics
-       the same directly supervised object is consumed by P2
-  -> P1: one current high-resolution factual read
-  -> P2: bounded, null-capable, exact-zero future-effect read
-  -> zero-preserving consequence
-  -> P3: factual / precision / effect / temporal / state-change compiler
-  -> restricted bottom ingress
+       one supervised semantic/geometry/status object
+  -> P1: one current high-resolution read
+       K object -> local chart -> existing 3x3 RGB/detail micro-read
+       emits ObjectFactualDock on the same K basis as W
+  -> P2: separate semantic and geometry selectors over that dock
+       status is calibration only, never an independent value
+  -> exact-zero-preserving consequence
+  -> P3: precision / temporal / state-change innovations
+       around one protected consequence
+  -> exactly one protected-consequence bottom ingress
   -> unchanged Evidence MMDiT / CVAE / workspace / adaptive execution
 ```
 
-Training-only path:
+Training-only graph:
 
 ```text
 future DINO supports
-  -> no-grad Teacher-G object association
-  -> four detached FutureObjectDynamics targets
+  -> no-grad, object-specific Teacher-G association
+  -> four ordered FutureObjectDynamics targets
 
 future state/action + detached teacher effects
-  -> FuturePlanRecognizer
-  -> detached targets for online S
+  -> factorized FuturePlanRecognizer
+  -> detached action/state/object K/V targets for online S
 ```
 
-Teacher-G and the recognizer never enter deployment values. Replacing future
-supports may change targets and losses only; it must not change deployment
-actions.
+Teacher-G and the recognizer cannot enter deployment values. Replacing future
+supports may change targets and losses only; it must never change a deployment
+action.
 
 ## Non-negotiable invariants
 
-1. Local `[B,C,8,8,M]` hypotheses are not persistent objects. A competitive
-   binder creates global `K=4` objects while retaining camera and chart support.
-   The local `M` owner prior is a conditional mixture: its complement is not
-   null. Only physical candidate invalidity may transfer prior mass to null.
-2. G2 to G3 ownership is `log(parent posterior) + bounded residual`. A zero
-   residual exactly preserves the parent posterior.
-3. Object, camera, space, type, and interval axes remain real until their named
-   consumer. No reduction followed by `expand` may recreate an identity axis.
-4. S reads the complete T5 sequence and ordered observable history. It receives
-   no frame position, scalar progress, phase label, noisy action, or teacher.
-   Its state-change value is built only from observed state deltas and current
-   transport through bias-free projections; zero deltas and zero transport
-   produce exact zero.
-5. `CoarseActionIntent` is the only action-conditioned W input. It receives no
-   target/noisy action and has no direct bottom bypass.
-6. W1 owns the two near intervals; W2 owns the two far intervals. W2 may read
-   W1 causally but may not replace its interval sequence with a mean.
-7. The only W-to-P value is the directly supervised
+1. Local `M` hypotheses are not persistent objects. The global binder creates
+   `K=4` objects with mutually competitive K+null mass. A local hypothesis
+   prior is a conditional mixture; its complement is not absence.
+2. G3 is `log(parent posterior) + bounded residual`. With a zero residual it
+   exactly inherits G2. Semantic, appearance and geometry are verification
+   posteriors inside the same physical K support; they cannot invent separate
+   object identities or move mass to null. The DINO reconstruction budget is
+   75% object-prototype error and 25% within-object coordinate refinement, so
+   the shared coordinate decoder cannot hide homogeneous K slots.
+3. Object, camera, space, local-hypothesis, type and interval axes stay real
+   until their named consumer. A reduced axis may not be recreated by
+   `expand` and called an object, interval or camera.
+4. S reads full T5 tokens, ordered observable history and typed K objects. It
+   receives no frame index, scalar progress, phase label, noisy ODE action or
+   future teacher. Goal/history/object/action/state K/V remain factorized.
+5. S interval object K/V are future-oriented innovations. The protected
+   current object enters W exactly once through `ObjectFactSet.content`.
+6. `CoarseActionIntent` is the only action-conditioned W input. It is computed
+   from online evidence, never target/noisy action, and has no bottom bypass.
+7. W1 owns the two near intervals and W2 owns the two far intervals. Their
+   output heads are disjoint. W2 may read both ordered W1 tokens but may not
+   replace them with a mean.
+8. The only W-to-P value is the directly supervised
    `FutureObjectDynamics`. No public world residual or hidden W carrier crosses
    this boundary.
-8. Visibility, persistence, uncertainty, and validity describe selection or
-   calibration. They do not repeatedly attenuate semantic effect values.
-9. P1 performs one high-resolution current-fact read. P2/P3 cannot reopen the
-   RGB/DINO bank, and P1 never reads future teacher values.
-10. P2 content, intent, and coordinate scores are each bounded to `[-1,1]`;
-    their temperatures are bounded to `[0.25,4]`. Its zero-vector normalization
-    uses a `0.25` norm floor.
-11. A neutral future field yields exact algebraic zero:
-    `effect=0`, `interaction=0`, and `consequence=P1_fact`.
-12. P3 precision and temporal lanes both consume consequence and the current
-    action query. The temporal lane additionally consumes S temporal control.
-    Its fifth lane is a `0.05`-scale state-change modulation: temporal/action
-    context may shape a nonzero observed change but cannot synthesize one.
-13. The bottom receives current state, the last typed state/action history, and
-    the five-lane P3 bank. Generic task, full-history, proposal, and duplicated
-    owned-trajectory aliases are forbidden. Object S does not provide an
-    external completion probability or execution-terminal logit bias.
-14. All online paths use ordinary autograd. No artificial gradient, hard gate,
-    entropy target, route quota, progress loss, forced slot diversity, or
-    forced nonzero flow is allowed.
-15. Flags-off historical paths remain reproducible; the new capability must not
-    silently mutate their semantics or load their top weights.
+9. Teacher temporal aggregation is object-specific. Stable successor content
+   and end-biased semantic change are different targets; static content is not
+   erased by a change mask.
+10. P1 performs one high-resolution current-fact read. It reuses the global-K
+    assignment and exports per-object facts, K+null posterior, chart posterior,
+    coordinates and the mature aggregate P1 fact in `ObjectFactualDock`.
+11. P2 semantic and geometry paths have different keys, values and posteriors.
+    Visibility, persistence, uncertainty and validity calibrate selection once;
+    they cannot become a third cheap policy value.
+12. P2 content, intent and coordinate scores are bounded to `[-1,1]`; their
+    temperatures stay in `[0.25,4]`; zero-vector normalization has a finite
+    Jacobian through a `0.25` norm floor.
+13. A neutral future field is algebraically neutral: `effect=0`,
+    `interaction=0`, and `protected_consequence=P1_fact` exactly.
+14. P3 contains only three real innovations: precision, temporal and
+    state-change. It has no duplicated factual/effect lanes. Precision and
+    temporal both consume consequence; state-change cannot synthesize a value
+    when observed deltas and transport are zero.
+15. The protected consequence enters the bottom once through protected detail.
+    Controlled dynamics sees the pre-top trajectory seed plus current state and
+    the final observed history, not a second copy of the P-modified trajectory.
+    P2 and P3 also query with that pre-top trajectory seed under ordinary
+    autograd; P1 facts and W consequences reach them only through their
+    explicit typed operands. A provenance snapshot is not a gradient detach.
+    Historical mid-cut and layer-contract towers are not constructed or
+    executed for this capability, and the bottom evidence adapter receives an
+    explicit typed-null layer row rather than a hidden second P carrier.
+16. Online paths use ordinary autograd. No artificial gradient, hard gate,
+    entropy target, route quota, progress loss, forced slot diversity or forced
+    nonzero flow is allowed.
+17. Flags-off historical paths remain reproducible. The active top may not
+    silently load an older top manifest; unchanged bottom migration requires an
+    explicit report.
 
 ## Typed boundaries
 
 ```text
 DenseFactChart
-  public_scene_base
-  semantic_chart / appearance_chart / geometry_chart
-  coordinates / support / validity
+  public_scene_base / dino_content
+  candidate content / semantic / appearance / geometry
+  candidate coordinates / support / validity / prior / flow transport
 
 ObjectFactSet
-  object_content [B,K,D]
-  typed_object_content
-  object_to_chart [B,K,C,8,8]
-  object_coordinates / transport_prior / support
-  existence  # object-vs-null confidence on the object's own read support
-  validity   # physical candidate support; the only legal W/P2 support mask
+  content / semantic / appearance / geometry             [B,K,*]
+  physical candidate_assignment                          [B,K,C,8,8,M]
+  typed semantic/appearance/geometry assignments          [B,K,C,8,8,M]
+  object_to_chart                                         [B,K,C,8,8]
+  coordinates / transport / support / existence / validity
 
-OnlineIntentState
-  protected_goal_set
-  observable_history_state
-  interval_queries [B,4,D]
-  temporal_queries [B,24,D]
-  state_change_evidence  # zero-centred observed delta, not terminal evidence
+ObjectIntentState
+  protected_goal_set / ordered history
+  interval action/state queries                           [B,4,H]
+  interval object keys/values                             [B,4,K,H]
+  typed object tokens                                     [B,K,H]
+  temporal_queries                                        [B,24,H]
+  state_change_evidence                                   [B,H]
 
 FutureObjectDynamics
-  current_content [B,K,D_dino]
-  successor_content [B,4,K,D_dino]
-  semantic_effect_delta [B,4,K,D_dino]
-  future_address [B,4,K,C,8,8]
-  transport_mean / transport_covariance
-  visibility_change / persistence_change
-  association_uncertainty / validity
+  current_reference                                       [B,K,D]
+  successor_content / semantic_delta                      [B,4,K,D]
+  transport / covariance / visibility / persistence
+  uncertainty / validity                                  [B,4,K,*]
+  future_address                                          [B,4,K,C,8,8]
 
-PolicyPlanDeltaBank
-  factual / precision / effect / temporal / state_change
+ObjectFactualDock
+  fact_by_object                                          [B,T,Q,K,H]
+  object_posterior + null_posterior                       [B,T,Q,K+1]
+  chart_posterior / coordinates on the same K basis
+  aggregate_fact                                          [B,T,Q,H]
+
+ObjectPolicyPlanDeltaBank
+  protected_base
+  precision / temporal / state_change
 ```
 
 Each type has one definition in
-`clearvla/policy/object_intent_dynamics_323/`. Do not duplicate these semantic
-types in `trunk.py` or select them by experiment version.
+`clearvla/policy/object_intent_dynamics_323/`; do not duplicate these semantic
+objects in `trunk.py` or select them by a V-number.
 
 ## Provenance table
 
 | Module | Legal inputs | Forbidden inputs |
 | --- | --- | --- |
-| G | current observation bank, coordinates, flow, observable state/registers | task/language, history, proposal, noisy action, teacher |
-| S | full T5, state history, executed-action history, typed G objects | frame position, scalar progress, noisy action, teacher |
+| G | current observation bank, coordinates, flow, observable state/registers | language, history, proposal, noisy action, teacher |
+| S | full T5, state/executed-action history, typed G objects | frame position, progress, phase, noisy action, teacher |
 | recognizer | future action/state and detached teacher effects; training only | deployment value path |
-| W | typed G objects, S, one online CoarseActionIntent | target/noisy action, generic aliases, teacher, old world residual |
-| P1 | G3 address, S query, current action-basis query | W effect, teacher, second visual read |
-| P2 | supervised FutureObjectDynamics, S interval query, post-P1 action query | raw/DINO reopen, public W hidden, default geometry value |
-| P3 | P1 fact, protected consequence, S temporal control, zero-centred observed state change, action query | unsupervised W carrier, RGB/DINO, second future head, completion/progress terminal bias |
+| W | current G objects once, factorized S innovations, one CoarseActionIntent | target/noisy action, generic aliases, teacher, public world residual |
+| P1 | G K-to-chart assignment, canonical S query, action-basis query | W effect, teacher, second visual read, mean-goal/last-history aliases |
+| P2 | ObjectFactualDock, supervised FutureObjectDynamics, S interval intent, action query | raw/DINO reopen, public W hidden, status value |
+| P3 | P1 fact, protected consequence, S temporal control/state-change, action query | repeated factual/effect lanes, teacher, RGB/DINO, completion/progress |
+| bottom | one protected consequence, three optional P3 innovations, observable state/history | second protected consequence through dynamics context |
 
 ## Loss ownership
 
 - Action flow matching remains the dominant objective.
-- Existing `flow_jepa_future_loss_weight` owns successor content, scale-aware
-  semantic delta, transport/covariance, visibility/persistence, and detached
-  uncertainty calibration.
-- Existing `flow_jepa_interval_stage_loss_weight` owns chronological transition,
-  object reconstruction, online-S matching, recognizer reconstruction, and
-  coarse-action structure.
-- Current-object existence is the read-conditioned object-vs-null confidence,
-  never the fraction of total chart area allocated to an object and never a
-  W/P2 gate. Physical current validity defines semantic target support;
-  predicted future visibility cannot erase the W training target.
-- Confidence may weight a target once. It never scales the P2 effect value.
-- Retired global-S, current-reference, proposal, slot-reduced future, and free
-  uncertainty-NLL aliases are not emitted by this capability.
-- Deleted auxiliary weights are not reassigned to hide connection defects.
+- The existing future budget owns stable successor content, ordered semantic
+  change, transport/covariance, visibility/persistence and detached teacher
+  dispersion. Stable successor and semantic change are no longer the same
+  algebraic error.
+- The existing interval/structure budget owns object reconstruction,
+  factorized online-S matching, recognizer reconstruction, chronological
+  transition and coarse action structure. Deleted losses are not reassigned.
+- Runtime is the single canonical loss owner. The trunk exports prediction,
+  target and diagnostics; it does not build a competing raw future loss.
+- Existence is read-conditioned object-vs-null confidence. Validity is physical
+  source support. Allocation share, existence and validity are never aliases.
+- Confidence/calibration may affect a selector or loss once. It never scales
+  the selected P2 effect a second time.
 
-## Runtime contract
+## Runtime and storage contract
 
-- Teacher association is built once per teacher-forced training or
-  representation-validation batch and zero times in deployment. Permission to
-  carry `future_training_pack` is owned by the explicit teacher-forced forward
-  entry point, not by mutable `train()`/`eval()` module mode. The training-only
-  recognizer is also absent from deployment sampling.
-- Five-step deployment caches visual/G/S/W and P1 once. P2, P3, and the bottom
-  action tower remain ODE-step dependent.
-- Generic W1/W2, generic P2, and generic P3 are skipped; unused ancestral heads
-  are frozen.
-- Every trainable system parameter occurs in exactly one optimizer group.
-- The inherited old Stage1 path is disabled by
-  `stage1_initialization_enabled=0`; the CLI therefore ignores any historical
-  `--stage1-checkpoint` argument carried by the V48 base launcher.
-- Formal training requires the configured T5 file. Only a deliberately separate
+- Teacher association is built once per teacher-forced train/representation
+  batch and zero times in deployment. The explicit teacher-forced call boundary
+  owns permission to carry future evidence; `train()` mode does not.
+- Five-step deployment caches visual/G/S/W/P1 once. P2, P3 and the bottom action
+  tower remain ODE-step dependent. P1 never opens a second visual read.
+- W/P2/P3 audit reductions are conditional on `collect_audit_metrics`; normal
+  execution performs the same dynamics/selector/consequence computation but
+  does not launch typed-router weights, pairwise cosines, entropy, FP32 RMS or
+  interval-mass reductions when those diagnostics are not requested.
+- The object capability executes no legacy mid-cut or layer-contract readout in
+  training or deployment. Their external loss weight is zero, their modules
+  own no optimizer state, and Evidence MMDiT accepts an explicit zero layer row.
+- Every trainable parameter belongs to exactly one optimizer group.
+- Stage1 initialization is disabled for this fresh top.
+- Formal training requires the configured T5 file. Only an explicitly separate
   null-goal smoke may omit language.
+- Established defaults:
 
-## Current evidence and pending gates
+```text
+raw HDF5:    /data/liang.zhang/dataset/grab_pen_single/grab_pen_single
+cache root:  /data/senwang/data
+T5 weights:  /data/senwang/checkpoint/grasp_pen_embed.pt
+```
 
-Local CPU evidence currently passes:
+Do not redirect the raw-HDF5 default merely because caches and weights moved.
 
-- object permutation and G ownership-continuity tests;
-- local-hypothesis prior/null separation, per-cell probability conservation,
-  and read-conditioned existence tests;
-- teacher isolation and target-only replacement tests;
-- exact-neutral P2/consequence and bounded zero-Jacobian tests;
-- W1 interval-order preservation and W2 sequence sensitivity;
-- P3 precision/temporal consequence-dependency tests;
-- exact-zero state-change evidence/lane and fifth-lane non-interference tests;
-- complete-system BF16 forward/backward and optimizer ownership;
-- deterministic eval/no-grad teacher-forced forward with FP32 targets, while
-  the ordinary policy/deployment entry point rejects the same future pack;
-- five-step cache behavior: eight top blocks execute
-  `[1,1,1,0,0,5,0,0]`, with G/S/W/P1 once and Teacher zero times;
-- flags-off sibling regressions and V120 log parser coverage.
+## Verification state
 
-The first V120 long run reached epoch 1 batch 640 with finite gradients and
-about 2.05 s/batch, but it exposed a source error: local owner-prior mass was
-passed as physical validity, and chart allocation share was exported as object
-existence. That run is evidence for the old faulty semantics and must not be
-continued as the repaired baseline. The source now keeps prior, validity,
-cell-null mass, allocation share, read-conditioned existence, and physical
-object validity separate;
-a fresh completed server smoke is required. No frozen-checkpoint intervention
-has been observed. Do not claim action improvement, useful W intervention, or
-batch-eight memory below 22 GiB until new server evidence exists.
+Local CPU tests cover schema/resume identity, physical/typed G continuity,
+mass conservation, object permutation through S/Teacher/P2, teacher FP32
+isolation, ordered successor-versus-delta targets, disjoint W1/W2 heads,
+typed P2 independence and bounded scores, exact-neutral consequence, P3
+dependency/zero semantics, full BF16 forward/backward, optimizer ownership,
+teacher-forced boundaries, future-target/action isolation, audit-switch
+bit-exactness and five-step cache behavior.
 
-A later run also showed that the unsupervised object-S completion scalar moved
-from about `0.99` to `0.001`, changing the external execution bias from roughly
-`+0.08` to `-0.09` while the independent execution controller compensated.
-That quantity was not identifiable as completion. The active source removes
-both its direct terminal bias and its P3 terminal lane; the same fifth-lane
-capacity now carries only algebraically zero-centred observable state change.
-This semantic repair also requires a fresh run.
+This source still requires a fresh server smoke and long run. No action-quality
+improvement is claimed until the new v121 log and frozen-checkpoint causal
+interventions exist. The decisive empirical questions are kept in
+`TOP_ARCHITECTURE_ISSUE_LEDGER.md`.
+
+## Run
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nohup bash scripts/current_object_intent_dynamics_323_smoke.sh > v121_smoke.log 2>&1 &
+CUDA_VISIBLE_DEVICES=0 nohup bash scripts/current_object_intent_dynamics_323.sh > v121.log 2>&1 &
+```
+
+Override `OBJECT_323_BATCH_SIZE`, `DATA_ROOT`, cache roots, T5 path or
+`OUT_DIR` only when the server layout differs. The long launcher defaults to
+batch 8 and refuses `--resume`.
 
 ## Authoritative source map
 
 ```text
 typed G/S/Teacher/W/P2/P3:
   clearvla/policy/object_intent_dynamics_323/
-ancestral observation bank, dense G chart and P1:
+ancestral observation bank and high-resolution reader:
   clearvla/policy/flow_dino_evidence.py
-placement, role schedule and bottom ingress:
+placement, ObjectFactualDock construction and bottom ingress:
   clearvla/policy/trunk.py
-provenance masks:
-  clearvla/policy/trunk_primitives.py
-losses, runtime cache, optimizer and logs:
+losses, cache, optimizer and logs:
   clearvla/experiments/observed_state_lab/policy_runtime_v39.py
-configuration and manifest:
+configuration and serialized context:
   clearvla/policy/config.py
   clearvla/cli/train_v40_policy.py
-active launchers:
+launchers:
   scripts/current_object_intent_dynamics_323.sh
   scripts/current_object_intent_dynamics_323_smoke.sh
 tests:
@@ -270,8 +295,7 @@ active issue ledger:
 
 ## Historical boundary
 
-V98, V107, V113, V114, V117, V118, and V119 remain ancestry and comparison
-experiments. Their detailed decisions are recoverable from Git history,
-versioned launchers, serialized run contexts, and focused research documents.
-Do not rebuild the active graph from their names or paste their old contracts
-back into this file.
+V98, V107, V113, V114, V117, V118, V119 and V120 are ancestry or comparison
+experiments. Reconstruct them from their scripts, serialized run contexts and
+Git history. Never paste an old contract back into this file or infer the
+active graph from an experiment name.

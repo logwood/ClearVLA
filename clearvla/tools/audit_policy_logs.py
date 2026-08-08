@@ -1,6 +1,6 @@
 """Audit ClearVLA training logs without importing the training stack.
 
-The parser accepts the historical ``[v39-layer]`` format, the compact V94-V120
+The parser accepts the historical ``[v39-layer]`` format, the compact V94-V121
 formats (including representation-only V95 Stage1), pretty-printed run
 contexts, and epoch JSON/JSONL records.
 Its summaries deliberately separate raw metrics, weighted objective
@@ -27,7 +27,7 @@ INIT_COUNT_RE = re.compile(r"^\[v39-init\]\s+(?P<label>.*?)(?:\s+count=(?P<count
 UNHANDLED_EXCEPTION_RE = re.compile(
     r"^(?P<type>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)):\s*(?P<message>.*)$"
 )
-COMPACT_POLICY_VERSIONS = tuple(range(94, 121))
+COMPACT_POLICY_VERSIONS = tuple(range(94, 122))
 
 
 def _compact_prefixes(family: str) -> tuple[str, ...]:
@@ -756,6 +756,10 @@ V94_ALIASES.update(
     {
         "object_ground": {
             "reconstruction": "object_grounding_reconstruction_mse",
+            "prototype_mse": "object_grounding_prototype_mse",
+            "spatial_refine_mse": (
+                "object_grounding_spatial_refinement_mse"
+            ),
             "existence": "object_grounding_existence_mean",
             "validity": "object_grounding_validity_mean",
             "allocation": "object_grounding_allocation_share_mean",
@@ -766,6 +770,16 @@ V94_ALIASES.update(
             "chart_H": "object_grounding_chart_entropy",
             "g3_parent_l1": "object_grounding_g3_parent_l1",
             "object_pair_cos": "object_grounding_object_content_pair_cosine",
+            "chart_pair_overlap": "object_grounding_object_chart_pair_overlap",
+            "sem_app_post_l1": (
+                "object_grounding_semantic_appearance_posterior_l1"
+            ),
+            "sem_geo_post_l1": (
+                "object_grounding_semantic_geometry_posterior_l1"
+            ),
+            "app_geo_post_l1": (
+                "object_grounding_appearance_geometry_posterior_l1"
+            ),
             "flow_prior": "object_grounding_transport_prior_rms",
         },
         "object_intent": {
@@ -777,6 +791,9 @@ V94_ALIASES.update(
             "appearance_H": "object_intent_interval_appearance_entropy",
             "geometry_H": "object_intent_interval_geometry_entropy",
             "interval_var": "object_intent_interval_variation",
+            "state_interval_var": "object_intent_interval_state_variation",
+            "object_key_var": "object_intent_interval_object_key_variation",
+            "object_value_var": "object_intent_interval_object_value_variation",
             "temporal_var": "object_intent_temporal_variation",
             "goal_innov": "object_intent_goal_innovation_rms",
             "history_innov": "object_intent_history_innovation_rms",
@@ -789,12 +806,21 @@ V94_ALIASES.update(
             "state_change": "object_intent_state_change_evidence_rms",
             "state_change_H": "object_intent_state_change_attention_entropy",
             "online_match": "object_intent_online_match_loss",
+            "action_match": "object_intent_action_match_loss",
+            "state_match": "object_intent_state_match_loss",
+            "object_key_match": "object_intent_object_key_match_loss",
+            "object_value_match": "object_intent_object_value_match_loss",
             "recognizer": "object_plan_recognition_loss",
             "coarse_action": "object_coarse_action_loss",
         },
         "object_dynamics": {
             "goal_H": "object_w_goal_attention_entropy",
             "goal_innov": "object_w_goal_innovation_rms",
+            "intent_innov": "object_w_interval_innovation_rms",
+            "action_innov": "object_w_action_innovation_rms",
+            "state_innov": "object_w_state_innovation_rms",
+            "object_key_innov": "object_w_object_key_innovation_rms",
+            "object_value_innov": "object_w_object_value_innovation_rms",
             "typed_innov": "object_w_typed_innovation_rms",
             "w1_delta": "object_w1_semantic_delta_rms",
             "w1_transport": "object_w1_transport_rms",
@@ -810,10 +836,14 @@ V94_ALIASES.update(
             "teacher_null": "object_teacher_null_probability",
             "teacher_sem_max": "object_teacher_semantic_max",
             "teacher_sem_margin": "object_teacher_semantic_margin",
+            "teacher_app_max": "object_teacher_appearance_max",
+            "teacher_app_margin": "object_teacher_appearance_margin",
+            "teacher_geom_margin": "object_teacher_geometry_margin",
             "teacher_uncert": "object_teacher_uncertainty",
             "teacher_delta": "object_teacher_semantic_delta_rms",
             "teacher_transport": "object_teacher_transport_rms",
             "teacher_supports": "object_teacher_supports_per_interval",
+            "content_loss": "object_future_content",
             "successor_loss": "object_future_successor",
             "semantic_loss": "object_future_semantic",
             "transport_loss": "object_future_transport",
@@ -828,6 +858,23 @@ V94_ALIASES.update(
             "target_var": "object_future_target_interval_variation",
         },
         "object_policy": {
+            # Schema-2 ancestry remains parseable below; active schema-3 logs
+            # expose the semantic and geometry routes independently.
+            "semantic_score": "object_p2_semantic_score_abs",
+            "semantic_score_max": "object_p2_semantic_score_max_abs",
+            "geometry_score": "object_p2_geometry_score_abs",
+            "geometry_score_max": "object_p2_geometry_score_max_abs",
+            "address_score": "object_p2_address_score_abs",
+            "transport_score": "object_p2_transport_score_abs",
+            "semantic_logit_max": "object_p2_semantic_logit_max_abs",
+            "geometry_logit_max": "object_p2_geometry_logit_max_abs",
+            "semantic_H": "object_p2_semantic_posterior_entropy",
+            "geometry_H": "object_p2_geometry_posterior_entropy",
+            "semantic_max": "object_p2_semantic_posterior_max",
+            "geometry_max": "object_p2_geometry_posterior_max",
+            "semantic_null": "object_p2_semantic_null_mass",
+            "geometry_null": "object_p2_geometry_null_mass",
+            "calibration": "object_p2_selector_calibration",
             "content_score": "object_p2_content_score_abs",
             "content_score_max": "object_p2_content_score_max_abs",
             "intent_score": "object_p2_intent_score_abs",
@@ -844,6 +891,14 @@ V94_ALIASES.update(
             "semantic_mass": "object_p2_semantic_value_mass",
             "geometry_mass": "object_p2_geometry_value_mass",
             "status_mass": "object_p2_status_value_mass",
+            "semantic_h4_8_mass": "object_p2_semantic_interval_0_mass",
+            "semantic_h8_16_mass": "object_p2_semantic_interval_1_mass",
+            "semantic_h16_32_mass": "object_p2_semantic_interval_2_mass",
+            "semantic_h32_48_mass": "object_p2_semantic_interval_3_mass",
+            "geometry_h4_8_mass": "object_p2_geometry_interval_0_mass",
+            "geometry_h8_16_mass": "object_p2_geometry_interval_1_mass",
+            "geometry_h16_32_mass": "object_p2_geometry_interval_2_mass",
+            "geometry_h32_48_mass": "object_p2_geometry_interval_3_mass",
             "h4_8_mass": "object_p2_interval_0_mass",
             "h8_16_mass": "object_p2_interval_1_mass",
             "h16_32_mass": "object_p2_interval_2_mass",
@@ -1411,15 +1466,17 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
             if line.startswith("[v119-effect-error]") and pending_v94 is not None:
                 pending_v94.metrics.update(_parse_v119_effect_error(line))
                 continue
-            v120_auxiliary = re.match(
-                r"^\[v120-(ground|intent|dynamics|policy)\]",
+            object_auxiliary = re.match(
+                r"^\[(v120|v121)-(ground|intent|dynamics|policy)\]",
                 line,
             )
-            if v120_auxiliary is not None and pending_v94 is not None:
-                family = f"object_{v120_auxiliary.group(1)}"
+            if object_auxiliary is not None and pending_v94 is not None:
+                family = f"object_{object_auxiliary.group(2)}"
                 pending_v94.metrics.update(_parse_v94_tokens(line, family))
                 continue
-            if line.startswith("[v120-dynamics-error]") and pending_v94 is not None:
+            if line.startswith(
+                ("[v120-dynamics-error]", "[v121-dynamics-error]")
+            ) and pending_v94 is not None:
                 pending_v94.metrics.update(_parse_v120_dynamics_error(line))
                 continue
             if (

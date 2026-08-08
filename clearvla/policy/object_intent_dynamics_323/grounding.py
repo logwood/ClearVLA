@@ -133,6 +133,21 @@ class DenseObjectGrounder(nn.Module):
         if not isinstance(g3_output, nn.Linear):
             raise TypeError("G3 residual output must remain a linear layer")
         nn.init.zeros_(g3_output.weight)
+        # Semantic, appearance and geometry verify evidence *inside* the one
+        # physical K+null assignment.  Zero initialization makes all three
+        # reads exactly inherit the physical posterior at startup; ordinary
+        # gradients may then refine them without creating three drifting
+        # object identities.
+        self.typed_verifier = nn.ModuleDict(
+            {
+                name: nn.Linear(2 * route_dim, 1, bias=False)
+                for name in ("semantic", "appearance", "geometry")
+            }
+        )
+        for verifier in self.typed_verifier.values():
+            if not isinstance(verifier, nn.Linear):
+                raise TypeError("typed verifier must remain a linear layer")
+            nn.init.zeros_(verifier.weight)
         self.decode_content_residual = nn.Linear(hidden, content_dim, bias=False)
         nn.init.zeros_(self.decode_content_residual.weight)
         self.decode_position = nn.Linear(16, content_dim, bias=False)
@@ -242,14 +257,53 @@ class DenseObjectGrounder(nn.Module):
         read = assignment.transpose(1, 2)
         read = read / read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 
-        def aggregate(value: Tensor) -> Tensor:
+        def aggregate(value: Tensor, weight: Tensor = read) -> Tensor:
             flat = value.reshape(batch, count, int(value.shape[-1]))
-            return torch.einsum("bkn,bnd->bkd", read.to(dtype=flat.dtype), flat)
+            return torch.einsum("bkn,bnd->bkd", weight.to(dtype=flat.dtype), flat)
+
+        def typed_verify(
+            name: str,
+            value: Tensor,
+        ) -> tuple[Tensor, Tensor, Tensor]:
+            flat = value.reshape(batch, count, int(value.shape[-1]))
+            parent_value = aggregate(value)
+            pair = torch.cat(
+                (
+                    parent_value[:, :, None].expand(-1, -1, count, -1),
+                    flat[:, None].expand(-1, self.objects, -1, -1),
+                ),
+                dim=-1,
+            )
+            residual = 0.50 * torch.tanh(
+                self.typed_verifier[name](pair).squeeze(-1).float()
+            )
+            # Multiplication by ``read`` makes the typed posterior absolutely
+            # continuous with respect to the physical object support: a typed
+            # verifier cannot resurrect an invalid/null candidate.
+            typed_read = read.float() * residual.exp()
+            typed_read = typed_read / typed_read.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-6)
+            # ``assignment.sum(dim=1)`` is [B,K]; keep exactly the physical
+            # allocation owned by each K object while redistributing evidence
+            # only inside that support.
+            object_mass = assignment.sum(dim=1)
+            typed_joint = typed_read * object_mass[..., None]
+            typed_value = torch.einsum(
+                "bkn,bnd->bkd", typed_read.to(dtype=flat.dtype), flat
+            )
+            return typed_value, typed_read, typed_joint
 
         content = aggregate(chart.candidate_content)
-        semantic = aggregate(chart.candidate_semantic)
-        appearance = aggregate(chart.candidate_appearance)
-        geometry = aggregate(chart.candidate_geometry)
+        semantic, semantic_read, semantic_assignment = typed_verify(
+            "semantic", chart.candidate_semantic
+        )
+        appearance, appearance_read, appearance_assignment = typed_verify(
+            "appearance", chart.candidate_appearance
+        )
+        geometry, geometry_read, geometry_assignment = typed_verify(
+            "geometry", chart.candidate_geometry
+        )
         coordinates = aggregate(chart.candidate_coordinates)
         transport_prior = aggregate(chart.candidate_transport_prior)
         support = aggregate(chart.candidate_support[..., None])
@@ -272,6 +326,15 @@ class DenseObjectGrounder(nn.Module):
         valid_prior_mass = (valid * prior).sum(dim=1).clamp_min(1e-6)
         allocation_share = assignment.sum(dim=1)[..., None] / valid_prior_mass[:, None]
         structured_assignment = assignment.transpose(1, 2).reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_semantic_assignment = semantic_assignment.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_appearance_assignment = appearance_assignment.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_geometry_assignment = geometry_assignment.reshape(
             batch, self.objects, *candidate_shape
         )
         structured_null = null_assignment.reshape(batch, *candidate_shape)
@@ -305,15 +368,31 @@ class DenseObjectGrounder(nn.Module):
         # satisfying the loss while the W-visible object content remains weak.
         decoded_slot = content + self.decode_content_residual(slots)
         decoded_position = self.decode_position(position)
-        reconstruction_value = decoded_slot[:, :, None, None, None, :] + decoded_position[:, None]
+        prototype_value = decoded_slot[:, :, None, None, None, :]
+        prototype_reconstruction = torch.einsum(
+            "bkcyx,bkcyxd->bcyxd",
+            chart_owner.to(dtype=prototype_value.dtype),
+            prototype_value.expand(-1, -1, *chart_owner.shape[2:], -1),
+        )
+        reconstruction_value = prototype_value + decoded_position[:, None]
         reconstructed = torch.einsum(
             "bkcyx,bkcyxd->bcyxd",
             chart_owner.to(dtype=reconstruction_value.dtype),
             reconstruction_value,
         )
-        reconstruction_error = (
-            reconstructed.float() - chart.dino_content.detach().float()
+        target_content = chart.dino_content.detach().float()
+        prototype_error = (
+            prototype_reconstruction.float() - target_content
         ).square().mean()
+        spatial_error = (
+            reconstructed.float() - target_content
+        ).square().mean()
+        # A shared coordinate decoder can cheaply explain spatially smooth
+        # DINO structure while every K slot remains identical.  Keep that
+        # within-object refinement, but make the object-prototype clustering
+        # term own most of the unchanged reconstruction budget so coordinate
+        # features cannot satisfy the G objective by themselves.
+        reconstruction_error = 0.75 * prototype_error + 0.25 * spatial_error
         facts = ObjectFactSet(
             dense_chart=chart,
             content=content,
@@ -327,6 +406,9 @@ class DenseObjectGrounder(nn.Module):
             validity=object_validity,
             object_to_chart=chart_read,
             candidate_assignment=structured_assignment,
+            semantic_candidate_assignment=structured_semantic_assignment,
+            appearance_candidate_assignment=structured_appearance_assignment,
+            geometry_candidate_assignment=structured_geometry_assignment,
             null_assignment=structured_null,
             reconstructed_dino=reconstructed,
             reconstruction_error=reconstruction_error,
@@ -334,6 +416,8 @@ class DenseObjectGrounder(nn.Module):
         facts.validate()
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
+            "object_grounding_prototype_mse": prototype_error.detach(),
+            "object_grounding_spatial_refinement_mse": spatial_error.detach(),
             "object_grounding_existence_mean": existence.detach().float().mean(),
             "object_grounding_validity_mean": object_validity.detach().float().mean(),
             "object_grounding_allocation_share_mean": allocation_share.detach().float().mean(),
@@ -361,6 +445,30 @@ class DenseObjectGrounder(nn.Module):
                 - parent_owner.detach().float()
             ).abs().mean(),
             "object_grounding_object_content_pair_cosine": self._pair_cosine(content),
+            "object_grounding_object_chart_pair_overlap": self._pair_overlap(
+                chart_read.flatten(2)
+            ),
+            "object_grounding_semantic_appearance_posterior_l1": (
+                0.5
+                * (semantic_read.detach().float() - appearance_read.detach().float())
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_semantic_geometry_posterior_l1": (
+                0.5
+                * (semantic_read.detach().float() - geometry_read.detach().float())
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_appearance_geometry_posterior_l1": (
+                0.5
+                * (appearance_read.detach().float() - geometry_read.detach().float())
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
             "object_grounding_transport_prior_rms": transport_prior.detach().float().square().mean().sqrt(),
         }
         return facts, metrics
@@ -372,3 +480,15 @@ class DenseObjectGrounder(nn.Module):
         objects = int(value.shape[1])
         mask = ~torch.eye(objects, device=value.device, dtype=torch.bool)
         return similarity[:, mask].mean() if objects > 1 else similarity.new_zeros(())
+
+    @staticmethod
+    def _pair_overlap(probability: Tensor) -> Tensor:
+        probability = probability.detach().float()
+        overlap = torch.einsum(
+            "bkn,bjn->bkj",
+            probability.clamp_min(0.0).sqrt(),
+            probability.clamp_min(0.0).sqrt(),
+        )
+        objects = int(probability.shape[1])
+        mask = ~torch.eye(objects, device=probability.device, dtype=torch.bool)
+        return overlap[:, mask].mean() if objects > 1 else overlap.new_zeros(())

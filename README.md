@@ -3,16 +3,15 @@
 ## Current Object Intent–Dynamics 3-2-3 Mainline
 
 The current experiment candidate is the `object_intent_dynamics_323`
-capability, logged as V120. The numeric label is bookkeeping; source selection
+capability, logged as V121. The numeric label is bookkeeping; source selection
 and checkpoint identity use the capability manifest. The top graph has K=4
-global grounded objects, a stateless online intent organizer plus a
-training-only future recognizer, W1/W2 object dynamics over
-`4-8 / 8-16 / 16-32 / 32-48`, one P1 high-resolution factual read, bounded
-zero-preserving P2 routing and a five-lane P3 compiler. The Evidence
-MMDiT/CVAE/workspace bottom remains intact behind a restricted typed ingress.
-The fifth P3 lane is a weak, zero-centred observable state-change lane; this
-capability no longer exports an unsupervised completion probability or an
-external execution-terminal bias.
+global grounded objects plus an explicit null, a stateless factorized online
+intent organizer plus a training-only future recognizer, W1/W2 object dynamics
+over `4-8 / 8-16 / 16-32 / 32-48`, one P1 high-resolution factual read,
+bounded zero-preserving semantic/geometry P2 routing through an
+`ObjectFactualDock`, and three real P3 innovations: precision, temporal and
+zero-centred observable state change. The Evidence MMDiT/CVAE/workspace bottom
+remains intact behind exactly one protected-consequence ingress.
 
 Batch-eight memory smoke (diagnostic synchronization is enabled, so do not use
 its timing as throughput):
@@ -21,9 +20,9 @@ its timing as throughput):
 CUDA_VISIBLE_DEVICES=0 \
 OBJECT_323_BATCH_SIZE=8 \
 SMOKE_TRAIN_BATCHES=2 \
-OUT_DIR=runs/v120_object_323_state_change_b8_memory_smoke \
+OUT_DIR=runs/v121_object_323_typed_dock_b8_memory_smoke \
 nohup bash scripts/current_object_intent_dynamics_323_smoke.sh \
-  > v120_object_323_state_change_b8_memory_smoke.log 2>&1 &
+  > v121_object_323_typed_dock_b8_memory_smoke.log 2>&1 &
 ```
 
 Long run:
@@ -31,9 +30,9 @@ Long run:
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 OBJECT_323_BATCH_SIZE=8 \
-OUT_DIR=runs/v120_object_intent_dynamics_323_state_change_b8 \
+OUT_DIR=runs/v121_object_intent_dynamics_323_typed_dock_b8 \
 nohup bash scripts/current_object_intent_dynamics_323.sh \
-  > v120_object_323_state_change_b8.log 2>&1 &
+  > v121_object_323_typed_dock_b8.log 2>&1 &
 ```
 
 The raw HDF5 default remains

@@ -81,6 +81,7 @@ from .object_intent_dynamics_323 import (
     FuturePlanRecognizer,
     ObjectConsequenceState,
     ObjectFactSet,
+    ObjectFactualDock,
     ObjectFutureDynamicsCompiler,
     ObjectFutureEffectReader,
     ObjectFutureTeacher,
@@ -161,6 +162,22 @@ class SharedFactualGlimpseBank:
 
 
 @dataclass(frozen=True)
+class LateRawDetailReadResult:
+    """Backward-compatible P1 result with an optional typed object dock."""
+
+    trajectory: Tensor
+    metrics: dict[str, Tensor]
+    object_dock: ObjectFactualDock | None = None
+
+    def __iter__(self):
+        # Historical callers unpacked ``(trajectory, metrics)``.  Preserve
+        # that interface while the active object mainline consumes the typed
+        # dock explicitly rather than smuggling it through a metrics dict.
+        yield self.trajectory
+        yield self.metrics
+
+
+@dataclass(frozen=True)
 class V115StaticEvidenceCache:
     """Observation/clean-intent evidence reused inside one deployment sample.
 
@@ -187,8 +204,8 @@ class V115StaticEvidenceCache:
         | ObjectIntentState
     )
     phase_context: Tensor
-    goal_context: Tensor
-    history_context: Tensor
+    goal_context: Tensor | None
+    history_context: Tensor | None
     interval_stage_prediction: Tensor | None
     policy_ingress_delta: Tensor
     protected_policy_detail: Tensor
@@ -205,6 +222,7 @@ class V115StaticEvidenceCache:
     # Capability-named object top.  These are online current-input products;
     # no future teacher or training recognizer is ever cached for deployment.
     object_facts: ObjectFactSet | None = None
+    object_factual_dock: ObjectFactualDock | None = None
     object_intent_state: ObjectIntentState | None = None
     object_coarse_action: CoarseActionIntentState | None = None
     object_future_dynamics: FutureObjectDynamics | None = None
@@ -233,6 +251,8 @@ class V115StaticEvidenceCache:
             raise ValueError(
                 "V115 static cache ingress delta does not match trajectory"
             )
+        if self.object_factual_dock is not None:
+            self.object_factual_dock.validate()
         batch = int(canvas.shape[0])
         if int(self.goal_tokens.shape[0]) != batch:
             raise ValueError("V115 static cache goal batch mismatch")
@@ -2220,6 +2240,7 @@ class LateRawDetailPolicyReader(nn.Module):
             if (
                 int(getattr(config, "stateless_phase_enabled", 0))
                 and not self.differential_intent_effect_mainline
+                and not self.object_intent_dynamics_mainline
             )
             else None
         )
@@ -2228,6 +2249,7 @@ class LateRawDetailPolicyReader(nn.Module):
             if (
                 self.functional_mainline_routing
                 and not self.differential_intent_effect_mainline
+                and not self.object_intent_dynamics_mainline
             )
             else None
         )
@@ -2441,6 +2463,33 @@ class LateRawDetailPolicyReader(nn.Module):
                         for _ in range(heads)
                     ]
                 )
+                if self.object_intent_dynamics_mainline:
+                    if not self.shared_factual_glimpse_bank:
+                        raise ValueError(
+                            "object factual docking requires the shared P1 glimpse bank"
+                        )
+                    object_feature_width = raw_dim + 5 + 3 * route_dim
+                    self.object_dock_value_heads = nn.ModuleList(
+                        [
+                            nn.Sequential(
+                                route_norm(object_feature_width),
+                                nn.Linear(
+                                    object_feature_width,
+                                    2 * self.head_dim,
+                                    bias=False,
+                                ),
+                                nn.SiLU(),
+                                nn.Linear(
+                                    2 * self.head_dim,
+                                    self.head_dim,
+                                    bias=False,
+                                ),
+                            )
+                            for _ in range(heads)
+                        ]
+                    )
+                else:
+                    self.object_dock_value_heads = None
             else:
                 self.raw_micro_grid = 0
                 self.register_buffer(
@@ -2450,6 +2499,7 @@ class LateRawDetailPolicyReader(nn.Module):
                 self.typed_coarse_query = None
                 self.appearance_world_owner_query = None
                 self.typed_local_refiners = None
+                self.object_dock_value_heads = None
             self.query_proj.requires_grad_(False)
             self.key_proj.requires_grad_(False)
         else:
@@ -2477,6 +2527,7 @@ class LateRawDetailPolicyReader(nn.Module):
             self.typed_coarse_query = None
             self.appearance_world_owner_query = None
             self.typed_local_refiners = None
+            self.object_dock_value_heads = None
 
     def _shared_factual_p1_query(
         self,
@@ -2899,8 +2950,9 @@ class LateRawDetailPolicyReader(nn.Module):
         *,
         clean_basis_tokens: Tensor | None = None,
         factual_condition: Tensor | None = None,
+        object_facts: ObjectFactSet | None = None,
         collect_diagnostics: bool = True,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> tuple[Tensor, dict[str, Tensor], ObjectFactualDock | None]:
         bank = detail.address_bank
         if (
             bank is None
@@ -3285,6 +3337,66 @@ class LateRawDetailPolicyReader(nn.Module):
                 "soft address world chart must preserve "
                 f"[B,T,C,G,G,H], got {tuple(world_horizon_grid.shape)}"
             )
+        object_support: Tensor | None = None
+        object_typed_support: dict[str, Tensor] = {}
+        object_prior: Tensor | None = None
+        object_null_support: Tensor | None = None
+        object_null_prior: Tensor | None = None
+        if self.object_intent_dynamics_mainline:
+            if object_facts is None:
+                raise ValueError(
+                    "object P1 requires the completed global-object facts"
+                )
+            object_facts.validate()
+            expected_assignment = (
+                batch,
+                object_facts.objects,
+                cameras,
+                grid,
+                grid,
+                slots,
+            )
+            if tuple(object_facts.candidate_assignment.shape) != expected_assignment:
+                raise ValueError(
+                    "object candidate assignment does not align with the P1 chart"
+                )
+            assignment = object_facts.candidate_assignment.float()
+            assignment_total = assignment.flatten(2).sum(dim=-1)
+            object_support = assignment / assignment_total[
+                :, :, None, None, None, None
+            ].clamp_min(1e-8)
+            for name, typed_assignment in (
+                ("semantic", object_facts.semantic_candidate_assignment),
+                ("appearance", object_facts.appearance_candidate_assignment),
+                ("geometry", object_facts.geometry_candidate_assignment),
+            ):
+                typed_assignment = typed_assignment.float()
+                typed_total = typed_assignment.flatten(2).sum(dim=-1)
+                object_typed_support[name] = typed_assignment / typed_total[
+                    :, :, None, None, None, None
+                ].clamp_min(1e-8)
+            null_assignment = object_facts.null_assignment.float()
+            if tuple(null_assignment.shape) != (
+                batch,
+                cameras,
+                grid,
+                grid,
+                slots,
+            ):
+                raise ValueError(
+                    "object null assignment does not align with the P1 chart"
+                )
+            null_total = null_assignment.flatten(1).sum(dim=-1, keepdim=True)
+            object_null_support = null_assignment / null_total[
+                :, :, None, None, None
+            ].clamp_min(1e-8)
+            partition = assignment_total.sum(dim=-1, keepdim=True) + null_total
+            object_prior = assignment_total / partition.clamp_min(1e-8)
+            object_null_prior = null_total / partition.clamp_min(1e-8)
+        elif object_facts is not None:
+            raise ValueError(
+                "global-object facts were supplied outside the object mainline"
+            )
         original_world_horizon_grid = world_horizon_grid
         original_progressive_world_source_bias = progressive_world_source_bias
         original_progressive_future_transport = progressive_future_transport
@@ -3559,6 +3671,11 @@ class LateRawDetailPolicyReader(nn.Module):
         state_count = cameras * grid * grid * slots
         chunk = int(self.config.flow_jepa_address_query_chunk)
         output_rows: list[Tensor] = []
+        object_dock_fact_rows: list[Tensor] = []
+        object_dock_posterior_rows: list[Tensor] = []
+        object_dock_null_rows: list[Tensor] = []
+        object_dock_chart_rows: list[Tensor] = []
+        object_dock_coordinate_rows: list[Tensor] = []
         route_entropy_rows: list[Tensor] = []
         route_max_rows: list[Tensor] = []
         fine_entropy_rows: list[Tensor] = []
@@ -3789,6 +3906,10 @@ class LateRawDetailPolicyReader(nn.Module):
         for start in range(0, int(query.shape[1]), chunk):
             stop = min(start + chunk, int(query.shape[1]))
             query_row = query[:, start:stop]
+            object_conditional_route: Tensor | None = None
+            object_typed_routes: dict[str, Tensor] = {}
+            object_posterior_row: Tensor | None = None
+            object_null_posterior_row: Tensor | None = None
             typed_fine_query_rows: dict[str, Tensor] = {}
             typed_coarse_query_rows: dict[str, Tensor] = {}
             functional_appearance_query_row: Tensor | None = None
@@ -4329,15 +4450,91 @@ class LateRawDetailPolicyReader(nn.Module):
                 route_logits_flat = route_logits.reshape(
                     batch, stop - start, glimpses, state_count
                 )
-                route_weights = torch.softmax(route_logits_flat, dim=-1).reshape(
-                    batch,
-                    stop - start,
-                    glimpses,
-                    cameras,
-                    grid,
-                    grid,
-                    slots,
-                )
+                if self.object_intent_dynamics_mainline:
+                    if (
+                        object_support is None
+                        or object_prior is None
+                        or object_null_support is None
+                        or object_null_prior is None
+                        or object_facts is None
+                    ):
+                        raise RuntimeError(
+                            "object P1 lost its global-to-local support dock"
+                        )
+                    objects = object_facts.objects
+                    support_log = object_support.clamp_min(1e-12).log()
+                    object_route_logit = (
+                        route_logits[:, :, :, None]
+                        + support_log[:, None, None]
+                    )
+                    object_route_flat = object_route_logit.flatten(4)
+                    object_conditional_route = torch.softmax(
+                        object_route_flat, dim=-1
+                    ).reshape(
+                        batch,
+                        stop - start,
+                        glimpses,
+                        objects,
+                        cameras,
+                        grid,
+                        grid,
+                        slots,
+                    )
+                    object_compatibility = torch.logsumexp(
+                        object_route_flat, dim=-1
+                    ) + object_prior.clamp_min(1e-8).log()[:, None, None]
+                    null_route_flat = (
+                        route_logits
+                        + object_null_support.clamp_min(1e-12).log()[
+                            :, None, None
+                        ]
+                    ).flatten(3)
+                    null_compatibility = torch.logsumexp(
+                        null_route_flat, dim=-1
+                    ) + object_null_prior.clamp_min(1e-8).log()[:, None]
+                    object_with_null = torch.softmax(
+                        torch.cat(
+                            (object_compatibility, null_compatibility[..., None]),
+                            dim=-1,
+                        ),
+                        dim=-1,
+                    )
+                    object_posterior_row = object_with_null[..., :-1]
+                    object_null_posterior_row = object_with_null[..., -1:]
+                    # P1 is a current-fact read and therefore conditions on a
+                    # non-null object.  The original null probability remains
+                    # explicit for P2; it is not discarded or converted into a
+                    # fake background object.
+                    conditional_object_mass = object_posterior_row / (
+                        1.0 - object_null_posterior_row
+                    ).clamp_min(1e-6)
+                    route_weights = torch.einsum(
+                        "bqgk,bqgkcijm->bqgcijm",
+                        conditional_object_mass,
+                        object_conditional_route,
+                    )
+                    for name, typed_support in object_typed_support.items():
+                        typed_route_logit = (
+                            route_logits[:, :, :, None]
+                            + typed_support.clamp_min(1e-12).log()[
+                                :, None, None
+                            ]
+                        )
+                        object_typed_routes[name] = torch.softmax(
+                            typed_route_logit.flatten(4), dim=-1
+                        ).reshape_as(object_conditional_route)
+                else:
+                    route_weights = torch.softmax(
+                        route_logits_flat, dim=-1
+                    ).reshape(
+                        batch,
+                        stop - start,
+                        glimpses,
+                        cameras,
+                        grid,
+                        grid,
+                        slots,
+                    )
                 if (
                     self.structured_ownership
                     and not self.utility_precision_mainline
@@ -4445,6 +4642,91 @@ class LateRawDetailPolicyReader(nn.Module):
                     assert typed_coordinates is not None
                     assert self.typed_micro_basis is not None
                     assert typed_future_rows is not None
+                    object_source_value: Tensor | None = None
+                    object_source_chart: Tensor | None = None
+                    object_source_coordinate: Tensor | None = None
+                    if self.object_intent_dynamics_mainline:
+                        if (
+                            object_conditional_route is None
+                            or object_posterior_row is None
+                            or object_null_posterior_row is None
+                            or self.object_dock_value_heads is None
+                            or set(object_typed_routes)
+                            != {"semantic", "appearance", "geometry"}
+                        ):
+                            raise RuntimeError(
+                                "object P1 did not construct its typed factual dock"
+                            )
+                        # Reuse the exact fine posterior already paid for by
+                        # P1.  This creates genuine K-specific current facts;
+                        # no pooled P1 hidden is expanded back into an object
+                        # axis.  The expensive 3x3 micro refiners below still
+                        # execute only once on the selected aggregate.
+                        state_rgb = torch.einsum(
+                            "bqgcijmn,bcijmnv->bqgcijmv",
+                            fine_weights,
+                            typed_literal_rgb.float(),
+                        )
+                        state_detail = torch.einsum(
+                            "bqgcijmn,bcijmnv->bqgcijmv",
+                            fine_weights,
+                            fine_values.float(),
+                        )
+                        state_coordinate = torch.einsum(
+                            "bqgcijmn,bcijmnd->bqgcijmd",
+                            fine_weights,
+                            typed_coordinates.float(),
+                        )
+                        object_rgb = torch.einsum(
+                            "bqgkcijm,bqgcijmv->bqgkv",
+                            object_conditional_route,
+                            state_rgb,
+                        )
+                        object_detail = torch.einsum(
+                            "bqgkcijm,bqgcijmv->bqgkv",
+                            object_conditional_route,
+                            state_detail,
+                        )
+                        object_source_coordinate = torch.einsum(
+                            "bqgkcijm,bqgcijmd->bqgkd",
+                            object_conditional_route,
+                            state_coordinate,
+                        )
+                        object_typed_contexts: dict[str, Tensor] = {}
+                        for name, typed_key in typed_fine_keys.items():
+                            state_key = torch.einsum(
+                                "bqgcijmn,bcijmnr->bqgcijmr",
+                                fine_weights,
+                                typed_key.float(),
+                            )
+                            object_typed_contexts[name] = torch.einsum(
+                                "bqgkcijm,bqgcijmr->bqgkr",
+                                object_typed_routes[name],
+                                state_key,
+                            )
+                        object_feature = torch.cat(
+                            (
+                                object_rgb,
+                                object_detail,
+                                object_source_coordinate,
+                                object_typed_contexts["semantic"],
+                                object_typed_contexts["appearance"],
+                                object_typed_contexts["geometry"],
+                            ),
+                            dim=-1,
+                        ).float()
+                        object_source_value = torch.stack(
+                            tuple(
+                                head(object_feature[:, :, glimpse_index]).to(
+                                    dtype=query_row.dtype
+                                )
+                                for glimpse_index, head in enumerate(
+                                    self.object_dock_value_heads
+                                )
+                            ),
+                            dim=2,
+                        )
+                        object_source_chart = object_conditional_route.sum(dim=-1)
                     micro_inputs = (
                         route_weights,
                         fine_weights,
@@ -4833,6 +5115,61 @@ class LateRawDetailPolicyReader(nn.Module):
                     typed_output = crossed_values.to(
                         dtype=factual_values.dtype
                     ).flatten(start_dim=-2)
+                    if self.object_intent_dynamics_mainline:
+                        if (
+                            object_source_value is None
+                            or object_source_chart is None
+                            or object_source_coordinate is None
+                            or object_posterior_row is None
+                            or object_null_posterior_row is None
+                        ):
+                            raise RuntimeError(
+                                "object factual values were lost before the P1 dock"
+                            )
+                        crossed_object_value = torch.einsum(
+                            "bqags,bqskd->bqagkd",
+                            cross_weights,
+                            object_source_value.float(),
+                        )
+                        fact_by_object = crossed_object_value.permute(
+                            0, 1, 2, 4, 3, 5
+                        ).flatten(start_dim=-2)
+                        fact_by_object, _ = smooth_rms_contract(
+                            fact_by_object.to(dtype=typed_output.dtype), 0.35
+                        )
+                        crossed_object_posterior = torch.einsum(
+                            "bqags,bqsk->bqagk",
+                            cross_weights,
+                            object_posterior_row,
+                        )
+                        crossed_null_posterior = torch.einsum(
+                            "bqags,bqsk->bqagk",
+                            cross_weights,
+                            object_null_posterior_row,
+                        )
+                        crossed_chart = torch.einsum(
+                            "bqags,bqskcyx->bqagkcyx",
+                            cross_weights,
+                            object_source_chart,
+                        )
+                        crossed_coordinate = torch.einsum(
+                            "bqags,bqskd->bqagkd",
+                            cross_weights,
+                            object_source_coordinate,
+                        )
+                        object_dock_fact_rows.append(fact_by_object)
+                        object_dock_posterior_rows.append(
+                            crossed_object_posterior.mean(dim=3)
+                        )
+                        object_dock_null_rows.append(
+                            crossed_null_posterior.mean(dim=3)
+                        )
+                        object_dock_chart_rows.append(
+                            crossed_chart.mean(dim=3)
+                        )
+                        object_dock_coordinate_rows.append(
+                            crossed_coordinate.mean(dim=3)
+                        )
                     if collect_diagnostics:
                         cross_entropy = -(
                             cross_weights.clamp_min(1e-8)
@@ -4934,6 +5271,44 @@ class LateRawDetailPolicyReader(nn.Module):
         context = torch.cat(output_rows, dim=1).reshape_as(trajectory)
         update = context * self.fixed_scale
         updated = trajectory + update
+        object_dock: ObjectFactualDock | None = None
+        if self.object_intent_dynamics_mainline:
+            if not all(
+                (
+                    object_dock_fact_rows,
+                    object_dock_posterior_rows,
+                    object_dock_null_rows,
+                    object_dock_chart_rows,
+                    object_dock_coordinate_rows,
+                )
+            ):
+                raise RuntimeError("object P1 produced no factual dock rows")
+            dock_object_posterior = torch.cat(
+                object_dock_posterior_rows, dim=1
+            ).float()
+            dock_null_posterior = torch.cat(
+                object_dock_null_rows, dim=1
+            ).float()
+            dock_mass = (
+                dock_object_posterior.sum(dim=-1, keepdim=True)
+                + dock_null_posterior
+            ).clamp_min(1e-8)
+            # Cross-glimpse attention may execute in BF16 under the outer
+            # training autocast.  Renormalize the K+null probability once in
+            # FP32 at the typed dock instead of accepting a ~1/256 mass drift.
+            dock_object_posterior = dock_object_posterior / dock_mass
+            dock_null_posterior = dock_null_posterior / dock_mass
+            object_dock = ObjectFactualDock(
+                fact_by_object=(
+                    torch.cat(object_dock_fact_rows, dim=1) * self.fixed_scale
+                ),
+                object_posterior=dock_object_posterior,
+                null_posterior=dock_null_posterior,
+                chart_posterior=torch.cat(object_dock_chart_rows, dim=1),
+                coordinates=torch.cat(object_dock_coordinate_rows, dim=1),
+                aggregate_fact=update,
+            )
+            object_dock.validate()
         if not collect_diagnostics:
             return updated, {
                 "flow_jepa_p1_query_rows": trajectory.new_tensor(
@@ -4953,7 +5328,7 @@ class LateRawDetailPolicyReader(nn.Module):
                     float(self.shared_factual_glimpse_bank),
                     dtype=torch.float32,
                 ),
-            }
+            }, object_dock
         route_entropy = torch.cat(route_entropy_rows, dim=1)
         route_max = torch.cat(route_max_rows, dim=1)
         fine_entropy = torch.cat(fine_entropy_rows, dim=1)
@@ -5252,7 +5627,46 @@ class LateRawDetailPolicyReader(nn.Module):
                     ),
                 }
             )
-        return updated, metrics
+        if object_dock is not None:
+            metrics.update(
+                {
+                    "object_p1_dock_object_mass": (
+                        object_dock.object_posterior.detach().float().sum(dim=-1).mean()
+                    ),
+                    "object_p1_dock_null_mass": (
+                        object_dock.null_posterior.detach().float().mean()
+                    ),
+                    "object_p1_dock_object_variation": (
+                        object_dock.fact_by_object.detach().float().std(
+                            dim=3, unbiased=False
+                        ).mean()
+                    ),
+                    "object_p1_dock_chart_entropy": (
+                        -(
+                            object_dock.chart_posterior.detach().float()
+                            .flatten(-3)
+                            .clamp_min(1e-8)
+                            * object_dock.chart_posterior.detach().float()
+                            .flatten(-3)
+                            .clamp_min(1e-8)
+                            .log()
+                        ).sum(dim=-1)
+                        / math.log(
+                            float(
+                                max(
+                                    int(
+                                        object_dock.chart_posterior.shape[-3]
+                                        * object_dock.chart_posterior.shape[-2]
+                                        * object_dock.chart_posterior.shape[-1]
+                                    ),
+                                    2,
+                                )
+                            )
+                        )
+                    ).mean(),
+                }
+            )
+        return updated, metrics, object_dock
 
     def forward(
         self,
@@ -5263,8 +5677,9 @@ class LateRawDetailPolicyReader(nn.Module):
         condition_query_context: Tensor | None = None,
         history_query_context: Tensor | None = None,
         clean_basis_tokens: Tensor | None = None,
+        object_facts: ObjectFactSet | None = None,
         collect_diagnostics: bool = True,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> LateRawDetailReadResult:
         cfg = self.config
         batch = int(trajectory_tokens.shape[0])
         horizon = int(cfg.action_horizon)
@@ -5327,7 +5742,10 @@ class LateRawDetailPolicyReader(nn.Module):
             phase_query_delta = self.phase_query_scale * self.phase_query_proj(
                 phase_input
             )
-            if self.differential_intent_effect_mainline:
+            if (
+                self.differential_intent_effect_mainline
+                or self.object_intent_dynamics_mainline
+            ):
                 if (
                     condition_query_context is not None
                     or history_query_context is not None
@@ -5335,8 +5753,7 @@ class LateRawDetailPolicyReader(nn.Module):
                     or self.history_query_proj is not None
                 ):
                     raise ValueError(
-                        "differential P1 accepts only the canonical "
-                        "IntentWindowView context"
+                        "explicit P1 accepts only its canonical intent context"
                     )
             else:
                 if (
@@ -5496,13 +5913,14 @@ class LateRawDetailPolicyReader(nn.Module):
                 raise RuntimeError(
                     "soft address bank was supplied to the legacy detail reader"
                 )
-            updated, metrics = self._read_soft_address_lattice(
+            updated, metrics, object_dock = self._read_soft_address_lattice(
                 query_input,
                 trajectory,
                 world_horizon_grid,
                 detail,
                 clean_basis_tokens=clean_basis_tokens,
                 factual_condition=factual_condition,
+                object_facts=object_facts,
                 collect_diagnostics=collect_diagnostics,
             )
             if collect_diagnostics:
@@ -5515,9 +5933,15 @@ class LateRawDetailPolicyReader(nn.Module):
                 metrics["flow_jepa_history_detail_query_norm"] = (
                     history_query_delta.detach().float().norm(dim=-1).mean()
                 )
-            return updated.reshape_as(trajectory_tokens), metrics
+            return LateRawDetailReadResult(
+                trajectory=updated.reshape_as(trajectory_tokens),
+                metrics=metrics,
+                object_dock=object_dock,
+            )
         if self.soft_address_lattice:
             raise RuntimeError("soft address lattice reader received no address bank")
+        if object_facts is not None:
+            raise ValueError("object factual docking requires the soft address lattice")
         if int(selector.shape[1]) != expected_detail:
             raise ValueError(
                 "late raw-detail tokens must preserve camera*grid^2="
@@ -5548,7 +5972,9 @@ class LateRawDetailPolicyReader(nn.Module):
         ).sum(dim=-1) / math.log(float(max(detail_per_camera, 2)))
         trajectory_norm = trajectory.detach().float().norm(dim=-1).mean()
         update_norm = update.detach().float().norm(dim=-1).mean()
-        return updated.reshape_as(trajectory_tokens), {
+        return LateRawDetailReadResult(
+            trajectory=updated.reshape_as(trajectory_tokens),
+            metrics={
             "flow_jepa_late_detail_attention_entropy": normalized_entropy.mean().detach(),
             "flow_jepa_late_detail_attention_max": weights.max(dim=-1).values.mean().detach(),
             "flow_jepa_late_detail_update_norm": update_norm,
@@ -5578,7 +6004,9 @@ class LateRawDetailPolicyReader(nn.Module):
                 if self.differential_intent_effect_mainline
                 else trajectory_tokens.new_zeros((), dtype=torch.float32)
             ),
-        }
+            },
+            object_dock=None,
+        )
 
 
 class MidcutContractHeads(nn.Module):
@@ -6308,7 +6736,8 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 heads=int(config.num_heads),
             )
             self.object_future_teacher = ObjectFutureTeacher(
-                content_dim=int(config.visual_token_dim), key_dim=64
+                content_dim=int(config.visual_token_dim),
+                key_dim=64,
             )
             self.object_plan_recognizer = FuturePlanRecognizer(
                 hidden=h,
@@ -6798,24 +7227,43 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             final_decoder == "evidence_latent_mmdit_action"
             and int(getattr(config, "flow_jepa_role_hierarchy", 0))
             and int(getattr(config, "flow_jepa_strict_role_visual_path", 0))
+            and not self.object_intent_dynamics_mainline
         )
         self.midcut_norm = nn.LayerNorm(h)
         self.midcut_heads = MidcutContractHeads(config)
-        if int(config.layer_contract_adapters):
+        if (
+            int(config.layer_contract_adapters)
+            and not self.object_intent_dynamics_mainline
+        ):
             self.layer_contract_heads = nn.ModuleList(
                 [LayerContractAdapterHeads(config, layer_index=i) for i in range(int(config.depth))]
             )
         else:
             self.layer_contract_heads = nn.ModuleList()
         self.layer_fm_probe = (
-            SharedLayerFlowActionProbe(config) if int(config.layer_shared_fm_probe) else None
+            SharedLayerFlowActionProbe(config)
+            if (
+                int(config.layer_shared_fm_probe)
+                and not self.object_intent_dynamics_mainline
+            )
+            else None
         )
         self.layer_role_scheduler = LayerRoleScheduler(config)
         self.layer_consequence_cell = (
             RecurrentMilestoneConsequenceCell(config)
-            if int(config.layer_recurrent_consequence)
+            if (
+                int(config.layer_recurrent_consequence)
+                and not self.object_intent_dynamics_mainline
+            )
             else None
         )
+        if self.object_intent_dynamics_mainline:
+            # The object capability has one explicit top-to-bottom ingress:
+            # ObjectPolicyPlanDeltaBank.  Historical mid-cut/layer adapters
+            # neither own an active loss nor feed the decoder, so allocating
+            # trainable parameters for them would create dead optimizer state.
+            self.midcut_norm.requires_grad_(False)
+            self.midcut_heads.requires_grad_(False)
         if self.terminal_policy_layer_contracts_only:
             # V103 is a single deployable path. The historical mid-cut probe
             # and G/W layer readouts are not auxiliary objectives and do not
@@ -7125,7 +7573,6 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             if self.object_intent_dynamics_mainline:
                 lanes = [
                     "p3_precision",
-                    "p3_effect",
                     "p3_temporal",
                     "p3_state_change",
                 ]
@@ -9548,7 +9995,11 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             # Clean task/state/action intent remains available to the decoder.
             owned_intent_memory.pop("visual", None)
         rollout_seed = canvas[:, slices["rollout"]].detach()
-        trajectory_seed = canvas[:, slices["trajectory"]].detach()
+        # Snapshot the action query before any P write, but keep ordinary
+        # autograd to its owning seed projection.  Value isolation requires a
+        # provenance boundary, not a gradient stop: P1/W still cannot enter
+        # through this tensor because it is captured before either is written.
+        trajectory_seed = canvas[:, slices["trajectory"]]
         time_emb = self.time(time.to(dtype=canvas.dtype))
         gate_rows: list[dict[str, Tensor]] = []
         gate_row_roles: list[str] = []
@@ -9579,6 +10030,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             | None
         ) = None
         object_facts: ObjectFactSet | None = None
+        object_factual_dock: ObjectFactualDock | None = None
         object_intent_state: ObjectIntentState | None = None
         object_coarse_action: CoarseActionIntentState | None = None
         object_plan_recognition: FuturePlanRecognition | None = None
@@ -9588,7 +10040,6 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         object_future_dynamics: FutureObjectDynamics | None = None
         object_training_targets: ObjectTopTrainingTargets | None = None
         object_top_metrics: dict[str, Tensor] = {}
-        object_top_losses: dict[str, Tensor] = {}
         p2_structured_effect_read: Tensor | None = None
         role_delta_metrics: dict[str, Tensor] = {}
         approved_ground_to_world: Tensor | None = None
@@ -9729,6 +10180,9 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 v115_static_evidence_cache.interval_stage_prediction
             )
             object_facts = v115_static_evidence_cache.object_facts
+            object_factual_dock = (
+                v115_static_evidence_cache.object_factual_dock
+            )
             object_intent_state = (
                 v115_static_evidence_cache.object_intent_state
             )
@@ -9793,21 +10247,29 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             _record_horizon_boundary(
                 "seed", canvas[:, slices["rollout"]]
             )
-        # The latent-main decoder is the final action path, so inference/eval
-        # must still materialize layer contracts even when callers disable
-        # auxiliary contract evaluation for speed.  We do not add extra losses;
-        # we only expose the latents needed by the action decoder.
+        # Legacy latent decoders need layer contracts at inference.  The
+        # object capability does not: its sole consequence ingress is the
+        # typed P3 bank, and constructing the old contracts would be an
+        # unconsumed per-block tower in both training and five-step deploy.
         final_decoder = str(getattr(cfg, "final_action_decoder", "legacy"))
-        force_layer_contracts = bool(enable_final_action_decoder) and (
-            final_decoder == "latent_main_action"
-            or (
-                final_decoder in {"latent_cvae_action", "adaptive_recurrent_cvae_action"}
-                and bool(int(getattr(cfg, "latent_cvae_layer_memory", 1)))
+        legacy_layer_contract_path = not self.object_intent_dynamics_mainline
+        force_layer_contracts = (
+            legacy_layer_contract_path
+            and bool(enable_final_action_decoder)
+            and (
+                final_decoder == "latent_main_action"
+                or (
+                    final_decoder
+                    in {"latent_cvae_action", "adaptive_recurrent_cvae_action"}
+                    and bool(int(getattr(cfg, "latent_cvae_layer_memory", 1)))
+                )
+                or final_decoder == "hierarchical_mmdit_action"
+                or final_decoder == "evidence_latent_mmdit_action"
             )
-            or final_decoder == "hierarchical_mmdit_action"
-            or final_decoder == "evidence_latent_mmdit_action"
         )
-        effective_layer_contracts = bool(enable_layer_contracts) or force_layer_contracts
+        effective_layer_contracts = legacy_layer_contract_path and (
+            bool(enable_layer_contracts) or force_layer_contracts
+        )
         cut = int(cfg.midcut_layer)
         contract_grad_scale = float(getattr(cfg, "layer_contract_grad_scale", 1.0))
         for index, block in enumerate(self.blocks, start=1):
@@ -9822,7 +10284,10 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 # V115. Their completed state was restored above. The midcut
                 # readout can still depend on the current noisy trajectory, so
                 # keep that small readout dynamic if its cut lies here.
-                if index == int(cfg.midcut_layer):
+                if (
+                    index == int(cfg.midcut_layer)
+                    and not self.object_intent_dynamics_mainline
+                ):
                     if v115_midcut_static_canvas is None:
                         raise RuntimeError(
                             "V115 static cache lost its dynamic midcut boundary"
@@ -10026,6 +10491,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 and index == world_boundary + 1
                 and not v115_reuse_static
                 and not self.grounded_intent_effect_mainline
+                and not self.object_intent_dynamics_mainline
             ):
                 if self.policy_plan_compiler is not None:
                     # Accumulated W hidden deltas are working state, not the
@@ -10183,19 +10649,25 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         dtype=torch.float32,
                     )
                 trajectory_before_detail = canvas[:, slices["trajectory"]]
-                updated_trajectory, reader_metrics = self.late_raw_detail_reader(
+                reader_result = self.late_raw_detail_reader(
                     trajectory_before_detail,
                     policy_factual_rollout,
                     late_raw_detail,
                     phase_context=phase_context,
                     condition_query_context=(
                         None
-                        if self.differential_intent_effect_mainline
+                        if (
+                            self.differential_intent_effect_mainline
+                            or self.object_intent_dynamics_mainline
+                        )
                         else condition_query_context
                     ),
                     history_query_context=(
                         None
-                        if self.differential_intent_effect_mainline
+                        if (
+                            self.differential_intent_effect_mainline
+                            or self.object_intent_dynamics_mainline
+                        )
                         else history_query_context
                     ),
                     clean_basis_tokens=(
@@ -10207,8 +10679,21 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         if self.late_raw_detail_reader.utility_precision_mainline
                         else None
                     ),
+                    object_facts=(
+                        object_facts
+                        if self.object_intent_dynamics_mainline
+                        else None
+                    ),
                     collect_diagnostics=collect_audit_metrics,
                 )
+                updated_trajectory = reader_result.trajectory
+                reader_metrics = reader_result.metrics
+                if self.object_intent_dynamics_mainline:
+                    object_factual_dock = reader_result.object_dock
+                    if object_factual_dock is None:
+                        raise RuntimeError(
+                            "object P1 did not return the Object-Chart dock"
+                        )
                 if collect_role_deltas or self.explicit_object_top:
                     protected_policy_detail = (
                         updated_trajectory - trajectory_before_detail
@@ -10263,8 +10748,6 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     progressive_address_state,
                     goal_phase_state,
                     phase_context,
-                    condition_query_context,
-                    history_query_context,
                     protected_policy_detail,
                     world_detail_entry_rollout,
                 )
@@ -10281,10 +10764,15 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 assert progressive_address_state is not None
                 assert goal_phase_state is not None
                 assert phase_context is not None
-                assert condition_query_context is not None
-                assert history_query_context is not None
                 assert protected_policy_detail is not None
                 assert world_detail_entry_rollout is not None
+                if not self.object_intent_dynamics_mainline and (
+                    condition_query_context is None
+                    or history_query_context is None
+                ):
+                    raise RuntimeError(
+                        "legacy V115 cache lost goal/history query contexts"
+                    )
                 if (
                     not self.object_intent_dynamics_mainline
                     and interval_stage_prediction is None
@@ -10296,6 +10784,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     value is None
                     for value in (
                         object_facts,
+                        object_factual_dock,
                         object_intent_state,
                         object_coarse_action,
                         object_w1_hidden,
@@ -10350,6 +10839,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     content_norm_rows=tuple(content_norm_rows),
                     time_norm_rows=tuple(time_norm_rows),
                     object_facts=object_facts,
+                    object_factual_dock=object_factual_dock,
                     object_intent_state=object_intent_state,
                     object_coarse_action=object_coarse_action,
                     object_future_dynamics=object_future_dynamics,
@@ -10382,7 +10872,15 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         "V117 P2 lost its effect bank/intent state or read twice"
                     )
                 trajectory_region = slices["trajectory"]
-                p2_query = canvas[:, trajectory_region].reshape(
+                # P2's action operand is the current diffusion query, not
+                # the trajectory after P1 has already written factual
+                # evidence into it.  P1 reaches P2 only through the typed
+                # ObjectFactualDock below; otherwise the pooled P1 carrier
+                # is a second, object-agnostic route around that dock.
+                p2_query = trajectory_seed.to(
+                    device=canvas.device,
+                    dtype=canvas.dtype,
+                ).reshape(
                     int(canvas.shape[0]),
                     int(cfg.action_horizon),
                     int(cfg.action_basis_tokens),
@@ -10396,14 +10894,16 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                             ObjectFutureEffectReader,
                         )
                         or object_future_dynamics is None
+                        or object_factual_dock is None
                     ):
                         raise RuntimeError(
-                            "object P2 lost its intent or completed W dynamics"
+                            "object P2 lost its P1 dock, intent, or completed W dynamics"
                         )
                     raw_p2_effect, effect_metrics = self.p2_effect_reader(
                         p2_query,
                         object_future_dynamics,
                         goal_phase_state,
+                        object_factual_dock,
                         collect_diagnostics=collect_audit_metrics,
                     )
                 elif self.grounded_intent_effect_mainline:
@@ -10495,6 +10995,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     ) = self.consequence_plan_organizer(
                         factual_base=p1_fact,
                         effect=p2_structured_effect_read,
+                        collect_diagnostics=collect_audit_metrics,
                     )
                     p2_write = (
                         consequence_plan_state.effect
@@ -10758,7 +11259,13 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         raise RuntimeError(
                             "object P3 lost consequence or stateless intent"
                         )
-                    action_query = canvas[:, slices["trajectory"]].reshape(
+                    # Keep the action operand independent of the P1/P2 writes.
+                    # P3 receives those values through its explicit p1_fact and
+                    # consequence operands, exactly once each.
+                    action_query = trajectory_seed.to(
+                        device=canvas.device,
+                        dtype=canvas.dtype,
+                    ).reshape(
                         int(canvas.shape[0]),
                         int(cfg.action_horizon),
                         int(cfg.action_basis_tokens),
@@ -10774,6 +11281,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         consequence=consequence_plan_state,
                         intent=goal_phase_state,
                         action_query=action_query,
+                        collect_diagnostics=collect_audit_metrics,
                     )
                 elif self.grounded_intent_effect_mainline:
                     if (
@@ -10939,6 +11447,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         facts=object_facts,
                         intent=object_intent_state,
                         action=object_coarse_action,
+                        collect_diagnostics=collect_audit_metrics,
                     )
                     object_top_metrics.update(object_w1_metrics)
                 elif object_world_depth == int(cfg.flow_jepa_world_blocks):
@@ -10952,69 +11461,9 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         intent=object_intent_state,
                         action=object_coarse_action,
                         w1_state=object_w1_hidden,
+                        collect_diagnostics=collect_audit_metrics,
                     )
                     object_top_metrics.update(object_w2_metrics)
-                    if object_teacher_dynamics is not None:
-                        target = object_teacher_dynamics
-                        target.validate()
-                        prediction = object_future_dynamics
-                        # The teacher value already encodes association
-                        # reliability: a null/occluded match falls back to
-                        # current content, zero motion and high uncertainty.
-                        # Masking these targets by future visibility would
-                        # leave exactly the conservative W directions
-                        # unsupervised.  Match the canonical runtime loss and
-                        # weight every target field only by physical current
-                        # object support.  Binder confidence/allocation are
-                        # not legal loss masks.
-                        validity = (
-                            object_facts.validity.detach().float()[:, None]
-                            .expand_as(target.validity)
-                        )
-
-                        def weighted_mse(predicted: Tensor, expected: Tensor) -> Tensor:
-                            weight = validity
-                            while weight.ndim < predicted.ndim:
-                                weight = weight.unsqueeze(-1)
-                            if int(weight.shape[-1]) == 1 and int(predicted.shape[-1]) != 1:
-                                weight = weight.expand_as(predicted)
-                            return (
-                                (predicted.float() - expected.detach().float()).square()
-                                * weight
-                            ).sum() / weight.sum().clamp_min(1.0)
-
-                        object_top_losses.update(
-                            {
-                                "object_future_successor_loss_raw": weighted_mse(
-                                    prediction.successor_content,
-                                    target.successor_content,
-                                ),
-                                "object_future_semantic_loss_raw": weighted_mse(
-                                    prediction.semantic_delta,
-                                    target.semantic_delta,
-                                ),
-                                "object_future_transport_loss_raw": weighted_mse(
-                                    prediction.transport_mean,
-                                    target.transport_mean,
-                                ),
-                                "object_future_covariance_loss_raw": weighted_mse(
-                                    prediction.transport_covariance,
-                                    target.transport_covariance,
-                                ),
-                                "object_future_visibility_loss_raw": weighted_mse(
-                                    prediction.visibility,
-                                    target.visibility,
-                                ),
-                                "object_future_persistence_loss_raw": weighted_mse(
-                                    prediction.persistence,
-                                    target.persistence,
-                                ),
-                                "object_future_uncertainty_loss_raw": weighted_mse(
-                                    prediction.uncertainty,
-                                    target.uncertainty,
-                                ),
-                            }
-                        )
                 else:
                     raise RuntimeError(
                         f"object W depth must be 1 or 2, got {object_world_depth}"
@@ -11311,9 +11760,42 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                                 future_state=future_state,
                                 teacher=object_teacher_dynamics,
                             )
-                            online_intent_loss = F.smooth_l1_loss(
-                                object_intent_state.interval_queries.float(),
-                                object_plan_recognition.interval_targets.float(),
+                            action_match = F.smooth_l1_loss(
+                                object_intent_state.interval_action_queries.float(),
+                                object_plan_recognition.action_targets.float(),
+                            )
+                            state_match = F.smooth_l1_loss(
+                                object_intent_state.interval_state_queries.float(),
+                                object_plan_recognition.state_targets.float(),
+                            )
+
+                            def object_match(
+                                online: Tensor, target: Tensor
+                            ) -> Tensor:
+                                row = F.smooth_l1_loss(
+                                    online.float(),
+                                    target.float(),
+                                    reduction="none",
+                                ).mean(dim=-1, keepdim=True)
+                                weight = (
+                                    object_plan_recognition.object_validity
+                                    .detach().float()
+                                )
+                                return (row * weight).sum() / weight.sum().clamp_min(1.0)
+
+                            object_key_match = object_match(
+                                object_intent_state.interval_object_keys,
+                                object_plan_recognition.object_key_targets,
+                            )
+                            object_value_match = object_match(
+                                object_intent_state.interval_object_values,
+                                object_plan_recognition.object_value_targets,
+                            )
+                            online_intent_loss = 0.25 * (
+                                action_match
+                                + state_match
+                                + object_key_match
+                                + object_value_match
                             )
                             plan_recognition_loss = (
                                 object_plan_recognition.reconstruction_loss
@@ -11338,6 +11820,26 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         object_top_metrics.update(
                             {
                                 "object_intent_online_match_loss": online_intent_loss.detach(),
+                                "object_intent_action_match_loss": (
+                                    action_match.detach()
+                                    if object_plan_recognition is not None
+                                    else online_intent_loss.detach()
+                                ),
+                                "object_intent_state_match_loss": (
+                                    state_match.detach()
+                                    if object_plan_recognition is not None
+                                    else online_intent_loss.detach()
+                                ),
+                                "object_intent_object_key_match_loss": (
+                                    object_key_match.detach()
+                                    if object_plan_recognition is not None
+                                    else online_intent_loss.detach()
+                                ),
+                                "object_intent_object_value_match_loss": (
+                                    object_value_match.detach()
+                                    if object_plan_recognition is not None
+                                    else online_intent_loss.detach()
+                                ),
                                 "object_plan_recognition_loss": plan_recognition_loss.detach(),
                                 "object_coarse_action_loss": object_coarse_action.loss.detach(),
                                 "object_coarse_action_rms": object_coarse_action.action_prediction.detach().float().square().mean().sqrt(),
@@ -11345,14 +11847,12 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         )
                         goal_phase_state = object_intent_state
                         phase_context = object_intent_state.interval_queries
-                        condition_query_context = (
-                            object_intent_state.protected_goal_set.mean(dim=1)[:, None]
-                            .expand(-1, 4, -1)
-                        )
-                        history_query_context = (
-                            object_intent_state.history_tokens[:, -1:, :]
-                            .expand(-1, 4, -1)
-                        )
+                        # Goal, history and typed objects already have one
+                        # canonical composition inside S.interval_queries.
+                        # Re-exporting mean-goal and last-history aliases gave
+                        # the current-only P1 path two correlated extra inputs.
+                        condition_query_context = None
+                        history_query_context = None
                     if self.stateless_goal_phase_machine is not None:
                         if any(
                             value is not None
@@ -11830,10 +12330,22 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     self.policy_plan_compiler is not None
                     and not v115_reuse_static
                     and index <= world_boundary
+                    and not self.object_intent_dynamics_mainline
                 ):
                     v115_midcut_static_canvas = canvas
-                mid_canvas = self.midcut_norm(canvas)
-                midcut = self.midcut_heads(mid_canvas, slices)
+                if self.object_intent_dynamics_mainline:
+                    if stop_at_midcut:
+                        raise RuntimeError(
+                            "object-intent capability has no legacy mid-cut "
+                            "training boundary"
+                        )
+                    # This capability owns no mid-cut objective or decoder
+                    # input.  Keep the module fields only for old config/state
+                    # compatibility; do not execute their dead readout graph.
+                    midcut = {}
+                else:
+                    mid_canvas = self.midcut_norm(canvas)
+                    midcut = self.midcut_heads(mid_canvas, slices)
                 if stop_at_midcut:
                     content_norm = (
                         torch.stack(content_norm_rows).mean()
@@ -11883,7 +12395,11 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     return promoted
         if midcut is None:
             # Defensive fallback; validate() should prevent this.
-            midcut = self.midcut_heads(self.midcut_norm(canvas), slices)
+            midcut = (
+                {}
+                if self.object_intent_dynamics_mainline
+                else self.midcut_heads(self.midcut_norm(canvas), slices)
+            )
         if isinstance(
             self.final_norm, AffineVarianceFlooredCenteredNorm
         ):
@@ -12006,7 +12522,6 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     canvas[:, slices["state"]],
                     canvas[:, slices["state_history"]][:, -1:],
                     canvas[:, slices["executed"]][:, -1:],
-                    policy_plan_delta_bank.protected_base.flatten(1, 2),
                 ],
                 dim=1,
             )
@@ -12021,11 +12536,18 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 ],
                 dim=1,
             )
+        controlled_action_tokens = (
+            self.final_norm(
+                trajectory_seed.to(device=trajectory.device, dtype=trajectory.dtype)
+            )
+            if self.object_intent_dynamics_mainline
+            else trajectory
+        )
         if str(getattr(cfg, "controlled_base_mode", "learned")) == "fixed_zero":
             dynamics = self.controlled_dynamics(
                 rollout_init.to(device=rollout.device, dtype=rollout.dtype),
                 context_kv,
-                action_tokens=trajectory,
+                action_tokens=controlled_action_tokens,
                 transition_tokens=rollout,
             )
         else:
@@ -12033,7 +12555,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             dynamics = self.controlled_dynamics(
                 rollout,
                 context_kv,
-                action_tokens=trajectory,
+                action_tokens=controlled_action_tokens,
             )
         controlled_delta = dynamics["rollout_delta_pred"]
         rollout_effect_pred = dynamics["rollout_effect_pred"]
@@ -12051,8 +12573,14 @@ class TemporalMidcutWorldActionDiT(nn.Module):
         latent_cvae_action: dict[str, Tensor] | None = None
         hierarchical_mmdit_action: dict[str, Tensor] | None = None
         evidence_latent_mmdit_action: dict[str, Tensor] | None = None
-        decoder_layer_contracts = layer_contracts
-        if strict_role_visual_path:
+        # Object P reaches the bottom exclusively through the typed P3 bank.
+        # The capability does not construct historical layer contracts at all:
+        # they would be an unsupervised second consequence ingress and pure
+        # training/deployment overhead.
+        decoder_layer_contracts = (
+            [] if self.object_intent_dynamics_mainline else layer_contracts
+        )
+        if strict_role_visual_path and not self.object_intent_dynamics_mainline:
             policy_blocks = int(getattr(cfg, "flow_jepa_policy_blocks", 0))
             generic_policy_contracts = policy_blocks - int(
                 self.policy_plan_compiler is not None
@@ -12096,8 +12624,8 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     _evidence_transition_source(event_context),
                 ]
             event_evidence = None
-            if layer_contracts:
-                candidate = layer_contracts[-1].get("event_logits")
+            if decoder_layer_contracts:
+                candidate = decoder_layer_contracts[-1].get("event_logits")
                 if (
                     isinstance(candidate, Tensor)
                     and candidate.ndim == 3
@@ -12170,8 +12698,8 @@ class TemporalMidcutWorldActionDiT(nn.Module):
             else:
                 transition_memory = [controlled_delta, rollout_effect_pred]
             event_evidence = None
-            if layer_contracts:
-                candidate = layer_contracts[-1].get("event_logits")
+            if decoder_layer_contracts:
+                candidate = decoder_layer_contracts[-1].get("event_logits")
                 if (
                     isinstance(candidate, Tensor)
                     and candidate.ndim == 3
@@ -12190,7 +12718,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 event_evidence=event_evidence,
                 state_memory=owned_state_memory,
                 intent_memory=owned_intent_memory,
-                layer_contracts=layer_contracts,
+                layer_contracts=decoder_layer_contracts,
                 collect_diagnostics=bool(
                     collect_diagnostics
                     or self._action_path_eval_intervention is not None
@@ -12233,7 +12761,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 visual_memory=visual_memory
                 if int(getattr(cfg, "latent_cvae_visual_memory", 0))
                 else None,
-                layer_contracts=layer_contracts,
+                layer_contracts=decoder_layer_contracts,
                 target_physical=cvae_target_physical,
             )
             pred_physical_velocity = latent_cvae_action["pred_velocity"]
@@ -12260,7 +12788,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                 visual_memory=visual_memory
                 if int(getattr(cfg, "latent_action_visual_memory", 0))
                 else None,
-                layer_contracts=layer_contracts,
+                layer_contracts=decoder_layer_contracts,
             )
             pred_physical_velocity = latent_main_action["pred_velocity"]
             legacy_event_logits = latent_main_action["event_logits"]
@@ -12309,7 +12837,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     visual_memory=visual_memory
                     if int(getattr(cfg, "action_flow_residual_visual_memory", 1))
                     else None,
-                    layer_contracts=layer_contracts,
+                    layer_contracts=decoder_layer_contracts,
                 )
             else:
                 memory_parts: list[Tensor] = []
@@ -12322,8 +12850,11 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     )
                 if int(getattr(cfg, "action_flow_residual_visual_memory", 1)):
                     memory_parts.append(visual_memory)
-                if int(getattr(cfg, "action_flow_residual_layer_memory", 1)) and layer_contracts:
-                    last_layer = layer_contracts[-1]
+                if (
+                    int(getattr(cfg, "action_flow_residual_layer_memory", 1))
+                    and decoder_layer_contracts
+                ):
+                    last_layer = decoder_layer_contracts[-1]
                     for key in (
                         "policy_effect_time_tokens",
                         "policy_effect_tokens",
@@ -13748,6 +14279,10 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     "object_fact_to_chart": object_facts.object_to_chart,
                     "object_intent_goal_set": goal_phase_state.protected_goal_set,
                     "object_intent_interval_queries": goal_phase_state.interval_queries,
+                    "object_intent_interval_action_queries": goal_phase_state.interval_action_queries,
+                    "object_intent_interval_state_queries": goal_phase_state.interval_state_queries,
+                    "object_intent_interval_object_keys": goal_phase_state.interval_object_keys,
+                    "object_intent_interval_object_values": goal_phase_state.interval_object_values,
                     "object_intent_temporal_queries": goal_phase_state.temporal_queries,
                     "object_intent_state_change_evidence": goal_phase_state.state_change_evidence,
                     "object_coarse_action_prediction": object_coarse_action.action_prediction,
@@ -13788,7 +14323,6 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         "object_reconstruction_loss_raw": object_training_targets.object_reconstruction_loss,
                     }
                 )
-            out.update(object_top_losses)
             for key, value in object_top_metrics.items():
                 out[key] = value
         elif isinstance(goal_phase_state, GroundedIntentState):
@@ -13906,8 +14440,6 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         "object_consequence_effect": consequence_plan_state.effect,
                         "object_consequence_interaction": consequence_plan_state.interaction,
                         "object_consequence_protected": consequence_plan_state.protected_consequence,
-                        "object_policy_plan_factual": policy_plan_delta_bank.factual,
-                        "object_policy_plan_effect": policy_plan_delta_bank.effect,
                         "object_policy_plan_state_change": policy_plan_delta_bank.state_change,
                     }
                 )

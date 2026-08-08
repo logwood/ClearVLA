@@ -1,8 +1,8 @@
-"""Object-grounded intent/dynamics top for the post-V119 mainline.
+"""Object-grounded intent/dynamics top for the schema-3 mainline.
 
 The package is intentionally capability-named rather than version-named.  It
-does not mutate the historical V119 implementation; the trunk selects this
-graph only when ``flow_jepa_object_intent_dynamics_mainline`` is enabled.
+rejects historical schema-2 top weights; the trunk selects this graph only
+when ``flow_jepa_object_intent_dynamics_mainline`` is enabled.
 """
 
 from .compiler import (
@@ -30,8 +30,10 @@ from .types import (
     FutureObjectDynamics,
     FuturePlanRecognition,
     ObjectFactSet,
+    ObjectFactualDock,
     ObjectIntentState,
     ObjectTopTrainingTargets,
+    manifest_from_mapping,
 )
 
 __all__ = [
@@ -47,6 +49,7 @@ __all__ = [
     "FuturePlanRecognition",
     "FuturePlanRecognizer",
     "ObjectConsequenceState",
+    "ObjectFactualDock",
     "ObjectFactSet",
     "ObjectFutureDynamicsCompiler",
     "ObjectW1WorkingState",
@@ -58,4 +61,5 @@ __all__ = [
     "ObjectTopTrainingTargets",
     "StatelessObjectIntentOrganizer",
     "ZeroPreservingObjectConsequence",
+    "manifest_from_mapping",
 ]

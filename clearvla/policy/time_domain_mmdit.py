@@ -61,6 +61,15 @@ class EvidenceViewAdapter(nn.Module):
         self.allow_terminal_layer_subset = bool(
             int(getattr(config, "flow_jepa_strict_role_visual_path", 0))
         )
+        self.allow_empty_layer_contracts = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_object_intent_dynamics_mainline",
+                    0,
+                )
+            )
+        )
         self.bank = OwnedEvidenceMemoryBank(config)
         self.layer_field_proj = nn.ModuleDict(
             {name: nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)) for name in self._LAYER_FIELDS}
@@ -75,6 +84,13 @@ class EvidenceViewAdapter(nn.Module):
         )
         self.event_proj = nn.Sequential(nn.LayerNorm(3), nn.Linear(3, h))
         self.layer_depth_embed = nn.Parameter(torch.randn(1, int(config.depth), h) * 0.02)
+        if self.allow_empty_layer_contracts:
+            # The object mainline deliberately keeps post-P1/P2 layer
+            # contracts out of the action decoder.  Their legacy selector
+            # projections have no legal input in this capability, so leaving
+            # them trainable would create permanently unowned optimizer rows.
+            self.layer_field_proj.requires_grad_(False)
+            self.layer_depth_embed.requires_grad_(False)
         self.intent_source_names = (
             "task",
             "state",
@@ -129,6 +145,15 @@ class EvidenceViewAdapter(nn.Module):
 
     def _layer_rows(self, layer_contracts: list[dict[str, Tensor]], reference: Tensor) -> Tensor:
         depth = int(self.layer_depth_embed.shape[1])
+        if not layer_contracts and self.allow_empty_layer_contracts:
+            # OwnedEvidenceMemoryBank requires every registered source to have
+            # at least one selector token.  This literal zero is a typed null
+            # row, not a synthesized policy-layer contract; its value lane is
+            # still compiled only from the separately allowed current-state
+            # intent memory below.
+            return reference.new_zeros(
+                int(reference.shape[0]), 1, self.hidden_size
+            )
         subset_allowed = self.allow_terminal_layer_subset and 0 < len(layer_contracts) <= depth
         if len(layer_contracts) != depth and not subset_allowed:
             raise RuntimeError(

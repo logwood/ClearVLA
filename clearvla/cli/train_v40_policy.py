@@ -2843,7 +2843,12 @@ def main() -> None:
             ),
             "target_action_conditioned": not flow_jepa_stage1,
             "final_action_decoder_executed": not flow_jepa_stage1,
-            "layer_contracts_executed": not flow_jepa_stage1,
+            "layer_contracts_executed": bool(
+                not flow_jepa_stage1
+                and not int(
+                    policy_config.flow_jepa_object_intent_dynamics_mainline
+                )
+            ),
             "prefetch_dinov2_tokens": bool(use_token_prefetch),
             "information_balanced_sampling": information_sampling_summary,
             "target_future_encoding": (

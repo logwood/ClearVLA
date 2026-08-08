@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Capability-named object/intent/dynamics 3-2-3 mainline.
 #
-# V120 is only the default run label.  Serialized identity is the compact
+# V121 is only the default run label.  Serialized identity is the compact
 # object_intent_dynamics_323 ArchitectureManifest.
 set -euo pipefail
 
@@ -18,7 +18,7 @@ for argument in "$@"; do
   esac
 done
 
-export OUT_DIR="${OUT_DIR:-runs/v120_object_intent_dynamics_323_state_change}"
+export OUT_DIR="${OUT_DIR:-runs/v121_object_intent_dynamics_323_typed_dock}"
 export OBJECT_323_BATCH_SIZE="${OBJECT_323_BATCH_SIZE:-8}"
 export V115_BATCH_SIZE="${OBJECT_323_BATCH_SIZE}"
 export FLOW_JEPA_PARENT_VERSION=object_intent_dynamics_323
@@ -33,7 +33,7 @@ export CACHE_DIR="${CACHE_DIR:-${CLEARVLA_DATA_CACHE_ROOT}/cache_336}"
 export DINO_CACHE_DIR="${DINO_CACHE_DIR:-${CLEARVLA_DATA_CACHE_ROOT}/dinov2_cache_336}"
 export T5_CONDITION_PATH="${T5_CONDITION_PATH:-${CLEARVLA_CHECKPOINT_ROOT}/grasp_pen_embed.pt}"
 
-printf '[object-intent-dynamics-323] run_label=v120 topology=3-2-3 G=global_objects S=stateless_intent+observable_state_change W=four_interval_object_dynamics P1=single_precision_read P2=zero_preserving_effect P3=factual+precision+effect+temporal+state_change completion_terminal=off fresh=1 stage1_init=off batch=%s\n' \
+printf '[object-intent-dynamics-323] run_label=v121 topology=3-2-3 G=shared_object_chart+typed_verifiers S=factorized_stateless_intent W=typed_four_interval_object_dynamics P1=single_precision_object_dock P2=typed_zero_preserving_effect P3=protected_consequence+precision+temporal+state_change bottom_ingress=single completion_terminal=off fresh=1 stage1_init=off batch=%s\n' \
   "${OBJECT_323_BATCH_SIZE}"
 printf '[object-intent-dynamics-323-paths] data=%s decoded_cache=%s dino_cache=%s t5=%s out=%s\n' \
   "${DATA_ROOT}" "${CACHE_DIR}" "${DINO_CACHE_DIR}" \

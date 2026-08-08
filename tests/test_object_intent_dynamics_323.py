@@ -9,10 +9,13 @@ from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
 )
 from clearvla.policy.grounded_intent_effect import GroundedFactSet
 from clearvla.policy.object_intent_dynamics_323 import (
+    ARCHITECTURE_MANIFEST,
+    ArchitectureManifest,
     CoarseActionIntent,
     DenseObjectGrounder,
     FutureObjectDynamics,
     FuturePlanRecognizer,
+    ObjectFactualDock,
     ObjectFutureDynamicsCompiler,
     ObjectFutureEffectReader,
     ObjectFutureTeacher,
@@ -20,6 +23,7 @@ from clearvla.policy.object_intent_dynamics_323 import (
     ObjectW1WorkingState,
     StatelessObjectIntentOrganizer,
     ZeroPreservingObjectConsequence,
+    manifest_from_mapping,
 )
 
 
@@ -103,6 +107,62 @@ def _online_top():
     return grounder, facts, ground_metrics, intent, coarse, dynamics
 
 
+def _factual_dock(
+    facts,
+    *,
+    horizon: int = 24,
+    basis: int = 2,
+) -> ObjectFactualDock:
+    """Small exact-K stand-in for the production P1 high-resolution dock."""
+
+    batch, objects, width = facts.content.shape
+    if width * 2 != 32:
+        raise ValueError("test factual dock expects the 16->32 fixture")
+    fact = torch.cat((facts.content, facts.content), dim=-1)
+    fact = fact[:, None, None].expand(-1, horizon, basis, -1, -1)
+    object_posterior = fact.new_full(
+        (batch, horizon, basis, objects), 0.9 / float(objects)
+    )
+    null_posterior = fact.new_full((batch, horizon, basis, 1), 0.1)
+    chart = facts.object_to_chart.float()
+    chart = chart / chart.sum(dim=(-3, -2, -1), keepdim=True).clamp_min(1e-6)
+    chart = chart[:, None, None].expand(-1, horizon, basis, -1, -1, -1, -1)
+    coordinates = facts.coordinates[:, None, None].expand(
+        -1, horizon, basis, -1, -1
+    )
+    aggregate = torch.einsum("btqk,btqkh->btqh", object_posterior, fact)
+    dock = ObjectFactualDock(
+        fact_by_object=fact,
+        object_posterior=object_posterior,
+        null_posterior=null_posterior,
+        chart_posterior=chart,
+        coordinates=coordinates,
+        aggregate_fact=aggregate,
+    )
+    dock.validate()
+    return dock
+
+
+def test_schema_three_manifest_rejects_old_top_and_bottom_identity() -> None:
+    restored = manifest_from_mapping(ARCHITECTURE_MANIFEST.as_dict())
+    assert restored == ARCHITECTURE_MANIFEST
+    old = dict(ARCHITECTURE_MANIFEST.as_dict())
+    old["schema"] = 2
+    try:
+        manifest_from_mapping(old)
+    except ValueError as error:
+        assert "identity" in str(error)
+    else:
+        raise AssertionError("schema-2 top must not resume into schema 3")
+    incompatible = ArchitectureManifest(bottom_compatibility="other_bottom")
+    try:
+        incompatible.validate()
+    except ValueError as error:
+        assert "bottom compatibility" in str(error)
+    else:
+        raise AssertionError("incompatible bottom identity must be rejected")
+
+
 def test_global_object_grounding_reconstructs_and_g3_starts_as_parent() -> None:
     grounder, facts, metrics, *_ = _online_top()
     facts.validate()
@@ -120,9 +180,90 @@ def test_global_object_grounding_reconstructs_and_g3_starts_as_parent() -> None:
     assert bool(((facts.existence >= 0.0) & (facts.existence <= 1.0)).all())
     torch.testing.assert_close(facts.validity, torch.ones_like(facts.validity))
     assert facts.reconstruction_error.isfinite()
+    torch.testing.assert_close(
+        facts.reconstruction_error.detach(),
+        0.75 * metrics["object_grounding_prototype_mse"]
+        + 0.25 * metrics["object_grounding_spatial_refinement_mse"],
+    )
     facts.reconstruction_error.backward()
     assert grounder.slot_seed.grad is not None
     assert torch.isfinite(grounder.slot_seed.grad).all()
+
+
+def test_typed_g_verifiers_start_from_one_physical_object_posterior() -> None:
+    _, facts, metrics, *_ = _online_top()
+    torch.testing.assert_close(
+        facts.semantic_candidate_assignment,
+        facts.appearance_candidate_assignment,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        facts.semantic_candidate_assignment,
+        facts.geometry_candidate_assignment,
+        atol=0.0,
+        rtol=0.0,
+    )
+    for name in (
+        "object_grounding_semantic_appearance_posterior_l1",
+        "object_grounding_semantic_geometry_posterior_l1",
+        "object_grounding_appearance_geometry_posterior_l1",
+    ):
+        assert float(metrics[name]) == 0.0
+
+
+def test_s_object_memories_preserve_the_global_object_permutation() -> None:
+    _, facts, *_ = _online_top()
+    permutation = torch.tensor([2, 0, 3, 1])
+    organizer = StatelessObjectIntentOrganizer(
+        hidden=32,
+        goal_dim=20,
+        state_dim=6,
+        action_dim=7,
+        content_dim=16,
+        route_dim=8,
+        horizon=24,
+        heads=4,
+    )
+    torch.manual_seed(1210)
+    inputs = {
+        "goal_tokens": torch.randn(2, 9, 20),
+        "goal_mask": torch.ones(2, 9, dtype=torch.bool),
+        "state_history": torch.randn(2, 3, 6),
+        "state": torch.randn(2, 6),
+        "executed_history": torch.randn(2, 3, 7),
+        "collect_diagnostics": True,
+    }
+    state, _ = organizer(facts=facts, **inputs)
+    permuted, _ = organizer(facts=facts.permute(permutation), **inputs)
+    torch.testing.assert_close(
+        permuted.interval_object_keys,
+        state.interval_object_keys[:, :, permutation],
+        atol=2e-6,
+        rtol=2e-6,
+    )
+    torch.testing.assert_close(
+        permuted.interval_object_values,
+        state.interval_object_values[:, :, permutation],
+        atol=2e-6,
+        rtol=2e-6,
+    )
+    changed_inputs = dict(inputs)
+    changed_inputs["goal_tokens"] = -inputs["goal_tokens"]
+    changed_inputs["state_history"] = inputs["state_history"].roll(1, dims=1)
+    changed, _ = organizer(facts=facts, **changed_inputs)
+    assert float(
+        (changed.interval_object_keys - state.interval_object_keys)
+        .detach()
+        .abs()
+        .sum()
+    ) > 1e-6
+    assert float(
+        (changed.interval_object_values - state.interval_object_values)
+        .detach()
+        .abs()
+        .sum()
+    ) > 1e-6
 
 
 def test_local_hypothesis_prior_is_not_false_null_or_object_existence() -> None:
@@ -216,6 +357,13 @@ def test_teacher_is_no_grad_and_supports_non_identity_transport() -> None:
     ):
         assert value.dtype == torch.float32
         assert torch.isfinite(value).all()
+    # Stable interval content and ordered semantic end state are deliberately
+    # distinct targets.  Collapsing both to the same aggregate recreates the
+    # old easy common-direction W solution.
+    stable_delta = (
+        target.successor_content - target.current_reference[:, None]
+    )
+    assert float((stable_delta - target.semantic_delta).abs().mean()) > 1e-6
 
 
 def test_object_permutation_is_equivariant_through_teacher_and_p2() -> None:
@@ -254,11 +402,16 @@ def test_object_permutation_is_equivariant_through_teacher_and_p2() -> None:
     )
     reader = ObjectFutureEffectReader(hidden=32, content_dim=16)
     action_query = torch.randn(2, 24, 2, 32)
+    dock = _factual_dock(facts)
     value, _ = reader(
-        action_query, dynamics, intent, collect_diagnostics=True
+        action_query, dynamics, intent, dock, collect_diagnostics=True
     )
     permuted_value, _ = reader(
-        action_query, permuted_dynamics, intent, collect_diagnostics=True
+        action_query,
+        permuted_dynamics,
+        intent,
+        dock.permute(permutation),
+        collect_diagnostics=True,
     )
     assert torch.allclose(value, permuted_value, atol=2e-5, rtol=2e-5)
 
@@ -268,8 +421,9 @@ def test_neutral_effect_is_algebraic_zero_through_consequence() -> None:
     neutral = FutureObjectDynamics.neutral(facts)
     reader = ObjectFutureEffectReader(hidden=32, content_dim=16)
     action_query = torch.randn(2, 24, 2, 32)
+    dock = _factual_dock(facts)
     effect, _ = reader(
-        action_query, neutral, intent, collect_diagnostics=True
+        action_query, neutral, intent, dock, collect_diagnostics=True
     )
     assert torch.equal(effect, torch.zeros_like(effect))
     factual = torch.randn_like(effect)
@@ -278,6 +432,160 @@ def test_neutral_effect_is_algebraic_zero_through_consequence() -> None:
     )
     assert torch.equal(consequence.interaction, torch.zeros_like(effect))
     assert torch.equal(consequence.protected_consequence, factual)
+
+
+def test_p2_and_p3_audit_switches_do_not_change_forward_values() -> None:
+    _, facts, _, intent, _, dynamics = _online_top()
+    dynamics = replace(dynamics, validity=torch.ones_like(dynamics.validity))
+    action_query = torch.randn(2, 24, 2, 32)
+    dock = _factual_dock(facts)
+    reader = ObjectFutureEffectReader(hidden=32, content_dim=16)
+    effect_with_audit, reader_metrics = reader(
+        action_query,
+        dynamics,
+        intent,
+        dock,
+        collect_diagnostics=True,
+    )
+    effect_without_audit, quiet_reader_metrics = reader(
+        action_query,
+        dynamics,
+        intent,
+        dock,
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(
+        effect_without_audit, effect_with_audit, atol=0.0, rtol=0.0
+    )
+    assert reader_metrics
+    assert quiet_reader_metrics == {}
+
+    factual = torch.randn_like(effect_with_audit)
+    organizer = ZeroPreservingObjectConsequence(32)
+    consequence_with_audit, consequence_metrics = organizer(
+        factual_base=factual,
+        effect=effect_with_audit,
+        collect_diagnostics=True,
+    )
+    consequence_without_audit, quiet_consequence_metrics = organizer(
+        factual_base=factual,
+        effect=effect_with_audit,
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(
+        consequence_without_audit.protected_consequence,
+        consequence_with_audit.protected_consequence,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert consequence_metrics
+    assert quiet_consequence_metrics == {}
+
+    compiler = ObjectPolicyPlanCompiler(hidden=32, horizon=24, basis=2)
+    bank_with_audit, compiler_metrics = compiler(
+        p1_fact=factual,
+        consequence=consequence_with_audit,
+        intent=intent,
+        action_query=action_query,
+        collect_diagnostics=True,
+    )
+    bank_without_audit, quiet_compiler_metrics = compiler(
+        p1_fact=factual,
+        consequence=consequence_with_audit,
+        intent=intent,
+        action_query=action_query,
+        collect_diagnostics=False,
+    )
+    for name in ("protected_base", "precision", "temporal", "state_change"):
+        torch.testing.assert_close(
+            getattr(bank_without_audit, name),
+            getattr(bank_with_audit, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert compiler_metrics
+    assert quiet_compiler_metrics == {}
+
+
+def test_w_audit_switch_does_not_change_future_dynamics() -> None:
+    _, facts, _, intent, coarse, _ = _online_top()
+    compiler = ObjectFutureDynamicsCompiler(
+        hidden=32, content_dim=16, route_dim=8, heads=4
+    )
+    w1_with_audit, state_with_audit, w1_metrics = compiler.forward_w1(
+        facts=facts,
+        intent=intent,
+        action=coarse,
+        collect_diagnostics=True,
+    )
+    w1_without_audit, state_without_audit, quiet_w1_metrics = compiler.forward_w1(
+        facts=facts,
+        intent=intent,
+        action=coarse,
+        collect_diagnostics=False,
+    )
+    for name in (
+        "successor_content",
+        "semantic_delta",
+        "transport_mean",
+        "transport_covariance",
+        "visibility",
+        "persistence",
+        "uncertainty",
+        "validity",
+        "future_address",
+    ):
+        torch.testing.assert_close(
+            getattr(w1_without_audit, name),
+            getattr(w1_with_audit, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+    torch.testing.assert_close(
+        state_without_audit.near, state_with_audit.near, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        state_without_audit.far_base,
+        state_with_audit.far_base,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert w1_metrics
+    assert quiet_w1_metrics == {}
+
+    w2_with_audit, w2_metrics = compiler.forward_w2(
+        facts=facts,
+        intent=intent,
+        action=coarse,
+        w1_state=state_with_audit,
+        collect_diagnostics=True,
+    )
+    w2_without_audit, quiet_w2_metrics = compiler.forward_w2(
+        facts=facts,
+        intent=intent,
+        action=coarse,
+        w1_state=state_without_audit,
+        collect_diagnostics=False,
+    )
+    for name in (
+        "successor_content",
+        "semantic_delta",
+        "transport_mean",
+        "transport_covariance",
+        "visibility",
+        "persistence",
+        "uncertainty",
+        "validity",
+        "future_address",
+    ):
+        torch.testing.assert_close(
+            getattr(w2_without_audit, name),
+            getattr(w2_with_audit, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert w2_metrics
+    assert quiet_w2_metrics == {}
 
 
 def test_p2_zero_initialized_content_has_bounded_finite_jacobian() -> None:
@@ -291,7 +599,7 @@ def test_p2_zero_initialized_content_has_bounded_finite_jacobian() -> None:
 
 
 def test_p2_scores_and_temperatures_are_bounded_by_construction() -> None:
-    _, _, _, intent, _, dynamics = _online_top()
+    _, facts, _, intent, _, dynamics = _online_top()
     dynamics = replace(
         dynamics,
         semantic_delta=torch.randn_like(dynamics.semantic_delta),
@@ -302,15 +610,18 @@ def test_p2_scores_and_temperatures_are_bounded_by_construction() -> None:
         torch.randn(2, 24, 2, 32),
         dynamics,
         intent,
+        _factual_dock(facts),
         collect_diagnostics=True,
     )
     for name in (
-        "object_p2_content_score_max_abs",
+        "object_p2_semantic_score_max_abs",
+        "object_p2_geometry_score_max_abs",
         "object_p2_intent_score_max_abs",
         "object_p2_coordinate_score_max_abs",
     ):
         assert float(metrics[name]) <= 1.0001
-    assert float(metrics["object_p2_combined_logit_max_abs"]) <= 12.0001
+    assert float(metrics["object_p2_semantic_logit_max_abs"]) <= 12.0001
+    assert float(metrics["object_p2_geometry_logit_max_abs"]) <= 12.0001
     for name in (
         "object_p2_temperature_content",
         "object_p2_temperature_intent",
@@ -319,13 +630,48 @@ def test_p2_scores_and_temperatures_are_bounded_by_construction() -> None:
         assert 0.25 <= float(metrics[name]) <= 4.0
 
 
+def test_p2_semantic_change_cannot_rewrite_geometry_selection() -> None:
+    _, facts, _, intent, _, dynamics = _online_top()
+    dynamics = replace(dynamics, validity=torch.ones_like(dynamics.validity))
+    reader = ObjectFutureEffectReader(hidden=32, content_dim=16)
+    query = torch.randn(2, 24, 2, 32)
+    dock = _factual_dock(facts)
+    _, baseline = reader(
+        query, dynamics, intent, dock, collect_diagnostics=True
+    )
+    changed = replace(
+        dynamics,
+        semantic_delta=dynamics.semantic_delta
+        + 0.5 * torch.randn_like(dynamics.semantic_delta),
+    )
+    _, intervened = reader(
+        query, changed, intent, dock, collect_diagnostics=True
+    )
+    for name in (
+        "object_p2_geometry_score_abs",
+        "object_p2_geometry_score_max_abs",
+        "object_p2_geometry_logit_max_abs",
+        "object_p2_geometry_posterior_entropy",
+        "object_p2_geometry_posterior_max",
+        "object_p2_geometry_null_mass",
+        "object_p2_geometry_interval_0_mass",
+        "object_p2_geometry_interval_1_mass",
+        "object_p2_geometry_interval_2_mass",
+        "object_p2_geometry_interval_3_mass",
+    ):
+        torch.testing.assert_close(
+            baseline[name], intervened[name], atol=0.0, rtol=0.0
+        )
+
+
 def test_w2_reads_both_near_intervals_without_mean_pooling() -> None:
     _, facts, _, intent, coarse, _ = _online_top()
     torch.manual_seed(1204)
     compiler = ObjectFutureDynamicsCompiler(
         hidden=32, content_dim=16, route_dim=8, heads=4
     )
-    torch.nn.init.normal_(compiler.delta_head.weight, std=0.05)
+    torch.nn.init.normal_(compiler.near_heads.semantic_delta.weight, std=0.05)
+    torch.nn.init.normal_(compiler.far_heads.semantic_delta.weight, std=0.05)
     _, state, _ = compiler.forward_w1(
         facts=facts, intent=intent, action=coarse
     )
@@ -364,6 +710,17 @@ def test_w2_reads_both_near_intervals_without_mean_pooling() -> None:
     assert float(difference.detach()) > 1e-6
 
 
+def test_w1_and_w2_own_disjoint_output_heads() -> None:
+    compiler = ObjectFutureDynamicsCompiler(
+        hidden=32, content_dim=16, route_dim=8, heads=4
+    )
+    near = {id(parameter) for parameter in compiler.near_heads.parameters()}
+    far = {id(parameter) for parameter in compiler.far_heads.parameters()}
+    assert near
+    assert far
+    assert near.isdisjoint(far)
+
+
 def test_recognizer_supervises_online_intent_without_teacher_value_leak() -> None:
     _, _, _, intent, _, dynamics = _online_top()
     recognizer = FuturePlanRecognizer(
@@ -376,9 +733,26 @@ def test_recognizer_supervises_online_intent_without_teacher_value_leak() -> Non
         future_state=future_state,
         teacher=dynamics,
     )
-    assert not posterior.interval_targets.requires_grad
-    online_loss = torch.nn.functional.smooth_l1_loss(
-        intent.interval_queries.float(), posterior.interval_targets.float()
+    posterior.validate(hidden=32)
+    assert not posterior.action_targets.requires_grad
+    assert not posterior.object_key_targets.requires_grad
+    online_loss = (
+        torch.nn.functional.smooth_l1_loss(
+            intent.interval_action_queries.float(),
+            posterior.action_targets.float(),
+        )
+        + torch.nn.functional.smooth_l1_loss(
+            intent.interval_state_queries.float(),
+            posterior.state_targets.float(),
+        )
+        + torch.nn.functional.smooth_l1_loss(
+            intent.interval_object_keys.float(),
+            posterior.object_key_targets.float(),
+        )
+        + torch.nn.functional.smooth_l1_loss(
+            intent.interval_object_values.float(),
+            posterior.object_value_targets.float(),
+        )
     )
     assert online_loss.isfinite()
     assert posterior.reconstruction_loss.requires_grad
@@ -425,7 +799,45 @@ def test_object_loss_uses_existing_future_and_interval_budgets() -> None:
     assert total.isfinite()
 
 
-def test_p3_has_five_distinct_lanes() -> None:
+def test_object_loss_has_no_constant_penalty_for_exact_neutral_future() -> None:
+    scalar = torch.zeros((), requires_grad=True)
+    content = scalar + torch.zeros(1, 4, 4, 8)
+    transport = scalar + torch.zeros(1, 4, 4, 2)
+    covariance = scalar + torch.zeros(1, 4, 4, 3)
+    status = scalar + torch.zeros(1, 4, 4, 1)
+    output = {
+        "pred_physical_velocity": scalar + torch.zeros(1, 24, 7),
+        "object_future_successor_prediction": content,
+        "object_future_successor_target": torch.zeros_like(content),
+        "object_future_semantic_prediction": content,
+        "object_future_semantic_target": torch.zeros_like(content),
+        "object_future_transport_prediction": transport,
+        "object_future_transport_target": torch.zeros_like(transport),
+        "object_future_covariance_prediction": covariance,
+        "object_future_covariance_target": torch.zeros_like(covariance),
+        "object_future_visibility_prediction": status,
+        "object_future_visibility_target": torch.zeros_like(status),
+        "object_future_persistence_prediction": status,
+        "object_future_persistence_target": torch.zeros_like(status),
+        "object_future_uncertainty_prediction": status,
+        "object_future_uncertainty_target": torch.zeros_like(status),
+        "object_future_validity_target": torch.ones_like(status),
+        "object_fact_validity": torch.ones(1, 4, 1),
+        "object_reconstruction_loss_raw": scalar,
+        "object_intent_online_match_loss_raw": scalar,
+        "object_plan_recognition_loss_raw": scalar,
+        "object_coarse_action_loss_raw": scalar,
+    }
+    terms = object_intent_dynamics_terms(output, require_teacher=True)
+    torch.testing.assert_close(
+        terms["object_future_dynamics"], torch.zeros_like(scalar)
+    )
+    torch.testing.assert_close(
+        terms["object_future_transition"], torch.zeros_like(scalar)
+    )
+
+
+def test_p3_has_three_innovation_lanes_and_one_protected_base() -> None:
     _, _, _, intent, _, _ = _online_top()
     factual = torch.randn(2, 24, 2, 32)
     effect = 0.1 * torch.randn_like(factual)
@@ -440,16 +852,14 @@ def test_p3_has_five_distinct_lanes() -> None:
     )
     bank.validate()
     assert bank.source_names == (
-        "p3_factual",
         "p3_precision",
-        "p3_effect",
         "p3_temporal",
         "p3_state_change",
     )
     assert not hasattr(bank, "execution_terminal")
     assert bank.as_policy_role_bank(source_depth=7).values.shape == (
         2,
-        5,
+        3,
         24,
         2,
         32,
@@ -558,7 +968,7 @@ def test_state_change_replacement_cannot_modify_other_p3_lanes() -> None:
         intent=changed_intent,
         action_query=action_query,
     )
-    for name in ("factual", "precision", "effect", "temporal"):
+    for name in ("precision", "temporal"):
         torch.testing.assert_close(
             getattr(zero_bank, name), getattr(changed_bank, name), atol=0.0, rtol=0.0
         )

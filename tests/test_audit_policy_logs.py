@@ -192,6 +192,53 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(len(run.epoch_records), 1)
         self.assertEqual(run.epoch_records[0]["val"]["full_rmse"], 0.1)
 
+    def test_v121_rows_parse_typed_grounding_and_policy_routes(self) -> None:
+        path = _write(
+            self.tmp_path / "v121.log",
+            "\n".join(
+                (
+                    "[v121-train] epoch=001 batch=0020 loss_total=0.450000 "
+                    "flow_loss=0.350000",
+                    "[v121-ground] reconstruction=0.02000 prototype_mse=0.02400 "
+                    "spatial_refine_mse=0.00800 chart_pair_overlap=0.310 "
+                    "sem_app_post_l1=0.120 sem_geo_post_l1=0.230 "
+                    "app_geo_post_l1=0.190",
+                    "[v121-dynamics] w1_delta=0.090 w2_delta=0.180 "
+                    "semantic_loss=0.0200 transition_loss=0.0300",
+                    "[v121-policy] semantic_score_max=0.910 "
+                    "geometry_score_max=0.720 semantic_H=0.810 geometry_H=0.640 "
+                    "semantic_mass=0.570 geometry_mass=0.430 "
+                    "p3_precision=0.120 p3_temporal=0.080 p3_state_change=0.003",
+                    "[v121-epoch] epoch=001 step=20 loss_total=0.450000 "
+                    "flow_loss=0.350000",
+                    "[v121-val] action_rmse=0.09000",
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(run.batch_points[0].source, "v121")
+        row = run.batch_points[0].metrics
+        self.assertEqual(row["object_grounding_prototype_mse"], 0.024)
+        self.assertEqual(
+            row["object_grounding_spatial_refinement_mse"], 0.008
+        )
+        self.assertEqual(row["object_grounding_object_chart_pair_overlap"], 0.31)
+        self.assertEqual(
+            row["object_grounding_semantic_appearance_posterior_l1"], 0.12
+        )
+        self.assertEqual(
+            row["object_grounding_semantic_geometry_posterior_l1"], 0.23
+        )
+        self.assertEqual(
+            row["object_grounding_appearance_geometry_posterior_l1"], 0.19
+        )
+        self.assertEqual(row["object_p2_semantic_score_max_abs"], 0.91)
+        self.assertEqual(row["object_p2_geometry_score_max_abs"], 0.72)
+        self.assertEqual(row["object_p2_semantic_value_mass"], 0.57)
+        self.assertEqual(row["object_p2_geometry_value_mass"], 0.43)
+        self.assertNotIn("object_p3_effect_rms", row)
+        self.assertEqual(row["object_p3_state_change_rms"], 0.003)
+
     def test_unhandled_nonfinite_backward_is_a_critical_finding(self) -> None:
         log = _write(
             self.tmp_path / "nonfinite.log",

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping, cast
 
 import torch
 from torch import Tensor
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 2
+CAPABILITY_SCHEMA = 3
 INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
 INTERVAL_BOUNDS = ((4, 8), (8, 16), (16, 32), (32, 48))
 
@@ -36,6 +37,8 @@ class ArchitectureManifest:
             raise ValueError("the first object-intent schema owns four global objects")
         if not self.language_required:
             raise ValueError("formal object-intent training requires language")
+        if self.bottom_compatibility != "evidence_mmdit_cvae_workspace_v1":
+            raise ValueError("object-intent bottom compatibility is invalid")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -50,6 +53,67 @@ class ArchitectureManifest:
 
 
 ARCHITECTURE_MANIFEST = ArchitectureManifest()
+
+
+def manifest_from_mapping(value: Mapping[str, object]) -> ArchitectureManifest:
+    """Deserialize only the compact capability identity.
+
+    The top graph is intentionally selected by capability rather than by a
+    V-number.  This parser exists solely to reject an incompatible top on
+    resume; tensor shapes and provenance remain executable type contracts.
+    """
+
+    def integer(raw: object, name: str) -> int:
+        if not isinstance(raw, (int, str)):
+            raise ValueError(f"object-intent manifest {name} must be an integer")
+        return int(raw)
+
+    def boolean(raw: object, name: str) -> bool:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, int) and raw in (0, 1):
+            return bool(raw)
+        raise ValueError(f"object-intent manifest {name} must be a boolean")
+
+    topology_value = value.get("topology", ())
+    interval_value = value.get("intervals", ())
+    if not isinstance(topology_value, (tuple, list)):
+        raise ValueError("object-intent manifest topology must be a sequence")
+    if not isinstance(interval_value, (tuple, list)):
+        raise ValueError("object-intent manifest intervals must be a sequence")
+    topology_items = cast(tuple[object, ...] | list[object], topology_value)
+    interval_items = cast(tuple[object, ...] | list[object], interval_value)
+    intervals: list[tuple[int, ...]] = []
+    for index, interval in enumerate(interval_items):
+        if not isinstance(interval, (tuple, list)):
+            raise ValueError(
+                f"object-intent manifest interval {index} must be a sequence"
+            )
+        interval_sequence = cast(tuple[object, ...] | list[object], interval)
+        intervals.append(
+            tuple(
+                integer(item, f"intervals[{index}]")
+                for item in interval_sequence
+            )
+        )
+    topology = tuple(integer(item, "topology") for item in topology_items)
+    if len(topology) != 3:
+        raise ValueError("object-intent manifest topology must have three entries")
+    if any(len(interval) != 2 for interval in intervals):
+        raise ValueError("object-intent manifest intervals must contain pairs")
+    manifest = ArchitectureManifest(
+        capability=str(value.get("capability", "")),
+        schema=integer(value.get("schema", -1), "schema"),
+        topology=cast(tuple[int, int, int], topology),
+        intervals=cast(tuple[tuple[int, int], ...], tuple(intervals)),
+        object_slots=integer(value.get("object_slots", -1), "object_slots"),
+        language_required=boolean(
+            value.get("language_required", False), "language_required"
+        ),
+        bottom_compatibility=str(value.get("bottom_compatibility", "")),
+    )
+    manifest.validate()
+    return manifest
 
 
 def _shape(value: Tensor, expected: tuple[int, ...], name: str) -> None:
@@ -126,6 +190,13 @@ class ObjectFactSet:
     validity: Tensor  # [B,K,1]
     object_to_chart: Tensor  # read posterior [B,K,C,Y,X]
     candidate_assignment: Tensor  # joint local-prior competition mass [B,K,C,Y,X,M]
+    # One physical K+null assignment owns object identity.  These three
+    # posteriors are bounded verification reads inside that physical support;
+    # they may refine which evidence explains an object but cannot create a
+    # second object identity or move mass to null.
+    semantic_candidate_assignment: Tensor  # [B,K,C,Y,X,M]
+    appearance_candidate_assignment: Tensor  # [B,K,C,Y,X,M]
+    geometry_candidate_assignment: Tensor  # [B,K,C,Y,X,M]
     null_assignment: Tensor  # joint local-prior null mass [B,C,Y,X,M]
     reconstructed_dino: Tensor  # [B,C,Y,X,D]
     reconstruction_error: Tensor  # scalar, not weighted here
@@ -161,6 +232,16 @@ class ObjectFactSet:
             (batch, objects, *candidates.shape[1:5]),
             "candidate assignment",
         )
+        for name in (
+            "semantic_candidate_assignment",
+            "appearance_candidate_assignment",
+            "geometry_candidate_assignment",
+        ):
+            _shape(
+                getattr(self, name),
+                (batch, objects, *candidates.shape[1:5]),
+                name.replace("_", " "),
+            )
         _shape(self.null_assignment, tuple(candidates.shape[:5]), "null assignment")
         _shape(self.reconstructed_dino, tuple(chart.shape), "reconstructed DINO")
         if self.reconstruction_error.ndim != 0:
@@ -185,9 +266,91 @@ class ObjectFactSet:
             validity=self.validity[:, index],
             object_to_chart=self.object_to_chart[:, index],
             candidate_assignment=self.candidate_assignment[:, index],
+            semantic_candidate_assignment=(
+                self.semantic_candidate_assignment[:, index]
+            ),
+            appearance_candidate_assignment=(
+                self.appearance_candidate_assignment[:, index]
+            ),
+            geometry_candidate_assignment=(
+                self.geometry_candidate_assignment[:, index]
+            ),
             null_assignment=self.null_assignment,
             reconstructed_dino=self.reconstructed_dino,
             reconstruction_error=self.reconstruction_error,
+        )
+
+
+@dataclass(frozen=True)
+class ObjectFactualDock:
+    """The single current-fact bridge from global K objects into P1/P2.
+
+    ``fact_by_object`` is read from the high-resolution current observation
+    under the corresponding global-object support.  It is not reconstructed
+    by expanding an already pooled P1 value.  ``aggregate_fact`` is the actual
+    P1 update delivered to the policy trajectory.  P2 reuses the same K/null
+    posterior and chart coordinates instead of inventing another object basis.
+    """
+
+    fact_by_object: Tensor  # [B,T,Q,K,H], conditional values
+    object_posterior: Tensor  # [B,T,Q,K]
+    null_posterior: Tensor  # [B,T,Q,1]
+    chart_posterior: Tensor  # [B,T,Q,K,C,Y,X]
+    coordinates: Tensor  # [B,T,Q,K,2]
+    aggregate_fact: Tensor  # [B,T,Q,H]
+
+    @property
+    def objects(self) -> int:
+        return int(self.fact_by_object.shape[3])
+
+    def validate(self) -> None:
+        if self.fact_by_object.ndim != 5:
+            raise ValueError("object factual values must be [B,T,Q,K,H]")
+        batch, horizon, basis, objects, hidden = self.fact_by_object.shape
+        _shape(
+            self.object_posterior,
+            (batch, horizon, basis, objects),
+            "object factual posterior",
+        )
+        _shape(
+            self.null_posterior,
+            (batch, horizon, basis, 1),
+            "object factual null posterior",
+        )
+        if (
+            self.chart_posterior.ndim != 7
+            or tuple(self.chart_posterior.shape[:4])
+            != (batch, horizon, basis, objects)
+        ):
+            raise ValueError(
+                "object factual chart posterior must be [B,T,Q,K,C,Y,X]"
+            )
+        _shape(
+            self.coordinates,
+            (batch, horizon, basis, objects, 2),
+            "object factual coordinates",
+        )
+        _shape(
+            self.aggregate_fact,
+            (batch, horizon, basis, hidden),
+            "object factual aggregate",
+        )
+        # Numerical invariants are checked at construction/preflight.  P2
+        # calls this shape validator at every ODE step, so value reductions or
+        # Python ``bool`` conversions here would introduce a GPU sync into the
+        # deployment hot path.
+
+    def permute(self, permutation: Tensor) -> "ObjectFactualDock":
+        if permutation.ndim != 1 or int(permutation.numel()) != self.objects:
+            raise ValueError("object factual permutation must cover every K slot")
+        index = permutation.to(device=self.fact_by_object.device, dtype=torch.long)
+        return ObjectFactualDock(
+            fact_by_object=self.fact_by_object[:, :, :, index],
+            object_posterior=self.object_posterior[:, :, :, index],
+            null_posterior=self.null_posterior,
+            chart_posterior=self.chart_posterior[:, :, :, index],
+            coordinates=self.coordinates[:, :, :, index],
+            aggregate_fact=self.aggregate_fact,
         )
 
 
@@ -202,6 +365,10 @@ class ObjectIntentState:
     appearance_object_tokens: Tensor  # [B,K,H]
     geometry_object_tokens: Tensor  # [B,K,H]
     interval_queries: Tensor  # [B,4,H]
+    interval_action_queries: Tensor  # [B,4,H]
+    interval_state_queries: Tensor  # [B,4,H]
+    interval_object_keys: Tensor  # [B,4,K,H]
+    interval_object_values: Tensor  # [B,4,K,H]
     temporal_queries: Tensor  # [B,T,H]
     # A zero-centred value built only from observed state deltas and current
     # transport.  It is not a phase, progress, completion, or terminal score.
@@ -218,11 +385,22 @@ class ObjectIntentState:
         batch = int(self.interval_queries.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
         _shape(self.interval_queries, (batch, 4, hidden), "interval queries")
+        _shape(
+            self.interval_action_queries,
+            (batch, 4, hidden),
+            "interval action queries",
+        )
+        _shape(
+            self.interval_state_queries,
+            (batch, 4, hidden),
+            "interval state queries",
+        )
         _shape(self.temporal_queries, (batch, horizon, hidden), "temporal queries")
         _shape(self.state_change_evidence, (batch, hidden), "state-change evidence")
         if self.object_tokens.ndim != 3:
             raise ValueError("object intent public tokens must be [B,K,H]")
         object_shape = tuple(self.object_tokens.shape)
+        objects = int(self.object_tokens.shape[1])
         for name in (
             "semantic_object_tokens",
             "appearance_object_tokens",
@@ -230,23 +408,66 @@ class ObjectIntentState:
         ):
             if tuple(getattr(self, name).shape) != object_shape:
                 raise ValueError(f"{name} lost the global-object axis")
+        _shape(
+            self.interval_object_keys,
+            (batch, 4, objects, hidden),
+            "interval object keys",
+        )
+        _shape(
+            self.interval_object_values,
+            (batch, 4, objects, hidden),
+            "interval object values",
+        )
 
 
 @dataclass(frozen=True)
 class FuturePlanRecognition:
-    """Training-only posterior target for online interval intent."""
+    """Factorized training-only targets for the online intent organizer."""
 
-    interval_targets: Tensor  # [B,4,H], detached at online matching boundary
-    action_summary: Tensor  # [B,4,A]
-    state_summary: Tensor  # [B,4,S]
-    effect_summary: Tensor  # [B,4,D]
+    action_targets: Tensor  # [B,4,H]
+    state_targets: Tensor  # [B,4,H]
+    object_key_targets: Tensor  # [B,4,K,H]
+    object_value_targets: Tensor  # [B,4,K,H]
+    action_summary: Tensor  # [B,4,3*A] start/end/change
+    state_summary: Tensor  # [B,4,3*S] start/end/change
+    effect_summary: Tensor  # [B,4,K,D+2] semantic/transport
+    object_validity: Tensor  # [B,4,K,1]
     reconstruction_loss: Tensor
+
+    def validate(self, *, hidden: int) -> None:
+        if self.action_targets.ndim != 3:
+            raise ValueError("recognizer action target must be [B,4,H]")
+        batch = int(self.action_targets.shape[0])
+        _shape(self.action_targets, (batch, 4, hidden), "action targets")
+        _shape(self.state_targets, (batch, 4, hidden), "state targets")
+        if (
+            self.object_key_targets.ndim != 4
+            or tuple(self.object_key_targets.shape[:2]) != (batch, 4)
+            or int(self.object_key_targets.shape[-1]) != hidden
+        ):
+            raise ValueError("recognizer object keys must be [B,4,K,H]")
+        _shape(
+            self.object_value_targets,
+            tuple(self.object_key_targets.shape),
+            "recognizer object values",
+        )
+        _shape(
+            self.object_validity,
+            (*self.object_key_targets.shape[:-1], 1),
+            "recognizer object validity",
+        )
+        if self.action_summary.ndim != 3 or self.state_summary.ndim != 3:
+            raise ValueError("recognizer action/state summaries lost interval axis")
+        if self.effect_summary.ndim != 4:
+            raise ValueError("recognizer effect summary lost object axis")
+        if self.reconstruction_loss.ndim != 0:
+            raise ValueError("recognizer reconstruction loss must be scalar")
 
 
 @dataclass(frozen=True)
 class CoarseActionIntentState:
     tokens: Tensor  # [B,4,H]
-    action_prediction: Tensor  # [B,4,A]
+    action_prediction: Tensor  # [B,4,3*A] start/end/change
     target: Tensor | None
     loss: Tensor
 

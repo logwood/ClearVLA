@@ -20,14 +20,32 @@ class ObjectFutureTeacher(nn.Module):
     never enters the deployment forward path.
     """
 
-    def __init__(self, *, content_dim: int, key_dim: int = 64) -> None:
+    def __init__(
+        self,
+        *,
+        content_dim: int,
+        key_dim: int = 64,
+    ) -> None:
         super().__init__()
         self.content_dim = int(content_dim)
         self.key_dim = int(key_dim)
-        self.semantic_key = nn.Linear(content_dim, key_dim, bias=False)
+        self.semantic_content_key = nn.Linear(
+            content_dim, key_dim, bias=False
+        )
+        self.appearance_content_key = nn.Linear(
+            content_dim, key_dim, bias=False
+        )
         with torch.no_grad():
-            nn.init.orthogonal_(self.semantic_key.weight)
-        self.semantic_key.requires_grad_(False)
+            for module in (
+                self.semantic_content_key,
+                self.appearance_content_key,
+            ):
+                nn.init.orthogonal_(module.weight)
+        for module in (
+            self.semantic_content_key,
+            self.appearance_content_key,
+        ):
+            module.requires_grad_(False)
 
     @staticmethod
     def _offsets(offsets: Tensor, *, batch: int, supports: int) -> Tensor:
@@ -37,8 +55,10 @@ class ObjectFutureTeacher(nn.Module):
             return offsets[None].expand(batch, -1)
         if tuple(offsets.shape) != (batch, supports):
             raise ValueError("future offsets must be [F] or [B,F]")
-        if not bool((offsets == offsets[:1]).all()):
-            raise ValueError("batched future offsets must agree across the batch")
+        # Per-example offsets are legal and handled by the vectorized interval
+        # masks below.  Avoid a tensor-to-Python equality check here: Teacher
+        # runs once per training batch and such a check would force a device
+        # synchronization without protecting an actual semantic invariant.
         return offsets
 
     @torch.no_grad()
@@ -89,13 +109,56 @@ class ObjectFutureTeacher(nn.Module):
             supports=supports,
         )
         objects = facts.objects
-        current_key = F.normalize(
-            self.semantic_key(facts.content.detach().float()), dim=-1, eps=1e-4
+        candidate_content = facts.dense_chart.candidate_content.detach().float()
+
+        def typed_current(
+            assignment: Tensor, value: Tensor
+        ) -> Tensor:
+            weight = assignment.detach().float().flatten(2)
+            weight = weight / weight.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            flat_value = value.detach().float().flatten(1, -2)
+            return torch.einsum("bkn,bnd->bkd", weight, flat_value)
+
+        # The typed G posterior selects full-DINO current content before the
+        # fixed association projection.  This keeps current/future keys in one
+        # measurable space; comparing a learned route vector with an unrelated
+        # random DINO projection would only manufacture an appearance score.
+        semantic_current_content = typed_current(
+            facts.semantic_candidate_assignment, candidate_content
         )
-        support_key = F.normalize(
-            self.semantic_key(future_supports.detach().float()), dim=-1, eps=1e-4
+        appearance_current_content = typed_current(
+            facts.appearance_candidate_assignment, candidate_content
         )
-        semantic = torch.einsum("bkr,bfcyxr->bfkcyx", current_key, support_key)
+        current_semantic_key = F.normalize(
+            self.semantic_content_key(semantic_current_content),
+            dim=-1,
+            eps=1e-4,
+        )
+        support_semantic_key = F.normalize(
+            self.semantic_content_key(future_supports.detach().float()),
+            dim=-1,
+            eps=1e-4,
+        )
+        semantic = torch.einsum(
+            "bkr,bfcyxr->bfkcyx",
+            current_semantic_key,
+            support_semantic_key,
+        )
+        current_appearance_key = F.normalize(
+            self.appearance_content_key(appearance_current_content),
+            dim=-1,
+            eps=1e-4,
+        )
+        support_appearance_key = F.normalize(
+            self.appearance_content_key(future_supports.detach().float()),
+            dim=-1,
+            eps=1e-4,
+        )
+        appearance = torch.einsum(
+            "bkr,bfcyxr->bfkcyx",
+            current_appearance_key,
+            support_appearance_key,
+        )
         axis_y = torch.linspace(-1.0, 1.0, rows, device=future_supports.device)
         axis_x = torch.linspace(-1.0, 1.0, columns, device=future_supports.device)
         coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
@@ -106,13 +169,21 @@ class ObjectFutureTeacher(nn.Module):
         # This is the explicit source->learned-flow displacement exported by
         # G3.  It is only a bounded prior: semantic matching remains global
         # within the camera, so zero flow and non-equal-pixel motion are legal.
+        geometry_coordinate = typed_current(
+            facts.geometry_candidate_assignment,
+            facts.dense_chart.candidate_coordinates,
+        )
+        geometry_support = typed_current(
+            facts.geometry_candidate_assignment,
+            facts.dense_chart.candidate_support[..., None],
+        )
         flow_hint = torch.tanh(facts.transport_prior.detach().float())
-        prior = facts.coordinates.detach().float()[:, None] + (
+        prior = geometry_coordinate[:, None] + (
             fraction[:, :, None, None] * flow_hint[:, None]
         )
         prior = prior.clamp(-1.0, 1.0)
         delta = coordinate - prior[:, :, :, None, None, None]
-        support_width = facts.support.detach().float().clamp(0.03, 1.0)
+        support_width = geometry_support.detach().float().clamp(0.03, 1.0)
         geometry = -0.5 * delta.square().sum(dim=-1) / (
             support_width[..., 0][:, None, :, None, None, None].square()
             + 0.08
@@ -127,7 +198,8 @@ class ObjectFutureTeacher(nn.Module):
         # merely because it competes with Y*X cells.  A fixed contrastive
         # temperature then rewards genuinely matching DINO evidence.
         candidate_logit = (
-            6.0 * semantic
+            4.5 * semantic
+            + 1.5 * appearance
             + geometry
             + camera_log
             - math.log(float(max(rows * columns, 1)))
@@ -200,20 +272,59 @@ class ObjectFutureTeacher(nn.Module):
         persistence_rows: list[Tensor] = []
         uncertainty_rows: list[Tensor] = []
         address_rows: list[Tensor] = []
+        semantic_end_rows: list[Tensor] = []
         support_counts: list[Tensor] = []
         for lower, upper in INTERVAL_BOUNDS:
             selected = ((offsets >= lower) & (offsets <= upper)).float()
             # Configured support sets normally cover every interval.  The
             # fallback selects the nearest support deterministically without
             # creating a zero/random target.
-            if not bool((selected.sum(dim=1) > 0).all()):
-                midpoint = 0.5 * float(lower + upper)
-                nearest = (offsets.float() - midpoint).abs().argmin(dim=1)
-                selected = F.one_hot(nearest, num_classes=supports).float()
+            midpoint = 0.5 * float(lower + upper)
+            nearest = (offsets.float() - midpoint).abs().argmin(dim=1)
+            fallback = F.one_hot(nearest, num_classes=supports).float()
+            selected = torch.where(
+                (selected.sum(dim=1, keepdim=True) > 0.0),
+                selected,
+                fallback,
+            )
             weight = selected / selected.sum(dim=1, keepdim=True).clamp_min(1.0)
-            successor_rows.append(torch.einsum("bf,bfkd->bkd", weight, successor_per_support))
-            transport_rows.append(torch.einsum("bf,bfkd->bkd", weight, transport_per_support))
-            covariance_rows.append(torch.einsum("bf,bfkd->bkd", weight, covariance_per_support))
+            # Reliability is object-owned.  Averaging it across K before the
+            # temporal aggregation made every object choose the same support
+            # frames and was a direct common-mode pressure on W targets.
+            reliability = visibility_per_support[..., 0].clamp_min(0.05)
+            content_weight = selected[:, :, None] * reliability
+            content_weight = content_weight / content_weight.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1e-6)
+            interval_offset = offsets.float().clamp(float(lower), float(upper))
+            interval_position = (
+                interval_offset - float(lower)
+            ) / float(max(upper - lower, 1))
+            end_weight = (
+                selected[:, :, None]
+                * reliability
+                * torch.exp(2.0 * interval_position)[:, :, None]
+            )
+            end_weight = end_weight / end_weight.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1e-6)
+            interval_successor = torch.einsum(
+                "bfk,bfkd->bkd", content_weight, successor_per_support
+            )
+            interval_end = torch.einsum(
+                "bfk,bfkd->bkd", end_weight, successor_per_support
+            )
+            successor_rows.append(interval_successor)
+            transport_rows.append(
+                torch.einsum(
+                    "bfk,bfkd->bkd", content_weight, transport_per_support
+                )
+            )
+            covariance_rows.append(
+                torch.einsum(
+                    "bfk,bfkd->bkd", content_weight, covariance_per_support
+                )
+            )
             interval_visibility = torch.einsum(
                 "bf,bfkd->bkd", weight, visibility_per_support
             )
@@ -233,8 +344,28 @@ class ObjectFutureTeacher(nn.Module):
             )
             uncertainty_rows.append(
                 torch.einsum("bf,bfkd->bkd", weight, uncertainty_per_support)
+                + (
+                    torch.einsum(
+                        "bfk,bfkd->bkd",
+                        content_weight,
+                        (
+                            successor_per_support
+                            - interval_successor[:, None]
+                        ).square().mean(dim=-1, keepdim=True),
+                    )
+                ).sqrt()
             )
-            address_rows.append(torch.einsum("bf,bfkcyx->bkcyx", weight, candidate_posterior))
+            address_rows.append(
+                torch.einsum(
+                    "bfk,bfkcyx->bkcyx",
+                    content_weight,
+                    candidate_posterior,
+                )
+            )
+            # The end-biased successor is kept locally so semantic change is
+            # ordered rather than algebraically identical to the interval
+            # stable-content target.
+            semantic_end_rows.append(interval_end)
             support_counts.append(selected.sum(dim=1).float().mean())
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
@@ -243,17 +374,20 @@ class ObjectFutureTeacher(nn.Module):
         persistence_probability = torch.stack(persistence_rows, dim=1)
         uncertainty = torch.stack(uncertainty_rows, dim=1)
         future_address = torch.stack(address_rows, dim=1)
+        semantic_end = torch.stack(semantic_end_rows, dim=1)
         current_validity = facts.validity.detach().float()[:, None]
         # Current object facts are visible and persistent by construction.
         # Export changes around that current state so a neutral/static future
         # is exactly zero and cannot become a constant P2 value shortcut.
         visibility_change = visibility - 1.0
         persistence_change = persistence_probability - 1.0
-        validity = visibility * current_validity
+        validity = current_validity.expand(-1, len(INTERVAL_BOUNDS), -1, -1)
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
-            semantic_delta=successor - facts.content.detach().float()[:, None],
+            semantic_delta=(
+                semantic_end - facts.content.detach().float()[:, None]
+            ),
             transport_mean=transport,
             transport_covariance=covariance,
             visibility=visibility_change,
@@ -278,6 +412,17 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_semantic_margin": (
                 semantic.detach().float().amax(dim=(-3, -2, -1))
                 - semantic.detach().float().mean(dim=(-3, -2, -1))
+            ).mean(),
+            "object_teacher_appearance_max": appearance.detach().float().amax(
+                dim=(-3, -2, -1)
+            ).mean(),
+            "object_teacher_appearance_margin": (
+                appearance.detach().float().amax(dim=(-3, -2, -1))
+                - appearance.detach().float().mean(dim=(-3, -2, -1))
+            ).mean(),
+            "object_teacher_geometry_margin": (
+                geometry.detach().float().amax(dim=(-3, -2, -1))
+                - geometry.detach().float().mean(dim=(-3, -2, -1))
             ).mean(),
             "object_teacher_supports_per_interval": torch.stack(support_counts).mean(),
             "object_teacher_adjacent_cosine": F.cosine_similarity(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..role_delta_attnres import RoleDeltaAttnRes, smooth_rms_contract
@@ -139,10 +140,6 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
-        self.interval_object = _CrossRead(hidden, heads)
-        self.interval_semantic = _CrossRead(hidden, heads)
-        self.interval_appearance = _CrossRead(hidden, heads)
-        self.interval_geometry = _CrossRead(hidden, heads)
         self.interval_typed_router = RoleDeltaAttnRes(
             hidden,
             max(hidden // 8, 32),
@@ -152,6 +149,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
             normalization_floor=0.25,
         )
         self.interval_self = _SelfBlock(hidden, heads)
+        self.interval_state_self = _SelfBlock(hidden, heads)
+        self.interval_object_key = nn.Sequential(
+            nn.LayerNorm(hidden, elementwise_affine=False),
+            nn.Linear(hidden, 2 * hidden, bias=False),
+            nn.SiLU(),
+            nn.Linear(2 * hidden, hidden, bias=False),
+        )
+        self.interval_object_value = nn.Sequential(
+            nn.LayerNorm(hidden, elementwise_affine=False),
+            nn.Linear(hidden, 2 * hidden, bias=False),
+            nn.SiLU(),
+            nn.Linear(2 * hidden, hidden, bias=False),
+        )
         self.temporal_identity = nn.Parameter(torch.randn(1, horizon, hidden) * 0.02)
         self.temporal_read = _CrossRead(hidden, heads)
         # This branch is deliberately value-zero-preserving.  The learned
@@ -254,47 +264,78 @@ class StatelessObjectIntentOrganizer(nn.Module):
         history_value, history_innovation, interval_history_attention = self.interval_history(
             interval_base, history, diagnostics=collect_diagnostics
         )
-        object_value, object_innovation, interval_object_attention = self.interval_object(
-            interval_base, objects, diagnostics=collect_diagnostics
-        )
-        _, semantic_innovation, interval_semantic_attention = self.interval_semantic(
-            interval_base, semantic_objects, diagnostics=collect_diagnostics
-        )
-        _, appearance_innovation, interval_appearance_attention = self.interval_appearance(
-            interval_base, appearance_objects, diagnostics=collect_diagnostics
-        )
-        _, geometry_innovation, interval_geometry_attention = self.interval_geometry(
-            interval_base, geometry_objects, diagnostics=collect_diagnostics
-        )
-        typed_query = interval_base + goal_innovation + history_innovation
+        object_base = objects[:, None] + interval_base[:, :, None]
+        typed_query = object_base
         typed_innovation, typed_route_metrics = self.interval_typed_router(
             typed_query,
             torch.stack(
                 (
-                    semantic_innovation,
-                    appearance_innovation,
-                    geometry_innovation,
+                    semantic_objects[:, None].expand(-1, 4, -1, -1),
+                    appearance_objects[:, None].expand(-1, 4, -1, -1),
+                    geometry_objects[:, None].expand(-1, 4, -1, -1),
                 ),
                 dim=-2,
             ),
             collect_diagnostics=collect_diagnostics,
         )
-        # Identity is outside all attention softmaxes.  Typed innovations are
-        # formed separately and only then combined; no cumulative hidden is
-        # selected as a pseudo-owner.
-        intervals = self.interval_self(
+        # The canonical P1 query owns goal/history exactly once.  Global K
+        # object evidence is not pooled into this query and then reintroduced
+        # in W under another name.
+        interval_action_queries = self.interval_self(
             interval_base
             + goal_innovation
             + history_innovation
-            + object_innovation
-            + typed_innovation
         )
+        interval_state_queries = self.interval_state_self(
+            interval_base + history_innovation
+        )
+        # Object K/V are intent-conditioned interactions, not another copy of
+        # the protected current fact.  With a zero typed/object signal these
+        # bias-free paths are exactly zero; goal/history can nevertheless
+        # decide which current object is predictive for each future interval.
+        object_intent_context = torch.tanh(
+            (
+                interval_action_queries[:, :, None]
+                + interval_state_queries[:, :, None]
+            )
+            / (2.0**0.5)
+        )
+        object_key_seed = semantic_objects[:, None] * object_intent_context
+        object_value_seed = typed_innovation * object_intent_context
+        interval_object_keys = self.interval_object_key(object_key_seed)
+        interval_object_values = self.interval_object_value(object_value_seed)
+        intervals = interval_action_queries
         temporal_base = self.temporal_identity.to(
             device=intervals.device, dtype=intervals.dtype
         ).expand(batch, -1, -1)
         temporal, _, _ = self.temporal_read(
             temporal_base, intervals, diagnostics=False
         )
+        # Read-only diagnostics for object/type selectivity.  These scores do
+        # not create another S value path.
+        normalized_interval = F.normalize(intervals.float(), dim=-1, eps=1e-4)
+        normalized_object = F.normalize(
+            interval_object_keys.float(), dim=-1, eps=1e-4
+        )
+        interval_object_attention = torch.softmax(
+            torch.einsum(
+                "bih,bikh->bik", normalized_interval, normalized_object
+            ),
+            dim=-1,
+        )
+
+        def typed_attention(value: Tensor) -> Tensor:
+            normalized = F.normalize(value.float(), dim=-1, eps=1e-4)
+            return torch.softmax(
+                torch.einsum(
+                    "bih,bkh->bik", normalized_interval, normalized
+                ),
+                dim=-1,
+            )
+
+        interval_semantic_attention = typed_attention(semantic_objects)
+        interval_appearance_attention = typed_attention(appearance_objects)
+        interval_geometry_attention = typed_attention(geometry_objects)
         state_change_values = self.state_change_input(observed_state_delta)
         state_change_history, state_change_attention = self.state_change_read(
             self.state_change_query_norm(
@@ -333,6 +374,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             appearance_object_tokens=appearance_objects,
             geometry_object_tokens=geometry_objects,
             interval_queries=intervals,
+            interval_action_queries=interval_action_queries,
+            interval_state_queries=interval_state_queries,
+            interval_object_keys=interval_object_keys,
+            interval_object_values=interval_object_values,
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
             goal_attention=goal_attention,
@@ -369,12 +414,29 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_interval_variation": intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
+            "object_intent_interval_state_variation": (
+                interval_state_queries.detach().float().std(
+                    dim=1, unbiased=False
+                ).mean()
+            ),
+            "object_intent_interval_object_key_variation": (
+                interval_object_keys.detach().float().std(
+                    dim=1, unbiased=False
+                ).mean()
+            ),
+            "object_intent_interval_object_value_variation": (
+                interval_object_values.detach().float().std(
+                    dim=1, unbiased=False
+                ).mean()
+            ),
             "object_intent_temporal_variation": temporal.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_object_innovation_rms": (
+                interval_object_values.detach().float().square().mean().sqrt()
+            ),
             "object_intent_typed_innovation_rms": typed_innovation.detach().float().square().mean().sqrt(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": facts.transport_prior.detach().float().square().mean().sqrt(),
@@ -388,12 +450,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
         for key, value in typed_route_metrics.items():
             metrics[f"object_intent_typed_{key}"] = value
         # Keep lints honest: the value paths are intentionally not combined.
-        del goal_value, history_value, object_value
+        del goal_value, history_value
         return state_out, metrics
 
 
 class FuturePlanRecognizer(nn.Module):
-    """Training-only whole-segment posterior, never an online action value."""
+    """Training-only factorized posterior, never an online action value.
+
+    Future action order, state endpoints and global-K object effects remain
+    separate.  The online organizer is supervised at those four boundaries;
+    no temporal/object mean is added into a single hidden label.
+    """
 
     def __init__(
         self,
@@ -410,13 +477,92 @@ class FuturePlanRecognizer(nn.Module):
         self.state_dim = int(state_dim)
         self.content_dim = int(content_dim)
         self.action_input = nn.Linear(action_dim, hidden, bias=False)
-        self.state_input = nn.Linear(state_dim, hidden, bias=False)
-        self.effect_input = nn.Linear(content_dim, hidden, bias=False)
-        self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
-        self.block = _SelfBlock(hidden, heads)
-        self.action_reconstruction = nn.Linear(hidden, action_dim, bias=False)
-        self.state_reconstruction = nn.Linear(hidden, state_dim, bias=False)
-        self.effect_reconstruction = nn.Linear(hidden, content_dim, bias=False)
+        self.action_key = nn.Linear(hidden, hidden, bias=False)
+        self.action_value = nn.Linear(hidden, hidden, bias=False)
+        self.action_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.action_time = nn.Linear(2, hidden, bias=False)
+        self.action_block = _SelfBlock(hidden, heads)
+        self.state_input = nn.Linear(3 * state_dim, hidden, bias=False)
+        self.state_block = _SelfBlock(hidden, heads)
+        self.effect_key_input = nn.Linear(content_dim + 5, hidden, bias=False)
+        self.effect_value_input = nn.Linear(content_dim + 2, hidden, bias=False)
+        self.effect_key_block = _SelfBlock(hidden, heads)
+        self.effect_value_block = _SelfBlock(hidden, heads)
+        self.interval_identity = nn.Parameter(
+            torch.randn(1, 4, hidden) * 0.02
+        )
+        self.action_reconstruction = nn.Linear(
+            hidden, 3 * action_dim, bias=False
+        )
+        self.state_reconstruction = nn.Linear(
+            hidden, 3 * state_dim, bias=False
+        )
+        self.effect_key_reconstruction = nn.Linear(
+            hidden, content_dim + 5, bias=False
+        )
+        self.effect_value_reconstruction = nn.Linear(
+            hidden, content_dim + 2, bias=False
+        )
+
+    @staticmethod
+    def _endpoint_summary(
+        value: Tensor, slices: tuple[slice, ...]
+    ) -> Tensor:
+        rows: list[Tensor] = []
+        for row in slices:
+            segment = value[:, row]
+            start = segment[:, 0]
+            end = segment[:, -1]
+            rows.append(torch.cat((start, end, end - start), dim=-1))
+        return torch.stack(rows, dim=1)
+
+    def _ordered_action_tokens(
+        self,
+        action: Tensor,
+        slices: tuple[slice, ...],
+    ) -> Tensor:
+        batch, length = action.shape[:2]
+        position = torch.linspace(
+            0.0,
+            1.0,
+            length,
+            device=action.device,
+            dtype=action.dtype,
+        )
+        time_feature = torch.stack(
+            (2.0 * position - 1.0, position.square()), dim=-1
+        )
+        sequence = self.action_input(action) + self.action_time(
+            time_feature
+        )[None]
+        query = self.action_queries.to(
+            device=action.device, dtype=sequence.dtype
+        ).expand(batch, -1, -1)
+        key = F.normalize(self.action_key(sequence).float(), dim=-1, eps=1e-4)
+        normalized_query = F.normalize(query.float(), dim=-1, eps=1e-4)
+        score = torch.einsum("bih,blh->bil", normalized_query, key)
+        legal = torch.zeros(4, length, device=action.device, dtype=torch.bool)
+        for index, row in enumerate(slices):
+            legal[index, row] = True
+        score = score.masked_fill(~legal[None], -1.0e4)
+        weight = torch.softmax(score, dim=-1)
+        update = torch.einsum(
+            "bil,blh->bih", weight.to(dtype=sequence.dtype), self.action_value(sequence)
+        )
+        return self.action_block(query + update, causal=True)
+
+    @staticmethod
+    def _masked_mse(
+        prediction: Tensor,
+        target: Tensor,
+        weight: Tensor,
+    ) -> Tensor:
+        error = (prediction.float() - target.detach().float()).square()
+        expanded_weight = weight.detach().float()
+        while expanded_weight.ndim < error.ndim:
+            expanded_weight = expanded_weight.unsqueeze(-1)
+        expanded_weight = expanded_weight.expand_as(error)
+        return (error * expanded_weight).sum() / expanded_weight.sum().clamp_min(1.0)
 
     def forward(
         self,
@@ -428,64 +574,97 @@ class FuturePlanRecognizer(nn.Module):
         if future_action.ndim != 3 or future_state.ndim != 3:
             raise ValueError("plan recognizer requires full future action/state sequences")
         length = min(int(future_action.shape[1]), int(future_state.shape[1]))
+        future_action = future_action[:, :length]
+        future_state = future_state[:, :length]
         slices = _interval_slices(length)
-        action_summary = torch.stack(
-            [future_action[:, row].mean(dim=1) for row in slices], dim=1
+        action_summary = self._endpoint_summary(future_action, slices)
+        state_summary = self._endpoint_summary(future_state, slices)
+        action_token = self._ordered_action_tokens(future_action, slices)
+        interval_identity = self.interval_identity.to(
+            device=future_action.device, dtype=action_token.dtype
         )
-        state_summary = torch.stack(
-            [future_state[:, row].mean(dim=1) for row in slices], dim=1
+        state_token = self.state_block(
+            self.state_input(state_summary) + interval_identity,
+            causal=True,
         )
         if teacher is None:
             effect_summary = future_action.new_zeros(
-                future_action.shape[0], 4, self.content_dim
+                future_action.shape[0], 4, 4, self.content_dim + 2
+            )
+            effect_key_summary = future_action.new_zeros(
+                future_action.shape[0], 4, 4, self.content_dim + 5
             )
             teacher_valid = future_action.new_zeros(
-                future_action.shape[0], 4, 1
+                future_action.shape[0], 4, 4, 1
             )
         else:
             teacher.validate()
-            effect_summary = (
-                teacher.semantic_delta
-                * teacher.validity.to(dtype=teacher.semantic_delta.dtype)
-            ).sum(dim=2) / teacher.validity.sum(dim=2).clamp_min(1e-6)
-            teacher_valid = teacher.validity.mean(dim=2)
-        token = (
-            self.action_input(action_summary)
-            + self.state_input(state_summary)
-            + self.effect_input(effect_summary)
-            + self.interval_identity.to(
-                device=future_action.device, dtype=future_action.dtype
-            )
+            effect_summary = torch.cat(
+                (teacher.semantic_delta, teacher.transport_mean), dim=-1
+            ).detach()
+            effect_key_summary = torch.cat(
+                (
+                    teacher.semantic_delta,
+                    teacher.transport_mean,
+                    teacher.transport_covariance,
+                ),
+                dim=-1,
+            ).detach()
+            teacher_valid = teacher.validity.detach()
+        batch, intervals, objects = effect_summary.shape[:3]
+        object_identity = interval_identity[:, :, None].expand(
+            batch, -1, objects, -1
         )
-        token = self.block(token)
-        action_pred = self.action_reconstruction(token)
-        state_pred = self.state_reconstruction(token)
-        effect_pred = self.effect_reconstruction(token)
-        effect_error = (
-            (effect_pred.float() - effect_summary.detach().float()).square()
-            * teacher_valid.detach().float()
-        ).sum() / teacher_valid.detach().float().sum().clamp_min(1.0) / float(
-            self.content_dim
+        object_key = self.effect_key_input(effect_key_summary) + object_identity
+        object_value = self.effect_value_input(effect_summary) + object_identity
+        object_key = self.effect_key_block(
+            object_key.transpose(1, 2).reshape(batch * objects, intervals, self.hidden),
+            causal=True,
+        ).reshape(batch, objects, intervals, self.hidden).transpose(1, 2)
+        object_value = self.effect_value_block(
+            object_value.transpose(1, 2).reshape(
+                batch * objects, intervals, self.hidden
+            ),
+            causal=True,
+        ).reshape(batch, objects, intervals, self.hidden).transpose(1, 2)
+        action_pred = self.action_reconstruction(action_token)
+        state_pred = self.state_reconstruction(state_token)
+        effect_key_pred = self.effect_key_reconstruction(object_key)
+        effect_value_pred = self.effect_value_reconstruction(object_value)
+        effect_error = 0.5 * (
+            self._masked_mse(
+                effect_key_pred, effect_key_summary, teacher_valid
+            )
+            + self._masked_mse(
+                effect_value_pred, effect_summary, teacher_valid
+            )
         )
         reconstruction = (
             (action_pred.float() - action_summary.detach().float()).square().mean()
             + (state_pred.float() - state_summary.detach().float()).square().mean()
             + 0.25 * effect_error
         )
-        return FuturePlanRecognition(
-            interval_targets=token.detach(),
+        result = FuturePlanRecognition(
+            action_targets=action_token.detach(),
+            state_targets=state_token.detach(),
+            object_key_targets=object_key.detach(),
+            object_value_targets=object_value.detach(),
             action_summary=action_summary.detach(),
             state_summary=state_summary.detach(),
             effect_summary=effect_summary.detach(),
+            object_validity=teacher_valid.detach(),
             reconstruction_loss=reconstruction,
         )
+        result.validate(hidden=self.hidden)
+        return result
 
 
 class CoarseActionIntent(nn.Module):
     """The sole online action-conditioned input to W.
 
-    It is predicted from current objects, observable intent and executed
-    history; it never reads the denoising proposal or noisy action.
+    It is predicted from the factorized online S state; it never re-reads raw
+    goal/history/G aliases and never reads the denoising proposal or noisy
+    action.
     """
 
     def __init__(
@@ -499,10 +678,9 @@ class CoarseActionIntent(nn.Module):
         self.action_dim = int(action_dim)
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.intent_read = _CrossRead(hidden, heads)
+        self.state_read = _CrossRead(hidden, heads)
         self.object_read = _CrossRead(hidden, heads)
-        self.semantic_read = _CrossRead(hidden, heads)
-        self.appearance_read = _CrossRead(hidden, heads)
-        self.geometry_read = _CrossRead(hidden, heads)
+        self.object_key_read = _CrossRead(hidden, heads)
         self.typed_router = RoleDeltaAttnRes(
             hidden,
             max(hidden // 8, 32),
@@ -511,9 +689,8 @@ class CoarseActionIntent(nn.Module):
             max_value_rms=0.35,
             normalization_floor=0.25,
         )
-        self.history_read = _CrossRead(hidden, heads)
         self.block = _SelfBlock(hidden, heads)
-        self.action_head = nn.Linear(hidden, action_dim, bias=False)
+        self.action_head = nn.Linear(hidden, 3 * action_dim, bias=False)
 
     def forward(
         self,
@@ -526,27 +703,36 @@ class CoarseActionIntent(nn.Module):
             device=intent.interval_queries.device,
             dtype=intent.interval_queries.dtype,
         ).expand(batch, -1, -1)
-        _, intent_delta, _ = self.intent_read(query, intent.interval_queries)
-        _, object_delta, _ = self.object_read(query, intent.object_tokens)
-        _, semantic_delta, _ = self.semantic_read(
-            query, intent.semantic_object_tokens
+        _, intent_delta, _ = self.intent_read(
+            query, intent.interval_action_queries
         )
-        _, appearance_delta, _ = self.appearance_read(
-            query, intent.appearance_object_tokens
+        _, state_delta, _ = self.state_read(
+            query, intent.interval_state_queries
         )
-        _, geometry_delta, _ = self.geometry_read(
-            query, intent.geometry_object_tokens
+        interval_query = query.reshape(batch * 4, 1, -1)
+        object_memory = intent.interval_object_values.reshape(
+            batch * 4, intent.interval_object_values.shape[2], -1
         )
+        object_key_memory = intent.interval_object_keys.reshape(
+            batch * 4, intent.interval_object_keys.shape[2], -1
+        )
+        _, object_delta, _ = self.object_read(
+            interval_query, object_memory
+        )
+        _, object_key_delta, _ = self.object_key_read(
+            interval_query, object_key_memory
+        )
+        object_delta = object_delta.reshape(batch, 4, -1)
+        object_key_delta = object_key_delta.reshape(batch, 4, -1)
         typed_delta, _ = self.typed_router(
-            query + intent_delta + object_delta,
+            query + intent_delta,
             torch.stack(
-                (semantic_delta, appearance_delta, geometry_delta), dim=-2
+                (state_delta, object_key_delta, object_delta), dim=-2
             ),
             collect_diagnostics=False,
         )
-        _, history_delta, _ = self.history_read(query, intent.history_tokens)
         token = self.block(
-            query + intent_delta + object_delta + typed_delta + history_delta
+            query + intent_delta + typed_delta
         )
         action_prediction = self.action_head(token)
         if future_action is None:
@@ -554,8 +740,8 @@ class CoarseActionIntent(nn.Module):
             loss = action_prediction.new_zeros(())
         else:
             slices = _interval_slices(int(future_action.shape[1]))
-            target = torch.stack(
-                [future_action[:, row].mean(dim=1) for row in slices], dim=1
+            target = FuturePlanRecognizer._endpoint_summary(
+                future_action, slices
             ).detach()
             loss = (action_prediction.float() - target.float()).square().mean()
         return CoarseActionIntentState(

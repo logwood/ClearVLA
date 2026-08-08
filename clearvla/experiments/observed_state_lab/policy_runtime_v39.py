@@ -33,6 +33,9 @@ from clearvla.policy.grounded_intent_effect import (
     StatelessIntentOrganizer,
     manifest_from_mapping,
 )
+from clearvla.policy.object_intent_dynamics_323 import (
+    manifest_from_mapping as object_intent_manifest_from_mapping,
+)
 from clearvla.policy.system import V39PolicySystem
 
 from .policy_runtime_v36_3 import (
@@ -3947,11 +3950,21 @@ def object_intent_dynamics_terms(
         direction = 1.0 - (
             prediction_direction * teacher_direction
         ).mean(dim=-1, keepdim=True)
-        return raw + normalized + 0.10 * direction
+        # A genuinely zero semantic change has no defined direction.  Without
+        # this smooth target-strength factor, an exact zero prediction/target
+        # pair contributes a constant 0.1 loss (and near-zero teacher noise can
+        # dominate the useful magnitude objective).  Non-trivial targets keep
+        # the directional term; static targets reduce exactly to magnitude
+        # matching and therefore do not create a forced-nonzero shortcut.
+        direction_strength = teacher_rms.square() / (
+            teacher_rms.square() + scale_floor.square()
+        )
+        return raw + normalized + 0.10 * direction_strength * direction
 
     result: dict[str, Tensor] = {}
     future_total = zero
     semantic_rows: Tensor | None = None
+    component_losses: dict[str, Tensor] = {}
     for (
         name,
         prediction_key,
@@ -3974,13 +3987,16 @@ def object_intent_dynamics_terms(
         # value: null mass blends successor back to the current fact, motion
         # to zero, visibility to zero and uncertainty upward.  Multiplying by
         # reliability again would erase precisely those conservative fallback
-        # targets and recreate an unsupervised W direction.  Current object
-        # existence is therefore the sole loss mask for every field.
+        # targets and recreate an unsupervised W direction.  The physical
+        # current-object validity derived from allocated chart support is
+        # therefore the sole loss mask for every field.
         weight = validity_weight
         denominator = weight.sum().clamp_min(1.0)
         component = (rows * weight).sum() / denominator
-        result[f"object_future_{name}"] = component
-        future_total = future_total + float(internal_weight) * component
+        component_losses[name] = component
+        if name not in {"successor", "semantic"}:
+            result[f"object_future_{name}"] = component
+            future_total = future_total + float(internal_weight) * component
         if name == "semantic":
             semantic_rows = rows
         squared_error = (
@@ -4011,6 +4027,16 @@ def object_intent_dynamics_terms(
             ] = (error_rms / target_rms).detach()
     if semantic_rows is None:
         raise RuntimeError("object future dynamics lost semantic rows")
+    # Stable interval content and ordered end-state change are two views of
+    # one future-content objective.  They retain separate diagnostics above,
+    # but no longer own duplicate top-level losses.
+    content_weight = 0.30 + 0.25
+    content_objective = (
+        0.30 * component_losses["successor"]
+        + 0.25 * component_losses["semantic"]
+    ) / content_weight
+    result["object_future_content"] = content_objective
+    future_total = future_total + content_weight * content_objective
     semantic_prediction = output["object_future_semantic_prediction"].float()
     semantic_target = output["object_future_semantic_target"].detach().float()
     transition_rows = row_loss(
@@ -11942,7 +11968,8 @@ def _validate_object_intent_preflight_output(
         "object_intent_state_change_evidence",
         "object_future_semantic_prediction",
         "object_consequence_protected",
-        "object_policy_plan_effect",
+        "flow_jepa_policy_plan_precision",
+        "flow_jepa_policy_plan_temporal",
         "object_policy_plan_state_change",
     ):
         value = output.get(key)
@@ -12834,6 +12861,7 @@ _FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v118",
         "v119",
         "v120",
+        "v121",
     }
 )
 _RAW_FLOW_JEPA_LOG_VERSIONS = frozenset(
@@ -12862,6 +12890,7 @@ _RAW_FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v118",
         "v119",
         "v120",
+        "v121",
     }
 )
 _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS = frozenset(
@@ -12887,6 +12916,7 @@ _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v118",
         "v119",
         "v120",
+        "v121",
     }
 )
 _BALANCED_FLOW_JEPA_LOG_VERSIONS = frozenset(
@@ -12911,6 +12941,7 @@ _BALANCED_FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v118",
         "v119",
         "v120",
+        "v121",
     }
 )
 
@@ -12923,7 +12954,7 @@ def _evidence_log_version(*rows: dict[str, float]) -> str:
         )
 
     if maximum("object_intent_dynamics_active") > 0.5:
-        return "v120"
+        return "v121"
     if maximum("grounded_intent_effect_active") > 0.5:
         return "v119"
     if maximum("flow_jepa_differential_effect_bank_active") > 0.5:
@@ -14912,9 +14943,7 @@ def _evidence_serial_log_line(
         ("object_w_heads", "grad_object_w_heads"),
         ("object_p2", "grad_object_p2_effect_reader"),
         ("object_consequence", "grad_object_consequence"),
-        ("object_p3_factual", "grad_object_p3_factual"),
         ("object_p3_precision", "grad_object_p3_precision"),
-        ("object_p3_effect", "grad_object_p3_effect"),
         ("object_p3_temporal", "grad_object_p3_temporal"),
         ("object_p3_state_change", "grad_object_p3_state_change"),
         ("intent_goal", "grad_intent_goal_program"),
@@ -15246,10 +15275,16 @@ def _evidence_serial_log_line(
                 )
             if len(interval_parts) > 2:
                 lines.append(" ".join(interval_parts))
-    if log_version == "v120":
-        ground_parts = ["[v120-ground]"]
+    if log_version in {"v120", "v121"}:
+        ground_parts = [f"[{log_version}-ground]"]
         for label, key, spec in (
             ("reconstruction", "object_grounding_reconstruction_mse", ".5f"),
+            ("prototype_mse", "object_grounding_prototype_mse", ".5f"),
+            (
+                "spatial_refine_mse",
+                "object_grounding_spatial_refinement_mse",
+                ".5f",
+            ),
             ("existence", "object_grounding_existence_mean", ".3f"),
             ("validity", "object_grounding_validity_mean", ".3f"),
             ("allocation", "object_grounding_allocation_share_mean", ".3f"),
@@ -15260,10 +15295,26 @@ def _evidence_serial_log_line(
             ("chart_H", "object_grounding_chart_entropy", ".3f"),
             ("g3_parent_l1", "object_grounding_g3_parent_l1", ".3e"),
             ("object_pair_cos", "object_grounding_object_content_pair_cosine", ".3f"),
+            ("chart_pair_overlap", "object_grounding_object_chart_pair_overlap", ".3f"),
+            (
+                "sem_app_post_l1",
+                "object_grounding_semantic_appearance_posterior_l1",
+                ".3f",
+            ),
+            (
+                "sem_geo_post_l1",
+                "object_grounding_semantic_geometry_posterior_l1",
+                ".3f",
+            ),
+            (
+                "app_geo_post_l1",
+                "object_grounding_appearance_geometry_posterior_l1",
+                ".3f",
+            ),
             ("flow_prior", "object_grounding_transport_prior_rms", ".3f"),
         ):
             append(ground_parts, label, key, spec, keep_zero=True)
-        intent_parts = ["[v120-intent]"]
+        intent_parts = [f"[{log_version}-intent]"]
         for label, key, spec in (
             ("goal_H", "object_intent_goal_attention_entropy", ".3f"),
             ("interval_goal_H", "object_intent_interval_goal_entropy", ".3f"),
@@ -15273,6 +15324,9 @@ def _evidence_serial_log_line(
             ("appearance_H", "object_intent_interval_appearance_entropy", ".3f"),
             ("geometry_H", "object_intent_interval_geometry_entropy", ".3f"),
             ("interval_var", "object_intent_interval_variation", ".3f"),
+            ("state_interval_var", "object_intent_interval_state_variation", ".3f"),
+            ("object_key_var", "object_intent_interval_object_key_variation", ".3f"),
+            ("object_value_var", "object_intent_interval_object_value_variation", ".3f"),
             ("temporal_var", "object_intent_temporal_variation", ".3f"),
             ("goal_innov", "object_intent_goal_innovation_rms", ".3f"),
             ("history_innov", "object_intent_history_innovation_rms", ".3f"),
@@ -15285,14 +15339,21 @@ def _evidence_serial_log_line(
             ("state_change", "object_intent_state_change_evidence_rms", ".3f"),
             ("state_change_H", "object_intent_state_change_attention_entropy", ".3f"),
             ("online_match", "object_intent_online_match_loss", ".5f"),
+            ("action_match", "object_intent_action_match_loss", ".5f"),
+            ("state_match", "object_intent_state_match_loss", ".5f"),
+            ("object_key_match", "object_intent_object_key_match_loss", ".5f"),
+            ("object_value_match", "object_intent_object_value_match_loss", ".5f"),
             ("recognizer", "object_plan_recognition_loss", ".5f"),
             ("coarse_action", "object_coarse_action_loss", ".5f"),
         ):
             append(intent_parts, label, key, spec, keep_zero=True)
-        dynamics_parts = ["[v120-dynamics]"]
+        dynamics_parts = [f"[{log_version}-dynamics]"]
         for label, key, spec in (
-            ("goal_H", "object_w_goal_attention_entropy", ".3f"),
-            ("goal_innov", "object_w_goal_innovation_rms", ".3f"),
+            ("intent_innov", "object_w_interval_innovation_rms", ".3f"),
+            ("action_innov", "object_w_action_innovation_rms", ".3f"),
+            ("state_innov", "object_w_state_innovation_rms", ".3f"),
+            ("object_key_innov", "object_w_object_key_innovation_rms", ".3f"),
+            ("object_value_innov", "object_w_object_value_innovation_rms", ".3f"),
             ("typed_innov", "object_w_typed_innovation_rms", ".3f"),
             ("w1_delta", "object_w1_semantic_delta_rms", ".3f"),
             ("w1_transport", "object_w1_transport_rms", ".3f"),
@@ -15308,12 +15369,14 @@ def _evidence_serial_log_line(
             ("teacher_null", "object_teacher_null_probability", ".3f"),
             ("teacher_sem_max", "object_teacher_semantic_max", ".3f"),
             ("teacher_sem_margin", "object_teacher_semantic_margin", ".3f"),
+            ("teacher_app_max", "object_teacher_appearance_max", ".3f"),
+            ("teacher_app_margin", "object_teacher_appearance_margin", ".3f"),
+            ("teacher_geom_margin", "object_teacher_geometry_margin", ".3f"),
             ("teacher_uncert", "object_teacher_uncertainty", ".3f"),
             ("teacher_delta", "object_teacher_semantic_delta_rms", ".3f"),
             ("teacher_transport", "object_teacher_transport_rms", ".3f"),
             ("teacher_supports", "object_teacher_supports_per_interval", ".2f"),
-            ("successor_loss", "object_future_successor", ".5f"),
-            ("semantic_loss", "object_future_semantic", ".5f"),
+            ("content_loss", "object_future_content", ".5f"),
             ("transport_loss", "object_future_transport", ".5f"),
             ("covariance_loss", "object_future_covariance", ".5f"),
             ("visibility_loss", "object_future_visibility", ".5f"),
@@ -15326,46 +15389,62 @@ def _evidence_serial_log_line(
             ("target_var", "object_future_target_interval_variation", ".3f"),
         ):
             append(dynamics_parts, label, key, spec, keep_zero=True)
-        policy_parts = ["[v120-policy]"]
+        policy_parts = [f"[{log_version}-policy]"]
         for label, key, spec in (
-            ("content_score", "object_p2_content_score_abs", ".3f"),
-            ("content_score_max", "object_p2_content_score_max_abs", ".3f"),
+            ("semantic_score", "object_p2_semantic_score_abs", ".3f"),
+            ("semantic_score_max", "object_p2_semantic_score_max_abs", ".3f"),
+            ("geometry_score", "object_p2_geometry_score_abs", ".3f"),
+            ("geometry_score_max", "object_p2_geometry_score_max_abs", ".3f"),
             ("intent_score", "object_p2_intent_score_abs", ".3f"),
             ("intent_score_max", "object_p2_intent_score_max_abs", ".3f"),
             ("coordinate_score", "object_p2_coordinate_score_abs", ".3f"),
             ("coordinate_score_max", "object_p2_coordinate_score_max_abs", ".3f"),
-            ("combined_logit_max", "object_p2_combined_logit_max_abs", ".3f"),
+            ("address_score", "object_p2_address_score_abs", ".3f"),
+            ("transport_score", "object_p2_transport_score_abs", ".3f"),
+            ("semantic_logit_max", "object_p2_semantic_logit_max_abs", ".3f"),
+            ("geometry_logit_max", "object_p2_geometry_logit_max_abs", ".3f"),
             ("tau_content", "object_p2_temperature_content", ".3f"),
             ("tau_intent", "object_p2_temperature_intent", ".3f"),
             ("tau_coordinate", "object_p2_temperature_coordinate", ".3f"),
-            ("posterior_H", "object_p2_posterior_entropy", ".3f"),
-            ("posterior_max", "object_p2_posterior_max", ".3f"),
-            ("null", "object_p2_null_mass", ".3f"),
+            ("semantic_H", "object_p2_semantic_posterior_entropy", ".3f"),
+            ("geometry_H", "object_p2_geometry_posterior_entropy", ".3f"),
+            ("semantic_max", "object_p2_semantic_posterior_max", ".3f"),
+            ("geometry_max", "object_p2_geometry_posterior_max", ".3f"),
+            ("semantic_null", "object_p2_semantic_null_mass", ".3f"),
+            ("geometry_null", "object_p2_geometry_null_mass", ".3f"),
+            ("calibration", "object_p2_selector_calibration", ".3f"),
             ("semantic_mass", "object_p2_semantic_value_mass", ".3f"),
             ("geometry_mass", "object_p2_geometry_value_mass", ".3f"),
-            ("status_mass", "object_p2_status_value_mass", ".3f"),
-            ("h4_8_mass", "object_p2_interval_0_mass", ".3f"),
-            ("h8_16_mass", "object_p2_interval_1_mass", ".3f"),
-            ("h16_32_mass", "object_p2_interval_2_mass", ".3f"),
-            ("h32_48_mass", "object_p2_interval_3_mass", ".3f"),
             ("effect_precontract", "object_p2_effect_precontract_rms", ".3f"),
             ("effect", "object_p2_effect_rms", ".3f"),
             ("contract_min", "object_p2_contract_min", ".3f"),
             ("consequence_effect", "object_consequence_effect_rms", ".3f"),
             ("interaction", "object_consequence_interaction_rms", ".3f"),
             ("consequence_ratio", "object_consequence_ratio", ".3f"),
-            ("p3_factual", "object_p3_factual_rms", ".3f"),
             ("p3_precision", "object_p3_precision_rms", ".3f"),
-            ("p3_effect", "object_p3_effect_rms", ".3f"),
             ("p3_temporal", "object_p3_temporal_rms", ".3f"),
             ("p3_state_change", "object_p3_state_change_rms", ".3f"),
         ):
             append(policy_parts, label, key, spec, keep_zero=True)
+        for interval_index, interval_name in enumerate(
+            ("h4_8", "h8_16", "h16_32", "h32_48")
+        ):
+            for owner in ("semantic", "geometry"):
+                append(
+                    policy_parts,
+                    f"{owner}_{interval_name}_mass",
+                    f"object_p2_{owner}_interval_{interval_index}_mass",
+                    ".3f",
+                    keep_zero=True,
+                )
         for parts in (ground_parts, intent_parts, dynamics_parts, policy_parts):
             if len(parts) > 1:
                 lines.append(" ".join(parts))
         for interval_name in ("h4_8", "h8_16", "h16_32", "h32_48"):
-            interval_parts = ["[v120-dynamics-error]", f"interval={interval_name}"]
+            interval_parts = [
+                f"[{log_version}-dynamics-error]",
+                f"interval={interval_name}",
+            ]
             for field in (
                 "successor",
                 "semantic",
@@ -17198,12 +17277,11 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                 *intent.object_geometry.parameters(),
                 *intent.interval_goal.parameters(),
                 *intent.interval_history.parameters(),
-                *intent.interval_object.parameters(),
-                *intent.interval_semantic.parameters(),
-                *intent.interval_appearance.parameters(),
-                *intent.interval_geometry.parameters(),
                 *intent.interval_typed_router.parameters(),
                 *intent.interval_self.parameters(),
+                *intent.interval_state_self.parameters(),
+                *intent.interval_object_key.parameters(),
+                *intent.interval_object_value.parameters(),
             ),
             reference=reference,
         )
@@ -17233,13 +17311,14 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_object_w_inputs"] = _parameter_grad_norm(
             (
                 world.interval_identity,
+                world.decoder_identity,
                 *world.object_content.parameters(),
-                *world.object_semantic.parameters(),
-                *world.object_appearance.parameters(),
-                *world.object_geometry.parameters(),
-                *world.object_transport_prior.parameters(),
+                *world.intent_action.parameters(),
+                *world.intent_state.parameters(),
+                *world.intent_object_key.parameters(),
+                *world.intent_object_value.parameters(),
+                *world.coarse_action.parameters(),
                 *world.typed_router.parameters(),
-                *world.goal_read.parameters(),
             ),
             reference=reference,
         )
@@ -17250,12 +17329,8 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         )
         losses["grad_object_w_heads"] = _parameter_grad_norm(
             (
-                *world.delta_head.parameters(),
-                *world.transport_head.parameters(),
-                *world.covariance_head.parameters(),
-                *world.visibility_head.parameters(),
-                *world.persistence_head.parameters(),
-                *world.uncertainty_head.parameters(),
+                *world.near_heads.parameters(),
+                *world.far_heads.parameters(),
             ),
             reference=reference,
         )
@@ -17265,9 +17340,6 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_object_consequence"] = _module_grad_norm(
             consequence, reference=reference
         )
-        losses["grad_object_p3_factual"] = _module_grad_norm(
-            p3.factual_lane, reference=reference
-        )
         losses["grad_object_p3_precision"] = _parameter_grad_norm(
             (
                 *p3.precision_action.parameters(),
@@ -17276,9 +17348,6 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                 *p3.precision_lane.parameters(),
             ),
             reference=reference,
-        )
-        losses["grad_object_p3_effect"] = _module_grad_norm(
-            p3.effect_lane, reference=reference
         )
         losses["grad_object_p3_temporal"] = _parameter_grad_norm(
             (
@@ -19277,13 +19346,25 @@ def train_v39_policy(
                     saved_policy,
                     system.policy_config,
                 )
-                if int(
-                    getattr(
-                        system.policy_config,
-                        "flow_jepa_grounded_intent_effect_mainline",
-                        0,
+                grounded_manifest_active = bool(
+                    int(
+                        getattr(
+                            system.policy_config,
+                            "flow_jepa_grounded_intent_effect_mainline",
+                            0,
+                        )
                     )
-                ):
+                )
+                object_manifest_active = bool(
+                    int(
+                        getattr(
+                            system.policy_config,
+                            "flow_jepa_object_intent_dynamics_mainline",
+                            0,
+                        )
+                    )
+                )
+                if grounded_manifest_active or object_manifest_active:
                     saved_manifest = (
                         payload.get("context", {}).get(
                             "architecture_manifest"
@@ -19294,21 +19375,26 @@ def train_v39_policy(
                     )
                     if not isinstance(saved_manifest, dict):
                         raise ValueError(
-                            "grounded resume checkpoint has no architecture "
+                            "capability resume checkpoint has no architecture "
                             "manifest; start a fresh run"
                         )
                     if not isinstance(current_manifest, dict):
                         raise ValueError(
-                            "grounded current run has no architecture manifest"
+                            "capability current run has no architecture manifest"
                         )
-                    saved_identity = manifest_from_mapping(saved_manifest)
-                    current_identity = manifest_from_mapping(current_manifest)
+                    manifest_parser = (
+                        object_intent_manifest_from_mapping
+                        if object_manifest_active
+                        else manifest_from_mapping
+                    )
+                    saved_identity = manifest_parser(saved_manifest)
+                    current_identity = manifest_parser(current_manifest)
                     if (
                         saved_identity.as_dict()
                         != current_identity.as_dict()
                     ):
                         raise ValueError(
-                            "grounded architecture manifest mismatch; "
+                            "capability architecture manifest mismatch; "
                             "start a fresh top run"
                         )
             saved_offsets = tuple(

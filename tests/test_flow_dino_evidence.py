@@ -7669,6 +7669,28 @@ def test_object_intent_dynamics_optimizer_owns_every_new_top_parameter() -> None
             for parameter in module.parameters()
             if parameter.requires_grad
         )
+
+    # Legacy contract towers are neither an auxiliary objective nor a decoder
+    # input for this capability.  They must not allocate parameters/optimizer
+    # state under a misleading inherited config flag.
+    assert len(system.planner.layer_contract_heads) == 0
+    assert system.planner.layer_fm_probe is None
+    assert system.planner.layer_consequence_cell is None
+    assert not system.planner.terminal_policy_layer_contracts_only
+    assert not any(
+        parameter.requires_grad
+        for parameter in system.planner.midcut_norm.parameters()
+    )
+    assert not any(
+        parameter.requires_grad
+        for parameter in system.planner.midcut_heads.parameters()
+    )
+    assert any(
+        parameter.requires_grad
+        for parameter in system.planner.event_probe.parameters()
+    )
+
+
 def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
     torch.manual_seed(1203)
     config = _complete_object_intent_dynamics_config(
@@ -7736,7 +7758,15 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
             goal_language_mask=torch.ones(batch, 5, dtype=torch.bool),
             future_training_pack=teacher_pack,
         )
-    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+    assert system.planner.evidence_latent_mmdit_action_decoder is not None
+    with (
+        patch.object(
+            system.planner.evidence_latent_mmdit_action_decoder,
+            "forward",
+            wraps=system.planner.evidence_latent_mmdit_action_decoder.forward,
+        ) as bottom_decoder,
+        torch.autocast(device_type="cpu", dtype=torch.bfloat16),
+    ):
         output = system.flow_training_forward(
             visual,
             state_history,
@@ -7756,6 +7786,14 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
             make_counterfactuals=False,
             collect_audit_metrics=True,
         )
+    assert bottom_decoder.call_count >= 1
+    for call in bottom_decoder.call_args_list:
+        assert call.kwargs["layer_contracts"] == []
+        assert call.kwargs["policy_role_delta_bank"] is not None
+        assert call.kwargs["policy_action_tokens"] is None
+    assert output["layer_contracts"] == []
+    assert "midcut_pred_physical_velocity" not in output
+    assert "midcut_rollout_effect_pred" not in output
     _validate_object_intent_preflight_output(
         output,
         config=config,
@@ -7783,7 +7821,8 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
     assert bool((output["object_future_visibility_target"] <= 0.0).all())
     assert bool((output["object_future_persistence_target"] <= 0.0).all())
     assert torch.isfinite(output["object_p2_effect_rms"])
-    assert torch.isfinite(output["object_p3_effect_rms"])
+    assert torch.isfinite(output["object_p3_precision_rms"])
+    assert torch.isfinite(output["object_p3_temporal_rms"])
     terms = object_intent_dynamics_terms(output, require_teacher=True)
     objective = (
         output["pred_physical_velocity"].float().square().mean()
@@ -7821,6 +7860,95 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
             and float(parameter.grad.abs().sum()) > 0.0
             for parameter in module.parameters()
             if parameter.requires_grad
+        )
+
+
+def test_object_future_teacher_changes_targets_but_not_online_action() -> None:
+    torch.manual_seed(1207)
+    config = _complete_object_intent_dynamics_config(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+        flow_jepa_p1_mixed_precision=0,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    visual = _visual(config, batch=batch)
+    raw_visual = _raw_visual(config, batch=batch, side=32)
+    state_history = torch.randn(
+        batch, config.visual_history_length, config.state_dim
+    )
+    executed = torch.randn(
+        batch, config.executed_history_length, config.action_dim
+    )
+    state = torch.randn(batch, config.state_dim)
+    action = torch.randn(batch, config.action_horizon, config.action_dim)
+    future_action = torch.randn(batch, 48, config.action_dim)
+    future_state = torch.randn(batch, 48, config.state_dim)
+    offsets = torch.tensor(
+        config.flow_jepa_effective_interval_support_offsets,
+        dtype=torch.long,
+    )
+    target_a = torch.randn(
+        batch,
+        int(offsets.numel()),
+        config.visual_history_length,
+        config.num_cameras,
+        config.patches_per_camera,
+        config.visual_token_dim,
+    )
+    target_b = torch.randn_like(target_a)
+    goal_tokens = torch.randn(batch, 5, config.goal_language_dim)
+    goal_mask = torch.ones(batch, 5, dtype=torch.bool)
+    training_noise = system.codec.encode(torch.randn_like(action), state)
+
+    def forward(target_visual: Tensor) -> dict[str, Tensor]:
+        teacher_pack = {
+            "future_action": future_action,
+            "future_state": future_state,
+            "future_offsets": offsets,
+            "target_visual": target_visual,
+        }
+        return system.flow_training_forward(
+            visual,
+            state_history,
+            executed,
+            state,
+            action,
+            raw_visual=raw_visual,
+            target_visual=target_visual,
+            future_training_pack=teacher_pack,
+            goal_language_tokens=goal_tokens,
+            goal_language_mask=goal_mask,
+            training_noise=training_noise,
+            training_time=torch.ones(batch),
+            proposal_keep=torch.ones(batch),
+            make_counterfactuals=False,
+            collect_audit_metrics=False,
+        )
+
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output_a = forward(target_a)
+        output_b = forward(target_b)
+    assert not torch.equal(
+        output_a["object_future_successor_target"],
+        output_b["object_future_successor_target"],
+    )
+    for name in (
+        "object_future_successor_prediction",
+        "object_future_semantic_prediction",
+        "object_future_transport_prediction",
+        "pred_physical_velocity",
+        "pred_action_estimate",
+    ):
+        torch.testing.assert_close(
+            output_a[name], output_b[name], atol=0.0, rtol=0.0
         )
 
 
