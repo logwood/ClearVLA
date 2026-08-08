@@ -1,149 +1,120 @@
 # ClearVLA 顶层问题账本
 
-更新：2026-08-08
+更新：2026-08-09
 
-对象：当前 `object_intent_dynamics_323` schema 3 工作树（默认实验标签 v121）
+对象：`object_intent_dynamics_323` schema 4，默认实验标签 V122。
 
-范围：Pre-G 之后的 G / S / Teacher / W / P1 / P2 / P3、相邻 loss、缓存和 bottom ingress
+范围：Pre-G 之后的 G / S / Teacher / W / P1 / P2 / P3、相邻 loss、静态缓存和 bottom ingress。底层 Evidence MMDiT、CVAE、workspace 与 execution controller 不在本轮重做范围。
 
-不在范围：Evidence MMDiT、CVAE、workspace、execution controller 内部重做
-
-当前执行图和禁止输入以
+当前目标图和不可违反的边界以
 [`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)
-为准。本账本只保留两类内容：已经由源码关闭的结构问题，以及仍须由新实验判断的问题。旧 V120 行号、旧五路 P3 和已经失效的候选修补不再保留。
+为准。本账本只保留仍能指导实现或实验判断的信息；V117–V120 的已失效局部契约和重复历史已清除。
 
-## 1. 历史证据的有效边界
+## 1. 本轮证据与结论边界
 
-三个完整 V120 仍然说明：
+直接证据来自：
 
-- 最好 action RMSE 约 `0.07931`，但后期会轻微反弹；tail、gripper 和 event 仍是难点。
-- W 有 loss 和梯度，不是完全断线；但 prediction interval variation 约 `0.0965`，低于 teacher 约 `0.140`，且 prediction adjacent cosine 约 `0.915`，高于 teacher 约 `0.856`。W 明显比目标更公共、更平滑。
-- transport normalized error 曾改善到约 `0.61–0.65`，但旧 P2 的 geometry value mass 仍很低、status value 反而占主导。这证明“几何 loss 下降”不等于“几何被 policy 使用”。
-- P1 detail/spatial 指标随 RMSE 改善而增强，因此不能削弱 P1 来强迫 W 显得重要。
-- completion 曾塌成全局偏置并直接影响 terminal/execution。它不可识别，已经移除；其日志不能再解释成阶段学习。
-- `grab_pen_single` 只有单一语言条件。任何语言区分能力、长期 goal 泛化能力都不能由该数据单独证明。
+- 当前工作区源码；
+- 完整 V117、V118、V119、三条 V120 日志；
+- V121 完整 epoch 1、验证与 epoch 2 训练段；
+- 冻结 checkpoint 的历史路径干预结论只在当前边界仍相同时引用。
 
-这些数据属于 schema-2 祖先，只用于说明为什么要改结构；不能证明 schema 3 已经有效。
+V121 epoch 1 的 action RMSE 为 `0.10004`，同口径 V120 为 `0.09762`。V121 的 first `1–4` 略好（`0.04018` 对 `0.04122`），middle 近似持平，tail 更差（`0.12609` 对 `0.12219`）。因此 V121 是定位实现问题的证据 run，不是性能改进基线。
 
-## 2. 已由当前源码关闭的问题
+V121 最关键的非 RMSE 证据是：W prediction 的区间差异弱于 teacher，P2 null 逐渐升高，P3 temporal 的幅度/梯度压过 precision，global K 后 typed evidence 的字段差异很弱，而 P1 的 micro/detail 读取本身非零。这些量与源码共同把问题定位在 G 后的语义边界，而不是“底层没训练”或“P1 没读细节”。
 
-“关闭”只表示结构缺陷不再存在，不等于已经获得动作收益。
+## 2. 已完成的 schema-4 源码修正
 
-| 旧问题 | 当前关闭方式 | 可执行边界 |
-| --- | --- | --- |
-| `P1-W-OBJECT-BASIS`：P1 在 local lattice、W 在 global K，二者只在聚合 hidden 相遇 | P1 复用同一个 `candidate_assignment`，输出 `ObjectFactualDock.fact_by_object/object_posterior/chart_posterior/coordinates`；P2 在同一 K 基底读 W | object permutation 必须贯穿 G→S→Teacher→P1/P2 等变 |
-| `G-TYPED-IDENTITY`：semantic/appearance/geometry 只是同一内容的改名投影 | 只有一个物理 K+null assignment；三类 typed verifier 只能在其 support 内作 bounded correction，零初始化时精确继承物理 posterior | typed posterior 不能制造新 K、null 或无效 support |
-| `G-COORDINATE-RECON-BYPASS`：共享坐标解码器可独自降低 DINO 重建而 K 槽继续同质 | 原有重建总预算内，75% 由不含坐标项的 object-prototype 重建承担，25% 才允许坐标细化 | 不增加 diversity/entropy 目标；分别记录 prototype 与 spatial-refinement MSE |
-| `S-P1-ALIAS-DUPLICATION`：canonical S 外又注入 mean-goal/last-history | object 主线 P1 只接 canonical interval query；goal/history/object/action/state 保持 factorized K/V | P1 value 仍只来自当前高分辨率 observation |
-| `S-AVERAGED-TEACHER`：recognizer 跨时间和 K 求平均 | recognizer 分别输出 interval action/state/object-key/object-value target | teacher target 只训练 S，不成为部署 value |
-| `TEACHER-COMMON-TIME`：所有对象共享同一 support 时间权重 | temporal reliability 现在为 `[B,F,K]`，每个对象独立选择 support；stable successor 与 end-biased semantic change 分开 | 替换 future support 只能改变 target/loss |
-| `W-COMMON-MODE`：重复当前 base、W1/W2 共用输出头 | 当前对象只进入 W 一次；S object K/V 是 future-oriented innovation；near/far heads 参数互斥；W2 保留两枚有序 W1 token | W 仍只有两块，不靠增大网络掩盖接口错误 |
-| `P2-TYPE-ROUTE`：semantic posterior 统治 geometry/status 三类 value | semantic 与 geometry 拥有独立 query/key/posterior/value；future address 参与几何坐标；status 只校准 null/validity | semantic-only perturbation 不得改变 geometry posterior |
-| `P3-DUPLICATE-SEMANTICS`：protected base 外又复制 factual/effect lane | P3 只保留 precision、temporal、state-change 三个 innovation | protected consequence 位于 optional route softmax 外 |
-| `BOTTOM-DUPLICATE-INGRESS`：同一 consequence 同时走 protected detail、controlled dynamics 或旧 layer contract | P2/P3 与 controlled dynamics 都用 pre-top trajectory seed；consequence 只经 typed P3 bank；object capability 不再构建/执行 midcut 与 layer-contract tower | bottom 不再从 P 修改后的 trajectory 或 post-P layer readout 间接重读 consequence；Evidence adapter 的 layer 输入是显式零行 |
-| `LOSS-MANIFOLD-DUPLICATION`：trunk/runtime 双记 loss，successor 与 delta 代数相同 | runtime 是唯一 canonical loss owner；Teacher 的 stable successor 与 ordered semantic end target 不同 | 删除的 loss 权重不转移到新项 |
-| `COMPLETION-BIAS`：无监督 completion 成为 terminal 全局偏置 | completion/terminal lane 退出 object 主线；仅保留零中心 observable state-change 小调制 | frame progress 只可 audit，不可进入 forward/loss |
+| 原问题 | 源码根因 | schema-4 修正 | 当前状态 |
+| --- | --- | --- | --- |
+| `P2-DELTA-CALIBRATION` | 将零中心 visibility/persistence change 和正 uncertainty 直接乘候选先验，静态正确预测反而偏向 null | 只让 physical camera validity 决定合法性；status 去公共模后仅作为有界相对排序分数，null prior 不受其单向惩罚 | 源码已修，待 V122 验证 |
+| `CAMERA-COORDINATE-COLLAPSE` | G 后把双相机坐标、transport 和 P1 source coordinate 压成 `[K,2]`，随后再对各相机广播 | `ObjectFactSet`、Teacher、W geometry、`ObjectFactualDock`、P2 geometry 全程保留真实 `[K,C,*]` | 源码已修，shape/等变测试通过 |
+| `FUTURE-LOSS-UNIT-IMBALANCE` | content、normalized coordinate、covariance、status 用 raw unit 混合；有效优化压力几乎由 content 独占 | 七个 future 字段先按 detached variance floor 变为无量纲误差，再使用原内部系数；外部 future 总权重不增加；native-unit error 只记日志 | 源码已修，零目标测试通过 |
+| `P3-PRECISION-REDUNDANCY` | 同一 aggregate P1 fact 已在 protected consequence 中，却又经 `precision_fact` 和 cumulative consequence 重投影 | precision 只读取现成 `ObjectFactualDock.fact_by_object` 的 K-centred 细节；`effect+interaction` 只条件化 query；aggregate fact 不再作为 optional value | 源码已修，代数零测试通过 |
+| `P3-TEMPORAL-FUNCTIONAL-BYPASS` | learned temporal identity 与 action query 即使无 S/W innovation 也能产生 temporal value | P3 只消费 `temporal_innovations` 与 `effect+interaction`；action 只能乘性调制，不能合成 value | 源码已修，query-only 零语义测试通过 |
+| `S-INTERVAL-COMMON-MODE` | online S 非 causal；online/recognizer 匹配包含 identity 的累计 state；更深一层是 CrossRead FFN 与 self-attention V 仍可从 query identity 制造“update” | online/recognizer/CoarseAction 统一 causal；Q/K identity 与 V innovation 在算子内部拆开；CrossRead FFN 只处理真实 attention update；训练只做 innovation-to-innovation matching | 源码已修，query-only 零语义测试通过 |
+| `W-STATE-COMMON-MODE` | full state/action carrier 作为 additive/broadcast W value；W interval/decoder identity 也可形成 object-free 默认方向 | W 只读 S/CoarseAction innovation；state 必须与 object K/V 乘性交互；action/interval/decoder identity 只能调制当前 object-owned value | 源码已修，零条件回到 object base 测试通过 |
+| `G-TYPED-UNDERIDENTIFIED` | semantic/appearance/geometry verifier 只有远端下游压力，G reconstruction 只约束 DINO content/position | 保留唯一 physical K；在原 G reconstruction 预算内加入三类 target-normalized typed-field consistency，不强迫三 posterior 不同 | 源码已修，普通 autograd/字段 loss 测试通过 |
+| `COARSE-ACTION-INTERVAL-UNKNOWN` | 只有总 loss/RMS，且 query carrier 可进入 W | CoarseAction 改为 causal innovation-only；新增 interval variation、adjacent cosine、target-normalized error | 源码已修，待日志验证可识别性 |
+| `ATTENTION-ENTROPY-SEMANTICS` | `object_H/semantic_H/...` 是事后 cosine-softmax audit，却被命名为真实 attention | V122 改名为 `*_sim_H`，内部 canonical key 明确为 `audit_similarity_entropy` | 日志语义已修 |
 
-## 3. 论文机制在当前实现中的边界
-
-- **Fast-WAM** 的可迁移部分是训练期未来监督与部署值隔离；当前 Teacher/recognizer 只塑造在线分支，不进入部署缓存。不能据此恢复像素视频生成或把 future token 塞给 action。
-- **Faster-WAM（future conditioning）** 的可迁移部分是一次建立、少量显式交互和 K/V 成对缓存；当前 G/S/W/P1 一次缓存，P2 是唯一 future dock。不能把 W 注入每层，也不能把论文的深度 interval 混同于这里的时间区间。
-- **Faster-WAM（Dock of Transformer）** 的可迁移部分是先对齐 world/action 的身份与坐标基底；`ObjectFactualDock` 正是 global K、local chart 和 action query 的显式交点。当前没有对应 3D/1D RoPE 证据，因此不生造 RoPE 修复。
-- **MV-WAM** 的可迁移部分是异质信息使用不同 K/V、目标和单向信息流；因此 semantic/geometry/status 被拆开，Teacher→W→P 单向。没有 return、失败或 rollback 数据时，不引入 value/completion/progress。
-
-共同结论不是“W 越大越好”，而是：future teacher 不泄漏、交换点要少而明确、身份/坐标先对齐、异质信息不进同一个汤。
-
-## 4. 当前真实主路
+## 3. 修正后的真实张量边界
 
 ```text
-local G hypotheses [B,C,8,8,M,*]
-  -> one physical K+null global assignment
-ObjectFactSet [B,K,*], K=4
-  -> factorized S [B,4,K,H] + [B,4,H] + [B,24,H]
-  -> W1/W2 FutureObjectDynamics [B,4,K,*]
+G physical object:
+  one K+null assignment
+  semantic / appearance / geometry = typed evidence reads, not three identities
+  camera_coordinates / camera_transport / camera_validity [B,K,C,*]
 
-ObjectFactSet.candidate_assignment
-  -> one P1 high-resolution micro-read
-  -> ObjectFactualDock [B,T,Q,K,H] + K+null/chart posterior
+S / recognizer / CoarseAction:
+  learned identities = Q/K/index only
+  action/state/object/temporal/coarse innovations = legal downstream values
+  online and training target share the same ordered causal interval structure
 
-ObjectFactualDock + typed FutureObjectDynamics
-  -> semantic/geometry P2 selectors
-  -> one zero-preserving consequence
-  -> P3 precision/temporal/state-change innovations
-  -> one protected bottom ingress
+W:
+  protected current object + object-conditioned intent/action modulation
+  state can only modulate object K/V
+  W1 = 4–8, 8–16; W2 = 16–32, 32–48
+  only supervised FutureObjectDynamics crosses W→P
+
+P1/P2/P3:
+  P1 reads high-resolution observation once and exports one ObjectFactualDock
+  P2 semantic selects [I,K]; geometry selects [I,K,C]
+  consequence = protected P1 fact + effect + interaction
+  P3 precision = centred unresolved K detail
+  P3 temporal = S temporal innovation + consequence innovation
+  protected consequence enters bottom exactly once
 ```
 
-P1 的成熟 aggregate fact 被保留；per-object dock 是与 W 对齐的精细事实载体，不是用较弱的 K 重建替换 P1。W 的目的也不是取代 P1，而是在同一对象/坐标基底上提供 P1 当前事实无法包含的未来后果。
+## 4. 当前日志口径
 
-## 5. 仍需新实验判断的问题
+V122 需要重点观察：
 
-### E1 — global K 是否真的形成可用对象
+- G：`typed_consistency` 与三字段 consistency、physical K pair cosine/chart overlap、三 typed posterior L1、camera coordinate variation；
+- S：action/state/temporal innovation RMS 与四区间 variation；`*_sim_H` 只是 read-only similarity audit；
+- CoarseAction：innovation RMS、interval variation、adjacent cosine、target-normalized error；
+- W：condition interaction、state-object interaction、object K/V innovation，W1/W2 interval/object cosine；
+- loss：每字段优化 loss、每区间 target-normalized error，以及单独的 native-unit error；
+- P2：semantic/geometry null、`relative_status_abs/mean`、相机几何 interval mass、effect RMS；
+- P3：centred-detail RMS、consequence-innovation RMS、precision null、precision/temporal/state-change RMS；
+- action：完整 train/val loss、first/middle/tail、arm/gripper/event，不以单个 RMSE 下结论。
 
-关注：
+禁止再把下列现象单独当作“接通”：张量非空、梯度非零、RMS 非零、接口名字不同或 attention audit entropy 不为 1。边界干预必须先改变自己的 typed state，再改变下一消费者，最终 action 变化的置信区间脱离零后才能声称有策略收益。
 
-- `object_pair_cos` 与 `chart_pair_overlap` 是否持续接近 1；
-- semantic/appearance/geometry posterior L1 是否始终为 0；
-- object existence、physical validity、allocation share、null mass 是否各自保持合理且不互相伪装；
-- 不同相机、gripper event 与高运动样本中的 K 是否仍稳定。
+## 5. 尚未由源码修正自动保证的实验问题
 
-没有固定 diversity/entropy 目标。若内容相似但 chart 不同，可能是合法的同类对象；只有内容和 chart 都同质、且干预也不可分，才能判为 object collapse。
+以下问题仍需 V122 smoke/长跑，而不能靠本次静态修正提前宣布解决：
 
-### E2 — Teacher 是否提供足够且正确的未来差异
+1. **global K 是否在真实数据上形成稳定对象**：字段一致性提供近端压力，但数据可能仍不足以唯一识别四个 object slots；不使用 forced diversity、slot quota 或 entropy target。
+2. **W 四区间是否达到 teacher 的可识别差异**：接口已阻断公共 carrier，但未来变化本身可能弱；比较 prediction/target variation、adjacent cosine 和四区间 normalized error。
+3. **P2 是否真正把 W effect 传给 action**：修正 null 语义不等于必然产生动作增益；需要 effect zero/shuffle 的 boundary→consequence→action 因果链。
+4. **tail/event 是否恢复**：V121 的时间退化与旧旁路相容，但也可能包含 gripper/event 分布因素；必须看至少三个验证点。
+5. **learned flow 的 action 增益**：本轮修复了它的相机几何落点，没有设置非零流配额；仍需独立 zero/spatial-shuffle 干预。
 
-关注四区间、对象、相机和空间分轴的：semantic/appearance margin、null、visibility、uncertainty、target variation、adjacent cosine、transport variation。
+若上述边界探针正确、W normalized error 确实下降，但 action 仍无增益，应归类为数据可识别性或任务收益问题，而不是继续增加 contract、硬门控或辅助 loss。
 
-若 target 本身近乎公共，优先归因数据运动/未来 DINO 可识别性，不再通过强迫 W diversity 伪造差异。若 target 有差异而 prediction 没有，才归因 W 学习或 loss 尺度。
+## 6. 明确排除与禁止回归
 
-### E3 — W1/W2 是否从“有梯度”变成“有分工”
+- 不恢复 scalar progress、phase label、completion terminal、LSTM cache 或训练期未来值到部署路径。
+- 不把 local M 当 global K；不混用 prior、allocation、existence 和 validity。
+- 不 reduce 后 `expand` 伪造 object、interval、camera 或 type 轴。
+- 不加入 hard gate、route quota、固定 entropy、forced diversity、forced flow 或人工梯度。
+- 不削弱 P1 的一次高分辨率事实读取，不重新打开第二次 RGB/DINO bank。
+- 不增加 `_validate_vXXX_*` 或按版本号选择源码；manifest 只记录 capability schema。
+- 不恢复未监督 public W residual、重复 P1 fact、cumulative temporal identity 或第二个 protected-consequence bottom ingress。
 
-关注：
+## 7. 验证状态与下一步
 
-- near/far interval normalized error 的完整 epoch 曲线；
-- prediction variation 与 target variation 的比例；
-- W1/W2 object pair cosine、interval adjacent cosine；
-- goal/action/state/object/typed innovation 的相对幅度；
-- W zero/shuffle 是否先改变 P2/consequence，再改变 action。
+本地已通过：
 
-W1/W2 仍相似时，先看 Teacher target 和 S factorized target 是否也相似；不能仅凭名称或梯度强行判为 W head 错误。
+- schema-4 manifest/reject；
+- G mass、typed consistency、camera-axis shape、object permutation；
+- Teacher FP32/no-grad 与 future-target/action isolation；
+- S/CoarseAction query-only 零语义；
+- W object-owned zero-condition；
+- P2 common-status offset invariance、typed selector 独立性与有界 score；
+- P3 centred-detail/temporal 代数零；
+- 完整 capability BF16 forward/backward、optimizer ownership、teacher-forced boundary 与五步静态缓存；
+- 日志解析回归。
 
-### E4 — P2 是否真正使用 semantic 与 geometry
-
-关注两套独立 posterior 的 score、entropy、max、null、四区间 mass，以及最终 semantic/geometry type mass。mass 没有人工目标；健康含义是它随样本和干预变化，而不是必须 50/50。
-
-必须分别做 semantic zero/shuffle、transport/address zero/shuffle。joint intervention 只能补充，不能掩盖是哪条路径有效。若 representation 边界变化而 consequence/action 不变，说明仍被下游补偿或忽略。
-
-### E5 — P1 强而 W 弱是否仍存在
-
-P1 强不是错误。验收目标是：保持 P1 精细当前事实，同时 W 在 precision-critical、tail、gripper/event 与较长 horizon 子集提供互补增益。禁止削弱 raw/detail、减少 glimpse 或增加硬门来制造 W 使用率。
-
-### E6 — S 的可识别性与长程能力
-
-单任务单语言只能检验历史/对象变化和四区间组织，不能证明语言泛化。frame progress 与 S 指标只作 audit。若 factorized boundary 正确但 S 仍固定，下一研究项应是更丰富目标/轨迹数据或 training-only plan recognizer，而不是恢复 scalar progress/伪阶段标签。
-
-### E7 — 泛化平台、速度和显存
-
-至少比较三个验证点和全部八个 epoch：full/first/tail、arm/gripper、event、四 horizon、precision-critical 子集，同时看 train/val gap。结构因果正确但动作无增益时，归入数据/目标可识别性，不继续无止境改接线。
-
-性能门：本地微型 BF16 forward/backward 小于 8 GiB；生产 batch 8 总进程不超过 22 GiB；Teacher 每训练 batch 一次、部署零次；五步采样不得重复构建 G/S/W/P1。
-
-## 6. 新日志的最低信息集
-
-- G：reconstruction、existence、validity、allocation、null、mass error、object content cosine、chart overlap、三组 typed-posterior L1。
-- S：goal/history/object/type attention；action/state/object K/V interval variation；各 innovation RMS；observable state-change。
-- Teacher/W：四区间逐项 normalized error；target/pred variation 与 cosine；per-object reliability/null/margin/transport。
-- P2：semantic/geometry 各自的 score/logit/posterior/null/interval mass、type mass、calibration。
-- P3/bottom：consequence ratio、三条 innovation、各 owner gradient、global preclip。
-- 训练/验证：所有 epoch 的 action、first/tail、arm/gripper/event 与 horizon 指标。
-
-旧 `p3_factual`、`p3_effect`、status value、completion、错误 argmax 名称和 inactive ancestry 零梯度不属于 v121 活跃语义。
-
-## 7. 禁止回归
-
-- future teacher、future action/state、recognizer target 永远不进入部署 value。
-- 不把 local M 叫 global object；prior/allocation/existence/validity 不混用。
-- 不通过 reduce-then-expand 伪造 object/interval/camera/type 轴。
-- 不增加 hard gate、quota、固定 entropy、forced diversity、forced flow 或人工梯度。
-- 不削弱 P1 的一次高分辨率当前事实读取，不恢复第二次 RGB/DINO 读取。
-- 不增加无 return 监督的 completion/progress/value。
-- 不新增 `_validate_vXXX_*` 或按版本号分支；能力名、小 manifest、typed interface 和真正的边界测试足够。
-- 保持一个 future cache、一个 ObjectFactualDock、一个 protected consequence bottom ingress。
+仍需服务器 fresh smoke 和 batch-8 长跑。默认命令见当前架构契约；schema 3 的 top checkpoint 不允许 resume 到 schema 4。

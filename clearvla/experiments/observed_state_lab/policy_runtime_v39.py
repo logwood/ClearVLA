@@ -3908,13 +3908,14 @@ def object_intent_dynamics_terms(
     current_validity = output.get("object_fact_validity")
     if not torch.is_tensor(current_validity):
         raise RuntimeError("object-intent loss lost physical current object validity")
-    validity_weight = current_validity.detach().float()[:, None].expand_as(
-        teacher_validity
+    object_validity_weight = current_validity.detach().float()[:, None].expand(
+        -1, 4, -1, -1
     )
-    if teacher_validity.ndim != 4 or int(teacher_validity.shape[1]) != 4:
+    if teacher_validity.ndim != 5 or int(teacher_validity.shape[1]) != 4:
         raise ValueError(
-            "object future validity must preserve [B,4,K,1]"
+            "object future validity must preserve [B,4,K,C,1]"
         )
+    camera_validity_weight = teacher_validity.clamp(0.0, 1.0)
 
     def row_loss(
         prediction: Tensor,
@@ -3922,17 +3923,14 @@ def object_intent_dynamics_terms(
         *,
         scale_floored: bool,
     ) -> Tensor:
-        raw = F.smooth_l1_loss(
-            prediction.float(), teacher.detach().float(), reduction="none"
-        ).mean(dim=-1, keepdim=True)
-        if not scale_floored:
-            return raw
         teacher_f = teacher.detach().float()
         prediction_f = prediction.float()
         teacher_rms = teacher_f.square().mean(dim=-1, keepdim=True).sqrt()
-        scale_floor = (
-            0.25 * teacher_rms.mean(dim=(0, 2), keepdim=True)
-        ).clamp_min(1e-3)
+        # Every field is optimized in its own detached physical unit.  The
+        # outer future-loss weight and the seven semantic coefficients remain
+        # unchanged; this only prevents full-DINO content from numerically
+        # erasing transport/status supervision because their raw units differ.
+        scale_floor = (0.10 * teacher_rms.mean().detach()).clamp_min(1e-3)
         scale = torch.sqrt(teacher_rms.square() + scale_floor.square())
         normalized = F.smooth_l1_loss(
             prediction_f / scale,
@@ -3959,7 +3957,10 @@ def object_intent_dynamics_terms(
         direction_strength = teacher_rms.square() / (
             teacher_rms.square() + scale_floor.square()
         )
-        return raw + normalized + 0.10 * direction_strength * direction
+        directional = 0.10 * direction_strength * direction if scale_floored else 0.0
+        # Native-unit error is logged below but deliberately not added to the
+        # optimized composite; doing so would reintroduce the unit imbalance.
+        return normalized + directional
 
     result: dict[str, Tensor] = {}
     future_total = zero
@@ -3990,10 +3991,24 @@ def object_intent_dynamics_terms(
         # targets and recreate an unsupervised W direction.  The physical
         # current-object validity derived from allocated chart support is
         # therefore the sole loss mask for every field.
-        weight = validity_weight
+        weight = (
+            camera_validity_weight
+            if rows.ndim == camera_validity_weight.ndim
+            else object_validity_weight
+        )
+        if tuple(rows.shape) != tuple(weight.shape):
+            raise ValueError(
+                f"object future {name} loss mask does not align with its axes"
+            )
         denominator = weight.sum().clamp_min(1.0)
         component = (rows * weight).sum() / denominator
         component_losses[name] = component
+        native_rows = F.smooth_l1_loss(
+            prediction.float(), teacher.detach().float(), reduction="none"
+        ).mean(dim=-1, keepdim=True)
+        result[f"object_future_{name}_native_unit_error"] = (
+            (native_rows * weight).sum() / denominator
+        ).detach()
         if name not in {"successor", "semantic"}:
             result[f"object_future_{name}"] = component
             future_total = future_total + float(internal_weight) * component
@@ -4045,7 +4060,7 @@ def object_intent_dynamics_terms(
         scale_floored=True,
     )
     transition_weight = torch.minimum(
-        validity_weight[:, 1:], validity_weight[:, :-1]
+        object_validity_weight[:, 1:], object_validity_weight[:, :-1]
     )
     transition = (
         transition_rows * transition_weight
@@ -11929,16 +11944,23 @@ def _validate_object_intent_preflight_output(
 
     objects = 4
     intervals = 4
+    cameras = int(config.num_cameras)
     content = int(config.visual_token_dim)
     expected = {
         "object_future_successor_target": (batch_size, intervals, objects, content),
         "object_future_semantic_target": (batch_size, intervals, objects, content),
-        "object_future_transport_target": (batch_size, intervals, objects, 2),
-        "object_future_covariance_target": (batch_size, intervals, objects, 3),
+        "object_future_transport_target": (
+            batch_size, intervals, objects, cameras, 2
+        ),
+        "object_future_covariance_target": (
+            batch_size, intervals, objects, cameras, 3
+        ),
         "object_future_visibility_target": (batch_size, intervals, objects, 1),
         "object_future_persistence_target": (batch_size, intervals, objects, 1),
         "object_future_uncertainty_target": (batch_size, intervals, objects, 1),
-        "object_future_validity_target": (batch_size, intervals, objects, 1),
+        "object_future_validity_target": (
+            batch_size, intervals, objects, cameras, 1
+        ),
     }
     for key, shape in expected.items():
         value = output.get(key)
@@ -11964,7 +11986,10 @@ def _validate_object_intent_preflight_output(
         raise ValueError("object-intent preflight capability marker is missing")
     for key in (
         "object_fact_content",
+        "object_fact_camera_coordinates",
         "object_intent_interval_queries",
+        "object_intent_interval_action_innovations",
+        "object_intent_temporal_innovations",
         "object_intent_state_change_evidence",
         "object_future_semantic_prediction",
         "object_consequence_protected",
@@ -12862,6 +12887,7 @@ _FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v119",
         "v120",
         "v121",
+        "v122",
     }
 )
 _RAW_FLOW_JEPA_LOG_VERSIONS = frozenset(
@@ -12891,6 +12917,7 @@ _RAW_FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v119",
         "v120",
         "v121",
+        "v122",
     }
 )
 _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS = frozenset(
@@ -12917,6 +12944,7 @@ _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v119",
         "v120",
         "v121",
+        "v122",
     }
 )
 _BALANCED_FLOW_JEPA_LOG_VERSIONS = frozenset(
@@ -12942,6 +12970,7 @@ _BALANCED_FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v119",
         "v120",
         "v121",
+        "v122",
     }
 )
 
@@ -12953,6 +12982,8 @@ def _evidence_log_version(*rows: dict[str, float]) -> str:
             default=0.0,
         )
 
+    if maximum("object_intent_schema") >= 4.0:
+        return "v122"
     if maximum("object_intent_dynamics_active") > 0.5:
         return "v121"
     if maximum("grounded_intent_effect_active") > 0.5:
@@ -15275,7 +15306,7 @@ def _evidence_serial_log_line(
                 )
             if len(interval_parts) > 2:
                 lines.append(" ".join(interval_parts))
-    if log_version in {"v120", "v121"}:
+    if log_version in {"v120", "v121", "v122"}:
         ground_parts = [f"[{log_version}-ground]"]
         for label, key, spec in (
             ("reconstruction", "object_grounding_reconstruction_mse", ".5f"),
@@ -15285,6 +15316,10 @@ def _evidence_serial_log_line(
                 "object_grounding_spatial_refinement_mse",
                 ".5f",
             ),
+            ("typed_consistency", "object_grounding_typed_consistency", ".3f"),
+            ("semantic_consistency", "object_grounding_semantic_consistency", ".3f"),
+            ("appearance_consistency", "object_grounding_appearance_consistency", ".3f"),
+            ("geometry_consistency", "object_grounding_geometry_consistency", ".3f"),
             ("existence", "object_grounding_existence_mean", ".3f"),
             ("validity", "object_grounding_validity_mean", ".3f"),
             ("allocation", "object_grounding_allocation_share_mean", ".3f"),
@@ -15312,17 +15347,33 @@ def _evidence_serial_log_line(
                 ".3f",
             ),
             ("flow_prior", "object_grounding_transport_prior_rms", ".3f"),
+            ("camera_coord_var", "object_grounding_camera_coordinate_variation", ".3f"),
         ):
             append(ground_parts, label, key, spec, keep_zero=True)
         intent_parts = [f"[{log_version}-intent]"]
+        audit_similarity_keys = (
+            {
+                "object": "object_intent_interval_object_audit_similarity_entropy",
+                "semantic": "object_intent_interval_semantic_audit_similarity_entropy",
+                "appearance": "object_intent_interval_appearance_audit_similarity_entropy",
+                "geometry": "object_intent_interval_geometry_audit_similarity_entropy",
+            }
+            if log_version == "v122"
+            else {
+                "object": "object_intent_interval_object_entropy",
+                "semantic": "object_intent_interval_semantic_entropy",
+                "appearance": "object_intent_interval_appearance_entropy",
+                "geometry": "object_intent_interval_geometry_entropy",
+            }
+        )
         for label, key, spec in (
             ("goal_H", "object_intent_goal_attention_entropy", ".3f"),
             ("interval_goal_H", "object_intent_interval_goal_entropy", ".3f"),
             ("history_H", "object_intent_interval_history_entropy", ".3f"),
-            ("object_H", "object_intent_interval_object_entropy", ".3f"),
-            ("semantic_H", "object_intent_interval_semantic_entropy", ".3f"),
-            ("appearance_H", "object_intent_interval_appearance_entropy", ".3f"),
-            ("geometry_H", "object_intent_interval_geometry_entropy", ".3f"),
+            ("object_sim_H", audit_similarity_keys["object"], ".3f"),
+            ("semantic_sim_H", audit_similarity_keys["semantic"], ".3f"),
+            ("appearance_sim_H", audit_similarity_keys["appearance"], ".3f"),
+            ("geometry_sim_H", audit_similarity_keys["geometry"], ".3f"),
             ("interval_var", "object_intent_interval_variation", ".3f"),
             ("state_interval_var", "object_intent_interval_state_variation", ".3f"),
             ("object_key_var", "object_intent_interval_object_key_variation", ".3f"),
@@ -15332,6 +15383,9 @@ def _evidence_serial_log_line(
             ("history_innov", "object_intent_history_innovation_rms", ".3f"),
             ("object_innov", "object_intent_object_innovation_rms", ".3f"),
             ("typed_innov", "object_intent_typed_innovation_rms", ".3f"),
+            ("action_innov", "object_intent_action_innovation_rms", ".3f"),
+            ("state_innov", "object_intent_state_innovation_rms", ".3f"),
+            ("temporal_innov", "object_intent_temporal_innovation_rms", ".3f"),
             ("state_delta", "object_intent_observed_state_delta_rms", ".3f"),
             ("transport", "object_intent_observed_transport_rms", ".3f"),
             ("change_history", "object_intent_state_change_history_rms", ".3f"),
@@ -15345,12 +15399,17 @@ def _evidence_serial_log_line(
             ("object_value_match", "object_intent_object_value_match_loss", ".5f"),
             ("recognizer", "object_plan_recognition_loss", ".5f"),
             ("coarse_action", "object_coarse_action_loss", ".5f"),
+            ("coarse_innov", "object_coarse_action_innovation_rms", ".3f"),
+            ("coarse_var", "object_coarse_action_interval_variation", ".3f"),
+            ("coarse_cos", "object_coarse_action_adjacent_cosine", ".3f"),
+            ("coarse_target_error", "object_coarse_action_target_normalized_error", ".3f"),
         ):
             append(intent_parts, label, key, spec, keep_zero=True)
         dynamics_parts = [f"[{log_version}-dynamics]"]
         for label, key, spec in (
             ("intent_innov", "object_w_interval_innovation_rms", ".3f"),
             ("action_innov", "object_w_action_innovation_rms", ".3f"),
+            ("condition_interaction", "object_w_condition_interaction_rms", ".3f"),
             ("state_innov", "object_w_state_innovation_rms", ".3f"),
             ("object_key_innov", "object_w_object_key_innovation_rms", ".3f"),
             ("object_value_innov", "object_w_object_value_innovation_rms", ".3f"),
@@ -15412,7 +15471,8 @@ def _evidence_serial_log_line(
             ("geometry_max", "object_p2_geometry_posterior_max", ".3f"),
             ("semantic_null", "object_p2_semantic_null_mass", ".3f"),
             ("geometry_null", "object_p2_geometry_null_mass", ".3f"),
-            ("calibration", "object_p2_selector_calibration", ".3f"),
+            ("relative_status_abs", "object_p2_relative_status_abs", ".3f"),
+            ("relative_status_mean", "object_p2_relative_status_mean", ".3f"),
             ("semantic_mass", "object_p2_semantic_value_mass", ".3f"),
             ("geometry_mass", "object_p2_geometry_value_mass", ".3f"),
             ("effect_precontract", "object_p2_effect_precontract_rms", ".3f"),
@@ -15424,6 +15484,9 @@ def _evidence_serial_log_line(
             ("p3_precision", "object_p3_precision_rms", ".3f"),
             ("p3_temporal", "object_p3_temporal_rms", ".3f"),
             ("p3_state_change", "object_p3_state_change_rms", ".3f"),
+            ("p3_centered_detail", "object_p3_centered_detail_rms", ".3f"),
+            ("p3_consequence_innov", "object_p3_consequence_innovation_rms", ".3f"),
+            ("p3_precision_null", "object_p3_precision_null_mass", ".3f"),
         ):
             append(policy_parts, label, key, spec, keep_zero=True)
         for interval_index, interval_name in enumerate(

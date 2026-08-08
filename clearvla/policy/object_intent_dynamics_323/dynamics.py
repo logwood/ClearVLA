@@ -121,6 +121,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.intent_object_key = nn.Linear(hidden, hidden, bias=False)
         self.intent_object_value = nn.Linear(hidden, hidden, bias=False)
         self.coarse_action = nn.Linear(hidden, hidden, bias=False)
+        self.condition_object = nn.Linear(hidden, hidden, bias=False)
+        self.condition_interaction = nn.Linear(hidden, hidden, bias=False)
+        self.state_object_interaction = nn.Linear(hidden, hidden, bias=False)
+        self.interval_object_identity = nn.Linear(hidden, hidden, bias=False)
+        self.decoder_object_identity = nn.Linear(hidden, hidden, bias=False)
+        self.camera_geometry = nn.Sequential(
+            nn.LayerNorm(5, elementwise_affine=False),
+            nn.Linear(5, hidden, bias=False),
+        )
         self.typed_router = RoleDeltaAttnRes(
             hidden,
             max(hidden // 8, 32),
@@ -160,24 +169,40 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         identity = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         )
-        current_base = objects[:, None] + identity
+        current_base = objects[:, None] + self.interval_object_identity(
+            torch.tanh(identity) * objects[:, None]
+        )
         interval_innovation = self.intent_action(
-            intent.interval_action_queries
-        )[:, :, None]
-        action_innovation = self.coarse_action(action.tokens)[:, :, None]
+            intent.interval_action_innovations
+        )
+        action_innovation = self.coarse_action(action.innovations)
+        condition = (interval_innovation + action_innovation) / (2.0**0.5)
+        condition_interaction = self.condition_interaction(
+            torch.tanh(condition[:, :, None])
+            * self.condition_object(objects)[:, None]
+        )
         state_innovation = self.intent_state(
-            intent.interval_state_queries
-        )[:, :, None].expand_as(current_base)
+            intent.interval_state_innovations
+        )[:, :, None]
         object_key_innovation = self.intent_object_key(
             intent.interval_object_keys
         )
         object_value_innovation = self.intent_object_value(
             intent.interval_object_values
         )
-        base = current_base + interval_innovation + action_innovation
+        # Goal/history/action may modulate a current object, but they cannot
+        # create an object-free additive W carrier shared by every K slot.
+        base = current_base + condition_interaction
+        state_object_innovation = self.state_object_interaction(
+            torch.tanh(state_innovation)
+            * torch.tanh(
+                (object_key_innovation + object_value_innovation)
+                / (2.0**0.5)
+            )
+        )
         typed_values = torch.stack(
             (
-                state_innovation,
+                state_object_innovation,
                 object_key_innovation,
                 object_value_innovation,
             ),
@@ -193,7 +218,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         metrics = {
             "object_w_interval_innovation_rms": interval_innovation.detach().float().square().mean().sqrt(),
             "object_w_action_innovation_rms": action_innovation.detach().float().square().mean().sqrt(),
-            "object_w_state_innovation_rms": state_innovation.detach().float().square().mean().sqrt(),
+            "object_w_condition_interaction_rms": condition_interaction.detach().float().square().mean().sqrt(),
+            "object_w_state_innovation_rms": state_object_innovation.detach().float().square().mean().sqrt(),
             "object_w_object_key_innovation_rms": object_key_innovation.detach().float().square().mean().sqrt(),
             "object_w_object_value_innovation_rms": object_value_innovation.detach().float().square().mean().sqrt(),
             "object_w_typed_innovation_rms": typed_update.detach().float().square().mean().sqrt(),
@@ -211,13 +237,32 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         heads: _ObjectDynamicsHeads,
     ) -> FutureObjectDynamics:
         intervals = int(hidden.shape[1])
-        value = hidden + self.decoder_identity.to(
+        decoder_identity = self.decoder_identity.to(
             device=hidden.device, dtype=hidden.dtype
         )[:, global_start : global_start + intervals]
+        value = hidden + self.decoder_object_identity(
+            torch.tanh(decoder_identity) * hidden
+        )
         successor_residual = heads.successor_residual(value)
         semantic_delta = heads.semantic_delta(value)
-        transport = 0.50 * torch.tanh(heads.transport(value).float()).to(dtype=value.dtype)
-        covariance = F.softplus(heads.covariance(value).float()).to(dtype=value.dtype)
+        camera_fact = torch.cat(
+            (
+                facts.camera_coordinates,
+                facts.camera_transport_prior,
+                facts.camera_support,
+            ),
+            dim=-1,
+        )
+        camera_value = (
+            value[:, :, :, None]
+            + self.camera_geometry(camera_fact)[:, None]
+        ) / (2.0**0.5)
+        transport = 0.50 * torch.tanh(
+            heads.transport(camera_value).float()
+        ).to(dtype=value.dtype)
+        covariance = F.softplus(
+            heads.covariance(camera_value).float()
+        ).to(dtype=value.dtype)
         # Zero-centred changes relative to the currently observed object.  The
         # map is exactly zero at initialization but keeps ordinary gradients
         # in both directions.
@@ -231,12 +276,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         # Physical support is immutable across W.  Predicted future visibility
         # is a supervised/calibration field and cannot erase either its own
         # training target or the semantic effect path.
-        validity = facts.validity[:, None].float().expand(
-            -1, intervals, -1, -1
+        validity = facts.camera_validity[:, None].float().expand(
+            -1, intervals, -1, -1, -1
         )
         address = self._transport_address(
             facts.object_to_chart,
-            facts.coordinates,
+            facts.camera_coordinates,
             transport,
         )
         return FutureObjectDynamics(
@@ -255,7 +300,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             uncertainty=uncertainty,
             validity=validity,
             future_address=address,
-            object_coordinates=facts.coordinates,
+            object_coordinates=facts.camera_coordinates,
         )
 
     @staticmethod
@@ -273,15 +318,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         center = (coordinates[:, None] + transport.float()).clamp(-1.0, 1.0)
         distance = (
             grid.reshape(1, 1, 1, 1, rows, columns, 2)
-            - center[:, :, :, None, None, None]
+            - center[:, :, :, :, None, None]
         ).square().sum(dim=-1)
-        logits = (
-            current.float().clamp_min(1e-6).log()[:, None]
-            - 4.0 * distance
-        )
-        return torch.softmax(logits.flatten(3), dim=-1).reshape(
-            batch, intervals, objects, cameras, rows, columns
-        ).to(dtype=current.dtype)
+        camera_mass = current.float().sum(dim=(-2, -1), keepdim=True)
+        spatial = current.float() / camera_mass.clamp_min(1e-6)
+        logits = spatial.clamp_min(1e-8).log()[:, None] - 4.0 * distance
+        transported = torch.softmax(
+            logits.flatten(-2), dim=-1
+        ).reshape(batch, intervals, objects, cameras, rows, columns)
+        return (transported * camera_mass[:, None]).to(dtype=current.dtype)
 
     def forward_w1(
         self,

@@ -10727,6 +10727,12 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
         )
 
 
+def test_object_intent_schema_four_selects_v122_log_semantics() -> None:
+    assert _evidence_log_version(
+        {"object_intent_schema": torch.tensor(4.0)}
+    ) == "v122"
+
+
 def test_grounded_intent_effect_uses_compact_contract_and_rejects_old_top() -> None:
     config = _complete_grounded_intent_effect_config()
     trainer = _complete_v115_trainer()

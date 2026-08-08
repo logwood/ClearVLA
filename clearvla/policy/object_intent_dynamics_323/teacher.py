@@ -169,23 +169,19 @@ class ObjectFutureTeacher(nn.Module):
         # This is the explicit source->learned-flow displacement exported by
         # G3.  It is only a bounded prior: semantic matching remains global
         # within the camera, so zero flow and non-equal-pixel motion are legal.
-        geometry_coordinate = typed_current(
-            facts.geometry_candidate_assignment,
-            facts.dense_chart.candidate_coordinates,
+        geometry_coordinate = facts.camera_coordinates.detach().float()
+        geometry_support = facts.camera_support.detach().float()
+        flow_hint = torch.tanh(
+            facts.camera_transport_prior.detach().float()
         )
-        geometry_support = typed_current(
-            facts.geometry_candidate_assignment,
-            facts.dense_chart.candidate_support[..., None],
-        )
-        flow_hint = torch.tanh(facts.transport_prior.detach().float())
         prior = geometry_coordinate[:, None] + (
-            fraction[:, :, None, None] * flow_hint[:, None]
+            fraction[:, :, None, None, None] * flow_hint[:, None]
         )
         prior = prior.clamp(-1.0, 1.0)
-        delta = coordinate - prior[:, :, :, None, None, None]
+        delta = coordinate - prior[:, :, :, :, None, None]
         support_width = geometry_support.detach().float().clamp(0.03, 1.0)
         geometry = -0.5 * delta.square().sum(dim=-1) / (
-            support_width[..., 0][:, None, :, None, None, None].square()
+            support_width[..., 0][:, None, :, :, None, None].square()
             + 0.08
             + 0.20 * fraction[:, :, None, None, None, None]
         )
@@ -231,28 +227,39 @@ class ObjectFutureTeacher(nn.Module):
         candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(
             cameras, -1, -1, -1
         )
-        transport_per_support = torch.einsum(
-            "bfkcyx,cyxd->bfkd", candidate_posterior, candidate_coordinate
-        ) - (1.0 - null_probability) * facts.coordinates.detach().float()[:, None]
+        camera_probability = candidate_posterior.sum(
+            dim=(-2, -1), keepdim=False
+        )
+        destination_coordinate = torch.einsum(
+            "bfkcyx,cyxd->bfkcd",
+            candidate_posterior,
+            candidate_coordinate,
+        ) / camera_probability[..., None].clamp_min(1e-6)
+        transport_per_support = torch.where(
+            camera_probability[..., None] > 1e-6,
+            destination_coordinate
+            - facts.camera_coordinates.detach().float()[:, None],
+            torch.zeros_like(destination_coordinate),
+        )
         centered = coordinate - (
-            facts.coordinates.detach().float()[:, None, :, None, None, None]
-            + transport_per_support[:, :, :, None, None, None]
+            facts.camera_coordinates.detach().float()[:, None, :, :, None, None]
+            + transport_per_support[:, :, :, :, None, None]
         )
         covariance_xx = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
+            "bfkcyx,bfkcyx->bfkc",
             candidate_posterior,
             centered[..., 0].square(),
-        )
+        ) / camera_probability.clamp_min(1e-6)
         covariance_xy = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
+            "bfkcyx,bfkcyx->bfkc",
             candidate_posterior,
             centered[..., 0] * centered[..., 1],
-        )
+        ) / camera_probability.clamp_min(1e-6)
         covariance_yy = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
+            "bfkcyx,bfkcyx->bfkc",
             candidate_posterior,
             centered[..., 1].square(),
-        )
+        ) / camera_probability.clamp_min(1e-6)
         covariance_per_support = torch.stack(
             (covariance_xx, covariance_xy, covariance_yy), dim=-1
         )
@@ -317,12 +324,12 @@ class ObjectFutureTeacher(nn.Module):
             successor_rows.append(interval_successor)
             transport_rows.append(
                 torch.einsum(
-                    "bfk,bfkd->bkd", content_weight, transport_per_support
+                    "bfk,bfkcd->bkcd", content_weight, transport_per_support
                 )
             )
             covariance_rows.append(
                 torch.einsum(
-                    "bfk,bfkd->bkd", content_weight, covariance_per_support
+                    "bfk,bfkcd->bkcd", content_weight, covariance_per_support
                 )
             )
             interval_visibility = torch.einsum(
@@ -375,13 +382,15 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty = torch.stack(uncertainty_rows, dim=1)
         future_address = torch.stack(address_rows, dim=1)
         semantic_end = torch.stack(semantic_end_rows, dim=1)
-        current_validity = facts.validity.detach().float()[:, None]
+        current_validity = facts.camera_validity.detach().float()[:, None]
         # Current object facts are visible and persistent by construction.
         # Export changes around that current state so a neutral/static future
         # is exactly zero and cannot become a constant P2 value shortcut.
         visibility_change = visibility - 1.0
         persistence_change = persistence_probability - 1.0
-        validity = current_validity.expand(-1, len(INTERVAL_BOUNDS), -1, -1)
+        validity = current_validity.expand(
+            -1, len(INTERVAL_BOUNDS), -1, -1, -1
+        )
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
@@ -395,7 +404,7 @@ class ObjectFutureTeacher(nn.Module):
             uncertainty=uncertainty,
             validity=validity,
             future_address=future_address,
-            object_coordinates=facts.coordinates.detach().float(),
+            object_coordinates=facts.camera_coordinates.detach().float(),
         )
         target.validate()
         metrics = {

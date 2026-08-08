@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 3
+CAPABILITY_SCHEMA = 4
 INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
 INTERVAL_BOUNDS = ((4, 8), (8, 16), (16, 32), (32, 48))
 
@@ -179,8 +179,10 @@ class ObjectFactSet:
     semantic: Tensor  # [B,K,R]
     appearance: Tensor
     geometry: Tensor
-    coordinates: Tensor  # [B,K,2]
-    transport_prior: Tensor  # [B,K,2]
+    camera_coordinates: Tensor  # [B,K,C,2]
+    camera_transport_prior: Tensor  # [B,K,C,2]
+    camera_support: Tensor  # [B,K,C,1]
+    camera_validity: Tensor  # [B,K,C,1]
     support: Tensor  # [B,K,1]
     # Read-conditioned object-vs-null confidence.  This is deliberately not
     # the fraction of total chart area allocated to an object.
@@ -200,6 +202,7 @@ class ObjectFactSet:
     null_assignment: Tensor  # joint local-prior null mass [B,C,Y,X,M]
     reconstructed_dino: Tensor  # [B,C,Y,X,D]
     reconstruction_error: Tensor  # scalar, not weighted here
+    typed_consistency_error: Tensor  # scalar, inside the existing G budget
 
     @property
     def batch(self) -> int:
@@ -218,8 +221,27 @@ class ObjectFactSet:
             value = getattr(self, name)
             if tuple(value.shape[:2]) != (batch, objects) or value.ndim != 3:
                 raise ValueError(f"object {name} must be [B,K,*]")
-        _shape(self.coordinates, (batch, objects, 2), "object coordinates")
-        _shape(self.transport_prior, (batch, objects, 2), "object transport prior")
+        cameras = int(self.dense_chart.dino_content.shape[1])
+        _shape(
+            self.camera_coordinates,
+            (batch, objects, cameras, 2),
+            "object camera coordinates",
+        )
+        _shape(
+            self.camera_transport_prior,
+            (batch, objects, cameras, 2),
+            "object camera transport prior",
+        )
+        _shape(
+            self.camera_support,
+            (batch, objects, cameras, 1),
+            "object camera support",
+        )
+        _shape(
+            self.camera_validity,
+            (batch, objects, cameras, 1),
+            "object camera validity",
+        )
         _shape(self.support, (batch, objects, 1), "object support")
         _shape(self.existence, (batch, objects, 1), "object existence")
         _shape(self.validity, (batch, objects, 1), "object validity")
@@ -246,6 +268,8 @@ class ObjectFactSet:
         _shape(self.reconstructed_dino, tuple(chart.shape), "reconstructed DINO")
         if self.reconstruction_error.ndim != 0:
             raise ValueError("object reconstruction error must be scalar")
+        if self.typed_consistency_error.ndim != 0:
+            raise ValueError("typed consistency error must be scalar")
 
     def permute(self, permutation: Tensor) -> "ObjectFactSet":
         """Permutation-equivariant view used by downstream causal audits."""
@@ -259,8 +283,10 @@ class ObjectFactSet:
             semantic=self.semantic[:, index],
             appearance=self.appearance[:, index],
             geometry=self.geometry[:, index],
-            coordinates=self.coordinates[:, index],
-            transport_prior=self.transport_prior[:, index],
+            camera_coordinates=self.camera_coordinates[:, index],
+            camera_transport_prior=self.camera_transport_prior[:, index],
+            camera_support=self.camera_support[:, index],
+            camera_validity=self.camera_validity[:, index],
             support=self.support[:, index],
             existence=self.existence[:, index],
             validity=self.validity[:, index],
@@ -278,6 +304,7 @@ class ObjectFactSet:
             null_assignment=self.null_assignment,
             reconstructed_dino=self.reconstructed_dino,
             reconstruction_error=self.reconstruction_error,
+            typed_consistency_error=self.typed_consistency_error,
         )
 
 
@@ -296,7 +323,7 @@ class ObjectFactualDock:
     object_posterior: Tensor  # [B,T,Q,K]
     null_posterior: Tensor  # [B,T,Q,1]
     chart_posterior: Tensor  # [B,T,Q,K,C,Y,X]
-    coordinates: Tensor  # [B,T,Q,K,2]
+    camera_coordinates: Tensor  # [B,T,Q,K,C,2]
     aggregate_fact: Tensor  # [B,T,Q,H]
 
     @property
@@ -325,10 +352,11 @@ class ObjectFactualDock:
             raise ValueError(
                 "object factual chart posterior must be [B,T,Q,K,C,Y,X]"
             )
+        cameras = int(self.chart_posterior.shape[4])
         _shape(
-            self.coordinates,
-            (batch, horizon, basis, objects, 2),
-            "object factual coordinates",
+            self.camera_coordinates,
+            (batch, horizon, basis, objects, cameras, 2),
+            "object factual camera coordinates",
         )
         _shape(
             self.aggregate_fact,
@@ -349,7 +377,7 @@ class ObjectFactualDock:
             object_posterior=self.object_posterior[:, :, :, index],
             null_posterior=self.null_posterior,
             chart_posterior=self.chart_posterior[:, :, :, index],
-            coordinates=self.coordinates[:, :, :, index],
+            camera_coordinates=self.camera_coordinates[:, :, :, index],
             aggregate_fact=self.aggregate_fact,
         )
 
@@ -366,10 +394,13 @@ class ObjectIntentState:
     geometry_object_tokens: Tensor  # [B,K,H]
     interval_queries: Tensor  # [B,4,H]
     interval_action_queries: Tensor  # [B,4,H]
+    interval_action_innovations: Tensor  # [B,4,H], identity-free
     interval_state_queries: Tensor  # [B,4,H]
+    interval_state_innovations: Tensor  # [B,4,H], identity-free
     interval_object_keys: Tensor  # [B,4,K,H]
     interval_object_values: Tensor  # [B,4,K,H]
     temporal_queries: Tensor  # [B,T,H]
+    temporal_innovations: Tensor  # [B,T,H], the only temporal value exported to P3
     # A zero-centred value built only from observed state deltas and current
     # transport.  It is not a phase, progress, completion, or terminal score.
     state_change_evidence: Tensor  # [B,H]
@@ -391,11 +422,26 @@ class ObjectIntentState:
             "interval action queries",
         )
         _shape(
+            self.interval_action_innovations,
+            (batch, 4, hidden),
+            "interval action innovations",
+        )
+        _shape(
             self.interval_state_queries,
             (batch, 4, hidden),
             "interval state queries",
         )
+        _shape(
+            self.interval_state_innovations,
+            (batch, 4, hidden),
+            "interval state innovations",
+        )
         _shape(self.temporal_queries, (batch, horizon, hidden), "temporal queries")
+        _shape(
+            self.temporal_innovations,
+            (batch, horizon, hidden),
+            "temporal innovations",
+        )
         _shape(self.state_change_evidence, (batch, hidden), "state-change evidence")
         if self.object_tokens.ndim != 3:
             raise ValueError("object intent public tokens must be [B,K,H]")
@@ -466,7 +512,8 @@ class FuturePlanRecognition:
 
 @dataclass(frozen=True)
 class CoarseActionIntentState:
-    tokens: Tensor  # [B,4,H]
+    tokens: Tensor  # [B,4,H], query plus innovation for diagnostics/reconstruction
+    innovations: Tensor  # [B,4,H], the only W-visible value
     action_prediction: Tensor  # [B,4,3*A] start/end/change
     target: Tensor | None
     loss: Tensor
@@ -479,14 +526,14 @@ class FutureObjectDynamics:
     current_reference: Tensor  # [B,K,D]
     successor_content: Tensor  # [B,I,K,D]
     semantic_delta: Tensor  # [B,I,K,D]
-    transport_mean: Tensor  # [B,I,K,2]
-    transport_covariance: Tensor  # [B,I,K,3]
+    transport_mean: Tensor  # [B,I,K,C,2]
+    transport_covariance: Tensor  # [B,I,K,C,3]
     visibility: Tensor  # zero-centred visibility change [B,I,K,1]
     persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
     uncertainty: Tensor  # [B,I,K,1]
-    validity: Tensor  # [B,I,K,1]
+    validity: Tensor  # physical per-camera support [B,I,K,C,1]
     future_address: Tensor  # [B,I,K,C,Y,X]
-    object_coordinates: Tensor  # [B,K,2]
+    object_coordinates: Tensor  # [B,K,C,2]
 
     @property
     def intervals(self) -> int:
@@ -502,17 +549,35 @@ class FutureObjectDynamics:
             )
         _shape(self.current_reference, (batch, objects, width), "current object reference")
         _shape(self.successor_content, (batch, intervals, objects, width), "successor content")
-        _shape(self.transport_mean, (batch, intervals, objects, 2), "transport mean")
-        _shape(self.transport_covariance, (batch, intervals, objects, 3), "transport covariance")
-        for name in ("visibility", "persistence", "uncertainty", "validity"):
-            _shape(getattr(self, name), (batch, intervals, objects, 1), name)
         if self.future_address.ndim != 6 or tuple(self.future_address.shape[:3]) != (
             batch,
             intervals,
             objects,
         ):
             raise ValueError("future address must be [B,I,K,C,Y,X]")
-        _shape(self.object_coordinates, (batch, objects, 2), "future object coordinates")
+        cameras = int(self.future_address.shape[3])
+        _shape(
+            self.transport_mean,
+            (batch, intervals, objects, cameras, 2),
+            "transport mean",
+        )
+        _shape(
+            self.transport_covariance,
+            (batch, intervals, objects, cameras, 3),
+            "transport covariance",
+        )
+        for name in ("visibility", "persistence", "uncertainty"):
+            _shape(getattr(self, name), (batch, intervals, objects, 1), name)
+        _shape(
+            self.validity,
+            (batch, intervals, objects, cameras, 1),
+            "future camera validity",
+        )
+        _shape(
+            self.object_coordinates,
+            (batch, objects, cameras, 2),
+            "future object camera coordinates",
+        )
 
     @classmethod
     def neutral(cls, facts: ObjectFactSet, *, intervals: int = 4) -> "FutureObjectDynamics":
@@ -521,19 +586,26 @@ class FutureObjectDynamics:
         batch, objects, width = current.shape
         zeros = current.new_zeros(batch, intervals, objects, width)
         scalar = current.new_zeros(batch, intervals, objects, 1)
+        cameras = int(facts.object_to_chart.shape[2])
         address = facts.object_to_chart[:, None].expand(-1, intervals, -1, -1, -1, -1)
         return cls(
             current_reference=current,
             successor_content=current[:, None].expand(-1, intervals, -1, -1),
             semantic_delta=zeros,
-            transport_mean=current.new_zeros(batch, intervals, objects, 2),
-            transport_covariance=current.new_zeros(batch, intervals, objects, 3),
+            transport_mean=current.new_zeros(
+                batch, intervals, objects, cameras, 2
+            ),
+            transport_covariance=current.new_zeros(
+                batch, intervals, objects, cameras, 3
+            ),
             visibility=scalar,
             persistence=scalar,
             uncertainty=scalar,
-            validity=scalar,
+            validity=facts.camera_validity[:, None].expand(
+                -1, intervals, -1, -1, -1
+            ),
             future_address=address,
-            object_coordinates=facts.coordinates,
+            object_coordinates=facts.camera_coordinates,
         )
 
 

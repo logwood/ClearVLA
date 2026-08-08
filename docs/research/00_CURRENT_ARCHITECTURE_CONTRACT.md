@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-08
+Updated: 2026-08-09
 
 This is the compact source of truth for the active top representation. Run
 labels identify experiments; they do not select source semantics. Historical
@@ -10,8 +10,8 @@ reasoning belongs in Git history and the focused issue ledger.
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        3
-default run label:      v121
+manifest schema:        4
+default run label:      v122
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -23,8 +23,8 @@ smoke launcher:         scripts/current_object_intent_dynamics_323_smoke.sh
 required capability:    object_intent_dynamics_323
 ```
 
-`v121` is only a log and output-directory label. The source is selected by the
-capability name. Schema 3 is incompatible with schema-2 top weights and must
+`v122` is only a log and output-directory label. The source is selected by the
+capability name. Schema 4 is incompatible with schema-3 top weights and must
 start fresh. The small serialized `ArchitectureManifest` owns only identity,
 topology, intervals, object count, language requirement and bottom
 compatibility; executable types own shapes and semantics. Do not add a new
@@ -39,24 +39,27 @@ current RGB / DINO / raw pair / learned flow
        one physical K+null assignment
        semantic / appearance / geometry bounded verification reads
        reversible K -> [C,8,8,M] correspondence
+       camera coordinates/transport/support remain [K,C,*]
   -> S StatelessObjectIntentOrganizer
        factorized T5, ordered state/action history, typed K-object memories
-       four interval identities and 24 temporal queries
+       protected query identities separate from causal interval innovations
+       24 temporal queries export only their zero-centred read innovation
        zero-centred observable state-change evidence
   -> CoarseActionIntent
-       online evidence only; its only consumer is W
+       causal online innovation only; its learned query is not W-visible
   -> W1: 4-8 and 8-16 object effects
   -> W2: 16-32 and 32-48 object effects
        separate near/far output heads; W2 reads the ordered W1 sequence
   -> FutureObjectDynamics
-       one supervised semantic/geometry/status object
+       object semantic/status plus per-camera geometry/validity
   -> P1: one current high-resolution read
        K object -> local chart -> existing 3x3 RGB/detail micro-read
        emits ObjectFactualDock on the same K basis as W
   -> P2: separate semantic and geometry selectors over that dock
-       status is calibration only, never an independent value
+       geometry remains camera-specific; common-mode-free status only ranks
+       physically valid candidates and never changes the null prior
   -> exact-zero-preserving consequence
-  -> P3: precision / temporal / state-change innovations
+  -> P3: centred object-detail precision / temporal / state-change innovations
        around one protected consequence
   -> exactly one protected-consequence bottom ingress
   -> unchanged Evidence MMDiT / CVAE / workspace / adaptive execution
@@ -86,25 +89,34 @@ action.
 2. G3 is `log(parent posterior) + bounded residual`. With a zero residual it
    exactly inherits G2. Semantic, appearance and geometry are verification
    posteriors inside the same physical K support; they cannot invent separate
-   object identities or move mass to null. The DINO reconstruction budget is
-   75% object-prototype error and 25% within-object coordinate refinement, so
-   the shared coordinate decoder cannot hide homogeneous K slots.
+   object identities or move mass to null. The existing G reconstruction
+   budget is 65% object-prototype error, 20% within-object coordinate
+   refinement and 15% target-normalized typed-field consistency. The typed
+   term asks each read to explain its own field; it never forces posteriors to
+   differ.
 3. Object, camera, space, local-hypothesis, type and interval axes stay real
    until their named consumer. A reduced axis may not be recreated by
    `expand` and called an object, interval or camera.
 4. S reads full T5 tokens, ordered observable history and typed K objects. It
    receives no frame index, scalar progress, phase label, noisy ODE action or
-   future teacher. Goal/history/object/action/state K/V remain factorized.
-5. S interval object K/V are future-oriented innovations. The protected
+   future teacher. Goal/history/object/action/state K/V remain factorized. Its
+   online and recognizer interval blocks are causal, and only innovation is
+   matched to innovation.
+5. S interval action/state/object K/V are future-oriented innovations. Query
+   identities and cumulative diagnostic carriers cannot become W/P3 values.
+   The protected
    current object enters W exactly once through `ObjectFactSet.content`.
 6. `CoarseActionIntent` is the only action-conditioned W input. It is computed
-   from online evidence, never target/noisy action, and has no bottom bypass.
+   causally from online evidence, never target/noisy action, and has no bottom
+   bypass. W consumes only its innovation, not its learned query carrier.
 7. W1 owns the two near intervals and W2 owns the two far intervals. Their
    output heads are disjoint. W2 may read both ordered W1 tokens but may not
    replace them with a mean.
 8. The only W-to-P value is the directly supervised
    `FutureObjectDynamics`. No public world residual or hidden W carrier crosses
-   this boundary.
+   this boundary. W interval and decoder identities may modulate an
+   object-owned value multiplicatively; they cannot form an object-free
+   additive carrier.
 9. Teacher temporal aggregation is object-specific. Stable successor content
    and end-biased semantic change are different targets; static content is not
    erased by a change mask.
@@ -112,17 +124,22 @@ action.
     assignment and exports per-object facts, K+null posterior, chart posterior,
     coordinates and the mature aggregate P1 fact in `ObjectFactualDock`.
 11. P2 semantic and geometry paths have different keys, values and posteriors.
-    Visibility, persistence, uncertainty and validity calibrate selection once;
-    they cannot become a third cheap policy value.
+    Geometry preserves `[I,K,C]` through selection. Visibility, persistence
+    and uncertainty enter only as a bounded relative score after their common
+    mode is removed. Physical per-camera validity alone may move mass to null;
+    status cannot become a third cheap value or punish every static object.
 12. P2 content, intent and coordinate scores are bounded to `[-1,1]`; their
     temperatures stay in `[0.25,4]`; zero-vector normalization has a finite
     Jacobian through a `0.25` norm floor.
 13. A neutral future field is algebraically neutral: `effect=0`,
     `interaction=0`, and `protected_consequence=P1_fact` exactly.
 14. P3 contains only three real innovations: precision, temporal and
-    state-change. It has no duplicated factual/effect lanes. Precision and
-    temporal both consume consequence; state-change cannot synthesize a value
-    when observed deltas and transport are zero.
+    state-change. It has no duplicated factual/effect lanes. Precision reads
+    only posterior-centred, already-materialized K-specific P1 detail and uses
+    `effect+interaction` only as a query condition. Temporal reads only S's
+    temporal innovation and `effect+interaction`. Learned temporal identity or
+    action query cannot synthesize either value; state-change cannot synthesize
+    a value when observed deltas and transport are zero.
 15. The protected consequence enters the bottom once through protected detail.
     Controlled dynamics sees the pre-top trajectory seed plus current state and
     the final observed history, not a second copy of the P-modified trajectory.
@@ -152,27 +169,28 @@ ObjectFactSet
   physical candidate_assignment                          [B,K,C,8,8,M]
   typed semantic/appearance/geometry assignments          [B,K,C,8,8,M]
   object_to_chart                                         [B,K,C,8,8]
-  coordinates / transport / support / existence / validity
+  camera coordinates / transport / support / validity       [B,K,C,*]
+  object support / existence / validity                      [B,K,*]
 
 ObjectIntentState
   protected_goal_set / ordered history
-  interval action/state queries                           [B,4,H]
+  interval action/state queries + separate innovations    [B,4,H]
   interval object keys/values                             [B,4,K,H]
   typed object tokens                                     [B,K,H]
-  temporal_queries                                        [B,24,H]
+  temporal queries + separate exported innovations        [B,24,H]
   state_change_evidence                                   [B,H]
 
 FutureObjectDynamics
   current_reference                                       [B,K,D]
   successor_content / semantic_delta                      [B,4,K,D]
-  transport / covariance / visibility / persistence
-  uncertainty / validity                                  [B,4,K,*]
+  transport / covariance / camera validity                [B,4,K,C,*]
+  visibility / persistence / uncertainty                  [B,4,K,*]
   future_address                                          [B,4,K,C,8,8]
 
 ObjectFactualDock
   fact_by_object                                          [B,T,Q,K,H]
   object_posterior + null_posterior                       [B,T,Q,K+1]
-  chart_posterior / coordinates on the same K basis
+  chart_posterior / per-camera coordinates on the same K basis
   aggregate_fact                                          [B,T,Q,H]
 
 ObjectPolicyPlanDeltaBank
@@ -194,7 +212,7 @@ objects in `trunk.py` or select them by a V-number.
 | W | current G objects once, factorized S innovations, one CoarseActionIntent | target/noisy action, generic aliases, teacher, public world residual |
 | P1 | G K-to-chart assignment, canonical S query, action-basis query | W effect, teacher, second visual read, mean-goal/last-history aliases |
 | P2 | ObjectFactualDock, supervised FutureObjectDynamics, S interval intent, action query | raw/DINO reopen, public W hidden, status value |
-| P3 | P1 fact, protected consequence, S temporal control/state-change, action query | repeated factual/effect lanes, teacher, RGB/DINO, completion/progress |
+| P3 | centred per-object P1 detail, consequence innovation, S temporal innovation/state-change, action query | aggregate P1 fact as optional value, cumulative consequence as optional value, temporal identity, teacher, RGB/DINO, completion/progress |
 | bottom | one protected consequence, three optional P3 innovations, observable state/history | second protected consequence through dynamics context |
 
 ## Loss ownership
@@ -202,8 +220,10 @@ objects in `trunk.py` or select them by a V-number.
 - Action flow matching remains the dominant objective.
 - The existing future budget owns stable successor content, ordered semantic
   change, transport/covariance, visibility/persistence and detached teacher
-  dispersion. Stable successor and semantic change are no longer the same
-  algebraic error.
+  dispersion. Each component is optimized in its own detached, variance-floor
+  unit before the unchanged internal coefficients are applied; native-unit
+  errors remain diagnostics. Stable successor and semantic change are no
+  longer the same algebraic error.
 - The existing interval/structure budget owns object reconstruction,
   factorized online-S matching, recognizer reconstruction, chronological
   transition and coarse action structure. Deleted losses are not reassigned.
@@ -245,23 +265,25 @@ Do not redirect the raw-HDF5 default merely because caches and weights moved.
 ## Verification state
 
 Local CPU tests cover schema/resume identity, physical/typed G continuity,
-mass conservation, object permutation through S/Teacher/P2, teacher FP32
-isolation, ordered successor-versus-delta targets, disjoint W1/W2 heads,
-typed P2 independence and bounded scores, exact-neutral consequence, P3
-dependency/zero semantics, full BF16 forward/backward, optimizer ownership,
-teacher-forced boundaries, future-target/action isolation, audit-switch
-bit-exactness and five-step cache behavior.
+field-specific typed consistency, camera-axis preservation, mass conservation,
+object permutation through S/Teacher/P2, teacher FP32 isolation, ordered
+successor-versus-delta targets, query-only innovation zero semantics,
+object-owned W conditioning, disjoint W1/W2 heads, common-status invariance,
+typed P2 independence and bounded scores, exact-neutral consequence, centred
+P3 precision/temporal zero semantics, full BF16 forward/backward, optimizer
+ownership, teacher-forced boundaries, future-target/action isolation,
+audit-switch bit-exactness and five-step cache behavior.
 
 This source still requires a fresh server smoke and long run. No action-quality
-improvement is claimed until the new v121 log and frozen-checkpoint causal
+improvement is claimed until the new v122 log and frozen-checkpoint causal
 interventions exist. The decisive empirical questions are kept in
 `TOP_ARCHITECTURE_ISSUE_LEDGER.md`.
 
 ## Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 nohup bash scripts/current_object_intent_dynamics_323_smoke.sh > v121_smoke.log 2>&1 &
-CUDA_VISIBLE_DEVICES=0 nohup bash scripts/current_object_intent_dynamics_323.sh > v121.log 2>&1 &
+CUDA_VISIBLE_DEVICES=0 nohup bash scripts/current_object_intent_dynamics_323_smoke.sh > v122_smoke.log 2>&1 &
+CUDA_VISIBLE_DEVICES=0 nohup bash scripts/current_object_intent_dynamics_323.sh > v122.log 2>&1 &
 ```
 
 Override `OBJECT_323_BATCH_SIZE`, `DATA_ROOT`, cache roots, T5 path or

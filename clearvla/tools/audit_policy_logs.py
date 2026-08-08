@@ -27,7 +27,7 @@ INIT_COUNT_RE = re.compile(r"^\[v39-init\]\s+(?P<label>.*?)(?:\s+count=(?P<count
 UNHANDLED_EXCEPTION_RE = re.compile(
     r"^(?P<type>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)):\s*(?P<message>.*)$"
 )
-COMPACT_POLICY_VERSIONS = tuple(range(94, 122))
+COMPACT_POLICY_VERSIONS = tuple(range(94, 123))
 
 
 def _compact_prefixes(family: str) -> tuple[str, ...]:
@@ -760,6 +760,10 @@ V94_ALIASES.update(
             "spatial_refine_mse": (
                 "object_grounding_spatial_refinement_mse"
             ),
+            "typed_consistency": "object_grounding_typed_consistency",
+            "semantic_consistency": "object_grounding_semantic_consistency",
+            "appearance_consistency": "object_grounding_appearance_consistency",
+            "geometry_consistency": "object_grounding_geometry_consistency",
             "existence": "object_grounding_existence_mean",
             "validity": "object_grounding_validity_mean",
             "allocation": "object_grounding_allocation_share_mean",
@@ -781,6 +785,7 @@ V94_ALIASES.update(
                 "object_grounding_appearance_geometry_posterior_l1"
             ),
             "flow_prior": "object_grounding_transport_prior_rms",
+            "camera_coord_var": "object_grounding_camera_coordinate_variation",
         },
         "object_intent": {
             "goal_H": "object_intent_goal_attention_entropy",
@@ -790,6 +795,10 @@ V94_ALIASES.update(
             "semantic_H": "object_intent_interval_semantic_entropy",
             "appearance_H": "object_intent_interval_appearance_entropy",
             "geometry_H": "object_intent_interval_geometry_entropy",
+            "object_sim_H": "object_intent_interval_object_audit_similarity_entropy",
+            "semantic_sim_H": "object_intent_interval_semantic_audit_similarity_entropy",
+            "appearance_sim_H": "object_intent_interval_appearance_audit_similarity_entropy",
+            "geometry_sim_H": "object_intent_interval_geometry_audit_similarity_entropy",
             "interval_var": "object_intent_interval_variation",
             "state_interval_var": "object_intent_interval_state_variation",
             "object_key_var": "object_intent_interval_object_key_variation",
@@ -799,6 +808,9 @@ V94_ALIASES.update(
             "history_innov": "object_intent_history_innovation_rms",
             "object_innov": "object_intent_object_innovation_rms",
             "typed_innov": "object_intent_typed_innovation_rms",
+            "action_innov": "object_intent_action_innovation_rms",
+            "state_innov": "object_intent_state_innovation_rms",
+            "temporal_innov": "object_intent_temporal_innovation_rms",
             "state_delta": "object_intent_observed_state_delta_rms",
             "transport": "object_intent_observed_transport_rms",
             "change_history": "object_intent_state_change_history_rms",
@@ -812,12 +824,17 @@ V94_ALIASES.update(
             "object_value_match": "object_intent_object_value_match_loss",
             "recognizer": "object_plan_recognition_loss",
             "coarse_action": "object_coarse_action_loss",
+            "coarse_innov": "object_coarse_action_innovation_rms",
+            "coarse_var": "object_coarse_action_interval_variation",
+            "coarse_cos": "object_coarse_action_adjacent_cosine",
+            "coarse_target_error": "object_coarse_action_target_normalized_error",
         },
         "object_dynamics": {
             "goal_H": "object_w_goal_attention_entropy",
             "goal_innov": "object_w_goal_innovation_rms",
             "intent_innov": "object_w_interval_innovation_rms",
             "action_innov": "object_w_action_innovation_rms",
+            "condition_interaction": "object_w_condition_interaction_rms",
             "state_innov": "object_w_state_innovation_rms",
             "object_key_innov": "object_w_object_key_innovation_rms",
             "object_value_innov": "object_w_object_value_innovation_rms",
@@ -858,7 +875,7 @@ V94_ALIASES.update(
             "target_var": "object_future_target_interval_variation",
         },
         "object_policy": {
-            # Schema-2 ancestry remains parseable below; active schema-3 logs
+            # Schema-2/3 ancestry remains parseable below; active schema-4 logs
             # expose the semantic and geometry routes independently.
             "semantic_score": "object_p2_semantic_score_abs",
             "semantic_score_max": "object_p2_semantic_score_max_abs",
@@ -875,6 +892,8 @@ V94_ALIASES.update(
             "semantic_null": "object_p2_semantic_null_mass",
             "geometry_null": "object_p2_geometry_null_mass",
             "calibration": "object_p2_selector_calibration",
+            "relative_status_abs": "object_p2_relative_status_abs",
+            "relative_status_mean": "object_p2_relative_status_mean",
             "content_score": "object_p2_content_score_abs",
             "content_score_max": "object_p2_content_score_max_abs",
             "intent_score": "object_p2_intent_score_abs",
@@ -914,6 +933,9 @@ V94_ALIASES.update(
             "p3_effect": "object_p3_effect_rms",
             "p3_temporal": "object_p3_temporal_rms",
             "p3_state_change": "object_p3_state_change_rms",
+            "p3_centered_detail": "object_p3_centered_detail_rms",
+            "p3_consequence_innov": "object_p3_consequence_innovation_rms",
+            "p3_precision_null": "object_p3_precision_null_mass",
         },
     }
 )
@@ -1467,7 +1489,7 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 pending_v94.metrics.update(_parse_v119_effect_error(line))
                 continue
             object_auxiliary = re.match(
-                r"^\[(v120|v121)-(ground|intent|dynamics|policy)\]",
+                r"^\[(v120|v121|v122)-(ground|intent|dynamics|policy)\]",
                 line,
             )
             if object_auxiliary is not None and pending_v94 is not None:
@@ -1475,7 +1497,11 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 pending_v94.metrics.update(_parse_v94_tokens(line, family))
                 continue
             if line.startswith(
-                ("[v120-dynamics-error]", "[v121-dynamics-error]")
+                (
+                    "[v120-dynamics-error]",
+                    "[v121-dynamics-error]",
+                    "[v122-dynamics-error]",
+                )
             ) and pending_v94 is not None:
                 pending_v94.metrics.update(_parse_v120_dynamics_error(line))
                 continue

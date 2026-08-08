@@ -94,6 +94,7 @@ class ObjectFutureEffectReader(nn.Module):
         self.semantic_key = nn.Linear(content_dim, hidden, bias=False)
         self.geometry_query = nn.Linear(hidden, hidden, bias=False)
         self.geometry_fact = nn.Linear(hidden, hidden, bias=False)
+        self.geometry_camera_fact = nn.Linear(2, hidden, bias=False)
         self.geometry_key = nn.Linear(5, hidden, bias=False)
         self.intent_query = nn.Linear(hidden, hidden, bias=False)
         self.intent_key = nn.Linear(hidden, hidden, bias=False)
@@ -168,12 +169,13 @@ class ObjectFutureEffectReader(nn.Module):
             (dynamics.transport_mean, dynamics.transport_covariance), dim=-1
         )
         geometry_query = self._bounded_unit(
-            self.geometry_query(action_query)[:, :, :, None]
-            + self.geometry_fact(factual_dock.fact_by_object)
+            self.geometry_query(action_query)[:, :, :, None, None]
+            + self.geometry_fact(factual_dock.fact_by_object)[..., None, :]
+            + self.geometry_camera_fact(factual_dock.camera_coordinates)
         )
         geometry_key = self._bounded_unit(self.geometry_key(geometry_source))
         geometry_score = torch.einsum(
-            "btqkh,bikh->btqik", geometry_query, geometry_key
+            "btqkch,bikch->btqikc", geometry_query, geometry_key
         )
 
         intent_query = self._bounded_unit(self.intent_query(action_query))
@@ -200,13 +202,13 @@ class ObjectFutureEffectReader(nn.Module):
         chart_coordinate = chart_coordinate[None].expand(cameras, -1, -1, -1)
         future_address = dynamics.future_address.float()
         future_address = future_address / future_address.sum(
-            dim=(-3, -2, -1), keepdim=True
+            dim=(-2, -1), keepdim=True
         ).clamp_min(1e-6)
         future_coordinate = torch.einsum(
-            "bikcyx,cyxd->bikd", future_address, chart_coordinate
+            "bikcyx,cyxd->bikcd", future_address, chart_coordinate
         )
         transported_source = (
-            factual_dock.coordinates.float()[:, :, :, None]
+            factual_dock.camera_coordinates.float()[:, :, :, None]
             + dynamics.transport_mean.float()[:, None, None]
         ).clamp(-1.0, 1.0)
         address_score = -0.5 * (
@@ -218,45 +220,76 @@ class ObjectFutureEffectReader(nn.Module):
             self.transport_query(action_query).float()
         )
         transport_score = 1.0 - 0.5 * (
-            requested_transport[:, :, :, None, None]
+            requested_transport[:, :, :, None, None, None]
             - dynamics.transport_mean.float()[:, None, None]
         ).square().sum(dim=-1)
         transport_score = transport_score.clamp(-1.0, 1.0)
-        coordinate_score = (0.5 * address_score + 0.5 * transport_score).clamp(
+        camera_coordinate_score = (
+            0.5 * address_score + 0.5 * transport_score
+        ).clamp(
             -1.0, 1.0
         )
+        factual_camera_mass = factual_dock.chart_posterior.float().sum(
+            dim=(-2, -1)
+        )
+        physical_camera_validity = dynamics.validity.float().squeeze(-1).clamp(
+            0.0, 1.0
+        )
+        coordinate_weight = (
+            factual_camera_mass[:, :, :, None]
+            * physical_camera_validity[:, None, None]
+        )
+        semantic_coordinate_score = (
+            camera_coordinate_score * coordinate_weight
+        ).sum(dim=-1) / coordinate_weight.sum(dim=-1).clamp_min(1e-6)
 
         temperature = self._temperatures().to(device=action_query.device)
         semantic_logit = (
             temperature[0] * semantic_score
             + temperature[1] * intent_score[..., None]
-            + temperature[2] * coordinate_score
+            + temperature[2] * semantic_coordinate_score
         )
         geometry_logit = (
             temperature[0] * geometry_score
-            + temperature[1] * intent_score[..., None]
-            + temperature[2] * coordinate_score
+            + temperature[1] * intent_score[..., None, None]
+            + temperature[2] * camera_coordinate_score
         )
 
-        # One selector calibration.  Visibility/persistence/uncertainty never
-        # become additive policy values and never multiply the selected value.
-        calibration = torch.sigmoid(
-            1.5 * dynamics.visibility.float().squeeze(-1)
-            + 1.5 * dynamics.persistence.float().squeeze(-1)
-            - dynamics.uncertainty.float().squeeze(-1)
+        # Status fields are zero-centred changes, not absolute availability.
+        # Only their relative, common-mode-free score may rank otherwise
+        # legal candidates; physical validity alone may move mass to null.
+        status_raw = (
+            0.5 * dynamics.visibility.float().squeeze(-1)
+            + 0.5 * dynamics.persistence.float().squeeze(-1)
+            - 0.5 * dynamics.uncertainty.float().squeeze(-1)
         )
-        physical_validity = dynamics.validity.float().squeeze(-1).clamp(0.0, 1.0)
+        object_validity = physical_camera_validity.amax(dim=-1)
+        status_center = (
+            status_raw * object_validity
+        ).sum(dim=(1, 2), keepdim=True) / object_validity.sum(
+            dim=(1, 2), keepdim=True
+        ).clamp_min(1e-6)
+        relative_status = torch.tanh(status_raw - status_center)
+        semantic_logit = semantic_logit + 0.5 * relative_status[:, None, None]
+        geometry_logit = geometry_logit + 0.5 * relative_status[
+            :, None, None, :, :, None
+        ]
         object_prior = factual_dock.object_posterior.float() / float(intervals)
-        candidate_prior = (
+        semantic_candidate_prior = (
             object_prior[:, :, :, None]
-            * physical_validity[:, None, None]
-            * calibration[:, None, None]
+            * object_validity[:, None, None]
+        )
+        geometry_candidate_prior = (
+            object_prior[:, :, :, None, :, None]
+            * factual_camera_mass[:, :, :, None]
+            * physical_camera_validity[:, None, None]
         )
         null_prior = factual_dock.null_posterior.float().clamp_min(1e-8)
 
-        def typed_posterior(logit: Tensor) -> Tensor:
-            flat_logit = logit.flatten(-2)
-            flat_prior = candidate_prior.flatten(-2)
+        def typed_posterior(logit: Tensor, prior: Tensor) -> Tensor:
+            candidate_axes = logit.ndim - 3
+            flat_logit = logit.flatten(-candidate_axes)
+            flat_prior = prior.flatten(-candidate_axes)
             candidate_log_prior = torch.where(
                 flat_prior > 0.0,
                 flat_prior.clamp_min(1e-30).log(),
@@ -268,14 +301,18 @@ class ObjectFutureEffectReader(nn.Module):
                 dim=-1,
             )
 
-        semantic_posterior = typed_posterior(semantic_logit)
-        geometry_posterior = typed_posterior(geometry_logit)
+        semantic_posterior = typed_posterior(
+            semantic_logit, semantic_candidate_prior
+        )
+        geometry_posterior = typed_posterior(
+            geometry_logit, geometry_candidate_prior
+        )
         semantic_source_value = self.semantic_value(
             dynamics.semantic_delta
         ).reshape(batch, intervals * objects, hidden)
         geometry_source_value = self.transport_value(
             dynamics.transport_mean
-        ).reshape(batch, intervals * objects, hidden)
+        ).reshape(batch, intervals * objects * cameras, hidden)
         selected_semantic = torch.einsum(
             "btqn,bnh->btqh",
             semantic_posterior[..., :-1].to(dtype=semantic_source_value.dtype),
@@ -294,7 +331,9 @@ class ObjectFutureEffectReader(nn.Module):
         selected_geometry_key = torch.einsum(
             "btqn,bnh->btqh",
             geometry_posterior[..., :-1],
-            geometry_key.reshape(batch, intervals * objects, hidden),
+            geometry_key.reshape(
+                batch, intervals * objects * cameras, hidden
+            ),
         )
         type_query = self._bounded_unit(self.type_query(action_query))
         type_logit = torch.stack(
@@ -325,8 +364,8 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_geometry_score_max_abs": geometry_score.detach().abs().amax(),
             "object_p2_intent_score_abs": intent_score.detach().abs().mean(),
             "object_p2_intent_score_max_abs": intent_score.detach().abs().amax(),
-            "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
-            "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
+            "object_p2_coordinate_score_abs": camera_coordinate_score.detach().abs().mean(),
+            "object_p2_coordinate_score_max_abs": camera_coordinate_score.detach().abs().amax(),
             "object_p2_address_score_abs": address_score.detach().abs().mean(),
             "object_p2_transport_score_abs": transport_score.detach().abs().mean(),
             "object_p2_semantic_logit_max_abs": semantic_logit.detach().abs().amax(),
@@ -344,7 +383,8 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_geometry_posterior_max": geometry_posterior.detach().amax(dim=-1).mean(),
             "object_p2_semantic_null_mass": semantic_posterior.detach()[..., -1].mean(),
             "object_p2_geometry_null_mass": geometry_posterior.detach()[..., -1].mean(),
-            "object_p2_selector_calibration": calibration.detach().mean(),
+            "object_p2_relative_status_abs": relative_status.detach().abs().mean(),
+            "object_p2_relative_status_mean": relative_status.detach().mean(),
             "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
             "object_p2_semantic_value_mass": type_weight.detach()[..., 0].mean(),
             "object_p2_geometry_value_mass": type_weight.detach()[..., 1].mean(),
@@ -353,8 +393,8 @@ class ObjectFutureEffectReader(nn.Module):
             batch, horizon, basis, intervals, objects
         ).sum(dim=-1)
         geometry_interval_mass = geometry_posterior[..., :-1].reshape(
-            batch, horizon, basis, intervals, objects
-        ).sum(dim=-1)
+            batch, horizon, basis, intervals, objects, cameras
+        ).sum(dim=(-2, -1))
         for index in range(intervals):
             metrics[f"object_p2_semantic_interval_{index}_mass"] = (
                 semantic_interval_mass[..., index].detach().float().mean()
@@ -413,8 +453,9 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self.horizon = int(horizon)
         self.basis = int(basis)
         self.precision_action = nn.Linear(hidden, hidden, bias=False)
-        self.precision_fact = nn.Linear(hidden, hidden, bias=False)
-        self.precision_consequence = nn.Linear(hidden, hidden, bias=False)
+        self.precision_consequence_query = nn.Linear(hidden, hidden, bias=False)
+        self.precision_object_key = nn.Linear(hidden, hidden, bias=False)
+        self.precision_object_value = nn.Linear(hidden, hidden, bias=False)
         self.precision_lane = nn.Linear(hidden, hidden, bias=False)
         self.temporal_action = nn.Linear(hidden, hidden, bias=False)
         self.temporal_consequence = nn.Linear(hidden, hidden, bias=False)
@@ -426,27 +467,67 @@ class ObjectPolicyPlanCompiler(nn.Module):
     def forward(
         self,
         *,
-        p1_fact: Tensor,
+        factual_dock: ObjectFactualDock,
         consequence: ObjectConsequenceState,
         intent: ObjectIntentState,
         action_query: Tensor,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
-        if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
+        factual_dock.validate()
+        if (
+            tuple(action_query.shape) != expected
+            or tuple(consequence.factual_base.shape) != expected
+        ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
-        precision_condition = (
-            self.precision_fact(p1_fact)
-            + self.precision_consequence(consequence.protected_consequence)
-        ) / math.sqrt(2.0)
-        precision = self.precision_lane(
-            torch.tanh(self.precision_action(action_query))
-            * precision_condition
+        if tuple(factual_dock.aggregate_fact.shape) != expected:
+            raise ValueError("P3 factual dock does not align with the protected fact")
+        consequence_innovation = consequence.effect + consequence.interaction
+        # Precision may revisit the already materialized K-specific P1 detail,
+        # but never the aggregate protected fact.  Centering across the real K
+        # objects removes the common carrier algebraically; identical object
+        # detail therefore produces exact zero without a gate or penalty.
+        centered_detail = factual_dock.fact_by_object - factual_dock.fact_by_object.mean(
+            dim=3, keepdim=True
         )
-        temporal_source = intent.temporal_queries[:, :, None].expand(-1, -1, self.basis, -1)
+        precision_query = ObjectFutureEffectReader._bounded_unit(
+            self.precision_action(action_query)
+            + self.precision_consequence_query(consequence_innovation)
+        )
+        precision_key = ObjectFutureEffectReader._bounded_unit(
+            self.precision_object_key(centered_detail)
+        )
+        precision_score = torch.einsum(
+            "btqh,btqkh->btqk", precision_query, precision_key
+        )
+        object_prior = factual_dock.object_posterior.float()
+        candidate_log_prior = torch.where(
+            object_prior > 0.0,
+            object_prior.clamp_min(1e-30).log(),
+            torch.full_like(object_prior, -1.0e4),
+        )
+        precision_posterior = torch.softmax(
+            torch.cat(
+                (
+                    precision_score + candidate_log_prior,
+                    factual_dock.null_posterior.float().clamp_min(1e-8).log(),
+                ),
+                dim=-1,
+            ),
+            dim=-1,
+        )
+        selected_detail = torch.einsum(
+            "btqk,btqkh->btqh",
+            precision_posterior[..., :-1].to(dtype=centered_detail.dtype),
+            self.precision_object_value(centered_detail),
+        )
+        precision = self.precision_lane(selected_detail)
+        temporal_source = intent.temporal_innovations[:, :, None].expand(
+            -1, -1, self.basis, -1
+        )
         temporal_condition = (
             temporal_source
-            + self.temporal_consequence(consequence.protected_consequence)
+            + self.temporal_consequence(consequence_innovation)
         ) / math.sqrt(2.0)
         temporal = self.temporal_lane(
             temporal_condition * torch.tanh(self.temporal_action(action_query))
@@ -482,5 +563,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
             "object_p3_precision_rms": lanes[0].detach().float().square().mean().sqrt(),
             "object_p3_temporal_rms": lanes[1].detach().float().square().mean().sqrt(),
             "object_p3_state_change_rms": lanes[2].detach().float().square().mean().sqrt(),
+            "object_p3_centered_detail_rms": centered_detail.detach().float().square().mean().sqrt(),
+            "object_p3_consequence_innovation_rms": consequence_innovation.detach().float().square().mean().sqrt(),
+            "object_p3_precision_null_mass": precision_posterior.detach()[..., -1].mean(),
         }
         return bank, metrics

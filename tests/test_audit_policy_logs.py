@@ -239,6 +239,41 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertNotIn("object_p3_effect_rms", row)
         self.assertEqual(row["object_p3_state_change_rms"], 0.003)
 
+    def test_v122_rows_parse_identity_innovation_and_camera_metrics(self) -> None:
+        path = _write(
+            self.tmp_path / "v122.log",
+            "\n".join(
+                (
+                    "[v122-train] epoch=001 batch=0020 loss_total=0.420000 "
+                    "flow_loss=0.330000",
+                    "[v122-ground] typed_consistency=0.210 camera_coord_var=0.080",
+                    "[v122-intent] object_sim_H=0.760 action_innov=0.110 "
+                    "temporal_innov=0.070 coarse_innov=0.090",
+                    "[v122-dynamics] condition_interaction=0.060 w2_delta=0.170",
+                    "[v122-policy] relative_status_abs=0.140 "
+                    "p3_centered_detail=0.190 p3_consequence_innov=0.050",
+                    "[v122-epoch] epoch=001 step=20 loss_total=0.420000 "
+                    "flow_loss=0.330000",
+                    "[v122-val] action_rmse=0.08800",
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(run.batch_points[0].source, "v122")
+        row = run.batch_points[0].metrics
+        self.assertEqual(row["object_grounding_typed_consistency"], 0.21)
+        self.assertEqual(
+            row["object_grounding_camera_coordinate_variation"], 0.08
+        )
+        self.assertEqual(
+            row["object_intent_interval_object_audit_similarity_entropy"],
+            0.76,
+        )
+        self.assertEqual(row["object_intent_action_innovation_rms"], 0.11)
+        self.assertEqual(row["object_w_condition_interaction_rms"], 0.06)
+        self.assertEqual(row["object_p2_relative_status_abs"], 0.14)
+        self.assertEqual(row["object_p3_centered_detail_rms"], 0.19)
+
     def test_unhandled_nonfinite_backward_is_a_critical_finding(self) -> None:
         log = _write(
             self.tmp_path / "nonfinite.log",

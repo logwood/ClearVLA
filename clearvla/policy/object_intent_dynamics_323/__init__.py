@@ -1,7 +1,7 @@
-"""Object-grounded intent/dynamics top for the schema-3 mainline.
+"""Object-grounded intent/dynamics top for the schema-4 mainline.
 
 The package is intentionally capability-named rather than version-named.  It
-rejects historical schema-2 top weights; the trunk selects this graph only
+rejects historical schema-3 top weights; the trunk selects this graph only
 when ``flow_jepa_object_intent_dynamics_mainline`` is enabled.
 """
 
@@ -22,6 +22,7 @@ from .intent import (
 from .teacher import ObjectFutureTeacher
 from .types import (
     ARCHITECTURE_MANIFEST,
+    CAPABILITY_SCHEMA,
     INTERVAL_BOUNDS,
     INTERVAL_NAMES,
     ArchitectureManifest,
@@ -38,6 +39,7 @@ from .types import (
 
 __all__ = [
     "ARCHITECTURE_MANIFEST",
+    "CAPABILITY_SCHEMA",
     "INTERVAL_BOUNDS",
     "INTERVAL_NAMES",
     "ArchitectureManifest",

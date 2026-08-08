@@ -304,8 +304,6 @@ class DenseObjectGrounder(nn.Module):
         geometry, geometry_read, geometry_assignment = typed_verify(
             "geometry", chart.candidate_geometry
         )
-        coordinates = aggregate(chart.candidate_coordinates)
-        transport_prior = aggregate(chart.candidate_transport_prior)
         support = aggregate(chart.candidate_support[..., None])
         # Presence is not an object's fraction of the complete chart.  That
         # quantity systematically penalizes small objects and, when reused as
@@ -338,6 +336,42 @@ class DenseObjectGrounder(nn.Module):
             batch, self.objects, *candidate_shape
         )
         structured_null = null_assignment.reshape(batch, *candidate_shape)
+
+        def camera_aggregate(value: Tensor, weight: Tensor) -> Tensor:
+            """Aggregate inside each real camera without recreating C later."""
+
+            cameras = int(value.shape[1])
+            flat_value = value.reshape(
+                batch, cameras, -1, int(value.shape[-1])
+            )
+            flat_weight = weight.reshape(
+                batch, self.objects, cameras, -1
+            ).float()
+            numerator = torch.einsum(
+                "bkcn,bcnd->bkcd",
+                flat_weight.to(dtype=flat_value.dtype),
+                flat_value,
+            )
+            return numerator / flat_weight.sum(
+                dim=-1, keepdim=True
+            ).to(dtype=numerator.dtype).clamp_min(1e-6)
+
+        camera_coordinates = camera_aggregate(
+            chart.candidate_coordinates,
+            structured_geometry_assignment,
+        )
+        camera_transport_prior = camera_aggregate(
+            chart.candidate_transport_prior,
+            structured_geometry_assignment,
+        )
+        camera_support = camera_aggregate(
+            chart.candidate_support[..., None],
+            structured_geometry_assignment,
+        )
+        camera_validity = camera_aggregate(
+            chart.candidate_validity,
+            structured_assignment,
+        ).clamp(0.0, 1.0)
         chart_assignment = structured_assignment.sum(dim=-1)
         # ``chart_read`` is the reverse lookup used by Teacher/P2 and is
         # normalized over space for each object.  It is *not* a per-cell owner
@@ -392,15 +426,76 @@ class DenseObjectGrounder(nn.Module):
         # within-object refinement, but make the object-prototype clustering
         # term own most of the unchanged reconstruction budget so coordinate
         # features cannot satisfy the G objective by themselves.
-        reconstruction_error = 0.75 * prototype_error + 0.25 * spatial_error
+        def typed_consistency(
+            value: Tensor,
+            typed_joint: Tensor,
+            prototype: Tensor,
+        ) -> Tensor:
+            """Reconstruct each live candidate from the typed G read.
+
+            This is a proximal field-specific objective on one physical K
+            assignment.  It does not ask the three evidence reads to differ;
+            when the same support explains two fields, equal posteriors remain
+            legal.  Multiplying the dimensionless error by the detached DINO
+            power keeps it inside the existing reconstruction unit/budget.
+            """
+
+            flat_value = value.reshape(batch, count, int(value.shape[-1])).float()
+            joint = typed_joint.float()
+            conditional_owner = joint / joint.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1e-6)
+            reconstruction = torch.einsum(
+                "bkn,bkd->bnd", conditional_owner, prototype.float()
+            )
+            target_power = flat_value.detach().square().mean(
+                dim=-1, keepdim=True
+            )
+            population_floor = (
+                0.10 * target_power.mean().detach()
+            ).clamp_min(1e-4)
+            normalized = (
+                reconstruction - flat_value.detach()
+            ).square().mean(dim=-1, keepdim=True) / (
+                target_power + population_floor
+            )
+            live = (
+                validity.float().reshape(batch, count, 1)
+                * candidate_prior.float().reshape(batch, count, 1)
+            )
+            return (normalized * live).sum() / live.sum().clamp_min(1.0)
+
+        semantic_consistency = typed_consistency(
+            chart.candidate_semantic, semantic_assignment, semantic
+        )
+        appearance_consistency = typed_consistency(
+            chart.candidate_appearance, appearance_assignment, appearance
+        )
+        geometry_consistency = typed_consistency(
+            chart.candidate_geometry, geometry_assignment, geometry
+        )
+        typed_consistency_error = (
+            semantic_consistency
+            + appearance_consistency
+            + geometry_consistency
+        ) / 3.0
+        dino_unit = target_content.detach().square().mean().clamp_min(1e-3)
+        typed_consistency_scaled = typed_consistency_error * dino_unit
+        reconstruction_error = (
+            0.65 * prototype_error
+            + 0.20 * spatial_error
+            + 0.15 * typed_consistency_scaled
+        )
         facts = ObjectFactSet(
             dense_chart=chart,
             content=content,
             semantic=semantic,
             appearance=appearance,
             geometry=geometry,
-            coordinates=coordinates,
-            transport_prior=transport_prior,
+            camera_coordinates=camera_coordinates,
+            camera_transport_prior=camera_transport_prior,
+            camera_support=camera_support,
+            camera_validity=camera_validity,
             support=support,
             existence=existence,
             validity=object_validity,
@@ -412,12 +507,18 @@ class DenseObjectGrounder(nn.Module):
             null_assignment=structured_null,
             reconstructed_dino=reconstructed,
             reconstruction_error=reconstruction_error,
+            typed_consistency_error=typed_consistency_error,
         )
         facts.validate()
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
             "object_grounding_prototype_mse": prototype_error.detach(),
             "object_grounding_spatial_refinement_mse": spatial_error.detach(),
+            "object_grounding_typed_consistency": typed_consistency_error.detach(),
+            "object_grounding_typed_consistency_scaled": typed_consistency_scaled.detach(),
+            "object_grounding_semantic_consistency": semantic_consistency.detach(),
+            "object_grounding_appearance_consistency": appearance_consistency.detach(),
+            "object_grounding_geometry_consistency": geometry_consistency.detach(),
             "object_grounding_existence_mean": existence.detach().float().mean(),
             "object_grounding_validity_mean": object_validity.detach().float().mean(),
             "object_grounding_allocation_share_mean": allocation_share.detach().float().mean(),
@@ -469,7 +570,10 @@ class DenseObjectGrounder(nn.Module):
                 .sum(dim=-1)
                 .mean()
             ),
-            "object_grounding_transport_prior_rms": transport_prior.detach().float().square().mean().sqrt(),
+            "object_grounding_transport_prior_rms": camera_transport_prior.detach().float().square().mean().sqrt(),
+            "object_grounding_camera_coordinate_variation": camera_coordinates.detach().float().std(
+                dim=2, unbiased=False
+            ).mean(),
         }
         return facts, metrics
 

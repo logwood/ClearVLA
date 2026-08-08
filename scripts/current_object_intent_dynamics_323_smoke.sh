@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export OUT_DIR="${OUT_DIR:-runs/v121_object_intent_dynamics_323_typed_dock_smoke}"
+export OUT_DIR="${OUT_DIR:-runs/v122_object_intent_dynamics_323_identity_innovation_smoke}"
 export OBJECT_323_BATCH_SIZE="${OBJECT_323_BATCH_SIZE:-1}"
 
 exec bash "${SCRIPT_DIR}/current_object_intent_dynamics_323.sh" \

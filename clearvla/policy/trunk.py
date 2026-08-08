@@ -73,6 +73,9 @@ from .object_intent_dynamics_323 import (
     ARCHITECTURE_MANIFEST as OBJECT_INTENT_DYNAMICS_MANIFEST,
 )
 from .object_intent_dynamics_323 import (
+    CAPABILITY_SCHEMA as OBJECT_INTENT_DYNAMICS_SCHEMA,
+)
+from .object_intent_dynamics_323 import (
     CoarseActionIntent,
     CoarseActionIntentState,
     DenseObjectGrounder,
@@ -4687,11 +4690,19 @@ class LateRawDetailPolicyReader(nn.Module):
                             object_conditional_route,
                             state_detail,
                         )
-                        object_source_coordinate = torch.einsum(
+                        object_source_coordinate_global = torch.einsum(
                             "bqgkcijm,bqgcijmd->bqgkd",
                             object_conditional_route,
                             state_coordinate,
                         )
+                        object_camera_mass = object_conditional_route.sum(
+                            dim=(-3, -2, -1)
+                        )
+                        object_source_coordinate = torch.einsum(
+                            "bqgkcijm,bqgcijmd->bqgkcd",
+                            object_conditional_route,
+                            state_coordinate,
+                        ) / object_camera_mass[..., None].clamp_min(1e-6)
                         object_typed_contexts: dict[str, Tensor] = {}
                         for name, typed_key in typed_fine_keys.items():
                             state_key = torch.einsum(
@@ -4708,7 +4719,7 @@ class LateRawDetailPolicyReader(nn.Module):
                             (
                                 object_rgb,
                                 object_detail,
-                                object_source_coordinate,
+                                object_source_coordinate_global,
                                 object_typed_contexts["semantic"],
                                 object_typed_contexts["appearance"],
                                 object_typed_contexts["geometry"],
@@ -5153,7 +5164,7 @@ class LateRawDetailPolicyReader(nn.Module):
                             object_source_chart,
                         )
                         crossed_coordinate = torch.einsum(
-                            "bqags,bqskd->bqagkd",
+                            "bqags,bqskcd->bqagkcd",
                             cross_weights,
                             object_source_coordinate,
                         )
@@ -5305,7 +5316,9 @@ class LateRawDetailPolicyReader(nn.Module):
                 object_posterior=dock_object_posterior,
                 null_posterior=dock_null_posterior,
                 chart_posterior=torch.cat(object_dock_chart_rows, dim=1),
-                coordinates=torch.cat(object_dock_coordinate_rows, dim=1),
+                camera_coordinates=torch.cat(
+                    object_dock_coordinate_rows, dim=1
+                ),
                 aggregate_fact=update,
             )
             object_dock.validate()
@@ -11255,13 +11268,14 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                             ObjectConsequenceState,
                         )
                         or not isinstance(goal_phase_state, ObjectIntentState)
+                        or object_factual_dock is None
                     ):
                         raise RuntimeError(
                             "object P3 lost consequence or stateless intent"
                         )
                     # Keep the action operand independent of the P1/P2 writes.
-                    # P3 receives those values through its explicit p1_fact and
-                    # consequence operands, exactly once each.
+                    # P3 receives unresolved K-specific P1 detail through the
+                    # typed dock and the P2 innovation through consequence.
                     action_query = trajectory_seed.to(
                         device=canvas.device,
                         dtype=canvas.dtype,
@@ -11275,9 +11289,7 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                         policy_plan_delta_bank,
                         plan_metrics,
                     ) = self.policy_plan_compiler(
-                        p1_fact=(
-                            protected_policy_detail + policy_role_deltas[0]
-                        ),
+                        factual_dock=object_factual_dock,
                         consequence=consequence_plan_state,
                         intent=goal_phase_state,
                         action_query=action_query,
@@ -11761,11 +11773,11 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                                 teacher=object_teacher_dynamics,
                             )
                             action_match = F.smooth_l1_loss(
-                                object_intent_state.interval_action_queries.float(),
+                                object_intent_state.interval_action_innovations.float(),
                                 object_plan_recognition.action_targets.float(),
                             )
                             state_match = F.smooth_l1_loss(
-                                object_intent_state.interval_state_queries.float(),
+                                object_intent_state.interval_state_innovations.float(),
                                 object_plan_recognition.state_targets.float(),
                             )
 
@@ -11845,6 +11857,46 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                                 "object_coarse_action_rms": object_coarse_action.action_prediction.detach().float().square().mean().sqrt(),
                             }
                         )
+                        if collect_audit_metrics:
+                            coarse_innovation = (
+                                object_coarse_action.innovations.detach().float()
+                            )
+                            coarse_prediction = (
+                                object_coarse_action.action_prediction.detach().float()
+                            )
+                            object_top_metrics.update(
+                                {
+                                    "object_coarse_action_innovation_rms": coarse_innovation.square().mean().sqrt(),
+                                    "object_coarse_action_interval_variation": coarse_innovation.std(
+                                        dim=1, unbiased=False
+                                    ).mean(),
+                                    "object_coarse_action_adjacent_cosine": F.cosine_similarity(
+                                        coarse_innovation[:, 1:],
+                                        coarse_innovation[:, :-1],
+                                        dim=-1,
+                                        eps=1e-4,
+                                    ).mean(),
+                                    "object_coarse_action_prediction_interval_variation": coarse_prediction.std(
+                                        dim=1, unbiased=False
+                                    ).mean(),
+                                }
+                            )
+                            if object_coarse_action.target is not None:
+                                coarse_target = (
+                                    object_coarse_action.target.detach().float()
+                                )
+                                object_top_metrics[
+                                    "object_coarse_action_target_normalized_error"
+                                ] = (
+                                    (coarse_prediction - coarse_target)
+                                    .square()
+                                    .mean()
+                                    .sqrt()
+                                    / coarse_target.square()
+                                    .mean()
+                                    .sqrt()
+                                    .clamp_min(1e-3)
+                                )
                         goal_phase_state = object_intent_state
                         phase_context = object_intent_state.interval_queries
                         # Goal, history and typed objects already have one
@@ -14268,22 +14320,29 @@ class TemporalMidcutWorldActionDiT(nn.Module):
                     "object_intent_dynamics_active": canvas.new_ones(
                         (), dtype=torch.float32
                     ),
+                    "object_intent_schema": canvas.new_tensor(
+                        float(OBJECT_INTENT_DYNAMICS_SCHEMA), dtype=torch.float32
+                    ),
                     "object_fact_content": object_facts.content,
                     "object_fact_semantic": object_facts.semantic,
                     "object_fact_appearance": object_facts.appearance,
                     "object_fact_geometry": object_facts.geometry,
-                    "object_fact_coordinates": object_facts.coordinates,
-                    "object_fact_transport_prior": object_facts.transport_prior,
+                    "object_fact_camera_coordinates": object_facts.camera_coordinates,
+                    "object_fact_camera_transport_prior": object_facts.camera_transport_prior,
+                    "object_fact_camera_validity": object_facts.camera_validity,
                     "object_fact_existence": object_facts.existence,
                     "object_fact_validity": object_facts.validity,
                     "object_fact_to_chart": object_facts.object_to_chart,
                     "object_intent_goal_set": goal_phase_state.protected_goal_set,
                     "object_intent_interval_queries": goal_phase_state.interval_queries,
                     "object_intent_interval_action_queries": goal_phase_state.interval_action_queries,
+                    "object_intent_interval_action_innovations": goal_phase_state.interval_action_innovations,
                     "object_intent_interval_state_queries": goal_phase_state.interval_state_queries,
+                    "object_intent_interval_state_innovations": goal_phase_state.interval_state_innovations,
                     "object_intent_interval_object_keys": goal_phase_state.interval_object_keys,
                     "object_intent_interval_object_values": goal_phase_state.interval_object_values,
                     "object_intent_temporal_queries": goal_phase_state.temporal_queries,
+                    "object_intent_temporal_innovations": goal_phase_state.temporal_innovations,
                     "object_intent_state_change_evidence": goal_phase_state.state_change_evidence,
                     "object_coarse_action_prediction": object_coarse_action.action_prediction,
                     "object_future_current_reference": object_future_dynamics.current_reference,
