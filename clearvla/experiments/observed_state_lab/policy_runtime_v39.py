@@ -8,7 +8,7 @@ import math
 import random
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -24,7 +24,15 @@ from clearvla.experiments.dynamic_world_lab.shared_runtime import (
     encode_current_tokens,
     gripper_transition_metrics,
 )
+from clearvla.policy.differential_intent_effect import (
+    DifferentialStatelessIntentController,
+)
 from clearvla.policy.gauges import masked_candidate_center
+from clearvla.policy.grounded_intent_effect import (
+    GROUNDING_MANIFEST,
+    StatelessIntentOrganizer,
+    manifest_from_mapping,
+)
 from clearvla.policy.system import V39PolicySystem
 
 from .policy_runtime_v36_3 import (
@@ -378,9 +386,7 @@ def _saved_flow_jepa_hierarchy(
 ) -> tuple[tuple[int, ...], int]:
     """Resolve checkpoint hierarchy fields with the policy-config fallbacks."""
 
-    window_offsets = tuple(
-        int(value) for value in saved_policy.get("flow_jepa_window_offsets", ())
-    )
+    window_offsets = tuple(int(value) for value in saved_policy.get("flow_jepa_window_offsets", ()))
     if not window_offsets:
         anchors = int(saved_policy.get("future_anchors", 0))
         horizon = int(saved_policy.get("action_horizon", 0))
@@ -390,8 +396,7 @@ def _saved_flow_jepa_hierarchy(
                 "future_anchors and action_horizon"
             )
         window_offsets = tuple(
-            max(1, int(round((index + 1) * horizon / float(anchors))))
-            for index in range(anchors)
+            max(1, int(round((index + 1) * horizon / float(anchors)))) for index in range(anchors)
         )
     stage_offset = int(saved_policy.get("flow_jepa_stage_offset", 0))
     if stage_offset <= 0:
@@ -419,6 +424,21 @@ def _validate_v102_resume_contract(
         "flow_jepa_progressive_grounding_address",
         "flow_jepa_coordinate_typed_raw_detail",
         "flow_jepa_structured_ownership_bottleneck",
+        "flow_jepa_pre_value_owner_routing",
+        "flow_jepa_functional_mainline_routing",
+        "flow_jepa_utility_precision_mainline",
+        "flow_jepa_action_free_world_factual",
+        "flow_jepa_shared_factual_glimpse_bank",
+        "flow_jepa_g_aligned_future_effect",
+        "flow_jepa_stateless_goal_phase_machine",
+        "flow_jepa_policy_plan_compiler",
+        "flow_jepa_supervised_effect_mainline",
+        "flow_jepa_stateless_intent_controller",
+        "flow_jepa_window_effect_bank",
+        "flow_jepa_effect_read_in_p2",
+        "flow_jepa_differential_intent_effect_mainline",
+        "flow_jepa_grounded_intent_effect_mainline",
+        "flow_jepa_p1_mixed_precision",
         "flow_jepa_interval_stage_typed_value",
         "flow_jepa_policy_workspace_horizon_pool",
         "role_attnres_enabled",
@@ -434,16 +454,61 @@ def _validate_v102_resume_contract(
         current_value = int(getattr(current_policy, field))
         if saved_value != current_value:
             raise ValueError(
-                f"resume {field} mismatch: checkpoint={saved_value}, "
-                f"current={current_value}"
+                f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
             )
+    saved_schedule = str(saved_policy.get("flow_jepa_top_role_schedule", "3-3-2"))
+    current_schedule = str(current_policy.flow_jepa_top_role_schedule)
+    if saved_schedule != current_schedule:
+        raise ValueError(
+            "resume flow_jepa_top_role_schedule mismatch: "
+            f"checkpoint={saved_schedule}, current={current_schedule}"
+        )
+    if int(getattr(current_policy, "flow_jepa_g_aligned_future_effect", 0)):
+        saved_decay = float(saved_policy.get("flow_jepa_teacher_g_ema_decay", float("nan")))
+        current_decay = float(current_policy.flow_jepa_teacher_g_ema_decay)
+        if saved_decay != current_decay:
+            raise ValueError(
+                "resume flow_jepa_teacher_g_ema_decay mismatch: "
+                f"checkpoint={saved_decay}, current={current_decay}"
+            )
+    saved_effect_slots = int(
+        saved_policy.get("flow_jepa_future_slots", current_policy.future_anchors)
+    )
+    current_effect_slots = int(
+        getattr(current_policy, "flow_jepa_future_slots", current_policy.future_anchors)
+    )
+    if saved_effect_slots != current_effect_slots:
+        raise ValueError(
+            "resume flow_jepa_future_slots mismatch: "
+            f"checkpoint={saved_effect_slots}, current={current_effect_slots}"
+        )
+    saved_time_distribution = str(
+        saved_policy.get("flow_matching_time_distribution", "uniform")
+    )
+    current_time_distribution = str(
+        getattr(current_policy, "flow_matching_time_distribution", "uniform")
+    )
+    if saved_time_distribution != current_time_distribution:
+        raise ValueError(
+            "resume flow_matching_time_distribution mismatch: "
+            f"checkpoint={saved_time_distribution}, "
+            f"current={current_time_distribution}"
+        )
+    if int(getattr(current_policy, "flow_jepa_utility_precision_mainline", 0)):
+        for field in (
+            "flow_jepa_address_query_batch_budget",
+            "flow_jepa_microgrid_tile",
+            "flow_jepa_checkpoint_min_batch",
+        ):
+            saved_value = int(saved_policy.get(field, -1))
+            current_value = int(getattr(current_policy, field))
+            if saved_value != current_value:
+                raise ValueError(
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
+                )
     if int(getattr(current_policy, "flow_jepa_late_policy_detail", 0)):
-        saved_detail_scale = float(
-            saved_policy.get("flow_jepa_late_policy_detail_scale", 0.25)
-        )
-        current_detail_scale = float(
-            current_policy.flow_jepa_late_policy_detail_scale
-        )
+        saved_detail_scale = float(saved_policy.get("flow_jepa_late_policy_detail_scale", 0.25))
+        current_detail_scale = float(current_policy.flow_jepa_late_policy_detail_scale)
         if saved_detail_scale != current_detail_scale:
             raise ValueError(
                 "resume flow_jepa_late_policy_detail_scale mismatch: "
@@ -459,8 +524,7 @@ def _validate_v102_resume_contract(
             current_value = int(getattr(current_policy, field))
             if saved_value != current_value:
                 raise ValueError(
-                    f"resume {field} mismatch: checkpoint={saved_value}, "
-                    f"current={current_value}"
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
                 )
     if int(getattr(current_policy, "flow_jepa_coordinate_typed_raw_detail", 0)):
         saved_micro_grid = int(saved_policy.get("flow_jepa_raw_micro_grid", 0))
@@ -471,15 +535,19 @@ def _validate_v102_resume_contract(
                 f"checkpoint={saved_micro_grid}, current={current_micro_grid}"
             )
     if int(getattr(current_policy, "flow_jepa_horizon_soft_address", 0)):
-        saved_scale = float(
-            saved_policy.get("flow_jepa_horizon_address_update_scale", 0.0)
-        )
-        current_scale = float(
-            current_policy.flow_jepa_horizon_address_update_scale
-        )
+        saved_scale = float(saved_policy.get("flow_jepa_horizon_address_update_scale", 0.0))
+        current_scale = float(current_policy.flow_jepa_horizon_address_update_scale)
         if saved_scale != current_scale:
             raise ValueError(
                 "resume flow_jepa_horizon_address_update_scale mismatch: "
+                f"checkpoint={saved_scale}, current={current_scale}"
+            )
+    if int(getattr(current_policy, "flow_jepa_pre_value_owner_routing", 0)):
+        saved_scale = float(saved_policy.get("flow_jepa_pre_value_owner_update_scale", 0.10))
+        current_scale = float(current_policy.flow_jepa_pre_value_owner_update_scale)
+        if saved_scale != current_scale:
+            raise ValueError(
+                "resume flow_jepa_pre_value_owner_update_scale mismatch: "
                 f"checkpoint={saved_scale}, current={current_scale}"
             )
     if int(getattr(current_policy, "flow_jepa_variance_safe_routing", 0)):
@@ -491,12 +559,9 @@ def _validate_v102_resume_contract(
             current_value = float(getattr(current_policy, field))
             if saved_value != current_value:
                 raise ValueError(
-                    f"resume {field} mismatch: checkpoint={saved_value}, "
-                    f"current={current_value}"
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
                 )
-    if int(
-        getattr(current_policy, "flow_jepa_complete_numerical_contract", 0)
-    ):
+    if int(getattr(current_policy, "flow_jepa_complete_numerical_contract", 0)):
         for field in (
             "flow_jepa_correlation_rms_floor",
             "flow_jepa_visibility_transition_fraction",
@@ -505,34 +570,25 @@ def _validate_v102_resume_contract(
             current_value = float(getattr(current_policy, field))
             if saved_value != current_value:
                 raise ValueError(
-                    f"resume {field} mismatch: checkpoint={saved_value}, "
-                    f"current={current_value}"
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
                 )
     if int(getattr(current_policy, "flow_jepa_interval_stage_delta", 0)):
-        for field in (
-            "flow_jepa_interval_stage_update_scale",
-        ):
+        for field in ("flow_jepa_interval_stage_update_scale",):
             saved_value = float(saved_policy.get(field, float("nan")))
             current_value = float(getattr(current_policy, field))
             if saved_value != current_value:
                 raise ValueError(
-                    f"resume {field} mismatch: checkpoint={saved_value}, "
-                    f"current={current_value}"
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
                 )
         for field in (
             "flow_jepa_interval_boundaries",
             "flow_jepa_interval_support_offsets",
         ):
-            saved_value = tuple(
-                int(value) for value in saved_policy.get(field, ())
-            )
-            current_value = tuple(
-                int(value) for value in getattr(current_policy, field)
-            )
+            saved_value = tuple(int(value) for value in saved_policy.get(field, ()))
+            current_value = tuple(int(value) for value in getattr(current_policy, field))
             if saved_value != current_value:
                 raise ValueError(
-                    f"resume {field} mismatch: checkpoint={saved_value}, "
-                    f"current={current_value}"
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
                 )
     if int(getattr(current_policy, "role_attnres_enabled", 0)):
         saved_key_dim = int(saved_policy.get("role_attnres_key_dim", 0))
@@ -551,8 +607,7 @@ def _validate_v102_resume_contract(
             current_value = float(getattr(current_policy, field))
             if saved_value != current_value:
                 raise ValueError(
-                    f"resume {field} mismatch: checkpoint={saved_value}, "
-                    f"current={current_value}"
+                    f"resume {field} mismatch: checkpoint={saved_value}, current={current_value}"
                 )
     if int(getattr(current_policy, "stateless_phase_enabled", 0)):
         saved_count = int(saved_policy.get("stateless_phase_count", 0))
@@ -562,9 +617,7 @@ def _validate_v102_resume_contract(
                 f"checkpoint={saved_count}, "
                 f"current={int(current_policy.stateless_phase_count)}"
             )
-        saved_scale = float(
-            saved_policy.get("stateless_phase_query_scale", float("nan"))
-        )
+        saved_scale = float(saved_policy.get("stateless_phase_query_scale", float("nan")))
         if saved_scale != float(current_policy.stateless_phase_query_scale):
             raise ValueError(
                 "resume stateless_phase_query_scale mismatch: "
@@ -701,6 +754,22 @@ def prepare_v39_policy_sample(
         "policy_action",
     ):
         out[key] = out[key].float()
+    if int(
+        getattr(
+            system.policy_config,
+            "flow_jepa_object_intent_dynamics_mainline",
+            0,
+        )
+    ):
+        for key in ("action", "future_state", "future_offsets"):
+            value = sample.get(key)
+            if not torch.is_tensor(value):
+                raise RuntimeError(
+                    f"object-intent training requires dataset field {key!r}"
+                )
+            out[key] = value.to(device=device, non_blocking=True)
+        out["action"] = out["action"].float()
+        out["future_state"] = out["future_state"].float()
     compute_dtype = dtype if device.type == "cuda" else torch.float32
     out["visual"] = visual.to(dtype=compute_dtype)
     if int(getattr(system.policy_config, "flow_jepa_raw_image_enabled", 0)):
@@ -724,8 +793,15 @@ def prepare_v39_policy_sample(
             raise ValueError("raw-image Flow-JEPA currently requires square RGB frames")
         if int(raw_visual.shape[-1]) < 32 or int(raw_visual.shape[-1]) % 16:
             raise ValueError("raw RGB side must be >=32 and divisible by 16")
-        out["raw_visual"] = raw_visual.to(
-            device=device, dtype=compute_dtype, non_blocking=True
+        out["raw_visual"] = raw_visual.to(device=device, dtype=compute_dtype, non_blocking=True)
+    frame_progress = sample.get("frame_progress")
+    if torch.is_tensor(frame_progress):
+        # Audit-only metadata: deliberately carried beside, rather than into,
+        # every model-forward argument list.
+        out["frame_progress"] = frame_progress.to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=True,
         )
     if include_target_visual:
         target_visual = encode_target_anchor_tokens(
@@ -738,6 +814,48 @@ def prepare_v39_policy_sample(
         )
         out["target_visual"] = target_visual.to(dtype=compute_dtype)
     return out
+
+
+def _object_intent_future_training_pack(
+    sample: dict[str, Tensor],
+    *,
+    system: V39PolicySystem,
+    require_teacher: bool,
+) -> dict[str, Tensor] | None:
+    """Build the sole training-only object teacher input at its runtime boundary.
+
+    Training, preflight, and representation validation previously assembled
+    this mapping independently.  That allowed validation to request the object
+    future loss while silently omitting its teacher.  Keep the decision and
+    required fields in one place; deployment sampling never calls this helper.
+    """
+
+    if not bool(
+        int(
+            getattr(
+                system.policy_config,
+                "flow_jepa_object_intent_dynamics_mainline",
+                0,
+            )
+        )
+    ):
+        return None
+    target_visual = sample.get("target_visual")
+    if not require_teacher and not torch.is_tensor(target_visual):
+        return None
+    required = ("action", "future_state", "future_offsets", "target_visual")
+    missing = [key for key in required if not torch.is_tensor(sample.get(key))]
+    if missing:
+        raise RuntimeError(
+            "object-intent teacher input is incomplete; missing tensor fields: "
+            + ", ".join(missing)
+        )
+    return {
+        "future_action": sample["action"],
+        "future_state": sample["future_state"],
+        "future_offsets": sample["future_offsets"],
+        "target_visual": sample["target_visual"],
+    }
 
 
 def _effect_distance(pred: Tensor, target: Tensor) -> Tensor:
@@ -905,9 +1023,11 @@ def _future_horizon_charts(
         raise ValueError("future JEPA target mask must be [B,K*N]")
     batch, tokens, hidden = pred.shape
     if torch.is_tensor(current):
-        if current.ndim != 3 or int(current.shape[0]) != int(pred.shape[0]) or int(
-            current.shape[2]
-        ) != int(pred.shape[2]):
+        if (
+            current.ndim != 3
+            or int(current.shape[0]) != int(pred.shape[0])
+            or int(current.shape[2]) != int(pred.shape[2])
+        ):
             raise ValueError("current JEPA chart must align with future batch/hidden axes")
         if int(pred.shape[1]) % int(current.shape[1]) != 0:
             raise ValueError("future JEPA token count must be a multiple of the current chart")
@@ -985,34 +1105,26 @@ def _future_change_weighting(
     )
     counts_h = selected_h.sum(dim=(0, 2))
     target_energy_h = target_delta_h.square().mean(dim=-1)
-    delta_scale_h = torch.sqrt(
-        (target_energy_h * selected_h).sum(dim=(0, 2))
-        / counts_h.clamp_min(1.0)
-    ).detach().clamp_min(1e-3)
+    delta_scale_h = (
+        torch.sqrt((target_energy_h * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0))
+        .detach()
+        .clamp_min(1e-3)
+    )
     current_energy_h = current_h.square().mean(dim=-1)
     current_scale_h = torch.sqrt(
-        (current_energy_h * selected_h).sum(dim=(0, 2))
-        / counts_h.clamp_min(1.0)
+        (current_energy_h * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
     ).detach()
     if reliable_normalization:
         normalization_scale_h = torch.sqrt(
-            delta_scale_h.square()
-            + (
-                _FUTURE_CHANGE_REFERENCE_FRACTION * current_scale_h
-            ).square()
+            delta_scale_h.square() + (_FUTURE_CHANGE_REFERENCE_FRACTION * current_scale_h).square()
         ).clamp_min(1e-3)
     else:
         # Preserve the serialized V104 objective exactly when the V105
         # reliability contract is disabled.
         normalization_scale_h = delta_scale_h
     hidden = int(target_delta_h.shape[-1])
-    strength_h = target_delta_h.norm(dim=-1).detach() / math.sqrt(
-        float(hidden)
-    )
-    reliability_h = strength_h / (
-        strength_h
-        + normalization_scale_h[None, :, None].clamp_min(1e-3)
-    )
+    strength_h = target_delta_h.norm(dim=-1).detach() / math.sqrt(float(hidden))
+    reliability_h = strength_h / (strength_h + normalization_scale_h[None, :, None].clamp_min(1e-3))
     return (
         counts_h,
         delta_scale_h,
@@ -1042,48 +1154,40 @@ def _scale_floored_direction_rows(
         raise ValueError("direction charts must be [B,A,N,H]")
     if tuple(normalization_scale_h.shape) != (int(prediction_h.shape[1]),):
         raise ValueError("direction scale must contain one value per horizon")
-    floor_h = (
-        0.25 * normalization_scale_h.detach().float()
-    ).clamp_min(1e-3)
+    floor_h = (0.25 * normalization_scale_h.detach().float()).clamp_min(1e-3)
     floor = floor_h[None, :, None, None]
     prediction_direction = prediction_h.float() / torch.sqrt(
-        prediction_h.float().square().mean(dim=-1, keepdim=True)
-        + floor.square()
+        prediction_h.float().square().mean(dim=-1, keepdim=True) + floor.square()
     )
     target_direction = target_h.detach().float() / torch.sqrt(
-        target_h.detach().float().square().mean(dim=-1, keepdim=True)
-        + floor.square()
+        target_h.detach().float().square().mean(dim=-1, keepdim=True) + floor.square()
     )
     return (
-        1.0
-        - (prediction_direction * target_direction).mean(dim=-1),
+        1.0 - (prediction_direction * target_direction).mean(dim=-1),
         floor_h,
     )
 
 
-def _flow_jepa_predictive_change_contract_loss(
+def _flow_jepa_predictive_change_contract_terms(
     output: dict[str, Tensor],
     *,
-    balance_horizons: bool,
     reliable_normalization: bool = False,
-) -> Tensor:
-    """Predict a teacher-chart delta without rewarding an absolute copy.
+) -> dict[str, Tensor]:
+    """Build the exact per-horizon terms used by predictive JEPA backward.
 
     Smooth-L1 on every selected token keeps genuinely static cells stable.
     Direction is weighted continuously by teacher change strength, so visible
-    changes matter more without introducing a hard motion threshold.  The
-    scale is estimated per real horizon and detached; horizons are either
-    averaged equally or reduced globally according to the existing contract.
+    changes matter more without introducing a hard motion threshold. Keeping
+    this calculation in one helper prevents the diagnostic view from silently
+    drifting away from the scalar sent to backward.
     """
 
-    pred_delta_h, target_delta_h, current_h, mask_h = _future_delta_charts(
-        output
-    )
+    pred_delta_h, target_delta_h, current_h, mask_h = _future_delta_charts(output)
     selected_h = mask_h.to(device=pred_delta_h.device, dtype=torch.float32)
     (
         counts_h,
-        _,
-        _,
+        delta_scale_h,
+        current_scale_h,
         normalization_scale_h,
         reliability_h,
     ) = _future_change_weighting(
@@ -1097,9 +1201,7 @@ def _flow_jepa_predictive_change_contract_loss(
         target_delta_h,
         reduction="none",
     ).mean(dim=-1)
-    raw_h = (raw_error_h * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(
-        1.0
-    )
+    raw_h = (raw_error_h * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
     normalized_error_h = F.smooth_l1_loss(
         pred_delta_h / normalization_scale_h[None, :, None, None],
         target_delta_h / normalization_scale_h[None, :, None, None],
@@ -1108,20 +1210,18 @@ def _flow_jepa_predictive_change_contract_loss(
 
     if reliable_normalization:
         normalized_weight_h = selected_h * reliability_h
-        smooth_h = (
-            normalized_error_h * normalized_weight_h
-        ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+        smooth_h = (normalized_error_h * normalized_weight_h).sum(dim=(0, 2)) / counts_h.clamp_min(
+            1.0
+        )
         magnitude_h = raw_h + smooth_h
     else:
         normalized_weight_h = selected_h
-        smooth_h = (
-            normalized_error_h * selected_h
-        ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+        smooth_h = (normalized_error_h * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
         magnitude_h = smooth_h
     direction_weight_h = selected_h * reliability_h
     direction_denominator_h = direction_weight_h.sum(dim=(0, 2))
     if torch.is_tensor(output.get("flow_jepa_variance_safe_routing")):
-        direction_rows_h, _ = _scale_floored_direction_rows(
+        direction_rows_h, direction_floor_h = _scale_floored_direction_rows(
             pred_delta_h,
             target_delta_h,
             normalization_scale_h,
@@ -1130,33 +1230,59 @@ def _flow_jepa_predictive_change_contract_loss(
         # Exact V105 compatibility when the V106 variance-safe contract is
         # absent from the real forward output.
         direction_rows_h = 1.0 - (
-            F.normalize(pred_delta_h, dim=-1)
-            * F.normalize(target_delta_h, dim=-1)
+            F.normalize(pred_delta_h, dim=-1) * F.normalize(target_delta_h, dim=-1)
         ).sum(dim=-1)
-    direction_h = (
-        direction_rows_h * direction_weight_h
-    ).sum(dim=(0, 2)) / (
+        direction_floor_h = normalization_scale_h.new_zeros(normalization_scale_h.shape)
+    direction_h = (direction_rows_h * direction_weight_h).sum(dim=(0, 2)) / (
         counts_h.clamp_min(1.0)
         if reliable_normalization
         else direction_denominator_h.clamp_min(1e-12)
     )
-    per_horizon = magnitude_h + 0.10 * direction_h
+    reliability_mean_h = direction_weight_h.sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    return {
+        "counts_h": counts_h,
+        "direction_denominator_h": direction_denominator_h,
+        "delta_scale_h": delta_scale_h,
+        "current_scale_h": current_scale_h,
+        "normalization_scale_h": normalization_scale_h,
+        "reliability_mean_h": reliability_mean_h,
+        "raw_h": raw_h,
+        "normalized_h": smooth_h,
+        "magnitude_h": magnitude_h,
+        "direction_h": direction_h,
+        "direction_floor_h": direction_floor_h,
+        "active_h": magnitude_h + 0.10 * direction_h,
+    }
+
+
+def _flow_jepa_predictive_change_contract_loss(
+    output: dict[str, Tensor],
+    *,
+    balance_horizons: bool,
+    reliable_normalization: bool = False,
+) -> Tensor:
+    """Predict a teacher-chart delta without rewarding an absolute copy."""
+
+    terms = _flow_jepa_predictive_change_contract_terms(
+        output,
+        reliable_normalization=reliable_normalization,
+    )
+    counts_h = terms["counts_h"]
     if balance_horizons:
-        return _mean_valid_horizon_rows(per_horizon, counts_h)
+        return _mean_valid_horizon_rows(terms["active_h"], counts_h)
 
     total_count = counts_h.sum().clamp_min(1.0)
     if reliable_normalization:
-        raw = (raw_h * counts_h).sum() / total_count
-        smooth = raw + (smooth_h * counts_h).sum() / total_count
+        raw = (terms["raw_h"] * counts_h).sum() / total_count
+        smooth = raw + (terms["normalized_h"] * counts_h).sum() / total_count
     else:
-        smooth = (smooth_h * counts_h).sum() / total_count
+        smooth = (terms["normalized_h"] * counts_h).sum() / total_count
     if reliable_normalization:
-        direction = (direction_h * counts_h).sum() / total_count
+        direction = (terms["direction_h"] * counts_h).sum() / total_count
     else:
+        direction_denominator_h = terms["direction_denominator_h"]
         direction_denominator = direction_denominator_h.sum().clamp_min(1e-12)
-        direction = (
-            direction_h * direction_denominator_h
-        ).sum() / direction_denominator
+        direction = (terms["direction_h"] * direction_denominator_h).sum() / direction_denominator
     return smooth + 0.10 * direction
 
 
@@ -1183,9 +1309,7 @@ def flow_jepa_future_prediction_loss(
         return pred.sum() * 0.0
     if torch.is_tensor(output.get("flow_jepa_future_delta_pred")):
         if not torch.is_tensor(output.get("flow_jepa_current_target")):
-            raise ValueError(
-                "predictive-change JEPA requires a frozen current teacher chart"
-            )
+            raise ValueError("predictive-change JEPA requires a frozen current teacher chart")
         return _flow_jepa_predictive_change_contract_loss(
             output,
             balance_horizons=balance_horizons,
@@ -1199,8 +1323,7 @@ def flow_jepa_future_prediction_loss(
             pred_h.float(), target_h.detach().float(), reduction="none"
         ).mean(dim=-1)
         cosine_rows = 1.0 - (
-            F.normalize(pred_h.float(), dim=-1)
-            * F.normalize(target_h.detach().float(), dim=-1)
+            F.normalize(pred_h.float(), dim=-1) * F.normalize(target_h.detach().float(), dim=-1)
         ).sum(dim=-1)
         loss_h = ((smooth_rows + 0.10 * cosine_rows) * weight_h).sum(dim=(0, 2))
         loss_h = loss_h / count_h.clamp_min(1.0)
@@ -1209,9 +1332,9 @@ def flow_jepa_future_prediction_loss(
         pred_f = pred.float()[selected]
         target_f = target.detach().float()[selected]
         smooth = F.smooth_l1_loss(pred_f, target_f)
-        cosine = 1.0 - (
-            F.normalize(pred_f, dim=-1) * F.normalize(target_f, dim=-1)
-        ).sum(dim=-1).mean()
+        cosine = (
+            1.0 - (F.normalize(pred_f, dim=-1) * F.normalize(target_f, dim=-1)).sum(dim=-1).mean()
+        )
         base = smooth + 0.10 * cosine
     change_direction = flow_jepa_future_change_direction_loss(
         output,
@@ -1222,79 +1345,87 @@ def flow_jepa_future_prediction_loss(
 
 def flow_jepa_future_reliable_diagnostics(
     output: dict[str, Tensor],
+    *,
+    reliable_normalization: bool = True,
+    balance_horizons: bool = True,
 ) -> dict[str, Tensor]:
-    """Expose why reliable normalization accepts or rejects each horizon."""
+    """Expose the exact predictive-JEPA components used by backward."""
 
     if not torch.is_tensor(output.get("flow_jepa_future_delta_pred")):
         return {}
-    pred_delta_h, target_delta_h, current_h, mask_h = _future_delta_charts(
-        output
+    terms = _flow_jepa_predictive_change_contract_terms(
+        output,
+        reliable_normalization=reliable_normalization,
     )
-    selected_h = mask_h.to(device=pred_delta_h.device, dtype=torch.float32)
-    (
-        counts_h,
-        delta_scale_h,
-        current_scale_h,
-        normalization_scale_h,
-        reliability_h,
-    ) = _future_change_weighting(
-        target_delta_h,
-        current_h,
-        selected_h,
-        reliable_normalization=True,
-    )
-    reliability_weight = selected_h * reliability_h
-    raw_rows = F.smooth_l1_loss(
-        pred_delta_h,
-        target_delta_h,
-        reduction="none",
-    ).mean(dim=-1)
-    normalized_rows = F.smooth_l1_loss(
-        pred_delta_h / normalization_scale_h[None, :, None, None],
-        target_delta_h / normalization_scale_h[None, :, None, None],
-        reduction="none",
-    ).mean(dim=-1)
-    raw_h = (raw_rows * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
-    reliable_h = (
-        normalized_rows * reliability_weight
-    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
-    reliability_mean_h = reliability_weight.sum(dim=(0, 2)) / counts_h.clamp_min(
-        1.0
-    )
+    delta_scale_h = terms["delta_scale_h"]
+    current_scale_h = terms["current_scale_h"]
+    normalization_scale_h = terms["normalization_scale_h"]
+    raw_h = terms["raw_h"]
+    normalized_h = terms["normalized_h"]
+    direction_h = terms["direction_h"]
+    active_h = terms["active_h"]
+    reliability_mean_h = terms["reliability_mean_h"]
+    counts_h = terms["counts_h"]
+    if balance_horizons:
+        active_direction = _mean_valid_horizon_rows(
+            direction_h,
+            counts_h,
+        )
+        active_composite = _mean_valid_horizon_rows(
+            active_h,
+            counts_h,
+        )
+    elif reliable_normalization:
+        total_count = counts_h.sum().clamp_min(1.0)
+        active_direction = (direction_h * counts_h).sum() / total_count
+        active_magnitude = ((raw_h + normalized_h) * counts_h).sum() / total_count
+        active_composite = active_magnitude + 0.10 * active_direction
+    else:
+        total_count = counts_h.sum().clamp_min(1.0)
+        direction_denominator_h = terms["direction_denominator_h"]
+        active_direction = (
+            direction_h * direction_denominator_h
+        ).sum() / direction_denominator_h.sum().clamp_min(1e-12)
+        active_magnitude = (normalized_h * counts_h).sum() / total_count
+        active_composite = active_magnitude + 0.10 * active_direction
     offsets = tuple(int(value) for value in output.get("flow_jepa_future_offsets", ()))
     diagnostics: dict[str, Tensor] = {
         "flow_jepa_future_target_delta_scale": delta_scale_h.mean().detach(),
-        "flow_jepa_future_current_reference_scale": (
-            current_scale_h.mean().detach()
-        ),
-        "flow_jepa_future_normalization_scale": (
-            normalization_scale_h.mean().detach()
-        ),
+        "flow_jepa_future_current_reference_scale": (current_scale_h.mean().detach()),
+        "flow_jepa_future_normalization_scale": (normalization_scale_h.mean().detach()),
         "flow_jepa_future_raw_delta_loss": raw_h.mean().detach(),
-        "flow_jepa_future_reliable_normalized_loss": reliable_h.mean().detach(),
+        "flow_jepa_future_reliable_normalized_loss": (normalized_h.mean().detach()),
         "flow_jepa_future_change_reliability": reliability_mean_h.mean().detach(),
+        "flow_jepa_future_active_direction_loss": active_direction.detach(),
+        "flow_jepa_future_active_composite_loss": active_composite.detach(),
     }
     if torch.is_tensor(output.get("flow_jepa_variance_safe_routing")):
         diagnostics["flow_jepa_future_direction_floor_min"] = (
-            0.25 * normalization_scale_h.detach().float()
-        ).clamp_min(1e-3).amin()
+            terms["direction_floor_h"].amin().detach()
+        )
     if len(offsets) == int(delta_scale_h.shape[0]):
         for index, offset in enumerate(offsets):
-            diagnostics[f"flow_jepa_future_horizon_{offset}_target_scale"] = (
-                delta_scale_h[index].detach()
-            )
+            diagnostics[f"flow_jepa_future_horizon_{offset}_target_scale"] = delta_scale_h[
+                index
+            ].detach()
             diagnostics[f"flow_jepa_future_horizon_{offset}_normalization_scale"] = (
                 normalization_scale_h[index].detach()
             )
-            diagnostics[f"flow_jepa_future_horizon_{offset}_raw_delta"] = (
-                raw_h[index].detach()
-            )
-            diagnostics[
-                f"flow_jepa_future_horizon_{offset}_reliable_normalized"
-            ] = reliable_h[index].detach()
-            diagnostics[f"flow_jepa_future_horizon_{offset}_reliability"] = (
-                reliability_mean_h[index].detach()
-            )
+            diagnostics[f"flow_jepa_future_horizon_{offset}_raw_delta"] = raw_h[index].detach()
+            diagnostics[f"flow_jepa_future_horizon_{offset}_reliable_normalized"] = normalized_h[
+                index
+            ].detach()
+            diagnostics[f"flow_jepa_future_horizon_{offset}_reliability"] = reliability_mean_h[
+                index
+            ].detach()
+            diagnostics[f"flow_jepa_future_horizon_{offset}_active_direction"] = direction_h[
+                index
+            ].detach()
+            diagnostics[f"flow_jepa_future_horizon_{offset}_active_loss"] = active_h[index].detach()
+            if torch.is_tensor(output.get("flow_jepa_variance_safe_routing")):
+                diagnostics[f"flow_jepa_future_horizon_{offset}_direction_floor"] = terms[
+                    "direction_floor_h"
+                ][index].detach()
     return diagnostics
 
 
@@ -1307,7 +1438,24 @@ def _flow_jepa_horizon_address_terms(
     future = output.get("flow_jepa_future_target")
     current = output.get("flow_jepa_current_target")
     if not all(torch.is_tensor(value) for value in (logits, future, current)):
-        reference = output["pred_physical_velocity"]
+        # Stage-1 JEPA training deliberately has no action-policy prediction.
+        # Keep the disabled address term connected to whichever prediction
+        # actually owns this objective instead of depending on a downstream
+        # policy-only key.
+        reference = next(
+            (
+                value
+                for key in (
+                    "flow_jepa_future_pred",
+                    "flow_jepa_stage_pred",
+                    "pred_physical_velocity",
+                )
+                if torch.is_tensor(value := output.get(key))
+            ),
+            None,
+        )
+        if reference is None:
+            raise KeyError("horizon address loss needs a JEPA or policy prediction reference")
         return {
             "flow_jepa_horizon_address": reference.float().sum() * 0.0,
         }
@@ -1321,43 +1469,35 @@ def _flow_jepa_horizon_address_terms(
         raise ValueError("future teacher does not align with horizon address logits")
     if tuple(current.shape[:2]) != (batch, positions):
         raise ValueError("current teacher does not align with horizon address logits")
-    future_h = future.detach().float().reshape(
-        batch, anchors, positions, int(future.shape[-1])
-    )
-    current_h = current.detach().float()[:, None].expand(
-        -1, anchors, -1, -1
-    )
-    strength = (
-        future_h - current_h
-    ).square().mean(dim=-1).clamp_min(0.0).sqrt()
+    future_h = future.detach().float().reshape(batch, anchors, positions, int(future.shape[-1]))
+    current_h = current.detach().float()[:, None].expand(-1, anchors, -1, -1)
+    strength = (future_h - current_h).square().mean(dim=-1).clamp_min(0.0).sqrt()
     interval_progress = output.get("flow_jepa_interval_progress_target")
     if torch.is_tensor(interval_progress):
         if tuple(interval_progress.shape) != tuple(future.shape):
-            raise ValueError(
-                "interval progression teacher must align with future address targets"
+            raise ValueError("interval progression teacher must align with future address targets")
+        progression_strength = (
+            interval_progress.detach()
+            .float()
+            .reshape(
+                batch,
+                anchors,
+                positions,
+                int(interval_progress.shape[-1]),
             )
-        progression_strength = interval_progress.detach().float().reshape(
-            batch,
-            anchors,
-            positions,
-            int(interval_progress.shape[-1]),
-        ).square().mean(dim=-1).clamp_min(0.0).sqrt()
+            .square()
+            .mean(dim=-1)
+            .clamp_min(0.0)
+            .sqrt()
+        )
         # Stage progression may change spatial relevance, but it does not
         # replace the content-change teacher or enter the online reader.
-        strength = torch.sqrt(
-            strength.square() + 0.25 * progression_strength.square()
-        )
+        strength = torch.sqrt(strength.square() + 0.25 * progression_strength.square())
     mean_strength = strength.mean(dim=-1)
     spatial_std = strength.std(dim=-1, unbiased=False)
-    spatial_contrast = spatial_std / (
-        mean_strength + spatial_std + 1e-8
-    )
-    current_scale = current.detach().float().square().mean(dim=-1).sqrt().mean(
-        dim=-1
-    )
-    temporal_reliability = mean_strength / (
-        mean_strength + current_scale[:, None].clamp_min(1e-6)
-    )
+    spatial_contrast = spatial_std / (mean_strength + spatial_std + 1e-8)
+    current_scale = current.detach().float().square().mean(dim=-1).sqrt().mean(dim=-1)
+    temporal_reliability = mean_strength / (mean_strength + current_scale[:, None].clamp_min(1e-6))
     reliability = (spatial_contrast * temporal_reliability).detach()
     teacher_scale = strength.mean(dim=-1, keepdim=True).detach().clamp_min(1e-6)
     teacher_probability = torch.softmax(
@@ -1369,31 +1509,27 @@ def _flow_jepa_horizon_address_terms(
         dim=-1,
     )
     teacher_log = teacher_probability.clamp_min(1e-8).log()
-    kl_h = (
-        teacher_probability * (teacher_log - log_predicted)
-    ).sum(dim=-1)
+    kl_h = (teacher_probability * (teacher_log - log_predicted)).sum(dim=-1)
     loss = (kl_h * reliability).mean()
     predicted_probability = log_predicted.exp()
     entropy_denominator = math.log(float(max(positions, 2)))
-    teacher_entropy = -(
-        teacher_probability.clamp_min(1e-8) * teacher_log
-    ).sum(dim=-1) / entropy_denominator
-    predicted_entropy = -(
-        predicted_probability.clamp_min(1e-8) * log_predicted
-    ).sum(dim=-1) / entropy_denominator
+    teacher_entropy = (
+        -(teacher_probability.clamp_min(1e-8) * teacher_log).sum(dim=-1) / entropy_denominator
+    )
+    predicted_entropy = (
+        -(predicted_probability.clamp_min(1e-8) * log_predicted).sum(dim=-1) / entropy_denominator
+    )
     result = {
         "flow_jepa_horizon_address": loss,
         "flow_jepa_horizon_address_kl": kl_h.mean().detach(),
         "flow_jepa_horizon_address_teacher_entropy": teacher_entropy.mean().detach(),
-        "flow_jepa_horizon_address_predicted_entropy": (
-            predicted_entropy.mean().detach()
-        ),
-        "flow_jepa_horizon_address_teacher_max": teacher_probability.max(
-            dim=-1
-        ).values.mean().detach(),
-        "flow_jepa_horizon_address_predicted_max": predicted_probability.max(
-            dim=-1
-        ).values.mean().detach(),
+        "flow_jepa_horizon_address_predicted_entropy": (predicted_entropy.mean().detach()),
+        "flow_jepa_horizon_address_teacher_max": teacher_probability.max(dim=-1)
+        .values.mean()
+        .detach(),
+        "flow_jepa_horizon_address_predicted_max": predicted_probability.max(dim=-1)
+        .values.mean()
+        .detach(),
         "flow_jepa_horizon_address_teacher_contrast": spatial_contrast.mean().detach(),
         "flow_jepa_horizon_address_teacher_reliability": reliability.mean().detach(),
         "flow_jepa_horizon_address_teacher_change": mean_strength.mean().detach(),
@@ -1401,9 +1537,7 @@ def _flow_jepa_horizon_address_terms(
     offsets = tuple(int(value) for value in output.get("flow_jepa_future_offsets", ()))
     if len(offsets) == anchors:
         for index, offset in enumerate(offsets):
-            result[f"flow_jepa_horizon_address_{offset}_kl"] = (
-                kl_h[:, index].mean().detach()
-            )
+            result[f"flow_jepa_horizon_address_{offset}_kl"] = kl_h[:, index].mean().detach()
             result[f"flow_jepa_horizon_address_{offset}_reliability"] = (
                 reliability[:, index].mean().detach()
             )
@@ -1465,19 +1599,15 @@ def flow_jepa_future_change_direction_loss(
         weights_h = mask_h.to(dtype=strength_h.dtype) * strength_h
         denominator_h = weights_h.sum(dim=(0, 2))
         direction_h = 1.0 - (
-            F.normalize(pred_delta_h, dim=-1)
-            * F.normalize(target_delta_h, dim=-1)
+            F.normalize(pred_delta_h, dim=-1) * F.normalize(target_delta_h, dim=-1)
         ).sum(dim=-1)
-        loss_h = (direction_h * weights_h).sum(dim=(0, 2)) / denominator_h.clamp_min(
-            1e-12
-        )
+        loss_h = (direction_h * weights_h).sum(dim=(0, 2)) / denominator_h.clamp_min(1e-12)
         return _mean_valid_horizon_rows(loss_h, denominator_h)
     weights = selected.float() * target_strength
     denominator = weights.sum().clamp_min(1e-12)
-    direction = 1.0 - (
-        F.normalize(pred_delta, dim=-1)
-        * F.normalize(target_delta, dim=-1)
-    ).sum(dim=-1)
+    direction = 1.0 - (F.normalize(pred_delta, dim=-1) * F.normalize(target_delta, dim=-1)).sum(
+        dim=-1
+    )
     return (direction * weights).sum() / denominator
 
 
@@ -1541,8 +1671,7 @@ def flow_jepa_future_change_loss(
         selected_count_h = selected_h.sum(dim=(0, 2)).clamp_min(1.0)
         delta_scale_h = (denominator_h / selected_count_h).detach().clamp_min(1e-3)
         direction_h = 1.0 - (
-            F.normalize(pred_delta_h, dim=-1)
-            * F.normalize(target_delta_h, dim=-1)
+            F.normalize(pred_delta_h, dim=-1) * F.normalize(target_delta_h, dim=-1)
         ).sum(dim=-1)
         scale = delta_scale_h[None, :, None, None]
         delta_match_h = F.smooth_l1_loss(
@@ -1550,15 +1679,15 @@ def flow_jepa_future_change_loss(
             target_delta_h / scale,
             reduction="none",
         ).mean(dim=-1)
-        loss_h = (
-            (direction_h + 0.25 * delta_match_h) * weights_h
-        ).sum(dim=(0, 2)) / denominator_h.clamp_min(1e-12)
+        loss_h = ((direction_h + 0.25 * delta_match_h) * weights_h).sum(
+            dim=(0, 2)
+        ) / denominator_h.clamp_min(1e-12)
         return _mean_valid_horizon_rows(loss_h, denominator_h)
     weights = selected.float() * target_strength
     denominator = weights.sum().clamp_min(1e-12)
-    direction = 1.0 - (
-        F.normalize(pred_delta, dim=-1) * F.normalize(target_delta, dim=-1)
-    ).sum(dim=-1)
+    direction = 1.0 - (F.normalize(pred_delta, dim=-1) * F.normalize(target_delta, dim=-1)).sum(
+        dim=-1
+    )
     selected_count = selected.float().sum().clamp_min(1.0)
     delta_scale = (weights.sum() / selected_count).detach().clamp_min(1e-3)
     delta_match = F.smooth_l1_loss(
@@ -1571,12 +1700,14 @@ def flow_jepa_future_change_loss(
 
 def flow_jepa_future_horizon_diagnostics(
     output: dict[str, Tensor],
+    *,
+    reliable_normalization: bool = False,
 ) -> dict[int, Tensor]:
-    """Expose masked JEPA quality at each real frame offset.
+    """Expose the active masked-JEPA loss at each real frame offset.
 
-    These values are diagnostics only.  In ``per_horizon`` mode the training
-    objective averages the same real horizons equally; legacy/global runs
-    retain the historical token-count aggregate.
+    Predictive-change runs reuse the exact raw/normalized/direction composite
+    that enters backward. Legacy absolute-prediction runs retain their
+    historical smooth-L1 plus cosine diagnostic.
     """
 
     pred = output.get("flow_jepa_future_pred")
@@ -1592,23 +1723,17 @@ def flow_jepa_future_horizon_diagnostics(
     horizon_count = len(offsets)
     if int(pred.shape[1]) % horizon_count:
         raise ValueError("future token count must divide evenly across real horizon offsets")
+    if torch.is_tensor(output.get("flow_jepa_future_delta_pred")):
+        active_h = _flow_jepa_predictive_change_contract_terms(
+            output,
+            reliable_normalization=reliable_normalization,
+        )["active_h"]
+        if int(active_h.shape[0]) != horizon_count:
+            raise ValueError("active predictive JEPA rows do not align with offsets")
+        return {int(offset): active_h[index] for index, offset in enumerate(offsets)}
     tokens = int(pred.shape[1]) // horizon_count
     pred_h = pred.float().reshape(int(pred.shape[0]), horizon_count, tokens, int(pred.shape[2]))
     target_h = target.detach().float().reshape_as(pred_h)
-    explicit_delta = output.get("flow_jepa_future_delta_pred")
-    if torch.is_tensor(explicit_delta):
-        current = output.get("flow_jepa_current_target")
-        if not torch.is_tensor(current):
-            raise ValueError(
-                "predictive-change diagnostics require a current teacher chart"
-            )
-        if int(current.shape[1]) != tokens:
-            raise ValueError("current teacher chart does not align with horizon tokens")
-        current_h = current.detach().float()[:, None].expand(
-            -1, horizon_count, -1, -1
-        )
-        pred_h = explicit_delta.float().reshape_as(pred_h)
-        target_h = target_h - current_h
     mask_h = mask.to(device=pred.device, dtype=torch.bool).reshape(
         int(pred.shape[0]), horizon_count, tokens
     )
@@ -1616,12 +1741,11 @@ def flow_jepa_future_horizon_diagnostics(
     for index, offset in enumerate(offsets):
         weight = mask_h[:, index].float()
         denominator = weight.sum().clamp_min(1.0)
-        smooth_rows = F.smooth_l1_loss(
-            pred_h[:, index], target_h[:, index], reduction="none"
-        ).mean(dim=-1)
+        smooth_rows = F.smooth_l1_loss(pred_h[:, index], target_h[:, index], reduction="none").mean(
+            dim=-1
+        )
         cosine_rows = 1.0 - (
-            F.normalize(pred_h[:, index], dim=-1)
-            * F.normalize(target_h[:, index], dim=-1)
+            F.normalize(pred_h[:, index], dim=-1) * F.normalize(target_h[:, index], dim=-1)
         ).sum(dim=-1)
         smooth = (smooth_rows * weight).sum() / denominator
         cosine = (cosine_rows * weight).sum() / denominator
@@ -1634,8 +1758,7 @@ def _flow_jepa_balance_horizons(trainer: V39PolicyTrainerConfig) -> bool:
     mode = mode.strip().lower().replace("-", "_")
     if mode not in {"global", "per_horizon"}:
         raise ValueError(
-            "flow_jepa_horizon_balance_mode must be 'global' or 'per_horizon', "
-            f"got {mode!r}"
+            f"flow_jepa_horizon_balance_mode must be 'global' or 'per_horizon', got {mode!r}"
         )
     return mode == "per_horizon"
 
@@ -1643,13 +1766,9 @@ def _flow_jepa_balance_horizons(trainer: V39PolicyTrainerConfig) -> bool:
 def _flow_jepa_uses_reliable_normalization(
     trainer: V39PolicyTrainerConfig,
 ) -> bool:
-    value = int(
-        getattr(trainer, "flow_jepa_future_reliable_normalization", 0)
-    )
+    value = int(getattr(trainer, "flow_jepa_future_reliable_normalization", 0))
     if value not in (0, 1):
-        raise ValueError(
-            "flow_jepa_future_reliable_normalization must be 0 or 1"
-        )
+        raise ValueError("flow_jepa_future_reliable_normalization must be 0 or 1")
     return bool(value)
 
 
@@ -1669,9 +1788,9 @@ def flow_jepa_stage_prediction_loss(output: dict[str, Tensor]) -> Tensor:
     target_norm = target_f.norm(dim=-1)
     informative = target_norm > 1e-3
     if bool(informative.any()):
-        cosine_rows = 1.0 - (
-            F.normalize(pred_f, dim=-1) * F.normalize(target_f, dim=-1)
-        ).sum(dim=-1)
+        cosine_rows = 1.0 - (F.normalize(pred_f, dim=-1) * F.normalize(target_f, dim=-1)).sum(
+            dim=-1
+        )
         cosine = cosine_rows[informative].mean()
     else:
         cosine = smooth * 0.0
@@ -1695,11 +1814,21 @@ def flow_jepa_interval_stage_terms(
     endpoint = output.get("flow_jepa_interval_endpoint_target")
     current = output.get("flow_jepa_current_target")
     mask = output.get("flow_jepa_future_target_mask")
-    if not all(
-        torch.is_tensor(value)
-        for value in (pred, target, endpoint, current, mask)
-    ):
-        reference = output["pred_physical_velocity"]
+    if not all(torch.is_tensor(value) for value in (pred, target, endpoint, current, mask)):
+        reference = next(
+            (
+                value
+                for key in (
+                    "flow_jepa_future_pred",
+                    "flow_jepa_stage_pred",
+                    "pred_physical_velocity",
+                )
+                if torch.is_tensor(value := output.get(key))
+            ),
+            None,
+        )
+        if reference is None:
+            raise KeyError("interval stage loss needs a JEPA or policy prediction reference")
         zero = reference.float().sum() * 0.0
         return {"flow_jepa_interval_stage": zero}
     if (
@@ -1709,13 +1838,10 @@ def flow_jepa_interval_stage_terms(
         or tuple(mask.shape) != tuple(pred.shape[:2])
     ):
         raise ValueError(
-            "interval progression prediction/targets/mask must align as "
-            "[B,A*N,H]/[B,A*N]"
+            "interval progression prediction/targets/mask must align as [B,A*N,H]/[B,A*N]"
         )
     batch, tokens, hidden = pred.shape
-    if current.ndim != 3 or int(current.shape[0]) != batch or int(
-        current.shape[-1]
-    ) != hidden:
+    if current.ndim != 3 or int(current.shape[0]) != batch or int(current.shape[-1]) != hidden:
         raise ValueError("interval current teacher chart has invalid geometry")
     per_horizon = int(current.shape[1])
     if tokens % per_horizon:
@@ -1724,9 +1850,7 @@ def flow_jepa_interval_stage_terms(
     pred_h = pred.float().reshape(batch, anchors, per_horizon, hidden)
     target_h = target.detach().float().reshape_as(pred_h)
     endpoint_h = endpoint.detach().float().reshape_as(pred_h)
-    current_h = current.detach().float()[:, None].expand(
-        -1, anchors, -1, -1
-    )
+    current_h = current.detach().float()[:, None].expand(-1, anchors, -1, -1)
     selected_h = mask.reshape(batch, anchors, per_horizon).to(
         device=pred.device,
         dtype=torch.float32,
@@ -1760,12 +1884,8 @@ def flow_jepa_interval_stage_terms(
     ).mean(dim=-1)
     reliability_weight = selected_h * reliability_h
     raw_h = (raw_rows * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
-    normalized_h = (
-        normalized_rows * reliability_weight
-    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
-    endpoint_h_loss = (
-        endpoint_rows * selected_h
-    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    normalized_h = (normalized_rows * reliability_weight).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    endpoint_h_loss = (endpoint_rows * selected_h).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
     # The interval organizer is deliberately initialized near zero.  A plain
     # cosine/F.normalize objective would therefore have a 1/||prediction||
     # backward singularity and could recreate the V105 address-gradient
@@ -1777,19 +1897,1004 @@ def flow_jepa_interval_stage_terms(
         target_h,
         normalization_scale_h,
     )
-    direction_h = (
-        direction_rows * reliability_weight
-    ).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
-    loss_h = (
-        raw_h
-        + normalized_h
-        + 0.10 * direction_h
-        + 0.25 * endpoint_h_loss
-    )
+    direction_h = (direction_rows * reliability_weight).sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
+    loss_h = raw_h + normalized_h + 0.10 * direction_h + 0.25 * endpoint_h_loss
     loss = _mean_valid_horizon_rows(loss_h, counts_h)
-    reliability_mean_h = reliability_weight.sum(
-        dim=(0, 2)
-    ) / counts_h.clamp_min(1.0)
+    # Keep the historical slot-reduced interval objective available for
+    # diagnostics, but do not let it own the grounded mainline. Reducing the
+    # object/camera/space axes before supervision recreates the averaging
+    # shortcut that Grounded Intent-Effect is designed to remove.
+    legacy_interval_loss = loss
+    grounded_core_loss: Tensor | None = None
+    effect_components: dict[str, Tensor] = {}
+    legacy_effect_names = (
+        (
+            "semantic",
+            "flow_jepa_future_effect_semantic_pred_slots",
+            "flow_jepa_future_effect_semantic_target_slots",
+            0.50,
+        ),
+        (
+            "transport",
+            "flow_jepa_future_effect_transport_pred_slots",
+            "flow_jepa_future_effect_transport_target_slots",
+            0.25,
+        ),
+        (
+            "transport_covariance",
+            "flow_jepa_future_effect_transport_covariance_pred_slots",
+            "flow_jepa_future_effect_transport_covariance_target_slots",
+            0.05,
+        ),
+        (
+            "persistence",
+            "flow_jepa_future_effect_persistence_pred_slots",
+            "flow_jepa_future_effect_persistence_target_slots",
+            0.10,
+        ),
+        (
+            "visibility",
+            "flow_jepa_future_effect_visibility_pred_slots",
+            "flow_jepa_future_effect_visibility_target_slots",
+            0.10,
+        ),
+        (
+            "uncertainty",
+            "flow_jepa_future_effect_uncertainty_pred_slots",
+            "flow_jepa_future_effect_uncertainty_target_slots",
+            0.05,
+        ),
+    )
+    v116_effect_names = (
+        (
+            "current",
+            "flow_jepa_future_effect_current_pred_slots",
+            "flow_jepa_future_effect_current_target_slots",
+            0.10,
+            False,
+        ),
+        (
+            "successor",
+            "flow_jepa_future_effect_successor_pred_slots",
+            "flow_jepa_future_effect_successor_target_slots",
+            0.25,
+            True,
+        ),
+        (
+            "semantic",
+            "flow_jepa_future_effect_semantic_pred_slots",
+            "flow_jepa_future_effect_semantic_target_slots",
+            0.25,
+            True,
+        ),
+        (
+            "transport",
+            "flow_jepa_future_effect_transport_pred_slots",
+            "flow_jepa_future_effect_transport_target_slots",
+            0.15,
+            True,
+        ),
+        (
+            "transport_covariance",
+            "flow_jepa_future_effect_transport_covariance_pred_slots",
+            "flow_jepa_future_effect_transport_covariance_target_slots",
+            0.05,
+            True,
+        ),
+        (
+            "persistence",
+            "flow_jepa_future_effect_persistence_pred_slots",
+            "flow_jepa_future_effect_persistence_target_slots",
+            0.05,
+            True,
+        ),
+        (
+            "visibility",
+            "flow_jepa_future_effect_visibility_pred_slots",
+            "flow_jepa_future_effect_visibility_target_slots",
+            0.10,
+            False,
+        ),
+        (
+            "uncertainty",
+            "flow_jepa_future_effect_uncertainty_pred_slots",
+            "flow_jepa_future_effect_uncertainty_target_slots",
+            0.10,
+            False,
+        ),
+    )
+    v116_effect = all(
+        torch.is_tensor(output.get(prediction_key))
+        and torch.is_tensor(output.get(target_key))
+        for _, prediction_key, target_key, _, _ in v116_effect_names
+    ) and torch.is_tensor(
+        output.get("flow_jepa_future_effect_w1_semantic_pred_slots")
+    )
+    differential_effect = all(
+        torch.is_tensor(output.get(key))
+        for key in (
+            "flow_jepa_future_effect_current_reference",
+            "flow_jepa_future_effect_successor_pred_slots",
+            "flow_jepa_future_effect_successor_target_slots",
+            "flow_jepa_future_effect_semantic_pred_slots",
+            "flow_jepa_future_effect_semantic_target_slots",
+            "flow_jepa_future_effect_transport_pred_slots",
+            "flow_jepa_future_effect_transport_target_slots",
+            "flow_jepa_future_effect_transport_covariance_pred_slots",
+            "flow_jepa_future_effect_transport_covariance_target_slots",
+            "flow_jepa_future_effect_persistence_pred_slots",
+            "flow_jepa_future_effect_persistence_target_slots",
+            "flow_jepa_future_effect_visibility_pred_slots",
+            "flow_jepa_future_effect_visibility_target_slots",
+            "flow_jepa_future_effect_uncertainty_pred_slots",
+            "flow_jepa_future_effect_uncertainty_target_slots",
+            "flow_jepa_future_effect_reliability_target_slots",
+            "flow_jepa_intent_predictive_effect",
+            "flow_jepa_future_effect_intent_summary_target_slots",
+        )
+    )
+    grounded_effect = bool(
+        torch.is_tensor(output.get("grounded_intent_effect_active"))
+        and all(
+            torch.is_tensor(output.get(key))
+            for key in (
+                "flow_jepa_future_effect_current_reference",
+                "flow_jepa_future_effect_current_reference_target",
+                "flow_jepa_future_effect_successor_pred_slots",
+                "flow_jepa_future_effect_successor_target_slots",
+                "flow_jepa_future_effect_semantic_pred_slots",
+                "flow_jepa_future_effect_semantic_target_slots",
+                "flow_jepa_future_effect_transport_pred_slots",
+                "flow_jepa_future_effect_transport_target_slots",
+                "flow_jepa_future_effect_transport_covariance_pred_slots",
+                "flow_jepa_future_effect_transport_covariance_target_slots",
+                "flow_jepa_future_effect_persistence_pred_slots",
+                "flow_jepa_future_effect_persistence_target_slots",
+                "flow_jepa_future_effect_visibility_pred_slots",
+                "flow_jepa_future_effect_visibility_target_slots",
+                "flow_jepa_future_effect_uncertainty_pred_slots",
+                "flow_jepa_future_effect_uncertainty_target_slots",
+                "flow_jepa_future_effect_reliability_pred_slots",
+                "flow_jepa_future_effect_reliability_target_slots",
+                "flow_jepa_future_effect_slot_valid",
+            )
+        )
+    )
+    effect_names = legacy_effect_names
+    effect_available = all(
+        torch.is_tensor(output.get(prediction_key)) and torch.is_tensor(output.get(target_key))
+        for _, prediction_key, target_key, _ in effect_names
+    )
+    effect_diagnostics: dict[str, Tensor] = {}
+    if grounded_effect:
+        interval_names = ("h4_8", "h8_16", "h16_32", "h32_48")
+        semantic_prediction = output[
+            "flow_jepa_future_effect_semantic_pred_slots"
+        ].float()
+        semantic_teacher = output[
+            "flow_jepa_future_effect_semantic_target_slots"
+        ].detach().float()
+        current_reference = output[
+            "flow_jepa_future_effect_current_reference"
+        ].detach().float()
+        current_teacher = output[
+            "flow_jepa_future_effect_current_reference_target"
+        ].detach().float()
+        successor_prediction = output[
+            "flow_jepa_future_effect_successor_pred_slots"
+        ].float()
+        successor_teacher = output[
+            "flow_jepa_future_effect_successor_target_slots"
+        ].detach().float()
+        teacher_reliability = output[
+            "flow_jepa_future_effect_reliability_target_slots"
+        ].detach().float().clamp(0.0, 1.0)
+        slot_valid = output[
+            "flow_jepa_future_effect_slot_valid"
+        ].detach().float().clamp(0.0, 1.0)
+        expected_effect_shape = tuple(semantic_prediction.shape)
+        if (
+            semantic_prediction.ndim != 7
+            or int(semantic_prediction.shape[1]) != 4
+            or tuple(semantic_teacher.shape) != expected_effect_shape
+            or tuple(successor_prediction.shape) != expected_effect_shape
+            or tuple(successor_teacher.shape) != expected_effect_shape
+            or tuple(current_reference.shape)
+            != tuple(semantic_prediction.shape[:1] + semantic_prediction.shape[2:])
+            or tuple(current_teacher.shape) != tuple(current_reference.shape)
+            or tuple(teacher_reliability.shape)
+            != tuple(semantic_prediction.shape[:-1] + (1,))
+            or tuple(slot_valid.shape) != tuple(teacher_reliability.shape)
+        ):
+            raise ValueError(
+                "grounded FutureEffect must preserve "
+                "[B,4,C,Y,X,M,D] and its object validity axis"
+            )
+        # The grounded preflight performs the full finite/value-domain audit.
+        # Avoid eight device reductions and Python-bool synchronizations in
+        # every training batch; the ordinary non-finite total-loss guard still
+        # protects optimization.
+
+        def grounded_scale_floored_rows(
+            prediction: Tensor,
+            teacher: Tensor,
+        ) -> Tensor:
+            raw = F.smooth_l1_loss(
+                prediction,
+                teacher,
+                reduction="none",
+            ).mean(dim=-1, keepdim=True)
+            teacher_rms = teacher.square().mean(dim=-1, keepdim=True).sqrt()
+            scale_floor = (
+                0.25
+                * teacher_rms.mean(
+                    dim=(0, 2, 3, 4, 5),
+                    keepdim=True,
+                )
+            ).clamp_min(1e-3)
+            scale = torch.sqrt(teacher_rms.square() + scale_floor.square())
+            normalized = F.smooth_l1_loss(
+                prediction / scale,
+                teacher / scale,
+                reduction="none",
+            ).mean(dim=-1, keepdim=True)
+            prediction_direction = prediction / torch.sqrt(
+                prediction.square().mean(dim=-1, keepdim=True)
+                + scale_floor.square()
+            )
+            teacher_direction = teacher / torch.sqrt(
+                teacher.square().mean(dim=-1, keepdim=True)
+                + scale_floor.square()
+            )
+            direction = 1.0 - (
+                prediction_direction * teacher_direction
+            ).mean(dim=-1, keepdim=True)
+            return raw + normalized + 0.10 * direction
+
+        component_specs = (
+            (
+                "successor",
+                successor_prediction,
+                successor_teacher,
+                0.25,
+                False,
+                False,
+            ),
+            (
+                "semantic",
+                semantic_prediction,
+                semantic_teacher,
+                0.20,
+                True,
+                True,
+            ),
+            (
+                "transport",
+                output["flow_jepa_future_effect_transport_pred_slots"].float(),
+                output[
+                    "flow_jepa_future_effect_transport_target_slots"
+                ].detach().float(),
+                0.10,
+                True,
+                False,
+            ),
+            (
+                "transport_covariance",
+                output[
+                    "flow_jepa_future_effect_transport_covariance_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_transport_covariance_target_slots"
+                ].detach().float(),
+                0.05,
+                True,
+                False,
+            ),
+            (
+                "persistence_change",
+                output[
+                    "flow_jepa_future_effect_persistence_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_persistence_target_slots"
+                ].detach().float(),
+                0.05,
+                False,
+                False,
+            ),
+            (
+                "visibility_change",
+                output[
+                    "flow_jepa_future_effect_visibility_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_visibility_target_slots"
+                ].detach().float(),
+                0.05,
+                False,
+                False,
+            ),
+            (
+                "uncertainty_calibration",
+                output[
+                    "flow_jepa_future_effect_uncertainty_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_uncertainty_target_slots"
+                ].detach().float(),
+                0.05,
+                False,
+                False,
+            ),
+            (
+                "reliability_calibration",
+                output[
+                    "flow_jepa_future_effect_reliability_pred_slots"
+                ].float(),
+                teacher_reliability,
+                0.05,
+                False,
+                False,
+            ),
+        )
+        valid_denominator = slot_valid.sum().clamp_min(1.0)
+        grounded_total = loss.new_zeros(())
+        for (
+            name,
+            prediction,
+            teacher,
+            internal_weight,
+            reliability_calibrated,
+            scale_floored,
+        ) in component_specs:
+            if tuple(prediction.shape) != tuple(teacher.shape):
+                raise ValueError(
+                    f"grounded FutureEffect {name} does not align"
+                )
+            rows = (
+                grounded_scale_floored_rows(prediction, teacher)
+                if scale_floored
+                else F.smooth_l1_loss(
+                    prediction,
+                    teacher,
+                    reduction="none",
+                ).mean(dim=-1, keepdim=True)
+            )
+            row_weight = slot_valid
+            if reliability_calibrated:
+                row_weight = row_weight * (
+                    0.25 + 0.75 * teacher_reliability
+                )
+            component = (rows * row_weight).sum() / valid_denominator
+            effect_components[name] = component
+            grounded_total = (
+                grounded_total + float(internal_weight) * component
+            )
+            squared_error = (
+                (prediction - teacher).square().mean(dim=-1, keepdim=True)
+            )
+            target_power = teacher.square().mean(dim=-1, keepdim=True)
+            for interval_index, interval_name in enumerate(interval_names):
+                interval_valid = slot_valid[:, interval_index]
+                interval_denominator = interval_valid.sum().clamp_min(1.0)
+                interval_rows = rows[:, interval_index]
+                interval_weight = row_weight[:, interval_index]
+                interval_component = (
+                    interval_rows * interval_weight
+                ).sum() / interval_denominator
+                effect_components[
+                    f"{name}_{interval_name}"
+                ] = interval_component
+                error_rms = torch.sqrt(
+                    (
+                        squared_error[:, interval_index]
+                        * interval_valid
+                    ).sum()
+                    / interval_denominator
+                )
+                target_rms = torch.sqrt(
+                    (
+                        target_power[:, interval_index]
+                        * interval_valid
+                    ).sum()
+                    / interval_denominator
+                ).clamp_min(1e-3)
+                effect_diagnostics[
+                    "grounded_future_effect_"
+                    f"{name}_{interval_name}_target_normalized_error"
+                ] = (error_rms / target_rms).detach()
+
+        # The externally weighted future objective owns this complete
+        # object-level field. The separately weighted interval objective owns
+        # only adjacent-interval differentiation.
+        grounded_core_loss = grounded_total
+        prediction_transition = (
+            semantic_prediction[:, 1:] - semantic_prediction[:, :-1]
+        )
+        teacher_transition = semantic_teacher[:, 1:] - semantic_teacher[:, :-1]
+        transition_rows = grounded_scale_floored_rows(
+            prediction_transition,
+            teacher_transition,
+        )
+        transition_valid = torch.minimum(
+            slot_valid[:, 1:],
+            slot_valid[:, :-1],
+        )
+        transition_reliability = 0.25 + 0.75 * torch.minimum(
+            teacher_reliability[:, 1:],
+            teacher_reliability[:, :-1],
+        )
+        transition_denominator = transition_valid.sum().clamp_min(1.0)
+        transition_component = (
+            transition_rows
+            * transition_valid
+            * transition_reliability
+        ).sum() / transition_denominator
+        effect_components["relative_transition"] = transition_component
+        for edge_index, (left, right) in enumerate(
+            zip(interval_names[:-1], interval_names[1:])
+        ):
+            edge_valid = transition_valid[:, edge_index]
+            edge_denominator = edge_valid.sum().clamp_min(1.0)
+            effect_components[
+                f"relative_transition_{left}_{right}"
+            ] = (
+                transition_rows[:, edge_index]
+                * edge_valid
+                * transition_reliability[:, edge_index]
+            ).sum() / edge_denominator
+
+        current_alignment = (
+            current_reference - current_teacher
+        ).square().mean().sqrt()
+        effect_diagnostics[
+            "grounded_future_effect_current_reference_alignment_rms"
+        ] = current_alignment.detach()
+        pooled_prediction = semantic_prediction.mean(dim=(2, 3, 4, 5))
+        pooled_teacher = semantic_teacher.mean(dim=(2, 3, 4, 5))
+        transport_prediction = output[
+            "flow_jepa_future_effect_transport_pred_slots"
+        ].float().mean(dim=(2, 3, 4, 5))
+        transport_teacher = output[
+            "flow_jepa_future_effect_transport_target_slots"
+        ].detach().float().mean(dim=(2, 3, 4, 5))
+        effect_diagnostics.update(
+            {
+                "grounded_future_effect_prediction_adjacent_cosine": (
+                    F.cosine_similarity(
+                        pooled_prediction[:, 1:],
+                        pooled_prediction[:, :-1],
+                        dim=-1,
+                        eps=1e-6,
+                    ).mean().detach()
+                ),
+                "grounded_future_effect_target_adjacent_cosine": (
+                    F.cosine_similarity(
+                        pooled_teacher[:, 1:],
+                        pooled_teacher[:, :-1],
+                        dim=-1,
+                        eps=1e-6,
+                    ).mean().detach()
+                ),
+                "grounded_future_effect_prediction_interval_variation": (
+                    pooled_prediction.std(dim=1, unbiased=False).mean().detach()
+                ),
+                "grounded_future_effect_target_interval_variation": (
+                    pooled_teacher.std(dim=1, unbiased=False).mean().detach()
+                ),
+                "grounded_future_effect_prediction_transport_variation": (
+                    transport_prediction.std(
+                        dim=1,
+                        unbiased=False,
+                    ).mean().detach()
+                ),
+                "grounded_future_effect_target_transport_variation": (
+                    transport_teacher.std(
+                        dim=1,
+                        unbiased=False,
+                    ).mean().detach()
+                ),
+            }
+        )
+        loss = transition_component
+        effect_available = True
+    elif differential_effect:
+        reliability = output[
+            "flow_jepa_future_effect_reliability_target_slots"
+        ].detach().float().clamp(0.0, 1.0)
+        semantic_prediction = output[
+            "flow_jepa_future_effect_semantic_pred_slots"
+        ].float()
+        semantic_teacher = output[
+            "flow_jepa_future_effect_semantic_target_slots"
+        ].detach().float()
+        current_reference = output[
+            "flow_jepa_future_effect_current_reference"
+        ].detach().float()
+        successor_prediction = current_reference[:, None] + semantic_prediction
+        successor_teacher = output[
+            "flow_jepa_future_effect_successor_target_slots"
+        ].detach().float()
+        if (
+            tuple(semantic_prediction.shape) != tuple(semantic_teacher.shape)
+            or tuple(successor_prediction.shape) != tuple(successor_teacher.shape)
+            or int(semantic_prediction.shape[1]) != 3
+        ):
+            raise ValueError(
+                "differential FutureEffect prediction/teacher shapes do not align"
+            )
+
+        def scale_floored_rows(
+            prediction: Tensor,
+            teacher: Tensor,
+        ) -> Tensor:
+            raw = F.smooth_l1_loss(
+                prediction,
+                teacher,
+                reduction="none",
+            ).mean(dim=-1, keepdim=True)
+            teacher_rms = teacher.square().mean(dim=-1, keepdim=True).sqrt()
+            reduce_dims = tuple(
+                index
+                for index in range(teacher_rms.ndim)
+                if index not in {1, teacher_rms.ndim - 1}
+            )
+            scale_floor = (
+                0.25
+                * teacher_rms.mean(dim=reduce_dims, keepdim=True)
+            ).clamp_min(1e-3)
+            scale = torch.sqrt(teacher_rms.square() + scale_floor.square())
+            normalized = F.smooth_l1_loss(
+                prediction / scale,
+                teacher / scale,
+                reduction="none",
+            ).mean(dim=-1, keepdim=True)
+            prediction_direction = prediction / torch.sqrt(
+                prediction.square().mean(dim=-1, keepdim=True)
+                + scale_floor.square()
+            )
+            teacher_direction = teacher / torch.sqrt(
+                teacher.square().mean(dim=-1, keepdim=True)
+                + scale_floor.square()
+            )
+            direction = 1.0 - (
+                prediction_direction * teacher_direction
+            ).mean(dim=-1, keepdim=True)
+            return raw + normalized + 0.10 * direction
+
+        component_specs = (
+            (
+                "successor",
+                successor_prediction,
+                successor_teacher,
+                0.30,
+                False,
+                False,
+            ),
+            (
+                "semantic",
+                semantic_prediction,
+                semantic_teacher,
+                0.20,
+                True,
+                True,
+            ),
+            (
+                "transport",
+                output["flow_jepa_future_effect_transport_pred_slots"].float(),
+                output[
+                    "flow_jepa_future_effect_transport_target_slots"
+                ].detach().float(),
+                0.10,
+                True,
+                False,
+            ),
+            (
+                "transport_covariance",
+                output[
+                    "flow_jepa_future_effect_transport_covariance_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_transport_covariance_target_slots"
+                ].detach().float(),
+                0.05,
+                True,
+                False,
+            ),
+            (
+                "persistence",
+                output[
+                    "flow_jepa_future_effect_persistence_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_persistence_target_slots"
+                ].detach().float(),
+                0.05,
+                False,
+                False,
+            ),
+            (
+                "visibility",
+                output[
+                    "flow_jepa_future_effect_visibility_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_visibility_target_slots"
+                ].detach().float(),
+                0.05,
+                False,
+                False,
+            ),
+            (
+                "uncertainty",
+                output[
+                    "flow_jepa_future_effect_uncertainty_pred_slots"
+                ].float(),
+                output[
+                    "flow_jepa_future_effect_uncertainty_target_slots"
+                ].detach().float(),
+                0.05,
+                False,
+                False,
+            ),
+        )
+        differential_total = loss.new_zeros(())
+        slot_effective = {
+            name: loss.new_zeros(())
+            for name in ("near", "mid", "late")
+        }
+        for (
+            name,
+            prediction,
+            teacher,
+            internal_weight,
+            reliability_calibrated,
+            scale_floored,
+        ) in component_specs:
+            if tuple(prediction.shape) != tuple(teacher.shape):
+                raise ValueError(
+                    f"differential FutureEffect {name} does not align"
+                )
+            rows = (
+                scale_floored_rows(prediction, teacher)
+                if scale_floored
+                else F.smooth_l1_loss(
+                    prediction,
+                    teacher,
+                    reduction="none",
+                ).mean(dim=-1, keepdim=True)
+            )
+            row_weight = (
+                0.25 + 0.75 * reliability
+                if reliability_calibrated
+                else torch.ones_like(reliability)
+            )
+            component = (rows * row_weight).sum() / float(
+                max(rows.numel(), 1)
+            )
+            effect_components[name] = component
+            for slot_index, slot_name in enumerate(("near", "mid", "late")):
+                slot_rows = rows[:, slot_index]
+                slot_weight = row_weight[:, slot_index]
+                slot_component = (
+                    slot_rows * slot_weight
+                ).sum() / float(max(slot_rows.numel(), 1))
+                effect_components[f"{name}_{slot_name}"] = slot_component
+                slot_effective[slot_name] = (
+                    slot_effective[slot_name]
+                    + float(internal_weight) * slot_component
+                )
+            differential_total = (
+                differential_total + float(internal_weight) * component
+            )
+
+        prediction_transition = (
+            semantic_prediction[:, 1:] - semantic_prediction[:, :-1]
+        )
+        teacher_transition = semantic_teacher[:, 1:] - semantic_teacher[:, :-1]
+        transition_rows = scale_floored_rows(
+            prediction_transition,
+            teacher_transition,
+        )
+        transition_reliability = 0.25 + 0.75 * torch.minimum(
+            reliability[:, 1:],
+            reliability[:, :-1],
+        )
+        transition_component = (
+            transition_rows * transition_reliability
+        ).sum() / float(max(transition_rows.numel(), 1))
+        effect_components["relative_transition"] = transition_component
+        differential_total = differential_total + 0.10 * transition_component
+        for edge_index, (left, right) in enumerate(
+            (("near", "mid"), ("mid", "late"))
+        ):
+            edge_rows = transition_rows[:, edge_index]
+            edge_weight = transition_reliability[:, edge_index]
+            edge_component = (edge_rows * edge_weight).sum() / float(
+                max(edge_rows.numel(), 1)
+            )
+            effect_components[
+                f"relative_transition_{left}_{right}"
+            ] = edge_component
+            slot_effective[left] = (
+                slot_effective[left] + 0.05 * edge_component
+            )
+            slot_effective[right] = (
+                slot_effective[right] + 0.05 * edge_component
+            )
+
+        intent_prediction = output[
+            "flow_jepa_intent_predictive_effect"
+        ].float()
+        intent_teacher = output[
+            "flow_jepa_future_effect_intent_summary_target_slots"
+        ].detach().float()
+        if tuple(intent_prediction.shape) != tuple(intent_teacher.shape):
+            raise ValueError(
+                "intent window prediction and future-effect summary do not align"
+            )
+        intent_rows = scale_floored_rows(intent_prediction, intent_teacher)
+        intent_component = intent_rows.mean()
+        effect_components["intent_summary"] = intent_component
+        differential_total = differential_total + 0.10 * intent_component
+        for slot_index, slot_name in enumerate(("near", "mid", "late")):
+            slot_intent = intent_rows[:, slot_index].mean()
+            effect_components[
+                f"intent_summary_{slot_name}"
+            ] = slot_intent
+            slot_effective[slot_name] = (
+                slot_effective[slot_name] + 0.10 * slot_intent
+            )
+            effect_components[
+                f"effective_{slot_name}"
+            ] = slot_effective[slot_name]
+        loss = loss + differential_total
+        effect_available = True
+    elif v116_effect:
+        teacher_reliability = output.get(
+            "flow_jepa_future_effect_reliability_target_slots"
+        )
+        if not torch.is_tensor(teacher_reliability):
+            raise RuntimeError("V116 FutureEffect requires teacher reliability")
+        teacher_reliability = teacher_reliability.detach().float().clamp(0.0, 1.0)
+        valid_denominator = teacher_reliability.numel()
+        window_effect = bool(
+            torch.is_tensor(output.get("flow_jepa_future_effect_slot_valid"))
+            and torch.is_tensor(
+                output.get("flow_jepa_future_effect_w1_slot_valid")
+            )
+            and int(teacher_reliability.shape[1]) == 3
+        )
+
+        def supervise_effect_stage(
+            *,
+            prediction_prefix: str,
+            stage_name: str,
+            stage_weight: float,
+            slot_mask: Tensor | None = None,
+        ) -> Tensor:
+            stage_total = loss.new_zeros(())
+            if slot_mask is not None:
+                if tuple(slot_mask.shape) != (3,):
+                    raise ValueError("V117 effect slot mask must be [3]")
+                broadcast_slot_mask = slot_mask.detach().float().reshape(
+                    1, 3, 1, 1, 1, 1, 1
+                )
+                stage_denominator = (
+                    float(valid_denominator)
+                    * float(slot_mask.detach().float().mean().item())
+                )
+            else:
+                broadcast_slot_mask = None
+                stage_denominator = float(valid_denominator)
+            for (
+                name,
+                final_prediction_key,
+                target_key,
+                internal_weight,
+                reliability_weighted,
+            ) in v116_effect_names:
+                prediction_key = (
+                    final_prediction_key
+                    if not prediction_prefix
+                    else final_prediction_key.replace(
+                        "flow_jepa_future_effect_",
+                        prediction_prefix,
+                    )
+                )
+                prediction = output.get(prediction_key)
+                teacher = output.get(target_key)
+                if not torch.is_tensor(prediction) or not torch.is_tensor(teacher):
+                    raise RuntimeError(
+                        f"V116 FutureEffect {stage_name}/{name} is incomplete"
+                    )
+                prediction = prediction.float()
+                teacher = teacher.detach().float()
+                if tuple(prediction.shape) != tuple(teacher.shape):
+                    raise ValueError(
+                        f"V116 FutureEffect {stage_name}/{name} does not align"
+                    )
+                rows = F.smooth_l1_loss(
+                    prediction,
+                    teacher,
+                    reduction="none",
+                ).mean(dim=-1, keepdim=True)
+                if name == "semantic":
+                    teacher_rms = teacher.square().mean(
+                        dim=-1, keepdim=True
+                    ).sqrt()
+                    anchor_floor = (
+                        0.25
+                        * teacher_rms.mean(
+                            dim=(0, 2, 3, 4, 5),
+                            keepdim=True,
+                        )
+                    ).clamp_min(1e-3)
+                    normalization = torch.sqrt(
+                        teacher_rms.square() + anchor_floor.square()
+                    )
+                    normalized_rows = F.smooth_l1_loss(
+                        prediction / normalization,
+                        teacher / normalization,
+                        reduction="none",
+                    ).mean(dim=-1, keepdim=True)
+                    prediction_direction = prediction / torch.sqrt(
+                        prediction.square().mean(dim=-1, keepdim=True)
+                        + anchor_floor.square()
+                    )
+                    teacher_direction = teacher / torch.sqrt(
+                        teacher.square().mean(dim=-1, keepdim=True)
+                        + anchor_floor.square()
+                    )
+                    direction_rows = 1.0 - (
+                        prediction_direction * teacher_direction
+                    ).mean(dim=-1, keepdim=True)
+                    rows = rows + normalized_rows + 0.10 * direction_rows
+                row_weight = (
+                    teacher_reliability
+                    if reliability_weighted
+                    else torch.ones_like(teacher_reliability)
+                )
+                if broadcast_slot_mask is not None:
+                    row_weight = row_weight * broadcast_slot_mask
+                # Divide by the valid element count, never reliability mass:
+                # weak matching reduces unreliable delta pressure without
+                # magnifying the few surviving cells.
+                component = (rows * row_weight).sum() / max(
+                    stage_denominator, 1.0
+                )
+                effect_components[f"{stage_name}_{name}"] = component
+                if stage_name == "w2" and not window_effect:
+                    effect_components[name] = component
+                stage_total = stage_total + float(internal_weight) * component
+            return float(stage_weight) * stage_total
+
+        if window_effect:
+            w1_slot_mask = output[
+                "flow_jepa_future_effect_w1_slot_valid"
+            ].detach().float()
+            w2_slot_mask = w1_slot_mask.new_tensor((0.0, 0.0, 1.0))
+            loss = loss + supervise_effect_stage(
+                prediction_prefix="flow_jepa_future_effect_w1_",
+                stage_name="w1",
+                stage_weight=2.0 / 3.0,
+                slot_mask=w1_slot_mask,
+            )
+            loss = loss + supervise_effect_stage(
+                prediction_prefix="",
+                stage_name="w2",
+                stage_weight=1.0 / 3.0,
+                slot_mask=w2_slot_mask,
+            )
+            # The generic loss name means the complete three-slot interface,
+            # not merely W2's late slot.  Keep W1/W2 component rows as well so
+            # a weak near/mid stage cannot be hidden by a healthy late stage
+            # (or vice versa).
+            for name, *_ in v116_effect_names:
+                effect_components[name] = (
+                    (2.0 / 3.0) * effect_components[f"w1_{name}"]
+                    + (1.0 / 3.0) * effect_components[f"w2_{name}"]
+                )
+            final_semantic = output[
+                "flow_jepa_future_effect_semantic_pred_slots"
+            ].float()
+            teacher_semantic = output[
+                "flow_jepa_future_effect_semantic_target_slots"
+            ].detach().float()
+            prediction_transition = (
+                final_semantic[:, 1:] - final_semantic[:, :-1]
+            )
+            teacher_transition = (
+                teacher_semantic[:, 1:] - teacher_semantic[:, :-1]
+            )
+            transition_rows = F.smooth_l1_loss(
+                prediction_transition,
+                teacher_transition,
+                reduction="none",
+            ).mean(dim=-1, keepdim=True)
+            transition_reliability = torch.minimum(
+                teacher_reliability[:, 1:],
+                teacher_reliability[:, :-1],
+            )
+            transition_component = (
+                transition_rows * transition_reliability
+            ).sum() / float(max(transition_reliability.numel(), 1))
+            effect_components["relative_transition"] = transition_component
+            loss = loss + 0.10 * transition_component
+        else:
+            loss = loss + supervise_effect_stage(
+                prediction_prefix="flow_jepa_future_effect_w1_",
+                stage_name="w1",
+                stage_weight=0.25,
+            )
+            loss = loss + supervise_effect_stage(
+                prediction_prefix="",
+                stage_name="w2",
+                stage_weight=0.75,
+            )
+        effect_available = True
+    elif effect_available:
+        teacher_reliability = output.get(
+            "flow_jepa_future_effect_reliability_target_slots"
+        )
+        if not torch.is_tensor(teacher_reliability):
+            raise RuntimeError("FutureEffect supervision requires teacher reliability")
+        teacher_reliability = teacher_reliability.detach().float()
+        # The fallback target (current fact / zero delta / identity transport)
+        # remains meaningful when matching is weak. Reliability modulates the
+        # precision of the supervision but cannot erase the whole objective.
+        effect_weight = 0.25 + 0.75 * teacher_reliability.clamp(0.0, 1.0)
+        weight_denominator = effect_weight.sum().clamp_min(1.0)
+        for (
+            name,
+            prediction_key,
+            target_key,
+            internal_weight,
+        ) in effect_names:
+            prediction = output[prediction_key].float()
+            teacher = output[target_key].detach().float()
+            if tuple(prediction.shape) != tuple(teacher.shape):
+                raise ValueError(f"FutureEffect {name} prediction and teacher do not align")
+            raw_rows = F.smooth_l1_loss(
+                prediction,
+                teacher,
+                reduction="none",
+            ).mean(dim=-1, keepdim=True)
+            if name == "semantic":
+                # A semantic-delta field is intentionally near zero at
+                # initialization and for reliable static facts.  Normalize
+                # with a detached teacher-scale floor, not F.normalize, so a
+                # zero prediction cannot acquire an inverse-norm gradient.
+                teacher_rms = teacher.square().mean(dim=-1, keepdim=True).sqrt()
+                anchor_floor = (
+                    0.25
+                    * teacher_rms.mean(
+                        dim=(0, 2, 3, 4, 5),
+                        keepdim=True,
+                    )
+                ).clamp_min(1e-3)
+                normalization = torch.sqrt(teacher_rms.square() + anchor_floor.square())
+                normalized_rows = F.smooth_l1_loss(
+                    prediction / normalization,
+                    teacher / normalization,
+                    reduction="none",
+                ).mean(dim=-1, keepdim=True)
+                prediction_direction = prediction / torch.sqrt(
+                    prediction.square().mean(dim=-1, keepdim=True) + anchor_floor.square()
+                )
+                teacher_direction = teacher / torch.sqrt(
+                    teacher.square().mean(dim=-1, keepdim=True) + anchor_floor.square()
+                )
+                direction_rows = 1.0 - (prediction_direction * teacher_direction).mean(
+                    dim=-1, keepdim=True
+                )
+                rows = raw_rows + normalized_rows + 0.10 * direction_rows
+            else:
+                rows = raw_rows
+            component = (rows * effect_weight).sum() / weight_denominator
+            effect_components[name] = component
+            loss = loss + float(internal_weight) * component
+    reliability_mean_h = reliability_weight.sum(dim=(0, 2)) / counts_h.clamp_min(1.0)
     result = {
         "flow_jepa_interval_stage": loss,
         "flow_jepa_interval_stage_raw": raw_h.mean().detach(),
@@ -1798,24 +2903,29 @@ def flow_jepa_interval_stage_terms(
         "flow_jepa_interval_stage_endpoint": endpoint_h_loss.mean().detach(),
         "flow_jepa_interval_stage_target_scale": target_scale_h.mean().detach(),
         "flow_jepa_interval_stage_reliability": reliability_mean_h.mean().detach(),
-        "flow_jepa_interval_stage_direction_floor_min": (
-            direction_floor_h.amin().detach()
-        ),
+        "flow_jepa_interval_stage_direction_floor_min": (direction_floor_h.amin().detach()),
+        "flow_jepa_future_effect_supervision_active": loss.new_tensor(float(effect_available)),
     }
-    offsets = tuple(
-        int(value) for value in output.get("flow_jepa_future_offsets", ())
-    )
+    if grounded_core_loss is not None:
+        # This tensor intentionally remains differentiable: the existing
+        # future-loss weight is routed to this exact supervised field.
+        result["grounded_future_effect_core"] = grounded_core_loss
+        result["grounded_slot_reduced_interval_audit"] = (
+            legacy_interval_loss.detach()
+        )
+    for name, component in effect_components.items():
+        result[f"flow_jepa_future_effect_{name}_loss"] = component.detach()
+    result.update(effect_diagnostics)
+    offsets = tuple(int(value) for value in output.get("flow_jepa_future_offsets", ()))
     if len(offsets) == anchors:
         for index, offset in enumerate(offsets):
-            result[f"flow_jepa_interval_stage_horizon_{offset}_loss"] = (
-                loss_h[index].detach()
-            )
-            result[
-                f"flow_jepa_interval_stage_horizon_{offset}_target_scale"
-            ] = target_scale_h[index].detach()
-            result[
-                f"flow_jepa_interval_stage_horizon_{offset}_reliability"
-            ] = reliability_mean_h[index].detach()
+            result[f"flow_jepa_interval_stage_horizon_{offset}_loss"] = loss_h[index].detach()
+            result[f"flow_jepa_interval_stage_horizon_{offset}_target_scale"] = target_scale_h[
+                index
+            ].detach()
+            result[f"flow_jepa_interval_stage_horizon_{offset}_reliability"] = reliability_mean_h[
+                index
+            ].detach()
     return result
 
 
@@ -1865,20 +2975,40 @@ def flow_jepa_stage1_losses(
         if enable_future_loss and effective_weight > 0.0:
             total = total + contribution
 
+    grounded_effect_active = torch.is_tensor(
+        output.get("grounded_intent_effect_active")
+    )
+    legacy_future_prediction = flow_jepa_future_prediction_loss(
+        output,
+        balance_horizons=balance_horizons,
+        reliable_normalization=reliable_normalization,
+    )
+    interval_terms: dict[str, Tensor] | None = None
+    future_prediction = legacy_future_prediction
+    if grounded_effect_active:
+        interval_terms = flow_jepa_interval_stage_terms(output)
+        grounded_core = interval_terms.get("grounded_future_effect_core")
+        if not torch.is_tensor(grounded_core):
+            raise RuntimeError(
+                "grounded future objective lost its object-level "
+                "FutureEffect core"
+            )
+        future_prediction = grounded_core
+        losses["grounded_slot_reduced_future_audit"] = (
+            legacy_future_prediction.detach().float().reshape(())
+        )
     add(
         "flow_jepa_future_prediction",
-        flow_jepa_future_prediction_loss(
-            output,
-            balance_horizons=balance_horizons,
-            reliable_normalization=reliable_normalization,
-        ),
+        future_prediction,
         float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)),
     )
-    for key, value in flow_jepa_future_reliable_diagnostics(output).items():
+    for key, value in flow_jepa_future_reliable_diagnostics(
+        output,
+        reliable_normalization=reliable_normalization,
+        balance_horizons=balance_horizons,
+    ).items():
         losses[key] = value.detach().float().reshape(())
-    address_weight = float(
-        getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)
-    )
+    address_weight = float(getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0))
     losses["flow_jepa_horizon_address_supervision_active"] = torch.as_tensor(
         float(address_weight > 0.0),
         device=pred.device,
@@ -1904,7 +3034,8 @@ def flow_jepa_stage1_losses(
         address_terms["flow_jepa_horizon_address"],
         address_weight,
     )
-    interval_terms = flow_jepa_interval_stage_terms(output)
+    if interval_terms is None:
+        interval_terms = flow_jepa_interval_stage_terms(output)
     for key, value in interval_terms.items():
         if key != "flow_jepa_interval_stage":
             losses[key] = value.detach().float().reshape(())
@@ -1919,9 +3050,7 @@ def flow_jepa_stage1_losses(
             )
         ),
     )
-    future_change_weight = float(
-        getattr(trainer, "flow_jepa_future_change_loss_weight", 0.0)
-    )
+    future_change_weight = float(getattr(trainer, "flow_jepa_future_change_loss_weight", 0.0))
     if future_change_weight > 0.0 and not all(
         torch.is_tensor(output.get(name))
         for name in (
@@ -1932,12 +3061,33 @@ def flow_jepa_stage1_losses(
         )
     ):
         raise RuntimeError("active future-change supervision requires current/future JEPA charts")
-    add(
-        "flow_jepa_future_change",
-        flow_jepa_future_change_loss(output, balance_horizons=balance_horizons),
-        future_change_weight,
+    future_change = flow_jepa_future_change_loss(
+        output,
+        balance_horizons=balance_horizons,
     )
-    for offset, value in flow_jepa_future_horizon_diagnostics(output).items():
+    if grounded_effect_active:
+        losses["flow_jepa_future_change"] = (
+            future_change.detach().float().reshape(())
+        )
+        losses["grounded_slot_reduced_future_change_audit"] = (
+            future_change.detach().float().reshape(())
+        )
+        losses["grounded_slot_reduced_future_change_audit_only"] = (
+            future_change.new_ones((), dtype=torch.float32)
+        )
+        losses["loss_contrib_flow_jepa_future_change"] = (
+            future_change.detach().float().reshape(()) * 0.0
+        )
+    else:
+        add(
+            "flow_jepa_future_change",
+            future_change,
+            future_change_weight,
+        )
+    for offset, value in flow_jepa_future_horizon_diagnostics(
+        output,
+        reliable_normalization=reliable_normalization,
+    ).items():
         losses[f"flow_jepa_future_horizon_{offset}"] = value.detach().float().reshape(())
     losses["flow_jepa_future_change_direction"] = (
         flow_jepa_future_change_direction_loss(
@@ -1967,9 +3117,7 @@ def flow_jepa_stage1_losses(
         if not torch.is_tensor(value) or value.numel() != 1:
             raise RuntimeError(f"V95 Stage1 did not expose {loss_name}")
         add(loss_name, value, float(getattr(trainer, weight_name, 0.0)))
-    identity_weight = float(
-        getattr(trainer, "flow_jepa_identity_advantage_loss_weight", 0.0)
-    )
+    identity_weight = float(getattr(trainer, "flow_jepa_identity_advantage_loss_weight", 0.0))
     identity_value = output.get("flow_jepa_identity_advantage_loss")
     if torch.is_tensor(identity_value) and identity_value.numel() == 1:
         add("flow_jepa_identity_advantage_loss", identity_value, identity_weight)
@@ -1977,9 +3125,7 @@ def flow_jepa_stage1_losses(
         raise RuntimeError(
             "identity-advantage supervision requires raw-image zero-flow guard output"
         )
-    static_identity_weight = float(
-        getattr(trainer, "flow_jepa_static_identity_loss_weight", 0.0)
-    )
+    static_identity_weight = float(getattr(trainer, "flow_jepa_static_identity_loss_weight", 0.0))
     static_identity_value = output.get("flow_jepa_static_identity_loss")
     if torch.is_tensor(static_identity_value) and static_identity_value.numel() == 1:
         add(
@@ -1988,21 +3134,15 @@ def flow_jepa_stage1_losses(
             static_identity_weight,
         )
     elif static_identity_weight > 0.0:
-        raise RuntimeError(
-            "static-identity supervision requires raw-image zero-flow guard output"
-        )
+        raise RuntimeError("static-identity supervision requires raw-image zero-flow guard output")
 
     if torch.is_grad_enabled() and not total.requires_grad:
         raise RuntimeError("V95 Stage1 objective has no active differentiable term")
     losses["loss"] = total
     losses["loss_group_representation"] = total.detach().float().reshape(())
     losses["loss_ledger_sum"] = total.detach().float().reshape(())
-    losses["loss_ledger_residual"] = total.detach().float().reshape(()) - losses[
-        "loss_ledger_sum"
-    ]
-    losses["flow_jepa_stage1_objective"] = torch.ones_like(
-        losses["loss_group_representation"]
-    )
+    losses["loss_ledger_residual"] = total.detach().float().reshape(()) - losses["loss_ledger_sum"]
+    losses["flow_jepa_stage1_objective"] = torch.ones_like(losses["loss_group_representation"])
     return losses
 
 
@@ -2676,6 +3816,264 @@ def _oracle_exit_supervision(
     }
 
 
+def object_intent_dynamics_terms(
+    output: dict[str, Tensor],
+    *,
+    require_teacher: bool,
+) -> dict[str, Tensor]:
+    """Losses for the sole object-level G->S->W interface.
+
+    The existing future weight owns W's complete four-interval dynamics.  The
+    existing interval weight owns chronological differentiation plus the
+    small G/S recognizer scaffolding.  No reliability denominator can cancel
+    attenuation, and visibility/persistence are supervised for existing
+    objects even when a future match is occluded.
+    """
+
+    reference = output.get("pred_physical_velocity")
+    if not torch.is_tensor(reference):
+        raise KeyError("object-intent loss requires the policy velocity reference")
+    zero = reference.float().sum() * 0.0
+    prediction_target_pairs = (
+        (
+            "successor",
+            "object_future_successor_prediction",
+            "object_future_successor_target",
+            0.30,
+            False,
+        ),
+        (
+            "semantic",
+            "object_future_semantic_prediction",
+            "object_future_semantic_target",
+            0.25,
+            True,
+        ),
+        (
+            "transport",
+            "object_future_transport_prediction",
+            "object_future_transport_target",
+            0.15,
+            False,
+        ),
+        (
+            "covariance",
+            "object_future_covariance_prediction",
+            "object_future_covariance_target",
+            0.05,
+            False,
+        ),
+        (
+            "visibility",
+            "object_future_visibility_prediction",
+            "object_future_visibility_target",
+            0.08,
+            False,
+        ),
+        (
+            "persistence",
+            "object_future_persistence_prediction",
+            "object_future_persistence_target",
+            0.07,
+            False,
+        ),
+        (
+            "uncertainty",
+            "object_future_uncertainty_prediction",
+            "object_future_uncertainty_target",
+            0.10,
+            False,
+        ),
+    )
+    teacher_available = all(
+        torch.is_tensor(output.get(prediction_key))
+        and torch.is_tensor(output.get(target_key))
+        for _, prediction_key, target_key, _, _ in prediction_target_pairs
+    ) and torch.is_tensor(output.get("object_future_validity_target"))
+    if not teacher_available:
+        if require_teacher:
+            raise RuntimeError(
+                "object-intent dynamics requires the four-interval object teacher"
+            )
+        return {
+            "object_future_dynamics": zero,
+            "object_future_transition": zero,
+            "object_intent_structure": zero,
+        }
+
+    teacher_validity = output["object_future_validity_target"].detach().float()
+    current_validity = output.get("object_fact_validity")
+    if not torch.is_tensor(current_validity):
+        raise RuntimeError("object-intent loss lost physical current object validity")
+    validity_weight = current_validity.detach().float()[:, None].expand_as(
+        teacher_validity
+    )
+    if teacher_validity.ndim != 4 or int(teacher_validity.shape[1]) != 4:
+        raise ValueError(
+            "object future validity must preserve [B,4,K,1]"
+        )
+
+    def row_loss(
+        prediction: Tensor,
+        teacher: Tensor,
+        *,
+        scale_floored: bool,
+    ) -> Tensor:
+        raw = F.smooth_l1_loss(
+            prediction.float(), teacher.detach().float(), reduction="none"
+        ).mean(dim=-1, keepdim=True)
+        if not scale_floored:
+            return raw
+        teacher_f = teacher.detach().float()
+        prediction_f = prediction.float()
+        teacher_rms = teacher_f.square().mean(dim=-1, keepdim=True).sqrt()
+        scale_floor = (
+            0.25 * teacher_rms.mean(dim=(0, 2), keepdim=True)
+        ).clamp_min(1e-3)
+        scale = torch.sqrt(teacher_rms.square() + scale_floor.square())
+        normalized = F.smooth_l1_loss(
+            prediction_f / scale,
+            teacher_f / scale,
+            reduction="none",
+        ).mean(dim=-1, keepdim=True)
+        prediction_direction = prediction_f / torch.sqrt(
+            prediction_f.square().mean(dim=-1, keepdim=True)
+            + scale_floor.square()
+        )
+        teacher_direction = teacher_f / torch.sqrt(
+            teacher_f.square().mean(dim=-1, keepdim=True)
+            + scale_floor.square()
+        )
+        direction = 1.0 - (
+            prediction_direction * teacher_direction
+        ).mean(dim=-1, keepdim=True)
+        return raw + normalized + 0.10 * direction
+
+    result: dict[str, Tensor] = {}
+    future_total = zero
+    semantic_rows: Tensor | None = None
+    for (
+        name,
+        prediction_key,
+        target_key,
+        internal_weight,
+        scale_floored,
+    ) in prediction_target_pairs:
+        prediction = output[prediction_key]
+        teacher = output[target_key]
+        if tuple(prediction.shape) != tuple(teacher.shape):
+            raise ValueError(
+                f"object future {name} prediction/target shapes do not align"
+            )
+        rows = row_loss(
+            prediction,
+            teacher,
+            scale_floored=scale_floored,
+        )
+        # Association reliability is already represented in the teacher
+        # value: null mass blends successor back to the current fact, motion
+        # to zero, visibility to zero and uncertainty upward.  Multiplying by
+        # reliability again would erase precisely those conservative fallback
+        # targets and recreate an unsupervised W direction.  Current object
+        # existence is therefore the sole loss mask for every field.
+        weight = validity_weight
+        denominator = weight.sum().clamp_min(1.0)
+        component = (rows * weight).sum() / denominator
+        result[f"object_future_{name}"] = component
+        future_total = future_total + float(internal_weight) * component
+        if name == "semantic":
+            semantic_rows = rows
+        squared_error = (
+            prediction.float() - teacher.detach().float()
+        ).square().mean(dim=-1, keepdim=True)
+        target_power = teacher.detach().float().square().mean(
+            dim=-1, keepdim=True
+        )
+        for interval_index, interval_name in enumerate(
+            ("h4_8", "h8_16", "h16_32", "h32_48")
+        ):
+            interval_weight = weight[:, interval_index]
+            interval_denominator = interval_weight.sum().clamp_min(1.0)
+            error_rms = torch.sqrt(
+                (
+                    squared_error[:, interval_index] * interval_weight
+                ).sum()
+                / interval_denominator
+            )
+            target_rms = torch.sqrt(
+                (
+                    target_power[:, interval_index] * interval_weight
+                ).sum()
+                / interval_denominator
+            ).clamp_min(1e-3)
+            result[
+                f"object_future_{name}_{interval_name}_normalized_error"
+            ] = (error_rms / target_rms).detach()
+    if semantic_rows is None:
+        raise RuntimeError("object future dynamics lost semantic rows")
+    semantic_prediction = output["object_future_semantic_prediction"].float()
+    semantic_target = output["object_future_semantic_target"].detach().float()
+    transition_rows = row_loss(
+        semantic_prediction[:, 1:] - semantic_prediction[:, :-1],
+        semantic_target[:, 1:] - semantic_target[:, :-1],
+        scale_floored=True,
+    )
+    transition_weight = torch.minimum(
+        validity_weight[:, 1:], validity_weight[:, :-1]
+    )
+    transition = (
+        transition_rows * transition_weight
+    ).sum() / transition_weight.sum().clamp_min(1.0)
+
+    structure_specs = (
+        ("object_reconstruction_loss_raw", 0.25),
+        ("object_intent_online_match_loss_raw", 0.35),
+        ("object_plan_recognition_loss_raw", 0.20),
+        ("object_coarse_action_loss_raw", 0.20),
+    )
+    structure = zero
+    for key, weight in structure_specs:
+        value = output.get(key)
+        if not torch.is_tensor(value) or value.numel() != 1:
+            if require_teacher:
+                raise RuntimeError(f"object-intent training lost {key}")
+            value = zero
+        value = value.float().reshape(())
+        result[key.removesuffix("_raw")] = value
+        structure = structure + float(weight) * value
+    # Chronological differentiation and the G/S recognizer scaffold share the
+    # pre-existing interval budget.  Neither creates a new external weight.
+    interval_objective = 0.50 * transition + 0.50 * structure
+    result.update(
+        {
+            "object_future_dynamics": future_total,
+            "object_future_transition": transition,
+            "object_intent_structure_core": structure,
+            "object_intent_structure": interval_objective,
+            "object_future_target_validity": teacher_validity.mean().detach(),
+            "object_future_prediction_adjacent_cosine": F.cosine_similarity(
+                semantic_prediction[:, 1:].flatten(2),
+                semantic_prediction[:, :-1].flatten(2),
+                dim=-1,
+                eps=1e-4,
+            ).mean().detach(),
+            "object_future_target_adjacent_cosine": F.cosine_similarity(
+                semantic_target[:, 1:].flatten(2),
+                semantic_target[:, :-1].flatten(2),
+                dim=-1,
+                eps=1e-4,
+            ).mean().detach(),
+            "object_future_prediction_interval_variation": (
+                semantic_prediction.std(dim=1, unbiased=False).mean().detach()
+            ),
+            "object_future_target_interval_variation": (
+                semantic_target.std(dim=1, unbiased=False).mean().detach()
+            ),
+        }
+    )
+    return result
+
+
 def flow_losses(
     system: V39PolicySystem,
     sample: dict[str, Tensor],
@@ -2686,13 +4084,24 @@ def flow_losses(
     global_step: int | None = None,
 ) -> dict[str, Tensor]:
     losses = v363_flow_losses(system, sample, output, trainer)  # type: ignore[arg-type]
+    # V116 names the actual action-flow ledger explicitly. These are aliases
+    # over the tensors already used by the objective, not new loss terms.
+    losses["action_flow_objective"] = losses["physical_flow"]
+    losses["native_velocity_mse"] = losses[
+        "physical_flow_native_uniform"
+    ]
+    losses["arm_tangent_mse"] = losses["arm_fm_native"]
+    losses["arm_null_mse"] = losses["arm_fm_null"]
+    losses["gripper_tangent_mse"] = losses["gripper_fm_native"]
+    losses["gripper_null_mse"] = losses["gripper_fm_null"]
+    losses["event_reweight_delta"] = (
+        losses["physical_flow"]
+        - losses["physical_flow_no_information_balance"]
+    ).detach()
     balance_horizons = _flow_jepa_balance_horizons(trainer)
     temporal_balance_active = bool(
         balance_horizons
-        or str(getattr(trainer, "horizon_weight_mode", "legacy"))
-        .strip()
-        .lower()
-        .replace("-", "_")
+        or str(getattr(trainer, "horizon_weight_mode", "legacy")).strip().lower().replace("-", "_")
         != "legacy"
         or float(getattr(trainer, "trajectory_information_weight", 0.0)) > 0.0
     )
@@ -2717,6 +4126,8 @@ def flow_losses(
                 or key.startswith("condition_")
                 or key.startswith("evidence_")
                 or key.startswith("flow_jepa_")
+                or key.startswith("grounded_")
+                or key.startswith("object_")
                 or key.startswith("role_")
                 or key.startswith("attnres_")
             )
@@ -2724,12 +4135,96 @@ def flow_losses(
             and value.numel() == 1
         ):
             losses[key] = value.detach().float().reshape(())
-    if "flow_jepa_future_pred" in output:
-        future_jepa = flow_jepa_future_prediction_loss(
+    object_dynamics_active = torch.is_tensor(
+        output.get("object_intent_dynamics_active")
+    )
+    if object_dynamics_active:
+        object_terms = object_intent_dynamics_terms(
+            output,
+            require_teacher=enable_future_loss,
+        )
+        for key, value in object_terms.items():
+            losses[key] = value.detach().float().reshape(())
+        future_jepa = object_terms["object_future_dynamics"]
+        interval_loss = object_terms["object_intent_structure"]
+        losses["flow_jepa_future_prediction"] = future_jepa.detach().float()
+        losses["flow_jepa_interval_stage"] = interval_loss.detach().float()
+        future_weight = max(
+            float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)),
+            0.0,
+        )
+        interval_weight = max(
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_interval_stage_loss_weight",
+                    0.0,
+                )
+            ),
+            0.0,
+        )
+        future_contribution = future_weight * future_jepa
+        interval_contribution = interval_weight * interval_loss
+        losses["loss_contrib_flow_jepa_future"] = (
+            future_contribution.detach().float()
+        )
+        losses["loss_contrib_flow_jepa_interval_stage"] = (
+            interval_contribution.detach().float()
+        )
+        if enable_future_loss:
+            losses["loss"] = (
+                losses["loss"]
+                + future_contribution
+                + interval_contribution
+            )
+        # Historical slot-reduced future/change/address/stage objectives are
+        # not owners in this capability.  Keep their canonical ledger rows at
+        # exact zero so an inherited nonzero trainer knob cannot silently add
+        # a second, averaging-based objective.
+        for name in (
+            "flow_jepa_future_change_direction",
+            "flow_jepa_future_change",
+            "flow_jepa_horizon_address",
+            "flow_jepa_stage_prediction",
+        ):
+            losses[name] = future_jepa.detach().new_zeros(())
+        losses["flow_jepa_horizon_address_supervision_active"] = (
+            future_jepa.detach().new_zeros(())
+        )
+        losses["loss_contrib_flow_jepa_future_change"] = (
+            future_jepa.detach().new_zeros(())
+        )
+        losses["loss_contrib_flow_jepa_horizon_address"] = (
+            future_jepa.detach().new_zeros(())
+        )
+        losses["loss_contrib_flow_jepa_stage"] = (
+            future_jepa.detach().new_zeros(())
+        )
+    if "flow_jepa_future_pred" in output and not object_dynamics_active:
+        grounded_effect_active = torch.is_tensor(
+            output.get("grounded_intent_effect_active")
+        )
+        legacy_future_jepa = flow_jepa_future_prediction_loss(
             output,
             balance_horizons=balance_horizons,
             reliable_normalization=reliable_normalization,
         )
+        interval_terms: dict[str, Tensor] | None = None
+        future_jepa = legacy_future_jepa
+        if grounded_effect_active:
+            interval_terms = flow_jepa_interval_stage_terms(output)
+            grounded_core = interval_terms.get(
+                "grounded_future_effect_core"
+            )
+            if not torch.is_tensor(grounded_core):
+                raise RuntimeError(
+                    "grounded future objective lost its object-level "
+                    "FutureEffect core"
+                )
+            future_jepa = grounded_core
+            losses["grounded_slot_reduced_future_audit"] = (
+                legacy_future_jepa.detach().float().reshape(())
+            )
         losses["flow_jepa_future_prediction"] = future_jepa.detach().float()
         losses["flow_jepa_future_change_direction"] = (
             flow_jepa_future_change_direction_loss(
@@ -2744,9 +4239,16 @@ def flow_losses(
             balance_horizons=balance_horizons,
         )
         losses["flow_jepa_future_change"] = future_change.detach().float()
-        for offset, value in flow_jepa_future_horizon_diagnostics(output).items():
+        for offset, value in flow_jepa_future_horizon_diagnostics(
+            output,
+            reliable_normalization=reliable_normalization,
+        ).items():
             losses[f"flow_jepa_future_horizon_{offset}"] = value.detach().float().reshape(())
-        for key, value in flow_jepa_future_reliable_diagnostics(output).items():
+        for key, value in flow_jepa_future_reliable_diagnostics(
+            output,
+            reliable_normalization=reliable_normalization,
+            balance_horizons=balance_horizons,
+        ).items():
             losses[key] = value.detach().float().reshape(())
         future_weight = max(float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)), 0.0)
         future_contribution = future_weight * future_jepa
@@ -2763,11 +4265,21 @@ def flow_losses(
             raise RuntimeError(
                 "active future-change supervision requires the current JEPA teacher chart"
             )
-        future_change_contribution = future_change_weight * future_change
-        losses["loss_contrib_flow_jepa_future_change"] = (
-            future_change_contribution.detach().float()
+        active_future_change_weight = (
+            0.0 if grounded_effect_active else future_change_weight
         )
-        if enable_future_loss and future_change_weight > 0.0:
+        future_change_contribution = (
+            active_future_change_weight * future_change
+        )
+        losses["loss_contrib_flow_jepa_future_change"] = future_change_contribution.detach().float()
+        if grounded_effect_active:
+            losses["grounded_slot_reduced_future_change_audit"] = (
+                future_change.detach().float().reshape(())
+            )
+            losses[
+                "grounded_slot_reduced_future_change_audit_only"
+            ] = future_change.new_ones((), dtype=torch.float32)
+        if enable_future_loss and active_future_change_weight > 0.0:
             losses["loss"] = losses["loss"] + future_change_contribution
         address_weight = max(
             float(
@@ -2802,12 +4314,11 @@ def flow_losses(
             if key != "flow_jepa_horizon_address":
                 losses[key] = value.detach().float().reshape(())
         address_contribution = address_weight * address_loss
-        losses["loss_contrib_flow_jepa_horizon_address"] = (
-            address_contribution.detach().float()
-        )
+        losses["loss_contrib_flow_jepa_horizon_address"] = address_contribution.detach().float()
         if enable_future_loss and address_weight > 0.0:
             losses["loss"] = losses["loss"] + address_contribution
-        interval_terms = flow_jepa_interval_stage_terms(output)
+        if interval_terms is None:
+            interval_terms = flow_jepa_interval_stage_terms(output)
         interval_loss = interval_terms["flow_jepa_interval_stage"]
         for key, value in interval_terms.items():
             losses[key] = value.detach().float().reshape(())
@@ -2822,9 +4333,7 @@ def flow_losses(
             0.0,
         )
         interval_contribution = interval_weight * interval_loss
-        losses["loss_contrib_flow_jepa_interval_stage"] = (
-            interval_contribution.detach().float()
-        )
+        losses["loss_contrib_flow_jepa_interval_stage"] = interval_contribution.detach().float()
         if enable_future_loss and interval_weight > 0.0:
             losses["loss"] = losses["loss"] + interval_contribution
         stage_jepa = flow_jepa_stage_prediction_loss(output)
@@ -2856,14 +4365,61 @@ def flow_losses(
             term = output.get(loss_name)
             weight = max(float(getattr(trainer, weight_name, 0.0)), 0.0)
             if not torch.is_tensor(term) or term.numel() != 1:
-                if loss_name in {
-                    "flow_jepa_identity_advantage_loss",
-                    "flow_jepa_static_identity_loss",
-                } and weight <= 0.0:
+                if (
+                    loss_name
+                    in {
+                        "flow_jepa_identity_advantage_loss",
+                        "flow_jepa_static_identity_loss",
+                    }
+                    and weight <= 0.0
+                ):
                     continue
                 raise RuntimeError(f"enabled Flow-DINO path did not expose {loss_name}")
             contribution = weight * term
             losses[f"loss_contrib_{loss_name}"] = contribution.detach().float().reshape(())
+            if weight > 0.0:
+                losses["loss"] = losses["loss"] + contribution
+    elif object_dynamics_active:
+        # Flow geometry remains a real observation-side objective.  Only the
+        # obsolete slot-reduced future/address owners above are disabled.
+        auxiliary_terms = (
+            ("flow_jepa_warp_loss", "flow_jepa_warp_loss_weight"),
+            (
+                "flow_jepa_identity_advantage_loss",
+                "flow_jepa_identity_advantage_loss_weight",
+            ),
+            (
+                "flow_jepa_static_identity_loss",
+                "flow_jepa_static_identity_loss_weight",
+            ),
+            ("flow_jepa_cycle_loss", "flow_jepa_cycle_loss_weight"),
+            ("flow_jepa_smoothness_loss", "flow_jepa_smoothness_loss_weight"),
+            ("flow_jepa_uncertainty_nll", "flow_jepa_uncertainty_nll_weight"),
+            (
+                "flow_jepa_refinement_sequence_loss",
+                "flow_jepa_refinement_sequence_loss_weight",
+            ),
+        )
+        for loss_name, weight_name in auxiliary_terms:
+            term = output.get(loss_name)
+            weight = max(float(getattr(trainer, weight_name, 0.0)), 0.0)
+            if not torch.is_tensor(term) or term.numel() != 1:
+                if (
+                    loss_name
+                    in {
+                        "flow_jepa_identity_advantage_loss",
+                        "flow_jepa_static_identity_loss",
+                    }
+                    and weight <= 0.0
+                ):
+                    continue
+                raise RuntimeError(
+                    f"object-intent Flow-DINO path did not expose {loss_name}"
+                )
+            contribution = weight * term
+            losses[f"loss_contrib_{loss_name}"] = (
+                contribution.detach().float().reshape(())
+            )
             if weight > 0.0:
                 losses["loss"] = losses["loss"] + contribution
     execution_cost = output.get("evidence_mmd_it_execution_cost")
@@ -2939,9 +4495,11 @@ def flow_losses(
             raise ValueError("native execution baseline has the wrong physical shape")
         with torch.no_grad():
             terminal_identity_error = (
-                execution_candidates[:, :, -1].float()
-                - execution_baseline.detach().float()
-            ).square().mean().sqrt()
+                (execution_candidates[:, :, -1].float() - execution_baseline.detach().float())
+                .square()
+                .mean()
+                .sqrt()
+            )
             candidate_residual = (
                 execution_candidates.float() - execution_target.detach().float()[:, None, None]
             )
@@ -3119,26 +4677,27 @@ def flow_losses(
             terminal_identity_error.detach().float()
         )
         terminal_valid = valid[..., -1] & active_candidate
-        operation_scalar = target_scalar[..., :-1].masked_fill(
-            ~valid[..., :-1], invalid_max
-        )
+        operation_scalar = target_scalar[..., :-1].masked_fill(~valid[..., :-1], invalid_max)
         best_operation = operation_scalar.amin(dim=-1)
         terminal_target_margin = target_scalar[..., -1] - best_operation
-        predicted_operation = predicted_scalar[..., :-1].masked_fill(
-            ~valid[..., :-1], invalid_max
-        )
+        predicted_operation = predicted_scalar[..., :-1].masked_fill(~valid[..., :-1], invalid_max)
         predicted_terminal_margin = predicted_scalar[..., -1] - predicted_operation.amin(dim=-1)
         terminal_denominator = terminal_valid.float().sum().clamp_min(1.0)
         losses["evidence_mmd_it_terminal_target_cost_margin"] = (
-            (terminal_target_margin * terminal_valid.float()).sum() / terminal_denominator
-        ).detach().float()
+            ((terminal_target_margin * terminal_valid.float()).sum() / terminal_denominator)
+            .detach()
+            .float()
+        )
         losses["evidence_mmd_it_terminal_predicted_cost_margin"] = (
-            (predicted_terminal_margin * terminal_valid.float()).sum() / terminal_denominator
-        ).detach().float()
+            ((predicted_terminal_margin * terminal_valid.float()).sum() / terminal_denominator)
+            .detach()
+            .float()
+        )
         losses["evidence_mmd_it_terminal_target_preferred_fraction"] = (
-            ((terminal_target_margin < 0.0) & terminal_valid).float().sum()
-            / terminal_denominator
-        ).detach().float()
+            (((terminal_target_margin < 0.0) & terminal_valid).float().sum() / terminal_denominator)
+            .detach()
+            .float()
+        )
         if enable_future_loss:
             losses["loss"] = losses["loss"] + execution_value_weight * execution_value_loss
     dyn = rollout_dynamics_loss(output)
@@ -4344,10 +5903,7 @@ def _needs_action_counterfactuals(trainer: V39PolicyTrainerConfig, epoch: int) -
     layer_mode = _uses_layer_adapter_contract(trainer)
     contract_stage = _is_contract_stage(trainer)
     if contract_stage:
-        return bool(
-            layer_mode
-            and float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0.0
-        )
+        return bool(layer_mode and float(getattr(trainer, "layer_contrast_loss_weight", 0.0)) > 0.0)
     if layer_mode:
         return bool(
             _layer_contract_aux_scale(trainer, epoch) > 0.0
@@ -4770,14 +6326,8 @@ def evaluate_v39_policy(
     contract_eval = _is_contract_stage(trainer) and _uses_layer_adapter_contract(trainer)
     representation_eval = bool(int(getattr(system.policy_config, "flow_jepa_enabled", 0))) and (
         float(getattr(trainer, "flow_jepa_future_loss_weight", 0.0)) > 0.0
-        or float(
-            getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)
-        )
-        > 0.0
-        or float(
-            getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)
-        )
-        > 0.0
+        or float(getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)) > 0.0
+        or float(getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)) > 0.0
         or float(getattr(trainer, "flow_jepa_stage_loss_weight", 0.0)) > 0.0
     )
     contract_metric_sums: dict[str, float] = {}
@@ -4838,8 +6388,7 @@ def evaluate_v39_policy(
         collect_sampling_diagnostics = batch_index in sampling_diagnostic_indices
         run_proposal_ablation = batch_index in proposal_ablation_indices
         run_execution_ablation = (
-            evidence_execution_decoder is not None
-            and batch_index in execution_ablation_indices
+            evidence_execution_decoder is not None and batch_index in execution_ablation_indices
         )
         run_representation_eval = batch_index in representation_eval_indices
         report_mem = memory_reporter is not None and memory_reporter.should_report(batch_index)
@@ -5099,6 +6648,11 @@ def evaluate_v39_policy(
                     raw_visual=sample.get("raw_visual"),
                     action_state=sample["action_state"],
                     target_visual=sample["target_visual"],
+                    future_training_pack=_object_intent_future_training_pack(
+                        sample,
+                        system=system,
+                        require_teacher=True,
+                    ),
                     training_noise=noise,
                     training_time=representation_time,
                     proposal_keep=torch.ones_like(representation_time),
@@ -5138,9 +6692,7 @@ def evaluate_v39_policy(
             execution_ablation_target_rows.append(target_raw)
             for name, pack in execution_ablation_packs.items():
                 action_value = pack["action"] if isinstance(pack, dict) else pack
-                execution_ablation_pred_rows[name].append(
-                    decode(action_normalizer, action_value)
-                )
+                execution_ablation_pred_rows[name].append(decode(action_normalizer, action_value))
         if torch.is_tensor(no_proposal):
             no_proposal_rows.append(decode(action_normalizer, no_proposal))
             no_proposal_target_rows.append(target_raw)
@@ -5169,7 +6721,7 @@ def evaluate_v39_policy(
                 ablation_start_event.elapsed_time(ablation_end_event) / 1000.0
             )
         if contract_losses is not None:
-            for key in (
+            fixed_contract_metric_keys = {
                 "loss",
                 "layer_contract",
                 "latent",
@@ -5183,9 +6735,17 @@ def evaluate_v39_policy(
                 "flow_jepa_stage_prediction_norm",
                 "flow_jepa_stage_to_window_gate",
                 "flow_jepa_stage_to_window_update_norm",
-            ):
-                value = contract_losses.get(key)
-                if torch.is_tensor(value):
+                "flow_jepa_future_raw_delta_loss",
+                "flow_jepa_future_reliable_normalized_loss",
+                "flow_jepa_future_change_reliability",
+                "flow_jepa_future_active_direction_loss",
+                "flow_jepa_future_active_composite_loss",
+                "flow_jepa_future_direction_floor_min",
+            }
+            for key, value in contract_losses.items():
+                if (
+                    key in fixed_contract_metric_keys or key.startswith("flow_jepa_future_horizon_")
+                ) and torch.is_tensor(value):
                     contract_metric_sums[key] = contract_metric_sums.get(key, 0.0) + float(
                         value.detach().float().cpu()
                     )
@@ -5271,17 +6831,15 @@ def evaluate_v39_policy(
     if execution_ablation_target_rows:
         ablation_target = np.concatenate(execution_ablation_target_rows)
         primary_ablation_mse = float(
-            ((np.concatenate(execution_ablation_pred_rows["primary"]) - ablation_target) ** 2).mean()
+            (
+                (np.concatenate(execution_ablation_pred_rows["primary"]) - ablation_target) ** 2
+            ).mean()
         )
-        metrics["execution_ablation_primary_full_rmse"] = float(
-            math.sqrt(primary_ablation_mse)
-        )
+        metrics["execution_ablation_primary_full_rmse"] = float(math.sqrt(primary_ablation_mse))
         for name in ("hard", "neutral", "full_capacity", "three_basis_reduction"):
             mode_pred = np.concatenate(execution_ablation_pred_rows[name])
             mode_squared = (mode_pred - ablation_target) ** 2
-            metrics[f"execution_ablation_{name}_full_rmse"] = float(
-                np.sqrt(mode_squared.mean())
-            )
+            metrics[f"execution_ablation_{name}_full_rmse"] = float(np.sqrt(mode_squared.mean()))
             metrics[f"execution_ablation_{name}_tail_rmse"] = (
                 float(np.sqrt(mode_squared[:, 8:].mean()))
                 if mode_squared.shape[1] > 8
@@ -5384,11 +6942,7 @@ def _flow_address_action_metrics(
     arm_squared = squared[..., :-1]
     gripper_squared = squared[..., -1]
     first_rmse = float(np.sqrt(squared[:, 0].mean()))
-    tail_rmse = (
-        float(np.sqrt(squared[:, 8:].mean()))
-        if squared.shape[1] > 8
-        else float("nan")
-    )
+    tail_rmse = float(np.sqrt(squared[:, 8:].mean())) if squared.shape[1] > 8 else float("nan")
     metrics = {
         "full_rmse": float(np.sqrt(squared.mean())),
         "first_rmse": first_rmse,
@@ -5532,8 +7086,7 @@ def evaluate_flow_address_intervention(
         selected_indices = {1 + (planned_batches - 1) // 2}
     else:
         selected_indices = {
-            1 + round(index * (planned_batches - 1) / float(budget - 1))
-            for index in range(budget)
+            1 + round(index * (planned_batches - 1) / float(budget - 1)) for index in range(budget)
         }
 
     system.eval()
@@ -5575,9 +7128,7 @@ def evaluate_flow_address_intervention(
             dtype=sample["visual"].dtype,
             action_state=sample["action_state"],
         )
-        stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(
-            trainer
-        )
+        stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer)
 
         if not verified_ordinary_baseline:
             encoder.clear_raw_address_eval_intervention()
@@ -5634,9 +7185,10 @@ def evaluate_flow_address_intervention(
                         representation_sums.get(key, 0.0) + float(value) * sample_count
                     )
                 representation_weight += sample_count
-            if mode == "spatial_shuffle" and reader_metrics.get(
-                "flow_jepa_raw_address_shuffle_spatial_fallback", 0.0
-            ) > 0.5:
+            if (
+                mode == "spatial_shuffle"
+                and reader_metrics.get("flow_jepa_raw_address_shuffle_spatial_fallback", 0.0) > 0.5
+            ):
                 spatial_shuffle_fallback_batches += 1
             if ordinary is not None and output_name == "baseline":
                 baseline_identity_max_abs_delta = max(
@@ -5771,18 +7323,14 @@ def _action_path_paired_metrics(
                 "action_delta_rmse": float(
                     np.sqrt(
                         (
-                            (
-                                prediction[:, band_start:band_end]
-                                - baseline[:, band_start:band_end]
-                            )
+                            (prediction[:, band_start:band_end] - baseline[:, band_start:band_end])
                             ** 2
                         ).mean()
                     )
                 ),
                 "mse_delta_vs_baseline": float(band_delta.mean()),
                 "relative_mse_delta": float(
-                    band_delta.mean()
-                    / max(float(baseline_band_mse.mean()), 1e-12)
+                    band_delta.mean() / max(float(baseline_band_mse.mean()), 1e-12)
                 ),
                 "mse_delta_ci": _paired_cluster_bootstrap_interval(
                     band_delta,
@@ -5810,6 +7358,136 @@ def _action_path_paired_metrics(
     return rows
 
 
+def _model_path_boundary_metric_names(mode: str) -> tuple[str, ...]:
+    """Return the first-boundary metrics owned by one intervention.
+
+    This is intentionally an allow-list. Natural model quantities such as an
+    observed G1 residual contain the word delta but are not differences caused
+    by the requested intervention. Treating every such scalar as causal made
+    the old acceptance matrix report a pass for unchanged fields.
+    """
+
+    normalized = str(mode).strip().lower()
+    if normalized.startswith("flow_"):
+        return ("flow_jepa_raw_flow_intervention_delta_norm",)
+    if normalized.startswith("raw_value_"):
+        return (
+            "flow_jepa_raw_value_intervention_delta_norm",
+            "flow_jepa_dense_raw_value_intervention_delta_norm",
+        )
+    if normalized.startswith("dino_key_"):
+        return ("flow_jepa_dino_key_intervention_delta_norm",)
+    if normalized.startswith("source_raw_match_"):
+        return ("flow_jepa_source_raw_key_intervention_delta_norm",)
+    if normalized.startswith("joint_address_key_"):
+        return (
+            "flow_jepa_raw_flow_intervention_delta_norm",
+            "flow_jepa_dino_key_intervention_delta_norm",
+            "flow_jepa_source_raw_key_intervention_delta_norm",
+        )
+    if normalized.startswith("literal_current_rgb_"):
+        return ("flow_jepa_literal_rgb_intervention_delta_norm",)
+    if normalized == "current_context_masked":
+        return ("flow_jepa_current_context_mask_fraction",)
+    if normalized == "goal_zero":
+        return ("goal_condition_keep_delta",)
+    if normalized == "goal_episode_shuffle":
+        return ("goal_input_delta_norm",)
+    if normalized == "action_history_zero":
+        return ("history_input_delta_norm", "history_condition_keep_delta")
+    if normalized == "action_history_condition_zero":
+        return ("history_condition_keep_delta",)
+    if normalized == "action_history_proposal_zero":
+        return ("history_proposal_keep_delta",)
+    if normalized == "action_history_proposal_episode_shuffle":
+        return ("history_proposal_input_delta_norm",)
+    if normalized in {
+        "action_history_episode_shuffle",
+        "action_history_truncate",
+    }:
+        return ("history_input_delta_norm",)
+    if normalized.startswith("future_effect_"):
+        return (
+            "future_effect_boundary_delta_norm",
+            # Historical V115 probes used the older explicit name.
+            "future_effect_intervention_delta_norm",
+        )
+    if normalized.startswith("intent_"):
+        return (
+            "grounded_intent_boundary_delta_norm",
+            "intent_window_state_delta_norm",
+            "intent_window_selector_delta_norm",
+            "intent_temporal_delta_norm",
+        )
+    if normalized in {
+        "address_g3_slot_permute",
+        "address_g3_slot_mean",
+    }:
+        return ("grounded_g3_slot_intervention_delta_norm",)
+    if normalized.startswith("address_g"):
+        return (
+            "address_posterior_signature_l2_delta",
+            "fine_posterior_signature_l2_delta",
+        )
+    if normalized.startswith("g") and "_delta_" in normalized:
+        stage = normalized.split("_", 1)[0]
+        return (f"{stage}_delta_norm", f"{stage}_delta_delta_norm")
+    if normalized.startswith("grounding_entry_"):
+        return ("grounding_entry_delta_norm",)
+    if normalized.startswith("p3_") and "_delta_" in normalized:
+        lane = normalized[len("p3_") :].split("_delta_", 1)[0]
+        return (f"p3_{lane}_delta_norm",)
+    if normalized.startswith("protected_detail_"):
+        return ("protected_detail_delta_norm",)
+    if normalized in {"policy_zero", "policy_temporal_shuffle"}:
+        return ("policy_bank_delta_norm", "policy_workspace_delta_norm")
+    if normalized.startswith("world_residual_"):
+        return ("world_residual_delta_norm",)
+    if normalized.startswith("interval_stage_"):
+        return ("interval_stage_intervention_delta_norm",)
+    if normalized.startswith("horizon_address_"):
+        return ("horizon_address_intervention_delta_norm",)
+    if normalized.startswith("w2p_far_context_"):
+        return ("w2p_far_context_delta_norm",)
+    if normalized.startswith("bottom_far_rollout_"):
+        return ("bottom_far_rollout_delta_norm",)
+    if normalized.startswith("all_far_context_"):
+        return (
+            "w2p_far_context_delta_norm",
+            "bottom_far_rollout_delta_norm",
+        )
+    if normalized.startswith("phase_"):
+        return ("phase_context_delta_norm",)
+    if normalized == "condition_query_zero":
+        return ("condition_query_context_delta_norm",)
+    if normalized in {
+        "address_posterior_uniform",
+        "camera_posterior_uniform",
+    }:
+        return ("address_posterior_l1_delta",)
+    if normalized == "fine_offset_zero":
+        return ("fine_posterior_l1_delta",)
+    if normalized == "camera_swap":
+        return ("camera_bank_value_delta_norm",)
+    if normalized.startswith("world_address_query_"):
+        return ("world_query_input_delta_norm",)
+    if normalized.startswith("future_transport_"):
+        return ("future_transport_input_delta_norm",)
+    if normalized.startswith(
+        ("semantic_owner_", "appearance_owner_", "geometry_owner_")
+    ):
+        return ("address_posterior_signature_l2_delta",)
+    if normalized.startswith("p1_appearance_gateway_"):
+        return (
+            "flow_jepa_typed_p1_appearance_gateway_intervention_delta_norm",
+        )
+    if normalized.startswith(("p2_rgb_precision_", "p2_detail_precision_")):
+        return ("detail_update_signature_l2_delta",)
+    if normalized == "p1_zero":
+        return ("p1_delta_norm",)
+    return ()
+
+
 def _model_path_acceptance_matrix(
     *,
     joined: dict[str, np.ndarray],
@@ -5825,14 +7503,13 @@ def _model_path_acceptance_matrix(
     rows: dict[str, Any] = {}
     for mode, paired_row in paired.items():
         diagnostics = boundary_diagnostics.get(mode, {})
+        metric_names = _model_path_boundary_metric_names(mode)
         delta_components = {
             key: float(value)
-            for key, value in diagnostics.items()
-            if "delta" in key and not key.endswith("_fallback")
+            for key in metric_names
+            if (value := diagnostics.get(key)) is not None
         }
-        boundary_delta_l2 = math.sqrt(
-            sum(value * value for value in delta_components.values())
-        )
+        boundary_delta_l2 = math.sqrt(sum(value * value for value in delta_components.values()))
         interval = paired_row["mse_delta_ci"]
         ci_low = float(interval["ci95_low"])
         ci_high = float(interval["ci95_high"])
@@ -5844,10 +7521,19 @@ def _model_path_acceptance_matrix(
             else "inconclusive"
         )
         action_delta_rmse = float(paired_row["action_delta_rmse"])
+        boundary_verified_batches = int(verification_counts.get(mode, 0))
+        boundary_changed = bool(
+            boundary_verified_batches > 0
+            and delta_components
+            and boundary_delta_l2 > numerical_tolerance
+        )
         rows[mode] = {
-            "boundary_verified_batches": int(verification_counts.get(mode, 0)),
+            "boundary_verified_batches": boundary_verified_batches,
+            "boundary_metric_contract": list(metric_names),
+            "boundary_metric_values": delta_components,
+            "boundary_contract_observed": bool(delta_components),
             "boundary_delta_l2": float(boundary_delta_l2),
-            "boundary_changed": bool(boundary_delta_l2 > numerical_tolerance),
+            "boundary_changed": boundary_changed,
             "action_delta_rmse": action_delta_rmse,
             "action_changed": bool(action_delta_rmse > numerical_tolerance),
             "mse_delta_ci95_low": ci_low,
@@ -5859,7 +7545,12 @@ def _model_path_acceptance_matrix(
         available = [rows[mode] for mode in modes if mode in rows]
         if not available:
             return None
-        return bool(any(row["action_changed"] for row in available))
+        return bool(
+            any(
+                row["boundary_changed"] and row["action_changed"]
+                for row in available
+            )
+        )
 
     def boundary_observed(modes: Sequence[str]) -> bool | None:
         available = [rows[mode] for mode in modes if mode in rows]
@@ -5882,8 +7573,7 @@ def _model_path_acceptance_matrix(
             "joint_vs_typed_only_action_delta_rmse": joint_vs_typed,
             "joint_vs_bottom_only_action_delta_rmse": joint_vs_bottom,
             "joint_distinguishable_from_each_single_path": bool(
-                joint_vs_typed > numerical_tolerance
-                and joint_vs_bottom > numerical_tolerance
+                joint_vs_typed > numerical_tolerance and joint_vs_bottom > numerical_tolerance
             ),
         }
 
@@ -5906,6 +7596,8 @@ def _model_path_acceptance_matrix(
         "address_g2_episode_shuffle",
         "address_g3_zero",
         "address_g3_episode_shuffle",
+        "address_g3_slot_permute",
+        "address_g3_slot_mean",
     )
     detail_modes = (
         "raw_value_zero",
@@ -5917,18 +7609,10 @@ def _model_path_acceptance_matrix(
     )
     representation = {} if representation is None else representation
     slot_count = representation.get("flow_jepa_address_slot_count")
-    slot_center_distance = representation.get(
-        "flow_jepa_address_slot_pair_distance_normalized"
-    )
-    slot_posterior_distance = representation.get(
-        "flow_jepa_address_slot_posterior_hellinger"
-    )
-    slot_effective_count = representation.get(
-        "flow_jepa_address_policy_slot_effective_count"
-    )
-    slot_query_variation = representation.get(
-        "flow_jepa_address_policy_slot_query_variation"
-    )
+    slot_center_distance = representation.get("flow_jepa_address_slot_pair_distance_normalized")
+    slot_posterior_distance = representation.get("flow_jepa_address_slot_posterior_hellinger")
+    slot_effective_count = representation.get("flow_jepa_address_policy_slot_effective_count")
+    slot_query_variation = representation.get("flow_jepa_address_policy_slot_query_variation")
     slot_observed = all(
         value is not None
         for value in (
@@ -5941,28 +7625,18 @@ def _model_path_acceptance_matrix(
     )
     address_slot_structure = {
         "observed": bool(slot_observed),
-        "configured_slot_count": (
-            None if slot_count is None else float(slot_count)
-        ),
+        "configured_slot_count": (None if slot_count is None else float(slot_count)),
         "coarse_center_pair_distance_normalized": (
-            None
-            if slot_center_distance is None
-            else float(slot_center_distance)
+            None if slot_center_distance is None else float(slot_center_distance)
         ),
         "coarse_posterior_pair_hellinger": (
-            None
-            if slot_posterior_distance is None
-            else float(slot_posterior_distance)
+            None if slot_posterior_distance is None else float(slot_posterior_distance)
         ),
         "policy_slot_effective_count": (
-            None
-            if slot_effective_count is None
-            else float(slot_effective_count)
+            None if slot_effective_count is None else float(slot_effective_count)
         ),
         "policy_slot_query_variation": (
-            None
-            if slot_query_variation is None
-            else float(slot_query_variation)
+            None if slot_query_variation is None else float(slot_query_variation)
         ),
         # These are numerical-identity checks, not practical utility
         # thresholds. They prevent a nominal M-slot tensor whose hypotheses
@@ -5990,49 +7664,28 @@ def _model_path_acceptance_matrix(
     }
     typed_route_specs = {
         "ground_to_world": {
-            "source_effective_count": (
-                "attnres_ground_to_world_source_effective_count"
-            ),
-            "anchor_route_std": (
-                "attnres_ground_to_world_anchor_route_std"
-            ),
-            "camera_route_std": (
-                "attnres_ground_to_world_camera_route_std"
-            ),
+            "source_effective_count": ("attnres_ground_to_world_source_effective_count"),
+            "anchor_route_std": ("attnres_ground_to_world_anchor_route_std"),
+            "camera_route_std": ("attnres_ground_to_world_camera_route_std"),
         },
         "world_to_policy": {
-            "source_effective_count": (
-                "attnres_world_to_policy_source_effective_count"
-            ),
-            "horizon_route_std": (
-                "attnres_world_to_policy_horizon_route_std"
-            ),
-            "basis_route_std": (
-                "attnres_world_to_policy_basis_route_std"
-            ),
+            "source_effective_count": ("attnres_world_to_policy_source_effective_count"),
+            "horizon_route_std": ("attnres_world_to_policy_horizon_route_std"),
+            "basis_route_std": ("attnres_world_to_policy_basis_route_std"),
         },
         "policy_to_mmdit": {
-            "source_effective_count": (
-                "evidence_policy_delta_attnres_source_effective_count"
-            ),
-            "horizon_route_std": (
-                "evidence_policy_delta_attnres_horizon_route_std"
-            ),
+            "source_effective_count": ("evidence_policy_delta_attnres_source_effective_count"),
+            "horizon_route_std": ("evidence_policy_delta_attnres_horizon_route_std"),
         },
         "protected_detail_basis": {
-            "source_effective_count": (
-                "evidence_protected_detail_basis_source_effective_count"
-            ),
-            "horizon_route_std": (
-                "evidence_protected_detail_basis_horizon_route_std"
-            ),
+            "source_effective_count": ("evidence_protected_detail_basis_source_effective_count"),
+            "horizon_route_std": ("evidence_protected_detail_basis_horizon_route_std"),
         },
     }
     typed_route_structure: dict[str, Any] = {}
     for route_name, fields in typed_route_specs.items():
         observed_values = {
-            name: representation.get(metric_name)
-            for name, metric_name in fields.items()
+            name: representation.get(metric_name) for name, metric_name in fields.items()
         }
         observed = all(value is not None for value in observed_values.values())
         axis_values = [
@@ -6050,34 +7703,43 @@ def _model_path_acceptance_matrix(
             "uses_multiple_sources_numerically": (
                 None
                 if effective_count is None
-                else bool(
-                    float(effective_count) > 1.0 + numerical_tolerance
-                )
+                else bool(float(effective_count) > 1.0 + numerical_tolerance)
             ),
             "query_axes_vary_numerically": (
                 None
                 if not axis_values
-                else bool(
-                    all(value > numerical_tolerance for value in axis_values)
+                else bool(all(value > numerical_tolerance for value in axis_values))
+            ),
+        }
+    typed_policy_plan_lanes = {
+        lane: {
+            "boundary_changed": boundary_observed(
+                (
+                    f"p3_{lane}_delta_zero",
+                    f"p3_{lane}_delta_episode_shuffle",
+                )
+            ),
+            "reaches_action": action_observed(
+                (
+                    f"p3_{lane}_delta_zero",
+                    f"p3_{lane}_delta_episode_shuffle",
                 )
             ),
         }
+        for lane in ("precision", "effect", "temporal", "terminal")
+    }
     return {
         "numerical_tolerance": float(numerical_tolerance),
         "replay": {
             "baseline_max_abs_delta": float(baseline_identity_max_abs_delta),
-            "numerically_identical": bool(
-                baseline_identity_max_abs_delta <= numerical_tolerance
-            ),
+            "numerically_identical": bool(baseline_identity_max_abs_delta <= numerical_tolerance),
         },
         "aggregate": {
             "spatial_boundary_changed": boundary_observed(spatial_modes),
             "spatial_path_reaches_action": action_observed(spatial_modes),
             "detail_boundary_changed": boundary_observed(detail_modes),
             "detail_path_reaches_action": action_observed(detail_modes),
-            "goal_path_reaches_action": action_observed(
-                ("goal_zero", "goal_episode_shuffle")
-            ),
+            "goal_path_reaches_action": action_observed(("goal_zero", "goal_episode_shuffle")),
             "history_path_reaches_action": action_observed(
                 (
                     "action_history_zero",
@@ -6133,6 +7795,8 @@ def _model_path_acceptance_matrix(
                     "address_g2_episode_shuffle",
                     "address_g3_zero",
                     "address_g3_episode_shuffle",
+                    "address_g3_slot_permute",
+                    "address_g3_slot_mean",
                 )
             ),
             "progressive_grounding_reaches_action": action_observed(
@@ -6143,6 +7807,8 @@ def _model_path_acceptance_matrix(
                     "address_g2_episode_shuffle",
                     "address_g3_zero",
                     "address_g3_episode_shuffle",
+                    "address_g3_slot_permute",
+                    "address_g3_slot_mean",
                 )
             ),
             "interval_stage_boundary_changed": boundary_observed(
@@ -6157,9 +7823,52 @@ def _model_path_acceptance_matrix(
                     "interval_stage_episode_shuffle",
                 )
             ),
+            "future_effect_boundary_changed": boundary_observed(
+                (
+                    "future_effect_zero",
+                    "future_effect_spatial_shuffle",
+                )
+            ),
+            "future_effect_reaches_action": action_observed(
+                (
+                    "future_effect_zero",
+                    "future_effect_spatial_shuffle",
+                )
+            ),
+            "typed_policy_plan_boundary_changed": boundary_observed(
+                tuple(mode for mode in rows if mode.startswith("p3_") and "_delta_" in mode)
+            ),
+            "typed_policy_plan_reaches_action": action_observed(
+                tuple(mode for mode in rows if mode.startswith("p3_") and "_delta_" in mode)
+            ),
+            "functional_world_route_boundary_changed": boundary_observed(
+                tuple(
+                    mode for mode in rows if mode.startswith("functional_w") and "_route_" in mode
+                )
+            ),
+            "functional_world_route_reaches_action": action_observed(
+                tuple(
+                    mode for mode in rows if mode.startswith("functional_w") and "_route_" in mode
+                )
+            ),
+            "p1_appearance_gateway_boundary_changed": boundary_observed(
+                (
+                    "p1_appearance_gateway_zero",
+                    "p1_appearance_gateway_spatial_shuffle",
+                )
+            ),
+            "p1_appearance_gateway_reaches_action": action_observed(
+                (
+                    "p1_appearance_gateway_zero",
+                    "p1_appearance_gateway_spatial_shuffle",
+                )
+            ),
+            "current_context_mask_boundary_changed": boundary_observed(("current_context_masked",)),
+            "current_context_mask_reaches_action": action_observed(("current_context_masked",)),
         },
         "address_slot_structure": address_slot_structure,
         "typed_route_structure": typed_route_structure,
+        "typed_policy_plan_lanes": typed_policy_plan_lanes,
         "long_horizon_pairwise": far_pairwise,
         "modes": rows,
         "interpretation": (
@@ -6239,18 +7948,12 @@ def _action_path_probe_batch_selection(
             1 + int(sample_index) // int(batch_size)
             for sample_index in np.flatnonzero(event_samples_array)
         }
-        event_batches = {
-            index for index in event_batches if 1 <= index <= int(planned_batches)
-        }
+        event_batches = {index for index in event_batches if 1 <= index <= int(planned_batches)}
 
     episode_batches: dict[int, set[int]] = {}
     event_episode_batches: dict[int, set[int]] = {}
     refs = getattr(dataset, "refs", None)
-    if (
-        isinstance(refs, Sequence)
-        and isinstance(batch_size, int)
-        and batch_size > 0
-    ):
+    if isinstance(refs, Sequence) and isinstance(batch_size, int) and batch_size > 0:
         sample_limit = min(len(refs), int(planned_batches) * int(batch_size))
         for sample_index in range(sample_limit):
             episode_id = getattr(refs[sample_index], "episode_idx", None)
@@ -6439,11 +8142,12 @@ def _validate_complete_v103_model_probe_contract(
         for name, expected in required_flags.items()
         if int(getattr(cfg, name, -1)) != int(expected)
     ]
+    v115_schedule = str(getattr(cfg, "flow_jepa_top_role_schedule", "3-3-2")) == "3-2-3"
     expected_values = {
         "depth": 8,
         "flow_jepa_grounding_blocks": 3,
-        "flow_jepa_world_blocks": 3,
-        "flow_jepa_policy_blocks": 2,
+        "flow_jepa_world_blocks": 2 if v115_schedule else 3,
+        "flow_jepa_policy_blocks": 3 if v115_schedule else 2,
         "future_anchors": 4,
         "flow_jepa_stage_tokens": 0,
         "latent_cvae_mmdit_depth": 3,
@@ -6459,17 +8163,13 @@ def _validate_complete_v103_model_probe_contract(
         24,
         48,
     ):
-        violations.append(
-            "flow_jepa_window_offsets must be exactly (4,12,24,48)"
-        )
+        violations.append("flow_jepa_window_offsets must be exactly (4,12,24,48)")
     if tuple(int(value) for value in cfg.flow_jepa_action_offsets) != (
         4,
         12,
         24,
     ):
-        violations.append(
-            "flow_jepa_action_offsets must be exactly (4,12,24)"
-        )
+        violations.append("flow_jepa_action_offsets must be exactly (4,12,24)")
     if float(getattr(cfg, "flow_jepa_address_flow_prior_floor", 0.0)) <= 0.0:
         violations.append("flow_jepa_address_flow_prior_floor must be positive")
     if int(getattr(cfg, "flow_jepa_address_slots", 0)) < 2:
@@ -6494,25 +8194,16 @@ def _validate_complete_v103_model_probe_contract(
     ):
         if float(getattr(cfg, name, 0.0)) <= 0.0:
             violations.append(f"{name} must be positive")
-    if str(getattr(cfg, "final_action_decoder", "")) != (
-        "evidence_latent_mmdit_action"
-    ):
-        violations.append(
-            "final_action_decoder must be evidence_latent_mmdit_action"
-        )
+    if str(getattr(cfg, "final_action_decoder", "")) != ("evidence_latent_mmdit_action"):
+        violations.append("final_action_decoder must be evidence_latent_mmdit_action")
     if str(getattr(cfg, "latent_cvae_mmdit_dwell_mode", "")) != "learned":
         violations.append("latent_cvae_mmdit_dwell_mode must be learned")
-    if (
-        str(getattr(cfg, "latent_cvae_mmdit_execution_eval_policy", ""))
-        != "soft"
-    ):
+    if str(getattr(cfg, "latent_cvae_mmdit_execution_eval_policy", "")) != "soft":
         violations.append("latent_cvae_mmdit_execution_eval_policy must be soft")
     operator_rank = int(getattr(cfg, "latent_cvae_mmdit_operator_rank", 0))
     operator_groups = int(getattr(cfg, "latent_cvae_mmdit_operator_groups", 0))
     if operator_rank < 1 or operator_groups < 1 or operator_rank % operator_groups:
-        violations.append(
-            "latent_cvae_mmdit_operator_rank/groups must be positive and divisible"
-        )
+        violations.append("latent_cvae_mmdit_operator_rank/groups must be positive and divisible")
 
     if str(trainer.training_stage).strip().lower().replace("-", "_") not in {
         "policy",
@@ -6537,9 +8228,7 @@ def _validate_complete_v103_model_probe_contract(
         )
         <= 0.0
     ):
-        violations.append(
-            "latent_cvae_mmdit_execution_value_loss_weight must be positive"
-        )
+        violations.append("latent_cvae_mmdit_execution_value_loss_weight must be positive")
     if (
         str(getattr(trainer, "flow_jepa_horizon_balance_mode", ""))
         .strip()
@@ -6611,8 +8300,7 @@ def _validate_complete_v104_model_contract(
         raise ValueError(
             "V104 model contract requires the complete V103 graph plus "
             "bounded flow coordinates, sequential horizon memory, and the "
-            "role residual amplitude contract; "
-            + "; ".join(violations)
+            "role residual amplitude contract; " + "; ".join(violations)
         )
 
 
@@ -6626,28 +8314,17 @@ def _validate_complete_v105_model_contract(
     violations: list[str] = []
     if int(getattr(cfg, "flow_jepa_horizon_soft_address", -1)) != 1:
         violations.append("flow_jepa_horizon_soft_address must be enabled")
-    if not 0.0 < float(
-        getattr(cfg, "flow_jepa_horizon_address_update_scale", 0.0)
-    ) <= 1.0:
-        violations.append(
-            "flow_jepa_horizon_address_update_scale must be in (0,1]"
-        )
-    if int(
-        getattr(trainer, "flow_jepa_future_reliable_normalization", -1)
-    ) != 1:
-        violations.append(
-            "flow_jepa_future_reliable_normalization must be enabled"
-        )
-    if float(
-        getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)
-    ) <= 0.0:
+    if not 0.0 < float(getattr(cfg, "flow_jepa_horizon_address_update_scale", 0.0)) <= 1.0:
+        violations.append("flow_jepa_horizon_address_update_scale must be in (0,1]")
+    if int(getattr(trainer, "flow_jepa_future_reliable_normalization", -1)) != 1:
+        violations.append("flow_jepa_future_reliable_normalization must be enabled")
+    if float(getattr(trainer, "flow_jepa_horizon_address_loss_weight", 0.0)) <= 0.0:
         violations.append("flow_jepa_horizon_address_loss_weight must be positive")
     if violations:
         raise ValueError(
             "V105 model contract requires the complete V104 graph plus a "
             "horizon-specific observation-only soft address, reliable future "
-            "delta normalization, and teacher-only address supervision; "
-            + "; ".join(violations)
+            "delta normalization, and teacher-only address supervision; " + "; ".join(violations)
         )
 
 
@@ -6678,10 +8355,7 @@ def _validate_complete_v106_model_contract(
         )
     )
     if boundaries != expected_boundaries:
-        violations.append(
-            "flow_jepa_interval_boundaries must resolve to exactly "
-            "(4,8,16,32,48)"
-        )
+        violations.append("flow_jepa_interval_boundaries must resolve to exactly (4,8,16,32,48)")
     supports = tuple(
         int(value)
         for value in getattr(
@@ -6717,14 +8391,14 @@ def _validate_complete_v106_model_contract(
     for name, minimum in minimum_numerical_floors.items():
         value = float(getattr(cfg, name, 0.0))
         if value < minimum or value > 1.0:
-            violations.append(
-                f"{name}={value:.6g}, requires [{minimum:.6g},1]"
-            )
+            violations.append(f"{name}={value:.6g}, requires [{minimum:.6g},1]")
     for start, end in zip(expected_boundaries[:-1], expected_boundaries[1:]):
-        interval_supports = tuple(
-            value for value in supports if start <= value <= end
-        )
-        if len(interval_supports) < 2 or interval_supports[0] != start or interval_supports[-1] != end:
+        interval_supports = tuple(value for value in supports if start <= value <= end)
+        if (
+            len(interval_supports) < 2
+            or interval_supports[0] != start
+            or interval_supports[-1] != end
+        ):
             violations.append(
                 f"interval [{start},{end}] must include both boundaries and "
                 "at least two teacher support observations"
@@ -6736,9 +8410,7 @@ def _validate_complete_v106_model_contract(
     ):
         if float(getattr(cfg, name, 0.0)) <= 0.0:
             violations.append(f"{name} must be positive")
-    if float(
-        getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)
-    ) <= 0.0:
+    if float(getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)) <= 0.0:
         violations.append("flow_jepa_interval_stage_loss_weight must be positive")
     if violations:
         raise ValueError(
@@ -6769,9 +8441,7 @@ def _validate_complete_v107_model_contract(
         if int(getattr(cfg, name, -1)) != int(expected)
     ]
     if int(getattr(cfg, "flow_jepa_raw_reader_heads", 0)) < 2:
-        violations.append(
-            "flow_jepa_raw_reader_heads must be at least two for V107 glimpses"
-        )
+        violations.append("flow_jepa_raw_reader_heads must be at least two for V107 glimpses")
     if int(getattr(cfg, "flow_jepa_address_query_chunk", 0)) < 1:
         violations.append("flow_jepa_address_query_chunk must be positive")
     if violations:
@@ -6779,8 +8449,7 @@ def _validate_complete_v107_model_contract(
             "V107 model contract requires the complete V106 graph plus factual "
             "multi-glimpse policy addressing, target-cell-specific horizon "
             "fine addressing, a typed interval-stage W->P value, and the "
-            "post-gate role residual write contract; "
-            + "; ".join(violations)
+            "post-gate role residual write contract; " + "; ".join(violations)
         )
 
 
@@ -6849,6 +8518,475 @@ def _validate_complete_v111_model_contract(
         )
 
 
+def _validate_complete_v112_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V111 plus pre-value public/private owner routing."""
+
+    _validate_complete_v111_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_pre_value_owner_routing", -1)) != 1:
+        raise ValueError(
+            "V112 model contract requires the complete V111 graph plus "
+            "flow_jepa_pre_value_owner_routing=1 so the explicit public chart, "
+            "W1-W3 private owner states, and P1 appearance fine factor form "
+            "one deployed pre-value route"
+        )
+    if float(getattr(cfg, "flow_jepa_pre_value_owner_update_scale", -1.0)) != 0.10:
+        raise ValueError("V112 model contract requires flow_jepa_pre_value_owner_update_scale=0.10")
+
+
+def _validate_complete_v113_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require functional typed routing across W, P1, P2 and horizons."""
+
+    _validate_complete_v112_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_functional_mainline_routing", -1)) != 1:
+        raise ValueError(
+            "V113 model contract requires "
+            "flow_jepa_functional_mainline_routing=1 so typed W owners are "
+            "selected before one hidden reconstruction, W appearance is a "
+            "mandatory P1 verifier, P2 keeps a protected policy carrier, and "
+            "phase/goal/history remain distinct per horizon"
+        )
+
+
+def _validate_complete_v114_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require shared factual P1 and protected utility/precision P2."""
+
+    _validate_complete_v113_model_contract(cfg, trainer)
+    if int(getattr(cfg, "flow_jepa_utility_precision_mainline", -1)) != 1:
+        raise ValueError(
+            "V114 model contract requires "
+            "flow_jepa_utility_precision_mainline=1 so P1 performs one "
+            "action-invariant factual read per horizon and the four action "
+            "basis tokens consume protected base/precision facts in P2"
+        )
+    if int(getattr(cfg, "flow_jepa_action_free_world_factual", -1)) != 1:
+        raise ValueError(
+            "V114 model contract requires "
+            "flow_jepa_action_free_world_factual=1 so noisy x_t cannot "
+            "re-enter P1 indirectly through W self-attention or dynamics"
+        )
+    if int(getattr(cfg, "flow_jepa_address_query_batch_budget", -1)) != 32:
+        raise ValueError("V114 model contract requires flow_jepa_address_query_batch_budget=32")
+    if int(getattr(cfg, "flow_jepa_microgrid_tile", -1)) != 3:
+        raise ValueError("V114 model contract requires flow_jepa_microgrid_tile=3")
+    if int(getattr(cfg, "flow_jepa_p1_mixed_precision", -1)) != 1:
+        raise ValueError(
+            "V114 model contract requires FP32 posterior/geometry with "
+            "BF16 factual value contraction"
+        )
+    if int(getattr(cfg, "flow_jepa_checkpoint_min_batch", -1)) != 4:
+        raise ValueError("V114 model contract requires flow_jepa_checkpoint_min_batch=4")
+
+
+def _validate_complete_v115_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require G-aligned consequences, stateless goal phases and 3-2-3 P3."""
+
+    # V115 retains the V114 model ancestry but intentionally retires V105's
+    # fixed-chart horizon-address objective.  Validate every other inherited
+    # contract against an audit copy, then require the real trainer to keep
+    # that dead auxiliary loss disabled.
+    v114_ancestry_trainer = replace(
+        trainer,
+        flow_jepa_horizon_address_loss_weight=max(
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_horizon_address_loss_weight",
+                    0.0,
+                )
+            ),
+            1e-6,
+        ),
+    )
+    _validate_complete_v114_model_contract(cfg, v114_ancestry_trainer)
+    required_flags = {
+        "flow_jepa_shared_factual_glimpse_bank": 1,
+        "flow_jepa_g_aligned_future_effect": 1,
+        "flow_jepa_stateless_goal_phase_machine": 1,
+        "flow_jepa_policy_plan_compiler": 1,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in required_flags.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    expected_values = {
+        "depth": 8,
+        "flow_jepa_grounding_blocks": 3,
+        "flow_jepa_world_blocks": 2,
+        "flow_jepa_policy_blocks": 3,
+        "flow_jepa_raw_reader_heads": 4,
+        "future_anchors": 4,
+        "stateless_phase_count": 4,
+    }
+    violations.extend(
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in expected_values.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    )
+    if str(getattr(cfg, "flow_jepa_top_role_schedule", "")) != "3-2-3":
+        violations.append("flow_jepa_top_role_schedule must be 3-2-3")
+    if (
+        abs(
+            float(
+                getattr(
+                    trainer,
+                    "flow_jepa_horizon_address_loss_weight",
+                    -1.0,
+                )
+            )
+        )
+        > 1e-12
+    ):
+        violations.append(
+            "flow_jepa_horizon_address_loss_weight must be 0 because the "
+            "legacy fixed-chart W posterior is not part of V115"
+        )
+    decay = float(getattr(cfg, "flow_jepa_teacher_g_ema_decay", -1.0))
+    if not 0.0 <= decay < 1.0:
+        violations.append("flow_jepa_teacher_g_ema_decay must be in [0,1)")
+    if violations:
+        raise ValueError(
+            "V115 model contract requires the complete V114 ancestry plus "
+            "one G-aligned FutureEffectField, the observable stateless "
+            "Goal-Phase program, and a non-generic P3 plan compiler on the "
+            "3-2-3 top schedule; " + "; ".join(violations)
+        )
+
+
+def _validate_complete_v116_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V115 plus unique supervised W effect and formal flow time."""
+
+    _validate_complete_v115_model_contract(cfg, trainer)
+    violations: list[str] = []
+    if int(
+        getattr(cfg, "flow_jepa_supervised_effect_mainline", -1)
+    ) != 1:
+        violations.append("flow_jepa_supervised_effect_mainline=1 is required")
+    if str(
+        getattr(cfg, "flow_matching_time_distribution", "")
+    ) != "beta_1_5_1":
+        violations.append(
+            "flow_matching_time_distribution must be beta_1_5_1"
+        )
+    if violations:
+        raise ValueError(
+            "V116 model contract requires the complete V115 graph plus a "
+            "fully supervised FutureEffect W->P boundary, separate terminal "
+            "execution evidence, four-state phase belief and formal Beta "
+            "flow-time sampling; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_complete_v117_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Require V116 plus observable intent, three effects, and a real P2 read."""
+
+    _validate_complete_v116_model_contract(cfg, trainer)
+    required = {
+        "flow_jepa_stateless_intent_controller": 1,
+        "flow_jepa_window_effect_bank": 1,
+        "flow_jepa_effect_read_in_p2": 1,
+        "flow_jepa_future_slots": 3,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in required.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    if int(getattr(cfg, "future_anchors", -1)) != 4:
+        violations.append("future_anchors must remain 4 for inherited online JEPA")
+    if violations:
+        raise ValueError(
+            "V117 model contract requires the complete V116 graph plus the "
+            "three-block stateless intent controller, near/mid/late window "
+            "effect ownership, and a structured read in the actual P2 block; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_differential_intent_effect_323_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Validate the capability graph directly, without replaying vXXX ancestry."""
+
+    required_flags = {
+        "flow_jepa_enabled": 1,
+        "flow_jepa_progressive_grounding_address": 1,
+        "flow_jepa_pre_value_owner_routing": 1,
+        "flow_jepa_functional_mainline_routing": 1,
+        "flow_jepa_shared_factual_glimpse_bank": 1,
+        "flow_jepa_g_aligned_future_effect": 1,
+        "flow_jepa_stateless_goal_phase_machine": 1,
+        "flow_jepa_policy_plan_compiler": 1,
+        "flow_jepa_supervised_effect_mainline": 1,
+        "flow_jepa_stateless_intent_controller": 1,
+        "flow_jepa_window_effect_bank": 1,
+        "flow_jepa_effect_read_in_p2": 1,
+        "flow_jepa_differential_intent_effect_mainline": 1,
+        "flow_jepa_action_free_world_factual": 1,
+        "flow_jepa_p1_mixed_precision": 1,
+    }
+    required_values = {
+        "depth": 8,
+        "flow_jepa_grounding_blocks": 3,
+        "flow_jepa_world_blocks": 2,
+        "flow_jepa_policy_blocks": 3,
+        "flow_jepa_future_slots": 3,
+        "future_anchors": 4,
+        "stateless_phase_count": 4,
+        "flow_jepa_raw_reader_heads": 4,
+        "flow_jepa_address_query_batch_budget": 32,
+        "flow_jepa_microgrid_tile": 3,
+        "flow_jepa_checkpoint_min_batch": 4,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in {**required_flags, **required_values}.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    if str(getattr(cfg, "flow_jepa_top_role_schedule", "")) != "3-2-3":
+        violations.append("flow_jepa_top_role_schedule must be 3-2-3")
+    if str(
+        getattr(cfg, "flow_matching_time_distribution", "")
+    ) != "beta_1_5_1":
+        violations.append(
+            "flow_matching_time_distribution must be beta_1_5_1"
+        )
+    if str(
+        getattr(cfg, "final_action_decoder", "")
+    ) != "evidence_latent_mmdit_action":
+        violations.append(
+            "final_action_decoder must be evidence_latent_mmdit_action"
+        )
+    if str(
+        getattr(trainer, "training_stage", "")
+    ).lower().replace("-", "_") not in {"policy", "stage2"}:
+        violations.append(
+            "training_stage must be policy/stage2 (single-stage end-to-end)"
+        )
+    if int(getattr(trainer, "single_stage_role_lr", 0)) != 1:
+        violations.append(
+            "single_stage_role_lr must be enabled so S/W/P are not inherited "
+            "as low-LR probes"
+        )
+    if abs(
+        float(
+            getattr(
+                trainer,
+                "flow_jepa_horizon_address_loss_weight",
+                -1.0,
+            )
+        )
+    ) > 1e-12:
+        violations.append(
+            "legacy fixed-chart horizon-address loss must remain disabled"
+        )
+    if float(
+        getattr(trainer, "flow_jepa_future_loss_weight", 0.0)
+    ) <= 0.0:
+        violations.append("flow_jepa_future_loss_weight must be positive")
+    if float(
+        getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)
+    ) <= 0.0:
+        violations.append(
+            "flow_jepa_interval_stage_loss_weight must be positive"
+        )
+    if violations:
+        raise ValueError(
+            "differential_intent_effect_323 requires one coherent observable "
+            "S / differentiated W / consequence-aware P graph; "
+            + "; ".join(violations)
+        )
+
+
+def _validate_grounded_intent_effect_323_model_contract(
+    cfg: Any,
+    trainer: V39PolicyTrainerConfig,
+) -> None:
+    """Validate the compact capability manifest and its live graph."""
+
+    GROUNDING_MANIFEST.validate()
+    required_flags = {
+        "flow_jepa_enabled": 1,
+        "flow_jepa_raw_image_enabled": 1,
+        "flow_jepa_late_policy_detail": 1,
+        "flow_jepa_soft_address_lattice": 1,
+        "flow_jepa_progressive_grounding_address": 1,
+        "flow_jepa_coordinate_typed_raw_detail": 1,
+        "flow_jepa_pre_value_owner_routing": 1,
+        "flow_jepa_functional_mainline_routing": 1,
+        "flow_jepa_utility_precision_mainline": 1,
+        "flow_jepa_shared_factual_glimpse_bank": 1,
+        "flow_jepa_g_aligned_future_effect": 1,
+        "flow_jepa_stateless_goal_phase_machine": 1,
+        "flow_jepa_policy_plan_compiler": 1,
+        "flow_jepa_supervised_effect_mainline": 1,
+        "flow_jepa_action_free_world_factual": 1,
+        "flow_jepa_p1_mixed_precision": 1,
+        "flow_jepa_grounded_intent_effect_mainline": 1,
+        "goal_conditioning_enabled": 1,
+        "action_history_enabled": 1,
+    }
+    required_disabled = {
+        "flow_jepa_stateless_intent_controller": 0,
+        "flow_jepa_window_effect_bank": 0,
+        "flow_jepa_effect_read_in_p2": 0,
+        "flow_jepa_differential_intent_effect_mainline": 0,
+    }
+    required_values = {
+        "depth": 8,
+        "flow_jepa_grounding_blocks": 3,
+        "flow_jepa_world_blocks": 2,
+        "flow_jepa_policy_blocks": 3,
+        "flow_jepa_future_slots": 4,
+        "future_anchors": 4,
+        "flow_jepa_raw_reader_heads": 4,
+        "flow_jepa_raw_micro_grid": 3,
+    }
+    violations = [
+        f"{name}={int(getattr(cfg, name, -1))}, expected {expected}"
+        for name, expected in {
+            **required_flags,
+            **required_disabled,
+            **required_values,
+        }.items()
+        if int(getattr(cfg, name, -1)) != int(expected)
+    ]
+    if str(getattr(cfg, "flow_jepa_top_role_schedule", "")) != "3-2-3":
+        violations.append("flow_jepa_top_role_schedule must be 3-2-3")
+    intervals = tuple(
+        tuple(int(value) for value in interval)
+        for interval in getattr(cfg, "flow_jepa_interval_windows", ())
+    )
+    if intervals != tuple(GROUNDING_MANIFEST.intervals):
+        violations.append(
+            "flow_jepa interval windows must be "
+            "((4,8),(8,16),(16,32),(32,48))"
+        )
+    if str(
+        getattr(cfg, "flow_matching_time_distribution", "")
+    ) != "beta_1_5_1":
+        violations.append(
+            "flow_matching_time_distribution must be beta_1_5_1"
+        )
+    if str(
+        getattr(cfg, "final_action_decoder", "")
+    ) != "evidence_latent_mmdit_action":
+        violations.append(
+            "final_action_decoder must be evidence_latent_mmdit_action"
+        )
+    if str(
+        getattr(trainer, "training_stage", "")
+    ).lower().replace("-", "_") not in {"policy", "stage2"}:
+        violations.append(
+            "training_stage must be policy/stage2 (single-stage end-to-end)"
+        )
+    if int(getattr(trainer, "single_stage_role_lr", 0)) != 1:
+        violations.append(
+            "single_stage_role_lr must own the new S/W/P parameters"
+        )
+    if float(
+        getattr(trainer, "flow_jepa_future_loss_weight", 0.0)
+    ) <= 0.0:
+        violations.append("flow_jepa_future_loss_weight must be positive")
+    if float(
+        getattr(trainer, "flow_jepa_interval_stage_loss_weight", 0.0)
+    ) <= 0.0:
+        violations.append(
+            "flow_jepa_interval_stage_loss_weight must be positive"
+        )
+    if abs(
+        float(
+            getattr(
+                trainer,
+                "flow_jepa_horizon_address_loss_weight",
+                -1.0,
+            )
+        )
+    ) > 1e-12:
+        violations.append(
+            "legacy fixed-chart horizon-address loss must remain disabled"
+        )
+    if violations:
+        raise ValueError(
+            "grounded_intent_effect_323 manifest mismatch; "
+            + "; ".join(violations)
+        )
+
+
+def _summarize_current_context_mask_comparison(
+    *,
+    enabled: bool,
+    finished_batches: int,
+    intervention_samples: int,
+    comparison_batches: int,
+    comparison_weight: int,
+    metric_sums: dict[str, dict[str, float]],
+    boundary_sums: dict[str, float],
+) -> dict[str, Any] | None:
+    """Finalize the V113-only matched mask audit when it was collected."""
+
+    if not enabled:
+        return None
+    if (
+        comparison_batches != finished_batches
+        or comparison_weight != intervention_samples
+    ):
+        raise RuntimeError(
+            "current-context mask comparison did not cover every selected "
+            "V113 probe batch"
+        )
+    denominator = float(max(comparison_weight, 1))
+    averaged_modes = {
+        mode: {
+            key: value / denominator
+            for key, value in sorted(values.items())
+        }
+        for mode, values in metric_sums.items()
+    }
+    shared_metric_keys = set(averaged_modes["unmasked"]).intersection(
+        averaged_modes["masked"]
+    )
+    return {
+        "schema": "clearvla-v113-current-context-mask-comparison-v1",
+        "matched_eval_mode": True,
+        "matched_checkpoint": True,
+        "matched_action_noise": True,
+        "matched_training_time": 0.5,
+        "comparison_batches": int(comparison_batches),
+        "comparison_samples": int(comparison_weight),
+        "modes": averaged_modes,
+        "masked_minus_unmasked": {
+            key: averaged_modes["masked"][key]
+            - averaged_modes["unmasked"][key]
+            for key in sorted(shared_metric_keys)
+        },
+        "masked_boundary": {
+            key: value / denominator
+            for key, value in sorted(boundary_sums.items())
+        },
+    }
+
+
 @torch.no_grad()
 def evaluate_v101_action_path_intervention(
     *,
@@ -6864,6 +9002,7 @@ def evaluate_v101_action_path_intervention(
     max_batches: int = 0,
     bootstrap_reps: int = 2000,
     bootstrap_seed: int = 0,
+    intervention_modes: Sequence[str] | None = None,
     require_complete_v103_contract: bool = False,
     require_complete_v104_contract: bool = False,
     require_complete_v105_contract: bool = False,
@@ -6873,6 +9012,14 @@ def evaluate_v101_action_path_intervention(
     require_complete_v109_contract: bool = False,
     require_complete_v110_contract: bool = False,
     require_complete_v111_contract: bool = False,
+    require_complete_v112_contract: bool = False,
+    require_complete_v113_contract: bool = False,
+    require_complete_v114_contract: bool = False,
+    require_complete_v115_contract: bool = False,
+    require_complete_v116_contract: bool = False,
+    require_complete_v117_contract: bool = False,
+    require_differential_intent_effect_contract: bool = False,
+    require_grounded_intent_effect_contract: bool = False,
 ) -> dict[str, Any]:
     """Paired deployed-action probe for V101 and typed V103 boundaries.
 
@@ -6903,11 +9050,59 @@ def evaluate_v101_action_path_intervention(
             require_complete_v109_contract,
             require_complete_v110_contract,
             require_complete_v111_contract,
+            require_complete_v112_contract,
+            require_complete_v113_contract,
+            require_complete_v114_contract,
+            require_complete_v115_contract,
+            require_complete_v116_contract,
+            require_complete_v117_contract,
+            require_differential_intent_effect_contract,
+            require_grounded_intent_effect_contract,
         )
     )
     if formal_contract_count > 1:
         raise ValueError("choose exactly one formal model-path contract")
-    if require_complete_v111_contract:
+    complete_v111_or_later = bool(
+        require_complete_v111_contract
+        or require_complete_v112_contract
+        or require_complete_v113_contract
+        or require_complete_v114_contract
+        or require_complete_v115_contract
+        or require_complete_v116_contract
+        or require_complete_v117_contract
+        or require_differential_intent_effect_contract
+        or require_grounded_intent_effect_contract
+    )
+    complete_v113_or_later = bool(
+        require_complete_v113_contract
+        or require_complete_v114_contract
+        or require_complete_v115_contract
+        or require_complete_v116_contract
+        or require_complete_v117_contract
+        or require_differential_intent_effect_contract
+        or require_grounded_intent_effect_contract
+    )
+    matched_current_context_probe = bool(
+        complete_v113_or_later
+        and not require_grounded_intent_effect_contract
+    )
+    if require_grounded_intent_effect_contract:
+        _validate_grounded_intent_effect_323_model_contract(cfg, trainer)
+    elif require_differential_intent_effect_contract:
+        _validate_differential_intent_effect_323_model_contract(cfg, trainer)
+    elif require_complete_v117_contract:
+        _validate_complete_v117_model_contract(cfg, trainer)
+    elif require_complete_v116_contract:
+        _validate_complete_v116_model_contract(cfg, trainer)
+    elif require_complete_v115_contract:
+        _validate_complete_v115_model_contract(cfg, trainer)
+    elif require_complete_v114_contract:
+        _validate_complete_v114_model_contract(cfg, trainer)
+    elif require_complete_v113_contract:
+        _validate_complete_v113_model_contract(cfg, trainer)
+    elif require_complete_v112_contract:
+        _validate_complete_v112_model_contract(cfg, trainer)
+    elif require_complete_v111_contract:
         _validate_complete_v111_model_contract(cfg, trainer)
     elif require_complete_v110_contract:
         _validate_complete_v110_model_contract(cfg, trainer)
@@ -6929,9 +9124,7 @@ def evaluate_v101_action_path_intervention(
         int(getattr(cfg, "flow_jepa_role_hierarchy", 0))
         and int(getattr(cfg, "flow_jepa_strict_role_visual_path", 0))
     )
-    fixed_policy_fusion = bool(
-        int(getattr(cfg, "flow_jepa_policy_workspace_fixed_fusion", 0))
-    )
+    fixed_policy_fusion = bool(int(getattr(cfg, "flow_jepa_policy_workspace_fixed_fusion", 0)))
     typed_policy_fusion = bool(
         int(getattr(cfg, "role_attnres_enabled", 0))
         and int(getattr(cfg, "role_attnres_ground_to_world", 0))
@@ -6954,20 +9147,15 @@ def evaluate_v101_action_path_intervention(
     planner = system.planner
     encoder = getattr(planner, "flow_dino_evidence", None)
     late_reader = getattr(planner, "late_raw_detail_reader", None)
-    soft_address = bool(
-        int(getattr(cfg, "flow_jepa_soft_address_lattice", 0))
-    )
+    soft_address = bool(int(getattr(cfg, "flow_jepa_soft_address_lattice", 0)))
     if not hasattr(planner, "set_action_path_eval_intervention"):
         raise RuntimeError("planner lacks the transient action-path intervention")
     if encoder is None or not hasattr(encoder, "set_raw_address_eval_intervention"):
         raise RuntimeError("Flow-DINO encoder lacks the transient address intervention")
     if soft_address and (
-        late_reader is None
-        or not hasattr(late_reader, "set_address_eval_intervention")
+        late_reader is None or not hasattr(late_reader, "set_address_eval_intervention")
     ):
-        raise RuntimeError(
-            "late raw reader lacks the transient address-posterior intervention"
-        )
+        raise RuntimeError("late raw reader lacks the transient address-posterior intervention")
     if not hasattr(system, "set_condition_eval_intervention"):
         raise RuntimeError("policy system lacks transient condition interventions")
 
@@ -6985,7 +9173,23 @@ def evaluate_v101_action_path_intervention(
         event_threshold=trainer.gripper_event_threshold,
     )
     probe_prefix = (
-        "[v111-model-path-probe]"
+        "[grounded-intent-effect-323-model-path-probe]"
+        if require_grounded_intent_effect_contract
+        else "[v118-model-path-probe]"
+        if require_differential_intent_effect_contract
+        else "[v117-model-path-probe]"
+        if require_complete_v117_contract
+        else "[v116-model-path-probe]"
+        if require_complete_v116_contract
+        else "[v115-model-path-probe]"
+        if require_complete_v115_contract
+        else "[v114-model-path-probe]"
+        if require_complete_v114_contract
+        else "[v113-model-path-probe]"
+        if require_complete_v113_contract
+        else "[v112-model-path-probe]"
+        if require_complete_v112_contract
+        else "[v111-model-path-probe]"
         if require_complete_v111_contract
         else "[v110-model-path-probe]"
         if require_complete_v110_contract
@@ -7017,9 +9221,7 @@ def evaluate_v101_action_path_intervention(
     )
 
     # output name, planner mode, encoder mode, condition mode, posterior mode
-    mode_contract: list[
-        tuple[str, str | None, str | None, str | None, str | None]
-    ] = [
+    mode_contract: list[tuple[str, str | None, str | None, str | None, str | None]] = [
         (
             "baseline",
             "none",
@@ -7138,7 +9340,7 @@ def evaluate_v101_action_path_intervention(
                 ),
             )
         )
-    if require_complete_v110_contract or require_complete_v111_contract:
+    if require_complete_v110_contract or complete_v111_or_later:
         mode_contract.extend(
             (
                 (
@@ -7171,7 +9373,7 @@ def evaluate_v101_action_path_intervention(
                 ),
             )
         )
-    if require_complete_v111_contract:
+    if complete_v111_or_later:
         mode_contract.extend(
             (
                 (
@@ -7220,9 +9422,7 @@ def evaluate_v101_action_path_intervention(
         )
     if bool(int(getattr(cfg, "goal_conditioning_enabled", 0))):
         if bool(int(getattr(cfg, "goal_condition_exact_null", 0))):
-            mode_contract.append(
-                ("goal_zero", None, None, "goal_zero", None)
-            )
+            mode_contract.append(("goal_zero", None, None, "goal_zero", None))
         mode_contract.append(
             (
                 "goal_episode_shuffle",
@@ -7252,9 +9452,7 @@ def evaluate_v101_action_path_intervention(
                 ),
             )
         )
-        if bool(
-            int(getattr(cfg, "action_history_condition_exact_null", 0))
-        ):
+        if bool(int(getattr(cfg, "action_history_condition_exact_null", 0))):
             mode_contract.append(
                 (
                     "action_history_condition_zero",
@@ -7264,50 +9462,374 @@ def evaluate_v101_action_path_intervention(
                     None,
                 )
             )
-        if typed_policy_fusion:
-            # V103 attaches the causal proposal to action loss. Probe that
-            # lane independently: direct compressed history remains fixed.
-            mode_contract.extend(
-                (
-                    (
-                        "action_history_proposal_zero",
-                        None,
-                        None,
-                        "history_proposal_zero",
-                        None,
-                    ),
-                    (
-                        "action_history_proposal_episode_shuffle",
-                        None,
-                        None,
-                        "history_proposal_batch_shuffle",
-                        None,
-                    ),
-                )
-            )
-    if bool(int(getattr(cfg, "stateless_phase_enabled", 0))):
+    if (
+        require_complete_v115_contract
+        or require_complete_v116_contract
+        or require_complete_v117_contract
+        or require_differential_intent_effect_contract
+        or require_grounded_intent_effect_contract
+    ):
+        # These modes intervene on the single online effect boundary after W
+        # has produced it and before P2/P3 consume it.  They do not touch
+        # the frozen FutureTeacherTrackPack or an auxiliary prediction head.
         mode_contract.extend(
             (
-                ("phase_belief_zero", "phase_zero", None, None, None),
                 (
-                    "phase_belief_episode_shuffle",
-                    "phase_batch_shuffle",
+                    "future_effect_zero",
+                    "future_effect_zero",
                     None,
                     None,
                     None,
                 ),
                 (
-                    "condition_query_zero",
-                    "condition_query_zero",
+                    "future_effect_spatial_shuffle",
+                    "future_effect_spatial_shuffle",
                     None,
                     None,
                     None,
                 ),
             )
         )
-    progressive_address = bool(
-        int(getattr(cfg, "flow_jepa_progressive_grounding_address", 0))
-    )
+        if (
+            require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ):
+            for component in (
+                "current",
+                "semantic",
+                "transport",
+                "reliability",
+            ):
+                mode_contract.extend(
+                    (
+                        (
+                            f"future_effect_{component}_zero",
+                            f"future_effect_{component}_zero",
+                            None,
+                            None,
+                            None,
+                        ),
+                        (
+                            f"future_effect_{component}_spatial_shuffle",
+                            f"future_effect_{component}_spatial_shuffle",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                )
+            if require_grounded_intent_effect_contract:
+                mode_contract.append(
+                    (
+                        "future_effect_reliability_one",
+                        "future_effect_reliability_one",
+                        None,
+                        None,
+                        None,
+                    )
+                )
+        if require_differential_intent_effect_contract:
+            for slot_name in ("near", "mid", "late"):
+                mode_contract.extend(
+                    (
+                        (
+                            f"future_effect_{slot_name}_zero",
+                            f"future_effect_{slot_name}_zero",
+                            None,
+                            None,
+                            None,
+                        ),
+                        (
+                            f"future_effect_{slot_name}_shuffle",
+                            f"future_effect_{slot_name}_shuffle",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                )
+        if require_grounded_intent_effect_contract:
+            for interval_name in (
+                "h4_8",
+                "h8_16",
+                "h16_32",
+                "h32_48",
+            ):
+                mode_contract.extend(
+                    (
+                        (
+                            f"future_effect_{interval_name}_zero",
+                            f"future_effect_{interval_name}_zero",
+                            None,
+                            None,
+                            None,
+                        ),
+                        (
+                            f"future_effect_{interval_name}_shuffle",
+                            f"future_effect_{interval_name}_shuffle",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                )
+    if typed_policy_fusion:
+        # V103 attaches the causal proposal to action loss. Probe that lane
+        # independently: direct compressed history remains fixed.
+        mode_contract.extend(
+            (
+                (
+                    "action_history_proposal_zero",
+                    None,
+                    None,
+                    "history_proposal_zero",
+                    None,
+                ),
+                (
+                    "action_history_proposal_episode_shuffle",
+                    None,
+                    None,
+                    "history_proposal_batch_shuffle",
+                    None,
+                ),
+            )
+        )
+    if bool(int(getattr(cfg, "stateless_phase_enabled", 0))) or (
+        require_grounded_intent_effect_contract
+    ):
+        if not (
+            require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ):
+            mode_contract.extend(
+                (
+                    ("phase_belief_zero", "phase_zero", None, None, None),
+                    (
+                        "phase_belief_episode_shuffle",
+                        "phase_batch_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "condition_query_zero",
+                        "condition_query_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+        if (
+            complete_v113_or_later
+            and not require_differential_intent_effect_contract
+            and not require_grounded_intent_effect_contract
+        ):
+            mode_contract.extend(
+                (
+                    (
+                        "goal_horizon_context_zero",
+                        "goal_context_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "history_horizon_context_zero",
+                        "history_context_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+        if require_complete_v117_contract:
+            mode_contract.extend(
+                (
+                    (
+                        "intent_window_selector_uniform",
+                        "intent_window_selector_uniform",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_window_selector_episode_shuffle",
+                        "intent_window_selector_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_temporal_zero",
+                        "intent_temporal_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_temporal_episode_shuffle",
+                        "intent_temporal_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+        if require_differential_intent_effect_contract:
+            mode_contract.extend(
+                (
+                    (
+                        "intent_state_zero",
+                        "intent_state_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_state_episode_shuffle",
+                        "intent_state_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_temporal_zero",
+                        "intent_temporal_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_temporal_episode_shuffle",
+                        "intent_temporal_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+            for window_name in ("near", "mid", "late"):
+                mode_contract.extend(
+                    (
+                        (
+                            f"intent_window_{window_name}_zero",
+                            f"intent_window_{window_name}_zero",
+                            None,
+                            None,
+                            None,
+                        ),
+                        (
+                            f"intent_window_{window_name}_shuffle",
+                            f"intent_window_{window_name}_shuffle",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                )
+        if require_grounded_intent_effect_contract:
+            mode_contract.extend(
+                (
+                    (
+                        "intent_state_zero",
+                        "intent_state_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_state_episode_shuffle",
+                        "intent_state_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_goal_set_zero",
+                        "intent_goal_set_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_goal_set_episode_shuffle",
+                        "intent_goal_set_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_achieved_zero",
+                        "intent_achieved_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_achieved_episode_shuffle",
+                        "intent_achieved_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_remaining_zero",
+                        "intent_remaining_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_remaining_episode_shuffle",
+                        "intent_remaining_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_temporal_zero",
+                        "intent_temporal_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "intent_temporal_episode_shuffle",
+                        "intent_temporal_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+            for interval_name in (
+                "h4_8",
+                "h8_16",
+                "h16_32",
+                "h32_48",
+            ):
+                mode_contract.extend(
+                    (
+                        (
+                            f"intent_interval_{interval_name}_zero",
+                            f"intent_interval_{interval_name}_zero",
+                            None,
+                            None,
+                            None,
+                        ),
+                        (
+                            f"intent_interval_{interval_name}_shuffle",
+                            f"intent_interval_{interval_name}_shuffle",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                )
+    progressive_address = bool(int(getattr(cfg, "flow_jepa_progressive_grounding_address", 0)))
     if bool(int(getattr(cfg, "flow_jepa_online_horizon_address", 0))) and not progressive_address:
         mode_contract.extend(
             (
@@ -7347,6 +9869,25 @@ def evaluate_v101_action_path_intervention(
                     ),
                 )
             )
+        if require_grounded_intent_effect_contract:
+            mode_contract.extend(
+                (
+                    (
+                        "address_g3_slot_permute",
+                        "address_g3_slot_permute",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        "address_g3_slot_mean",
+                        "address_g3_slot_mean",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
     if bool(int(getattr(cfg, "flow_jepa_interval_stage_delta", 0))):
         mode_contract.extend(
             (
@@ -7366,29 +9907,165 @@ def evaluate_v101_action_path_intervention(
                 ),
             )
         )
+    if complete_v113_or_later:
+        mode_contract.append(
+            (
+                "current_context_masked",
+                None,
+                "current_context_masked",
+                None,
+                None,
+            )
+        )
+        for depth in range(int(cfg.flow_jepa_world_blocks) + 1):
+            mode_contract.extend(
+                (
+                    (
+                        f"functional_w{depth}_route_zero",
+                        f"functional_w{depth}_route_zero",
+                        None,
+                        None,
+                        None,
+                    ),
+                    (
+                        f"functional_w{depth}_route_spatial_shuffle",
+                        f"functional_w{depth}_route_shuffle",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            )
+        mode_contract.extend(
+            (
+                (
+                    "p1_appearance_gateway_zero",
+                    None,
+                    None,
+                    None,
+                    "p1_appearance_gateway_zero",
+                ),
+                (
+                    "p1_appearance_gateway_spatial_shuffle",
+                    None,
+                    None,
+                    None,
+                    "p1_appearance_gateway_spatial_shuffle",
+                ),
+            )
+        )
+        for owner in ("semantic", "appearance", "geometry", "horizon"):
+            mode_contract.extend(
+                (
+                    (
+                        f"p2_{owner}_zero",
+                        None,
+                        None,
+                        None,
+                        f"p2_{owner}_zero",
+                    ),
+                    (
+                        f"p2_{owner}_shuffle",
+                        None,
+                        None,
+                        None,
+                        f"p2_{owner}_shuffle",
+                    ),
+                )
+            )
+        if int(getattr(cfg, "flow_jepa_utility_precision_mainline", 0)):
+            for value_lane in ("rgb_precision", "detail_precision"):
+                mode_contract.extend(
+                    (
+                        (
+                            f"p2_{value_lane}_zero",
+                            None,
+                            None,
+                            None,
+                            f"p2_{value_lane}_zero",
+                        ),
+                        (
+                            f"p2_{value_lane}_spatial_shuffle",
+                            None,
+                            None,
+                            None,
+                            f"p2_{value_lane}_spatial_shuffle",
+                        ),
+                    )
+                )
+            for basis_index in range(int(cfg.action_basis_tokens)):
+                mode_contract.extend(
+                    (
+                        (
+                            f"p2_basis{basis_index}_zero",
+                            None,
+                            None,
+                            None,
+                            f"p2_basis{basis_index}_zero",
+                        ),
+                        (
+                            f"p2_basis{basis_index}_horizon_shuffle",
+                            None,
+                            None,
+                            None,
+                            f"p2_basis{basis_index}_horizon_shuffle",
+                        ),
+                    )
+                )
     if typed_policy_fusion:
         grounding_sources = tuple(
-            f"g{index + 1}"
-            for index in range(int(cfg.flow_jepa_grounding_blocks))
+            f"g{index + 1}" for index in range(int(cfg.flow_jepa_grounding_blocks))
         )
-        world_sources = (
-            "grounding_entry",
-            *(
-                f"w{index + 1}"
-                for index in range(int(cfg.flow_jepa_world_blocks))
-            ),
-        )
-        policy_sources = (
-            "world_to_policy",
-            *(
-                f"p{index + 1}"
-                for index in range(int(cfg.flow_jepa_policy_blocks))
-            ),
-        )
-        for source in (*grounding_sources, *world_sources, *policy_sources):
-            mode_contract.append(
-                (f"{source}_delta_zero", f"{source}_zero", None, None, None)
+        if (
+            require_complete_v115_contract
+            or require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ):
+            # Generic W/P hidden deltas no longer cross an ownership boundary
+            # in V115. Probe only the deployed final-W innovation and P3
+            # typed lanes instead of manufacturing interventions on old names.
+            if (
+                require_differential_intent_effect_contract
+                or require_grounded_intent_effect_contract
+            ):
+                world_sources = ("grounding_entry",)
+                policy_sources = [
+                    "p3_precision",
+                    "p3_temporal",
+                ]
+            else:
+                world_sources = (
+                    ("grounding_entry",)
+                    if require_complete_v117_contract
+                    else (
+                        "grounding_entry",
+                        "functional_owner_boundary",
+                    )
+                )
+                policy_sources = [
+                    "p3_precision",
+                    "p3_effect",
+                    "p3_temporal",
+                ]
+                if not (
+                    require_complete_v116_contract
+                    or require_complete_v117_contract
+                ):
+                    policy_sources.append("p3_terminal")
+            policy_sources = tuple(policy_sources)
+        else:
+            world_sources = (
+                "grounding_entry",
+                *(f"w{index + 1}" for index in range(int(cfg.flow_jepa_world_blocks))),
             )
+            policy_sources = (
+                "world_to_policy",
+                *(f"p{index + 1}" for index in range(int(cfg.flow_jepa_policy_blocks))),
+            )
+        for source in (*grounding_sources, *world_sources, *policy_sources):
+            mode_contract.append((f"{source}_delta_zero", f"{source}_zero", None, None, None))
             mode_contract.append(
                 (
                     f"{source}_delta_episode_shuffle",
@@ -7458,6 +10135,126 @@ def evaluate_v101_action_path_intervention(
                 ),
             )
         )
+    if require_grounded_intent_effect_contract:
+        # The grounded capability is a sibling graph, not "V118 plus every
+        # ancestral probe."  Keeping inactive W residual/router names here
+        # would waste frozen-checkpoint runtime and recreate misleading zero
+        # diagnostics.  This allow-list contains only live grounded boundaries
+        # plus the unchanged observation/P1/bottom controls.
+        grounded_active_modes = {
+            "baseline",
+            "policy_zero",
+            "policy_temporal_shuffle",
+            "flow_zero",
+            "flow_episode_shuffle",
+            "flow_spatial_shuffle",
+            "raw_value_zero",
+            "raw_value_spatial_shuffle",
+            "source_raw_match_zero",
+            "source_raw_match_spatial_shuffle",
+            "dino_key_spatial_shuffle",
+            "joint_address_key_spatial_shuffle",
+            "address_posterior_uniform",
+            "fine_offset_zero",
+            "camera_posterior_uniform",
+            "camera_swap",
+            "literal_current_rgb_zero",
+            "literal_current_rgb_spatial_shuffle",
+            "semantic_owner_zero",
+            "semantic_owner_shuffle",
+            "appearance_owner_zero",
+            "appearance_owner_shuffle",
+            "geometry_owner_zero",
+            "geometry_owner_shuffle",
+            "goal_zero",
+            "goal_episode_shuffle",
+            "action_history_zero",
+            "action_history_episode_shuffle",
+            "action_history_truncate",
+            "action_history_condition_zero",
+            "action_history_proposal_zero",
+            "action_history_proposal_episode_shuffle",
+            "future_effect_zero",
+            "future_effect_spatial_shuffle",
+            "future_effect_current_zero",
+            "future_effect_current_spatial_shuffle",
+            "future_effect_semantic_zero",
+            "future_effect_semantic_spatial_shuffle",
+            "future_effect_transport_zero",
+            "future_effect_transport_spatial_shuffle",
+            "future_effect_reliability_zero",
+            "future_effect_reliability_spatial_shuffle",
+            "future_effect_reliability_one",
+            "intent_state_zero",
+            "intent_state_episode_shuffle",
+            "intent_goal_set_zero",
+            "intent_goal_set_episode_shuffle",
+            "intent_achieved_zero",
+            "intent_achieved_episode_shuffle",
+            "intent_remaining_zero",
+            "intent_remaining_episode_shuffle",
+            "intent_temporal_zero",
+            "intent_temporal_episode_shuffle",
+            "current_context_masked",
+            "protected_detail_zero",
+            "protected_detail_episode_shuffle",
+            "p2_rgb_precision_zero",
+            "p2_rgb_precision_spatial_shuffle",
+            "p2_detail_precision_zero",
+            "p2_detail_precision_spatial_shuffle",
+            "p3_precision_delta_zero",
+            "p3_precision_delta_episode_shuffle",
+            "p3_temporal_delta_zero",
+            "p3_temporal_delta_episode_shuffle",
+            "grounding_entry_delta_zero",
+            "grounding_entry_delta_episode_shuffle",
+            "address_g3_slot_permute",
+            "address_g3_slot_mean",
+        }
+        for stage in range(1, int(cfg.flow_jepa_grounding_blocks) + 1):
+            grounded_active_modes.update(
+                {
+                    f"address_g{stage}_zero",
+                    f"address_g{stage}_episode_shuffle",
+                    f"g{stage}_delta_zero",
+                    f"g{stage}_delta_episode_shuffle",
+                }
+            )
+        for interval_name in (
+            "h4_8",
+            "h8_16",
+            "h16_32",
+            "h32_48",
+        ):
+            grounded_active_modes.update(
+                {
+                    f"future_effect_{interval_name}_zero",
+                    f"future_effect_{interval_name}_shuffle",
+                    f"intent_interval_{interval_name}_zero",
+                    f"intent_interval_{interval_name}_shuffle",
+                }
+            )
+        mode_contract = [
+            row for row in mode_contract if row[0] in grounded_active_modes
+        ]
+        if not mode_contract or mode_contract[0][0] != "baseline":
+            raise RuntimeError("grounded probe lost its baseline mode")
+    requested_intervention_modes: tuple[str, ...] | None = None
+    if intervention_modes is not None:
+        requested_intervention_modes = tuple(
+            dict.fromkeys(str(mode).strip() for mode in intervention_modes if str(mode).strip())
+        )
+        available_modes = {output_name for output_name, _, _, _, _ in mode_contract}
+        unknown_modes = sorted(set(requested_intervention_modes).difference(available_modes))
+        if unknown_modes:
+            raise ValueError(
+                "unknown model-path intervention modes: "
+                + ", ".join(unknown_modes)
+                + "; available modes: "
+                + ", ".join(sorted(available_modes))
+            )
+        selected_modes = {"baseline", *requested_intervention_modes}
+        mode_contract = [row for row in mode_contract if row[0] in selected_modes]
     system.eval()
     predictions: dict[str, list[np.ndarray]] = {
         output_name: [] for output_name, _, _, _, _ in mode_contract
@@ -7476,22 +10273,27 @@ def evaluate_v101_action_path_intervention(
     mode_reader_sums: dict[str, dict[str, float]] = {
         output_name: {} for output_name, _, _, _, _ in mode_contract
     }
-    mode_reader_weights = {
-        output_name: 0 for output_name, _, _, _, _ in mode_contract
-    }
-    verification_counts = {
-        output_name: 0 for output_name, _, _, _, _ in mode_contract
-    }
+    mode_reader_weights = {output_name: 0 for output_name, _, _, _, _ in mode_contract}
+    verification_counts = {output_name: 0 for output_name, _, _, _, _ in mode_contract}
     boundary_diagnostics: dict[str, dict[str, float]] = {
         output_name: {} for output_name, _, _, _, _ in mode_contract
     }
     boundary_diagnostic_weights: dict[str, dict[str, int]] = {
         output_name: {} for output_name, _, _, _, _ in mode_contract
     }
+    current_mask_metric_sums: dict[str, dict[str, float]] = {
+        "unmasked": {},
+        "masked": {},
+    }
+    current_mask_boundary_sums: dict[str, float] = {}
+    current_mask_comparison_weight = 0
+    current_mask_comparison_batches = 0
     finished_batches = 0
     intervention_samples = 0
     baseline_identity_max_abs_delta = 0.0
+    baseline_identity_checked_batches = 0
     verified_ordinary_baseline = False
+    replay_tolerance = 1e-8
 
     for batch_index, batch in enumerate(loader, start=1):
         if batch_index > planned_batches:
@@ -7505,7 +10307,7 @@ def evaluate_v101_action_path_intervention(
             camera_names=camera_names,
             device=device,
             dtype=dtype,
-            include_target_visual=False,
+            include_target_visual=matched_current_context_probe,
         )
         sample_count = int(sample["policy_action"].shape[0])
         generator = torch.Generator(device=device)
@@ -7517,11 +10319,13 @@ def evaluate_v101_action_path_intervention(
             dtype=sample["visual"].dtype,
             action_state=sample["action_state"],
         )
-        stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(
-            trainer
-        )
+        stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(trainer)
 
-        if not verified_ordinary_baseline:
+        check_ordinary_baseline = bool(
+            require_grounded_intent_effect_contract
+            or not verified_ordinary_baseline
+        )
+        if check_ordinary_baseline:
             planner.clear_action_path_eval_intervention()
             encoder.clear_raw_address_eval_intervention()
             system.clear_condition_eval_intervention()
@@ -7545,6 +10349,117 @@ def evaluate_v101_action_path_intervention(
                 raise TypeError("ordinary V101 baseline did not return an action tensor")
         else:
             ordinary = None
+
+        if matched_current_context_probe:
+            target_visual = sample.get("target_visual")
+            if not torch.is_tensor(target_visual):
+                raise RuntimeError("V113 current-context mask comparison requires future teachers")
+            representation_time = torch.full(
+                (sample_count,),
+                0.5,
+                device=device,
+                dtype=sample["policy_action"].dtype,
+            )
+            matched_mask_rows: dict[str, dict[str, Tensor]] = {}
+            matched_mask_boundaries: dict[str, dict[str, float]] = {}
+            for comparison_name, address_mode in (
+                ("unmasked", "none"),
+                ("masked", "current_context_masked"),
+            ):
+                encoder.set_raw_address_eval_intervention(address_mode)
+                try:
+                    with autocast_context(device, dtype):
+                        representation_output = system.flow_training_forward(
+                            sample["visual"],
+                            sample["history_state"],
+                            sample["executed_action_history"],
+                            sample["state"],
+                            sample["policy_action"],
+                            raw_visual=sample.get("raw_visual"),
+                            action_state=sample["action_state"],
+                            target_visual=target_visual,
+                            training_noise=noise,
+                            training_time=representation_time,
+                            proposal_keep=torch.ones_like(representation_time),
+                            make_counterfactuals=False,
+                            stop_at_midcut=False,
+                        )
+                        representation_losses = flow_losses(
+                            system,
+                            sample,
+                            representation_output,
+                            trainer,
+                            enable_future_loss=True,
+                        )
+                    matched_mask_rows[comparison_name] = {
+                        key: value.detach().float().reshape(())
+                        for key, value in representation_losses.items()
+                        if (
+                            key
+                            in {
+                                "flow_jepa_future_prediction",
+                                "flow_jepa_future_raw_delta_loss",
+                                "flow_jepa_future_reliable_normalized_loss",
+                                "flow_jepa_future_change_reliability",
+                                "flow_jepa_future_active_direction_loss",
+                                "flow_jepa_future_active_composite_loss",
+                                "flow_jepa_future_direction_floor_min",
+                                "flow_jepa_horizon_address",
+                            }
+                            or key.startswith("flow_jepa_future_horizon_")
+                        )
+                        and torch.is_tensor(value)
+                        and value.numel() == 1
+                    }
+                    matched_mask_boundaries[comparison_name] = encoder.raw_address_eval_metrics()
+                finally:
+                    encoder.clear_raw_address_eval_intervention()
+            expected_mask_codes = {"unmasked": 0.0, "masked": 12.0}
+            for comparison_name, expected_code in expected_mask_codes.items():
+                observed_code = matched_mask_boundaries[comparison_name].get(
+                    "flow_jepa_raw_address_intervention_code"
+                )
+                if observed_code is None or not math.isclose(
+                    float(observed_code),
+                    expected_code,
+                    abs_tol=1e-6,
+                ):
+                    raise RuntimeError(
+                        "current-context comparison did not reach the raw "
+                        f"reader for {comparison_name!r}"
+                    )
+            masked_fraction = matched_mask_boundaries["masked"].get(
+                "flow_jepa_current_context_mask_fraction",
+                0.0,
+            )
+            unmasked_fraction = matched_mask_boundaries["unmasked"].get(
+                "flow_jepa_current_context_mask_fraction",
+                0.0,
+            )
+            if float(masked_fraction) <= float(unmasked_fraction):
+                raise RuntimeError(
+                    "matched current-context intervention did not increase latest-context masking"
+                )
+            shared_keys = set(matched_mask_rows["unmasked"]).intersection(
+                matched_mask_rows["masked"]
+            )
+            if not shared_keys:
+                raise RuntimeError("current-context comparison collected no shared JEPA metrics")
+            for comparison_name in ("unmasked", "masked"):
+                for key in shared_keys:
+                    current_mask_metric_sums[comparison_name][key] = (
+                        current_mask_metric_sums[comparison_name].get(key, 0.0)
+                        + float(matched_mask_rows[comparison_name][key].cpu()) * sample_count
+                    )
+            for key, value in matched_mask_boundaries["masked"].items():
+                if key.startswith("flow_jepa_current_context_mask_") and isinstance(
+                    value, (int, float)
+                ):
+                    current_mask_boundary_sums[key] = (
+                        current_mask_boundary_sums.get(key, 0.0) + float(value) * sample_count
+                    )
+            current_mask_comparison_weight += sample_count
+            current_mask_comparison_batches += 1
 
         baseline_address_signature: dict[str, float] | None = None
         baseline_fine_signature: dict[str, float] | None = None
@@ -7580,20 +10495,26 @@ def evaluate_v101_action_path_intervention(
             elif late_reader is not None:
                 late_reader.clear_address_eval_intervention()
             try:
-                with autocast_context(device, dtype):
-                    action = system.sample(
-                        sample["visual"],
-                        sample["history_state"],
-                        sample["executed_action_history"],
-                        sample["state"],
-                        raw_visual=sample.get("raw_visual"),
-                        action_state=sample["action_state"],
-                        steps=trainer.eval_inference_steps,
-                        noise=noise,
-                        use_proposal=True,
-                        stop_at_midcut=stop_midcut_eval,
-                        collect_diagnostics=False,
-                    )
+                try:
+                    with autocast_context(device, dtype):
+                        action = system.sample(
+                            sample["visual"],
+                            sample["history_state"],
+                            sample["executed_action_history"],
+                            sample["state"],
+                            raw_visual=sample.get("raw_visual"),
+                            action_state=sample["action_state"],
+                            steps=trainer.eval_inference_steps,
+                            noise=noise,
+                            use_proposal=True,
+                            stop_at_midcut=stop_midcut_eval,
+                            collect_diagnostics=False,
+                        )
+                except Exception as error:
+                    raise RuntimeError(
+                        "model-path probe failed while evaluating "
+                        f"mode={output_name!r} batch_index={batch_index}"
+                    ) from error
                 if not torch.is_tensor(action):
                     raise TypeError(
                         f"model-path mode {output_name!r} did not return an action tensor"
@@ -7620,26 +10541,32 @@ def evaluate_v101_action_path_intervention(
                         f"model-path mode {output_name!r} never reached its boundary"
                     )
                 verification_counts[output_name] += 1
+            if output_name in {
+                "address_g3_slot_permute",
+                "address_g3_slot_mean",
+            }:
+                public_delta = planner_state.get(
+                    "grounded_g3_slot_intervention_public_base_delta_norm"
+                )
+                if public_delta is None or abs(float(public_delta)) > 1e-8:
+                    raise RuntimeError(
+                        f"model-path mode {output_name!r} changed the protected "
+                        "G3 public/P1 control base"
+                    )
             if condition_mode not in {None, "none"}:
                 apply_count = int(condition_state["apply_count"])
                 if apply_count <= 0:
-                    raise RuntimeError(
-                        f"condition mode {output_name!r} never reached its boundary"
-                    )
+                    raise RuntimeError(f"condition mode {output_name!r} never reached its boundary")
                 verification_counts[output_name] += 1
             if posterior_mode not in {None, "none"}:
                 apply_count = int(posterior_state["apply_count"])
                 if apply_count <= 0:
-                    raise RuntimeError(
-                        f"posterior mode {output_name!r} never reached its boundary"
-                    )
+                    raise RuntimeError(f"posterior mode {output_name!r} never reached its boundary")
                 verification_counts[output_name] += 1
             if address_mode is not None:
                 code = reader_metrics.get("flow_jepa_raw_address_intervention_code")
                 if code is None:
-                    raise RuntimeError(
-                        f"raw mode {output_name!r} never reached the reader"
-                    )
+                    raise RuntimeError(f"raw mode {output_name!r} never reached the reader")
                 expected_code = {
                     "none": 0.0,
                     "zero": 1.0,
@@ -7653,11 +10580,11 @@ def evaluate_v101_action_path_intervention(
                     "joint_address_key_spatial_shuffle": 9.0,
                     "literal_rgb_zero": 10.0,
                     "literal_rgb_spatial_shuffle": 11.0,
+                    "current_context_masked": 12.0,
                 }[address_mode]
                 if not math.isclose(float(code), expected_code, abs_tol=1e-6):
                     raise RuntimeError(
-                        f"raw mode {output_name!r} reported code {code}, "
-                        f"expected {expected_code}"
+                        f"raw mode {output_name!r} reported code {code}, expected {expected_code}"
                     )
                 verification_counts[output_name] += 1
             for state in (planner_state, condition_state, posterior_state):
@@ -7672,8 +10599,7 @@ def evaluate_v101_action_path_intervention(
                             + float(value) * sample_count
                         )
                         boundary_diagnostic_weights[output_name][key] = (
-                            boundary_diagnostic_weights[output_name].get(key, 0)
-                            + sample_count
+                            boundary_diagnostic_weights[output_name].get(key, 0) + sample_count
                         )
             if soft_address:
                 address_signature = {
@@ -7705,36 +10631,22 @@ def evaluate_v101_action_path_intervention(
                     or not baseline_fine_signature
                     or not baseline_detail_signature
                 ):
-                    raise RuntimeError(
-                        "model-path mode ran before its paired baseline signatures"
-                    )
+                    raise RuntimeError("model-path mode ran before its paired baseline signatures")
                 address_signature_delta = math.sqrt(
                     sum(
-                        (
-                            address_signature[key]
-                            - baseline_address_signature[key]
-                        )
-                        ** 2
+                        (address_signature[key] - baseline_address_signature[key]) ** 2
                         for key in baseline_address_signature
                     )
                 )
                 detail_signature_delta = math.sqrt(
                     sum(
-                        (
-                            detail_signature[key]
-                            - baseline_detail_signature[key]
-                        )
-                        ** 2
+                        (detail_signature[key] - baseline_detail_signature[key]) ** 2
                         for key in baseline_detail_signature
                     )
                 )
                 fine_signature_delta = math.sqrt(
                     sum(
-                        (
-                            fine_signature[key]
-                            - baseline_fine_signature[key]
-                        )
-                        ** 2
+                        (fine_signature[key] - baseline_fine_signature[key]) ** 2
                         for key in baseline_fine_signature
                     )
                 )
@@ -7757,21 +10669,16 @@ def evaluate_v101_action_path_intervention(
                         + float(value) * sample_count
                     )
                     boundary_diagnostic_weights[output_name][key] = (
-                        boundary_diagnostic_weights[output_name].get(key, 0)
-                        + sample_count
+                        boundary_diagnostic_weights[output_name].get(key, 0) + sample_count
                     )
             for key, value in reader_metrics.items():
-                if (
-                    key.endswith("_intervention_delta_norm")
-                    or key.endswith("_intervention_delta")
-                ):
+                if key.endswith("_intervention_delta_norm") or key.endswith("_intervention_delta"):
                     boundary_diagnostics[output_name][key] = (
                         boundary_diagnostics[output_name].get(key, 0.0)
                         + float(value) * sample_count
                     )
                     boundary_diagnostic_weights[output_name][key] = (
-                        boundary_diagnostic_weights[output_name].get(key, 0)
-                        + sample_count
+                        boundary_diagnostic_weights[output_name].get(key, 0) + sample_count
                     )
             for key in reader_diagnostic_keys:
                 if key not in reader_metrics:
@@ -7792,10 +10699,7 @@ def evaluate_v101_action_path_intervention(
                     {
                         key: value
                         for key, value in planner_state.items()
-                        if (
-                            key not in {"mode", "apply_count"}
-                            and isinstance(value, (int, float))
-                        )
+                        if (key not in {"mode", "apply_count"} and isinstance(value, (int, float)))
                     }
                 )
                 baseline_representation.update(
@@ -7817,10 +10721,33 @@ def evaluate_v101_action_path_intervention(
                     )
                 representation_weight += sample_count
                 if ordinary is not None:
+                    replay_delta = float(
+                        (ordinary - action)
+                        .detach()
+                        .float()
+                        .abs()
+                        .max()
+                        .cpu()
+                    )
                     baseline_identity_max_abs_delta = max(
                         baseline_identity_max_abs_delta,
-                        float((ordinary - action).detach().float().abs().max().cpu()),
+                        replay_delta,
                     )
+                    baseline_identity_checked_batches += 1
+                    if (
+                        require_grounded_intent_effect_contract
+                        and replay_delta > replay_tolerance
+                    ):
+                        raise RuntimeError(
+                            "grounded model-path probe baseline replay changed "
+                            "the deployed action on "
+                            f"batch_index={batch_index}: "
+                            f"max_abs_delta={replay_delta:.3e}, "
+                            f"tolerance={replay_tolerance:.1e}. "
+                            "The explicit none instrumentation is not "
+                            "deployment-equivalent; causal intervention "
+                            "results would be invalid."
+                        )
                     verified_ordinary_baseline = True
             predictions[output_name].append(decode(action_normalizer, action))
 
@@ -7844,6 +10771,15 @@ def evaluate_v101_action_path_intervention(
         raise RuntimeError(
             "action-path probe finished "
             f"{finished_batches}/{len(selected_indices)} selected batches"
+        )
+    if (
+        require_grounded_intent_effect_contract
+        and baseline_identity_checked_batches != finished_batches
+    ):
+        raise RuntimeError(
+            "grounded model-path replay comparison covered "
+            f"{baseline_identity_checked_batches}/{finished_batches} "
+            "selected batches"
         )
     target = np.concatenate(target_rows)
     current = np.concatenate(current_rows)
@@ -7879,16 +10815,14 @@ def evaluate_v101_action_path_intervention(
         ]
     reader_intervention_diagnostics = {
         mode: {
-            key: value / float(max(mode_reader_weights[mode], 1))
-            for key, value in values.items()
+            key: value / float(max(mode_reader_weights[mode], 1)) for key, value in values.items()
         }
         for mode, values in mode_reader_sums.items()
         if values
     }
     averaged_boundary_diagnostics = {
         mode: {
-            key: value
-            / float(max(boundary_diagnostic_weights[mode].get(key, 0), 1))
+            key: value / float(max(boundary_diagnostic_weights[mode].get(key, 0), 1))
             for key, value in values.items()
         }
         for mode, values in boundary_diagnostics.items()
@@ -7907,9 +10841,7 @@ def evaluate_v101_action_path_intervention(
             "remove the complete typed policy bank (or the legacy fixed "
             "policy workspace) entering the final decoder"
         ),
-        "policy_temporal_shuffle": (
-            "misalign that policy input across the action horizon"
-        ),
+        "policy_temporal_shuffle": ("misalign that policy input across the action horizon"),
         "world_residual_zero": (
             "keep the grounding output at every slot and remove only the "
             "residual written by the world blocks"
@@ -7952,9 +10884,7 @@ def evaluate_v101_action_path_intervention(
             "source-side raw pair evidence while target raw keys/values and "
             "camera identity remain fixed"
         ),
-        "raw_value_zero": (
-            "remove only high-frequency raw values after address-bank compilation"
-        ),
+        "raw_value_zero": ("remove only high-frequency raw values after address-bank compilation"),
         "raw_value_spatial_shuffle": (
             "misalign only high-frequency raw values while address keys stay fixed"
         ),
@@ -7974,27 +10904,26 @@ def evaluate_v101_action_path_intervention(
             "spatially misalign only the future transport consumed by P while "
             "current RGB/detail values and W source priors remain fixed"
         ),
+        "current_context_masked": (
+            "reuse the deterministic observation-derived JEPA target mask on "
+            "the latest online RGB/DINO context while checkpoint, eval mode, "
+            "future targets, action noise and every other condition stay fixed"
+        ),
         "semantic_owner_zero": (
             "remove P's semantic fine/coarse keys and semantic W sidecar while "
             "retaining appearance, geometry, public W state and precision values"
         ),
-        "semantic_owner_shuffle": (
-            "misalign only P's semantic keys and semantic W sidecar"
-        ),
+        "semantic_owner_shuffle": ("misalign only P's semantic keys and semantic W sidecar"),
         "appearance_owner_zero": (
             "remove P's appearance verifier keys and appearance W sidecar while "
             "retaining semantic source ownership, geometry and precision values"
         ),
-        "appearance_owner_shuffle": (
-            "misalign only P's appearance keys and appearance W sidecar"
-        ),
+        "appearance_owner_shuffle": ("misalign only P's appearance keys and appearance W sidecar"),
         "geometry_owner_zero": (
             "remove P's geometry keys and geometry W sidecar while retaining "
             "semantic relevance, appearance and precision values"
         ),
-        "geometry_owner_shuffle": (
-            "misalign only P's geometry keys and geometry W sidecar"
-        ),
+        "geometry_owner_shuffle": ("misalign only P's geometry keys and geometry W sidecar"),
         "address_posterior_uniform": (
             "replace the learned joint camera/slot/xy posterior by a valid-state uniform posterior"
         ),
@@ -8018,10 +10947,11 @@ def evaluate_v101_action_path_intervention(
             "and the observation-owned key/value bank remain fixed"
         ),
         "goal_zero": (
-            "apply the exact goal-null contract without changing state/history/vision"
+            "zero the real T5 condition before the grounded S organizer while "
+            "leaving state/history/vision fixed"
         ),
         "goal_episode_shuffle": (
-            "permute per-sample goal tensors before goal resampling"
+            "permute per-sample T5 tensors before the grounded S organizer"
         ),
         "action_history_zero": (
             "zero executed-action history before both proposal and condition memory"
@@ -8044,18 +10974,12 @@ def evaluate_v101_action_path_intervention(
         "action_history_truncate": (
             "retain only the configured recent history and remove the older prefix"
         ),
-        "phase_belief_zero": (
-            "zero only the stateless phase selector context"
-        ),
-        "phase_belief_episode_shuffle": (
-            "permute only the stateless phase selector context"
-        ),
+        "phase_belief_zero": ("zero only the stateless phase selector context"),
+        "phase_belief_episode_shuffle": ("permute only the stateless phase selector context"),
         "condition_query_zero": (
             "zero the separate goal/history selector context used by W blocks, W->P, and detail reads"
         ),
-        "horizon_address_zero": (
-            "remove only the bounded online G3-to-W1 horizon-address write"
-        ),
+        "horizon_address_zero": ("remove only the bounded online G3-to-W1 horizon-address write"),
         "horizon_address_episode_shuffle": (
             "episode-shuffle only the online G3-to-W1 address write; for a "
             "one-sample smoke, rotate its horizon axis deterministically"
@@ -8080,6 +11004,14 @@ def evaluate_v101_action_path_intervention(
         ),
         "address_g3_episode_shuffle": (
             "misalign only the G3 canonical priors and selector summary"
+        ),
+        "address_g3_slot_permute": (
+            "consistently cycle only the within-sample G3 object-fact/owner "
+            "slot axis; preserve the public scene base and P1 address/value lattice"
+        ),
+        "address_g3_slot_mean": (
+            "replace each G3 object-fact/owner slot by its within-cell slot "
+            "mean; preserve the public scene base and P1 address/value lattice"
         ),
         "interval_stage_zero": (
             "remove only the bounded per-camera/per-xy interval-stage delta "
@@ -8128,6 +11060,291 @@ def evaluate_v101_action_path_intervention(
             "jointly episode-shuffle the typed W->P +48 candidates and the +48 "
             "bottom rollout chart while retaining every 4/12/24 path"
         )
+    if matched_current_context_probe:
+        mode_semantics["interval_stage_zero"] = (
+            "zero the interval owner state at every configured online W "
+            "boundary; the old post-W organizer is frozen and is not the "
+            "intervention target"
+        )
+        mode_semantics["interval_stage_episode_shuffle"] = (
+            "spatially misalign the interval owner state at every configured "
+            "online W boundary while retaining the other three typed owners"
+        )
+        mode_semantics["goal_horizon_context_zero"] = (
+            "zero only the ordered goal selector bank after goal resampling"
+        )
+        mode_semantics["history_horizon_context_zero"] = (
+            "zero only the ordered executed-history selector bank"
+        )
+        if require_complete_v117_contract:
+            mode_semantics.update(
+                {
+                    "intent_window_selector_uniform": (
+                        "replace only S3's three-window P2 logit prior with a "
+                        "uniform distribution; effect values and temporal control stay fixed"
+                    ),
+                    "intent_window_selector_episode_shuffle": (
+                        "misalign only S3's three-window P2 logit prior"
+                    ),
+                    "intent_temporal_zero": (
+                        "zero only S3's horizon-resolved temporal control before P3"
+                    ),
+                    "intent_temporal_episode_shuffle": (
+                        "misalign only S3's horizon-resolved temporal control before P3"
+                    ),
+                }
+            )
+        if require_differential_intent_effect_contract:
+            mode_semantics.update(
+                {
+                    "intent_state_zero": (
+                        "zero the three typed reads from the one canonical "
+                        "four-token IntentStateBank"
+                    ),
+                    "intent_state_episode_shuffle": (
+                        "misalign the three typed reads from the canonical "
+                        "IntentStateBank without changing Goal/history/G3 inputs"
+                    ),
+                    "intent_temporal_zero": (
+                        "zero only the horizon-resolved read from the same "
+                        "IntentStateBank before P3"
+                    ),
+                    "intent_temporal_episode_shuffle": (
+                        "misalign only the horizon-resolved IntentStateBank read"
+                    ),
+                }
+            )
+            for window_name in ("near", "mid", "late"):
+                mode_semantics[
+                    f"intent_window_{window_name}_zero"
+                ] = (
+                    f"zero only the {window_name} typed IntentStateBank read "
+                    "before W/P2"
+                )
+                mode_semantics[
+                    f"intent_window_{window_name}_shuffle"
+                ] = (
+                    f"misalign only the {window_name} typed IntentStateBank "
+                    "read before W/P2"
+                )
+        if require_grounded_intent_effect_contract:
+            mode_semantics.update(
+                {
+                    "intent_state_zero": (
+                        "zero every observable output of the one grounded "
+                        "StatelessIntentState after S and before G/W/P consumers"
+                    ),
+                    "intent_state_episode_shuffle": (
+                        "episode-shuffle the complete grounded intent state "
+                        "without changing T5/history/G inputs"
+                    ),
+                    "intent_goal_set_zero": (
+                        "zero only S's already-compiled protected goal output; "
+                        "this audits an independent second landing and is not "
+                        "a T5-input intervention"
+                    ),
+                    "intent_goal_set_episode_shuffle": (
+                        "episode-shuffle only S's already-compiled protected "
+                        "goal output; this does not recompute other S fields"
+                    ),
+                    "intent_achieved_zero": (
+                        "zero only S's achieved-evidence output"
+                    ),
+                    "intent_achieved_episode_shuffle": (
+                        "episode-shuffle only S's achieved-evidence output"
+                    ),
+                    "intent_remaining_zero": (
+                        "zero only S's remaining-goal output"
+                    ),
+                    "intent_remaining_episode_shuffle": (
+                        "episode-shuffle only S's remaining-goal output"
+                    ),
+                    "intent_temporal_zero": (
+                        "zero only the 24-query temporal control consumed by P3"
+                    ),
+                    "intent_temporal_episode_shuffle": (
+                        "episode-shuffle only the 24-query temporal control"
+                    ),
+                }
+            )
+            for interval_name in (
+                "h4_8",
+                "h8_16",
+                "h16_32",
+                "h32_48",
+            ):
+                mode_semantics[
+                    f"intent_interval_{interval_name}_zero"
+                ] = (
+                    f"zero only S's {interval_name} interval intent before W/P2"
+                )
+                mode_semantics[
+                    f"intent_interval_{interval_name}_shuffle"
+                ] = (
+                    f"misalign only S's {interval_name} interval intent before W/P2"
+                )
+        mode_semantics["p1_appearance_gateway_zero"] = (
+            "zero only the mandatory W-conditioned appearance query after "
+            "its P1 gateway projection; upstream W appearance state, policy "
+            "query, candidate keys and precision values remain fixed"
+        )
+        mode_semantics["p1_appearance_gateway_spatial_shuffle"] = (
+            "spatially misalign only the mandatory W-conditioned appearance "
+            "query after its P1 gateway projection"
+        )
+        for depth in range(int(cfg.flow_jepa_world_blocks) + 1):
+            mode_semantics[f"functional_w{depth}_route_zero"] = (
+                f"zero only the selected typed owner write at W boundary {depth}"
+            )
+            mode_semantics[f"functional_w{depth}_route_spatial_shuffle"] = (
+                f"spatially misalign only the selected typed owner write at W boundary {depth}"
+            )
+        for owner in ("semantic", "appearance", "geometry", "horizon"):
+            mode_semantics[f"p2_{owner}_zero"] = (
+                f"zero only P2's {owner} innovation before its null-capable router"
+            )
+            mode_semantics[f"p2_{owner}_shuffle"] = (
+                f"misalign only P2's {owner} innovation before routing"
+            )
+    if (
+        require_complete_v115_contract
+        or require_complete_v116_contract
+        or require_complete_v117_contract
+        or require_differential_intent_effect_contract
+        or require_grounded_intent_effect_contract
+    ):
+        mode_semantics["future_effect_zero"] = (
+            (
+                "zero every slotwise effect component in the one "
+                "DifferentialWindowEffectBank while retaining the protected "
+                "current G3 reference"
+            )
+            if (
+                require_differential_intent_effect_contract
+                or require_grounded_intent_effect_contract
+            )
+            else (
+                "replace the single W2-produced FutureEffectField at the W->P "
+                "boundary with an exact-zero field, including uncertainty; "
+                "the frozen future teacher is not touched"
+            )
+        )
+        mode_semantics["future_effect_spatial_shuffle"] = (
+            (
+                "spatially misalign every slotwise effect component while "
+                "retaining the protected current G3 reference"
+            )
+            if (
+                require_differential_intent_effect_contract
+                or require_grounded_intent_effect_contract
+            )
+            else (
+                "spatially misalign every component of that same online "
+                "FutureEffectField before P2/P3 consume it"
+            )
+        )
+        if (
+            require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ):
+            mode_semantics.update(
+                {
+                    "future_effect_current_zero": (
+                        "zero only protected current content and reconstruct "
+                        "successor=current+semantic_delta"
+                    ),
+                    "future_effect_current_spatial_shuffle": (
+                        "spatially shuffle only current content and reconstruct "
+                        "successor=current+semantic_delta"
+                    ),
+                    "future_effect_semantic_zero": (
+                        "zero only semantic delta and set successor=current"
+                    ),
+                    "future_effect_semantic_spatial_shuffle": (
+                        "spatially shuffle semantic delta and reconstruct successor"
+                    ),
+                    "future_effect_transport_zero": (
+                        "zero only transport mean/covariance"
+                    ),
+                    "future_effect_transport_spatial_shuffle": (
+                        "spatially shuffle only transport mean/covariance"
+                    ),
+                    "future_effect_reliability_zero": (
+                        (
+                            "zero only reliability and uncertainty; semantic, "
+                            "transport and zero-centred visibility/persistence "
+                            "changes remain fixed"
+                        )
+                        if require_grounded_intent_effect_contract
+                        else (
+                            "zero only persistence, visibility and uncertainty channels"
+                        )
+                    ),
+                    "future_effect_reliability_spatial_shuffle": (
+                        (
+                            "spatially shuffle only reliability and uncertainty"
+                        )
+                        if require_grounded_intent_effect_contract
+                        else (
+                            "spatially shuffle only persistence, visibility and uncertainty"
+                        )
+                    ),
+                    "future_effect_reliability_one": (
+                        "set only the grounded online effect reliability to one "
+                        "before P2; keep effect content, geometry, validity and "
+                        "uncertainty fixed (audit-only bypass)"
+                    ),
+                }
+            )
+        if require_differential_intent_effect_contract:
+            for slot_name in ("near", "mid", "late"):
+                mode_semantics[f"future_effect_{slot_name}_zero"] = (
+                    f"zero only the {slot_name} DifferentialWindowEffectBank "
+                    "slot before P2"
+                )
+                mode_semantics[f"future_effect_{slot_name}_shuffle"] = (
+                    f"misalign only the {slot_name} "
+                    "DifferentialWindowEffectBank slot before P2"
+                )
+        if require_grounded_intent_effect_contract:
+            for interval_name in (
+                "h4_8",
+                "h8_16",
+                "h16_32",
+                "h32_48",
+            ):
+                mode_semantics[f"future_effect_{interval_name}_zero"] = (
+                    f"zero only the {interval_name} object-level effect fields "
+                    "before the one P2 read"
+                )
+                mode_semantics[f"future_effect_{interval_name}_shuffle"] = (
+                    f"spatially misalign only the {interval_name} object-level "
+                    "effect fields before P2"
+                )
+        lanes = (
+            ["precision", "temporal"]
+            if (
+                require_differential_intent_effect_contract
+                or require_grounded_intent_effect_contract
+            )
+            else ["precision", "effect", "temporal"]
+        )
+        if not (
+            require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ):
+            lanes.append("terminal")
+        for lane in lanes:
+            mode_semantics[f"p3_{lane}_delta_zero"] = (
+                f"zero only P3's typed {lane} lane entering bottom MMDiT"
+            )
+            mode_semantics[f"p3_{lane}_delta_episode_shuffle"] = (
+                f"episode-shuffle only P3's typed {lane} lane entering bottom MMDiT"
+            )
     schema = "clearvla-v101-action-path-intervention-v3"
     if typed_policy_fusion:
         schema = "clearvla-v103-model-path-intervention-v3"
@@ -8164,9 +11381,52 @@ def evaluate_v101_action_path_intervention(
                 require_complete_v111_contract,
                 "clearvla-v111-model-path-intervention-v10",
             ),
+            (
+                require_complete_v112_contract,
+                "clearvla-v112-model-path-intervention-v11",
+            ),
+            (
+                require_complete_v113_contract,
+                "clearvla-v113-model-path-intervention-v13",
+            ),
+            (
+                require_complete_v114_contract,
+                "clearvla-v114-model-path-intervention-v14",
+            ),
+            (
+                require_complete_v115_contract,
+                "clearvla-v115-model-path-intervention-v15",
+            ),
+            (
+                require_complete_v117_contract,
+                "clearvla-v117-model-path-intervention-v17",
+            ),
+            (
+                require_differential_intent_effect_contract,
+                "clearvla-differential-intent-effect-model-path-v18",
+            ),
+            (
+                require_grounded_intent_effect_contract,
+                "clearvla-grounded-intent-effect-323-model-path-v1",
+            ),
+            (
+                require_complete_v116_contract,
+                "clearvla-v116-model-path-intervention-v16",
+            ),
         ):
             if enabled:
                 schema = candidate
+    current_context_mask_comparison = (
+        _summarize_current_context_mask_comparison(
+            enabled=matched_current_context_probe,
+            finished_batches=finished_batches,
+            intervention_samples=intervention_samples,
+            comparison_batches=current_mask_comparison_batches,
+            comparison_weight=current_mask_comparison_weight,
+            metric_sums=current_mask_metric_sums,
+            boundary_sums=current_mask_boundary_sums,
+        )
+    )
     return {
         "schema": schema,
         "complete_v103_contract_verified": bool(
@@ -8178,7 +11438,7 @@ def evaluate_v101_action_path_intervention(
             or require_complete_v108_contract
             or require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v104_contract_verified": bool(
             require_complete_v104_contract
@@ -8188,7 +11448,7 @@ def evaluate_v101_action_path_intervention(
             or require_complete_v108_contract
             or require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v105_contract_verified": bool(
             require_complete_v105_contract
@@ -8197,7 +11457,7 @@ def evaluate_v101_action_path_intervention(
             or require_complete_v108_contract
             or require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v106_contract_verified": bool(
             require_complete_v106_contract
@@ -8205,31 +11465,69 @@ def evaluate_v101_action_path_intervention(
             or require_complete_v108_contract
             or require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v107_contract_verified": bool(
             require_complete_v107_contract
             or require_complete_v108_contract
             or require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v108_contract_verified": bool(
             require_complete_v108_contract
             or require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v109_contract_verified": bool(
             require_complete_v109_contract
             or require_complete_v110_contract
-            or require_complete_v111_contract
+            or complete_v111_or_later
         ),
         "complete_v110_contract_verified": bool(
-            require_complete_v110_contract or require_complete_v111_contract
+            require_complete_v110_contract or complete_v111_or_later
         ),
-        "complete_v111_contract_verified": bool(
-            require_complete_v111_contract
+        "complete_v111_contract_verified": bool(complete_v111_or_later),
+        "complete_v112_contract_verified": bool(
+            require_complete_v112_contract or complete_v113_or_later
+        ),
+        "complete_v113_contract_verified": bool(complete_v113_or_later),
+        "complete_v114_contract_verified": bool(
+            require_complete_v114_contract
+            or require_complete_v115_contract
+            or require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ),
+        "complete_v115_contract_verified": bool(
+            require_complete_v115_contract
+            or require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ),
+        "complete_v116_contract_verified": bool(
+            require_complete_v116_contract
+            or require_complete_v117_contract
+            or require_differential_intent_effect_contract
+            or require_grounded_intent_effect_contract
+        ),
+        "complete_v117_contract_verified": bool(
+            require_complete_v117_contract
+            or require_differential_intent_effect_contract
+        ),
+        "differential_intent_effect_contract_verified": bool(
+            require_differential_intent_effect_contract
+        ),
+        "grounded_intent_effect_contract_verified": bool(
+            require_grounded_intent_effect_contract
+        ),
+        "architecture_manifest": (
+            GROUNDING_MANIFEST.as_dict()
+            if require_grounded_intent_effect_contract
+            else None
         ),
         "planned_batches": int(planned_batches),
         "selected_batch_indices": sorted(selected_indices),
@@ -8238,7 +11536,14 @@ def evaluate_v101_action_path_intervention(
         "intervention_samples": int(intervention_samples),
         "intervention_coverage": float(finished_batches / planned_batches),
         "patched_baseline_max_abs_delta": float(baseline_identity_max_abs_delta),
+        "baseline_identity_checked_batches": int(
+            baseline_identity_checked_batches
+        ),
+        "baseline_identity_tolerance": float(replay_tolerance),
         "inference_steps": int(trainer.eval_inference_steps),
+        "requested_intervention_modes": (
+            None if requested_intervention_modes is None else list(requested_intervention_modes)
+        ),
         "action_offsets": list(action_offsets),
         "mode_semantics": mode_semantics,
         "scope_limits": {
@@ -8271,6 +11576,9 @@ def evaluate_v101_action_path_intervention(
             "is also fixed except when a full-history or proposal-only "
             "intervention intentionally tests the history-derived proposal path; "
             "proposal-only modes keep the direct history-condition memory fixed"
+            "; grounded runs additionally require the explicit none replay to "
+            "match ordinary deployment on every selected batch before any "
+            "causal result is returned"
         ),
         "intervention_verified_batches": verification_counts,
         "episode_ids": episode_ids.astype(int).tolist(),
@@ -8278,6 +11586,7 @@ def evaluate_v101_action_path_intervention(
         "episode_clusters": int(len(np.unique(episode_ids))),
         "representation": representation,
         "boundary_diagnostics": averaged_boundary_diagnostics,
+        "current_context_mask_comparison": (current_context_mask_comparison),
         "acceptance_matrix": acceptance_matrix,
         "reader_intervention_diagnostics": reader_intervention_diagnostics,
         "modes": mode_metrics,
@@ -8319,14 +11628,32 @@ def _validate_v106_preflight_target_pack(
     """Validate the formal interval teacher before the first training batch."""
 
     positions = (
-        int(config.num_cameras)
-        * int(config.flow_jepa_grid_size)
-        * int(config.flow_jepa_grid_size)
+        int(config.num_cameras) * int(config.flow_jepa_grid_size) * int(config.flow_jepa_grid_size)
     )
     anchors = int(config.future_anchors)
     hidden = int(config.hidden_size)
-    future_shape = (int(batch_size), anchors * positions, hidden)
-    current_shape = (int(batch_size), positions, hidden)
+    grounded_mainline = bool(
+        int(
+            getattr(
+                config,
+                "flow_jepa_grounded_intent_effect_mainline",
+                0,
+            )
+        )
+    )
+    teacher_content_width = (
+        int(config.visual_token_dim) if grounded_mainline else hidden
+    )
+    future_shape = (
+        int(batch_size),
+        anchors * positions,
+        teacher_content_width,
+    )
+    current_shape = (
+        int(batch_size),
+        positions,
+        teacher_content_width,
+    )
     for key in (
         "flow_jepa_future_target",
         "flow_jepa_interval_progress_target",
@@ -8339,9 +11666,7 @@ def _validate_v106_preflight_target_pack(
                 f"got {None if value is None else tuple(value.shape)}"
             )
         if value.dtype != torch.float32:
-            raise TypeError(
-                f"V106 preflight {key} must remain float32, got {value.dtype}"
-            )
+            raise TypeError(f"V106 preflight {key} must remain float32, got {value.dtype}")
         if not bool(torch.isfinite(value).all()):
             raise FloatingPointError(f"V106 preflight {key} is non-finite")
     current = pack.get("flow_jepa_current_target")
@@ -8353,13 +11678,10 @@ def _validate_v106_preflight_target_pack(
         )
     if current.dtype != torch.float32:
         raise TypeError(
-            "V106 preflight flow_jepa_current_target must remain float32, "
-            f"got {current.dtype}"
+            f"V106 preflight flow_jepa_current_target must remain float32, got {current.dtype}"
         )
     if not bool(torch.isfinite(current).all()):
-        raise FloatingPointError(
-            "V106 preflight flow_jepa_current_target is non-finite"
-        )
+        raise FloatingPointError("V106 preflight flow_jepa_current_target is non-finite")
     mask = pack.get("flow_jepa_future_target_mask")
     expected_mask_shape = future_shape[:2]
     if not torch.is_tensor(mask) or tuple(mask.shape) != expected_mask_shape:
@@ -8370,12 +11692,9 @@ def _validate_v106_preflight_target_pack(
         )
     if mask.dtype != torch.bool:
         raise TypeError(
-            "V106 preflight flow_jepa_future_target_mask must be bool, "
-            f"got {mask.dtype}"
+            f"V106 preflight flow_jepa_future_target_mask must be bool, got {mask.dtype}"
         )
-    expected_support_count = len(
-        tuple(config.flow_jepa_effective_interval_support_offsets)
-    )
+    expected_support_count = len(tuple(config.flow_jepa_effective_interval_support_offsets))
     support_count = pack.get("flow_jepa_interval_support_count")
     if (
         not torch.is_tensor(support_count)
@@ -8410,6 +11729,238 @@ def _validate_v106_preflight_target_pack(
             "V106 preflight effective interval support is outside the "
             f"valid [1,{max_interval_supports}] range"
         )
+    if grounded_mainline:
+        slots = 4
+        content_width = int(config.visual_token_dim)
+        object_slots = int(config.flow_jepa_address_slots)
+        prefix = (
+            int(batch_size),
+            slots,
+            int(config.num_cameras),
+            int(config.flow_jepa_grid_size),
+            int(config.flow_jepa_grid_size),
+            object_slots,
+        )
+        typed_widths = {
+            "successor": content_width,
+            "semantic": content_width,
+            "transport": 2,
+            "transport_covariance": 3,
+            "persistence": 1,
+            "visibility": 1,
+            "uncertainty": 1,
+            "reliability": 1,
+        }
+        for name, width in typed_widths.items():
+            key = f"flow_jepa_future_effect_{name}_target_slots"
+            value = pack.get(key)
+            expected = (*prefix, int(width))
+            if (
+                not torch.is_tensor(value)
+                or tuple(value.shape) != expected
+                or value.dtype != torch.float32
+                or not bool(torch.isfinite(value).all())
+            ):
+                raise ValueError(
+                    f"grounded preflight {key} must be finite float32 "
+                    f"{expected}, got "
+                    f"{None if value is None else tuple(value.shape)}"
+                )
+        current_reference = pack.get(
+            "flow_jepa_future_effect_current_reference_target"
+        )
+        expected_current = (
+            int(batch_size),
+            int(config.num_cameras),
+            int(config.flow_jepa_grid_size),
+            int(config.flow_jepa_grid_size),
+            object_slots,
+            content_width,
+        )
+        if (
+            not torch.is_tensor(current_reference)
+            or tuple(current_reference.shape) != expected_current
+            or current_reference.dtype != torch.float32
+            or not bool(torch.isfinite(current_reference).all())
+        ):
+            raise ValueError(
+                "grounded preflight current reference must be finite "
+                f"float32 {expected_current}, got "
+                f"{None if current_reference is None else tuple(current_reference.shape)}"
+            )
+        for key in (
+            "flow_jepa_future_effect_persistence_target_slots",
+            "flow_jepa_future_effect_visibility_target_slots",
+        ):
+            change = pack[key]
+            if bool((change > 1e-6).any()) or bool((change < -1.0001).any()):
+                raise ValueError(
+                    f"grounded preflight {key} is not a zero-centred "
+                    "change in [-1,0]"
+                )
+        active = pack.get("grounded_intent_effect_active")
+        if (
+            not torch.is_tensor(active)
+            or int(active.numel()) != 1
+            or float(active.detach().cpu()) != 1.0
+        ):
+            raise ValueError(
+                "grounded preflight capability marker is missing"
+            )
+    if int(getattr(config, "flow_jepa_window_effect_bank", 0)):
+        slots = int(getattr(config, "flow_jepa_future_slots", 0))
+        canonical_slots = int(config.flow_jepa_address_slots)
+        prefix = (
+            int(batch_size),
+            slots,
+            int(config.num_cameras),
+            int(config.flow_jepa_grid_size),
+            int(config.flow_jepa_grid_size),
+            canonical_slots,
+        )
+        differential = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_differential_intent_effect_mainline",
+                    0,
+                )
+            )
+        )
+        typed_widths = {
+            "successor": hidden,
+            "semantic": hidden,
+            "transport": 2,
+            "transport_covariance": 3,
+            "persistence": 1,
+            "visibility": 1,
+            "uncertainty": 1,
+            "reliability": 1,
+        }
+        if not differential:
+            typed_widths = {"current": hidden, **typed_widths}
+        for name, width in typed_widths.items():
+            key = f"flow_jepa_future_effect_{name}_target_slots"
+            value = pack.get(key)
+            expected = (*prefix, int(width))
+            if not torch.is_tensor(value) or tuple(value.shape) != expected:
+                raise ValueError(
+                    f"V117 preflight {key} must be {expected}, "
+                    f"got {None if value is None else tuple(value.shape)}"
+                )
+            if value.dtype != torch.float32 or not bool(torch.isfinite(value).all()):
+                raise ValueError(
+                    f"V117 preflight {key} must be finite float32"
+                )
+        if differential:
+            current_reference = pack.get(
+                "flow_jepa_future_effect_current_reference_target"
+            )
+            expected_current = (
+                int(batch_size),
+                int(config.num_cameras),
+                int(config.flow_jepa_grid_size),
+                int(config.flow_jepa_grid_size),
+                canonical_slots,
+                hidden,
+            )
+            if (
+                not torch.is_tensor(current_reference)
+                or tuple(current_reference.shape) != expected_current
+                or current_reference.dtype != torch.float32
+                or not bool(torch.isfinite(current_reference).all())
+            ):
+                raise ValueError(
+                    "differential preflight current reference must be finite "
+                    f"float32 {expected_current}, got "
+                    f"{None if current_reference is None else tuple(current_reference.shape)}"
+                )
+            intent_summary = pack.get(
+                "flow_jepa_future_effect_intent_summary_target_slots"
+            )
+            expected_summary = (int(batch_size), slots, hidden)
+            if (
+                not torch.is_tensor(intent_summary)
+                or tuple(intent_summary.shape) != expected_summary
+                or intent_summary.dtype != torch.float32
+                or not bool(torch.isfinite(intent_summary).all())
+            ):
+                raise ValueError(
+                    "differential preflight intent summary must be finite "
+                    f"float32 {expected_summary}, got "
+                    f"{None if intent_summary is None else tuple(intent_summary.shape)}"
+                )
+
+
+@torch.no_grad()
+def _validate_object_intent_preflight_output(
+    output: dict[str, Tensor],
+    *,
+    config: Any,
+    batch_size: int,
+) -> None:
+    """Validate the capability boundary, not the retired V106 target pack."""
+
+    objects = 4
+    intervals = 4
+    content = int(config.visual_token_dim)
+    expected = {
+        "object_future_successor_target": (batch_size, intervals, objects, content),
+        "object_future_semantic_target": (batch_size, intervals, objects, content),
+        "object_future_transport_target": (batch_size, intervals, objects, 2),
+        "object_future_covariance_target": (batch_size, intervals, objects, 3),
+        "object_future_visibility_target": (batch_size, intervals, objects, 1),
+        "object_future_persistence_target": (batch_size, intervals, objects, 1),
+        "object_future_uncertainty_target": (batch_size, intervals, objects, 1),
+        "object_future_validity_target": (batch_size, intervals, objects, 1),
+    }
+    for key, shape in expected.items():
+        value = output.get(key)
+        if not torch.is_tensor(value) or tuple(value.shape) != shape:
+            raise ValueError(
+                f"object-intent preflight {key} must be {shape}, got "
+                f"{None if value is None else tuple(value.shape)}"
+            )
+        if value.requires_grad:
+            raise ValueError(f"object-intent teacher target {key} retained autograd")
+        finite = bool(torch.isfinite(value).all())
+        if value.dtype != torch.float32 or not finite:
+            raise ValueError(
+                f"object-intent teacher target {key} must be finite float32; "
+                f"got dtype={value.dtype} finite={finite}"
+            )
+    active = output.get("object_intent_dynamics_active")
+    if (
+        not torch.is_tensor(active)
+        or int(active.numel()) != 1
+        or float(active.detach().cpu()) != 1.0
+    ):
+        raise ValueError("object-intent preflight capability marker is missing")
+    for key in (
+        "object_fact_content",
+        "object_intent_interval_queries",
+        "object_intent_state_change_evidence",
+        "object_future_semantic_prediction",
+        "object_consequence_protected",
+        "object_policy_plan_effect",
+        "object_policy_plan_state_change",
+    ):
+        value = output.get(key)
+        if not torch.is_tensor(value) or not bool(torch.isfinite(value).all()):
+            raise ValueError(f"object-intent preflight online boundary {key} is invalid")
+    if "flow_jepa_execution_terminal_evidence" in output:
+        raise ValueError(
+            "object-intent state-change evidence cannot become terminal control"
+        )
+    external_terminal_bias = output.get(
+        "evidence_execution_terminal_external_bias"
+    )
+    if torch.is_tensor(external_terminal_bias) and not bool(
+        (external_terminal_bias.detach().float() == 0.0).all()
+    ):
+        raise ValueError(
+            "object-intent path injected an external execution-terminal bias"
+        )
 
 
 @torch.no_grad()
@@ -8432,11 +11983,16 @@ def _preflight_evidence_dynamic_sampling(
     no effect on the experiment trajectory.
     """
 
-    decoder = getattr(
-        system.planner, "evidence_latent_mmdit_action_decoder", None
-    )
-    interval_stage = bool(
-        int(getattr(system.policy_config, "flow_jepa_interval_stage_delta", 0))
+    decoder = getattr(system.planner, "evidence_latent_mmdit_action_decoder", None)
+    interval_stage = bool(int(getattr(system.policy_config, "flow_jepa_interval_stage_delta", 0)))
+    object_dynamics_mainline = bool(
+        int(
+            getattr(
+                system.policy_config,
+                "flow_jepa_object_intent_dynamics_mainline",
+                0,
+            )
+        )
     )
     run_deploy_preflight = bool(
         decoder is not None
@@ -8475,9 +12031,9 @@ def _preflight_evidence_dynamic_sampling(
                 dtype=sample["visual"].dtype,
                 action_state=sample["action_state"],
             )
-            stop_midcut_eval = _is_contract_stage(
+            stop_midcut_eval = _is_contract_stage(trainer) and not _uses_layer_adapter_contract(
                 trainer
-            ) and not _uses_layer_adapter_contract(trainer)
+            )
             with autocast_context(device, dtype):
                 prediction_pack = system.sample(
                     sample["visual"],
@@ -8499,39 +12055,125 @@ def _preflight_evidence_dynamic_sampling(
                 raise TypeError("deploy preflight expected a sampled action pack")
             prediction = prediction_pack["action"]
             if not bool(torch.isfinite(prediction).all()):
-                raise FloatingPointError(
-                    "non-finite action in deploy sampling preflight"
-                )
+                raise FloatingPointError("non-finite action in deploy sampling preflight")
             deploy_sampling_passed = True
 
         interval_teacher_passed = False
         if interval_stage:
             if "target_visual" not in sample:
-                raise RuntimeError(
-                    "V106 preflight did not prepare interval teacher observations"
-                )
-            with autocast_context(device, dtype):
-                visual_context = system.planner.encode_visual_context(
-                    sample["visual"],
-                    raw_visual=sample.get("raw_visual"),
-                )
-                if visual_context is None:
-                    raise RuntimeError(
-                        "V106 preflight could not compile online visual context"
+                raise RuntimeError("V106 preflight did not prepare interval teacher observations")
+            if object_dynamics_mainline:
+                with autocast_context(device, dtype):
+                    object_output = system.flow_training_forward(
+                        sample["visual"],
+                        sample["history_state"],
+                        sample["executed_action_history"],
+                        sample["state"],
+                        sample["policy_action"],
+                        raw_visual=sample.get("raw_visual"),
+                        action_state=sample["action_state"],
+                        target_visual=sample["target_visual"],
+                        future_training_pack=_object_intent_future_training_pack(
+                            sample,
+                            system=system,
+                            require_teacher=True,
+                        ),
+                        make_counterfactuals=False,
+                        collect_audit_metrics=True,
                     )
-                target_pack = system.build_rollout_target_pack(
-                    sample["visual"],
-                    sample["target_visual"],
-                    visual_context=visual_context,
+                _validate_object_intent_preflight_output(
+                    object_output,
+                    config=system.policy_config,
+                    batch_size=int(sample["visual"].shape[0]),
                 )
-            _validate_v106_preflight_target_pack(
-                target_pack,
-                config=system.policy_config,
-                batch_size=int(sample["visual"].shape[0]),
-            )
+                del object_output
+            else:
+                with autocast_context(device, dtype):
+                    visual_context = system.planner.encode_visual_context(
+                        sample["visual"],
+                        raw_visual=sample.get("raw_visual"),
+                    )
+                    if visual_context is None:
+                        raise RuntimeError("V106 preflight could not compile online visual context")
+                    target_pack = system.build_rollout_target_pack(
+                        sample["visual"],
+                        sample["target_visual"],
+                        visual_context=visual_context,
+                    )
+                _validate_v106_preflight_target_pack(
+                    target_pack,
+                    config=system.policy_config,
+                    batch_size=int(sample["visual"].shape[0]),
+                )
             interval_teacher_passed = True
         preflight_version = (
-            "v111"
+            "object_intent_dynamics_323"
+            if object_dynamics_mainline
+            else "grounded_intent_effect_323"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_grounded_intent_effect_mainline",
+                    0,
+                )
+            )
+            else "v118"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_differential_intent_effect_mainline",
+                    0,
+                )
+            )
+            else "v117"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_stateless_intent_controller",
+                    0,
+                )
+            )
+            else "v116"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_supervised_effect_mainline",
+                    0,
+                )
+            )
+            else "v115"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_policy_plan_compiler",
+                    0,
+                )
+            )
+            else "v114"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_utility_precision_mainline",
+                    0,
+                )
+            )
+            else "v113"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_functional_mainline_routing",
+                    0,
+                )
+            )
+            else "v112"
+            if int(
+                getattr(
+                    system.policy_config,
+                    "flow_jepa_pre_value_owner_routing",
+                    0,
+                )
+            )
+            else "v111"
             if int(
                 getattr(
                     system.policy_config,
@@ -8555,8 +12197,7 @@ def _preflight_evidence_dynamic_sampling(
                     0,
                 )
             )
-            else
-            "v108"
+            else "v108"
             if int(
                 getattr(
                     system.policy_config,
@@ -8842,7 +12483,11 @@ def _detached_scalar_metric(key: str, value: Tensor) -> Tensor:
 
 
 def _accumulate_metric_tensors(
-    acc: dict[str, Tensor], losses: dict[str, Tensor], *, grad: Tensor | float | None = None
+    acc: dict[str, Tensor],
+    losses: dict[str, Tensor],
+    *,
+    counts: dict[str, int] | None = None,
+    grad: Tensor | float | None = None,
 ) -> None:
     for key, value in losses.items():
         if not torch.is_tensor(value):
@@ -8851,6 +12496,8 @@ def _accumulate_metric_tensors(
         acc[key] = (
             acc.get(key, torch.zeros((), device=detached.device, dtype=torch.float32)) + detached
         )
+        if counts is not None:
+            counts[key] = counts.get(key, 0) + 1
     if grad is not None:
         g = (
             _detached_scalar_metric("grad", grad)
@@ -8858,13 +12505,30 @@ def _accumulate_metric_tensors(
             else torch.tensor(float(grad))
         )
         acc["grad"] = acc.get("grad", torch.zeros((), device=g.device, dtype=torch.float32)) + g
+        if counts is not None:
+            counts["grad"] = counts.get("grad", 0) + 1
 
 
-def _finalize_metric_tensors(acc: dict[str, Tensor], count: int) -> dict[str, float]:
+def _finalize_metric_tensors(
+    acc: dict[str, Tensor],
+    count: int,
+    *,
+    counts: dict[str, int] | None = None,
+) -> dict[str, float]:
     if count <= 0:
         return {}
     return {
-        key: float((_detached_scalar_metric(key, value) / float(count)).cpu())
+        key: float(
+            (
+                _detached_scalar_metric(key, value)
+                / float(
+                    max(
+                        counts.get(key, count) if counts is not None else count,
+                        1,
+                    )
+                )
+            ).cpu()
+        )
         for key, value in acc.items()
     }
 
@@ -8884,6 +12548,35 @@ def _sync_loss_row(
             else float(grad)
         )
     return row
+
+
+@torch.no_grad()
+def _attach_intent_frame_progress_audit(
+    losses: dict[str, Tensor],
+    sample: dict[str, Tensor],
+    output: dict[str, Tensor],
+) -> None:
+    """Compare S progress with factual episode position without training on it."""
+
+    frame_progress = sample.get("frame_progress")
+    if not torch.is_tensor(frame_progress):
+        return
+    frame = frame_progress.detach().float().reshape(-1)
+    intent_progress = output.get(
+        "flow_jepa_intent_progress_coordinate_per_sample",
+        output.get("flow_jepa_intent_progress_coordinate"),
+    )
+    if not torch.is_tensor(intent_progress):
+        return
+    intent = intent_progress.detach().float()
+    if int(intent.shape[0]) != int(frame.shape[0]):
+        return
+    intent = intent.reshape(int(frame.shape[0]), -1).mean(dim=-1)
+    gap = intent - frame
+    # All three values therefore use the exact same diagnostic samples.
+    losses["flow_jepa_frame_progress"] = frame.mean()
+    losses["flow_jepa_intent_frame_progress_gap"] = gap.mean()
+    losses["flow_jepa_intent_frame_progress_mae"] = gap.abs().mean()
 
 
 def _attach_v94_loss_ledger(
@@ -9132,30 +12825,134 @@ _FLOW_JEPA_LOG_VERSIONS = frozenset(
         "v109",
         "v110",
         "v111",
+        "v112",
+        "v113",
+        "v114",
+        "v115",
+        "v116",
+        "v117",
+        "v118",
+        "v119",
+        "v120",
     }
 )
 _RAW_FLOW_JEPA_LOG_VERSIONS = frozenset(
-    {"v97", "v98", "v99", "v100", "v101", "v102", "v103", "v104", "v105", "v106", "v107", "v108", "v109", "v110", "v111"}
+    {
+        "v97",
+        "v98",
+        "v99",
+        "v100",
+        "v101",
+        "v102",
+        "v103",
+        "v104",
+        "v105",
+        "v106",
+        "v107",
+        "v108",
+        "v109",
+        "v110",
+        "v111",
+        "v112",
+        "v113",
+        "v114",
+        "v115",
+        "v116",
+        "v117",
+        "v118",
+        "v119",
+        "v120",
+    }
 )
 _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS = frozenset(
-    {"v100", "v101", "v102", "v103", "v104", "v105", "v106", "v107", "v108", "v109", "v110", "v111"}
+    {
+        "v100",
+        "v101",
+        "v102",
+        "v103",
+        "v104",
+        "v105",
+        "v106",
+        "v107",
+        "v108",
+        "v109",
+        "v110",
+        "v111",
+        "v112",
+        "v113",
+        "v114",
+        "v115",
+        "v116",
+        "v117",
+        "v118",
+        "v119",
+        "v120",
+    }
 )
 _BALANCED_FLOW_JEPA_LOG_VERSIONS = frozenset(
-    {"v101", "v102", "v103", "v104", "v105", "v106", "v107", "v108", "v109", "v110", "v111"}
+    {
+        "v101",
+        "v102",
+        "v103",
+        "v104",
+        "v105",
+        "v106",
+        "v107",
+        "v108",
+        "v109",
+        "v110",
+        "v111",
+        "v112",
+        "v113",
+        "v114",
+        "v115",
+        "v116",
+        "v117",
+        "v118",
+        "v119",
+        "v120",
+    }
 )
 
 
 def _evidence_log_version(*rows: dict[str, float]) -> str:
     def maximum(*keys: str) -> float:
         return max(
-            (
-                float(row.get(key, 0.0))
-                for row in rows
-                for key in keys
-            ),
+            (float(row.get(key, 0.0)) for row in rows for key in keys),
             default=0.0,
         )
 
+    if maximum("object_intent_dynamics_active") > 0.5:
+        return "v120"
+    if maximum("grounded_intent_effect_active") > 0.5:
+        return "v119"
+    if maximum("flow_jepa_differential_effect_bank_active") > 0.5:
+        return "v118"
+    if maximum("flow_jepa_stateless_intent_controller_active") > 0.5:
+        return "v117"
+    if maximum("flow_jepa_supervised_effect_mainline_active") > 0.5:
+        return "v116"
+    if (
+        maximum(
+            "flow_jepa_policy_plan_compiler_active",
+            "flow_jepa_goal_phase_machine_active",
+            "flow_jepa_future_effect_field_active",
+        )
+        > 0.5
+    ):
+        return "v115"
+    if (
+        maximum(
+            "flow_jepa_p1_shared_factual",
+            "flow_jepa_typed_p2_utility_precision",
+        )
+        > 0.5
+    ):
+        return "v114"
+    if maximum("flow_jepa_functional_mainline_routing") > 0.5:
+        return "v113"
+    if maximum("flow_jepa_pre_value_owner_routing") > 0.5:
+        return "v112"
     if maximum("flow_jepa_structured_ownership_bottleneck") > 0.5:
         return "v111"
     if maximum("flow_jepa_coordinate_typed_raw_detail") > 0.5:
@@ -9204,28 +13001,40 @@ def _evidence_log_version(*rows: dict[str, float]) -> str:
         )
     ):
         return "v104"
-    if maximum(
-        "flow_jepa_predictive_change_contract",
-        "flow_jepa_soft_address_lattice",
-        "evidence_policy_delta_bridge_enabled",
-    ) > 0.5:
+    if (
+        maximum(
+            "flow_jepa_predictive_change_contract",
+            "flow_jepa_soft_address_lattice",
+            "evidence_policy_delta_bridge_enabled",
+        )
+        > 0.5
+    ):
         return "v103"
-    if maximum(
-        "flow_jepa_raw_detail_deferred_to_policy",
-        "flow_jepa_world_anchor_write_only",
-        "evidence_top_policy_workspace_horizon_pool",
-    ) > 0.5:
+    if (
+        maximum(
+            "flow_jepa_raw_detail_deferred_to_policy",
+            "flow_jepa_world_anchor_write_only",
+            "evidence_top_policy_workspace_horizon_pool",
+        )
+        > 0.5
+    ):
         return "v102"
-    if maximum(
-        "temporal_balance_active",
-        "flow_jepa_teacher_balanced_target_mask",
-        "evidence_top_policy_workspace_fixed_fusion",
-    ) > 0.5:
+    if (
+        maximum(
+            "temporal_balance_active",
+            "flow_jepa_teacher_balanced_target_mask",
+            "evidence_top_policy_workspace_fixed_fusion",
+        )
+        > 0.5
+    ):
         return "v101"
-    if maximum(
-        "flow_jepa_strict_role_visual_path",
-        "flow_jepa_raw_additive_detail_path",
-    ) > 0.5:
+    if (
+        maximum(
+            "flow_jepa_strict_role_visual_path",
+            "flow_jepa_raw_additive_detail_path",
+        )
+        > 0.5
+    ):
         return "v100"
     if maximum("flow_jepa_zero_flow_guard") > 0.5:
         return "v99"
@@ -9253,10 +13062,7 @@ def _evidence_serial_log_line(
     it is evidence; fields from inactive decoder families are never fabricated.
     """
 
-    if (
-        "role_residual_written_rms" not in row
-        and "role_residual_bounded_rms" in row
-    ):
+    if "role_residual_written_rms" not in row and "role_residual_bounded_rms" in row:
         # V104-V106 reported the pre-gate bounded tensor under the historical
         # write label.  Preserve old-log readability while V107 prefers the
         # factual post-gate write metric whenever it exists.
@@ -9283,6 +13089,19 @@ def _evidence_serial_log_line(
         f"loss_total={row['loss']:.6f}",
         f"flow_loss={row['physical_flow']:.6f}",
     ]
+    if log_version in {"v116", "v117", "v118"}:
+        # These are semantic aliases over the actual objective tensors.  Keep
+        # the ancestral fields below for cross-version parsers, while making
+        # the V116 action ledger readable without knowing the old shorthand.
+        for label, key, spec in (
+            ("native_velocity_mse", "native_velocity_mse", ".6f"),
+            ("arm_tangent_mse", "arm_tangent_mse", ".5f"),
+            ("arm_null_mse", "arm_null_mse", ".5f"),
+            ("gripper_tangent_mse", "gripper_tangent_mse", ".5f"),
+            ("gripper_null_mse", "gripper_null_mse", ".5f"),
+            ("event_reweight_delta", "event_reweight_delta", "+.3e"),
+        ):
+            append(loss_parts, label, key, spec, keep_zero=True)
     for label, key, spec in (
         ("native_flow", "physical_flow_native", ".6f"),
         ("arm_flow", "arm_fm_per_dim", ".5f"),
@@ -9304,8 +13123,7 @@ def _evidence_serial_log_line(
     present_groups = [
         name
         for name in group_keys
-        if f"loss_group_{name}" in row
-        and abs(float(row[f"loss_group_{name}"])) > 1e-12
+        if f"loss_group_{name}" in row and abs(float(row[f"loss_group_{name}"])) > 1e-12
     ]
     if present_groups:
         loss_parts.append(
@@ -9313,9 +13131,7 @@ def _evidence_serial_log_line(
             + "/".join(f"{name}:{row[f'loss_group_{name}']:.5f}" for name in present_groups)
         )
     contribution_keys = [
-        key
-        for key in row
-        if key.startswith("loss_contrib_") and abs(float(row[key])) > 1e-12
+        key for key in row if key.startswith("loss_contrib_") and abs(float(row[key])) > 1e-12
     ]
     if contribution_keys:
         ranked_contributions = sorted(
@@ -9335,11 +13151,7 @@ def _evidence_serial_log_line(
     representation_parts: list[str] = []
     if log_version in _FLOW_JEPA_LOG_VERSIONS:
         representation_parts.append(f"[{log_version}-repr]")
-        future_prediction_label = (
-            "future_pred"
-            if log_version != "v95"
-            else "window_pred"
-        )
+        future_prediction_label = "future_pred" if log_version != "v95" else "window_pred"
         for label, key, spec in (
             (future_prediction_label, "flow_jepa_future_prediction", ".5f"),
             ("change_dir", "flow_jepa_future_change_direction", ".5f"),
@@ -9558,6 +13370,21 @@ def _evidence_serial_log_line(
                 ".0f",
             ),
             (
+                "pre_value_owner",
+                "flow_jepa_pre_value_owner_routing",
+                ".0f",
+            ),
+            (
+                "functional_mainline",
+                "flow_jepa_functional_mainline_routing",
+                ".0f",
+            ),
+            (
+                "g3_query_private_cos",
+                "flow_jepa_progressive_g3_query_private_cosine",
+                ".3f",
+            ),
+            (
                 "g2_owner_sem_app_l1",
                 "flow_jepa_progressive_g2_semantic_appearance_posterior_l1",
                 ".3f",
@@ -9600,6 +13427,143 @@ def _evidence_serial_log_line(
             (
                 "world_public_ratio",
                 "flow_jepa_progressive_world_public_ratio",
+                ".3f",
+            ),
+            (
+                "world_public_private_ratio",
+                "flow_jepa_progressive_world_public_private_ratio",
+                ".3f",
+            ),
+            (
+                "world_private_rms",
+                "flow_jepa_progressive_world_private_state_rms",
+                ".3f",
+            ),
+            (
+                "w0_app_state",
+                "flow_jepa_pre_value_w0_appearance_state_rms",
+                ".3f",
+            ),
+            (
+                "w1_app_state",
+                "flow_jepa_pre_value_w1_appearance_state_rms",
+                ".3f",
+            ),
+            (
+                "w2_app_state",
+                "flow_jepa_pre_value_w2_appearance_state_rms",
+                ".3f",
+            ),
+            (
+                "w3_app_state",
+                "flow_jepa_pre_value_w3_appearance_state_rms",
+                ".3f",
+            ),
+            (
+                "w3_sem_state",
+                "flow_jepa_pre_value_w3_semantic_state_rms",
+                ".3f",
+            ),
+            (
+                "w3_geo_state",
+                "flow_jepa_pre_value_w3_geometry_state_rms",
+                ".3f",
+            ),
+            (
+                "w3_interval_state",
+                "flow_jepa_pre_value_w3_interval_state_rms",
+                ".3f",
+            ),
+            (
+                "w0_carrier_ratio",
+                "flow_jepa_pre_value_w0_carrier_ratio",
+                ".3f",
+            ),
+            (
+                "w1_carrier_ratio",
+                "flow_jepa_pre_value_w1_carrier_ratio",
+                ".3f",
+            ),
+            (
+                "w2_carrier_ratio",
+                "flow_jepa_pre_value_w2_carrier_ratio",
+                ".3f",
+            ),
+            (
+                "w3_carrier_ratio",
+                "flow_jepa_pre_value_w3_carrier_ratio",
+                ".3f",
+            ),
+            (
+                "p1_app_prior",
+                "flow_jepa_typed_p1_appearance_pre_value_prior_rms",
+                ".3f",
+            ),
+            (
+                "p1_w_app_candidate",
+                "flow_jepa_typed_p1_world_appearance_candidate_logit_rms",
+                ".3f",
+            ),
+            (
+                "p1_app_gateway_query",
+                "flow_jepa_typed_p1_appearance_gateway_query_rms",
+                ".3f",
+            ),
+            ("p1_query_rows", "flow_jepa_p1_query_rows", ".0f"),
+            ("p2_query_rows", "flow_jepa_p2_query_rows", ".0f"),
+            (
+                "p1_query_chunk",
+                "flow_jepa_address_query_chunk_actual",
+                ".0f",
+            ),
+            (
+                "p1_checkpoint_configured",
+                "flow_jepa_typed_p1_activation_checkpoint",
+                ".0f",
+            ),
+            (
+                "p1_checkpoint_active",
+                "flow_jepa_typed_p1_activation_checkpoint_active",
+                ".0f",
+            ),
+            (
+                "w0_owner_route_entropy",
+                "flow_jepa_functional_w0_route_entropy",
+                ".3f",
+            ),
+            (
+                "w0_owner_route_null",
+                "flow_jepa_functional_w0_route_null_mass",
+                ".3f",
+            ),
+            (
+                "w3_owner_route_entropy",
+                "flow_jepa_functional_w3_route_entropy",
+                ".3f",
+            ),
+            (
+                "w3_owner_route_null",
+                "flow_jepa_functional_w3_route_null_mass",
+                ".3f",
+            ),
+            (
+                "w3_owner_route_sem",
+                "flow_jepa_functional_w3_semantic_route_mass",
+                ".3f",
+            ),
+            (
+                "w3_owner_route_app",
+                "flow_jepa_functional_w3_appearance_route_mass",
+                ".3f",
+            ),
+            (
+                "w3_owner_route_geo",
+                "flow_jepa_functional_w3_geometry_route_mass",
+                ".3f",
+            ),
+            (
+                "w3_owner_route_interval",
+                "flow_jepa_functional_w3_interval_route_mass",
                 ".3f",
             ),
             (
@@ -9649,6 +13613,512 @@ def _evidence_serial_log_line(
                 ".3f",
             ),
             (
+                "effect_pred_cos",
+                "flow_jepa_future_effect_pred_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "effect_target_cos",
+                "flow_jepa_future_effect_target_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "effect_pred_var",
+                "flow_jepa_future_effect_pred_interval_variation",
+                ".3f",
+            ),
+            (
+                "effect_target_var",
+                "flow_jepa_future_effect_target_interval_variation",
+                ".3f",
+            ),
+            (
+                "effect_transport_pred_var",
+                "flow_jepa_future_effect_pred_transport_variation",
+                ".3f",
+            ),
+            (
+                "effect_transport_target_var",
+                "flow_jepa_future_effect_target_transport_variation",
+                ".3f",
+            ),
+            (
+                "effect_teacher_rel",
+                "flow_jepa_future_effect_teacher_reliability_mean",
+                ".3f",
+            ),
+            (
+                "effect_teacher_entropy",
+                "flow_jepa_future_effect_teacher_association_entropy",
+                ".3f",
+            ),
+            (
+                "effect_teacher_semantic_advantage",
+                "flow_jepa_future_effect_teacher_semantic_advantage",
+                ".3f",
+            ),
+            (
+                "effect_semantic_loss",
+                "flow_jepa_future_effect_semantic_loss",
+                ".4f",
+            ),
+            (
+                "effect_successor_loss",
+                "flow_jepa_future_effect_successor_loss",
+                ".4f",
+            ),
+            (
+                "effect_semantic_near_loss",
+                "flow_jepa_future_effect_semantic_near_loss",
+                ".4f",
+            ),
+            (
+                "effect_semantic_mid_loss",
+                "flow_jepa_future_effect_semantic_mid_loss",
+                ".4f",
+            ),
+            (
+                "effect_semantic_late_loss",
+                "flow_jepa_future_effect_semantic_late_loss",
+                ".4f",
+            ),
+            (
+                "effect_intent_summary_loss",
+                "flow_jepa_future_effect_intent_summary_loss",
+                ".4f",
+            ),
+            (
+                "effect_near_contrib",
+                "flow_jepa_future_effect_effective_near_loss",
+                ".4f",
+            ),
+            (
+                "effect_mid_contrib",
+                "flow_jepa_future_effect_effective_mid_loss",
+                ".4f",
+            ),
+            (
+                "effect_late_contrib",
+                "flow_jepa_future_effect_effective_late_loss",
+                ".4f",
+            ),
+            (
+                "effect_w1_current_loss",
+                "flow_jepa_future_effect_w1_current_loss",
+                ".4f",
+            ),
+            (
+                "effect_w1_successor_loss",
+                "flow_jepa_future_effect_w1_successor_loss",
+                ".4f",
+            ),
+            (
+                "effect_w1_semantic_loss",
+                "flow_jepa_future_effect_w1_semantic_loss",
+                ".4f",
+            ),
+            (
+                "effect_w2_current_loss",
+                "flow_jepa_future_effect_w2_current_loss",
+                ".4f",
+            ),
+            (
+                "effect_w2_successor_loss",
+                "flow_jepa_future_effect_w2_successor_loss",
+                ".4f",
+            ),
+            (
+                "effect_w2_semantic_loss",
+                "flow_jepa_future_effect_w2_semantic_loss",
+                ".4f",
+            ),
+            (
+                "effect_transport_loss",
+                "flow_jepa_future_effect_transport_loss",
+                ".4f",
+            ),
+            (
+                "effect_cov_loss",
+                "flow_jepa_future_effect_transport_covariance_loss",
+                ".4f",
+            ),
+            (
+                "effect_persist_loss",
+                "flow_jepa_future_effect_persistence_loss",
+                ".4f",
+            ),
+            (
+                "effect_visible_loss",
+                "flow_jepa_future_effect_visibility_loss",
+                ".4f",
+            ),
+            (
+                "effect_uncert_loss",
+                "flow_jepa_future_effect_uncertainty_loss",
+                ".4f",
+            ),
+            (
+                "effect_relative_transition_loss",
+                "flow_jepa_future_effect_relative_transition_loss",
+                ".4f",
+            ),
+            (
+                "w1_effect_cos",
+                "flow_jepa_differential_w1_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "w1_effect_var",
+                "flow_jepa_differential_w1_slot_variation",
+                ".3f",
+            ),
+            (
+                "w2_effect_cos",
+                "flow_jepa_differential_w2_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "w2_effect_var",
+                "flow_jepa_differential_w2_slot_variation",
+                ".3f",
+            ),
+            (
+                "effect_pred_near",
+                "flow_jepa_differential_w2_near_effect_rms",
+                ".3f",
+            ),
+            (
+                "effect_pred_mid",
+                "flow_jepa_differential_w2_mid_effect_rms",
+                ".3f",
+            ),
+            (
+                "effect_pred_late",
+                "flow_jepa_differential_w2_late_effect_rms",
+                ".3f",
+            ),
+            (
+                "effect_target_near",
+                "flow_jepa_future_effect_target_near_rms",
+                ".3f",
+            ),
+            (
+                "effect_target_mid",
+                "flow_jepa_future_effect_target_mid_rms",
+                ".3f",
+            ),
+            (
+                "effect_target_late",
+                "flow_jepa_future_effect_target_late_rms",
+                ".3f",
+            ),
+            (
+                "effect_rel_near",
+                "flow_jepa_future_effect_teacher_reliability_near",
+                ".3f",
+            ),
+            (
+                "effect_rel_mid",
+                "flow_jepa_future_effect_teacher_reliability_mid",
+                ".3f",
+            ),
+            (
+                "effect_rel_late",
+                "flow_jepa_future_effect_teacher_reliability_late",
+                ".3f",
+            ),
+            (
+                "p2_diff_read",
+                "flow_jepa_p2_effect_read_rms",
+                ".3f",
+            ),
+            (
+                "p2_diff_content_score",
+                "flow_jepa_p2_effect_content_score_rms",
+                ".3f",
+            ),
+            (
+                "p2_diff_intent_score",
+                "flow_jepa_p2_effect_intent_score_rms",
+                ".3f",
+            ),
+            (
+                "p2_diff_coordinate_score",
+                "flow_jepa_p2_effect_coordinate_score_rms",
+                ".3f",
+            ),
+            (
+                "p2_diff_entropy",
+                "flow_jepa_p2_effect_entropy",
+                ".3f",
+            ),
+            (
+                "p2_effect_read",
+                "flow_jepa_p2_structured_effect_read_rms",
+                ".3f",
+            ),
+            (
+                "p2_effect_entropy",
+                "flow_jepa_p2_structured_effect_entropy",
+                ".3f",
+            ),
+            (
+                "p2_effect_interval_var",
+                "flow_jepa_p2_structured_effect_interval_rms_variation",
+                ".3f",
+            ),
+            (
+                "p2_effect_slot_var",
+                "flow_jepa_p2_structured_effect_slot_variation",
+                ".3f",
+            ),
+            ("p2_effect_near", "flow_jepa_p2_effect_near_mass", ".3f"),
+            ("p2_effect_mid", "flow_jepa_p2_effect_mid_mass", ".3f"),
+            ("p2_effect_late", "flow_jepa_p2_effect_late_mass", ".3f"),
+            (
+                "consequence_effect",
+                "flow_jepa_consequence_effect_base_rms",
+                ".3f",
+            ),
+            (
+                "consequence_organized",
+                "flow_jepa_consequence_organized_delta_rms",
+                ".3f",
+            ),
+            (
+                "plan_protected_base",
+                "flow_jepa_policy_plan_protected_base_rms",
+                ".3f",
+            ),
+            (
+                "plan_precision",
+                "flow_jepa_policy_plan_precision_rms",
+                ".3f",
+            ),
+            (
+                "plan_temporal",
+                "flow_jepa_policy_plan_temporal_rms",
+                ".3f",
+            ),
+            (
+                "intent_progress",
+                "flow_jepa_intent_progress_coordinate",
+                ".3f",
+            ),
+            ("frame_progress", "flow_jepa_frame_progress", ".3f"),
+            (
+                "progress_gap",
+                "flow_jepa_intent_frame_progress_gap",
+                "+.3f",
+            ),
+            (
+                "progress_mae",
+                "flow_jepa_intent_frame_progress_mae",
+                ".3f",
+            ),
+            (
+                "intent_selector_max",
+                "flow_jepa_intent_window_selector_max",
+                ".3f",
+            ),
+            (
+                "intent_selector_entropy",
+                "flow_jepa_intent_window_selector_entropy",
+                ".3f",
+            ),
+            (
+                "intent_window_cos",
+                "flow_jepa_intent_window_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "intent_program_cos",
+                "flow_jepa_intent_program_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "intent_attention_entropy",
+                "flow_jepa_intent_program_attention_entropy",
+                ".3f",
+            ),
+            (
+                "intent_predictive_effect",
+                "flow_jepa_intent_predictive_effect_rms",
+                ".3f",
+            ),
+            (
+                "intent_language_innovation",
+                "flow_jepa_intent_language_innovation_rms",
+                ".3f",
+            ),
+            (
+                "intent_history_innovation",
+                "flow_jepa_intent_history_innovation_rms",
+                ".3f",
+            ),
+            (
+                "intent_grounding_innovation",
+                "flow_jepa_intent_grounding_innovation_rms",
+                ".3f",
+            ),
+            (
+                "intent_ordered_innovation",
+                "flow_jepa_intent_ordered_innovation_rms",
+                ".3f",
+            ),
+            (
+                "intent_near_program",
+                "flow_jepa_intent_near_program_argmax",
+                ".2f",
+            ),
+            (
+                "intent_mid_program",
+                "flow_jepa_intent_mid_program_argmax",
+                ".2f",
+            ),
+            (
+                "intent_late_program",
+                "flow_jepa_intent_late_program_argmax",
+                ".2f",
+            ),
+            (
+                "intent_observation_steps",
+                "flow_jepa_intent_observation_steps",
+                ".0f",
+            ),
+            (
+                "w0_proposal_mass",
+                "flow_jepa_w0_typed_condition_proposal_mass",
+                ".3f",
+            ),
+            (
+                "w1_proposal_mass",
+                "flow_jepa_w1_typed_condition_proposal_mass",
+                ".3f",
+            ),
+            (
+                "w2_proposal_mass",
+                "flow_jepa_w2_typed_condition_proposal_mass",
+                ".3f",
+            ),
+            (
+                "w0_clean_proposal",
+                "flow_jepa_w0_clean_proposal_context_rms",
+                ".3f",
+            ),
+            (
+                "w1_clean_proposal",
+                "flow_jepa_w1_clean_proposal_context_rms",
+                ".3f",
+            ),
+            (
+                "w2_clean_proposal",
+                "flow_jepa_w2_clean_proposal_context_rms",
+                ".3f",
+            ),
+            (
+                "w0_direct_intent_bypass",
+                "flow_jepa_w0_direct_intent_bypass",
+                ".1e",
+            ),
+            (
+                "w1_direct_intent_bypass",
+                "flow_jepa_w1_direct_intent_bypass",
+                ".1e",
+            ),
+            (
+                "w2_direct_intent_bypass",
+                "flow_jepa_w2_direct_intent_bypass",
+                ".1e",
+            ),
+            (
+                "p1_intent_query",
+                "flow_jepa_phase_detail_query_norm",
+                ".3f",
+            ),
+            (
+                "p1_direct_condition_bypass",
+                "flow_jepa_differential_p1_direct_condition_bypass",
+                ".1e",
+            ),
+            (
+                "g_to_p_intent_query",
+                "attnres_world_to_policy_phase_query_norm",
+                ".3f",
+            ),
+            (
+                "g_to_p_goal_bypass",
+                "attnres_world_to_policy_condition_query_norm",
+                ".1e",
+            ),
+            (
+                "g_to_p_history_bypass",
+                "attnres_world_to_policy_history_query_norm",
+                ".1e",
+            ),
+            ("phase_entropy", "flow_jepa_phase_entropy", ".3f"),
+            ("phase_max", "flow_jepa_phase_max", ".3f"),
+            (
+                "phase_terminal",
+                "flow_jepa_phase_terminal_mass",
+                ".3f",
+            ),
+            (
+                "execution_terminal",
+                "flow_jepa_execution_terminal_probability",
+                ".3f",
+            ),
+            (
+                "execution_terminal_uncert",
+                "flow_jepa_execution_terminal_uncertainty",
+                ".3f",
+            ),
+            (
+                "execution_terminal_bias",
+                "evidence_execution_terminal_external_bias",
+                "+.3f",
+            ),
+            (
+                "phase_index",
+                "flow_jepa_phase_expected_index",
+                ".3f",
+            ),
+            (
+                "phase_index_std",
+                "flow_jepa_phase_expected_index_std",
+                ".3f",
+            ),
+            (
+                "phase_replay_steps",
+                "flow_jepa_phase_replay_steps",
+                ".0f",
+            ),
+            (
+                "phase_interval_cos",
+                "flow_jepa_phase_horizon_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "phase_interval_var",
+                "flow_jepa_phase_horizon_variation",
+                ".3f",
+            ),
+            (
+                "phase_grounding_program_var",
+                "flow_jepa_phase_program_grounding_variation",
+                ".3f",
+            ),
+            (
+                "p1_g3_only_address",
+                "flow_jepa_p1_g3_only_factual_address",
+                ".0f",
+            ),
+            (
+                "legacy_w_posterior_skipped",
+                "flow_jepa_v115_legacy_w_posterior_skipped",
+                ".0f",
+            ),
+            (
                 "future_transport_spatial_logit",
                 "flow_jepa_progressive_future_transport_spatial_logit_rms",
                 ".3f",
@@ -9665,6 +14135,93 @@ def _evidence_serial_log_line(
                 ".3f",
             ),
             ("p2_detail_output", "flow_jepa_typed_p2_output_rms", ".3f"),
+            (
+                "p2_policy_carrier",
+                "flow_jepa_typed_p2_policy_carrier_rms",
+                ".3f",
+            ),
+            (
+                "p2_owner_delta",
+                "flow_jepa_typed_p2_routed_delta_rms",
+                ".3f",
+            ),
+            (
+                "p2_route_null",
+                "flow_jepa_typed_p2_route_null_mass",
+                ".3f",
+            ),
+            (
+                "phase_horizon_var",
+                "flow_jepa_phase_horizon_variation",
+                ".3f",
+            ),
+            ("phase_entropy", "flow_jepa_phase_entropy", ".3f"),
+            ("phase_max", "flow_jepa_phase_max", ".3f"),
+            (
+                "phase_terminal",
+                "flow_jepa_phase_terminal_mass",
+                ".3f",
+            ),
+            (
+                "goal_horizon_var",
+                "flow_jepa_goal_horizon_variation",
+                ".3f",
+            ),
+            (
+                "history_horizon_var",
+                "flow_jepa_history_horizon_variation",
+                ".3f",
+            ),
+            (
+                "phase_horizon_cos",
+                "flow_jepa_phase_horizon_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "goal_horizon_cos",
+                "flow_jepa_goal_horizon_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "history_horizon_cos",
+                "flow_jepa_history_horizon_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "p3_protected_base",
+                "flow_jepa_policy_plan_protected_base_rms",
+                ".3f",
+            ),
+            (
+                "p3_precision",
+                "flow_jepa_policy_plan_precision_rms",
+                ".3f",
+            ),
+            (
+                "p3_effect",
+                "flow_jepa_policy_plan_effect_rms",
+                ".3f",
+            ),
+            (
+                "p3_temporal",
+                "flow_jepa_policy_plan_temporal_rms",
+                ".3f",
+            ),
+            (
+                "p3_terminal",
+                "flow_jepa_policy_plan_terminal_rms",
+                ".3f",
+            ),
+            (
+                "p3_lane_cos",
+                "flow_jepa_policy_plan_lane_cosine",
+                ".3f",
+            ),
+            (
+                "p3_lane_var",
+                "flow_jepa_policy_plan_lane_variation",
+                ".3f",
+            ),
             (
                 "horizon_cos_seed",
                 "flow_jepa_online_address_boundary_seed_adjacent_cosine",
@@ -9756,6 +14313,11 @@ def _evidence_serial_log_line(
                 ".3f",
             ),
             (
+                "interval_stage_online_w",
+                "flow_jepa_interval_stage_online_w_candidate",
+                ".0f",
+            ),
+            (
                 "interval_stage_carrier_ratio",
                 "flow_jepa_interval_stage_carrier_ratio",
                 ".3f",
@@ -9820,6 +14382,8 @@ def _evidence_serial_log_line(
             ("future_scale", "target_scale", ".3f"),
             ("future_norm_scale", "normalization_scale", ".3f"),
             ("future_rel", "reliability", ".3f"),
+            ("future_direction", "active_direction", ".4f"),
+            ("future_active", "active_loss", ".4f"),
             ("address_kl", "address_kl", ".3f"),
             ("address_rel", "address_reliability", ".3f"),
         ):
@@ -9828,17 +14392,13 @@ def _evidence_serial_log_line(
                 if suffix == "address_kl":
                     key = f"flow_jepa_horizon_address_{offset}_kl"
                 elif suffix == "address_reliability":
-                    key = (
-                        f"flow_jepa_horizon_address_{offset}_reliability"
-                    )
+                    key = f"flow_jepa_horizon_address_{offset}_reliability"
                 else:
                     key = f"flow_jepa_future_horizon_{offset}_{suffix}"
                 if key in row:
                     entries.append(f"{offset}:{format(row[key], spec)}")
             if entries:
-                representation_parts.append(
-                    f"{label}=" + "/".join(entries)
-                )
+                representation_parts.append(f"{label}=" + "/".join(entries))
         interval_offsets = sorted(
             {
                 int(match.group(1))
@@ -9863,9 +14423,7 @@ def _evidence_serial_log_line(
                 if key in row:
                     parts.append(f"{label}:{format(row[key], spec)}")
             if parts:
-                representation_parts.append(
-                    f"interval_h{offset}=" + "/".join(parts)
-                )
+                representation_parts.append(f"interval_h{offset}=" + "/".join(parts))
         if log_version == "v96":
             for label, key, spec in (
                 ("horizon_count", "flow_jepa_horizon_count", ".0f"),
@@ -9964,17 +14522,23 @@ def _evidence_serial_log_line(
                 ("motion_visible", "flow_jepa_raw_observable_motion_fraction", ".3f"),
                 ("raw_precision", "flow_jepa_raw_detail_precision_mean", ".3f"),
                 (
-                    "raw_detail_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_flow",
+                    "raw_detail_share"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "raw_address_flow",
                     "flow_jepa_raw_address_flow_mass",
                     ".3f",
                 ),
                 (
-                    "raw_base_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_fallback",
+                    "raw_base_share"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "raw_address_fallback",
                     "flow_jepa_raw_address_fallback_mass",
                     ".3f",
                 ),
                 (
-                    "detail_address_entropy" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_entropy",
+                    "detail_address_entropy"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "raw_address_entropy",
                     "flow_jepa_raw_address_entropy",
                     ".3f",
                 ),
@@ -10248,9 +14812,7 @@ def _evidence_serial_log_line(
         if key.startswith("evidence_mmd_it_block_") and key.endswith("_update_norm")
     )
     if block_update_keys:
-        block_update_keys = [
-            key for key in block_update_keys if abs(float(row[key])) > 1e-12
-        ]
+        block_update_keys = [key for key in block_update_keys if abs(float(row[key])) > 1e-12]
     if block_update_keys:
         execution_parts.append(
             "block_updates=" + "/".join(f"{row[key]:.3f}" for key in block_update_keys)
@@ -10261,9 +14823,7 @@ def _evidence_serial_log_line(
         if key.startswith("layer") and key.endswith("_contract") and key[5:-9].isdigit()
     )
     if layer_contract_keys:
-        layer_contract_keys = [
-            key for key in layer_contract_keys if abs(float(row[key])) > 1e-12
-        ]
+        layer_contract_keys = [key for key in layer_contract_keys if abs(float(row[key])) > 1e-12]
     if layer_contract_keys:
         execution_parts.append(
             "layer_losses=" + "/".join(f"{row[key]:.4f}" for key in layer_contract_keys)
@@ -10304,6 +14864,9 @@ def _evidence_serial_log_line(
         ("address_g2", "grad_flow_dino_progressive_g2"),
         ("address_g3", "grad_flow_dino_progressive_g3"),
         ("address_world_query", "grad_flow_dino_progressive_world_query"),
+        ("functional_world_route", "grad_flow_dino_functional_world_router"),
+        ("future_effect_sem", "grad_flow_dino_future_effect_semantic"),
+        ("future_effect_geo", "grad_flow_dino_future_effect_geometry"),
         ("future_transport", "grad_flow_dino_progressive_future_transport"),
         ("interval_stage", "grad_flow_dino_interval_stage"),
         ("attnres_g2w", "grad_attnres_ground_to_world"),
@@ -10312,11 +14875,92 @@ def _evidence_serial_log_line(
         ("protected_detail_route", "grad_protected_detail_basis_reader"),
         ("late_detail_reader", "grad_late_raw_detail_reader"),
         ("typed_p1_selector", "grad_late_raw_detail_typed_p1_selector"),
+        ("p1_app_gateway", "grad_late_raw_detail_p1_appearance_gateway"),
         ("literal_rgb_value", "grad_late_raw_detail_literal_rgb_value"),
         ("learned_detail_value", "grad_late_raw_detail_learned_detail_value"),
         ("typed_p2_condition", "grad_late_raw_detail_typed_p2_condition"),
+        ("p2_owner_router", "grad_late_raw_detail_typed_p2_router"),
         ("typed_p2_refiner", "grad_late_raw_detail_typed_p2"),
         ("goal_tokens", "grad_goal_resampler"),
+        ("horizon_condition", "grad_stateless_horizon_adapter"),
+        ("horizon_phase", "grad_stateless_horizon_phase_path"),
+        ("horizon_goal", "grad_stateless_horizon_goal_path"),
+        ("horizon_history", "grad_stateless_horizon_history_path"),
+        ("horizon_world_queries", "grad_stateless_horizon_world_queries"),
+        ("goal_phase", "grad_stateless_goal_phase_machine"),
+        ("grounded_s_goal", "grad_grounded_intent_goal"),
+        ("grounded_s_observable", "grad_grounded_intent_observable"),
+        ("grounded_s_intervals", "grad_grounded_intent_intervals"),
+        ("grounded_s_temporal", "grad_grounded_intent_temporal"),
+        ("grounded_s_completion", "grad_grounded_intent_completion"),
+        ("grounded_w_proposal", "grad_grounded_clean_proposal"),
+        ("grounded_w_inputs", "grad_grounded_world_shared_inputs"),
+        ("grounded_w1_blocks", "grad_grounded_world_w1_blocks"),
+        ("grounded_w2_blocks", "grad_grounded_world_w2_blocks"),
+        ("grounded_w_shared_heads", "grad_grounded_world_shared_heads"),
+        ("object_grounder", "grad_object_grounder"),
+        ("object_s_goal", "grad_object_s_goal"),
+        ("object_s_history", "grad_object_s_history"),
+        ("object_s_typed", "grad_object_s_typed_intervals"),
+        ("object_s_temporal", "grad_object_s_temporal"),
+        ("object_s_state_change", "grad_object_s_state_change"),
+        ("object_recognizer", "grad_object_plan_recognizer"),
+        ("object_coarse_action", "grad_object_coarse_action"),
+        ("object_w_inputs", "grad_object_w_inputs"),
+        ("object_w1", "grad_object_w1"),
+        ("object_w2", "grad_object_w2"),
+        ("object_w_heads", "grad_object_w_heads"),
+        ("object_p2", "grad_object_p2_effect_reader"),
+        ("object_consequence", "grad_object_consequence"),
+        ("object_p3_factual", "grad_object_p3_factual"),
+        ("object_p3_precision", "grad_object_p3_precision"),
+        ("object_p3_effect", "grad_object_p3_effect"),
+        ("object_p3_temporal", "grad_object_p3_temporal"),
+        ("object_p3_state_change", "grad_object_p3_state_change"),
+        ("intent_goal", "grad_intent_goal_program"),
+        ("intent_history", "grad_intent_history_encoder"),
+        ("intent_history_write", "grad_intent_history_write"),
+        ("intent_grounding", "grad_intent_grounding_write"),
+        ("intent_ordered", "grad_intent_ordered_refinement"),
+        ("intent_window", "grad_intent_window_read"),
+        ("intent_predictive", "grad_intent_predictive_effect"),
+        ("intent_terminal", "grad_intent_terminal"),
+        (
+            "w_clean_proposal",
+            "grad_differential_clean_proposal_world_condition",
+        ),
+        ("intent_g_to_p_query", "grad_intent_canonical_g_to_p_query"),
+        ("intent_p1_query", "grad_intent_canonical_p1_query"),
+        ("intent_s1", "grad_stateless_intent_s1"),
+        ("intent_s2", "grad_stateless_intent_s2"),
+        ("intent_s3", "grad_stateless_intent_s3"),
+        ("intent_mlp", "grad_stateless_intent_mlp"),
+        ("goal_program", "grad_goal_phase_program"),
+        ("phase_transition", "grad_goal_phase_transition"),
+        ("phase_observation", "grad_goal_phase_observation"),
+        ("goal_world_typed", "grad_goal_phase_typed_world_context"),
+        ("p3_compiler", "grad_policy_plan_compiler"),
+        ("p2_effect_reader", "grad_p2_structured_effect_reader"),
+        ("consequence_organizer", "grad_consequence_plan_organizer"),
+        ("window_effect_near_mid", "grad_flow_dino_window_effect_near_mid"),
+        ("window_effect_late", "grad_flow_dino_window_effect_late"),
+        (
+            "differential_w1",
+            "grad_differential_w1_near_mid_transition",
+        ),
+        (
+            "differential_w2",
+            "grad_differential_w2_late_transition",
+        ),
+        ("effect_decoder", "grad_differential_effect_decoder"),
+        (
+            "current_reference",
+            "grad_differential_current_reference_bridge",
+        ),
+        ("p3_precision", "grad_policy_plan_precision"),
+        ("p3_effect", "grad_policy_plan_effect"),
+        ("p3_temporal", "grad_policy_plan_temporal"),
+        ("p3_terminal", "grad_policy_plan_terminal"),
         ("action_history", "grad_action_history_encoder"),
         ("dit_blocks", "grad_dit_blocks"),
         ("grounding_blocks", "grad_dit_grounding_blocks"),
@@ -10325,12 +14969,425 @@ def _evidence_serial_log_line(
         ("policy_heads", "grad_final_policy_heads"),
         ("global_preclip", "grad"),
     ):
-        append(grad_parts, label, key, ".2e", keep_zero=True)
+        append(
+            grad_parts,
+            label,
+            key,
+            ".2e",
+            keep_zero=(log_version not in {"v119", "v120"}),
+        )
     grad_parts.extend((f"lr={learning_rate:.3e}", f"sec_per_batch={seconds_per_batch:.3f}"))
+    if log_version in {"v119", "v120"}:
+        # V119 is a capability-selected sibling, not another layer of V115-
+        # V118 semantics.  Rebuild its representation line from the live
+        # current-observation path so retired phase/world/carrier aliases
+        # cannot reappear merely because an ancestry tensor is still exposed
+        # for checkpoint compatibility or audit.
+        representation_parts = [f"[{log_version}-repr]"]
+        for label, key, spec in (
+            ("warp", "flow_jepa_warp_loss", ".5f"),
+            ("identity_adv", "flow_jepa_identity_advantage_loss", ".5f"),
+            ("static_identity", "flow_jepa_static_identity_loss", ".5f"),
+            ("cycle", "flow_jepa_cycle_loss", ".5f"),
+            ("smooth", "flow_jepa_smoothness_loss", ".5f"),
+            ("refine_seq", "flow_jepa_refinement_sequence_loss", ".5f"),
+            ("flow_mag", "flow_jepa_patch_flow_magnitude", ".3f"),
+            ("confidence", "flow_jepa_confidence_mean", ".3f"),
+            ("occlusion", "flow_jepa_occlusion_fraction", ".3f"),
+            ("corr_entropy", "flow_jepa_correlation_entropy", ".3f"),
+            ("corr_margin", "flow_jepa_correlation_margin", ".3f"),
+            ("context_drop", "flow_jepa_context_dropout_fraction", ".3f"),
+            ("target_mask", "flow_jepa_future_target_fraction", ".3f"),
+            (
+                "p1_spatial_var",
+                "flow_jepa_typed_p1_spatial_variation",
+                ".3f",
+            ),
+            ("literal_rgb", "flow_jepa_literal_rgb_chart_rms", ".3f"),
+            (
+                "p1_query_chunk",
+                "flow_jepa_address_query_chunk_actual",
+                ".0f",
+            ),
+            (
+                "p1_checkpoint_active",
+                "flow_jepa_typed_p1_activation_checkpoint_active",
+                ".0f",
+            ),
+        ):
+            append(representation_parts, label, key, spec)
     lines = [" ".join(loss_parts)]
     if representation_parts:
         lines.append(" ".join(representation_parts))
-    if log_version in _BALANCED_FLOW_JEPA_LOG_VERSIONS:
+    if log_version == "v119":
+        grounded_parts = ["[v119-ground]"]
+        for label, key, spec in (
+            ("active", "grounded_intent_effect_active", ".0f"),
+            ("g2_fine_H", "flow_jepa_progressive_g2_fine_entropy", ".3f"),
+            (
+                "g2_sem_app_l1",
+                "flow_jepa_progressive_g2_semantic_appearance_posterior_l1",
+                ".3f",
+            ),
+            (
+                "g2_app_geo_l1",
+                "flow_jepa_progressive_g2_appearance_geometry_posterior_l1",
+                ".3f",
+            ),
+            (
+                "g3_sem_H",
+                "flow_jepa_progressive_g3_semantic_slot_entropy",
+                ".3f",
+            ),
+            (
+                "g3_app_H",
+                "flow_jepa_progressive_g3_appearance_slot_entropy",
+                ".3f",
+            ),
+            (
+                "g3_geo_H",
+                "flow_jepa_progressive_g3_geometry_slot_entropy",
+                ".3f",
+            ),
+            ("g2g3_sem", "grounded_g2_g3_semantic_owner_l1", ".3f"),
+            ("g2g3_app", "grounded_g2_g3_appearance_owner_l1", ".3f"),
+            ("g2g3_geo", "grounded_g2_g3_geometry_owner_l1", ".3f"),
+            (
+                "p1_app_geo_l1",
+                "flow_jepa_typed_p1_appearance_geometry_fine_l1",
+                ".3f",
+            ),
+            (
+                "p1_sem_app_l1",
+                "flow_jepa_typed_p1_semantic_appearance_route_l1",
+                ".3f",
+            ),
+            (
+                "current_ref_align",
+                "grounded_future_effect_current_reference_alignment_rms",
+                ".3e",
+            ),
+        ):
+            append(grounded_parts, label, key, spec)
+        intent_parts = ["[v119-intent]"]
+        for label, key, spec in (
+            ("goal_attention_H", "grounded_s_goal_attention_entropy", ".3f"),
+            (
+                "interval_goal_H",
+                "grounded_s_interval_goal_attention_entropy",
+                ".3f",
+            ),
+            ("source_attention_H", "grounded_s_interval_source_entropy", ".3f"),
+            ("interval_cos", "grounded_s_interval_adjacent_cosine", ".3f"),
+            ("interval_var", "grounded_s_interval_variation", ".3f"),
+            ("achieved", "grounded_s_achieved_rms", ".3f"),
+            ("remaining", "grounded_s_remaining_rms", ".3f"),
+            ("completion", "grounded_s_completion_probability", ".3f"),
+            ("source_null", "grounded_s_interval_null_mass", ".3f"),
+            ("source_observable", "grounded_s_interval_observable_mass", ".3f"),
+            ("source_history", "grounded_s_interval_history_mass", ".3f"),
+            ("source_semantic", "grounded_s_interval_semantic_mass", ".3f"),
+            ("source_appearance", "grounded_s_interval_appearance_mass", ".3f"),
+            ("source_geometry", "grounded_s_interval_geometry_mass", ".3f"),
+        ):
+            append(intent_parts, label, key, spec)
+        for interval in ("h4_8", "h8_16", "h16_32", "h32_48"):
+            append(
+                intent_parts,
+                f"{interval}_goal_H",
+                f"grounded_s_{interval}_goal_attention_entropy",
+                ".3f",
+            )
+            append(
+                intent_parts,
+                f"{interval}_source_H",
+                f"grounded_s_{interval}_source_attention_entropy",
+                ".3f",
+            )
+        effect_parts = ["[v119-effect]"]
+        for label, key, spec in (
+            ("w1_sem", "grounded_w1_semantic_rms", ".3f"),
+            ("w1_transport", "grounded_w1_transport_rms", ".3f"),
+            ("w1_interval_var", "grounded_w1_interval_variation", ".3f"),
+            ("w1_object_var", "grounded_w1_object_variation", ".3f"),
+            ("w1_cos", "grounded_w1_adjacent_cosine", ".3f"),
+            ("w2_sem", "grounded_w2_semantic_rms", ".3f"),
+            ("w2_transport", "grounded_w2_transport_rms", ".3f"),
+            ("w2_interval_var", "grounded_w2_interval_variation", ".3f"),
+            ("w2_object_var", "grounded_w2_object_variation", ".3f"),
+            ("w2_cos", "grounded_w2_adjacent_cosine", ".3f"),
+            (
+                "pred_cos",
+                "grounded_future_effect_prediction_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "target_cos",
+                "grounded_future_effect_target_adjacent_cosine",
+                ".3f",
+            ),
+            (
+                "pred_var",
+                "grounded_future_effect_prediction_interval_variation",
+                ".3f",
+            ),
+            (
+                "target_var",
+                "grounded_future_effect_target_interval_variation",
+                ".3f",
+            ),
+            (
+                "transport_pred_var",
+                "grounded_future_effect_prediction_transport_variation",
+                ".3f",
+            ),
+            (
+                "transport_target_var",
+                "grounded_future_effect_target_transport_variation",
+                ".3f",
+            ),
+            ("loss_successor", "flow_jepa_future_effect_successor_loss", ".4f"),
+            ("loss_semantic", "flow_jepa_future_effect_semantic_loss", ".4f"),
+            ("loss_transport", "flow_jepa_future_effect_transport_loss", ".4f"),
+            (
+                "loss_covariance",
+                "flow_jepa_future_effect_transport_covariance_loss",
+                ".4f",
+            ),
+            (
+                "loss_persistence_change",
+                "flow_jepa_future_effect_persistence_change_loss",
+                ".4f",
+            ),
+            (
+                "loss_visibility_change",
+                "flow_jepa_future_effect_visibility_change_loss",
+                ".4f",
+            ),
+            (
+                "loss_uncertainty_calibration",
+                "flow_jepa_future_effect_uncertainty_calibration_loss",
+                ".4f",
+            ),
+            (
+                "loss_reliability_calibration",
+                "flow_jepa_future_effect_reliability_calibration_loss",
+                ".4f",
+            ),
+            (
+                "loss_interval_transition",
+                "flow_jepa_future_effect_relative_transition_loss",
+                ".4f",
+            ),
+        ):
+            append(effect_parts, label, key, spec)
+        policy_parts = ["[v119-policy]"]
+        for label, key, spec in (
+            ("effect_read", "grounded_p2_effect_read_rms", ".3f"),
+            ("content_score_max", "grounded_p2_content_score_abs_max", ".3f"),
+            ("intent_score_max", "grounded_p2_intent_score_abs_max", ".3f"),
+            ("coordinate_score_max", "grounded_p2_coordinate_score_abs_max", ".3f"),
+            (
+                "query_coordinate_std",
+                "grounded_p2_query_coordinate_std",
+                ".3f",
+            ),
+            ("posterior_max", "grounded_p2_posterior_max", ".3f"),
+            ("posterior_H", "grounded_p2_posterior_entropy", ".3f"),
+            ("tau_content", "grounded_p2_content_temperature", ".3f"),
+            ("tau_intent", "grounded_p2_intent_temperature", ".3f"),
+            ("tau_coordinate", "grounded_p2_coordinate_temperature", ".3f"),
+            ("mass_h4_8", "grounded_p2_h4_8_mass", ".3f"),
+            ("mass_h8_16", "grounded_p2_h8_16_mass", ".3f"),
+            ("mass_h16_32", "grounded_p2_h16_32_mass", ".3f"),
+            ("mass_h32_48", "grounded_p2_h32_48_mass", ".3f"),
+            ("consequence_effect", "grounded_consequence_effect_rms", ".3f"),
+            (
+                "consequence_interaction",
+                "grounded_consequence_interaction_rms",
+                ".3f",
+            ),
+            ("p3_precision", "grounded_p3_precision_rms", ".3f"),
+            ("p3_temporal", "grounded_p3_temporal_rms", ".3f"),
+        ):
+            append(policy_parts, label, key, spec)
+        for parts in (grounded_parts, intent_parts, effect_parts, policy_parts):
+            if len(parts) > 1:
+                lines.append(" ".join(parts))
+        normalized_fields = (
+            ("successor", "successor"),
+            ("semantic", "semantic"),
+            ("transport", "transport"),
+            ("covariance", "transport_covariance"),
+            ("persistence", "persistence_change"),
+            ("visibility", "visibility_change"),
+            ("uncertainty", "uncertainty_calibration"),
+            ("reliability", "reliability_calibration"),
+        )
+        for interval_name in ("h4_8", "h8_16", "h16_32", "h32_48"):
+            interval_parts = [
+                "[v119-effect-error]",
+                f"interval={interval_name}",
+            ]
+            append(
+                interval_parts,
+                "teacher_reliability",
+                "grounded_future_effect_teacher_reliability_"
+                f"{interval_name}",
+                ".3f",
+            )
+            for display_name, field_name in normalized_fields:
+                append(
+                    interval_parts,
+                    display_name,
+                    "grounded_future_effect_"
+                    f"{field_name}_{interval_name}_target_normalized_error",
+                    ".3f",
+                )
+            if len(interval_parts) > 2:
+                lines.append(" ".join(interval_parts))
+    if log_version == "v120":
+        ground_parts = ["[v120-ground]"]
+        for label, key, spec in (
+            ("reconstruction", "object_grounding_reconstruction_mse", ".5f"),
+            ("existence", "object_grounding_existence_mean", ".3f"),
+            ("validity", "object_grounding_validity_mean", ".3f"),
+            ("allocation", "object_grounding_allocation_share_mean", ".3f"),
+            ("null", "object_grounding_null_mass", ".3f"),
+            ("mass_error", "object_grounding_mass_conservation_error", ".1e"),
+            ("owner_H", "object_grounding_candidate_owner_entropy", ".3f"),
+            ("local_prior_H", "object_grounding_local_prior_entropy", ".3f"),
+            ("chart_H", "object_grounding_chart_entropy", ".3f"),
+            ("g3_parent_l1", "object_grounding_g3_parent_l1", ".3e"),
+            ("object_pair_cos", "object_grounding_object_content_pair_cosine", ".3f"),
+            ("flow_prior", "object_grounding_transport_prior_rms", ".3f"),
+        ):
+            append(ground_parts, label, key, spec, keep_zero=True)
+        intent_parts = ["[v120-intent]"]
+        for label, key, spec in (
+            ("goal_H", "object_intent_goal_attention_entropy", ".3f"),
+            ("interval_goal_H", "object_intent_interval_goal_entropy", ".3f"),
+            ("history_H", "object_intent_interval_history_entropy", ".3f"),
+            ("object_H", "object_intent_interval_object_entropy", ".3f"),
+            ("semantic_H", "object_intent_interval_semantic_entropy", ".3f"),
+            ("appearance_H", "object_intent_interval_appearance_entropy", ".3f"),
+            ("geometry_H", "object_intent_interval_geometry_entropy", ".3f"),
+            ("interval_var", "object_intent_interval_variation", ".3f"),
+            ("temporal_var", "object_intent_temporal_variation", ".3f"),
+            ("goal_innov", "object_intent_goal_innovation_rms", ".3f"),
+            ("history_innov", "object_intent_history_innovation_rms", ".3f"),
+            ("object_innov", "object_intent_object_innovation_rms", ".3f"),
+            ("typed_innov", "object_intent_typed_innovation_rms", ".3f"),
+            ("state_delta", "object_intent_observed_state_delta_rms", ".3f"),
+            ("transport", "object_intent_observed_transport_rms", ".3f"),
+            ("change_history", "object_intent_state_change_history_rms", ".3f"),
+            ("change_transport", "object_intent_state_change_transport_rms", ".3f"),
+            ("state_change", "object_intent_state_change_evidence_rms", ".3f"),
+            ("state_change_H", "object_intent_state_change_attention_entropy", ".3f"),
+            ("online_match", "object_intent_online_match_loss", ".5f"),
+            ("recognizer", "object_plan_recognition_loss", ".5f"),
+            ("coarse_action", "object_coarse_action_loss", ".5f"),
+        ):
+            append(intent_parts, label, key, spec, keep_zero=True)
+        dynamics_parts = ["[v120-dynamics]"]
+        for label, key, spec in (
+            ("goal_H", "object_w_goal_attention_entropy", ".3f"),
+            ("goal_innov", "object_w_goal_innovation_rms", ".3f"),
+            ("typed_innov", "object_w_typed_innovation_rms", ".3f"),
+            ("w1_delta", "object_w1_semantic_delta_rms", ".3f"),
+            ("w1_transport", "object_w1_transport_rms", ".3f"),
+            ("w1_interval_cos", "object_w1_interval_adjacent_cosine", ".3f"),
+            ("w1_object_cos", "object_w1_object_pair_cosine", ".3f"),
+            ("w2_delta", "object_w2_semantic_delta_rms", ".3f"),
+            ("w2_transport", "object_w2_transport_rms", ".3f"),
+            ("w2_interval_cos", "object_w2_interval_adjacent_cosine", ".3f"),
+            ("w2_object_cos", "object_w2_object_pair_cosine", ".3f"),
+            ("teacher_visibility", "object_teacher_visibility", ".3f"),
+            ("teacher_visibility_change", "object_teacher_visibility_change", ".3f"),
+            ("teacher_persistence_change", "object_teacher_persistence_change", ".3f"),
+            ("teacher_null", "object_teacher_null_probability", ".3f"),
+            ("teacher_sem_max", "object_teacher_semantic_max", ".3f"),
+            ("teacher_sem_margin", "object_teacher_semantic_margin", ".3f"),
+            ("teacher_uncert", "object_teacher_uncertainty", ".3f"),
+            ("teacher_delta", "object_teacher_semantic_delta_rms", ".3f"),
+            ("teacher_transport", "object_teacher_transport_rms", ".3f"),
+            ("teacher_supports", "object_teacher_supports_per_interval", ".2f"),
+            ("successor_loss", "object_future_successor", ".5f"),
+            ("semantic_loss", "object_future_semantic", ".5f"),
+            ("transport_loss", "object_future_transport", ".5f"),
+            ("covariance_loss", "object_future_covariance", ".5f"),
+            ("visibility_loss", "object_future_visibility", ".5f"),
+            ("persistence_loss", "object_future_persistence", ".5f"),
+            ("uncertainty_loss", "object_future_uncertainty", ".5f"),
+            ("transition_loss", "object_future_transition", ".5f"),
+            ("pred_cos", "object_future_prediction_adjacent_cosine", ".3f"),
+            ("target_cos", "object_future_target_adjacent_cosine", ".3f"),
+            ("pred_var", "object_future_prediction_interval_variation", ".3f"),
+            ("target_var", "object_future_target_interval_variation", ".3f"),
+        ):
+            append(dynamics_parts, label, key, spec, keep_zero=True)
+        policy_parts = ["[v120-policy]"]
+        for label, key, spec in (
+            ("content_score", "object_p2_content_score_abs", ".3f"),
+            ("content_score_max", "object_p2_content_score_max_abs", ".3f"),
+            ("intent_score", "object_p2_intent_score_abs", ".3f"),
+            ("intent_score_max", "object_p2_intent_score_max_abs", ".3f"),
+            ("coordinate_score", "object_p2_coordinate_score_abs", ".3f"),
+            ("coordinate_score_max", "object_p2_coordinate_score_max_abs", ".3f"),
+            ("combined_logit_max", "object_p2_combined_logit_max_abs", ".3f"),
+            ("tau_content", "object_p2_temperature_content", ".3f"),
+            ("tau_intent", "object_p2_temperature_intent", ".3f"),
+            ("tau_coordinate", "object_p2_temperature_coordinate", ".3f"),
+            ("posterior_H", "object_p2_posterior_entropy", ".3f"),
+            ("posterior_max", "object_p2_posterior_max", ".3f"),
+            ("null", "object_p2_null_mass", ".3f"),
+            ("semantic_mass", "object_p2_semantic_value_mass", ".3f"),
+            ("geometry_mass", "object_p2_geometry_value_mass", ".3f"),
+            ("status_mass", "object_p2_status_value_mass", ".3f"),
+            ("h4_8_mass", "object_p2_interval_0_mass", ".3f"),
+            ("h8_16_mass", "object_p2_interval_1_mass", ".3f"),
+            ("h16_32_mass", "object_p2_interval_2_mass", ".3f"),
+            ("h32_48_mass", "object_p2_interval_3_mass", ".3f"),
+            ("effect_precontract", "object_p2_effect_precontract_rms", ".3f"),
+            ("effect", "object_p2_effect_rms", ".3f"),
+            ("contract_min", "object_p2_contract_min", ".3f"),
+            ("consequence_effect", "object_consequence_effect_rms", ".3f"),
+            ("interaction", "object_consequence_interaction_rms", ".3f"),
+            ("consequence_ratio", "object_consequence_ratio", ".3f"),
+            ("p3_factual", "object_p3_factual_rms", ".3f"),
+            ("p3_precision", "object_p3_precision_rms", ".3f"),
+            ("p3_effect", "object_p3_effect_rms", ".3f"),
+            ("p3_temporal", "object_p3_temporal_rms", ".3f"),
+            ("p3_state_change", "object_p3_state_change_rms", ".3f"),
+        ):
+            append(policy_parts, label, key, spec, keep_zero=True)
+        for parts in (ground_parts, intent_parts, dynamics_parts, policy_parts):
+            if len(parts) > 1:
+                lines.append(" ".join(parts))
+        for interval_name in ("h4_8", "h8_16", "h16_32", "h32_48"):
+            interval_parts = ["[v120-dynamics-error]", f"interval={interval_name}"]
+            for field in (
+                "successor",
+                "semantic",
+                "transport",
+                "covariance",
+                "visibility",
+                "persistence",
+                "uncertainty",
+            ):
+                append(
+                    interval_parts,
+                    field,
+                    f"object_future_{field}_{interval_name}_normalized_error",
+                    ".3f",
+                    keep_zero=True,
+                )
+            if len(interval_parts) > 2:
+                lines.append(" ".join(interval_parts))
+    if (
+        log_version in _BALANCED_FLOW_JEPA_LOG_VERSIONS
+        and log_version != "v119"
+    ):
         balance_parts = [f"[{log_version}-balance]"]
         for label, key, spec in (
             ("flow_without_info_balance", "physical_flow_no_information_balance", ".6f"),
@@ -10350,26 +15407,26 @@ def _evidence_serial_log_line(
         ):
             append(balance_parts, label, key, spec, keep_zero=True)
         for key in sorted(
-            key
-            for key in row
-            if key.startswith("action_band_") and key.endswith("_physical_flow")
+            key for key in row if key.startswith("action_band_") and key.endswith("_physical_flow")
         ):
             label = key.removeprefix("action_band_").removesuffix("_physical_flow")
             append(balance_parts, f"action_h{label}", key, ".6f", keep_zero=True)
         lines.append(" ".join(balance_parts))
     lines.extend((" ".join(execution_parts), " ".join(grad_parts)))
-    if log_version == "v111":
-        owner_grad_parts = ["[v111-owner-grad]"]
+    if log_version in {"v111", "v112", "v113"}:
+        owner_grad_parts = [f"[{log_version}-owner-grad]"]
         for label, key in (
             ("g2_sem", "grad_flow_dino_progressive_g2_semantic_owner"),
             ("g2_app", "grad_flow_dino_progressive_g2_appearance_owner"),
             ("g2_geo", "grad_flow_dino_progressive_g2_geometry_owner"),
+            ("g3_public", "grad_flow_dino_progressive_g3_public"),
             ("g3_sem", "grad_flow_dino_progressive_g3_semantic_owner"),
             ("g3_app", "grad_flow_dino_progressive_g3_appearance_owner"),
             ("g3_geo", "grad_flow_dino_progressive_g3_geometry_owner"),
             ("w_sem", "grad_flow_dino_progressive_world_semantic_owner"),
             ("w_app", "grad_flow_dino_progressive_world_appearance_owner"),
             ("w_geo", "grad_flow_dino_progressive_world_geometry_owner"),
+            ("w_interval", "grad_flow_dino_progressive_world_interval_owner"),
             ("p2_policy", "grad_late_raw_detail_typed_p2_policy_owner"),
             ("p2_sem", "grad_late_raw_detail_typed_p2_semantic_owner"),
             ("p2_app", "grad_late_raw_detail_typed_p2_appearance_owner"),
@@ -10401,11 +15458,7 @@ def _flow_jepa_stage1_serial_log_line(
         f"loss_representation={row['loss']:.6f}",
     ]
     contributions = sorted(
-        (
-            key
-            for key in row
-            if key.startswith("loss_contrib_") and abs(float(row[key])) > 1e-12
-        ),
+        (key for key in row if key.startswith("loss_contrib_") and abs(float(row[key])) > 1e-12),
         key=lambda key: abs(float(row[key])),
         reverse=True,
     )
@@ -10413,8 +15466,7 @@ def _flow_jepa_stage1_serial_log_line(
         train.append(
             "contrib="
             + "/".join(
-                f"{key.removeprefix('loss_contrib_')}:{row[key]:.5f}"
-                for key in contributions
+                f"{key.removeprefix('loss_contrib_')}:{row[key]:.5f}" for key in contributions
             )
         )
     append(train, "ledger_gap", "loss_ledger_residual", "+.2e")
@@ -10549,8 +15601,7 @@ def _evidence_epoch_log_line(
     groups = [
         name
         for name in ("action", "representation", "rollout", "execution", "latent", "layer")
-        if f"loss_group_{name}" in train
-        and abs(float(train[f"loss_group_{name}"])) > 1e-12
+        if f"loss_group_{name}" in train and abs(float(train[f"loss_group_{name}"])) > 1e-12
     ]
     if groups:
         train_parts.append(
@@ -10594,14 +15645,8 @@ def _evidence_epoch_log_line(
     ]
     if log_version in _BALANCED_FLOW_JEPA_LOG_VERSIONS:
         action_band_keys = sorted(
-            (
-                key
-                for key in val
-                if key.startswith("action_band_") and key.endswith("_rmse")
-            ),
-            key=lambda key: int(
-                key.removeprefix("action_band_").split("_", 1)[0]
-            ),
+            (key for key in val if key.startswith("action_band_") and key.endswith("_rmse")),
+            key=lambda key: int(key.removeprefix("action_band_").split("_", 1)[0]),
         )
         if action_band_keys:
             val_parts.append(
@@ -10618,9 +15663,7 @@ def _evidence_epoch_log_line(
         "three_basis_reduction",
     )
     available_ablations = [
-        name
-        for name in execution_ablation_names
-        if f"execution_ablation_{name}_full_rmse" in val
+        name for name in execution_ablation_names if f"execution_ablation_{name}_full_rmse" in val
     ]
     if available_ablations:
         val_parts.append(
@@ -10635,11 +15678,7 @@ def _evidence_epoch_log_line(
         )
 
     if log_version in _FLOW_JEPA_LOG_VERSIONS:
-        future_validation_label = (
-            "jepa_future"
-            if log_version != "v95"
-            else "jepa_window"
-        )
+        future_validation_label = "jepa_future" if log_version != "v95" else "jepa_window"
         for label, key, spec in (
             (future_validation_label, "flow_jepa_future_prediction", ".5f"),
             ("jepa_change", "flow_jepa_future_change_direction", ".5f"),
@@ -10882,6 +15921,23 @@ def _evidence_epoch_log_line(
                 ".3f",
             ),
             ("p2_detail_output", "flow_jepa_typed_p2_output_rms", ".3f"),
+            ("p1_query_rows", "flow_jepa_p1_query_rows", ".0f"),
+            ("p2_query_rows", "flow_jepa_p2_query_rows", ".0f"),
+            (
+                "p1_query_chunk",
+                "flow_jepa_address_query_chunk_actual",
+                ".0f",
+            ),
+            (
+                "p1_checkpoint_configured",
+                "flow_jepa_typed_p1_activation_checkpoint",
+                ".0f",
+            ),
+            (
+                "p1_checkpoint_active",
+                "flow_jepa_typed_p1_activation_checkpoint_active",
+                ".0f",
+            ),
             (
                 "horizon_cos_seed",
                 "flow_jepa_online_address_boundary_seed_adjacent_cosine",
@@ -10963,9 +16019,33 @@ def _evidence_epoch_log_line(
         )
         for key in horizon_keys:
             source = val if key in val else train
-            val_parts.append(
-                f"future_h{key.rsplit('_', 1)[-1]}={source[key]:.5f}"
-            )
+            val_parts.append(f"future_h{key.rsplit('_', 1)[-1]}={source[key]:.5f}")
+        reliable_offsets = sorted(
+            {
+                int(match.group(1))
+                for source in (val, train)
+                for key in source
+                for match in (
+                    re.fullmatch(
+                        r"flow_jepa_future_horizon_(\d+)_active_loss",
+                        key,
+                    ),
+                )
+                if match is not None
+            }
+        )
+        for label, suffix in (
+            ("future_direction", "active_direction"),
+            ("future_active", "active_loss"),
+        ):
+            entries: list[str] = []
+            for offset in reliable_offsets:
+                key = f"flow_jepa_future_horizon_{offset}_{suffix}"
+                source = val if key in val else train
+                if key in source:
+                    entries.append(f"{offset}:{source[key]:.4f}")
+            if entries:
+                val_parts.append(f"{label}=" + "/".join(entries))
         interval_offsets = sorted(
             {
                 int(match.group(1))
@@ -11038,12 +16118,16 @@ def _evidence_epoch_log_line(
                 ("motion_visible", "flow_jepa_raw_observable_motion_fraction", ".3f"),
                 ("raw_precision", "flow_jepa_raw_detail_precision_mean", ".3f"),
                 (
-                    "raw_detail_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_flow",
+                    "raw_detail_share"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "raw_address_flow",
                     "flow_jepa_raw_address_flow_mass",
                     ".3f",
                 ),
                 (
-                    "raw_base_share" if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS else "raw_address_fallback",
+                    "raw_base_share"
+                    if log_version in _COMPLEMENTARY_FLOW_JEPA_LOG_VERSIONS
+                    else "raw_address_fallback",
                     "flow_jepa_raw_address_fallback_mass",
                     ".3f",
                 ),
@@ -11568,9 +16652,7 @@ def _linear_row_grad_norm(
 
 
 @torch.no_grad()
-def _nonfinite_gradient_report(
-    module: torch.nn.Module, *, limit: int = 12
-) -> str:
+def _nonfinite_gradient_report(module: torch.nn.Module, *, limit: int = 12) -> str:
     """Identify corrupt parameter gradients only after a clip failure."""
 
     rows: list[str] = []
@@ -11590,9 +16672,7 @@ def _nonfinite_gradient_report(
             omitted += 1
             continue
         finite_values = values[finite]
-        finite_max = (
-            float(finite_values.abs().max()) if int(finite_values.numel()) else 0.0
-        )
+        finite_max = float(finite_values.abs().max()) if int(finite_values.numel()) else 0.0
         rows.append(
             f"{name}[shape={tuple(parameter.shape)},nan={int(torch.isnan(values).sum())},"
             f"+inf={int(torch.isposinf(values).sum())},-inf={int(torch.isneginf(values).sum())},"
@@ -11685,9 +16765,7 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
     )
     if getattr(planner, "flow_dino_evidence", None) is not None:
         flow_dino = planner.flow_dino_evidence
-        losses["grad_flow_dino_evidence"] = _module_grad_norm(
-            flow_dino, reference=reference
-        )
+        losses["grad_flow_dino_evidence"] = _module_grad_norm(flow_dino, reference=reference)
         if bool(getattr(flow_dino, "raw_enabled", False)):
             raw_flow = flow_dino.raw_flow
             if raw_flow is None:
@@ -11764,11 +16842,11 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                 )
                 if progressive.g2_typed_query is not None:
                     for owner_name in ("semantic", "appearance", "geometry"):
-                        losses[
-                            f"grad_flow_dino_progressive_g2_{owner_name}_owner"
-                        ] = _module_grad_norm(
-                            progressive.g2_typed_query[owner_name],
-                            reference=reference,
+                        losses[f"grad_flow_dino_progressive_g2_{owner_name}_owner"] = (
+                            _module_grad_norm(
+                                progressive.g2_typed_query[owner_name],
+                                reference=reference,
+                            )
                         )
                 losses["grad_flow_dino_progressive_g3"] = _parameter_grad_norm(
                     (
@@ -11786,20 +16864,41 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                             if progressive.g3_typed_summary_out is not None
                             else ()
                         ),
+                        *(
+                            progressive.g3_public_summary_out.parameters()
+                            if progressive.g3_public_summary_out is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.g3_owner_residual.parameters()
+                            if progressive.g3_owner_residual is not None
+                            else ()
+                        ),
                     ),
                     reference=reference,
                 )
-                if progressive.g3_typed_slot_score is not None:
+                if progressive.g3_public_summary_out is not None:
+                    losses["grad_flow_dino_progressive_g3_public"] = _module_grad_norm(
+                        progressive.g3_public_summary_out,
+                        reference=reference,
+                    )
+                if progressive.g3_owner_residual is not None:
                     for owner_name in ("semantic", "appearance", "geometry"):
-                        losses[
-                            f"grad_flow_dino_progressive_g3_{owner_name}_owner"
-                        ] = _module_grad_norm(
-                            progressive.g3_typed_slot_score[owner_name],
-                            reference=reference,
+                        losses[f"grad_flow_dino_progressive_g3_{owner_name}_owner"] = (
+                            _module_grad_norm(
+                                progressive.g3_owner_residual[owner_name],
+                                reference=reference,
+                            )
                         )
-                losses[
-                    "grad_flow_dino_progressive_world_query"
-                ] = _parameter_grad_norm(
+                elif progressive.g3_typed_slot_score is not None:
+                    for owner_name in ("semantic", "appearance", "geometry"):
+                        losses[f"grad_flow_dino_progressive_g3_{owner_name}_owner"] = (
+                            _module_grad_norm(
+                                progressive.g3_typed_slot_score[owner_name],
+                                reference=reference,
+                            )
+                        )
+                losses["grad_flow_dino_progressive_world_query"] = _parameter_grad_norm(
                     (
                         *progressive.horizon_query_norm.parameters(),
                         *progressive.horizon_query_proj.parameters(),
@@ -11808,25 +16907,226 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                             if progressive.world_typed_query is not None
                             else ()
                         ),
+                        *(
+                            progressive.world_owner_transitions.parameters()
+                            if progressive.world_owner_transitions is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.world_owner_writes.parameters()
+                            if progressive.world_owner_writes is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.world_owner_route_attnres.parameters()
+                            if progressive.world_owner_route_attnres is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.world_owner_fused_writes.parameters()
+                            if progressive.world_owner_fused_writes is not None
+                            else ()
+                        ),
+                        *(
+                            progressive.world_horizon_condition.parameters()
+                            if progressive.world_horizon_condition is not None
+                            else ()
+                        ),
                     ),
                     reference=reference,
                 )
                 if progressive.world_typed_query is not None:
                     for owner_name in ("semantic", "appearance", "geometry"):
-                        losses[
-                            f"grad_flow_dino_progressive_world_{owner_name}_owner"
-                        ] = _module_grad_norm(
-                            progressive.world_typed_query[owner_name],
-                            reference=reference,
+                        losses[f"grad_flow_dino_progressive_world_{owner_name}_owner"] = (
+                            _parameter_grad_norm(
+                                (
+                                    *progressive.world_typed_query[owner_name].parameters(),
+                                    *(
+                                        parameter
+                                        for transition_bank in (
+                                            progressive.world_owner_transitions
+                                            if progressive.world_owner_transitions is not None
+                                            else ()
+                                        )
+                                        for parameter in transition_bank[owner_name].parameters()
+                                    ),
+                                    *(
+                                        progressive.world_owner_writes[owner_name].parameters()
+                                        if progressive.world_owner_writes is not None
+                                        else ()
+                                    ),
+                                ),
+                                reference=reference,
+                            )
+                        )
+                    if progressive.world_owner_transitions is not None:
+                        losses["grad_flow_dino_progressive_world_interval_owner"] = (
+                            _parameter_grad_norm(
+                                (
+                                    *(
+                                        parameter
+                                        for transition_bank in progressive.world_owner_transitions
+                                        for parameter in transition_bank["interval"].parameters()
+                                    ),
+                                    *(
+                                        progressive.world_owner_writes["interval"].parameters()
+                                        if progressive.world_owner_writes is not None
+                                        else ()
+                                    ),
+                                ),
+                                reference=reference,
+                            )
                         )
                 if progressive.future_transport is not None:
-                    losses[
-                        "grad_flow_dino_progressive_future_transport"
-                    ] = _module_grad_norm(
+                    losses["grad_flow_dino_progressive_future_transport"] = _module_grad_norm(
                         progressive.future_transport,
                         reference=reference,
                     )
-            if flow_dino.interval_stage_organizer is not None:
+                if progressive.future_effect_semantic is not None:
+                    losses["grad_flow_dino_future_effect_semantic"] = _module_grad_norm(
+                        progressive.future_effect_semantic,
+                        reference=reference,
+                    )
+                if progressive.future_effect_geometry is not None:
+                    losses["grad_flow_dino_future_effect_geometry"] = _module_grad_norm(
+                        progressive.future_effect_geometry,
+                        reference=reference,
+                    )
+                if progressive.window_successor_cell is not None:
+                    losses["grad_flow_dino_window_effect_near_mid"] = _module_grad_norm(
+                        progressive.window_successor_cell,
+                        reference=reference,
+                    )
+                if progressive.window_late_cell is not None:
+                    losses["grad_flow_dino_window_effect_late"] = _module_grad_norm(
+                        progressive.window_late_cell,
+                        reference=reference,
+                    )
+                differential_window = getattr(
+                    progressive,
+                    "differential_window_compiler",
+                    None,
+                )
+                if differential_window is not None:
+                    losses[
+                        "grad_differential_w1_near_mid_transition"
+                    ] = _parameter_grad_norm(
+                        (
+                            *differential_window.intent_to_route.parameters(),
+                            *differential_window.w1_transition.parameters(),
+                        ),
+                        reference=reference,
+                    )
+                    losses[
+                        "grad_differential_w2_late_transition"
+                    ] = _parameter_grad_norm(
+                        (
+                            differential_window.late_query,
+                            differential_window.late_source_type,
+                            *differential_window.late_query_norm.parameters(),
+                            *differential_window.late_memory_norm.parameters(),
+                            *differential_window.late_attention.parameters(),
+                            *differential_window.late_ffn.parameters(),
+                        ),
+                        reference=reference,
+                    )
+                    losses[
+                        "grad_differential_effect_decoder"
+                    ] = _parameter_grad_norm(
+                        (
+                            *differential_window.effect_semantic.parameters(),
+                            *differential_window.effect_geometry.parameters(),
+                        ),
+                        reference=reference,
+                    )
+                    losses[
+                        "grad_differential_current_reference_bridge"
+                    ] = _module_grad_norm(
+                        differential_window.current_reference,
+                        reference=reference,
+                    )
+                    losses["grad_flow_dino_window_effect_near_mid"] = losses[
+                        "grad_differential_w1_near_mid_transition"
+                    ]
+                    losses["grad_flow_dino_window_effect_late"] = losses[
+                        "grad_differential_w2_late_transition"
+                    ]
+                grounded_world = getattr(
+                    progressive,
+                    "grounded_world_compiler",
+                    None,
+                )
+                if grounded_world is not None:
+                    losses["grad_grounded_world_shared_inputs"] = (
+                        _parameter_grad_norm(
+                            (
+                                *grounded_world.world_input.parameters(),
+                                *grounded_world.intent_input.parameters(),
+                                *grounded_world.proposal_input.parameters(),
+                                *grounded_world.owner_input.parameters(),
+                            ),
+                            reference=reference,
+                        )
+                    )
+                    losses["grad_grounded_world_w1_blocks"] = _module_grad_norm(
+                        grounded_world.w1_blocks,
+                        reference=reference,
+                    )
+                    losses["grad_grounded_world_w2_blocks"] = _module_grad_norm(
+                        grounded_world.w2_blocks,
+                        reference=reference,
+                    )
+                    losses["grad_grounded_world_shared_heads"] = (
+                        _parameter_grad_norm(
+                            (
+                                *grounded_world.semantic_head.parameters(),
+                                *grounded_world.geometry_head.parameters(),
+                                *grounded_world.appearance_head.parameters(),
+                                *grounded_world.reliability_head.parameters(),
+                                *grounded_world.uncertainty_head.parameters(),
+                            ),
+                            reference=reference,
+                        )
+                    )
+                    losses["grad_flow_dino_window_effect_near_mid"] = (
+                        losses["grad_grounded_world_w1_blocks"]
+                    )
+                    losses["grad_flow_dino_window_effect_late"] = losses[
+                        "grad_grounded_world_w2_blocks"
+                    ]
+                if progressive.world_owner_route_attnres is not None:
+                    losses["grad_flow_dino_functional_world_router"] = _parameter_grad_norm(
+                        (
+                            *progressive.world_owner_route_attnres.parameters(),
+                            *progressive.world_owner_fused_writes.parameters(),
+                            *progressive.world_horizon_condition.parameters(),
+                        ),
+                        reference=reference,
+                    )
+            if (
+                bool(
+                    getattr(
+                        flow_dino,
+                        "functional_mainline_routing_enabled",
+                        False,
+                    )
+                )
+                and progressive is not None
+                and progressive.world_owner_transitions is not None
+                and progressive.world_owner_fused_writes is not None
+            ):
+                losses["grad_flow_dino_interval_stage"] = _parameter_grad_norm(
+                    (
+                        *(
+                            parameter
+                            for transition_bank in (progressive.world_owner_transitions)
+                            for parameter in transition_bank["interval"].parameters()
+                        ),
+                        *progressive.world_owner_fused_writes.parameters(),
+                    ),
+                    reference=reference,
+                )
+            elif flow_dino.interval_stage_organizer is not None:
                 losses["grad_flow_dino_interval_stage"] = _module_grad_norm(
                     flow_dino.interval_stage_organizer,
                     reference=reference,
@@ -11847,6 +17147,155 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
             losses["grad_flow_dino_future_predictor"] = _module_grad_norm(
                 flow_dino.future_prediction, reference=reference
             )
+    if bool(getattr(planner, "object_intent_dynamics_mainline", False)):
+        grounder = planner.object_grounder
+        intent = planner.object_intent_organizer
+        recognizer = planner.object_plan_recognizer
+        coarse_action = planner.object_coarse_action
+        world = planner.object_future_compiler
+        p2 = planner.p2_effect_reader
+        consequence = planner.consequence_plan_organizer
+        p3 = planner.policy_plan_compiler
+        if any(
+            module is None
+            for module in (
+                grounder,
+                intent,
+                recognizer,
+                coarse_action,
+                world,
+                p2,
+                consequence,
+                p3,
+            )
+        ):
+            raise RuntimeError("object-intent gradient audit lost a capability owner")
+        losses["grad_object_grounder"] = _module_grad_norm(
+            grounder, reference=reference
+        )
+        losses["grad_object_s_goal"] = _parameter_grad_norm(
+            (
+                intent.goal_queries,
+                *intent.goal_input.parameters(),
+                *intent.goal_read.parameters(),
+                *intent.goal_self.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_s_history"] = _parameter_grad_norm(
+            (
+                *intent.history_input.parameters(),
+                *intent.history_blocks.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_s_typed_intervals"] = _parameter_grad_norm(
+            (
+                intent.interval_identity,
+                *intent.object_content.parameters(),
+                *intent.object_semantic.parameters(),
+                *intent.object_appearance.parameters(),
+                *intent.object_geometry.parameters(),
+                *intent.interval_goal.parameters(),
+                *intent.interval_history.parameters(),
+                *intent.interval_object.parameters(),
+                *intent.interval_semantic.parameters(),
+                *intent.interval_appearance.parameters(),
+                *intent.interval_geometry.parameters(),
+                *intent.interval_typed_router.parameters(),
+                *intent.interval_self.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_s_temporal"] = _parameter_grad_norm(
+            (
+                intent.temporal_identity,
+                *intent.temporal_read.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_s_state_change"] = _parameter_grad_norm(
+            (
+                intent.state_change_query,
+                *intent.state_change_read.parameters(),
+                *intent.state_change_input.parameters(),
+                *intent.state_change_transport.parameters(),
+                *intent.state_change_fuse.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_plan_recognizer"] = _module_grad_norm(
+            recognizer, reference=reference
+        )
+        losses["grad_object_coarse_action"] = _module_grad_norm(
+            coarse_action, reference=reference
+        )
+        losses["grad_object_w_inputs"] = _parameter_grad_norm(
+            (
+                world.interval_identity,
+                *world.object_content.parameters(),
+                *world.object_semantic.parameters(),
+                *world.object_appearance.parameters(),
+                *world.object_geometry.parameters(),
+                *world.object_transport_prior.parameters(),
+                *world.typed_router.parameters(),
+                *world.goal_read.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_w1"] = _module_grad_norm(world.w1, reference=reference)
+        losses["grad_object_w2"] = _parameter_grad_norm(
+            (*world.w1_to_w2.parameters(), *world.w2.parameters()),
+            reference=reference,
+        )
+        losses["grad_object_w_heads"] = _parameter_grad_norm(
+            (
+                *world.delta_head.parameters(),
+                *world.transport_head.parameters(),
+                *world.covariance_head.parameters(),
+                *world.visibility_head.parameters(),
+                *world.persistence_head.parameters(),
+                *world.uncertainty_head.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_p2_effect_reader"] = _module_grad_norm(
+            p2, reference=reference
+        )
+        losses["grad_object_consequence"] = _module_grad_norm(
+            consequence, reference=reference
+        )
+        losses["grad_object_p3_factual"] = _module_grad_norm(
+            p3.factual_lane, reference=reference
+        )
+        losses["grad_object_p3_precision"] = _parameter_grad_norm(
+            (
+                *p3.precision_action.parameters(),
+                *p3.precision_fact.parameters(),
+                *p3.precision_consequence.parameters(),
+                *p3.precision_lane.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_p3_effect"] = _module_grad_norm(
+            p3.effect_lane, reference=reference
+        )
+        losses["grad_object_p3_temporal"] = _parameter_grad_norm(
+            (
+                *p3.temporal_action.parameters(),
+                *p3.temporal_consequence.parameters(),
+                *p3.temporal_lane.parameters(),
+            ),
+            reference=reference,
+        )
+        losses["grad_object_p3_state_change"] = _parameter_grad_norm(
+            (
+                *p3.state_change_action.parameters(),
+                *p3.state_change_temporal.parameters(),
+                *p3.state_change_lane.parameters(),
+            ),
+            reference=reference,
+        )
     if getattr(planner, "goal_resampler", None) is not None:
         losses["grad_goal_resampler"] = _module_grad_norm(
             planner.goal_resampler, reference=reference
@@ -11862,12 +17311,8 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
             losses["grad_condition_world_query"] = _module_grad_norm(
                 planner.condition_world_query_proj, reference=reference
             )
-        phase_world_blocks = getattr(
-            planner, "phase_world_block_query_proj", None
-        )
-        condition_world_blocks = getattr(
-            planner, "condition_world_block_query_proj", None
-        )
+        phase_world_blocks = getattr(planner, "phase_world_block_query_proj", None)
+        condition_world_blocks = getattr(planner, "condition_world_block_query_proj", None)
         if phase_world_blocks is not None and condition_world_blocks is not None:
             losses["grad_stateless_phase_world_blocks"] = _parameter_grad_norm(
                 (
@@ -11878,6 +17323,400 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                     )
                     for parameter in module.parameters()
                 ),
+                reference=reference,
+            )
+    if getattr(planner, "stateless_horizon_adapter", None) is not None:
+        horizon_adapter = planner.stateless_horizon_adapter
+        losses["grad_stateless_horizon_adapter"] = _module_grad_norm(
+            horizon_adapter, reference=reference
+        )
+        losses["grad_stateless_horizon_phase_path"] = _parameter_grad_norm(
+            (
+                parameter
+                for module in (
+                    horizon_adapter.anchor_query,
+                    horizon_adapter.state_context,
+                    horizon_adapter.visual_context,
+                    horizon_adapter.phase_query,
+                    horizon_adapter.phase_key,
+                    horizon_adapter.phase_output,
+                )
+                for parameter in module.parameters()
+            ),
+            reference=reference,
+        )
+        losses["grad_stateless_horizon_goal_path"] = _parameter_grad_norm(
+            (
+                parameter
+                for module in (
+                    horizon_adapter.goal_cross,
+                    horizon_adapter.goal_output,
+                )
+                for parameter in module.parameters()
+            ),
+            reference=reference,
+        )
+        losses["grad_stateless_horizon_history_path"] = _parameter_grad_norm(
+            (
+                parameter
+                for module in (
+                    horizon_adapter.history_cross,
+                    horizon_adapter.history_output,
+                )
+                for parameter in module.parameters()
+            ),
+            reference=reference,
+        )
+        horizon_projection_banks = tuple(
+            bank
+            for bank in (
+                getattr(planner, "horizon_phase_world_block_query_proj", None),
+                getattr(planner, "horizon_goal_world_block_query_proj", None),
+                getattr(planner, "horizon_history_world_block_query_proj", None),
+                getattr(planner, "horizon_proposal_world_block_query_proj", None),
+            )
+            if bank is not None
+        )
+        if horizon_projection_banks:
+            losses["grad_stateless_horizon_world_queries"] = _parameter_grad_norm(
+                (parameter for bank in horizon_projection_banks for parameter in bank.parameters()),
+                reference=reference,
+            )
+    if getattr(planner, "stateless_goal_phase_machine", None) is not None:
+        goal_phase = planner.stateless_goal_phase_machine
+        losses["grad_stateless_goal_phase_machine"] = _module_grad_norm(
+            goal_phase, reference=reference
+        )
+        if isinstance(goal_phase, StatelessIntentOrganizer):
+            losses["grad_grounded_intent_goal"] = _parameter_grad_norm(
+                (
+                    goal_phase.goal_queries,
+                    *goal_phase.goal_input.parameters(),
+                    *goal_phase.goal_block.parameters(),
+                ),
+                reference=reference,
+            )
+            losses["grad_grounded_intent_observable"] = (
+                _parameter_grad_norm(
+                    (
+                        goal_phase.history_type,
+                        goal_phase.observable_queries,
+                        *goal_phase.state_input.parameters(),
+                        *goal_phase.action_input.parameters(),
+                        *goal_phase.history_blocks.parameters(),
+                        *goal_phase.observable_goal.parameters(),
+                        *goal_phase.observable_history.parameters(),
+                        *goal_phase.fact_inputs.parameters(),
+                        *goal_phase.observable_fact.parameters(),
+                        *goal_phase.observable_router.parameters(),
+                    ),
+                    reference=reference,
+                )
+            )
+            losses["grad_grounded_intent_intervals"] = (
+                _parameter_grad_norm(
+                    (
+                        goal_phase.interval_queries,
+                        *goal_phase.interval_goal.parameters(),
+                        *goal_phase.interval_observable.parameters(),
+                        *goal_phase.interval_history.parameters(),
+                        *goal_phase.interval_fact.parameters(),
+                        *goal_phase.interval_router.parameters(),
+                    ),
+                    reference=reference,
+                )
+            )
+            losses["grad_grounded_intent_temporal"] = (
+                _parameter_grad_norm(
+                    (
+                        *goal_phase.temporal_query.parameters(),
+                        *goal_phase.temporal_read.parameters(),
+                    ),
+                    reference=reference,
+                )
+            )
+            losses["grad_grounded_intent_completion"] = (
+                _parameter_grad_norm(
+                    (
+                        *goal_phase.completion.parameters(),
+                        *goal_phase.completion_head.parameters(),
+                    ),
+                    reference=reference,
+                )
+            )
+            proposal_entry = getattr(
+                planner,
+                "grounded_clean_proposal_proj",
+                None,
+            )
+            if proposal_entry is not None:
+                losses["grad_grounded_clean_proposal"] = _module_grad_norm(
+                    proposal_entry,
+                    reference=reference,
+                )
+        elif isinstance(goal_phase, DifferentialStatelessIntentController):
+            losses["grad_intent_goal_program"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.program_seed,
+                        goal_phase.goal_input,
+                        goal_phase.goal_block,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_intent_history_encoder"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.state_input,
+                        goal_phase.action_input,
+                        goal_phase.history_fuse,
+                        goal_phase.history_time,
+                        goal_phase.history_blocks,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_intent_history_write"] = _module_grad_norm(
+                goal_phase.history_to_program,
+                reference=reference,
+            )
+            losses["grad_intent_grounding_write"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.grounding_input,
+                        goal_phase.grounding_to_program,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_intent_ordered_refinement"] = _module_grad_norm(
+                goal_phase.ordered_refinement,
+                reference=reference,
+            )
+            losses["grad_intent_window_read"] = _parameter_grad_norm(
+                (
+                    goal_phase.window_query,
+                    *goal_phase.window_coordinate_key.parameters(),
+                    *goal_phase.window_read.parameters(),
+                    *goal_phase.window_refinement.parameters(),
+                ),
+                reference=reference,
+            )
+            losses["grad_intent_predictive_effect"] = _module_grad_norm(
+                goal_phase.predictive_effect,
+                reference=reference,
+            )
+            losses["grad_intent_terminal"] = _module_grad_norm(
+                goal_phase.terminal_head,
+                reference=reference,
+            )
+            proposal_world_queries = getattr(
+                planner,
+                "horizon_proposal_world_block_query_proj",
+                None,
+            )
+            if proposal_world_queries is not None:
+                losses[
+                    "grad_differential_clean_proposal_world_condition"
+                ] = _module_grad_norm(
+                    proposal_world_queries,
+                    reference=reference,
+                )
+            canonical_g_to_p = getattr(
+                planner,
+                "phase_world_query_proj",
+                None,
+            )
+            if canonical_g_to_p is not None:
+                losses["grad_intent_canonical_g_to_p_query"] = (
+                    _module_grad_norm(
+                        canonical_g_to_p,
+                        reference=reference,
+                    )
+                )
+            late_reader = getattr(planner, "late_raw_detail_reader", None)
+            canonical_p1 = (
+                getattr(late_reader, "phase_query_proj", None)
+                if late_reader is not None
+                else None
+            )
+            if canonical_p1 is not None:
+                losses["grad_intent_canonical_p1_query"] = _module_grad_norm(
+                    canonical_p1,
+                    reference=reference,
+                )
+            # Compatibility aliases preserve historical parsers while the
+            # explicit names above expose the actual five-block ownership.
+            losses["grad_stateless_intent_s1"] = losses[
+                "grad_intent_goal_program"
+            ]
+            losses["grad_stateless_intent_s2"] = _parameter_grad_norm(
+                (
+                    *goal_phase.history_blocks.parameters(),
+                    *goal_phase.history_to_program.parameters(),
+                ),
+                reference=reference,
+            )
+            losses["grad_stateless_intent_s3"] = _parameter_grad_norm(
+                (
+                    *goal_phase.grounding_to_program.parameters(),
+                    *goal_phase.ordered_refinement.parameters(),
+                    goal_phase.window_query,
+                    *goal_phase.window_read.parameters(),
+                ),
+                reference=reference,
+            )
+            losses["grad_stateless_intent_mlp"] = _parameter_grad_norm(
+                (
+                    *goal_phase.window_refinement.parameters(),
+                    *goal_phase.predictive_effect.parameters(),
+                    *goal_phase.terminal_head.parameters(),
+                ),
+                reference=reference,
+            )
+            losses["grad_goal_phase_program"] = losses[
+                "grad_intent_goal_program"
+            ]
+            losses["grad_goal_phase_transition"] = losses[
+                "grad_intent_ordered_refinement"
+            ]
+            losses["grad_goal_phase_observation"] = losses[
+                "grad_intent_grounding_write"
+            ]
+        elif hasattr(goal_phase, "history_block"):
+            losses["grad_stateless_intent_s1"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.goal_input,
+                        goal_phase.program_query,
+                        goal_phase.goal_cross,
+                        goal_phase.program_ffn,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_stateless_intent_s2"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.state_input,
+                        goal_phase.action_input,
+                        goal_phase.grounding_input,
+                        goal_phase.history_fuse,
+                        goal_phase.grounding_cross,
+                        goal_phase.history_block,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_stateless_intent_s3"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.control_cross,
+                        goal_phase.control_query,
+                        goal_phase.program_key,
+                        goal_phase.observable_role,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_stateless_intent_mlp"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.progress_head,
+                        goal_phase.window_score,
+                        goal_phase.completion_head,
+                        goal_phase.intent_output,
+                        goal_phase.phase_output,
+                        goal_phase.goal_output,
+                        goal_phase.history_output,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            # Compatibility aliases retain parsers without pretending that S
+            # still owns a recurrent transition matrix.
+            losses["grad_goal_phase_program"] = losses[
+                "grad_stateless_intent_s1"
+            ]
+            losses["grad_goal_phase_transition"] = losses[
+                "grad_stateless_intent_s3"
+            ]
+            losses["grad_goal_phase_observation"] = losses[
+                "grad_stateless_intent_s2"
+            ]
+        else:
+            losses["grad_goal_phase_program"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.goal_cross,
+                        goal_phase.program_ffn,
+                        goal_phase.program_query,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+            losses["grad_goal_phase_transition"] = _parameter_grad_norm(
+                goal_phase.transition.parameters(),
+                reference=reference,
+            )
+            losses["grad_goal_phase_observation"] = _parameter_grad_norm(
+                (
+                    parameter
+                    for module in (
+                        goal_phase.observation_encoder,
+                        goal_phase.grounding_cross,
+                        goal_phase.state_input,
+                        goal_phase.action_input,
+                        goal_phase.grounding_input,
+                    )
+                    for parameter in module.parameters()
+                ),
+                reference=reference,
+            )
+        typed_world_context_parameters: list[torch.nn.Parameter] = []
+        for bank in (
+            getattr(
+                planner,
+                "horizon_phase_world_block_query_proj",
+                None,
+            ),
+            getattr(
+                planner,
+                "horizon_goal_world_block_query_proj",
+                None,
+            ),
+            getattr(
+                planner,
+                "horizon_history_world_block_query_proj",
+                None,
+            ),
+            getattr(planner, "horizon_typed_context_router", None),
+        ):
+            if bank is not None:
+                typed_world_context_parameters.extend(bank.parameters())
+        typed_query = getattr(planner, "horizon_typed_context_query", None)
+        if isinstance(typed_query, torch.nn.Parameter):
+            typed_world_context_parameters.append(typed_query)
+        if typed_world_context_parameters:
+            losses["grad_goal_phase_typed_world_context"] = _parameter_grad_norm(
+                typed_world_context_parameters,
                 reference=reference,
             )
     if getattr(planner, "ground_to_world_attnres", None) is not None:
@@ -11909,9 +17748,7 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
         losses["grad_late_raw_detail_reader"] = _module_grad_norm(
             planner.late_raw_detail_reader, reference=reference
         )
-        typed_refiners = getattr(
-            planner.late_raw_detail_reader, "typed_local_refiners", None
-        )
+        typed_refiners = getattr(planner.late_raw_detail_reader, "typed_local_refiners", None)
         if typed_refiners is not None:
             reader = planner.late_raw_detail_reader
             p1_modules = tuple(
@@ -11921,22 +17758,21 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                     getattr(reader, "lattice_world_key_proj", None),
                     getattr(reader, "typed_fine_query", None),
                     getattr(reader, "typed_coarse_query", None),
+                    getattr(reader, "appearance_world_owner_query", None),
                 )
                 if module is not None
             )
-            losses[
-                "grad_late_raw_detail_typed_p1_selector"
-            ] = _parameter_grad_norm(
-                (
-                    parameter
-                    for module in p1_modules
-                    for parameter in module.parameters()
-                ),
+            losses["grad_late_raw_detail_typed_p1_selector"] = _parameter_grad_norm(
+                (parameter for module in p1_modules for parameter in module.parameters()),
                 reference=reference,
             )
-            losses[
-                "grad_late_raw_detail_literal_rgb_value"
-            ] = _parameter_grad_norm(
+            appearance_gateway = getattr(reader, "appearance_world_owner_query", None)
+            if appearance_gateway is not None:
+                losses["grad_late_raw_detail_p1_appearance_gateway"] = _module_grad_norm(
+                    appearance_gateway,
+                    reference=reference,
+                )
+            losses["grad_late_raw_detail_literal_rgb_value"] = _parameter_grad_norm(
                 (
                     parameter
                     for refiner in typed_refiners
@@ -11944,9 +17780,7 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                 ),
                 reference=reference,
             )
-            losses[
-                "grad_late_raw_detail_learned_detail_value"
-            ] = _parameter_grad_norm(
+            losses["grad_late_raw_detail_learned_detail_value"] = _parameter_grad_norm(
                 (
                     parameter
                     for refiner in typed_refiners
@@ -11954,9 +17788,7 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                 ),
                 reference=reference,
             )
-            losses[
-                "grad_late_raw_detail_typed_p2_condition"
-            ] = _parameter_grad_norm(
+            losses["grad_late_raw_detail_typed_p2_condition"] = _parameter_grad_norm(
                 (
                     parameter
                     for refiner in typed_refiners
@@ -11988,24 +17820,55 @@ def _attach_grad_diagnostics(losses: dict[str, Tensor], system: V39PolicySystem)
                     "geometry",
                     "horizon",
                 ):
-                    losses[
-                        f"grad_late_raw_detail_typed_p2_{owner_name}_owner"
-                    ] = _parameter_grad_norm(
-                        (
-                            parameter
-                            for refiner in typed_refiners
-                            for module in (
-                                refiner.owner_conditions[owner_name],
-                                refiner.owner_outputs[owner_name],
-                            )
-                            for parameter in module.parameters()
-                        ),
-                        reference=reference,
+                    losses[f"grad_late_raw_detail_typed_p2_{owner_name}_owner"] = (
+                        _parameter_grad_norm(
+                            (
+                                parameter
+                                for refiner in typed_refiners
+                                for module in (
+                                    refiner.owner_conditions[owner_name],
+                                    refiner.owner_outputs[owner_name],
+                                )
+                                for parameter in module.parameters()
+                            ),
+                            reference=reference,
+                        )
                     )
+                losses["grad_late_raw_detail_typed_p2_router"] = _parameter_grad_norm(
+                    (
+                        parameter
+                        for refiner in typed_refiners
+                        for parameter in refiner.delta_router.parameters()
+                    ),
+                    reference=reference,
+                )
             losses["grad_late_raw_detail_typed_p2"] = _module_grad_norm(
                 typed_refiners, reference=reference
             )
         final_modules.append(planner.late_raw_detail_reader)
+    if getattr(planner, "policy_plan_compiler", None) is not None:
+        compiler = planner.policy_plan_compiler
+        losses["grad_policy_plan_compiler"] = _module_grad_norm(compiler, reference=reference)
+        for lane in ("precision", "effect", "temporal", "terminal"):
+            module = getattr(compiler, f"{lane}_lane", None)
+            if module is not None:
+                losses[f"grad_policy_plan_{lane}"] = _module_grad_norm(
+                    module,
+                    reference=reference,
+                )
+        final_modules.append(compiler)
+    if getattr(planner, "p2_effect_reader", None) is not None:
+        losses["grad_p2_structured_effect_reader"] = _module_grad_norm(
+            planner.p2_effect_reader,
+            reference=reference,
+        )
+        final_modules.append(planner.p2_effect_reader)
+    if getattr(planner, "consequence_plan_organizer", None) is not None:
+        losses["grad_consequence_plan_organizer"] = _module_grad_norm(
+            planner.consequence_plan_organizer,
+            reference=reference,
+        )
+        final_modules.append(planner.consequence_plan_organizer)
     if getattr(planner, "residual_action_flow_denoiser", None) is not None:
         losses["grad_residual_action_flow"] = _module_grad_norm(
             planner.residual_action_flow_denoiser, reference=reference
@@ -12322,11 +18185,45 @@ def _optimizer_groups(
     planner = system.planner
     phase_world_block_modules = [
         *list(getattr(planner, "phase_world_block_query_proj", None) or ()),
-        *list(
-            getattr(planner, "condition_world_block_query_proj", None) or ()
-        ),
+        *list(getattr(planner, "condition_world_block_query_proj", None) or ()),
     ]
+    horizon_world_block_modules = [
+        *list(getattr(planner, "horizon_phase_world_block_query_proj", None) or ()),
+        *list(getattr(planner, "horizon_goal_world_block_query_proj", None) or ()),
+        *list(getattr(planner, "horizon_history_world_block_query_proj", None) or ()),
+        *list(getattr(planner, "horizon_proposal_world_block_query_proj", None) or ()),
+    ]
+    typed_horizon_router = getattr(planner, "horizon_typed_context_router", None)
+    if typed_horizon_router is not None:
+        horizon_world_block_modules.extend(list(typed_horizon_router))
+    typed_horizon_query = getattr(planner, "horizon_typed_context_query", None)
+    if isinstance(typed_horizon_query, torch.nn.Parameter):
+        horizon_world_block_modules.append(typed_horizon_query)
     groups: list[dict[str, Any]] = []
+    object_top_modules = [
+        module
+        for module in (
+            getattr(planner, "object_grounder", None),
+            getattr(planner, "object_intent_organizer", None),
+            getattr(planner, "object_plan_recognizer", None),
+            getattr(planner, "object_coarse_action", None),
+            getattr(planner, "object_future_compiler", None),
+        )
+        if module is not None
+    ]
+
+    def add_object_top_group() -> None:
+        params = _unique_params(object_top_modules)
+        if params:
+            groups.append(
+                {
+                    "params": params,
+                    # G/S/W are the new mainline, not inherited low-LR probes.
+                    # P2/P3 retain their existing final-policy ownership.
+                    "lr": trainer.lr,
+                    "name": "object_intent_dynamics_323_top",
+                }
+            )
     complete_latent_decoder = (
         getattr(planner, "latent_cvae_action_decoder", None) is not None
         or getattr(planner, "latent_main_action_decoder", None) is not None
@@ -12498,6 +18395,32 @@ def _optimizer_groups(
                     ]
                 )
             shared_modules.extend(phase_world_block_modules)
+        if getattr(planner, "stateless_horizon_adapter", None) is not None:
+            shared_modules.extend(
+                module
+                for module in [
+                    planner.stateless_horizon_adapter,
+                    planner.phase_world_query_proj,
+                    planner.condition_world_query_proj,
+                    planner.history_world_query_proj,
+                    *horizon_world_block_modules,
+                ]
+                if module is not None
+            )
+        if getattr(planner, "stateless_goal_phase_machine", None) is not None:
+            shared_modules.extend(
+                module
+                for module in [
+                    planner.stateless_goal_phase_machine,
+                    planner.phase_world_query_proj,
+                    planner.condition_world_query_proj,
+                    planner.history_world_query_proj,
+                    *horizon_world_block_modules,
+                ]
+                if module is not None
+            )
+        if getattr(planner, "grounded_clean_proposal_proj", None) is not None:
+            shared_modules.append(planner.grounded_clean_proposal_proj)
         for bridge_name in (
             "ground_to_world_attnres",
             "world_to_policy_attnres",
@@ -12550,6 +18473,7 @@ def _optimizer_groups(
                 "name": "flow_jepa_stage1_evidence",
             }
         )
+        add_object_top_group()
         return [group for group in groups if len(group["params"]) > 0]
 
     if (
@@ -12576,6 +18500,32 @@ def _optimizer_groups(
                     ]
                 )
             shared_modules.extend(phase_world_block_modules)
+        if getattr(planner, "stateless_horizon_adapter", None) is not None:
+            shared_modules.extend(
+                module
+                for module in [
+                    planner.stateless_horizon_adapter,
+                    planner.phase_world_query_proj,
+                    planner.condition_world_query_proj,
+                    planner.history_world_query_proj,
+                    *horizon_world_block_modules,
+                ]
+                if module is not None
+            )
+        if getattr(planner, "stateless_goal_phase_machine", None) is not None:
+            shared_modules.extend(
+                module
+                for module in [
+                    planner.stateless_goal_phase_machine,
+                    planner.phase_world_query_proj,
+                    planner.condition_world_query_proj,
+                    planner.history_world_query_proj,
+                    *horizon_world_block_modules,
+                ]
+                if module is not None
+            )
+        if getattr(planner, "grounded_clean_proposal_proj", None) is not None:
+            shared_modules.append(planner.grounded_clean_proposal_proj)
         for bridge_name in (
             "ground_to_world_attnres",
             "world_to_policy_attnres",
@@ -12634,6 +18584,12 @@ def _optimizer_groups(
             ]
             if getattr(planner, "late_raw_detail_reader", None) is not None:
                 final_modules.append(planner.late_raw_detail_reader)
+            if getattr(planner, "policy_plan_compiler", None) is not None:
+                final_modules.append(planner.policy_plan_compiler)
+            if getattr(planner, "p2_effect_reader", None) is not None:
+                final_modules.append(planner.p2_effect_reader)
+            if getattr(planner, "consequence_plan_organizer", None) is not None:
+                final_modules.append(planner.consequence_plan_organizer)
             if not event_probe_in_contract:
                 final_modules.append(planner.event_probe)
             if getattr(planner, "residual_action_flow_denoiser", None) is not None:
@@ -12674,9 +18630,7 @@ def _optimizer_groups(
             )
         else:
             upper_lr = trainer.lr * float(getattr(trainer, "upper_lr_scale", 0.20))
-            single_stage_role_lr = bool(
-                int(getattr(trainer, "single_stage_role_lr", 0))
-            )
+            single_stage_role_lr = bool(int(getattr(trainer, "single_stage_role_lr", 0)))
             shared_lr = trainer.lr if single_stage_role_lr else upper_lr * 0.5
             groups.append(
                 {
@@ -12713,8 +18667,7 @@ def _optimizer_groups(
             inherited_contract_lr = (
                 trainer.lr
                 if single_stage_role_lr
-                else upper_lr
-                * float(getattr(trainer, "midcut_head_lr_scale", 1.0))
+                else upper_lr * float(getattr(trainer, "midcut_head_lr_scale", 1.0))
             )
             groups.append(
                 {
@@ -12761,6 +18714,12 @@ def _optimizer_groups(
             ]
             if getattr(planner, "late_raw_detail_reader", None) is not None:
                 final_modules.append(planner.late_raw_detail_reader)
+            if getattr(planner, "policy_plan_compiler", None) is not None:
+                final_modules.append(planner.policy_plan_compiler)
+            if getattr(planner, "p2_effect_reader", None) is not None:
+                final_modules.append(planner.p2_effect_reader)
+            if getattr(planner, "consequence_plan_organizer", None) is not None:
+                final_modules.append(planner.consequence_plan_organizer)
             groups.append(
                 {
                     "params": _unique_params(final_modules),
@@ -12822,11 +18781,14 @@ def _optimizer_groups(
         if flow_dino is not None:
             groups.append(
                 {
-                    "params": [parameter for parameter in flow_dino.parameters() if parameter.requires_grad],
+                    "params": [
+                        parameter for parameter in flow_dino.parameters() if parameter.requires_grad
+                    ],
                     "lr": trainer.lr * float(getattr(trainer, "flow_jepa_lr_scale", 1.0)),
                     "name": "flow_dino_evidence",
                 }
             )
+        add_object_top_group()
         return [group for group in groups if len(group["params"]) > 0]
 
     pre_modules = [
@@ -12844,6 +18806,22 @@ def _optimizer_groups(
     if getattr(planner, "stateless_phase_adapter", None) is not None:
         pre_modules.append(planner.stateless_phase_adapter)
         pre_modules.extend(phase_world_block_modules)
+    if getattr(planner, "stateless_horizon_adapter", None) is not None:
+        pre_modules.extend(
+            [
+                planner.stateless_horizon_adapter,
+                *horizon_world_block_modules,
+            ]
+        )
+    if getattr(planner, "stateless_goal_phase_machine", None) is not None:
+        pre_modules.extend(
+            [
+                planner.stateless_goal_phase_machine,
+                *horizon_world_block_modules,
+            ]
+        )
+    if getattr(planner, "grounded_clean_proposal_proj", None) is not None:
+        pre_modules.append(planner.grounded_clean_proposal_proj)
     if getattr(planner, "ground_to_world_attnres", None) is not None:
         pre_modules.append(planner.ground_to_world_attnres)
     mid_modules = [planner.midcut_heads]
@@ -12857,12 +18835,20 @@ def _optimizer_groups(
     ]
     if getattr(planner, "late_raw_detail_reader", None) is not None:
         post_modules.append(planner.late_raw_detail_reader)
+    if getattr(planner, "policy_plan_compiler", None) is not None:
+        post_modules.append(planner.policy_plan_compiler)
+    if getattr(planner, "p2_effect_reader", None) is not None:
+        post_modules.append(planner.p2_effect_reader)
+    if getattr(planner, "consequence_plan_organizer", None) is not None:
+        post_modules.append(planner.consequence_plan_organizer)
     if getattr(planner, "world_to_policy_attnres", None) is not None:
         post_modules.append(planner.world_to_policy_attnres)
     if getattr(planner, "phase_world_query_proj", None) is not None:
         post_modules.append(planner.phase_world_query_proj)
     if getattr(planner, "condition_world_query_proj", None) is not None:
         post_modules.append(planner.condition_world_query_proj)
+    if getattr(planner, "history_world_query_proj", None) is not None:
+        post_modules.append(planner.history_world_query_proj)
     if stage in {"contract", "stage1"}:
         groups.append(
             {"params": _unique_params(pre_modules), "lr": trainer.lr, "name": "pre_midcut_trunk"}
@@ -12956,12 +18942,68 @@ def _optimizer_groups(
     if flow_dino is not None:
         groups.append(
             {
-                "params": [parameter for parameter in flow_dino.parameters() if parameter.requires_grad],
+                "params": [
+                    parameter for parameter in flow_dino.parameters() if parameter.requires_grad
+                ],
                 "lr": trainer.lr * float(getattr(trainer, "flow_jepa_lr_scale", 1.0)),
                 "name": "flow_dino_evidence",
             }
         )
+    add_object_top_group()
     return [group for group in groups if len(group["params"]) > 0]
+
+
+def _validate_object_optimizer_ownership(
+    system: V39PolicySystem,
+    groups: Sequence[dict[str, Any]],
+) -> None:
+    """Every trainable system parameter must have exactly one optimizer owner.
+
+    The capability modules are the most likely omission point, but validating
+    only that subset would still permit an ancestral trainable parameter to be
+    silently dropped or duplicated while the new top appears healthy.  The
+    object graph is fresh-only, so its preflight can enforce the stronger
+    whole-system invariant without affecting historical launchers.
+    """
+
+    if not int(
+        getattr(
+            system.policy_config,
+            "flow_jepa_object_intent_dynamics_mainline",
+            0,
+        )
+    ):
+        return
+    owned_count: dict[int, int] = {}
+    for group in groups:
+        for parameter in group["params"]:
+            owned_count[id(parameter)] = owned_count.get(id(parameter), 0) + 1
+    trainable = {
+        id(parameter): name
+        for name, parameter in system.named_parameters()
+        if parameter.requires_grad
+    }
+    missing = [
+        name
+        for parameter_id, name in trainable.items()
+        if owned_count.get(parameter_id, 0) == 0
+    ]
+    duplicate = [
+        f"{trainable.get(parameter_id, '<unregistered>')}:{count}"
+        for parameter_id, count in owned_count.items()
+        if count != 1
+    ]
+    extra = [
+        f"<unregistered>:{parameter_id}"
+        for parameter_id in owned_count
+        if parameter_id not in trainable
+    ]
+    if missing or duplicate or extra:
+        raise RuntimeError(
+            "object-intent optimizer ownership is not a one-to-one partition "
+            "of all trainable system parameters: "
+            f"missing={missing[:12]} duplicate={duplicate[:12]} extra={extra[:12]}"
+        )
 
 
 def _is_contract_stage(trainer: V39PolicyTrainerConfig) -> bool:
@@ -12971,12 +19013,9 @@ def _is_contract_stage(trainer: V39PolicyTrainerConfig) -> bool:
     }
 
 
-def _is_flow_jepa_stage1(
-    system: V39PolicySystem, trainer: V39PolicyTrainerConfig
-) -> bool:
+def _is_flow_jepa_stage1(system: V39PolicySystem, trainer: V39PolicyTrainerConfig) -> bool:
     return bool(
-        _is_contract_stage(trainer)
-        and int(getattr(system.policy_config, "flow_jepa_enabled", 0))
+        _is_contract_stage(trainer) and int(getattr(system.policy_config, "flow_jepa_enabled", 0))
     )
 
 
@@ -13099,8 +19138,10 @@ def train_v39_policy(
     system.to(device=device, dtype=torch.float32)
     if memory_reporter.enabled:
         memory_reporter.snapshot(tag="after_model_to_device", phase="setup", print_line=True)
+    optimizer_groups = _optimizer_groups(system, trainer)
+    _validate_object_optimizer_ownership(system, optimizer_groups)
     optimizer = torch.optim.AdamW(
-        _optimizer_groups(system, trainer),
+        optimizer_groups,
         weight_decay=trainer.weight_decay,
         betas=(trainer.beta1, trainer.beta2),
         eps=trainer.eps,
@@ -13176,11 +19217,16 @@ def train_v39_policy(
                 "future_anchors",
                 "flow_jepa_stage_tokens",
             ):
-                default_value = 0 if field in {
-                    "flow_jepa_raw_image_enabled",
-                    "flow_jepa_role_hierarchy",
-                    "flow_jepa_zero_flow_guard",
-                } else -1
+                default_value = (
+                    0
+                    if field
+                    in {
+                        "flow_jepa_raw_image_enabled",
+                        "flow_jepa_role_hierarchy",
+                        "flow_jepa_zero_flow_guard",
+                    }
+                    else -1
+                )
                 saved_value = int(saved_policy.get(field, default_value))
                 current_value = int(getattr(system.policy_config, field))
                 if saved_value != current_value:
@@ -13231,6 +19277,40 @@ def train_v39_policy(
                     saved_policy,
                     system.policy_config,
                 )
+                if int(
+                    getattr(
+                        system.policy_config,
+                        "flow_jepa_grounded_intent_effect_mainline",
+                        0,
+                    )
+                ):
+                    saved_manifest = (
+                        payload.get("context", {}).get(
+                            "architecture_manifest"
+                        )
+                    )
+                    current_manifest = context.get(
+                        "architecture_manifest"
+                    )
+                    if not isinstance(saved_manifest, dict):
+                        raise ValueError(
+                            "grounded resume checkpoint has no architecture "
+                            "manifest; start a fresh run"
+                        )
+                    if not isinstance(current_manifest, dict):
+                        raise ValueError(
+                            "grounded current run has no architecture manifest"
+                        )
+                    saved_identity = manifest_from_mapping(saved_manifest)
+                    current_identity = manifest_from_mapping(current_manifest)
+                    if (
+                        saved_identity.as_dict()
+                        != current_identity.as_dict()
+                    ):
+                        raise ValueError(
+                            "grounded architecture manifest mismatch; "
+                            "start a fresh top run"
+                        )
             saved_offsets = tuple(
                 int(value) for value in saved_policy.get("flow_jepa_history_offsets", ())
             )
@@ -13242,9 +19322,7 @@ def train_v39_policy(
                     "resume flow_jepa_history_offsets mismatch: "
                     f"checkpoint={saved_offsets}, current={current_offsets}"
                 )
-            saved_window_offsets, saved_stage_offset = _saved_flow_jepa_hierarchy(
-                saved_policy
-            )
+            saved_window_offsets, saved_stage_offset = _saved_flow_jepa_hierarchy(saved_policy)
             current_window_offsets = tuple(
                 int(value) for value in system.policy_config.flow_jepa_effective_window_offsets
             )
@@ -13268,9 +19346,7 @@ def train_v39_policy(
                     "pre-hierarchy V95 checkpoints may be used only as --stage1-checkpoint"
                 )
         saved_action_history = int(saved_policy.get("action_history_enabled", 0))
-        current_action_history = int(
-            getattr(system.policy_config, "action_history_enabled", 0)
-        )
+        current_action_history = int(getattr(system.policy_config, "action_history_enabled", 0))
         if saved_action_history != current_action_history:
             raise ValueError(
                 "resume action-history architecture mismatch: "
@@ -13487,14 +19563,13 @@ def train_v39_policy(
         if hasattr(train_batch_sampler, "set_epoch"):
             train_batch_sampler.set_epoch(epoch)
         metric_sums: dict[str, Tensor] = {}
+        metric_counts: dict[str, int] = {}
         metric_count = 0
         throughput_start = time.perf_counter()
         throughput_batch = 0
         include_future = _needs_future_targets(trainer, epoch)
         include_counterfactuals = (
-            False
-            if flow_jepa_stage1
-            else _needs_action_counterfactuals(trainer, epoch)
+            False if flow_jepa_stage1 else _needs_action_counterfactuals(trainer, epoch)
         )
         for batch_index, batch in enumerate(train_loader, start=1):
             if trainer.max_train_batches and batch_index > trainer.max_train_batches:
@@ -13555,6 +19630,11 @@ def train_v39_policy(
             contract_stage = _is_contract_stage(trainer)
             stop_midcut = contract_stage and not layer_mode
             layer_aux_contribution: Tensor | None = None
+            collect_step_diagnostics = bool(
+                batch_index == 1
+                or (trainer.log_every and batch_index % int(trainer.log_every) == 0)
+                or callgraph_auditor is not None
+            )
             with autocast_context(device, dtype):
                 if flow_jepa_stage1:
                     target_visual = sample.get("target_visual")
@@ -13584,12 +19664,18 @@ def train_v39_policy(
                         raw_visual=sample.get("raw_visual"),
                         action_state=sample["action_state"],
                         target_visual=sample.get("target_visual"),
+                        future_training_pack=_object_intent_future_training_pack(
+                            sample,
+                            system=system,
+                            require_teacher=bool(use_future),
+                        ),
                         # Future teacher targets and action counterfactuals are
                         # different requirements.  V95 needs frozen future DINO
                         # targets, but its zero-weight legacy contrast objectives
                         # must not retain two extra full policy graphs.
                         make_counterfactuals=bool(use_future and include_counterfactuals),
                         stop_at_midcut=stop_midcut,
+                        collect_audit_metrics=collect_step_diagnostics,
                     )
                 if flow_jepa_stage1:
                     # The dedicated branch above already owns the complete
@@ -13690,6 +19776,8 @@ def train_v39_policy(
                     losses[aux_scale_key] = torch.as_tensor(
                         aux_scale, device=losses["loss"].device, dtype=losses["loss"].dtype
                     )
+            if not flow_jepa_stage1:
+                _attach_intent_frame_progress_audit(losses, sample, output)
             if evidence_decoder is not None and not contract_stage:
                 _attach_v94_loss_ledger(
                     losses,
@@ -13710,7 +19798,12 @@ def train_v39_policy(
                     f"non-finite training loss before backward at epoch={epoch} batch={batch_index}"
                 )
             losses["loss"].float().backward()
-            _attach_grad_diagnostics(losses, system)
+            collect_grad_diagnostics = collect_step_diagnostics
+            if collect_grad_diagnostics:
+                _attach_grad_diagnostics(losses, system)
+            losses["grad_diagnostics_coverage"] = losses["loss"].new_tensor(
+                float(collect_grad_diagnostics), dtype=torch.float32
+            )
             if callgraph_auditor is not None:
                 callgraph_auditor.capture_gradients()
                 callgraph_auditor.begin_phase("sample")
@@ -13790,10 +19883,11 @@ def train_v39_policy(
                     if evidence_decoder is not None
                     else "grad_latent_cvae_action_post_clip"
                 )
-                losses[clip_key] = _parameter_grad_norm(
-                    local_clip_params,
-                    reference=losses["loss"],
-                )
+                if collect_grad_diagnostics:
+                    losses[clip_key] = _parameter_grad_norm(
+                        local_clip_params,
+                        reference=losses["loss"],
+                    )
             main_clip_params = [
                 parameter
                 for parameter in system.parameters()
@@ -13816,10 +19910,13 @@ def train_v39_policy(
                     batch=batch_index,
                     label="exit-controller",
                 )
-                losses["grad_hierarchical_mmdit_exit_controller_post_clip"] = _parameter_grad_norm(
-                    exit_controller_params,
-                    reference=losses["loss"],
-                )
+                if collect_grad_diagnostics:
+                    losses["grad_hierarchical_mmdit_exit_controller_post_clip"] = (
+                        _parameter_grad_norm(
+                            exit_controller_params,
+                            reference=losses["loss"],
+                        )
+                    )
             if report_mem and memory_reporter.detail:
                 memory_reporter.snapshot(
                     tag="train_after_clip",
@@ -13840,7 +19937,12 @@ def train_v39_policy(
                     print_line=True,
                     extra={"use_future": bool(use_future)},
                 )
-            _accumulate_metric_tensors(metric_sums, losses, grad=grad)
+            _accumulate_metric_tensors(
+                metric_sums,
+                losses,
+                counts=metric_counts,
+                grad=grad,
+            )
             metric_count += 1
             if trainer.log_every and batch_index % trainer.log_every == 0:
                 row = _sync_loss_row(losses, grad=grad)
@@ -14326,7 +20428,11 @@ def train_v39_policy(
                     ),
                     flush=True,
                 )
-        train_metrics = _finalize_metric_tensors(metric_sums, metric_count)
+        train_metrics = _finalize_metric_tensors(
+            metric_sums,
+            metric_count,
+            counts=metric_counts,
+        )
         evidence_epoch = (
             getattr(system.planner, "evidence_latent_mmdit_action_decoder", None) is not None
         )
@@ -14485,6 +20591,11 @@ __all__ = [
     "rollout_contrast_loss",
     "flow_jepa_stage1_losses",
     "flow_jepa_interval_stage_terms",
+    "_validate_complete_v115_model_contract",
+    "_validate_complete_v116_model_contract",
+    "_validate_complete_v117_model_contract",
+    "_validate_differential_intent_effect_323_model_contract",
+    "_validate_grounded_intent_effect_323_model_contract",
     "flow_losses",
     "layer_contract_losses",
     "evaluate_flow_jepa_stage1",
@@ -14500,4 +20611,7 @@ __all__ = [
     "_validate_complete_v109_model_contract",
     "_validate_complete_v110_model_contract",
     "_validate_complete_v111_model_contract",
+    "_validate_complete_v112_model_contract",
+    "_validate_complete_v113_model_contract",
+    "evaluate_model_path_intervention",
 ]

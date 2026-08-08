@@ -1,6 +1,6 @@
 """Audit ClearVLA training logs without importing the training stack.
 
-The parser accepts the historical ``[v39-layer]`` format, the compact V94-V102
+The parser accepts the historical ``[v39-layer]`` format, the compact V94-V120
 formats (including representation-only V95 Stage1), pretty-printed run
 contexts, and epoch JSON/JSONL records.
 Its summaries deliberately separate raw metrics, weighted objective
@@ -27,6 +27,11 @@ INIT_COUNT_RE = re.compile(r"^\[v39-init\]\s+(?P<label>.*?)(?:\s+count=(?P<count
 UNHANDLED_EXCEPTION_RE = re.compile(
     r"^(?P<type>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)):\s*(?P<message>.*)$"
 )
+COMPACT_POLICY_VERSIONS = tuple(range(94, 121))
+
+
+def _compact_prefixes(family: str) -> tuple[str, ...]:
+    return tuple(f"[v{version}-{family}]" for version in COMPACT_POLICY_VERSIONS)
 
 
 # Only legacy slash groups that carry cross-version decision value are decoded
@@ -232,6 +237,34 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "value_reader": "grad_evidence_mmdit_execution_value_reader",
         "layer_adapter": "grad_layer_contract_adapters",
         "consequence": "grad_layer_consequence_cell",
+        "intent_goal": "grad_intent_goal_program",
+        "intent_history": "grad_intent_history_encoder",
+        "intent_history_write": "grad_intent_history_write",
+        "intent_grounding": "grad_intent_grounding_write",
+        "intent_ordered": "grad_intent_ordered_refinement",
+        "intent_window": "grad_intent_window_read",
+        "intent_predictive": "grad_intent_predictive_effect",
+        "intent_terminal": "grad_intent_terminal",
+        "w_clean_proposal": (
+            "grad_differential_clean_proposal_world_condition"
+        ),
+        "intent_g_to_p_query": "grad_intent_canonical_g_to_p_query",
+        "intent_p1_query": "grad_intent_canonical_p1_query",
+        "consequence_organizer": "grad_consequence_plan_organizer",
+        "grounded_w_inputs": "grad_grounded_world_shared_inputs",
+        "grounded_w1_blocks": "grad_grounded_world_w1_blocks",
+        "grounded_w2_blocks": "grad_grounded_world_w2_blocks",
+        "grounded_w_shared_heads": "grad_grounded_world_shared_heads",
+        # Preserve the actual names from already-completed V119 logs.  Their
+        # W1 group is known to include shared inputs, so it remains a legacy
+        # key rather than being relabeled as the corrected blocks-only group.
+        "grounded_w1": "grad_grounded_world_w1",
+        "grounded_w2": "grad_grounded_world_w2",
+        "grounded_w_heads": "grad_grounded_world_effect_heads",
+        "differential_w1": "grad_differential_w1_near_mid_transition",
+        "differential_w2": "grad_differential_w2_late_transition",
+        "effect_decoder": "grad_differential_effect_decoder",
+        "current_reference": "grad_differential_current_reference_bridge",
         "dynamics": "grad_controlled_dynamics",
         "dit": "grad_dit_blocks",
         "dit_blocks": "grad_dit_blocks",
@@ -435,6 +468,85 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "goal_pair_cos": "flow_jepa_goal_pair_cosine",
         "action_mem_norm": "flow_jepa_action_condition_norm",
         "goal_action_cos": "flow_jepa_goal_action_cosine",
+        "effect_w1_current_loss": "flow_jepa_future_effect_w1_current_loss",
+        "effect_w1_successor_loss": "flow_jepa_future_effect_w1_successor_loss",
+        "effect_w1_semantic_loss": "flow_jepa_future_effect_w1_semantic_loss",
+        "effect_w2_current_loss": "flow_jepa_future_effect_w2_current_loss",
+        "effect_w2_successor_loss": "flow_jepa_future_effect_w2_successor_loss",
+        "effect_semantic_loss": "flow_jepa_future_effect_semantic_loss",
+        "effect_successor_loss": "flow_jepa_future_effect_successor_loss",
+        "effect_semantic_near_loss": "flow_jepa_future_effect_semantic_near_loss",
+        "effect_semantic_mid_loss": "flow_jepa_future_effect_semantic_mid_loss",
+        "effect_semantic_late_loss": "flow_jepa_future_effect_semantic_late_loss",
+        "effect_intent_summary_loss": "flow_jepa_future_effect_intent_summary_loss",
+        "effect_near_contrib": "flow_jepa_future_effect_effective_near_loss",
+        "effect_mid_contrib": "flow_jepa_future_effect_effective_mid_loss",
+        "effect_late_contrib": "flow_jepa_future_effect_effective_late_loss",
+        "effect_transport_loss": "flow_jepa_future_effect_transport_loss",
+        "effect_cov_loss": "flow_jepa_future_effect_transport_covariance_loss",
+        "effect_persist_loss": "flow_jepa_future_effect_persistence_loss",
+        "effect_visible_loss": "flow_jepa_future_effect_visibility_loss",
+        "effect_uncert_loss": "flow_jepa_future_effect_uncertainty_loss",
+        "w1_effect_cos": "flow_jepa_differential_w1_adjacent_cosine",
+        "w1_effect_var": "flow_jepa_differential_w1_slot_variation",
+        "w2_effect_cos": "flow_jepa_differential_w2_adjacent_cosine",
+        "w2_effect_var": "flow_jepa_differential_w2_slot_variation",
+        "effect_pred_near": "flow_jepa_differential_w2_near_effect_rms",
+        "effect_pred_mid": "flow_jepa_differential_w2_mid_effect_rms",
+        "effect_pred_late": "flow_jepa_differential_w2_late_effect_rms",
+        "effect_target_near": "flow_jepa_future_effect_target_near_rms",
+        "effect_target_mid": "flow_jepa_future_effect_target_mid_rms",
+        "effect_target_late": "flow_jepa_future_effect_target_late_rms",
+        "effect_rel_near": "flow_jepa_future_effect_teacher_reliability_near",
+        "effect_rel_mid": "flow_jepa_future_effect_teacher_reliability_mid",
+        "effect_rel_late": "flow_jepa_future_effect_teacher_reliability_late",
+        "p2_diff_read": "flow_jepa_p2_effect_read_rms",
+        "p2_diff_content_score": "flow_jepa_p2_effect_content_score_rms",
+        "p2_diff_intent_score": "flow_jepa_p2_effect_intent_score_rms",
+        "p2_diff_coordinate_score": "flow_jepa_p2_effect_coordinate_score_rms",
+        "p2_diff_entropy": "flow_jepa_p2_effect_entropy",
+        "p2_effect_read": "flow_jepa_p2_structured_effect_read_rms",
+        "p2_effect_entropy": "flow_jepa_p2_structured_effect_entropy",
+        "p2_effect_interval_var": "flow_jepa_p2_structured_effect_interval_rms_variation",
+        "consequence_effect": "flow_jepa_consequence_effect_base_rms",
+        "consequence_organized": "flow_jepa_consequence_organized_delta_rms",
+        "plan_protected_base": "flow_jepa_policy_plan_protected_base_rms",
+        "plan_precision": "flow_jepa_policy_plan_precision_rms",
+        "plan_temporal": "flow_jepa_policy_plan_temporal_rms",
+        "intent_program_cos": "flow_jepa_intent_program_adjacent_cosine",
+        "intent_attention_entropy": "flow_jepa_intent_program_attention_entropy",
+        "intent_predictive_effect": "flow_jepa_intent_predictive_effect_rms",
+        "intent_language_innovation": "flow_jepa_intent_language_innovation_rms",
+        "intent_history_innovation": "flow_jepa_intent_history_innovation_rms",
+        "intent_grounding_innovation": "flow_jepa_intent_grounding_innovation_rms",
+        "intent_ordered_innovation": "flow_jepa_intent_ordered_innovation_rms",
+        "intent_near_program": "flow_jepa_intent_near_program_argmax",
+        "intent_mid_program": "flow_jepa_intent_mid_program_argmax",
+        "intent_late_program": "flow_jepa_intent_late_program_argmax",
+        "w0_proposal_mass": "flow_jepa_w0_typed_condition_proposal_mass",
+        "w1_proposal_mass": "flow_jepa_w1_typed_condition_proposal_mass",
+        "w2_proposal_mass": "flow_jepa_w2_typed_condition_proposal_mass",
+        "w0_clean_proposal": "flow_jepa_w0_clean_proposal_context_rms",
+        "w1_clean_proposal": "flow_jepa_w1_clean_proposal_context_rms",
+        "w2_clean_proposal": "flow_jepa_w2_clean_proposal_context_rms",
+        "w0_direct_intent_bypass": "flow_jepa_w0_direct_intent_bypass",
+        "w1_direct_intent_bypass": "flow_jepa_w1_direct_intent_bypass",
+        "w2_direct_intent_bypass": "flow_jepa_w2_direct_intent_bypass",
+        "p1_intent_query": "flow_jepa_phase_detail_query_norm",
+        "p1_direct_condition_bypass": (
+            "flow_jepa_differential_p1_direct_condition_bypass"
+        ),
+        "g_to_p_intent_query": "attnres_world_to_policy_phase_query_norm",
+        "g_to_p_goal_bypass": (
+            "attnres_world_to_policy_condition_query_norm"
+        ),
+        "g_to_p_history_bypass": (
+            "attnres_world_to_policy_history_query_norm"
+        ),
+        "phase_terminal": "flow_jepa_phase_terminal_mass",
+        "execution_terminal": "flow_jepa_execution_terminal_probability",
+        "execution_terminal_uncert": "flow_jepa_execution_terminal_uncertainty",
+        "execution_terminal_bias": "evidence_execution_terminal_external_bias",
         "repr_batch_cov": "eval_representation_coverage",
         "horizon_count": "flow_jepa_horizon_count",
         "horizon_max": "flow_jepa_horizon_max",
@@ -510,6 +622,258 @@ V94_ALIASES: dict[str, dict[str, str]] = {
         "world_blocks": "flow_jepa_world_block_count",
         "policy_blocks": "flow_jepa_policy_block_count",
     },
+}
+
+
+# V119 has capability-specific compact rows in addition to the inherited
+# train/repr/exec/grad lines.  Keep their display names separate instead of
+# overloading the already-large ancestry ``repr`` alias table.
+V94_ALIASES.update(
+    {
+        "ground": {
+            "active": "grounded_intent_effect_active",
+            "g2_fine_H": "flow_jepa_progressive_g2_fine_entropy",
+            "g2_sem_app_l1": (
+                "flow_jepa_progressive_g2_semantic_appearance_posterior_l1"
+            ),
+            "g2_app_geo_l1": (
+                "flow_jepa_progressive_g2_appearance_geometry_posterior_l1"
+            ),
+            "g3_sem_H": "flow_jepa_progressive_g3_semantic_slot_entropy",
+            "g3_app_H": "flow_jepa_progressive_g3_appearance_slot_entropy",
+            "g3_geo_H": "flow_jepa_progressive_g3_geometry_slot_entropy",
+            "g2g3_sem": "grounded_g2_g3_semantic_owner_l1",
+            "g2g3_app": "grounded_g2_g3_appearance_owner_l1",
+            "g2g3_geo": "grounded_g2_g3_geometry_owner_l1",
+            "p1_app_geo_l1": (
+                "flow_jepa_typed_p1_appearance_geometry_fine_l1"
+            ),
+            "p1_sem_app_l1": (
+                "flow_jepa_typed_p1_semantic_appearance_route_l1"
+            ),
+            "current_ref_align": (
+                "grounded_future_effect_current_reference_alignment_rms"
+            ),
+        },
+        "intent": {
+            "goal_attention_H": "grounded_s_goal_attention_entropy",
+            "interval_goal_H": "grounded_s_interval_goal_attention_entropy",
+            "source_attention_H": "grounded_s_interval_source_entropy",
+            "interval_cos": "grounded_s_interval_adjacent_cosine",
+            "interval_var": "grounded_s_interval_variation",
+            "achieved": "grounded_s_achieved_rms",
+            "remaining": "grounded_s_remaining_rms",
+            "completion": "grounded_s_completion_probability",
+            "source_null": "grounded_s_interval_null_mass",
+            "source_observable": "grounded_s_interval_observable_mass",
+            "source_history": "grounded_s_interval_history_mass",
+            "source_semantic": "grounded_s_interval_semantic_mass",
+            "source_appearance": "grounded_s_interval_appearance_mass",
+            "source_geometry": "grounded_s_interval_geometry_mass",
+            **{
+                f"{interval}_goal_H": (
+                    f"grounded_s_{interval}_goal_attention_entropy"
+                )
+                for interval in ("h4_8", "h8_16", "h16_32", "h32_48")
+            },
+            **{
+                f"{interval}_source_H": (
+                    f"grounded_s_{interval}_source_attention_entropy"
+                )
+                for interval in ("h4_8", "h8_16", "h16_32", "h32_48")
+            },
+        },
+        "effect": {
+            "w1_sem": "grounded_w1_semantic_rms",
+            "w1_transport": "grounded_w1_transport_rms",
+            "w1_interval_var": "grounded_w1_interval_variation",
+            "w1_object_var": "grounded_w1_object_variation",
+            "w1_cos": "grounded_w1_adjacent_cosine",
+            "w2_sem": "grounded_w2_semantic_rms",
+            "w2_transport": "grounded_w2_transport_rms",
+            "w2_interval_var": "grounded_w2_interval_variation",
+            "w2_object_var": "grounded_w2_object_variation",
+            "w2_cos": "grounded_w2_adjacent_cosine",
+            "pred_cos": "grounded_future_effect_prediction_adjacent_cosine",
+            "target_cos": "grounded_future_effect_target_adjacent_cosine",
+            "pred_var": "grounded_future_effect_prediction_interval_variation",
+            "target_var": "grounded_future_effect_target_interval_variation",
+            "transport_pred_var": (
+                "grounded_future_effect_prediction_transport_variation"
+            ),
+            "transport_target_var": (
+                "grounded_future_effect_target_transport_variation"
+            ),
+            "loss_successor": "flow_jepa_future_effect_successor_loss",
+            "loss_semantic": "flow_jepa_future_effect_semantic_loss",
+            "loss_transport": "flow_jepa_future_effect_transport_loss",
+            "loss_covariance": (
+                "flow_jepa_future_effect_transport_covariance_loss"
+            ),
+            "loss_persistence_change": (
+                "flow_jepa_future_effect_persistence_change_loss"
+            ),
+            "loss_visibility_change": (
+                "flow_jepa_future_effect_visibility_change_loss"
+            ),
+            "loss_uncertainty_calibration": (
+                "flow_jepa_future_effect_uncertainty_calibration_loss"
+            ),
+            "loss_reliability_calibration": (
+                "flow_jepa_future_effect_reliability_calibration_loss"
+            ),
+            "loss_interval_transition": (
+                "flow_jepa_future_effect_relative_transition_loss"
+            ),
+        },
+        "policy": {
+            "effect_read": "grounded_p2_effect_read_rms",
+            "content_score_max": "grounded_p2_content_score_abs_max",
+            "intent_score_max": "grounded_p2_intent_score_abs_max",
+            "coordinate_score_max": "grounded_p2_coordinate_score_abs_max",
+            "query_coordinate_std": "grounded_p2_query_coordinate_std",
+            "posterior_max": "grounded_p2_posterior_max",
+            "posterior_H": "grounded_p2_posterior_entropy",
+            "tau_content": "grounded_p2_content_temperature",
+            "tau_intent": "grounded_p2_intent_temperature",
+            "tau_coordinate": "grounded_p2_coordinate_temperature",
+            "mass_h4_8": "grounded_p2_h4_8_mass",
+            "mass_h8_16": "grounded_p2_h8_16_mass",
+            "mass_h16_32": "grounded_p2_h16_32_mass",
+            "mass_h32_48": "grounded_p2_h32_48_mass",
+            "consequence_effect": "grounded_consequence_effect_rms",
+            "consequence_interaction": "grounded_consequence_interaction_rms",
+            "p3_precision": "grounded_p3_precision_rms",
+            "p3_temporal": "grounded_p3_temporal_rms",
+        },
+    }
+)
+
+# V120 uses a capability-owned schema.  Keep separate alias families so its
+# concise display names cannot overwrite the different V119 meanings of
+# ``interval_var``, ``intent_score`` or ``p3_*``.
+V94_ALIASES.update(
+    {
+        "object_ground": {
+            "reconstruction": "object_grounding_reconstruction_mse",
+            "existence": "object_grounding_existence_mean",
+            "validity": "object_grounding_validity_mean",
+            "allocation": "object_grounding_allocation_share_mean",
+            "null": "object_grounding_null_mass",
+            "mass_error": "object_grounding_mass_conservation_error",
+            "owner_H": "object_grounding_candidate_owner_entropy",
+            "local_prior_H": "object_grounding_local_prior_entropy",
+            "chart_H": "object_grounding_chart_entropy",
+            "g3_parent_l1": "object_grounding_g3_parent_l1",
+            "object_pair_cos": "object_grounding_object_content_pair_cosine",
+            "flow_prior": "object_grounding_transport_prior_rms",
+        },
+        "object_intent": {
+            "goal_H": "object_intent_goal_attention_entropy",
+            "interval_goal_H": "object_intent_interval_goal_entropy",
+            "history_H": "object_intent_interval_history_entropy",
+            "object_H": "object_intent_interval_object_entropy",
+            "semantic_H": "object_intent_interval_semantic_entropy",
+            "appearance_H": "object_intent_interval_appearance_entropy",
+            "geometry_H": "object_intent_interval_geometry_entropy",
+            "interval_var": "object_intent_interval_variation",
+            "temporal_var": "object_intent_temporal_variation",
+            "goal_innov": "object_intent_goal_innovation_rms",
+            "history_innov": "object_intent_history_innovation_rms",
+            "object_innov": "object_intent_object_innovation_rms",
+            "typed_innov": "object_intent_typed_innovation_rms",
+            "state_delta": "object_intent_observed_state_delta_rms",
+            "transport": "object_intent_observed_transport_rms",
+            "change_history": "object_intent_state_change_history_rms",
+            "change_transport": "object_intent_state_change_transport_rms",
+            "state_change": "object_intent_state_change_evidence_rms",
+            "state_change_H": "object_intent_state_change_attention_entropy",
+            "online_match": "object_intent_online_match_loss",
+            "recognizer": "object_plan_recognition_loss",
+            "coarse_action": "object_coarse_action_loss",
+        },
+        "object_dynamics": {
+            "goal_H": "object_w_goal_attention_entropy",
+            "goal_innov": "object_w_goal_innovation_rms",
+            "typed_innov": "object_w_typed_innovation_rms",
+            "w1_delta": "object_w1_semantic_delta_rms",
+            "w1_transport": "object_w1_transport_rms",
+            "w1_interval_cos": "object_w1_interval_adjacent_cosine",
+            "w1_object_cos": "object_w1_object_pair_cosine",
+            "w2_delta": "object_w2_semantic_delta_rms",
+            "w2_transport": "object_w2_transport_rms",
+            "w2_interval_cos": "object_w2_interval_adjacent_cosine",
+            "w2_object_cos": "object_w2_object_pair_cosine",
+            "teacher_visibility": "object_teacher_visibility",
+            "teacher_visibility_change": "object_teacher_visibility_change",
+            "teacher_persistence_change": "object_teacher_persistence_change",
+            "teacher_null": "object_teacher_null_probability",
+            "teacher_sem_max": "object_teacher_semantic_max",
+            "teacher_sem_margin": "object_teacher_semantic_margin",
+            "teacher_uncert": "object_teacher_uncertainty",
+            "teacher_delta": "object_teacher_semantic_delta_rms",
+            "teacher_transport": "object_teacher_transport_rms",
+            "teacher_supports": "object_teacher_supports_per_interval",
+            "successor_loss": "object_future_successor",
+            "semantic_loss": "object_future_semantic",
+            "transport_loss": "object_future_transport",
+            "covariance_loss": "object_future_covariance",
+            "visibility_loss": "object_future_visibility",
+            "persistence_loss": "object_future_persistence",
+            "uncertainty_loss": "object_future_uncertainty",
+            "transition_loss": "object_future_transition",
+            "pred_cos": "object_future_prediction_adjacent_cosine",
+            "target_cos": "object_future_target_adjacent_cosine",
+            "pred_var": "object_future_prediction_interval_variation",
+            "target_var": "object_future_target_interval_variation",
+        },
+        "object_policy": {
+            "content_score": "object_p2_content_score_abs",
+            "content_score_max": "object_p2_content_score_max_abs",
+            "intent_score": "object_p2_intent_score_abs",
+            "intent_score_max": "object_p2_intent_score_max_abs",
+            "coordinate_score": "object_p2_coordinate_score_abs",
+            "coordinate_score_max": "object_p2_coordinate_score_max_abs",
+            "combined_logit_max": "object_p2_combined_logit_max_abs",
+            "tau_content": "object_p2_temperature_content",
+            "tau_intent": "object_p2_temperature_intent",
+            "tau_coordinate": "object_p2_temperature_coordinate",
+            "posterior_H": "object_p2_posterior_entropy",
+            "posterior_max": "object_p2_posterior_max",
+            "null": "object_p2_null_mass",
+            "semantic_mass": "object_p2_semantic_value_mass",
+            "geometry_mass": "object_p2_geometry_value_mass",
+            "status_mass": "object_p2_status_value_mass",
+            "h4_8_mass": "object_p2_interval_0_mass",
+            "h8_16_mass": "object_p2_interval_1_mass",
+            "h16_32_mass": "object_p2_interval_2_mass",
+            "h32_48_mass": "object_p2_interval_3_mass",
+            "effect_precontract": "object_p2_effect_precontract_rms",
+            "effect": "object_p2_effect_rms",
+            "contract_min": "object_p2_contract_min",
+            "consequence_effect": "object_consequence_effect_rms",
+            "interaction": "object_consequence_interaction_rms",
+            "consequence_ratio": "object_consequence_ratio",
+            "p3_factual": "object_p3_factual_rms",
+            "p3_precision": "object_p3_precision_rms",
+            "p3_effect": "object_p3_effect_rms",
+            "p3_temporal": "object_p3_temporal_rms",
+            "p3_state_change": "object_p3_state_change_rms",
+        },
+    }
+)
+
+_V119_INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
+_V119_EFFECT_ERROR_FIELDS = {
+    "teacher_reliability": "teacher_reliability",
+    "successor": "successor",
+    "semantic": "semantic",
+    "transport": "transport",
+    "covariance": "transport_covariance",
+    "persistence": "persistence_change",
+    "visibility": "visibility_change",
+    "uncertainty": "uncertainty_calibration",
+    "reliability": "reliability_calibration",
 }
 
 
@@ -806,6 +1170,22 @@ def _parse_v94_tokens(line: str, family: str) -> dict[str, float]:
                 if value is not None:
                     metrics[f"action_band_{name}_rmse"] = value
             continue
+        horizon_group_suffix = {
+            "future_scale": "target_scale",
+            "future_norm_scale": "normalization_scale",
+            "future_rel": "reliability",
+            "future_direction": "active_direction",
+            "future_active": "active_loss",
+        }.get(key)
+        if horizon_group_suffix is not None:
+            for item in raw.split("/"):
+                if ":" not in item:
+                    continue
+                offset, value_raw = item.split(":", 1)
+                value = _number(value_raw)
+                if value is not None and offset.isdigit():
+                    metrics[f"flow_jepa_future_horizon_{offset}_{horizon_group_suffix}"] = value
+            continue
         if key in {"route", "dwell"} and "soft:" in raw:
             parsed: dict[str, float] = {}
             for item in raw.split("/"):
@@ -836,6 +1216,57 @@ def _parse_v94_tokens(line: str, family: str) -> dict[str, float]:
             if key.startswith("future_h") and key.removeprefix("future_h").isdigit():
                 canonical = f"flow_jepa_future_horizon_{key.removeprefix('future_h')}"
             metrics[canonical] = value
+    return metrics
+
+
+def _parse_v119_effect_error(line: str) -> dict[str, float]:
+    """Decode one interval-qualified V119 target-normalized error row."""
+
+    tokens = {match.group("key"): match.group("value").rstrip(",;") for match in TOKEN_RE.finditer(line)}
+    interval = tokens.get("interval")
+    if interval not in _V119_INTERVAL_NAMES:
+        return {}
+    metrics: dict[str, float] = {}
+    for display_name, field_name in _V119_EFFECT_ERROR_FIELDS.items():
+        value = _number(tokens.get(display_name, ""))
+        if value is None:
+            continue
+        if display_name == "teacher_reliability":
+            canonical = f"grounded_future_effect_teacher_reliability_{interval}"
+        else:
+            canonical = (
+                f"grounded_future_effect_{field_name}_{interval}"
+                "_target_normalized_error"
+            )
+        metrics[canonical] = value
+    return metrics
+
+
+def _parse_v120_dynamics_error(line: str) -> dict[str, float]:
+    """Decode one interval-qualified V120 object-dynamics error row."""
+
+    tokens = {
+        match.group("key"): match.group("value").rstrip(",;")
+        for match in TOKEN_RE.finditer(line)
+    }
+    interval = tokens.get("interval")
+    if interval not in _V119_INTERVAL_NAMES:
+        return {}
+    metrics: dict[str, float] = {}
+    for field_name in (
+        "successor",
+        "semantic",
+        "transport",
+        "covariance",
+        "visibility",
+        "persistence",
+        "uncertainty",
+    ):
+        value = _number(tokens.get(field_name, ""))
+        if value is not None:
+            metrics[
+                f"object_future_{field_name}_{interval}_normalized_error"
+            ] = value
     return metrics
 
 
@@ -917,8 +1348,7 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 exception_match = UNHANDLED_EXCEPTION_RE.match(line)
                 if exception_match:
                     error_text = (
-                        f"{exception_match.group('type')}: "
-                        f"{exception_match.group('message')}"
+                        f"{exception_match.group('type')}: {exception_match.group('message')}"
                     )
                     run.fatal_errors.append(error_text[:1000])
                     traceback_active = False
@@ -942,20 +1372,7 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 if epoch or batch:
                     run.batch_points.append(BatchPoint(epoch, batch, metrics, "v39-layer"))
                 continue
-            if line.startswith(
-                (
-                    "[v94-train]",
-                    "[v95-train]",
-                    "[v96-train]",
-                    "[v97-train]",
-                    "[v98-train]",
-                    "[v99-train]",
-                    "[v100-train]",
-                    "[v101-train]",
-                    "[v102-train]",
-                    "[v95-stage1-train]",
-                )
-            ):
+            if line.startswith(_compact_prefixes("train") + ("[v95-stage1-train]",)):
                 flush_v94()
                 metrics = _parse_v94_tokens(line, "train")
                 epoch = int(metrics.pop("epoch", 0.0))
@@ -964,78 +1381,57 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                     metrics.setdefault("loss_group_representation", metrics["loss"])
                     source = "v95-stage1"
                 else:
-                    source = (
-                        "v102"
-                        if line.startswith("[v102-")
-                        else "v101"
-                        if line.startswith("[v101-")
-                        else "v100"
-                        if line.startswith("[v100-")
-                        else "v99"
-                        if line.startswith("[v99-")
-                        else "v98"
-                        if line.startswith("[v98-")
-                        else "v97"
-                        if line.startswith("[v97-")
-                        else "v96"
-                        if line.startswith("[v96-")
-                        else "v95"
-                        if line.startswith("[v95-")
-                        else "v94"
-                    )
+                    version_match = re.match(r"^\[(v\d+)-", line)
+                    if version_match is None:
+                        raise RuntimeError("compact train row lost its version prefix")
+                    source = version_match.group(1)
                 pending_v94 = BatchPoint(epoch, batch, metrics, source)
                 continue
-            if line.startswith(
-                (
-                    "[v94-exec]",
-                    "[v95-exec]",
-                    "[v96-exec]",
-                    "[v97-exec]",
-                    "[v98-exec]",
-                    "[v99-exec]",
-                    "[v100-exec]",
-                    "[v101-exec]",
-                    "[v102-exec]",
-                )
-            ) and pending_v94 is not None:
+            if line.startswith(_compact_prefixes("exec")) and pending_v94 is not None:
                 pending_v94.metrics.update(_parse_v94_tokens(line, "exec"))
                 continue
-            if line.startswith(
-                (
-                    "[v94-grad]",
-                    "[v95-grad]",
-                    "[v96-grad]",
-                    "[v97-grad]",
-                    "[v98-grad]",
-                    "[v99-grad]",
-                    "[v100-grad]",
-                    "[v101-grad]",
-                    "[v102-grad]",
-                    "[v95-stage1-grad]",
-                )
-            ) and (
+            if line.startswith(_compact_prefixes("grad") + ("[v95-stage1-grad]",)) and (
                 pending_v94 is not None
             ):
                 pending_v94.metrics.update(_parse_v94_tokens(line, "grad"))
                 continue
-            if line.startswith(
-                (
-                    "[v95-repr]",
-                    "[v96-repr]",
-                    "[v97-repr]",
-                    "[v98-repr]",
-                    "[v99-repr]",
-                    "[v100-repr]",
-                    "[v101-repr]",
-                    "[v102-repr]",
-                    "[v95-stage1-repr]",
-                )
-            ) and (
+            if line.startswith(_compact_prefixes("repr") + ("[v95-stage1-repr]",)) and (
                 pending_v94 is not None
             ):
                 pending_v94.metrics.update(_parse_v94_tokens(line, "repr"))
                 continue
-            if line.startswith(("[v101-balance]", "[v102-balance]")) and pending_v94 is not None:
+            v119_auxiliary = re.match(
+                r"^\[v119-(ground|intent|effect|policy)\]",
+                line,
+            )
+            if v119_auxiliary is not None and pending_v94 is not None:
+                family = v119_auxiliary.group(1)
+                pending_v94.metrics.update(_parse_v94_tokens(line, family))
+                continue
+            if line.startswith("[v119-effect-error]") and pending_v94 is not None:
+                pending_v94.metrics.update(_parse_v119_effect_error(line))
+                continue
+            v120_auxiliary = re.match(
+                r"^\[v120-(ground|intent|dynamics|policy)\]",
+                line,
+            )
+            if v120_auxiliary is not None and pending_v94 is not None:
+                family = f"object_{v120_auxiliary.group(1)}"
+                pending_v94.metrics.update(_parse_v94_tokens(line, family))
+                continue
+            if line.startswith("[v120-dynamics-error]") and pending_v94 is not None:
+                pending_v94.metrics.update(_parse_v120_dynamics_error(line))
+                continue
+            if (
+                line.startswith(
+                    tuple(
+                        f"[v{version}-balance]"
+                        for version in COMPACT_POLICY_VERSIONS
+                        if version >= 101
+                    )
+                )
+                and pending_v94 is not None
+            ):
                 pending_v94.metrics.update(_parse_v94_tokens(line, "balance"))
                 continue
             if line.startswith("[v95-stage1-epoch]"):
@@ -1059,19 +1455,7 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                     "val": val_metrics,
                 }
                 continue
-            if line.startswith(
-                (
-                    "[v94-epoch]",
-                    "[v95-epoch]",
-                    "[v96-epoch]",
-                    "[v97-epoch]",
-                    "[v98-epoch]",
-                    "[v99-epoch]",
-                    "[v100-epoch]",
-                    "[v101-epoch]",
-                    "[v102-epoch]",
-                )
-            ):
+            if line.startswith(_compact_prefixes("epoch")):
                 flush_epoch()
                 metrics = _parse_v94_tokens(line, "train")
                 epoch = int(metrics.pop("epoch", 0.0))
@@ -1083,34 +1467,10 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                     "val": {},
                 }
                 continue
-            if line.startswith(
-                (
-                    "[v94-val]",
-                    "[v95-val]",
-                    "[v96-val]",
-                    "[v97-val]",
-                    "[v98-val]",
-                    "[v99-val]",
-                    "[v100-val]",
-                    "[v101-val]",
-                    "[v102-val]",
-                )
-            ) and pending_epoch is not None:
+            if line.startswith(_compact_prefixes("val")) and pending_epoch is not None:
                 pending_epoch["val"].update(_parse_v94_tokens(line, "val"))
                 continue
-            if line.startswith(
-                (
-                    "[v94-probe]",
-                    "[v95-probe]",
-                    "[v96-probe]",
-                    "[v97-probe]",
-                    "[v98-probe]",
-                    "[v99-probe]",
-                    "[v100-probe]",
-                    "[v101-probe]",
-                    "[v102-probe]",
-                )
-            ) and pending_epoch is not None:
+            if line.startswith(_compact_prefixes("probe")) and pending_epoch is not None:
                 pending_epoch["val"].update(_parse_v94_tokens(line, "probe"))
                 continue
             init_match = INIT_COUNT_RE.match(line)
@@ -1119,18 +1479,7 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                 continue
             header_match = HEADER_RE.match(line)
             if header_match and not line.startswith(
-                (
-                    "[v39-init]",
-                    "[v94-",
-                    "[v95-",
-                    "[v96-",
-                    "[v97-",
-                    "[v98-",
-                    "[v99-",
-                    "[v100-",
-                    "[v101-",
-                    "[v102-",
-                )
+                ("[v39-init]",) + tuple(f"[v{version}-" for version in COMPACT_POLICY_VERSIONS)
             ):
                 run.headers.append(line)
                 config = _parse_header_body(header_match.group("body"))
@@ -1453,9 +1802,7 @@ def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[F
             for error in run.fatal_errors
             if any(token in error.lower() for token in ("non-finite", "nan", "inf"))
         ]
-        out_of_memory = [
-            error for error in run.fatal_errors if "outofmemoryerror" in error.lower()
-        ]
+        out_of_memory = [error for error in run.fatal_errors if "outofmemoryerror" in error.lower()]
         code = (
             "non-finite-backward"
             if nonfinite
@@ -1700,26 +2047,26 @@ def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[F
     ]
     if open_points:
         capacities = [
-            point.metrics.get(
-                "evidence_mmd_it_capacity_gate_mass",
-                point.metrics.get("evidence_mmd_it_capacity_ratio"),
-            )
+            value
             for point in open_points
             if (
-                "evidence_mmd_it_capacity_gate_mass" in point.metrics
-                or "evidence_mmd_it_capacity_ratio" in point.metrics
+                value := point.metrics.get(
+                    "evidence_mmd_it_capacity_gate_mass",
+                    point.metrics.get("evidence_mmd_it_capacity_ratio"),
+                )
             )
+            is not None
         ]
         depths = [
-            point.metrics.get(
-                "evidence_mmd_it_effective_basis_mass",
-                point.metrics.get("evidence_mmd_it_effective_depth"),
-            )
+            value
             for point in open_points
             if (
-                "evidence_mmd_it_effective_basis_mass" in point.metrics
-                or "evidence_mmd_it_effective_depth" in point.metrics
+                value := point.metrics.get(
+                    "evidence_mmd_it_effective_basis_mass",
+                    point.metrics.get("evidence_mmd_it_effective_depth"),
+                )
             )
+            is not None
         ]
         capacity = _median(capacities[-20:])
         depth = _median(depths[-20:])

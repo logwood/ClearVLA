@@ -5,23 +5,37 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-import numpy as np
-from torch.utils.data import TensorDataset
+from torch import Tensor
+from torch.utils.data import DataLoader, TensorDataset
 
 from clearvla.cli.train_v40_policy import (
     _source_fingerprint,
     _validate_flow_jepa_stage1_checkpoint,
     _validate_required_model_contract,
 )
-from clearvla.experiments.observed_state_lab.dataset import CachedTokenPolicyWindowDataset
+from clearvla.data.samplers import (
+    InformationBalancedBatchSampler,
+    InformationBalancedSamplerConfig,
+)
 from clearvla.experiments.classic_policy_lab.cli_common import make_loader
+from clearvla.experiments.classic_policy_lab.normalizer import ArrayNormalizer
+from clearvla.experiments.observed_state_lab import policy_runtime_v39 as policy_runtime_v39_module
+from clearvla.experiments.observed_state_lab.dataset import CachedTokenPolicyWindowDataset
+from clearvla.experiments.observed_state_lab.policy_runtime_v36_3 import (
+    position_weights,
+    trajectory_information_weights,
+)
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     V39PolicyTrainerConfig,
     _action_path_paired_metrics,
     _action_path_probe_batch_selection,
+    _attach_grad_diagnostics,
+    _evidence_log_version,
+    _evidence_serial_log_line,
     _model_path_acceptance_matrix,
     _optimizer_groups,
     _validate_complete_v103_model_probe_contract,
@@ -33,52 +47,70 @@ from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     _validate_complete_v109_model_contract,
     _validate_complete_v110_model_contract,
     _validate_complete_v111_model_contract,
-    _validate_v106_preflight_target_pack,
+    _validate_complete_v112_model_contract,
+    _validate_complete_v113_model_contract,
+    _validate_complete_v114_model_contract,
+    _validate_complete_v115_model_contract,
+    _validate_complete_v116_model_contract,
+    _validate_complete_v117_model_contract,
+    _validate_differential_intent_effect_323_model_contract,
+    _validate_grounded_intent_effect_323_model_contract,
+    _validate_object_intent_preflight_output,
+    _validate_object_optimizer_ownership,
     _validate_v102_resume_contract,
-    flow_losses,
-    flow_jepa_future_change_loss,
+    _validate_v106_preflight_target_pack,
+    evaluate_v101_action_path_intervention,
     flow_jepa_future_change_direction_loss,
+    flow_jepa_future_change_loss,
     flow_jepa_future_horizon_diagnostics,
+    flow_jepa_future_prediction_loss,
     flow_jepa_future_reliable_diagnostics,
     flow_jepa_horizon_address_loss,
     flow_jepa_interval_stage_terms,
-    flow_jepa_future_prediction_loss,
     flow_jepa_stage1_losses,
-)
-from clearvla.experiments.observed_state_lab.policy_runtime_v36_3 import (
-    position_weights,
-    trajectory_information_weights,
-)
-from clearvla.data.samplers import (
-    InformationBalancedBatchSampler,
-    InformationBalancedSamplerConfig,
+    flow_losses,
+    object_intent_dynamics_terms,
 )
 from clearvla.policy.config import V39PolicyConfig
+from clearvla.policy.differential_intent_effect import (
+    DifferentialFutureEffectReader,
+    DifferentialPolicyPlanCompiler,
+    DifferentialStatelessIntentController,
+    IntentStateBank,
+)
 from clearvla.policy.flow_dino_evidence import (
     FlowDINOEvidenceEncoder,
-    LateRawDetailEvidence,
+    FutureEffectField,
     LatentSeaRaft,
+    LateRawDetailEvidence,
     SoftAddressLatticeBank,
+    WindowEffectBank,
+    _continuous_cycle_visibility,
     _CorrelationPyramid,
     _DenseRawFlowRefiner,
     _EarlyMaskedRawContextEncoder,
-    _RawDeformableAddressReader,
-    _SoftMultiResolutionAddressCompiler,
-    _HorizonSoftAddressJEPA,
-    _IntervalStageDeltaOrganizer,
-    _SoftFlowAddressReader,
-    _SparseFineFlowRefiner,
     _fixed_observable_motion,
     _fixed_raw_motion_descriptor,
-    _continuous_cycle_visibility,
+    _HorizonSoftAddressJEPA,
+    _IntervalStageDeltaOrganizer,
+    _RawDeformableAddressReader,
     _smooth_bound_flow_to_image,
+    _SoftFlowAddressReader,
+    _SoftMultiResolutionAddressCompiler,
+    _SparseFineFlowRefiner,
     _stable_sqrt,
     _stable_vector_norm,
     warp_patch_grid,
 )
 from clearvla.policy.goal_conditioning import (
+    StatelessGoalPhaseMachine,
+    StatelessHorizonConditionAdapter,
+    StatelessIntentController,
     StatelessPhaseAdapter,
     load_precomputed_t5_condition,
+)
+from clearvla.policy.grounded_intent_effect import (
+    FutureEffectField as GroundedFutureEffectField,
 )
 from clearvla.policy.proposal import RejectableHistoryProposal
 from clearvla.policy.role_delta_attnres import (
@@ -91,9 +123,13 @@ from clearvla.policy.system import V39PolicySystem, balanced_future_teacher_mask
 from clearvla.policy.time_domain_mmdit import EvidenceLatentMMDiTActionDecoder
 from clearvla.policy.trunk import (
     LateRawDetailPolicyReader,
-    _CoordinateTypedLocalRefiner,
-    _StructuredOwnershipLocalRefiner,
+    PolicyPlanCompiler,
+    StructuredFutureEffectReader,
     _align_milestone_tokens_to_horizon,
+    _CoordinateTypedLocalRefiner,
+    _FunctionalOwnershipLocalRefiner,
+    _StructuredOwnershipLocalRefiner,
+    _UtilityPrecisionLocalRefiner,
 )
 from clearvla.policy.trunk_primitives import (
     TemporalDynamicsBoundDiTBlock,
@@ -373,6 +409,128 @@ def _complete_v111_config(**overrides: object) -> V39PolicyConfig:
     return _complete_v110_config(**values)
 
 
+def _complete_v112_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_pre_value_owner_routing": 1,
+    }
+    values.update(overrides)
+    return _complete_v111_config(**values)
+
+
+def _complete_v113_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_functional_mainline_routing": 1,
+    }
+    values.update(overrides)
+    return _complete_v112_config(**values)
+
+
+def _complete_v114_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_utility_precision_mainline": 1,
+        "flow_jepa_action_free_world_factual": 1,
+        "flow_jepa_address_query_batch_budget": 32,
+        "flow_jepa_microgrid_tile": 3,
+        "flow_jepa_p1_mixed_precision": 1,
+        "flow_jepa_checkpoint_min_batch": 4,
+    }
+    values.update(overrides)
+    return _complete_v113_config(**values)
+
+
+def _complete_v115_p1_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_shared_factual_glimpse_bank": 1,
+        "flow_jepa_raw_reader_heads": 4,
+    }
+    values.update(overrides)
+    return _complete_v114_config(**values)
+
+
+def _complete_v115_teacher_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_g_aligned_future_effect": 1,
+    }
+    values.update(overrides)
+    return _complete_v115_p1_config(**values)
+
+
+def _complete_v115_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_g_aligned_future_effect": 1,
+        "flow_jepa_stateless_goal_phase_machine": 1,
+        "flow_jepa_top_role_schedule": "3-2-3",
+        "flow_jepa_policy_plan_compiler": 1,
+        "flow_jepa_world_blocks": 2,
+        "flow_jepa_policy_blocks": 3,
+    }
+    values.update(overrides)
+    return _complete_v115_p1_config(**values)
+
+
+def _complete_v116_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_supervised_effect_mainline": 1,
+        "flow_matching_time_distribution": "beta_1_5_1",
+    }
+    values.update(overrides)
+    return _complete_v115_config(**values)
+
+
+def _complete_v117_config(**overrides: object) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_stateless_intent_controller": 1,
+        "flow_jepa_window_effect_bank": 1,
+        "flow_jepa_future_slots": 3,
+        "flow_jepa_effect_read_in_p2": 1,
+    }
+    values.update(overrides)
+    return _complete_v116_config(**values)
+
+
+def _complete_differential_intent_effect_config(
+    **overrides: object,
+) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_differential_intent_effect_mainline": 1,
+    }
+    values.update(overrides)
+    return _complete_v117_config(**values)
+
+
+def _complete_grounded_intent_effect_config(
+    **overrides: object,
+) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_grounded_intent_effect_mainline": 1,
+        "flow_jepa_future_slots": 4,
+        "flow_jepa_stateless_intent_controller": 0,
+        "flow_jepa_window_effect_bank": 0,
+        "flow_jepa_effect_read_in_p2": 0,
+        "flow_jepa_differential_intent_effect_mainline": 0,
+    }
+    values.update(overrides)
+    return _complete_v116_config(**values)
+
+
+def _complete_object_intent_dynamics_config(
+    **overrides: object,
+) -> V39PolicyConfig:
+    values: dict[str, object] = {
+        "flow_jepa_object_intent_dynamics_mainline": 1,
+        "flow_jepa_grounded_intent_effect_mainline": 0,
+        "flow_jepa_differential_intent_effect_mainline": 0,
+        "flow_jepa_supervised_effect_mainline": 0,
+        "flow_jepa_stateless_intent_controller": 0,
+        "flow_jepa_window_effect_bank": 0,
+        "flow_jepa_effect_read_in_p2": 0,
+        "flow_jepa_future_slots": 4,
+        "flow_matching_time_distribution": "beta_1_5_1",
+    }
+    values.update(overrides)
+    return _complete_v115_config(**values)
+
+
 def _complete_v103_trainer(**overrides: object) -> V39PolicyTrainerConfig:
     values: dict[str, object] = {
         "training_stage": "policy",
@@ -440,6 +598,22 @@ def _complete_v110_trainer(**overrides: object) -> V39PolicyTrainerConfig:
 
 def _complete_v111_trainer(**overrides: object) -> V39PolicyTrainerConfig:
     return replace(_complete_v110_trainer(), **overrides)
+
+
+def _complete_v112_trainer(**overrides: object) -> V39PolicyTrainerConfig:
+    return replace(_complete_v111_trainer(), **overrides)
+
+
+def _complete_v113_trainer(**overrides: object) -> V39PolicyTrainerConfig:
+    return replace(_complete_v112_trainer(), **overrides)
+
+
+def _complete_v115_trainer(**overrides: object) -> V39PolicyTrainerConfig:
+    values: dict[str, object] = {
+        "flow_jepa_horizon_address_loss_weight": 0.0,
+    }
+    values.update(overrides)
+    return replace(_complete_v113_trainer(), **values)
 
 
 def _raw_visual(
@@ -512,7 +686,7 @@ def test_predictive_change_loss_uses_delta_not_absolute_scene_copy() -> None:
         zero_output, balance_horizons=True
     )
     assert float(perfect_loss) < 1e-6
-    assert float(zero_loss) > float(perfect_loss) + 1e-3
+    assert float(zero_loss.detach()) > float(perfect_loss.detach()) + 1e-3
     zero_loss.backward()
     assert zero.grad is not None and float(zero.grad.abs().sum()) > 0.0
 
@@ -556,6 +730,46 @@ def test_predictive_change_reuses_one_online_mask_for_context_and_targets() -> N
     assert not bool(eval_pack.context_dropout_mask.any())
     assert float(eval_pack.metrics["flow_jepa_context_target_mask_aligned"]) == 0.0
     assert float(eval_pack.metrics["flow_jepa_deploy_context_unmasked"]) == 1.0
+
+    encoder.set_raw_address_eval_intervention("current_context_masked")
+    with torch.no_grad():
+        masked_eval_pack = encoder(
+            _visual(config, batch=2),
+            raw_visual=_raw_visual(config, batch=2),
+        )
+        rollout_count = (
+            config.future_anchors
+            * config.num_cameras
+            * config.flow_jepa_grid_size**2
+        )
+        encoder.refine_raw_evidence(
+            masked_eval_pack,
+            torch.randn(2, rollout_count + 1, config.hidden_size),
+            {"rollout": slice(1, 1 + rollout_count)},
+        )
+    masked_future = masked_eval_pack.future_target_mask.reshape(
+        2,
+        config.future_anchors,
+        config.num_cameras,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_grid_size,
+    )
+    masked_latest = masked_eval_pack.context_dropout_mask[:, -1][
+        :, None
+    ].expand_as(masked_future)
+    assert torch.equal(masked_latest, masked_future)
+    assert bool(masked_latest.any())
+    assert float(
+        masked_eval_pack.metrics["flow_jepa_deploy_context_unmasked"]
+    ) == 0.0
+    current_mask_metrics = encoder.raw_address_eval_metrics()
+    assert current_mask_metrics[
+        "flow_jepa_raw_address_intervention_code"
+    ] == pytest.approx(12.0)
+    assert current_mask_metrics[
+        "flow_jepa_current_context_mask_intervention_delta"
+    ] > 0.0
+    encoder.clear_raw_address_eval_intervention()
 
     try:
         _typed_332_config(
@@ -856,7 +1070,7 @@ def test_bounded_raw_refiner_preserves_valid_coordinates_for_large_seed() -> Non
     assert bool((coordinates >= 0.0).all())
     assert bool((coordinates <= 11.0).all())
     assert estimate.boundary_compression is not None
-    assert float(estimate.boundary_compression.mean()) > 0.0
+    assert float(estimate.boundary_compression.detach().mean()) > 0.0
 
 
 def test_zero_motion_magnitudes_have_finite_gradients_and_zero_vector_subgradient() -> None:
@@ -2058,6 +2272,14 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
             "action_delta_rmse": 0.5,
             "mse_delta_ci": {"ci95_low": -0.2, "ci95_high": 0.1},
         },
+        "future_effect_zero": {
+            "action_delta_rmse": 0.4,
+            "mse_delta_ci": {"ci95_low": -0.2, "ci95_high": 0.1},
+        },
+        "p3_effect_delta_zero": {
+            "action_delta_rmse": 0.3,
+            "mse_delta_ci": {"ci95_low": -0.2, "ci95_high": 0.1},
+        },
     }
     matrix = _model_path_acceptance_matrix(
         joined={
@@ -2067,6 +2289,8 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
             "bottom_far_rollout_zero": bottom_only,
             "all_far_context_zero": joint,
             "action_history_proposal_zero": baseline + 0.5,
+            "future_effect_zero": baseline + 0.4,
+            "p3_effect_delta_zero": baseline + 0.3,
         },
         paired=paired,
         verification_counts={mode: 1 for mode in paired},
@@ -2084,6 +2308,12 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
             },
             "action_history_proposal_zero": {
                 "history_proposal_keep_delta": 1.0
+            },
+            "future_effect_zero": {
+                "future_effect_intervention_delta_norm": 1.0
+            },
+            "p3_effect_delta_zero": {
+                "p3_effect_delta_norm": 1.0
             },
         },
         baseline_identity_max_abs_delta=0.0,
@@ -2111,6 +2341,15 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
     assert matrix["aggregate"]["history_proposal_boundary_changed"]
     assert matrix["aggregate"]["history_proposal_path_reaches_action"]
     assert matrix["aggregate"]["history_condition_path_reaches_action"] is None
+    assert matrix["aggregate"]["future_effect_boundary_changed"]
+    assert matrix["aggregate"]["future_effect_reaches_action"]
+    assert matrix["aggregate"]["typed_policy_plan_boundary_changed"]
+    assert matrix["aggregate"]["typed_policy_plan_reaches_action"]
+    assert matrix["typed_policy_plan_lanes"]["effect"]["boundary_changed"]
+    assert matrix["typed_policy_plan_lanes"]["effect"]["reaches_action"]
+    assert matrix["typed_policy_plan_lanes"]["precision"][
+        "boundary_changed"
+    ] is None
     assert matrix["address_slot_structure"]["observed"]
     assert matrix["address_slot_structure"][
         "coarse_posteriors_numerically_distinct"
@@ -2141,6 +2380,36 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
         rows["bottom_far_rollout_zero"]["utility_direction"]
         == "ablation_helpful_path_harmful"
     )
+
+
+def test_model_path_acceptance_ignores_unrelated_natural_delta_metrics() -> None:
+    baseline = np.zeros((2, 2, 1), dtype=np.float32)
+    paired = {
+        "future_effect_zero": {
+            "action_delta_rmse": 0.5,
+            "mse_delta_ci": {"ci95_low": 0.1, "ci95_high": 0.2},
+        }
+    }
+    matrix = _model_path_acceptance_matrix(
+        joined={
+            "baseline": baseline,
+            "future_effect_zero": baseline + 0.5,
+        },
+        paired=paired,
+        verification_counts={"future_effect_zero": 1},
+        boundary_diagnostics={
+            "future_effect_zero": {
+                # This is a normal active G residual, not the difference
+                # caused by the FutureEffect intervention.
+                "attnres_observed_grounding_delta_norm_g1": 9.0,
+            }
+        },
+        baseline_identity_max_abs_delta=0.0,
+    )
+    row = matrix["modes"]["future_effect_zero"]
+    assert not row["boundary_contract_observed"]
+    assert not row["boundary_changed"]
+    assert not matrix["aggregate"]["future_effect_reaches_action"]
 
 
 def test_role_delta_attnres_zero_values_are_exact_and_gradients_are_natural() -> None:
@@ -2190,8 +2459,8 @@ def test_role_value_contract_bounds_amplitude_without_detach_or_hard_clip() -> N
     raw = (1000.0 * torch.randn(2, 4, 5, 32)).requires_grad_()
     bounded, scale = smooth_rms_contract(raw, 1.0)
     bounded_rms = bounded.float().square().mean(dim=-1).sqrt()
-    assert float(bounded_rms.max()) <= 1.0001
-    assert 0.0 < float(scale.min()) < 1.0
+    assert float(bounded_rms.detach().max()) <= 1.0001
+    assert 0.0 < float(scale.detach().min()) < 1.0
     bounded.square().mean().backward()
     assert raw.grad is not None
     assert torch.isfinite(raw.grad).all()
@@ -2382,6 +2651,18 @@ def test_predictive_change_contract_reaches_masked_raw_context() -> None:
         flow_jepa_predictive_change_contract=1,
     )
     system = V39PolicySystem(config).train()
+    optimizer_groups = _optimizer_groups(system, _complete_v113_trainer())
+    grouped_ids = [
+        id(parameter)
+        for group in optimizer_groups
+        for parameter in group["params"]
+    ]
+    assert len(grouped_ids) == len(set(grouped_ids))
+    assert {
+        id(parameter)
+        for parameter in system.parameters()
+        if parameter.requires_grad
+    } == set(grouped_ids)
     batch = 1
     output = system.flow_training_forward(
         _visual(config, batch=batch),
@@ -3959,6 +4240,69 @@ def test_v105_reliable_future_loss_is_not_invariant_to_weak_teacher_scale() -> N
     ) == pytest.approx(1.0)
 
 
+def test_v106_per_horizon_diagnostics_match_the_active_scale_floored_loss() -> None:
+    current = torch.randn(2, 3, 6)
+    anchors = 4
+    target_delta = torch.randn(2, anchors, 3, 6) * torch.tensor(
+        (0.02, 0.04, 0.08, 0.16)
+    )[None, :, None, None]
+    prediction = 0.5 * target_delta
+    output = {
+        "pred_physical_velocity": torch.zeros(2, 1, 1),
+        "flow_jepa_future_pred": prediction.reshape(2, anchors * 3, 6),
+        "flow_jepa_future_delta_pred": prediction.reshape(
+            2, anchors * 3, 6
+        ),
+        "flow_jepa_future_target": (
+            current[:, None] + target_delta
+        ).reshape(2, anchors * 3, 6),
+        "flow_jepa_current_target": current,
+        "flow_jepa_future_target_mask": torch.ones(
+            2, anchors * 3, dtype=torch.bool
+        ),
+        "flow_jepa_future_offsets": (4, 12, 24, 48),
+        "flow_jepa_variance_safe_routing": torch.ones(()),
+    }
+    diagnostics = flow_jepa_future_reliable_diagnostics(
+        output,
+        reliable_normalization=True,
+    )
+    horizon_rows = flow_jepa_future_horizon_diagnostics(
+        output,
+        reliable_normalization=True,
+    )
+    for offset in (4, 12, 24, 48):
+        raw = diagnostics[f"flow_jepa_future_horizon_{offset}_raw_delta"]
+        normalized = diagnostics[
+            f"flow_jepa_future_horizon_{offset}_reliable_normalized"
+        ]
+        direction = diagnostics[
+            f"flow_jepa_future_horizon_{offset}_active_direction"
+        ]
+        active = diagnostics[
+            f"flow_jepa_future_horizon_{offset}_active_loss"
+        ]
+        torch.testing.assert_close(
+            active,
+            raw + normalized + 0.10 * direction,
+        )
+        torch.testing.assert_close(horizon_rows[offset], active)
+        assert float(
+            diagnostics[
+                f"flow_jepa_future_horizon_{offset}_direction_floor"
+            ]
+        ) > 0.0
+    objective = flow_jepa_future_prediction_loss(
+        output,
+        balance_horizons=True,
+        reliable_normalization=True,
+    )
+    torch.testing.assert_close(
+        objective,
+        torch.stack(tuple(horizon_rows.values())).mean(),
+    )
+
+
 def test_v105_contract_requires_address_and_reliable_normalization() -> None:
     config = _complete_v105_config()
     trainer = _complete_v105_trainer()
@@ -4141,17 +4485,49 @@ def test_v106_interval_teacher_is_signed_spatial_increment_not_global_mean() -> 
     # Two cells carry different signed velocities.  If the teacher pooled
     # spatially or reduced the interval to a plain frame average, this ratio
     # and the signed progression target would disappear.
+    source_side = math.isqrt(config.patches_per_camera)
+    assert source_side * source_side == config.patches_per_camera
+    assert source_side % config.flow_jepa_grid_size == 0
+    source_per_target = source_side // config.flow_jepa_grid_size
     for support_index, offset in enumerate(supports):
-        target[:, support_index, -1, 0, 0, 0] = float(offset)
-        target[:, support_index, -1, 0, 1, 0] = -3.0 * float(offset)
+        source_grid = target[:, support_index, -1, 0].reshape(
+            batch,
+            source_side,
+            source_side,
+            config.visual_token_dim,
+        )
+        source_grid[
+            :,
+            :source_per_target,
+            :source_per_target,
+            0,
+        ] = float(offset)
+        source_grid[
+            :,
+            :source_per_target,
+            source_per_target : 2 * source_per_target,
+            0,
+        ] = -3.0 * float(offset)
 
     def project(tokens: torch.Tensor) -> torch.Tensor:
         leading = tuple(tokens.shape[:-2])
+        source_side = math.isqrt(int(tokens.shape[-2]))
+        assert source_side * source_side == int(tokens.shape[-2])
         scalar = tokens[..., 0].reshape(
             *leading,
-            config.flow_jepa_grid_size,
-            config.flow_jepa_grid_size,
+            source_side,
+            source_side,
         )
+        if source_side != config.flow_jepa_grid_size:
+            flat_leading = math.prod(leading)
+            scalar = F.adaptive_avg_pool2d(
+                scalar.reshape(flat_leading, 1, source_side, source_side),
+                (config.flow_jepa_grid_size, config.flow_jepa_grid_size),
+            ).reshape(
+                *leading,
+                config.flow_jepa_grid_size,
+                config.flow_jepa_grid_size,
+            )
         return scalar[..., None].expand(
             *scalar.shape,
             config.hidden_size,
@@ -5933,6 +6309,21 @@ def test_directed_canvas_attention_preserves_context_action_future_order() -> No
     assert mask[5:7, 7:10].all()
     assert mask[7:8, 8:10].all()
     assert not mask[8:10].any()
+    ancestral_policy_mask = block._directed_attention_mask(
+        11,
+        slices,
+        device=torch.device("cpu"),
+        role="policy",
+    )
+    assert not ancestral_policy_mask[5:7, 8:10].any()
+    v115_policy_mask = block._directed_attention_mask(
+        11,
+        slices,
+        device=torch.device("cpu"),
+        role="policy",
+        policy_explicit_handoff_only=True,
+    )
+    assert v115_policy_mask[5:7, 8:10].all()
 
     torch.manual_seed(23)
     canvas = torch.randn(2, 11, config.hidden_size)
@@ -6383,6 +6774,188 @@ def test_v102_resume_contract_rejects_shape_compatible_semantic_changes() -> Non
     ):
         legacy_saved.pop(field, None)
     _validate_v102_resume_contract(legacy_saved, legacy_current)
+
+
+def test_v115_resume_contract_rejects_topology_and_teacher_changes() -> None:
+    current = _complete_v115_config()
+    saved = asdict(current)
+    _validate_v102_resume_contract(saved, current)
+
+    mismatched_schedule = dict(saved)
+    mismatched_schedule["flow_jepa_top_role_schedule"] = "3-3-2"
+    try:
+        _validate_v102_resume_contract(mismatched_schedule, current)
+    except ValueError as error:
+        assert "top_role_schedule" in str(error)
+    else:
+        raise AssertionError("V115 resume accepted a changed 3-2-3 topology")
+
+    mismatched_teacher = dict(saved)
+    mismatched_teacher["flow_jepa_teacher_g_ema_decay"] = 0.99
+    try:
+        _validate_v102_resume_contract(mismatched_teacher, current)
+    except ValueError as error:
+        assert "teacher_g_ema_decay" in str(error)
+    else:
+        raise AssertionError("V115 resume accepted a changed Teacher-G EMA")
+
+
+def test_v116_resume_contract_rejects_mainline_and_time_changes() -> None:
+    current = _complete_v116_config()
+    saved = asdict(current)
+    _validate_v102_resume_contract(saved, current)
+    for field, changed in (
+        ("flow_jepa_supervised_effect_mainline", 0),
+        ("flow_matching_time_distribution", "uniform"),
+    ):
+        mismatched = dict(saved)
+        mismatched[field] = changed
+        with pytest.raises(ValueError, match=field):
+            _validate_v102_resume_contract(mismatched, current)
+
+
+def test_v115_flags_off_restore_exact_v114_configuration_and_graph() -> None:
+    small = {
+        "flow_jepa_grid_size": 2,
+        "future_grid_size": 2,
+        "patches_per_camera": 4,
+        "flow_jepa_address_slots": 2,
+        "flow_jepa_address_route_dim": 8,
+    }
+    parent = _complete_v114_config(**small)
+    disabled = _complete_v115_config(
+        **small,
+        flow_jepa_shared_factual_glimpse_bank=0,
+        flow_jepa_g_aligned_future_effect=0,
+        flow_jepa_stateless_goal_phase_machine=0,
+        flow_jepa_top_role_schedule="3-3-2",
+        flow_jepa_policy_plan_compiler=0,
+        flow_jepa_world_blocks=3,
+        flow_jepa_policy_blocks=2,
+    )
+    assert asdict(disabled) == asdict(parent)
+    torch.manual_seed(173)
+    parent_system = V39PolicySystem(parent)
+    torch.manual_seed(173)
+    disabled_system = V39PolicySystem(disabled)
+    assert tuple(parent_system.state_dict()) == tuple(
+        disabled_system.state_dict()
+    )
+    for name, value in parent_system.state_dict().items():
+        torch.testing.assert_close(
+            value,
+            disabled_system.state_dict()[name],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+def test_v116_flags_off_restore_exact_v115_configuration_and_graph() -> None:
+    small = {
+        "flow_jepa_grid_size": 2,
+        "future_grid_size": 2,
+        "patches_per_camera": 4,
+        "flow_jepa_address_slots": 2,
+        "flow_jepa_address_route_dim": 8,
+    }
+    parent = _complete_v115_config(**small)
+    disabled = _complete_v116_config(
+        **small,
+        flow_jepa_supervised_effect_mainline=0,
+        flow_matching_time_distribution="uniform",
+    )
+    assert asdict(disabled) == asdict(parent)
+    torch.manual_seed(419)
+    parent_system = V39PolicySystem(parent)
+    torch.manual_seed(419)
+    disabled_system = V39PolicySystem(disabled)
+    assert tuple(parent_system.state_dict()) == tuple(
+        disabled_system.state_dict()
+    )
+    for name, value in parent_system.state_dict().items():
+        torch.testing.assert_close(
+            value,
+            disabled_system.state_dict()[name],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+def test_v115_policy_modulation_cannot_reopen_world_rollout() -> None:
+    torch.manual_seed(174)
+    config = _complete_v115_config(
+        dropout=0.0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    planner = V39PolicySystem(config).planner.eval()
+    batch = 1
+    canvas, slices = planner.seed(
+        noisy_physical=torch.randn(
+            batch, config.action_horizon, config.physical_action_dim
+        ),
+        state=torch.randn(batch, config.state_dim),
+        state_history=torch.randn(
+            batch, config.visual_history_length, config.state_dim
+        ),
+        executed_history=torch.randn(
+            batch, config.executed_history_length, config.action_dim
+        ),
+        executed_memory=torch.randn(
+            batch, config.action_history_token_count, config.hidden_size
+        ),
+        proposal_tokens=torch.randn(
+            batch, config.action_horizon, config.hidden_size
+        ),
+        proposal_keep=torch.ones(batch),
+        rollout_init=torch.randn(
+            batch, config.future_token_count, config.hidden_size
+        ),
+        stage_init=None,
+        goal_tokens=torch.randn(
+            batch, config.goal_token_count, config.hidden_size
+        ),
+        goal_condition_keep=torch.ones(batch),
+        action_history_condition_keep=torch.ones(batch),
+    )
+    visual_memory = torch.randn(batch, 7, config.hidden_size)
+    time_emb = torch.randn(batch, config.hidden_size)
+    baseline, _, _ = planner._mod_embed(
+        canvas,
+        visual_memory,
+        time_emb,
+        slices,
+        role="policy",
+    )
+    changed_canvas = canvas.clone()
+    changed_canvas[:, slices["rollout"]] += 10.0 * torch.randn_like(
+        changed_canvas[:, slices["rollout"]]
+    )
+    changed, _, _ = planner._mod_embed(
+        changed_canvas,
+        visual_memory,
+        time_emb,
+        slices,
+        role="policy",
+    )
+    torch.testing.assert_close(baseline, changed, rtol=0.0, atol=0.0)
+    policy_block = planner.blocks[-2]
+    attention_mask = policy_block._directed_attention_mask(
+        int(canvas.shape[1]),
+        slices,
+        device=canvas.device,
+        role="policy",
+        policy_explicit_handoff_only=True,
+    )
+    assert bool(
+        attention_mask[
+            slices["trajectory"],
+            slices["rollout"],
+        ].all()
+    )
 
 
 def test_new_stage1_owns_representation_but_not_final_action_decoder() -> None:
@@ -6995,6 +7568,4134 @@ def test_v107_action_loss_reaches_multi_glimpse_and_typed_interval_path() -> Non
         late_reader.lattice_query_proj.weight,
         interval.interval_stage_organizer.delta_out.weight,
         bridge.query_proj.weight,
+    ):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert float(parameter.grad.abs().sum()) > 0.0
+
+
+def test_object_intent_preflight_keeps_eval_mode_for_teacher_forced_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[bool, bool, set[str]]] = []
+
+    class _FakePreflightSystem(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.planner = SimpleNamespace(evidence_latent_mmdit_action_decoder=None)
+            self.policy_config = SimpleNamespace(
+                flow_jepa_interval_stage_delta=1,
+                flow_jepa_object_intent_dynamics_mainline=1,
+                flow_jepa_effective_interval_support_offsets=(4, 8, 16, 32),
+                flow_jepa_complete_numerical_contract=0,
+            )
+
+        def flow_training_forward(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            training_pack = kwargs["future_training_pack"]
+            calls.append(
+                (
+                    bool(self.training),
+                    bool(torch.is_grad_enabled()),
+                    set(training_pack),
+                )
+            )
+            return {}
+
+    sample = {
+        "visual": torch.zeros(1, 1),
+        "history_state": torch.zeros(1, 1),
+        "executed_action_history": torch.zeros(1, 1),
+        "state": torch.zeros(1, 1),
+        "policy_action": torch.zeros(1, 1),
+        "action_state": torch.zeros(1, 1),
+        "target_visual": torch.zeros(1, 1),
+        "action": torch.zeros(1, 1),
+        "future_state": torch.zeros(1, 1),
+        "future_offsets": torch.tensor([4]),
+    }
+    monkeypatch.setattr(
+        policy_runtime_v39_module,
+        "prepare_v39_policy_sample",
+        lambda *args, **kwargs: sample,
+    )
+    monkeypatch.setattr(
+        policy_runtime_v39_module,
+        "_validate_object_intent_preflight_output",
+        lambda *args, **kwargs: None,
+    )
+    system = _FakePreflightSystem().train()
+    policy_runtime_v39_module._preflight_evidence_dynamic_sampling(
+        system=system,  # type: ignore[arg-type]
+        loader=[object()],  # type: ignore[arg-type]
+        conditioner=object(),  # type: ignore[arg-type]
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        camera_names=("top", "wrist"),
+        trainer=SimpleNamespace(eval_inference_steps=5),  # type: ignore[arg-type]
+    )
+
+    assert calls == [
+        (
+            False,
+            False,
+            {"future_action", "future_state", "future_offsets", "target_visual"},
+        )
+    ]
+    assert system.training
+
+
+def test_object_intent_dynamics_optimizer_owns_every_new_top_parameter() -> None:
+    system = V39PolicySystem(
+        _complete_object_intent_dynamics_config()
+    ).train()
+    groups = _optimizer_groups(system, _complete_v115_trainer())
+    _validate_object_optimizer_ownership(system, groups)
+    named = {group["name"]: group for group in groups}
+    assert "object_intent_dynamics_323_top" in named
+    owned = {
+        id(parameter)
+        for parameter in named["object_intent_dynamics_323_top"]["params"]
+    }
+    for module in (
+        system.planner.object_grounder,
+        system.planner.object_intent_organizer,
+        system.planner.object_plan_recognizer,
+        system.planner.object_coarse_action,
+        system.planner.object_future_compiler,
+    ):
+        assert module is not None
+        assert all(
+            id(parameter) in owned
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        )
+def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
+    torch.manual_seed(1203)
+    config = _complete_object_intent_dynamics_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+        flow_jepa_p1_mixed_precision=0,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    visual = _visual(config, batch=batch)
+    raw_visual = _raw_visual(config, batch=batch, side=32)
+    state_history = torch.randn(
+        batch, config.visual_history_length, config.state_dim
+    )
+    executed = torch.randn(
+        batch, config.executed_history_length, config.action_dim
+    )
+    state = torch.randn(batch, config.state_dim)
+    action = torch.randn(batch, config.action_horizon, config.action_dim)
+    future_length = 48
+    future_action = torch.randn(batch, future_length, config.action_dim)
+    future_state = torch.randn(batch, future_length, config.state_dim)
+    support_offsets = torch.tensor(
+        config.flow_jepa_effective_interval_support_offsets,
+        dtype=torch.long,
+    )
+    target_visual = torch.randn(
+        batch,
+        int(support_offsets.numel()),
+        config.visual_history_length,
+        config.num_cameras,
+        config.patches_per_camera,
+        config.visual_token_dim,
+    )
+    teacher_pack = {
+        "future_action": future_action,
+        "future_state": future_state,
+        "future_offsets": support_offsets,
+        "target_visual": target_visual,
+    }
+    proposal = system.proposal(executed)
+    with pytest.raises(
+        ValueError,
+        match="explicit teacher-forced forward boundary",
+    ):
+        system._policy_forward(
+            system.codec.encode(action, state),
+            torch.ones(batch),
+            visual,
+            state_history,
+            state,
+            executed,
+            proposal["tokens"],
+            torch.ones(batch),
+            executed_memory=proposal["history_tokens"],
+            goal_language_tokens=torch.randn(
+                batch, 5, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(batch, 5, dtype=torch.bool),
+            future_training_pack=teacher_pack,
+        )
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            visual,
+            state_history,
+            executed,
+            state,
+            action,
+            raw_visual=raw_visual,
+            target_visual=target_visual,
+            future_training_pack=teacher_pack,
+            goal_language_tokens=torch.randn(
+                batch, 5, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(batch, 5, dtype=torch.bool),
+            training_noise=system.codec.encode(torch.randn_like(action), state),
+            training_time=torch.ones(batch),
+            proposal_keep=torch.ones(batch),
+            make_counterfactuals=False,
+            collect_audit_metrics=True,
+        )
+    _validate_object_intent_preflight_output(
+        output,
+        config=config,
+        batch_size=batch,
+    )
+    assert float(output["object_intent_dynamics_active"]) == 1.0
+    assert tuple(output["object_future_semantic_prediction"].shape[:3]) == (
+        batch,
+        4,
+        4,
+    )
+    assert tuple(output["object_intent_interval_queries"].shape) == (
+        batch,
+        4,
+        config.hidden_size,
+    )
+    assert tuple(output["object_intent_state_change_evidence"].shape) == (
+        batch,
+        config.hidden_size,
+    )
+    assert "object_intent_completion_probability" not in output
+    assert "object_policy_plan_terminal" not in output
+    assert "flow_jepa_execution_terminal_evidence" not in output
+    assert float(output["evidence_execution_terminal_external_bias"]) == 0.0
+    assert bool((output["object_future_visibility_target"] <= 0.0).all())
+    assert bool((output["object_future_persistence_target"] <= 0.0).all())
+    assert torch.isfinite(output["object_p2_effect_rms"])
+    assert torch.isfinite(output["object_p3_effect_rms"])
+    terms = object_intent_dynamics_terms(output, require_teacher=True)
+    objective = (
+        output["pred_physical_velocity"].float().square().mean()
+        + terms["object_future_dynamics"]
+        + terms["object_intent_structure"]
+    )
+    objective.backward()
+    for module in (
+        system.planner.object_grounder,
+        system.planner.object_intent_organizer,
+        system.planner.object_coarse_action,
+        system.planner.object_future_compiler,
+        system.planner.p2_effect_reader,
+        system.planner.policy_plan_compiler,
+    ):
+        assert module is not None
+        assert any(
+            parameter.grad is not None and torch.isfinite(parameter.grad).all()
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        )
+    assert system.planner.object_intent_organizer is not None
+    assert system.planner.policy_plan_compiler is not None
+    for module in (
+        system.planner.object_intent_organizer.state_change_read,
+        system.planner.object_intent_organizer.state_change_input,
+        system.planner.object_intent_organizer.state_change_fuse,
+        system.planner.policy_plan_compiler.state_change_action,
+        system.planner.policy_plan_compiler.state_change_temporal,
+        system.planner.policy_plan_compiler.state_change_lane,
+    ):
+        assert any(
+            parameter.grad is not None
+            and torch.isfinite(parameter.grad).all()
+            and float(parameter.grad.abs().sum()) > 0.0
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        )
+
+
+def test_object_intent_dynamics_five_step_deploy_reuses_static_top_without_teacher() -> None:
+    torch.manual_seed(1206)
+    config = _complete_object_intent_dynamics_config(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        inference_steps=5,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+        flow_jepa_p1_mixed_precision=0,
+    )
+    system = V39PolicySystem(config).eval()
+    planner = system.planner
+    assert planner.object_grounder is not None
+    assert planner.object_intent_organizer is not None
+    assert planner.object_future_teacher is not None
+    assert planner.object_future_compiler is not None
+    assert planner.late_raw_detail_reader is not None
+    assert planner.p2_effect_reader is not None
+    assert planner.policy_plan_compiler is not None
+    inputs = (
+        _visual(config, batch=1),
+        torch.randn(1, config.visual_history_length, config.state_dim),
+        torch.randn(1, config.executed_history_length, config.action_dim),
+        torch.randn(1, config.state_dim),
+    )
+    keywords = {
+        "raw_visual": _raw_visual(config, batch=1, side=32),
+        "goal_language_tokens": torch.randn(1, 5, config.goal_language_dim),
+        "goal_language_mask": torch.ones(1, 5, dtype=torch.bool),
+        "noise": torch.randn(1, config.action_horizon, config.action_dim),
+        "steps": 5,
+        "collect_diagnostics": False,
+    }
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        uncached = system.sample(*inputs, **keywords, reuse_static_evidence=False)
+    block_calls = [0 for _ in planner.blocks]
+
+    def count_hook(counter: list[int], index: int):
+        def hook(_module, _args, _output) -> None:
+            counter[index] += 1
+
+        return hook
+
+    handles = [
+        block.register_forward_hook(count_hook(block_calls, index))
+        for index, block in enumerate(planner.blocks)
+    ]
+    with (
+        patch.object(
+            planner,
+            "encode_visual_context",
+            wraps=planner.encode_visual_context,
+        ) as encode_visual,
+        patch.object(
+            planner.object_grounder,
+            "forward",
+            wraps=planner.object_grounder.forward,
+        ) as grounder,
+        patch.object(
+            planner.object_intent_organizer,
+            "forward",
+            wraps=planner.object_intent_organizer.forward,
+        ) as organizer,
+        patch.object(
+            planner.object_future_teacher,
+            "forward",
+            wraps=planner.object_future_teacher.forward,
+        ) as teacher,
+        patch.object(
+            planner.object_future_compiler,
+            "forward_w1",
+            wraps=planner.object_future_compiler.forward_w1,
+        ) as w1,
+        patch.object(
+            planner.object_future_compiler,
+            "forward_w2",
+            wraps=planner.object_future_compiler.forward_w2,
+        ) as w2,
+        patch.object(
+            planner.late_raw_detail_reader,
+            "forward",
+            wraps=planner.late_raw_detail_reader.forward,
+        ) as detail_reader,
+        patch.object(
+            planner.p2_effect_reader,
+            "forward",
+            wraps=planner.p2_effect_reader.forward,
+        ) as p2,
+        patch.object(
+            planner.policy_plan_compiler,
+            "forward",
+            wraps=planner.policy_plan_compiler.forward,
+        ) as p3,
+        torch.no_grad(),
+        torch.autocast(device_type="cpu", dtype=torch.bfloat16),
+    ):
+        cached = system.sample(*inputs, **keywords)
+    for handle in handles:
+        handle.remove()
+    torch.testing.assert_close(cached, uncached, rtol=3e-4, atol=2e-5)
+    assert encode_visual.call_count == 1
+    assert grounder.call_count == 1
+    assert organizer.call_count == 1
+    assert teacher.call_count == 0
+    assert w1.call_count == 1
+    assert w2.call_count == 1
+    assert detail_reader.call_count == 1
+    assert p2.call_count == 5
+    assert p3.call_count == 5
+    assert block_calls == [1, 1, 1, 0, 0, 5, 0, 0]
+
+
+def test_v114_contract_launcher_and_v113_flag_off_ancestry() -> None:
+    config = _complete_v114_config()
+    trainer = _complete_v113_trainer()
+    _validate_complete_v114_model_contract(config, trainer)
+    assert _validate_required_model_contract("v114", config, trainer) == "v114"
+    v113 = replace(config, flow_jepa_utility_precision_mainline=0)
+    _validate_complete_v113_model_contract(v113, trainer)
+    with pytest.raises(
+        ValueError, match="flow_jepa_utility_precision_mainline"
+    ):
+        _validate_complete_v114_model_contract(v113, trainer)
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v114_shared_factual_utility_precision.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v114}"'
+        in launcher
+    )
+    assert "V114_BATCH_SIZE:-8" in launcher
+    assert "--flow-jepa-utility-precision-mainline 1" in launcher
+    assert "--flow-jepa-action-free-world-factual 1" in launcher
+    assert "--flow-jepa-p1-mixed-precision 1" in launcher
+    assert "V114_EVAL_PROPOSAL_ABLATION_BATCHES:-2" in launcher
+    assert "V114_EVAL_EXECUTION_ABLATION_BATCHES:-1" in launcher
+
+
+def test_v114_utility_refiner_preserves_exact_facts_and_natural_gradients() -> None:
+    torch.manual_seed(401)
+    refiner = _UtilityPrecisionLocalRefiner(
+        width=16, raw_dim=12, route_dim=8, depth=2
+    ).train()
+    contexts = {
+        "query": torch.randn(3, 1, 8),
+        "semantic": torch.randn(3, 1, 8),
+        "appearance": torch.randn(3, 1, 8),
+        "geometry": torch.randn(3, 1, 8),
+        "future_transport": torch.randn(3, 1, 5),
+    }
+    coordinates = torch.randn(3, 1, 9, 2)
+    zero, zero_metrics = refiner(
+        rgb=torch.zeros(3, 1, 9, 3),
+        learned_detail=torch.zeros(3, 1, 9, 12),
+        coordinates=coordinates,
+        **contexts,
+    )
+    assert torch.equal(zero, torch.zeros_like(zero))
+    assert float(zero_metrics["flow_jepa_typed_p2_output_rms"]) == 0.0
+
+    rgb = torch.randn(3, 1, 9, 3, requires_grad=True)
+    detail = torch.randn(3, 1, 9, 12, requires_grad=True)
+    output, metrics = refiner(
+        rgb=rgb,
+        learned_detail=detail,
+        coordinates=coordinates,
+        **contexts,
+    )
+    assert (
+        float(metrics["flow_jepa_typed_p1_rgb_reconstruction_error"]) <= 2e-7
+    )
+    assert (
+        float(metrics["flow_jepa_typed_p1_detail_reconstruction_error"]) <= 2e-7
+    )
+    for mode in (
+        "p2_rgb_precision_zero",
+        "p2_rgb_precision_spatial_shuffle",
+        "p2_detail_precision_zero",
+        "p2_detail_precision_spatial_shuffle",
+    ):
+        intervened, _ = refiner(
+            rgb=rgb,
+            learned_detail=detail,
+            coordinates=coordinates,
+            intervention=mode,
+            **contexts,
+        )
+        assert torch.isfinite(intervened).all()
+        assert not torch.equal(intervened, output)
+    output.square().mean().backward()
+    for value in (rgb.grad, detail.grad):
+        assert value is not None and torch.isfinite(value).all()
+        assert float(value.abs().sum()) > 0.0
+
+
+def test_v114_world_factual_chart_cannot_read_noisy_trajectory() -> None:
+    torch.manual_seed(404)
+    config = _complete_v114_config(
+        dropout=0.0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+    )
+    block = TemporalDynamicsBoundDiTBlock(config, role="world").eval()
+    lengths = {
+        "task": config.goal_token_count,
+        "state": 1,
+        "state_history": config.visual_history_length,
+        "executed": config.action_history_token_count,
+        "proposal": config.action_horizon,
+        "trajectory": config.action_horizon * config.action_basis_tokens,
+        # A non-empty stage is essential: the original direct-only test could
+        # not catch trajectory -> stage -> rollout leakage.
+        "stage": config.flow_jepa_stage_tokens,
+        "rollout": config.future_token_count,
+        "registers": config.canvas_registers,
+    }
+    slices: dict[str, slice] = {}
+    cursor = 0
+    for name, length in lengths.items():
+        slices[name] = slice(cursor, cursor + int(length))
+        cursor += int(length)
+    canvas = torch.randn(2, cursor, config.hidden_size)
+    changed = canvas.clone()
+    changed[:, slices["trajectory"]] = torch.randn_like(
+        changed[:, slices["trajectory"]]
+    ) * 7.0
+    visual = torch.randn(2, 7, config.hidden_size)
+    mod = torch.randn(2, config.hidden_size)
+    baseline, _ = block(canvas, visual, mod, slices)
+    intervened, _ = block(changed, visual, mod, slices)
+    torch.testing.assert_close(
+        intervened[:, slices["rollout"]],
+        baseline[:, slices["rollout"]],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_v114_grounding_stage_cannot_bypass_factual_action_mask() -> None:
+    torch.manual_seed(407)
+    config = _complete_v114_config(
+        dropout=0.0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+    )
+    block = TemporalDynamicsBoundDiTBlock(config, role="grounding").eval()
+    lengths = {
+        "task": config.goal_token_count,
+        "state": 1,
+        "state_history": config.visual_history_length,
+        "executed": config.action_history_token_count,
+        "proposal": config.action_horizon,
+        "trajectory": config.action_horizon * config.action_basis_tokens,
+        "stage": config.flow_jepa_stage_tokens,
+        "rollout": config.future_token_count,
+        "registers": config.canvas_registers,
+    }
+    slices: dict[str, slice] = {}
+    cursor = 0
+    for name, length in lengths.items():
+        slices[name] = slice(cursor, cursor + int(length))
+        cursor += int(length)
+    canvas = torch.randn(2, cursor, config.hidden_size)
+    changed = canvas.clone()
+    changed[:, slices["trajectory"]] = torch.randn_like(
+        changed[:, slices["trajectory"]]
+    ) * 7.0
+    changed[:, slices["proposal"]] = torch.randn_like(
+        changed[:, slices["proposal"]]
+    ) * 5.0
+    visual = torch.randn(2, 7, config.hidden_size)
+    mod = torch.randn(2, config.hidden_size)
+    baseline, _ = block(canvas, visual, mod, slices)
+    intervened, _ = block(changed, visual, mod, slices)
+    for name in ("stage", "rollout"):
+        torch.testing.assert_close(
+            intervened[:, slices[name]],
+            baseline[:, slices[name]],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+def test_v114_tiled_microgrid_matches_ancestry_contraction_and_gradients() -> None:
+    torch.manual_seed(402)
+    shape = (1, 2, 2, 1, 2, 2, 1)
+    candidates = 4
+    micro = 9
+    route_logits = torch.randn(*shape, requires_grad=True)
+    fine_logits = torch.randn(*shape, candidates, requires_grad=True)
+    route = torch.softmax(route_logits.flatten(3), dim=-1).reshape(shape)
+    fine = torch.softmax(fine_logits, dim=-1)
+    basis = torch.rand(candidates, micro)
+    rgb = torch.randn(1, 1, 2, 2, 1, candidates, 3)
+    detail = torch.randn(1, 1, 2, 2, 1, candidates, 7)
+    coordinates = torch.randn(1, 1, 2, 2, 1, candidates, 2)
+    ancestry = LateRawDetailPolicyReader._typed_microgrid_expectation(
+        route,
+        fine,
+        basis,
+        rgb,
+        detail,
+        coordinates,
+        micro_tile=1,
+    )
+    tiled = LateRawDetailPolicyReader._typed_microgrid_expectation(
+        route,
+        fine,
+        basis,
+        rgb,
+        detail,
+        coordinates,
+        micro_tile=3,
+    )
+    for expected, actual in zip(ancestry, tiled):
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    ancestry_loss = sum(value.square().mean() for value in ancestry)
+    ancestry_grad = torch.autograd.grad(
+        ancestry_loss, (route_logits, fine_logits), retain_graph=True
+    )
+    tiled_loss = sum(value.square().mean() for value in tiled)
+    tiled_grad = torch.autograd.grad(
+        tiled_loss, (route_logits, fine_logits)
+    )
+    for expected, actual in zip(ancestry_grad, tiled_grad):
+        torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+def test_v114_full_action_path_uses_24_factual_and_96_basis_queries() -> None:
+    torch.manual_seed(403)
+    config = _complete_v114_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=1,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+    )
+    system = V39PolicySystem(config).train()
+    optimizer_groups = _optimizer_groups(system, _complete_v113_trainer())
+    grouped_ids = [
+        id(parameter)
+        for group in optimizer_groups
+        for parameter in group["params"]
+    ]
+    assert len(grouped_ids) == len(set(grouped_ids))
+    assert {
+        id(parameter)
+        for parameter in system.parameters()
+        if parameter.requires_grad
+    } == set(grouped_ids)
+    batch = 1
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
+            torch.randn(
+                batch, config.executed_history_length, config.action_dim
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(batch, config.action_horizon, config.action_dim),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            # A 32px synthetic pyramid collapses this 3x3 micro-read to
+            # repeated values, making the action-dependent precision query
+            # legitimately unidentifiable. Use the smallest non-degenerate
+            # pyramid when asserting its backward path.
+            raw_visual=_raw_visual(config, batch=batch, side=48),
+            goal_language_tokens=torch.randn(
+                batch, 3, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
+            make_counterfactuals=False,
+        )
+    assert float(output["flow_jepa_p1_query_rows"]) == config.action_horizon
+    assert float(output["flow_jepa_p2_query_rows"]) == (
+        config.action_horizon * config.action_basis_tokens
+    )
+    assert float(output["flow_jepa_p1_shared_factual"]) == 1.0
+    assert float(output["flow_jepa_typed_p2_utility_precision"]) == 1.0
+    assert float(output["flow_jepa_typed_p1_activation_checkpoint"]) == 1.0
+    # The B1 functional test stays below the V114 checkpoint threshold; the
+    # metric must report actual execution separately from the configured flag.
+    assert (
+        float(output["flow_jepa_typed_p1_activation_checkpoint_active"]) == 0.0
+    )
+    assert float(output["flow_jepa_address_query_chunk_actual"]) == 24.0
+    output["pred_physical_velocity"].float().square().mean().backward()
+    reader = system.planner.late_raw_detail_reader
+    assert reader is not None
+    assert not any(
+        parameter.requires_grad
+        for parameter in reader.typed_fine_query["semantic"].parameters()
+    )
+    for parameter_name, parameter in (
+        ("shared_p1_basis_key", reader.shared_p1_basis_key.weight),
+        ("shared_p1_context_query", reader.shared_p1_context_query.weight),
+        ("lattice_query_proj", reader.lattice_query_proj.weight),
+        ("typed_coarse_query.semantic", reader.typed_coarse_query["semantic"].weight),
+        ("typed_fine_query.geometry", reader.typed_fine_query["geometry"].weight),
+        (
+            "typed_local_refiners.0.owner_outputs.policy",
+            reader.typed_local_refiners[0].owner_outputs["policy"].weight,
+        ),
+    ):
+        assert parameter.grad is not None, parameter_name
+        assert torch.isfinite(parameter.grad).all(), parameter_name
+        assert float(parameter.grad.abs().sum()) > 0.0, parameter_name
+
+
+def test_v115_shared_factual_bank_cross_reads_once_and_has_action_gradients() -> None:
+    torch.manual_seed(411)
+    config = _complete_v115_p1_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).train()
+    batch = 1
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
+            torch.randn(
+                batch, config.executed_history_length, config.action_dim
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(batch, config.action_horizon, config.action_dim),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            goal_language_tokens=torch.randn(
+                batch, 3, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
+            make_counterfactuals=False,
+        )
+    assert float(output["flow_jepa_p1_query_rows"]) == config.action_horizon
+    assert float(output["flow_jepa_p2_query_rows"]) == (
+        config.action_horizon * config.action_basis_tokens
+    )
+    assert float(output["flow_jepa_shared_factual_glimpse_bank"]) == 1.0
+    assert torch.isfinite(output["flow_jepa_p2_factual_cross_entropy"])
+    assert torch.isfinite(
+        output["flow_jepa_p2_factual_cross_basis_variation"]
+    )
+    output["pred_physical_velocity"].float().square().mean().backward()
+    reader = system.planner.late_raw_detail_reader
+    assert reader is not None
+    assert reader.shared_p1_role_query is not None
+    for parameter in (
+        reader.shared_p1_role_query["appearance"].weight,
+        reader.shared_p1_owner_mix_logits,
+        reader.shared_p2_glimpse_query.weight,
+        reader.shared_p2_glimpse_key.weight,
+    ):
+        assert parameter is not None
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert float(parameter.grad.abs().sum()) > 0.0
+
+
+def test_v115_teacher_dispersion_matches_materialized_reference() -> None:
+    torch.manual_seed(411)
+    config = _complete_v115_teacher_config(
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    encoder = FlowDINOEvidenceEncoder(config).eval()
+    association = torch.softmax(
+        torch.randn(2, 3, 2, 2, 2, 2, 2, 2).flatten(-2),
+        dim=-1,
+    ).reshape(2, 3, 2, 2, 2, 2, 2, 2)
+    support = torch.randn(2, 3, 2, 2, 2, 7)
+    matched = torch.einsum(
+        "bscijmuv,bscuvh->bscijmh",
+        association,
+        support,
+    )
+    expected = torch.einsum(
+        "bscijmuv,bscijmuv->bscijm",
+        association,
+        (
+            support[:, :, :, None, None, None]
+            - matched[..., None, None, :]
+        )
+        .square()
+        .mean(dim=-1),
+    ).clamp_min(0.0).sqrt()
+    actual = encoder._teacher_weighted_feature_dispersion(
+        association,
+        support,
+        matched,
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+    assert not actual.requires_grad
+
+
+def test_v115_p3_global_conditions_cover_production_time_and_basis() -> None:
+    config = _complete_v115_config(
+        hidden_size=32,
+        action_horizon=24,
+        action_basis_tokens=4,
+    )
+    compiler = PolicyPlanCompiler(config)
+    condition = torch.randn(8, config.hidden_size)
+    expanded = compiler._expand_global_condition(
+        condition,
+        batch=8,
+        name="test condition",
+    )
+    assert tuple(expanded.shape) == (8, 24, 4, config.hidden_size)
+    for time_index, basis_index in ((0, 0), (12, 2), (23, 3)):
+        torch.testing.assert_close(
+            expanded[:, time_index, basis_index],
+            condition,
+            rtol=0.0,
+            atol=0.0,
+        )
+    with pytest.raises(ValueError, match=r"must be \[B,H\]"):
+        compiler._expand_global_condition(
+            condition[:, None],
+            batch=8,
+            name="bad condition",
+        )
+
+
+def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None:
+    torch.manual_seed(412)
+    config = _complete_v115_teacher_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).train()
+    batch = 1
+    arguments = (
+        _visual(config, batch=batch),
+        torch.randn(batch, config.visual_history_length, config.state_dim),
+        torch.randn(
+            batch, config.executed_history_length, config.action_dim
+        ),
+        torch.randn(batch, config.state_dim),
+        torch.randn(batch, config.action_horizon, config.action_dim),
+    )
+    target = torch.randn(
+        batch,
+        len(config.flow_jepa_effective_interval_support_offsets),
+        config.visual_history_length,
+        config.num_cameras,
+        config.patches_per_camera,
+        config.visual_token_dim,
+    )
+    keywords = {
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "goal_language_tokens": torch.randn(
+            batch, 3, config.goal_language_dim
+        ),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+        "make_counterfactuals": False,
+    }
+    torch.manual_seed(413)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        baseline = system.flow_training_forward(
+            *arguments,
+            target_visual=target,
+            **keywords,
+        )
+    torch.manual_seed(413)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        replaced = system.flow_training_forward(
+            *arguments,
+            target_visual=target.roll(shifts=1, dims=4),
+            **keywords,
+        )
+    torch.testing.assert_close(
+        baseline["pred_physical_velocity"],
+        replaced["pred_physical_velocity"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert float(baseline["flow_jepa_g_aligned_future_teacher"]) == 1.0
+    assert (
+        float(baseline["flow_jepa_teacher_g_builds_this_pack"])
+        == 1.0
+    )
+    assert (
+        float(baseline["flow_jepa_g_aligned_teacher_used_completed_g3"])
+        == 1.0
+    )
+    slot_target = baseline[
+        "flow_jepa_future_effect_semantic_target_slots"
+    ]
+    assert tuple(slot_target.shape) == (
+        batch,
+        config.future_anchors,
+        config.num_cameras,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_address_slots,
+        config.hidden_size,
+    )
+    assert not slot_target.requires_grad
+    assert torch.isfinite(slot_target).all()
+    assert not torch.equal(
+        slot_target,
+        replaced["flow_jepa_future_effect_semantic_target_slots"],
+    )
+    assert torch.isfinite(
+        baseline["flow_jepa_future_association_entropy"]
+    ).all()
+    assert torch.is_tensor(
+        baseline["flow_jepa_future_effect_transport_pred_slots"]
+    )
+    predicted_covariance = baseline[
+        "flow_jepa_future_effect_transport_covariance_pred_slots"
+    ].float()
+    predicted_uncertainty = baseline[
+        "flow_jepa_future_effect_uncertainty_pred_slots"
+    ].float()
+    target_uncertainty = baseline[
+        "flow_jepa_future_effect_uncertainty_target_slots"
+    ].float()
+    assert bool((predicted_covariance[..., :2] >= 0.01).all())
+    assert bool((predicted_covariance[..., :2] <= 1.0).all())
+    assert bool((predicted_uncertainty >= 0.05).all())
+    assert bool((predicted_uncertainty <= 4.0).all())
+    assert bool((target_uncertainty >= 0.0).all())
+    assert bool((target_uncertainty <= 4.0).all())
+    interval_terms = flow_jepa_interval_stage_terms(baseline)
+    assert (
+        float(interval_terms["flow_jepa_future_effect_supervision_active"])
+        == 1.0
+    )
+    encoder = system.planner.flow_dino_evidence
+    assert encoder is not None
+    assert encoder.teacher_g_semantic_projection is not None
+    system.eval()
+    with torch.no_grad():
+        for parameter in (
+            encoder.teacher_g_semantic_projection.parameters()
+        ):
+            parameter.zero_()
+        with torch.autocast(
+            device_type="cpu", dtype=torch.bfloat16
+        ):
+            no_semantic_match = system.flow_training_forward(
+                *arguments,
+                target_visual=target,
+                **keywords,
+            )
+    assert torch.count_nonzero(
+        no_semantic_match[
+            "flow_jepa_future_effect_reliability_target_slots"
+        ]
+    ) == 0
+    assert torch.count_nonzero(
+        no_semantic_match[
+            "flow_jepa_future_effect_semantic_target_slots"
+        ]
+    ) == 0
+    assert torch.count_nonzero(
+        no_semantic_match[
+            "flow_jepa_future_effect_transport_target_slots"
+        ]
+    ) == 0
+    system.train()
+    organizer = system.planner.flow_dino_evidence.progressive_grounding_address
+    assert organizer is not None
+    assert organizer.future_effect_geometry is not None
+    action_gradient = torch.autograd.grad(
+        baseline["pred_physical_velocity"].float().square().mean(),
+        organizer.future_effect_geometry[-1].weight,
+        retain_graph=True,
+    )[0]
+    assert torch.isfinite(action_gradient).all()
+    assert float(action_gradient.abs().sum()) > 0.0
+    interval_terms["flow_jepa_interval_stage"].backward()
+    for module in (
+        organizer.future_effect_semantic,
+        organizer.future_effect_geometry,
+    ):
+        assert module is not None
+        gradients = [
+            parameter.grad
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        assert gradients
+        assert all(gradient is not None for gradient in gradients)
+        assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_v115_goal_phase_machine_replays_observable_monotone_program() -> None:
+    torch.manual_seed(414)
+    machine = StatelessGoalPhaseMachine(
+        hidden=16,
+        program_states=4,
+        intervals=4,
+        heads=4,
+    ).train()
+    inputs = {
+        "goal_tokens": torch.randn(2, 5, 16),
+        "state_history_tokens": torch.randn(2, 4, 16),
+        "history_tokens": torch.randn(2, 6, 16),
+        "grounding_tokens": torch.randn(2, 9, 16),
+    }
+    state, metrics = machine(**inputs)
+    state.validate(
+        batch=2,
+        program_states=4,
+        intervals=4,
+        hidden=16,
+    )
+    torch.testing.assert_close(
+        state.phase_belief.float().sum(dim=-1),
+        torch.ones(2),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert float(metrics["flow_jepa_goal_phase_machine_active"]) == 1.0
+    assert (
+        float(metrics["flow_jepa_phase_program_grounding_variation"])
+        > 0.0
+    )
+    changed, _ = machine(
+        **{
+            **inputs,
+            "history_tokens": inputs["history_tokens"].roll(
+                shifts=1, dims=0
+            ),
+        }
+    )
+    assert not torch.equal(state.phase_belief, changed.phase_belief)
+    (
+        state.interval_selector.square().mean()
+        + state.goal_context.square().mean()
+        + state.history_context.square().mean()
+    ).backward()
+    for parameter in (
+        machine.goal_cross.in_proj_weight,
+        machine.transition[-1].weight,
+        machine.grounding_cross.in_proj_weight,
+        machine.interval_history_cross.in_proj_weight,
+    ):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert float(parameter.grad.abs().sum()) > 0.0
+
+
+def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
+    torch.manual_seed(416)
+    config = _complete_v115_config(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    visual = _visual(config, batch=batch)
+    state_history = torch.randn(
+        batch, config.visual_history_length, config.state_dim
+    )
+    executed_history = torch.randn(
+        batch, config.executed_history_length, config.action_dim
+    )
+    state = torch.randn(batch, config.state_dim)
+    target_action = torch.randn(
+        batch, config.action_horizon, config.action_dim
+    )
+    target_visual = torch.randn(
+        batch,
+        len(config.flow_jepa_effective_interval_support_offsets),
+        config.visual_history_length,
+        config.num_cameras,
+        config.patches_per_camera,
+        config.visual_token_dim,
+    )
+    training_noise = torch.randn(
+        batch,
+        config.action_horizon,
+        config.physical_action_dim,
+    )
+    keywords = {
+        "target_visual": target_visual,
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "goal_language_tokens": torch.randn(
+            batch, 3, config.goal_language_dim
+        ),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+        "training_noise": training_noise,
+        "proposal_keep": torch.ones(batch),
+        "make_counterfactuals": False,
+    }
+    with torch.no_grad(), torch.autocast(
+        device_type="cpu", dtype=torch.bfloat16
+    ):
+        early = system.flow_training_forward(
+            visual,
+            state_history,
+            executed_history,
+            state,
+            target_action,
+            training_time=torch.full((batch,), 0.2),
+            **keywords,
+        )
+        late = system.flow_training_forward(
+            visual,
+            state_history,
+            executed_history,
+            state,
+            target_action,
+            training_time=torch.full((batch,), 0.8),
+            **keywords,
+        )
+        system.planner.set_action_path_eval_intervention(
+            "world_residual_zero"
+        )
+        world_zero = system.flow_training_forward(
+            visual,
+            state_history,
+            executed_history,
+            state,
+            target_action,
+            training_time=torch.full((batch,), 0.2),
+            **keywords,
+        )
+        intervention_state = (
+            system.planner.action_path_eval_intervention_state()
+        )
+        system.planner.clear_action_path_eval_intervention()
+        system.planner.set_action_path_eval_intervention(
+            "future_effect_zero"
+        )
+        effect_zero = system.flow_training_forward(
+            visual,
+            state_history,
+            executed_history,
+            state,
+            target_action,
+            training_time=torch.full((batch,), 0.2),
+            **keywords,
+        )
+        effect_intervention_state = (
+            system.planner.action_path_eval_intervention_state()
+        )
+        system.planner.clear_action_path_eval_intervention()
+    torch.testing.assert_close(
+        early["flow_jepa_future_effect_semantic_pred_slots"],
+        late["flow_jepa_future_effect_semantic_pred_slots"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert not torch.equal(
+        early["pred_physical_velocity"],
+        late["pred_physical_velocity"],
+    )
+    torch.testing.assert_close(
+        early["pred_physical_velocity"],
+        world_zero["pred_physical_velocity"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert int(intervention_state["apply_count"]) == 1
+    assert not torch.equal(
+        early["pred_physical_velocity"],
+        effect_zero["pred_physical_velocity"],
+    )
+    assert int(effect_intervention_state["apply_count"]) == 1
+    assert (
+        float(
+            effect_intervention_state[
+                "future_effect_boundary_delta_norm"
+            ]
+        )
+        > 0.0
+    )
+
+
+def test_v115_w_intervention_cannot_readdress_p1_current_facts() -> None:
+    torch.manual_seed(418)
+    config = _complete_v115_config(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).eval()
+    reader = system.planner.late_raw_detail_reader
+    assert reader is not None
+    batch = 1
+    inputs = (
+        _visual(config, batch=batch),
+        torch.randn(batch, config.visual_history_length, config.state_dim),
+        torch.randn(
+            batch, config.executed_history_length, config.action_dim
+        ),
+        torch.randn(batch, config.state_dim),
+        torch.randn(batch, config.action_horizon, config.action_dim),
+    )
+    keywords = {
+        "target_visual": torch.randn(
+            batch,
+            len(config.flow_jepa_effective_interval_support_offsets),
+            config.visual_history_length,
+            config.num_cameras,
+            config.patches_per_camera,
+            config.visual_token_dim,
+        ),
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "goal_language_tokens": torch.randn(
+            batch, 3, config.goal_language_dim
+        ),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+        "training_noise": torch.randn(
+            batch,
+            config.action_horizon,
+            config.physical_action_dim,
+        ),
+        "proposal_keep": torch.ones(batch),
+        "make_counterfactuals": False,
+    }
+
+    def run(
+        action_mode: str | None,
+    ) -> tuple[dict[str, Tensor], dict[str, str | int | float]]:
+        if action_mode is not None:
+            system.planner.set_action_path_eval_intervention(action_mode)
+        reader.set_address_eval_intervention("none")
+        try:
+            with torch.no_grad(), torch.autocast(
+                device_type="cpu", dtype=torch.bfloat16
+            ):
+                output = system.flow_training_forward(*inputs, **keywords)
+            return output, reader.address_eval_intervention_state()
+        finally:
+            reader.clear_address_eval_intervention()
+            system.planner.clear_action_path_eval_intervention()
+
+    baseline, baseline_address = run(None)
+    w0_zero, w0_address = run("functional_w0_route_zero")
+    assert float(baseline["flow_jepa_p1_g3_only_factual_address"]) == 1.0
+    assert not torch.equal(
+        baseline["pred_physical_velocity"],
+        w0_zero["pred_physical_velocity"],
+    )
+    for prefix in (
+        "address_posterior_signature_",
+        "fine_posterior_signature_",
+    ):
+        keys = sorted(key for key in baseline_address if key.startswith(prefix))
+        assert keys
+        for key in keys:
+            assert w0_address[key] == pytest.approx(
+                baseline_address[key],
+                rel=0.0,
+                abs=0.0,
+            )
+
+
+def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
+    torch.manual_seed(415)
+    config = _complete_v115_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    trainer = _complete_v115_trainer()
+    _validate_complete_v115_model_contract(config, trainer)
+    assert _validate_required_model_contract(
+        "v115", config, trainer
+    ) == "v115"
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v115_g_aligned_goal_phase_323.sh"
+    ).read_text(encoding="utf-8")
+    for expected in (
+        "CLEARVLA_REQUIRED_MODEL_CONTRACT=v115",
+        "V115_BATCH_SIZE:-8",
+        "FLOW_JEPA_WORLD_BLOCKS=2",
+        "FLOW_JEPA_POLICY_BLOCKS=3",
+        "FLOW_JEPA_HORIZON_ADDRESS_WEIGHT=0",
+        "--flow-jepa-shared-factual-glimpse-bank 1",
+        "--flow-jepa-g-aligned-future-effect 1",
+        "--flow-jepa-stateless-goal-phase-machine 1",
+        "--flow-jepa-top-role-schedule 3-2-3",
+        "--flow-jepa-policy-plan-compiler 1",
+    ):
+        assert expected in launcher
+    system = V39PolicySystem(config).train()
+    assert system.planner.block_roles == (
+        "grounding",
+        "grounding",
+        "grounding",
+        "world",
+        "world",
+        "policy",
+        "policy",
+        "policy",
+    )
+    assert not any(
+        parameter.requires_grad
+        for parameter in system.planner.blocks[-1].parameters()
+    )
+    assert not any(
+        parameter.requires_grad
+        for parameter in system.planner.layer_contract_heads[-1].parameters()
+    )
+    assert system.planner.flow_dino_evidence is not None
+    assert not any(
+        parameter.requires_grad
+        for parameter in (
+            system.planner.flow_dino_evidence.future_prediction.parameters()
+        )
+    )
+    organizer = (
+        system.planner.flow_dino_evidence.progressive_grounding_address
+    )
+    assert organizer is not None
+    assert organizer.world_owner_transitions is not None
+    assert organizer.world_owner_route_attnres is not None
+    assert organizer.world_owner_fused_writes is not None
+    assert organizer.world_horizon_condition is not None
+    assert len(organizer.world_owner_transitions) == 3
+    assert len(organizer.world_owner_route_attnres) == 3
+    assert len(organizer.world_owner_fused_writes) == 3
+    assert len(organizer.world_horizon_condition) == 3
+    assert organizer.world_typed_query is not None
+    assert organizer.future_transport is not None
+    assert not any(
+        parameter.requires_grad
+        for parameter in organizer.world_typed_query.parameters()
+    )
+    assert not any(
+        parameter.requires_grad
+        for parameter in organizer.future_transport.parameters()
+    )
+    assert system.planner.horizon_typed_context_router is not None
+    assert len(system.planner.horizon_typed_context_router) == 3
+    assert system.planner.horizon_typed_context_query is not None
+    optimizer_groups = _optimizer_groups(system, trainer)
+    grouped_id_list = [
+        id(parameter)
+        for group in optimizer_groups
+        for parameter in group["params"]
+    ]
+    assert len(grouped_id_list) == len(set(grouped_id_list))
+    grouped_ids = set(grouped_id_list)
+    trainable_ids = {
+        id(parameter)
+        for parameter in system.parameters()
+        if parameter.requires_grad
+    }
+    assert grouped_ids == trainable_ids
+    parameter_owner = {
+        id(parameter): (str(group["name"]), float(group["lr"]))
+        for group in optimizer_groups
+        for parameter in group["params"]
+    }
+    assert system.planner.stateless_goal_phase_machine is not None
+    assert system.planner.policy_plan_compiler is not None
+    assert {
+        parameter_owner[id(parameter)][0]
+        for parameter in (
+            system.planner.stateless_goal_phase_machine.parameters()
+        )
+        if parameter.requires_grad
+    } == {"single_stage_shared_input"}
+    assert {
+        parameter_owner[id(parameter)][1]
+        for parameter in (
+            system.planner.stateless_goal_phase_machine.parameters()
+        )
+        if parameter.requires_grad
+    } == {trainer.lr}
+    assert {
+        parameter_owner[id(parameter)][0]
+        for parameter in system.planner.policy_plan_compiler.parameters()
+        if parameter.requires_grad
+    } == {"final_policy_heads"}
+
+    batch = 2
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(
+                batch, config.visual_history_length, config.state_dim
+            ),
+            torch.randn(
+                batch,
+                config.executed_history_length,
+                config.action_dim,
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(
+                batch, config.action_horizon, config.action_dim
+            ),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            goal_language_tokens=torch.randn(
+                batch, 3, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(
+                batch, 3, dtype=torch.bool
+            ),
+            make_counterfactuals=False,
+        )
+    assert float(output["flow_jepa_goal_phase_machine_active"]) == 1.0
+    assert float(output["flow_jepa_policy_plan_compiler_active"]) == 1.0
+    assert float(output["flow_jepa_v115_legacy_w_posterior_skipped"]) == 1.0
+    assert "flow_jepa_horizon_address_logits" not in output
+    for depth in range(3):
+        typed_condition_mass = torch.stack(
+            [
+                output[
+                    f"flow_jepa_w{depth}_typed_condition_{name}_mass"
+                ]
+                for name in ("phase", "goal", "history")
+            ]
+        )
+        assert torch.isfinite(typed_condition_mass).all()
+        assert bool((typed_condition_mass > 0.0).all())
+    torch.testing.assert_close(
+        output["flow_jepa_future_pred"],
+        output["flow_jepa_interval_progress_pred"],
+    )
+    interval_terms = flow_jepa_interval_stage_terms(output)
+    assert float(
+        interval_terms["flow_jepa_future_effect_supervision_active"]
+    ) == 1.0
+    assert torch.isfinite(
+        interval_terms["flow_jepa_future_effect_semantic_loss"]
+    )
+    assert tuple(output["flow_jepa_goal_phase_belief"].shape) == (batch, 5)
+    world_route_keys = {
+        key
+        for key in output
+        if key.startswith("attnres_world_to_policy_source_mass_")
+    }
+    assert any(
+        "grounding_entry_" in key for key in world_route_keys
+    )
+    assert any(
+        "functional_owner_boundary_" in key for key in world_route_keys
+    )
+    assert not any(
+        any(f"_w{depth}_" in key for depth in (1, 2, 3))
+        for key in world_route_keys
+    )
+    lanes = [
+        output[f"flow_jepa_policy_plan_{name}"]
+        for name in ("precision", "effect", "temporal", "terminal")
+    ]
+    protected_plan_base = output[
+        "flow_jepa_policy_plan_protected_base"
+    ]
+    assert all(
+        tuple(value.shape)
+        == (
+            batch,
+            config.action_horizon,
+            config.action_basis_tokens,
+            config.hidden_size,
+        )
+        for value in lanes
+    )
+    assert all(torch.isfinite(value).all() for value in lanes)
+    assert tuple(protected_plan_base.shape) == tuple(lanes[0].shape)
+    assert torch.isfinite(protected_plan_base).all()
+    output["pred_physical_velocity"].float().square().mean().backward()
+    machine = system.planner.stateless_goal_phase_machine
+    compiler = system.planner.policy_plan_compiler
+    decoder = system.planner.evidence_latent_mmdit_action_decoder
+    assert machine is not None and compiler is not None
+    assert decoder is not None
+    assert decoder.protected_detail_basis_attnres is not None
+    for parameter in (
+        machine.goal_cross.in_proj_weight,
+        machine.transition[-1].weight,
+        system.planner.horizon_typed_context_query,
+        compiler.precision_lane[-1].weight,
+        compiler.effect_lane[-1].weight,
+        compiler.temporal_lane[-1].weight,
+        compiler.terminal_lane[-1].weight,
+        decoder.protected_detail_basis_attnres.query_proj.weight,
+    ):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert float(parameter.grad.abs().sum()) > 0.0
+
+
+def test_v115_p3_typed_lane_interventions_apply_at_the_plan_boundary() -> None:
+    torch.manual_seed(418)
+    config = _complete_v115_config(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    arguments = (
+        _visual(config, batch=batch),
+        torch.randn(
+            batch, config.visual_history_length, config.state_dim
+        ),
+        torch.randn(
+            batch, config.executed_history_length, config.action_dim
+        ),
+        torch.randn(batch, config.state_dim),
+        torch.randn(batch, config.action_horizon, config.action_dim),
+    )
+    keywords = {
+        "target_visual": torch.randn(
+            batch,
+            len(config.flow_jepa_effective_interval_support_offsets),
+            config.visual_history_length,
+            config.num_cameras,
+            config.patches_per_camera,
+            config.visual_token_dim,
+        ),
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "goal_language_tokens": torch.randn(
+            batch, 3, config.goal_language_dim
+        ),
+        "goal_language_mask": torch.ones(
+            batch, 3, dtype=torch.bool
+        ),
+        "training_noise": torch.randn(
+            batch,
+            config.action_horizon,
+            config.physical_action_dim,
+        ),
+        "proposal_keep": torch.ones(batch),
+        "make_counterfactuals": False,
+    }
+    lane_names = ("precision", "effect", "temporal", "terminal")
+    with torch.no_grad(), torch.autocast(
+        device_type="cpu", dtype=torch.bfloat16
+    ):
+        baseline = system.flow_training_forward(
+            *arguments,
+            training_time=torch.full((batch,), 0.4),
+            **keywords,
+        )
+        baseline_lane_norms = {
+            lane: float(
+                baseline[f"flow_jepa_policy_plan_{lane}"]
+                .float()
+                .norm()
+            )
+            for lane in lane_names
+        }
+        assert all(value > 0.0 for value in baseline_lane_norms.values()), (
+            baseline_lane_norms
+        )
+        for lane in lane_names:
+            system.planner.set_action_path_eval_intervention(
+                f"p3_{lane}_zero"
+            )
+            intervened = system.flow_training_forward(
+                *arguments,
+                training_time=torch.full((batch,), 0.4),
+                **keywords,
+            )
+            state = (
+                system.planner.action_path_eval_intervention_state()
+            )
+            system.planner.clear_action_path_eval_intervention()
+            assert int(state["apply_count"]) == 1
+            assert float(state[f"p3_{lane}_delta_norm"]) > 0.0
+            torch.testing.assert_close(
+                intervened["flow_jepa_policy_plan_protected_base"],
+                baseline["flow_jepa_policy_plan_protected_base"],
+                rtol=0.0,
+                atol=0.0,
+            )
+            # The probe belongs to the typed bank's final bottom ingress, not
+            # to P3's generated state.  Thus every exported P3 lane remains an
+            # exact measurement of the unperturbed compiler output.
+            for other in lane_names:
+                torch.testing.assert_close(
+                    intervened[f"flow_jepa_policy_plan_{other}"],
+                    baseline[f"flow_jepa_policy_plan_{other}"],
+                    rtol=0.0,
+                    atol=0.0,
+                )
+            assert not torch.equal(
+                intervened["pred_physical_velocity"],
+                baseline["pred_physical_velocity"],
+            )
+
+
+@pytest.mark.parametrize(
+    "contract_version",
+    ("v115", "grounded"),
+)
+def test_v115_complete_bfloat16_total_loss_has_no_dead_trainable_owner(
+    contract_version: str,
+) -> None:
+    torch.manual_seed(419)
+    config_factory = {
+        "v115": _complete_v115_config,
+        "grounded": _complete_grounded_intent_effect_config,
+    }[contract_version]
+    config = config_factory(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    trainer = _complete_v115_trainer()
+    system = V39PolicySystem(config).train()
+    decoder = system.planner.evidence_latent_mmdit_action_decoder
+    assert decoder is not None
+    decoder.set_execution_training_step(2000)
+    batch = 1
+    state = torch.randn(batch, config.state_dim)
+    target_action = torch.randn(
+        batch, config.action_horizon, config.action_dim
+    )
+    sample = {
+        "policy_action": target_action,
+        "policy_action_raw": target_action,
+        "state_raw": state,
+        "action_state": state,
+    }
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(
+                batch,
+                config.visual_history_length,
+                config.state_dim,
+            ),
+            torch.randn(
+                batch,
+                config.executed_history_length,
+                config.action_dim,
+            ),
+            state,
+            target_action,
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            target_visual=torch.randn(
+                batch,
+                len(
+                    config.flow_jepa_effective_interval_support_offsets
+                ),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            goal_language_tokens=torch.randn(
+                batch, 3, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(
+                batch, 3, dtype=torch.bool
+            ),
+            make_counterfactuals=False,
+        )
+        losses = flow_losses(
+            system,
+            sample,
+            output,
+            trainer,
+            global_step=2000,
+        )
+        total = losses["loss"]
+    assert total.dtype == torch.float32
+    assert torch.isfinite(total)
+    total.backward()
+    missing = [
+        name
+        for name, parameter in system.named_parameters()
+        if parameter.requires_grad and parameter.grad is None
+    ]
+    nonfinite = [
+        name
+        for name, parameter in system.named_parameters()
+        if (
+            parameter.requires_grad
+            and parameter.grad is not None
+            and not bool(torch.isfinite(parameter.grad).all())
+        )
+    ]
+    assert missing == []
+    assert nonfinite == []
+
+
+@pytest.mark.parametrize(
+    "contract_version",
+    ("v115", "v116", "v117", "v118", "grounded"),
+)
+def test_v115_five_step_deploy_builds_static_evidence_once_without_teacher(
+    contract_version: str,
+) -> None:
+    torch.manual_seed(417)
+    config_factory = {
+        "v115": _complete_v115_config,
+        "v116": _complete_v116_config,
+        "v117": _complete_v117_config,
+        "v118": _complete_differential_intent_effect_config,
+        "grounded": _complete_grounded_intent_effect_config,
+    }[contract_version]
+    config = config_factory(
+        dropout=0.0,
+        proposal_dropout=0.0,
+        inference_steps=5,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).eval()
+    encoder = system.planner.flow_dino_evidence
+    assert encoder is not None
+    teacher_builds_before = int(encoder._teacher_g_build_count)
+    inputs = (
+        _visual(config, batch=1),
+        torch.randn(
+            1, config.visual_history_length, config.state_dim
+        ),
+        torch.randn(
+            1, config.executed_history_length, config.action_dim
+        ),
+        torch.randn(1, config.state_dim),
+    )
+    raw_visual = _raw_visual(config, batch=1, side=32)
+    goal_language_tokens = torch.randn(
+        1, 3, config.goal_language_dim
+    )
+    goal_language_mask = torch.ones(1, 3, dtype=torch.bool)
+    sampling_noise = torch.randn(
+        1, config.action_horizon, config.action_dim
+    )
+    with torch.no_grad(), torch.autocast(
+        device_type="cpu", dtype=torch.bfloat16
+    ):
+        uncached = system.sample(
+            *inputs,
+            raw_visual=raw_visual,
+            goal_language_tokens=goal_language_tokens,
+            goal_language_mask=goal_language_mask,
+            noise=sampling_noise,
+            steps=5,
+            collect_diagnostics=False,
+            reuse_static_evidence=False,
+        )
+
+    def count_hook(counter: list[int], index: int = 0):
+        def hook(_module, _args, _output) -> None:
+            counter[index] += 1
+
+        return hook
+
+    block_calls = [0 for _ in system.planner.blocks]
+    phase_calls = [0]
+    reader_calls = [0]
+    compiler_calls = [0]
+    effect_reader_calls = [0]
+    handles = [
+        block.register_forward_hook(count_hook(block_calls, index))
+        for index, block in enumerate(system.planner.blocks)
+    ]
+    assert system.planner.stateless_goal_phase_machine is not None
+    assert system.planner.late_raw_detail_reader is not None
+    assert system.planner.policy_plan_compiler is not None
+    handles.extend(
+        (
+            system.planner.stateless_goal_phase_machine.register_forward_hook(
+                count_hook(phase_calls)
+            ),
+            system.planner.late_raw_detail_reader.register_forward_hook(
+                count_hook(reader_calls)
+            ),
+            system.planner.policy_plan_compiler.register_forward_hook(
+                count_hook(compiler_calls)
+            ),
+        )
+    )
+    if contract_version in {"v117", "v118", "grounded"}:
+        assert system.planner.p2_effect_reader is not None
+        handles.append(
+            system.planner.p2_effect_reader.register_forward_hook(
+                count_hook(effect_reader_calls)
+            )
+        )
+    with (
+        patch.object(
+            system.planner,
+            "encode_visual_context",
+            wraps=system.planner.encode_visual_context,
+        ) as encode_visual,
+        patch.object(
+            encoder,
+            "teacher_g_aligned_track_pack",
+            wraps=encoder.teacher_g_aligned_track_pack,
+        ) as teacher_g,
+        torch.no_grad(),
+        torch.autocast(device_type="cpu", dtype=torch.bfloat16),
+    ):
+        sampled = system.sample(
+            *inputs,
+            raw_visual=raw_visual,
+            goal_language_tokens=goal_language_tokens,
+            goal_language_mask=goal_language_mask,
+            noise=sampling_noise,
+            steps=5,
+            collect_diagnostics=False,
+        )
+    for handle in handles:
+        handle.remove()
+    assert torch.is_tensor(sampled)
+    assert torch.isfinite(sampled).all()
+    torch.testing.assert_close(
+        sampled,
+        uncached,
+        # Reusing the bounded ingress residual changes one BF16 addition
+        # ordering; it must remain far below one BF16 ULP at action scale.
+        rtol=3e-4,
+        atol=2e-5,
+    )
+    assert encode_visual.call_count == 1
+    assert teacher_g.call_count == 0
+    if contract_version == "grounded":
+        assert block_calls[:5] == [1, 1, 1, 0, 0]
+        assert block_calls[5:] == [5, 0, 0]
+    else:
+        assert block_calls[:5] == [1, 1, 1, 1, 1]
+        assert block_calls[5:7] == [5, 5]
+        assert block_calls[7] == 0
+    assert phase_calls == [1]
+    assert reader_calls == [1]
+    assert compiler_calls == [5]
+    assert effect_reader_calls == (
+        [5]
+        if contract_version in {"v117", "v118", "grounded"}
+        else [0]
+    )
+    assert int(encoder._teacher_g_build_count) == teacher_builds_before
+
+
+def test_v116_structured_effect_read_is_exact_zero_for_zero_field() -> None:
+    config = _complete_v116_config(
+        hidden_size=32,
+        action_horizon=24,
+        action_basis_tokens=2,
+        future_anchors=4,
+        stateless_phase_count=4,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    compiler = PolicyPlanCompiler(config)
+    prefix = (
+        2,
+        config.future_anchors,
+        config.num_cameras,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_address_slots,
+    )
+    zero_hidden = torch.zeros(*prefix, config.hidden_size)
+    zero_one = torch.zeros(*prefix, 1)
+    field = FutureEffectField(
+        semantic_delta=zero_hidden,
+        transport_mean=torch.zeros(*prefix, 2),
+        transport_covariance=torch.zeros(*prefix, 3),
+        persistence=zero_one,
+        visibility=zero_one,
+        uncertainty=zero_one,
+        current_content=zero_hidden,
+        successor_content=zero_hidden,
+    )
+    read, metrics = compiler._structured_effect_read(
+        torch.randn(
+            2,
+            config.action_horizon,
+            config.action_basis_tokens,
+            config.hidden_size,
+        ),
+        SimpleNamespace(world_future_effect_field=field),
+    )
+    assert torch.equal(read, torch.zeros_like(read))
+    assert float(metrics["flow_jepa_p2_structured_effect_read_rms"]) == 0.0
+
+
+def test_v116_future_effect_component_interventions_preserve_field_contract() -> None:
+    config = _complete_v116_config(
+        hidden_size=32,
+        action_horizon=24,
+        action_basis_tokens=2,
+        future_anchors=4,
+        stateless_phase_count=4,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    planner = V39PolicySystem(config).planner.eval()
+    prefix = (
+        1,
+        config.future_anchors,
+        config.num_cameras,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_address_slots,
+    )
+    current = torch.randn(*prefix, config.hidden_size)
+    semantic = torch.randn_like(current)
+    field = FutureEffectField(
+        semantic_delta=semantic,
+        transport_mean=torch.randn(*prefix, 2),
+        transport_covariance=torch.rand(*prefix, 3),
+        persistence=torch.rand(*prefix, 1),
+        visibility=torch.rand(*prefix, 1),
+        uncertainty=torch.rand(*prefix, 1),
+        current_content=current,
+        successor_content=current + semantic,
+    )
+    state = SimpleNamespace(world_future_effect_field=field)
+    planner.set_action_path_eval_intervention(
+        "future_effect_semantic_zero"
+    )
+    planner._intervene_future_effect_field(state)
+    planner.clear_action_path_eval_intervention()
+    changed = state.world_future_effect_field
+    changed.validate()
+    assert torch.equal(
+        changed.semantic_delta,
+        torch.zeros_like(changed.semantic_delta),
+    )
+    torch.testing.assert_close(changed.current_content, current)
+    torch.testing.assert_close(changed.successor_content, current)
+    with pytest.raises(ValueError):
+        planner.set_action_path_eval_intervention("p3_terminal_zero")
+
+
+def test_grounded_reliability_one_intervention_is_a_narrow_eval_bypass() -> None:
+    config = _complete_grounded_intent_effect_config(
+        hidden_size=32,
+        action_horizon=24,
+        action_basis_tokens=2,
+        future_anchors=4,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    planner = V39PolicySystem(config).planner.eval()
+    batch = 1
+    intervals = 4
+    cameras = config.num_cameras
+    grid = config.flow_jepa_grid_size
+    slots = config.flow_jepa_address_slots
+    content = 8
+    current = torch.randn(batch, cameras, grid, grid, slots, content)
+    prefix = (batch, intervals, cameras, grid, grid, slots)
+    field = GroundedFutureEffectField(
+        current_reference=current,
+        semantic_delta=torch.randn(*prefix, content),
+        transport_delta=torch.randn(*prefix, 2),
+        covariance_delta=torch.randn(*prefix, 3),
+        visibility_change=torch.randn(*prefix, 1),
+        persistence_change=torch.randn(*prefix, 1),
+        reliability=torch.full((*prefix, 1), 0.125),
+        validity=torch.ones(*prefix, 1),
+        uncertainty=torch.rand(*prefix, 1),
+        source_coordinates=torch.rand(
+            batch,
+            cameras,
+            grid,
+            grid,
+            slots,
+            2,
+        ),
+    )
+    field.validate()
+    state = SimpleNamespace(world_grounded_effect_field=field)
+    planner.set_action_path_eval_intervention(
+        "future_effect_reliability_one"
+    )
+    planner._intervene_future_effect_field(state)
+    intervention_state = planner.action_path_eval_intervention_state()
+    planner.clear_action_path_eval_intervention()
+    changed = state.world_grounded_effect_field
+    assert isinstance(changed, GroundedFutureEffectField)
+    assert torch.equal(changed.reliability, torch.ones_like(field.reliability))
+    for name in (
+        "current_reference",
+        "semantic_delta",
+        "transport_delta",
+        "covariance_delta",
+        "visibility_change",
+        "persistence_change",
+        "validity",
+        "uncertainty",
+        "source_coordinates",
+    ):
+        torch.testing.assert_close(
+            getattr(changed, name),
+            getattr(field, name),
+            rtol=0.0,
+            atol=0.0,
+        )
+    assert intervention_state["apply_count"] == 1
+    assert intervention_state["future_effect_boundary_delta_norm"] > 0.0
+
+
+def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
+    torch.manual_seed(418)
+    config = _complete_v116_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    trainer = _complete_v115_trainer()
+    _validate_complete_v116_model_contract(config, trainer)
+    assert _validate_required_model_contract("v116", config, trainer) == "v116"
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v116_supervised_effect_mainline.sh"
+    ).read_text(encoding="utf-8")
+    assert 'CLEARVLA_REQUIRED_MODEL_CONTRACT:-v116' in launcher
+    assert "--flow-jepa-supervised-effect-mainline 1" in launcher
+    assert "--flow-matching-time-distribution beta_1_5_1" in launcher
+    fingerprints = _source_fingerprint()
+    for script in (
+        "scripts/current_v116_supervised_effect_mainline.sh",
+        "scripts/current_v116_supervised_effect_mainline_smoke.sh",
+        "scripts/run_v116_model_path_probe.sh",
+    ):
+        assert fingerprints[script] != "missing"
+
+    system = V39PolicySystem(config).train()
+    batch = 1
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(
+                batch, config.visual_history_length, config.state_dim
+            ),
+            torch.randn(
+                batch,
+                config.executed_history_length,
+                config.action_dim,
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(
+                batch, config.action_horizon, config.action_dim
+            ),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            goal_language_tokens=torch.randn(
+                batch, 3, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(
+                batch, 3, dtype=torch.bool
+            ),
+            make_counterfactuals=False,
+        )
+    assert float(output["flow_matching_beta_1_5_1"]) == 1.0
+    assert tuple(output["flow_jepa_goal_phase_belief"].shape) == (batch, 4)
+    _validate_v106_preflight_target_pack(
+        output,
+        config=config,
+        batch_size=batch,
+    )
+    assert tuple(
+        output["flow_jepa_goal_phase_terminal_probability"].shape
+    ) == (batch, 1)
+    torch.testing.assert_close(
+        output["flow_jepa_phase_terminal_mass"],
+        output["flow_jepa_goal_phase_terminal_probability"].float().mean(),
+    )
+    assert "flow_jepa_policy_plan_terminal" not in output
+    assert "flow_jepa_future_effect_state_innovation_slots" not in output
+    for name in (
+        "current",
+        "successor",
+        "semantic",
+        "transport",
+        "transport_covariance",
+        "persistence",
+        "visibility",
+        "uncertainty",
+    ):
+        assert torch.is_tensor(
+            output[f"flow_jepa_future_effect_{name}_pred_slots"]
+        )
+        assert torch.is_tensor(
+            output[f"flow_jepa_future_effect_w1_{name}_pred_slots"]
+        )
+    for depth in range(3):
+        for source in ("phase", "goal", "history", "proposal"):
+            assert torch.isfinite(
+                output[
+                    f"flow_jepa_w{depth}_typed_condition_{source}_mass"
+                ]
+            )
+    terms = flow_jepa_interval_stage_terms(output)
+    for name in (
+        "w1_current",
+        "w1_semantic",
+        "w2_current",
+        "w2_semantic",
+    ):
+        assert torch.isfinite(
+            terms[f"flow_jepa_future_effect_{name}_loss"]
+        )
+    assert torch.isfinite(output["pred_physical_velocity"]).all()
+    optimizer_ids = {
+        id(parameter)
+        for group in _optimizer_groups(system, trainer)
+        for parameter in group["params"]
+    }
+    trainable_ids = {
+        id(parameter)
+        for parameter in system.parameters()
+        if parameter.requires_grad
+    }
+    assert optimizer_ids == trainable_ids, [
+        name
+        for name, parameter in system.named_parameters()
+        if parameter.requires_grad and id(parameter) not in optimizer_ids
+    ]
+    (
+        output["pred_physical_velocity"].float().square().mean()
+        + terms["flow_jepa_interval_stage"]
+    ).backward()
+    organizer = system.planner.flow_dino_evidence
+    compiler = system.planner.policy_plan_compiler
+    machine = system.planner.stateless_goal_phase_machine
+    assert organizer is not None and organizer.progressive_grounding_address is not None
+    progressive = organizer.progressive_grounding_address
+    assert compiler is not None and machine is not None
+    required_parameters = (
+        progressive.future_effect_semantic[-1].weight,
+        progressive.future_effect_geometry[-1].weight,
+        progressive.future_effect_current[-1].weight,
+        compiler.structured_effect_value[-1].weight,
+        compiler.effect_lane[-1].weight,
+        compiler.temporal_lane[-1].weight,
+        machine.completion_head[-1].weight,
+        system.planner.horizon_proposal_world_block_query_proj[0].weight,
+    )
+    for parameter in required_parameters:
+        assert parameter is not None
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+
+
+def test_v117_intent_window_effect_and_p2_read_are_one_trainable_path() -> None:
+    torch.manual_seed(419)
+    config = _complete_v117_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    trainer = _complete_v115_trainer()
+    _validate_complete_v117_model_contract(config, trainer)
+    assert _validate_required_model_contract("v117", config, trainer) == "v117"
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v117_window_effect_intent_p2.sh"
+    ).read_text(encoding="utf-8")
+    assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=v117" in launcher
+    for argument in (
+        "--flow-jepa-stateless-intent-controller 1",
+        "--flow-jepa-window-effect-bank 1",
+        "--flow-jepa-future-slots 3",
+        "--flow-jepa-effect-read-in-p2 1",
+    ):
+        assert argument in launcher
+    fingerprints = _source_fingerprint()
+    for script in (
+        "scripts/current_v117_window_effect_intent_p2.sh",
+        "scripts/current_v117_window_effect_intent_p2_smoke.sh",
+        "scripts/run_v117_model_path_probe.sh",
+    ):
+        assert fingerprints[script] != "missing"
+
+    system = V39PolicySystem(config).train()
+    batch = 1
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
+            torch.randn(
+                batch,
+                config.executed_history_length,
+                config.action_dim,
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(batch, config.action_horizon, config.action_dim),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
+            make_counterfactuals=False,
+        )
+    assert tuple(output["flow_jepa_goal_phase_belief"].shape) == (batch, 4)
+    assert tuple(output["flow_jepa_intent_window_selector"].shape) == (batch, 3)
+    assert tuple(output["flow_jepa_future_effect_semantic_pred_slots"].shape[:2]) == (
+        batch,
+        3,
+    )
+    assert tuple(output["flow_jepa_future_effect_semantic_target_slots"].shape[:2]) == (
+        batch,
+        3,
+    )
+    _validate_v106_preflight_target_pack(
+        output,
+        config=config,
+        batch_size=batch,
+    )
+    assert "flow_jepa_future_effect_reliability_slots" not in output
+    torch.testing.assert_close(
+        output["flow_jepa_future_effect_w1_semantic_pred_slots"][:, :2],
+        output["flow_jepa_future_effect_semantic_pred_slots"][:, :2],
+    )
+    torch.testing.assert_close(
+        output["flow_jepa_future_effect_w1_slot_valid"].float(),
+        torch.tensor([1.0, 1.0, 0.0]),
+    )
+    torch.testing.assert_close(
+        output["flow_jepa_future_effect_slot_valid"].float(),
+        torch.ones(3),
+    )
+    assert torch.isfinite(output["flow_jepa_p2_structured_effect_read_rms"])
+    assert not any(
+        key.startswith("attnres_world_to_policy_source_mass_")
+        and "functional_owner_boundary" in key
+        for key in output
+    )
+    terms = flow_jepa_interval_stage_terms(output)
+    torch.testing.assert_close(
+        terms["flow_jepa_future_effect_semantic_loss"],
+        (2.0 / 3.0) * terms["flow_jepa_future_effect_w1_semantic_loss"]
+        + (1.0 / 3.0) * terms["flow_jepa_future_effect_w2_semantic_loss"],
+    )
+    loss = output["pred_physical_velocity"].float().square().mean()
+    loss = loss + terms["flow_jepa_interval_stage"]
+    loss.backward()
+    gradient_diagnostics = {"loss": loss.detach()}
+    _attach_grad_diagnostics(gradient_diagnostics, system)
+    for name in (
+        "grad_stateless_intent_s1",
+        "grad_stateless_intent_s2",
+        "grad_stateless_intent_s3",
+        "grad_stateless_intent_mlp",
+        "grad_flow_dino_window_effect_near_mid",
+        "grad_flow_dino_window_effect_late",
+        "grad_p2_structured_effect_reader",
+    ):
+        assert torch.isfinite(gradient_diagnostics[name])
+
+    planner = system.planner
+    machine = planner.stateless_goal_phase_machine
+    organizer = planner.flow_dino_evidence.progressive_grounding_address
+    reader = planner.p2_effect_reader
+    assert isinstance(machine, StatelessIntentController)
+    assert organizer is not None
+    assert isinstance(reader, StructuredFutureEffectReader)
+    required_parameters = (
+        machine.goal_cross.out_proj.weight,
+        machine.history_block.self_attn.out_proj.weight,
+        machine.control_cross.out_proj.weight,
+        machine.window_score[-1].weight,
+        machine.intent_output[0][-1].weight,
+        machine.intent_output[1][-1].weight,
+        machine.intent_output[2][-1].weight,
+        organizer.window_successor_cell[-1].weight,
+        organizer.window_late_cell[-1].weight,
+        reader.value[-1].weight,
+        planner.policy_plan_compiler.effect_lane[-1].weight,
+    )
+    for parameter in required_parameters:
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+    for module_name, module in (
+        ("stateless_intent", machine),
+        ("window_successor", organizer.window_successor_cell),
+        ("window_late", organizer.window_late_cell),
+        ("p2_effect_reader", reader),
+        ("p3_compiler", planner.policy_plan_compiler),
+    ):
+        assert module is not None
+        assert [
+            f"{module_name}.{name}"
+            for name, parameter in module.named_parameters()
+            if parameter.requires_grad and parameter.grad is None
+        ] == []
+
+
+def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> None:
+    torch.manual_seed(521)
+    config = _complete_differential_intent_effect_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    trainer = _complete_v115_trainer()
+    _validate_differential_intent_effect_323_model_contract(config, trainer)
+    assert (
+        _validate_required_model_contract(
+            "differential_intent_effect_323",
+            config,
+            trainer,
+        )
+        == "differential_intent_effect_323"
+    )
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v118_differential_intent_effect_323.sh"
+    ).read_text(encoding="utf-8")
+    assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=differential_intent_effect_323" in launcher
+    assert "--flow-jepa-differential-intent-effect-mainline 1" in launcher
+    probe_launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_v118_model_path_probe.sh"
+    ).read_text(encoding="utf-8")
+    assert "MODEL_PATH_REQUIRED_CONTRACT=differential_intent_effect_323" in probe_launcher
+    assert "intent_window_selector_uniform" not in probe_launcher
+    assert "p3_effect_delta_zero" not in probe_launcher
+
+    system = V39PolicySystem(config).train()
+    planner = system.planner
+    assert planner.horizon_phase_world_block_query_proj is None
+    assert planner.horizon_goal_world_block_query_proj is None
+    assert planner.horizon_history_world_block_query_proj is None
+    assert planner.horizon_typed_context_router is None
+    assert planner.horizon_typed_context_query is None
+    assert planner.horizon_proposal_world_block_query_proj is not None
+    assert planner.phase_world_query_proj is not None
+    assert planner.condition_world_query_proj is None
+    assert planner.history_world_query_proj is None
+    assert planner.late_raw_detail_reader is not None
+    assert planner.late_raw_detail_reader.phase_query_proj is not None
+    assert planner.late_raw_detail_reader.condition_query_proj is None
+    assert planner.late_raw_detail_reader.history_query_proj is None
+    intent_machine = planner.stateless_goal_phase_machine
+    assert isinstance(intent_machine, DifferentialStatelessIntentController)
+    intent_probe, _ = intent_machine(
+        goal_tokens=torch.randn(1, 3, config.hidden_size),
+        state_history_tokens=torch.randn(1, 2, config.state_dim),
+        history_tokens=torch.randn(1, 2, config.action_dim),
+        grounding_tokens=torch.randn(1, 4, config.hidden_size),
+    )
+    planner.eval()
+    planner.set_action_path_eval_intervention("intent_window_near_zero")
+    isolated_intent_probe = planner._intervene_intent_state(intent_probe)
+    planner.clear_action_path_eval_intervention()
+    planner.train()
+    assert isinstance(isolated_intent_probe, IntentStateBank)
+    assert torch.count_nonzero(
+        isolated_intent_probe.window_view.tokens[:, 0]
+    ) == 0
+    torch.testing.assert_close(
+        isolated_intent_probe.window_view.tokens[:, 1:],
+        intent_probe.window_view.tokens[:, 1:],
+    )
+    torch.testing.assert_close(
+        isolated_intent_probe.temporal_control,
+        intent_probe.temporal_control,
+    )
+    clean_proposal = torch.randn(
+        1,
+        config.action_horizon,
+        config.hidden_size,
+    )
+    proposal_context, proposal_metrics = (
+        planner._functional_world_horizon_context(
+            depth=0,
+            phase_context=None,
+            goal_context=None,
+            history_context=None,
+            proposal_context=clean_proposal,
+            device=clean_proposal.device,
+            dtype=clean_proposal.dtype,
+        )
+    )
+    assert proposal_context is not None
+    assert proposal_context.shape == (
+        1,
+        config.future_anchors,
+        config.hidden_size,
+    )
+    assert float(proposal_metrics["flow_jepa_w0_direct_intent_bypass"]) == 0.0
+    with pytest.raises(
+        ValueError,
+        match="forbids direct phase/goal/history",
+    ):
+        planner._functional_world_horizon_context(
+            depth=0,
+            phase_context=torch.randn(
+                1,
+                config.future_anchors,
+                config.hidden_size,
+            ),
+            goal_context=None,
+            history_context=None,
+            proposal_context=clean_proposal,
+            device=clean_proposal.device,
+            dtype=clean_proposal.dtype,
+        )
+    batch = 1
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
+            torch.randn(
+                batch,
+                config.executed_history_length,
+                config.action_dim,
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(batch, config.action_horizon, config.action_dim),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            goal_language_tokens=torch.randn(
+                batch,
+                3,
+                config.goal_language_dim,
+            ),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
+            make_counterfactuals=False,
+        )
+    _validate_v106_preflight_target_pack(
+        output,
+        config=config,
+        batch_size=batch,
+    )
+
+    assert "flow_jepa_future_effect_current_pred_slots" not in output
+    assert "flow_jepa_policy_plan_effect" not in output
+    assert tuple(output["flow_jepa_intent_state_bank"].shape[:2]) == (batch, 4)
+    assert tuple(output["flow_jepa_intent_window_tokens"].shape[:2]) == (
+        batch,
+        3,
+    )
+    assert tuple(
+        output["flow_jepa_future_effect_current_reference"].shape[:1]
+    ) == (batch,)
+    assert tuple(
+        output["flow_jepa_future_effect_w1_semantic_pred_slots"].shape[:2]
+    ) == (batch, 2)
+    assert tuple(
+        output["flow_jepa_future_effect_semantic_pred_slots"].shape[:2]
+    ) == (batch, 3)
+    torch.testing.assert_close(
+        output["flow_jepa_future_effect_w1_semantic_pred_slots"],
+        output["flow_jepa_future_effect_semantic_pred_slots"][:, :2],
+    )
+    for name in (
+        "flow_jepa_consequence_factual_base",
+        "flow_jepa_consequence_effect_base",
+        "flow_jepa_consequence_organized_delta",
+    ):
+        assert torch.is_tensor(output[name])
+
+    terms = flow_jepa_interval_stage_terms(output)
+    assert "flow_jepa_future_effect_current_loss" not in terms
+    for name in (
+        "successor",
+        "semantic",
+        "relative_transition",
+        "intent_summary",
+        "semantic_near",
+        "semantic_mid",
+        "semantic_late",
+    ):
+        assert torch.isfinite(
+            terms[f"flow_jepa_future_effect_{name}_loss"]
+        )
+    loss = (
+        output["pred_physical_velocity"].float().square().mean()
+        + terms["flow_jepa_interval_stage"]
+    )
+    loss.backward()
+    diagnostics = {"loss": loss.detach()}
+    _attach_grad_diagnostics(diagnostics, system)
+    for name in (
+        "grad_intent_goal_program",
+        "grad_intent_history_encoder",
+        "grad_intent_history_write",
+        "grad_intent_grounding_write",
+        "grad_intent_ordered_refinement",
+        "grad_intent_window_read",
+        "grad_differential_clean_proposal_world_condition",
+        "grad_intent_canonical_g_to_p_query",
+        "grad_intent_canonical_p1_query",
+        "grad_differential_w1_near_mid_transition",
+        "grad_differential_w2_late_transition",
+        "grad_differential_effect_decoder",
+        "grad_p2_structured_effect_reader",
+        "grad_consequence_plan_organizer",
+        "grad_policy_plan_compiler",
+    ):
+        assert name in diagnostics
+        assert torch.isfinite(diagnostics[name])
+
+    serial_row = {
+        name: float(value.detach())
+        for name, value in {
+            **output,
+            **terms,
+            **diagnostics,
+        }.items()
+        if torch.is_tensor(value) and value.numel() == 1
+    }
+    serial_row["loss"] = float(loss.detach())
+    serial_row["physical_flow"] = float(
+        output["pred_physical_velocity"].detach().float().square().mean()
+    )
+    assert _evidence_log_version(serial_row) == "v118"
+    serial_line = _evidence_serial_log_line(
+        serial_row,
+        epoch=1,
+        batch_index=1,
+        learning_rate=1e-4,
+        seconds_per_batch=1.0,
+    )
+    assert "[v118-train]" in serial_line
+    assert "effect_near_contrib=" in serial_line
+    assert "p2_diff_content_score=" in serial_line
+    assert "intent_window=" in serial_line
+    assert "w0_clean_proposal=" in serial_line
+    assert "p1_intent_query=" in serial_line
+
+    planner = system.planner
+    machine = planner.stateless_goal_phase_machine
+    organizer = planner.flow_dino_evidence.progressive_grounding_address
+    reader = planner.p2_effect_reader
+    compiler = planner.policy_plan_compiler
+    assert isinstance(machine, DifferentialStatelessIntentController)
+    assert organizer is not None
+    assert isinstance(reader, DifferentialFutureEffectReader)
+    assert isinstance(compiler, DifferentialPolicyPlanCompiler)
+    assert organizer.differential_window_compiler is not None
+    required_parameters = (
+        machine.goal_block.attention.in_proj_weight,
+        machine.history_blocks[0].attention.in_proj_weight,
+        machine.grounding_to_program.attention.in_proj_weight,
+        machine.window_read.in_proj_weight,
+        organizer.differential_window_compiler.w1_transition.attention.in_proj_weight,
+        organizer.differential_window_compiler.late_attention.in_proj_weight,
+        reader.effect_value[-1].weight,
+        planner.consequence_plan_organizer.organizer[-1].weight,
+        compiler.precision_lane[-1].weight,
+        compiler.temporal_lane[-1].weight,
+    )
+    for parameter in required_parameters:
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+    optimizer_ids = {
+        id(parameter)
+        for group in _optimizer_groups(system, trainer)
+        for parameter in group["params"]
+    }
+    trainable_ids = {
+        id(parameter)
+        for parameter in system.parameters()
+        if parameter.requires_grad
+    }
+    assert optimizer_ids == trainable_ids
+
+
+def test_v117_p2_effect_reader_is_exact_zero_and_preserves_window_type() -> None:
+    config = _complete_v117_config(
+        hidden_size=32,
+        action_horizon=24,
+        action_basis_tokens=2,
+        future_anchors=4,
+        stateless_phase_count=4,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    reader = StructuredFutureEffectReader(config)
+    prefix = (
+        1,
+        3,
+        config.num_cameras,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_grid_size,
+        config.flow_jepa_address_slots,
+    )
+    zero_hidden = torch.zeros(*prefix, config.hidden_size)
+    zero_one = torch.zeros(*prefix, 1)
+    field = WindowEffectBank(
+        semantic_delta=zero_hidden,
+        transport_mean=torch.zeros(*prefix, 2),
+        transport_covariance=torch.zeros(*prefix, 3),
+        persistence=zero_one,
+        visibility=zero_one,
+        uncertainty=zero_one,
+        current_content=zero_hidden,
+        successor_content=zero_hidden,
+        slot_valid=torch.ones(3),
+    )
+    read, metrics = reader(
+        torch.randn(1, config.action_horizon, config.action_basis_tokens, 32),
+        field,
+        window_selector=torch.tensor([[0.2, 0.3, 0.5]]),
+    )
+    assert torch.equal(read, torch.zeros_like(read))
+    assert float(metrics["flow_jepa_p2_structured_effect_read_rms"]) == 0.0
+    planner = V39PolicySystem(config).planner.eval()
+    state = SimpleNamespace(world_future_effect_field=field)
+    planner.set_action_path_eval_intervention("future_effect_semantic_zero")
+    planner._intervene_future_effect_field(state)
+    planner.clear_action_path_eval_intervention()
+    assert isinstance(state.world_future_effect_field, WindowEffectBank)
+    torch.testing.assert_close(state.world_future_effect_field.slot_valid, torch.ones(3))
+
+
+@pytest.mark.parametrize(
+    "capability",
+    ("v117", "differential", "grounded"),
+)
+def test_future_teacher_changes_only_loss_targets(
+    capability: str,
+) -> None:
+    torch.manual_seed(420)
+    config_builder = {
+        "v117": _complete_v117_config,
+        "differential": _complete_differential_intent_effect_config,
+        "grounded": _complete_grounded_intent_effect_config,
+    }[capability]
+    config = config_builder(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    visual = _visual(config, batch=batch)
+    raw_visual = _raw_visual(config, batch=batch, side=32)
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(
+        batch, config.executed_history_length, config.action_dim
+    )
+    state = torch.randn(batch, config.state_dim)
+    action = torch.randn(batch, config.action_horizon, config.action_dim)
+    target_a = torch.randn(
+        batch,
+        len(config.flow_jepa_effective_interval_support_offsets),
+        config.visual_history_length,
+        config.num_cameras,
+        config.patches_per_camera,
+        config.visual_token_dim,
+    )
+    target_b = target_a + 2.0 * torch.randn_like(target_a)
+    common = {
+        "raw_visual": raw_visual,
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+        "training_noise": system.codec.encode(torch.randn_like(action), state),
+        "training_time": torch.ones(batch),
+        "proposal_keep": torch.ones(batch),
+        "make_counterfactuals": False,
+    }
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        first = system.flow_training_forward(
+            visual,
+            state_history,
+            executed,
+            state,
+            action,
+            target_visual=target_a,
+            **common,
+        )
+        changed = system.flow_training_forward(
+            visual,
+            state_history,
+            executed,
+            state,
+            action,
+            target_visual=target_b,
+            **common,
+        )
+    assert tuple(
+        first["flow_jepa_future_effect_semantic_target_slots"].shape[:2]
+    ) == (batch, 4 if capability == "grounded" else 3)
+    assert not torch.equal(
+        first["flow_jepa_future_effect_semantic_target_slots"],
+        changed["flow_jepa_future_effect_semantic_target_slots"],
+    )
+    torch.testing.assert_close(
+        first["pred_physical_velocity"],
+        changed["pred_physical_velocity"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_grounded_intent_effect_full_system_preserves_four_object_intervals() -> None:
+    torch.manual_seed(423)
+    config = _complete_grounded_intent_effect_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+        flow_jepa_p1_mixed_precision=0,
+    )
+    system = V39PolicySystem(config).train()
+    batch = 1
+    visual = _visual(config, batch=batch)
+    raw_visual = _raw_visual(config, batch=batch, side=32)
+    state_history = torch.randn(
+        batch,
+        config.visual_history_length,
+        config.state_dim,
+    )
+    executed = torch.randn(
+        batch,
+        config.executed_history_length,
+        config.action_dim,
+    )
+    state = torch.randn(batch, config.state_dim)
+    action = torch.randn(batch, config.action_horizon, config.action_dim)
+    target_visual = torch.randn(
+        batch,
+        len(config.flow_jepa_effective_interval_support_offsets),
+        config.visual_history_length,
+        config.num_cameras,
+        config.patches_per_camera,
+        config.visual_token_dim,
+    )
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = system.flow_training_forward(
+            visual,
+            state_history,
+            executed,
+            state,
+            action,
+            raw_visual=raw_visual,
+            target_visual=target_visual,
+            goal_language_tokens=torch.randn(
+                batch,
+                5,
+                config.goal_language_dim,
+            ),
+            goal_language_mask=torch.ones(batch, 5, dtype=torch.bool),
+            training_noise=system.codec.encode(torch.randn_like(action), state),
+            training_time=torch.ones(batch),
+            proposal_keep=torch.ones(batch),
+            make_counterfactuals=False,
+        )
+    assert float(output["grounded_intent_effect_active"]) == 1.0
+    semantic = output["flow_jepa_future_effect_semantic_pred_slots"]
+    assert tuple(semantic.shape[:2]) == (batch, 4)
+    assert int(semantic.shape[-2]) == config.flow_jepa_address_slots
+    assert int(semantic.shape[-1]) == config.visual_token_dim
+    assert int(semantic.shape[-1]) != config.hidden_size
+    assert system.planner.ground_to_world_attnres is None
+    assert int(output["flow_jepa_future_pred"].shape[-1]) == (
+        config.visual_token_dim
+    )
+    semantic_target = output["flow_jepa_future_effect_semantic_target_slots"]
+    assert tuple(semantic_target.shape) == tuple(semantic.shape)
+    assert tuple(
+        output["flow_jepa_future_effect_current_reference_target"].shape
+    ) == tuple(output["flow_jepa_future_effect_current_reference"].shape)
+    torch.testing.assert_close(
+        output["flow_jepa_future_effect_current_reference_target"],
+        output["flow_jepa_future_effect_current_reference"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert tuple(output["grounded_intent_interval_intents"].shape) == (
+        batch,
+        4,
+        config.hidden_size,
+    )
+    assert tuple(output["grounded_consequence_effect"].shape) == (
+        batch,
+        config.action_horizon,
+        config.action_basis_tokens,
+        config.hidden_size,
+    )
+    _validate_v106_preflight_target_pack(
+        output,
+        config=config,
+        batch_size=batch,
+    )
+    assert bool(
+        (
+            output["flow_jepa_future_effect_visibility_target_slots"]
+            <= 0.0
+        ).all()
+    )
+    assert bool(
+        (
+            output["flow_jepa_future_effect_persistence_target_slots"]
+            <= 0.0
+        ).all()
+    )
+    terms = flow_jepa_interval_stage_terms(output)
+    assert torch.isfinite(terms["flow_jepa_interval_stage"])
+    assert terms["grounded_future_effect_core"].requires_grad
+    torch.testing.assert_close(
+        terms["flow_jepa_interval_stage"],
+        terms["flow_jepa_future_effect_relative_transition_loss"],
+    )
+    expected_core = (
+        0.25 * terms["flow_jepa_future_effect_successor_loss"]
+        + 0.20 * terms["flow_jepa_future_effect_semantic_loss"]
+        + 0.10 * terms["flow_jepa_future_effect_transport_loss"]
+        + 0.05
+        * terms[
+            "flow_jepa_future_effect_transport_covariance_loss"
+        ]
+        + 0.05
+        * terms[
+            "flow_jepa_future_effect_persistence_change_loss"
+        ]
+        + 0.05
+        * terms[
+            "flow_jepa_future_effect_visibility_change_loss"
+        ]
+        + 0.05
+        * terms[
+            "flow_jepa_future_effect_uncertainty_calibration_loss"
+        ]
+        + 0.05
+        * terms[
+            "flow_jepa_future_effect_reliability_calibration_loss"
+        ]
+    )
+    torch.testing.assert_close(
+        terms["grounded_future_effect_core"].detach(),
+        expected_core,
+    )
+    assert float(
+        terms["flow_jepa_future_effect_supervision_active"]
+    ) == 1.0
+    for name in (
+        "successor",
+        "semantic",
+        "transport",
+        "transport_covariance",
+        "persistence_change",
+        "visibility_change",
+        "uncertainty_calibration",
+        "reliability_calibration",
+        "relative_transition",
+    ):
+        assert torch.isfinite(
+            terms[f"flow_jepa_future_effect_{name}_loss"]
+        )
+    trainer = _complete_v115_trainer()
+    ledger = flow_losses(
+        system,
+        {
+            "policy_action": action,
+            "policy_action_raw": action,
+            "state_raw": state,
+            "action_state": state,
+        },
+        output,
+        trainer,
+        global_step=2000,
+    )
+    torch.testing.assert_close(
+        ledger["flow_jepa_future_prediction"],
+        terms["grounded_future_effect_core"].detach(),
+    )
+    torch.testing.assert_close(
+        ledger["loss_contrib_flow_jepa_future"],
+        float(trainer.flow_jepa_future_loss_weight)
+        * terms["grounded_future_effect_core"].detach(),
+    )
+    torch.testing.assert_close(
+        ledger["flow_jepa_interval_stage"],
+        terms["flow_jepa_interval_stage"].detach(),
+    )
+    assert float(ledger["grounded_intent_effect_active"]) == 1.0
+    assert "grounded_w1_semantic_rms" in ledger
+    assert _evidence_log_version(ledger) == "v119"
+    assert float(
+        ledger["grounded_slot_reduced_future_change_audit_only"]
+    ) == 1.0
+    (
+        terms["grounded_future_effect_core"]
+        +
+        terms["flow_jepa_interval_stage"]
+        + output["pred_physical_velocity"].float().square().mean()
+    ).backward()
+    grounded_gradients = [
+        parameter.grad
+        for name, parameter in system.named_parameters()
+        if "grounded_world_compiler" in name and parameter.requires_grad
+    ]
+    assert grounded_gradients
+    assert any(
+        gradient is not None
+        and bool(torch.isfinite(gradient).all())
+        and float(gradient.float().abs().sum()) > 0.0
+        for gradient in grounded_gradients
+    )
+    gradient_diagnostics = {"loss": ledger["loss"].detach()}
+    _attach_grad_diagnostics(gradient_diagnostics, system)
+    for name in (
+        "grad_grounded_world_shared_inputs",
+        "grad_grounded_world_w1_blocks",
+        "grad_grounded_world_w2_blocks",
+        "grad_grounded_world_shared_heads",
+    ):
+        assert name in gradient_diagnostics
+        assert torch.isfinite(gradient_diagnostics[name])
+    assert "grad_grounded_world_w1" not in gradient_diagnostics
+    assert "grad_grounded_world_w2" not in gradient_diagnostics
+    capability_modules = {
+        "intent": system.planner.stateless_goal_phase_machine,
+        "proposal": system.planner.grounded_clean_proposal_proj,
+        "world": (
+            system.planner.flow_dino_evidence
+            .progressive_grounding_address.grounded_world_compiler
+        ),
+        "p2": system.planner.p2_effect_reader,
+        "consequence": system.planner.consequence_plan_organizer,
+        "p3": system.planner.policy_plan_compiler,
+    }
+    missing_capability_gradients = [
+        f"{owner}.{name}"
+        for owner, module in capability_modules.items()
+        if module is not None
+        for name, parameter in module.named_parameters()
+        if parameter.requires_grad and parameter.grad is None
+    ]
+    assert missing_capability_gradients == []
+    optimizer_groups = _optimizer_groups(
+        system,
+        _complete_v115_trainer(),
+    )
+    optimizer_parameter_ids = [
+        id(parameter)
+        for group in optimizer_groups
+        for parameter in group["params"]
+    ]
+    assert len(optimizer_parameter_ids) == len(
+        set(optimizer_parameter_ids)
+    )
+    assert [
+        name
+        for name, parameter in system.named_parameters()
+        if parameter.requires_grad
+        and id(parameter) not in set(optimizer_parameter_ids)
+    ] == []
+    for index in (3, 4, 6, 7):
+        assert not any(
+            parameter.requires_grad
+            for parameter in system.planner.blocks[index].parameters()
+        )
+
+
+def test_grounded_intent_effect_uses_compact_contract_and_rejects_old_top() -> None:
+    config = _complete_grounded_intent_effect_config()
+    trainer = _complete_v115_trainer()
+    _validate_grounded_intent_effect_323_model_contract(config, trainer)
+    with pytest.raises(ValueError, match="grounded_intent_effect_323 manifest mismatch"):
+        _validate_grounded_intent_effect_323_model_contract(
+            replace(config, flow_jepa_grounded_intent_effect_mainline=0),
+            trainer,
+        )
+    assert (
+        _validate_required_model_contract(
+            "grounded_intent_effect_323",
+            config,
+            trainer,
+        )
+        == "grounded_intent_effect_323"
+    )
+    saved = asdict(config)
+    _validate_v102_resume_contract(saved, config)
+    saved["flow_jepa_grounded_intent_effect_mainline"] = 0
+    with pytest.raises(
+        ValueError,
+        match="grounded_intent_effect_mainline mismatch",
+    ):
+        _validate_v102_resume_contract(saved, config)
+
+
+def test_grounded_capability_flag_off_leaves_v118_graph_bit_exact() -> None:
+    base = _complete_differential_intent_effect_config()
+    explicit_off = replace(
+        base,
+        flow_jepa_grounded_intent_effect_mainline=0,
+    )
+    torch.manual_seed(423)
+    base_system = V39PolicySystem(base)
+    torch.manual_seed(423)
+    off_system = V39PolicySystem(explicit_off)
+    assert tuple(base_system.state_dict()) == tuple(off_system.state_dict())
+    for name, value in base_system.state_dict().items():
+        torch.testing.assert_close(value, off_system.state_dict()[name])
+    assert base_system.planner.differential_intent_effect_mainline
+    assert not base_system.planner.grounded_intent_effect_mainline
+    assert (
+        base_system.planner.flow_dino_evidence
+        .progressive_grounding_address.grounded_world_compiler
+        is None
+    )
+
+
+def test_v117_flags_off_restore_v116_modules_and_reject_resume_mismatch() -> None:
+    base = _complete_v116_config()
+    explicit_off = replace(
+        base,
+        flow_jepa_stateless_intent_controller=0,
+        flow_jepa_window_effect_bank=0,
+        flow_jepa_future_slots=4,
+        flow_jepa_effect_read_in_p2=0,
+    )
+    torch.manual_seed(421)
+    base_system = V39PolicySystem(base)
+    torch.manual_seed(421)
+    off_system = V39PolicySystem(explicit_off)
+    assert tuple(base_system.state_dict()) == tuple(off_system.state_dict())
+    for name, value in base_system.state_dict().items():
+        torch.testing.assert_close(value, off_system.state_dict()[name])
+    saved = asdict(base)
+    with pytest.raises(ValueError, match="stateless_intent_controller mismatch"):
+        _validate_v102_resume_contract(saved, _complete_v117_config())
+
+
+def test_differential_flag_off_restores_exact_v117_graph_and_rejects_resume() -> None:
+    base = _complete_v117_config()
+    explicit_off = replace(
+        base,
+        flow_jepa_differential_intent_effect_mainline=0,
+    )
+    torch.manual_seed(422)
+    base_system = V39PolicySystem(base)
+    torch.manual_seed(422)
+    off_system = V39PolicySystem(explicit_off)
+    assert tuple(base_system.state_dict()) == tuple(off_system.state_dict())
+    for name, value in base_system.state_dict().items():
+        torch.testing.assert_close(value, off_system.state_dict()[name])
+    saved = asdict(base)
+    with pytest.raises(
+        ValueError,
+        match="differential_intent_effect_mainline mismatch",
+    ):
+        _validate_v102_resume_contract(
+            saved,
+            _complete_differential_intent_effect_config(),
+        )
+
+
+def test_v114_audit_gating_preserves_mainline_values_and_gradients() -> None:
+    torch.manual_seed(405)
+    config = _complete_v114_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    system = V39PolicySystem(config).train()
+    batch = 1
+    arguments = (
+        _visual(config, batch=batch),
+        torch.randn(batch, config.visual_history_length, config.state_dim),
+        torch.randn(
+            batch, config.executed_history_length, config.action_dim
+        ),
+        torch.randn(batch, config.state_dim),
+        torch.randn(batch, config.action_horizon, config.action_dim),
+    )
+    keywords = {
+        "target_visual": torch.randn(
+            batch,
+            len(config.flow_jepa_effective_interval_support_offsets),
+            config.visual_history_length,
+            config.num_cameras,
+            config.patches_per_camera,
+            config.visual_token_dim,
+        ),
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "goal_language_tokens": torch.randn(
+            batch, 3, config.goal_language_dim
+        ),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+        "make_counterfactuals": False,
+    }
+    torch.manual_seed(406)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        audited = system.flow_training_forward(
+            *arguments,
+            collect_audit_metrics=True,
+            **keywords,
+        )
+    torch.manual_seed(406)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        lean = system.flow_training_forward(
+            *arguments,
+            collect_audit_metrics=False,
+            **keywords,
+        )
+    torch.testing.assert_close(
+        lean["pred_physical_velocity"],
+        audited["pred_physical_velocity"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    parameter = system.planner.late_raw_detail_reader.shared_p1_context_query.weight
+    audited_grad = torch.autograd.grad(
+        audited["pred_physical_velocity"].float().square().mean(),
+        parameter,
+        retain_graph=False,
+    )[0]
+    lean_grad = torch.autograd.grad(
+        lean["pred_physical_velocity"].float().square().mean(),
+        parameter,
+        retain_graph=False,
+    )[0]
+    torch.testing.assert_close(lean_grad, audited_grad, rtol=0.0, atol=0.0)
+    assert float(audited["flow_jepa_address_policy_entropy"]) > 0.0
+    assert "flow_jepa_address_policy_entropy" not in lean
+    assert "gate_self" in audited
+    assert "gate_self" not in lean
+    assert "flow_jepa_phase_entropy" in audited
+    assert "flow_jepa_phase_entropy" not in lean
+
+
+def test_v114_minimal_sampling_matches_diagnostic_sampling() -> None:
+    torch.manual_seed(408)
+    config = _complete_v114_config(
+        dropout=0.0,
+        inference_steps=1,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    inputs = (
+        _visual(config, batch=batch),
+        torch.randn(batch, config.visual_history_length, config.state_dim),
+        torch.randn(
+            batch, config.executed_history_length, config.action_dim
+        ),
+        torch.randn(batch, config.state_dim),
+    )
+    keywords = {
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "noise": torch.randn(
+            batch, config.action_horizon, config.action_dim
+        ),
+        "steps": 1,
+        "return_event_logits": True,
+        "goal_language_tokens": torch.randn(
+            batch, 3, config.goal_language_dim
+        ),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+    }
+    with torch.no_grad(), torch.autocast(
+        device_type="cpu", dtype=torch.bfloat16
+    ):
+        diagnostic = system.sample(
+            *inputs, collect_diagnostics=True, **keywords
+        )
+        minimal = system.sample(
+            *inputs, collect_diagnostics=False, **keywords
+        )
+    for key in ("action", "physical_action", "event_logits", "motion_logits"):
+        torch.testing.assert_close(
+            minimal[key], diagnostic[key], rtol=0.0, atol=0.0
+        )
+
+
+def test_grounded_probe_none_replay_matches_deployment_bit_exact() -> None:
+    torch.manual_seed(409)
+    config = _complete_grounded_intent_effect_config(
+        dropout=0.0,
+        inference_steps=1,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    inputs = (
+        _visual(config, batch=batch),
+        torch.randn(batch, config.visual_history_length, config.state_dim),
+        torch.randn(
+            batch,
+            config.executed_history_length,
+            config.action_dim,
+        ),
+        torch.randn(batch, config.state_dim),
+    )
+    keywords = {
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+        "noise": torch.randn(
+            batch,
+            config.action_horizon,
+            config.action_dim,
+        ),
+        "steps": 1,
+        "goal_language_tokens": torch.randn(
+            batch,
+            3,
+            config.goal_language_dim,
+        ),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
+        "collect_diagnostics": False,
+    }
+    encoder = system.planner.flow_dino_evidence
+    reader = system.planner.late_raw_detail_reader
+    assert encoder is not None
+    assert reader is not None
+    with torch.no_grad(), torch.autocast(
+        device_type="cpu",
+        dtype=torch.bfloat16,
+    ):
+        ordinary = system.sample(*inputs, **keywords)
+        system.planner.set_action_path_eval_intervention("none")
+        encoder.set_raw_address_eval_intervention("none")
+        reader.set_address_eval_intervention("none")
+        try:
+            instrumented = system.sample(*inputs, **keywords)
+        finally:
+            system.planner.clear_action_path_eval_intervention()
+            encoder.clear_raw_address_eval_intervention()
+            reader.clear_address_eval_intervention()
+    assert torch.is_tensor(ordinary)
+    assert torch.is_tensor(instrumented)
+    torch.testing.assert_close(
+        instrumented,
+        ordinary,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_grounded_probe_result_requires_replay_for_every_selected_batch() -> None:
+    torch.manual_seed(410)
+    config = _complete_grounded_intent_effect_config(
+        dropout=0.0,
+        inference_steps=1,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=4,
+    )
+    system = V39PolicySystem(config).eval()
+    batch = 1
+    action = torch.randn(batch, config.action_horizon, config.action_dim)
+    state = torch.randn(batch, config.state_dim)
+    prepared = {
+        "visual": _visual(config, batch=batch),
+        "history_state": torch.randn(
+            batch,
+            config.visual_history_length,
+            config.state_dim,
+        ),
+        "executed_action_history": torch.randn(
+            batch,
+            config.executed_history_length,
+            config.action_dim,
+        ),
+        "state": state,
+        "state_raw": state,
+        "action_state": state,
+        "policy_action": action,
+        "policy_action_raw": action,
+        "raw_visual": _raw_visual(config, batch=batch, side=32),
+    }
+    loader = DataLoader(
+        [{"episode_idx": torch.tensor(0)}],
+        batch_size=1,
+    )
+    normalizer = ArrayNormalizer.fit_identity(
+        [action.reshape(-1, config.action_dim).numpy()]
+    )
+    trainer = _complete_v115_trainer(eval_inference_steps=1)
+    with patch(
+        "clearvla.experiments.observed_state_lab.policy_runtime_v39."
+        "prepare_v39_policy_sample",
+        return_value=prepared,
+    ):
+        result = evaluate_v101_action_path_intervention(
+            system=system,
+            loader=loader,
+            conditioner=object(),
+            device=torch.device("cpu"),
+            dtype=torch.bfloat16,
+            camera_names=("cam0",),
+            action_normalizer=normalizer,
+            trainer=trainer,
+            intervention_batches=1,
+            bootstrap_reps=1000,
+            intervention_modes=(
+                "future_effect_reliability_one",
+                "address_g3_slot_permute",
+                "address_g3_slot_mean",
+            ),
+            require_grounded_intent_effect_contract=True,
+        )
+    assert result["finished_intervention_batches"] == 1
+    assert result["baseline_identity_checked_batches"] == 1
+    assert result["patched_baseline_max_abs_delta"] == 0.0
+    assert result["baseline_identity_tolerance"] == 1e-8
+    for mode in (
+        "future_effect_reliability_one",
+        "address_g3_slot_permute",
+        "address_g3_slot_mean",
+    ):
+        assert result["intervention_verified_batches"][mode] == 1
+        assert result["acceptance_matrix"]["modes"][mode][
+            "boundary_changed"
+        ]
+    for key in (
+        "grounded_p2_effect_value_pre_mask_rms",
+        "grounded_p2_effect_value_post_validity_rms",
+        "grounded_p2_effect_value_post_reliability_rms",
+        "grounded_p2_effect_reliability_valid_mean",
+        "grounded_p2_effect_reliability_attenuation_ratio",
+    ):
+        assert key in result["representation"]
+
+
+def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
+    config = _complete_v113_config()
+    trainer = _complete_v113_trainer()
+    _validate_complete_v113_model_contract(config, trainer)
+    assert _validate_required_model_contract("v113", config, trainer) == "v113"
+    v112 = replace(config, flow_jepa_functional_mainline_routing=0)
+    _validate_complete_v112_model_contract(v112, trainer)
+    with pytest.raises(
+        ValueError, match="flow_jepa_functional_mainline_routing"
+    ):
+        _validate_complete_v113_model_contract(v112, trainer)
+
+    small = {
+        "flow_jepa_grid_size": 2,
+        "future_grid_size": 2,
+        "patches_per_camera": 4,
+        "flow_jepa_address_slots": 2,
+        "flow_jepa_address_route_dim": 8,
+        "flow_jepa_raw_reader_heads": 2,
+    }
+    v112_encoder = FlowDINOEvidenceEncoder(
+        replace(v112, **small)
+    )
+    v113_encoder = FlowDINOEvidenceEncoder(
+        replace(config, **small)
+    )
+    parent = v112_encoder.progressive_grounding_address
+    repaired = v113_encoder.progressive_grounding_address
+    assert parent is not None and repaired is not None
+    assert parent.world_owner_route_attnres is None
+    assert repaired.world_owner_route_attnres is not None
+    assert repaired.world_owner_fused_writes is not None
+    assert repaired.world_horizon_condition is not None
+    assert all(
+        not parameter.requires_grad
+        for parameter in repaired.world_owner_writes.parameters()
+    )
+    assert v113_encoder.interval_stage_organizer is not None
+    assert not any(
+        parameter.requires_grad
+        for parameter in v113_encoder.interval_stage_organizer.parameters()
+    )
+
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v113_functional_mainline_routing.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        "CLEARVLA_REQUIRED_MODEL_CONTRACT:-v113"
+        in launcher
+    )
+    assert "--flow-jepa-functional-mainline-routing 1" in launcher
+    assert "V113_BATCH_SIZE:-1" in launcher
+    v111_parent = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v111_structured_ownership_bottleneck.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${'
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"'
+    ) in v111_parent
+    smoke = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v113_functional_mainline_routing_smoke.sh"
+    ).read_text(encoding="utf-8")
+    assert "--memory-report-detail 1" in smoke
+    assert "--memory-report-sync 1" in smoke
+    probe = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_v113_model_path_probe.sh"
+    ).read_text(encoding="utf-8")
+    assert "current_context_masked" in probe
+    assert "uniform_route_weights" in probe
+    assert "clearvla-v113-model-path-intervention-v13" in probe
+
+
+def test_v113_horizon_context_keeps_goal_history_and_phase_typed() -> None:
+    torch.manual_seed(301)
+    adapter = StatelessHorizonConditionAdapter(
+        hidden=32, horizon_count=4, heads=4
+    ).train()
+    inputs = {
+        "goal_tokens": torch.randn(2, 4, 32, requires_grad=True),
+        "history_tokens": torch.randn(2, 6, 32, requires_grad=True),
+        "state_tokens": torch.randn(2, 2, 32, requires_grad=True),
+        "visual_tokens": torch.randn(2, 8, 32, requires_grad=True),
+    }
+    phase, goal, history, metrics = adapter(**inputs)
+    assert phase.shape == goal.shape == history.shape == (2, 4, 32)
+    for key in (
+        "flow_jepa_phase_horizon_variation",
+        "flow_jepa_goal_horizon_variation",
+        "flow_jepa_history_horizon_variation",
+    ):
+        assert key in metrics and float(metrics[key]) > 0.0
+    assert not torch.allclose(goal, history)
+    (phase.square().mean() + goal.square().mean() + history.square().mean()).backward()
+    for name in ("goal_tokens", "history_tokens", "state_tokens", "visual_tokens"):
+        gradient = inputs[name].grad
+        assert gradient is not None and torch.isfinite(gradient).all()
+        assert float(gradient.abs().sum()) > 0.0
+
+
+def test_v113_online_w_route_and_interval_interventions_hit_the_live_path() -> None:
+    torch.manual_seed(304)
+    config = _complete_v113_config(
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    encoder = FlowDINOEvidenceEncoder(config).eval()
+    bank = _synthetic_v109_address_bank(config, batch=1, zero_values=False)
+    initial_rollout = torch.randn(
+        1, config.future_token_count, config.hidden_size
+    )
+    horizon_context = torch.randn(
+        1, config.future_anchors, config.hidden_size
+    )
+
+    def run(
+        intervention: str | None,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        state = encoder.begin_progressive_grounding_address(bank)
+        rollout = initial_rollout.clone()
+        collected_metrics: dict[str, Tensor] = {}
+        for stage in (1, 2, 3):
+            state = encoder.update_progressive_grounding_address(
+                state, rollout, stage=stage
+            )
+        for depth in range(4):
+            rollout, metrics = encoder.advance_progressive_world_owner_state(
+                rollout,
+                state,
+                depth=depth,
+                intervention=intervention,
+                horizon_query_context=horizon_context,
+            )
+            collected_metrics.update(metrics)
+        return (
+            rollout,
+            encoder.progressive_interval_prediction(state),
+            collected_metrics,
+        )
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        baseline, interval, _ = run(None)
+        route_results = {
+            (depth, operation): run(
+                f"functional_w{depth}_route_{operation}"
+            )
+            for depth in range(config.flow_jepa_world_blocks + 1)
+            for operation in ("zero", "shuffle")
+        }
+        _, interval_zero, _ = run("interval_stage_zero")
+        _, interval_shuffle, _ = run("interval_stage_shuffle")
+    for (depth, _), (intervened, _, route_metrics) in route_results.items():
+        assert not torch.equal(intervened, baseline)
+        assert (
+            float((intervened - baseline).detach().float().abs().sum())
+            > 0.0
+        )
+        assert float(
+            route_metrics[
+                f"flow_jepa_functional_w{depth}_route_"
+                "intervention_delta_norm"
+            ]
+        ) > 0.0
+    assert float(interval.detach().float().abs().sum()) > 0.0
+    assert torch.equal(interval_zero, torch.zeros_like(interval_zero))
+    assert torch.isfinite(interval_shuffle).all()
+    assert not torch.equal(interval_shuffle, interval)
+
+
+def test_v113_p1_appearance_gateway_intervention_is_isolated() -> None:
+    torch.manual_seed(305)
+    config = _complete_v113_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    encoder = FlowDINOEvidenceEncoder(config).eval()
+    bank = _synthetic_v109_address_bank(config, batch=1, zero_values=False)
+    state = encoder.begin_progressive_grounding_address(bank)
+    rollout = torch.randn(
+        1, config.future_token_count, config.hidden_size
+    )
+    for stage in (1, 2, 3):
+        state = encoder.update_progressive_grounding_address(
+            state, rollout, stage=stage
+        )
+    horizon_context = torch.randn(
+        1, config.future_anchors, config.hidden_size
+    )
+    for depth in range(config.flow_jepa_world_blocks + 1):
+        rollout, _ = encoder.advance_progressive_world_owner_state(
+            rollout,
+            state,
+            depth=depth,
+            horizon_query_context=horizon_context,
+        )
+    encoder.score_progressive_horizon_posterior(rollout, state)
+    assert state.world_appearance_fine_query is not None
+    appearance_before = state.world_appearance_fine_query.detach().clone()
+
+    reader = LateRawDetailPolicyReader(config).eval()
+    trajectory = torch.randn(
+        1,
+        config.action_horizon * config.action_basis_tokens,
+        config.hidden_size,
+    )
+    detail = LateRawDetailEvidence(
+        selector_tokens=rollout.new_empty(1, 0, config.hidden_size),
+        value_tokens=rollout.new_empty(1, 0, config.hidden_size),
+        address_bank=bank,
+        progressive_address=state,
+    )
+    phase_context = torch.randn(
+        1, config.future_anchors, config.hidden_size
+    )
+    condition_context = torch.randn(
+        1, config.future_anchors, config.hidden_size
+    )
+    history_context = torch.randn(
+        1, config.future_anchors, config.hidden_size
+    )
+
+    def run(mode: str) -> tuple[Tensor, dict[str, str | int | float]]:
+        reader.set_address_eval_intervention(mode)
+        try:
+            with torch.no_grad():
+                updated, _ = reader(
+                    trajectory,
+                    rollout,
+                    detail,
+                    phase_context=phase_context,
+                    condition_query_context=condition_context,
+                    history_query_context=history_context,
+                )
+            return updated, reader.address_eval_intervention_state()
+        finally:
+            reader.clear_address_eval_intervention()
+
+    baseline, baseline_state = run("none")
+    uniform, uniform_state = run("address_posterior_uniform")
+    zero, zero_state = run("p1_appearance_gateway_zero")
+    shuffled, shuffled_state = run(
+        "p1_appearance_gateway_spatial_shuffle"
+    )
+    assert baseline_state["intervention_code"] == pytest.approx(0.0)
+    assert uniform_state["intervention_code"] == pytest.approx(1.0)
+    assert zero_state["intervention_code"] == pytest.approx(15.0)
+    assert shuffled_state["intervention_code"] == pytest.approx(16.0)
+    for intervention_state in (zero_state, shuffled_state):
+        assert int(intervention_state["apply_count"]) == 1
+        assert float(
+            intervention_state[
+                "flow_jepa_typed_p1_appearance_gateway_"
+                "intervention_delta_norm"
+            ]
+        ) > 0.0
+    assert float((uniform - baseline).abs().sum()) > 0.0
+    assert float((zero - baseline).abs().sum()) > 0.0
+    assert float((shuffled - baseline).abs().sum()) > 0.0
+    for mode, expected_code in (
+        ("fine_offset_zero", 2.0),
+        ("camera_posterior_uniform", 3.0),
+        ("camera_swap", 4.0),
+        ("world_query_zero", 5.0),
+        ("world_query_spatial_shuffle", 6.0),
+        ("future_transport_neutral", 7.0),
+        ("future_transport_spatial_shuffle", 8.0),
+        ("semantic_owner_zero", 9.0),
+        ("semantic_owner_shuffle", 10.0),
+        ("appearance_owner_zero", 11.0),
+        ("appearance_owner_shuffle", 12.0),
+        ("geometry_owner_zero", 13.0),
+        ("geometry_owner_shuffle", 14.0),
+        ("p2_semantic_zero", 17.0),
+        ("p2_semantic_shuffle", 18.0),
+        ("p2_appearance_zero", 19.0),
+        ("p2_appearance_shuffle", 20.0),
+        ("p2_geometry_zero", 21.0),
+        ("p2_geometry_shuffle", 22.0),
+        ("p2_horizon_zero", 23.0),
+        ("p2_horizon_shuffle", 24.0),
+    ):
+        intervened, intervention_state = run(mode)
+        assert torch.isfinite(intervened).all()
+        assert int(intervention_state["apply_count"]) == 1
+        assert intervention_state["intervention_code"] == pytest.approx(
+            expected_code
+        )
+    torch.testing.assert_close(
+        state.world_appearance_fine_query,
+        appearance_before,
+    )
+
+
+def test_v113_functional_p2_is_zero_preserving_and_routes_owner_deltas() -> None:
+    torch.manual_seed(302)
+    refiner = _FunctionalOwnershipLocalRefiner(
+        width=16, raw_dim=12, route_dim=8, depth=2
+    ).train()
+    contexts = {
+        "query": torch.randn(2, 1, 8),
+        "semantic": torch.randn(2, 1, 8),
+        "appearance": torch.randn(2, 1, 8),
+        "geometry": torch.randn(2, 1, 8),
+        "future_transport": torch.randn(2, 1, 5),
+    }
+    coordinates = torch.randn(2, 1, 9, 2)
+    zero, zero_metrics = refiner(
+        rgb=torch.zeros(2, 1, 9, 3),
+        learned_detail=torch.zeros(2, 1, 9, 12),
+        coordinates=coordinates,
+        **contexts,
+    )
+    assert torch.equal(zero, torch.zeros_like(zero))
+    assert float(zero_metrics["flow_jepa_typed_p2_output_rms"]) == 0.0
+
+    rgb = torch.randn(2, 1, 9, 3, requires_grad=True)
+    detail = torch.randn(2, 1, 9, 12, requires_grad=True)
+    output, metrics = refiner(
+        rgb=rgb,
+        learned_detail=detail,
+        coordinates=coordinates,
+        **contexts,
+    )
+    assert torch.isfinite(output).all()
+    assert float(metrics["flow_jepa_typed_p2_functional_routing"]) == 1.0
+    route_mass = sum(
+        float(metrics[f"flow_jepa_typed_p2_{name}_route_mass"])
+        for name in ("semantic", "appearance", "geometry", "horizon")
+    )
+    assert 0.0 < route_mass < 1.0
+    appearance_zero, _ = refiner(
+        rgb=rgb,
+        learned_detail=detail,
+        coordinates=coordinates,
+        intervention="p2_appearance_zero",
+        **contexts,
+    )
+    assert not torch.equal(appearance_zero, output)
+    output.square().mean().backward()
+    for value in (rgb.grad, detail.grad):
+        assert value is not None and torch.isfinite(value).all()
+        assert float(value.abs().sum()) > 0.0
+
+
+def test_v113_full_action_path_routes_once_and_backpropagates() -> None:
+    torch.manual_seed(303)
+    config = _complete_v113_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    system = V39PolicySystem(config).train()
+    optimizer_groups = _optimizer_groups(system, _complete_v113_trainer())
+    grouped_ids = [
+        id(parameter)
+        for group in optimizer_groups
+        for parameter in group["params"]
+    ]
+    assert len(grouped_ids) == len(set(grouped_ids))
+    assert {
+        id(parameter)
+        for parameter in system.parameters()
+        if parameter.requires_grad
+    } == set(grouped_ids)
+    encoder = system.planner.flow_dino_evidence
+    reader = system.planner.late_raw_detail_reader
+    assert encoder is not None and reader is not None
+    batch = 1
+    with patch.object(
+        reader,
+        "_read_soft_address_lattice",
+        wraps=reader._read_soft_address_lattice,
+    ) as policy_value_read:
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            output = system.flow_training_forward(
+                _visual(config, batch=batch),
+                torch.randn(
+                    batch, config.visual_history_length, config.state_dim
+                ),
+                torch.randn(
+                    batch,
+                    config.executed_history_length,
+                    config.action_dim,
+                ),
+                torch.randn(batch, config.state_dim),
+                torch.randn(
+                    batch,
+                    config.action_horizon,
+                    config.action_dim,
+                ),
+                target_visual=torch.randn(
+                    batch,
+                    len(config.flow_jepa_effective_interval_support_offsets),
+                    config.visual_history_length,
+                    config.num_cameras,
+                    config.patches_per_camera,
+                    config.visual_token_dim,
+                ),
+                raw_visual=_raw_visual(config, batch=batch, side=32),
+                goal_language_tokens=torch.randn(
+                    batch, 3, config.goal_language_dim
+                ),
+                goal_language_mask=torch.ones(
+                    batch, 3, dtype=torch.bool
+                ),
+                make_counterfactuals=False,
+            )
+    assert policy_value_read.call_count == 1
+    for key in (
+        "flow_jepa_functional_mainline_routing",
+        "flow_jepa_typed_p1_appearance_gateway_query_rms",
+        "flow_jepa_typed_p2_functional_routing",
+        "flow_jepa_interval_stage_online_w_candidate",
+        "flow_jepa_phase_horizon_variation",
+        "flow_jepa_goal_horizon_variation",
+        "flow_jepa_history_horizon_variation",
+    ):
+        assert key in output and torch.isfinite(output[key]).all()
+    (
+        output["pred_physical_velocity"].float().square().mean()
+        + output["flow_jepa_interval_progress_pred"].float().square().mean()
+    ).backward()
+    organizer = encoder.progressive_grounding_address
+    assert organizer is not None
+    checked = (
+        organizer.world_owner_route_attnres[0].query_proj.weight,
+        organizer.world_owner_fused_writes[0].weight,
+        reader.appearance_world_owner_query.weight,
+        system.planner.stateless_horizon_adapter.goal_cross.in_proj_weight,
+    )
+    for parameter in checked:
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert float(parameter.grad.abs().sum()) > 0.0
+    diagnostics = {"loss": output["pred_physical_velocity"].float().mean()}
+    _attach_grad_diagnostics(diagnostics, system)
+    for key in (
+        "grad_late_raw_detail_p1_appearance_gateway",
+        "grad_late_raw_detail_typed_p2_router",
+        "grad_stateless_horizon_phase_path",
+        "grad_stateless_horizon_goal_path",
+        "grad_stateless_horizon_history_path",
+    ):
+        assert key in diagnostics
+        assert torch.isfinite(diagnostics[key])
+        assert float(diagnostics[key]) > 0.0
+
+
+def test_v112_contract_launcher_and_v111_flag_off_ancestry() -> None:
+    config = _complete_v112_config()
+    trainer = _complete_v112_trainer()
+    _validate_complete_v112_model_contract(config, trainer)
+    assert _validate_required_model_contract("v112", config, trainer) == "v112"
+
+    v111 = replace(config, flow_jepa_pre_value_owner_routing=0)
+    _validate_complete_v111_model_contract(v111, trainer)
+    with pytest.raises(ValueError, match="flow_jepa_pre_value_owner_routing"):
+        _validate_complete_v112_model_contract(v111, trainer)
+    with pytest.raises(
+        ValueError, match="flow_jepa_pre_value_owner_update_scale"
+    ):
+        _validate_complete_v112_model_contract(
+            replace(config, flow_jepa_pre_value_owner_update_scale=0.20),
+            trainer,
+        )
+
+    small = {
+        "flow_jepa_grid_size": 2,
+        "future_grid_size": 2,
+        "patches_per_camera": 4,
+        "flow_jepa_address_slots": 2,
+        "flow_jepa_address_route_dim": 8,
+    }
+    v111_organizer = FlowDINOEvidenceEncoder(
+        replace(v111, **small)
+    ).progressive_grounding_address
+    v112_organizer = FlowDINOEvidenceEncoder(
+        replace(config, **small)
+    ).progressive_grounding_address
+    assert v111_organizer is not None and v112_organizer is not None
+    v111_keys = set(v111_organizer.state_dict())
+    v112_keys = set(v112_organizer.state_dict())
+    added = v112_keys - v111_keys
+    assert added
+    assert not (v111_keys - v112_keys)
+    assert all(
+        "g3_public_summary_out" in key or "world_owner_" in key
+        for key in added
+    )
+    assert not any(
+        "g3_public_summary_out" in key or "world_owner_" in key
+        for key in v111_keys
+    )
+
+    launcher = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v112_pre_value_owner_routing.sh"
+    ).read_text(encoding="utf-8")
+    assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=v112" in launcher
+    assert "--flow-jepa-pre-value-owner-routing 1" in launcher
+    smoke = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "current_v112_pre_value_owner_routing_smoke.sh"
+    ).read_text(encoding="utf-8")
+    assert "--max-train-batches" in smoke
+    assert "--eval-sampling-diagnostic-batches 1" in smoke
+
+
+def test_v112_pre_value_owner_state_reaches_joint_p1_fine_posterior() -> None:
+    torch.manual_seed(213)
+    config = _complete_v112_config(
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    encoder = FlowDINOEvidenceEncoder(config).train()
+    organizer = encoder.progressive_grounding_address
+    assert organizer is not None and organizer.pre_value_owner_routing
+    assert organizer.g3_public_summary_out is not None
+    assert organizer.world_owner_transitions is not None
+    assert organizer.world_owner_writes is not None
+    assert organizer.g3_typed_summary_out is not None
+    assert not any(
+        parameter.requires_grad
+        for parameter in organizer.g3_typed_summary_out.parameters()
+    )
+
+    bank = _synthetic_v109_address_bank(config, batch=1, zero_values=False)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        state = encoder.begin_progressive_grounding_address(bank)
+        rollout = torch.randn(
+            1,
+            config.future_token_count,
+            config.hidden_size,
+        )
+        for stage in (1, 2, 3):
+            state = encoder.update_progressive_grounding_address(
+                state,
+                rollout,
+                stage=stage,
+            )
+        for depth in range(4):
+            rollout, owner_metrics = (
+                encoder.advance_progressive_world_owner_state(
+                    rollout,
+                    state,
+                    depth=depth,
+                )
+            )
+            assert (
+                f"flow_jepa_pre_value_w{depth}_appearance_state_rms"
+                in owner_metrics
+            )
+        encoder.score_progressive_horizon_posterior(rollout, state)
+        assert state.world_owner_depth == 3
+        assert state.world_appearance_fine_query is not None
+
+        trajectory = torch.randn(
+            1,
+            config.action_horizon * config.action_basis_tokens,
+            config.hidden_size,
+        )
+        reader = LateRawDetailPolicyReader(config).train()
+        updated, metrics = reader(
+            trajectory,
+            rollout,
+            LateRawDetailEvidence(
+                selector_tokens=rollout.new_empty(
+                    1, 0, config.hidden_size
+                ),
+                value_tokens=rollout.new_empty(
+                    1, 0, config.hidden_size
+                ),
+                address_bank=bank,
+                progressive_address=state,
+            ),
+            phase_context=torch.randn(1, config.hidden_size),
+            condition_query_context=torch.randn(1, config.hidden_size),
+        )
+        loss = (updated - trajectory).float().square().mean()
+    loss.backward()
+
+    for key in (
+        "flow_jepa_typed_p1_appearance_pre_value_prior_rms",
+        "flow_jepa_typed_p1_world_appearance_candidate_logit_rms",
+    ):
+        assert key in metrics and torch.isfinite(metrics[key])
+        assert float(metrics[key]) > 0.0
+    assert float(metrics["flow_jepa_pre_value_owner_routing"]) == 1.0
+
+    checked_parameters = [
+        organizer.g3_typed_slot_score["appearance"][-1].weight,
+        organizer.world_typed_query["appearance"].weight,
+        organizer.world_owner_writes["appearance"].weight,
+        reader.typed_fine_query["appearance"].weight,
+    ]
+    checked_parameters.extend(
+        transition["appearance"][-1].weight
+        for transition in organizer.world_owner_transitions
+    )
+    for parameter in checked_parameters:
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+        assert float(parameter.grad.abs().sum()) > 0.0
+
+
+def test_v112_full_action_path_advances_all_owner_boundaries_once() -> None:
+    torch.manual_seed(214)
+    config = _complete_v112_config(
+        dropout=0.0,
+        flow_jepa_raw_activation_checkpoint=0,
+        flow_jepa_grid_size=2,
+        future_grid_size=2,
+        patches_per_camera=4,
+        flow_jepa_address_slots=2,
+        flow_jepa_address_route_dim=8,
+        flow_jepa_raw_reader_heads=2,
+    )
+    system = V39PolicySystem(config).train()
+    encoder = system.planner.flow_dino_evidence
+    late_reader = system.planner.late_raw_detail_reader
+    assert encoder is not None and late_reader is not None
+    batch = 1
+    with patch.object(
+        encoder,
+        "advance_progressive_world_owner_state",
+        wraps=encoder.advance_progressive_world_owner_state,
+    ) as owner_advance, patch.object(
+        late_reader,
+        "_read_soft_address_lattice",
+        wraps=late_reader._read_soft_address_lattice,
+    ) as policy_value_read:
+        output = system.flow_training_forward(
+            _visual(config, batch=batch),
+            torch.randn(
+                batch, config.visual_history_length, config.state_dim
+            ),
+            torch.randn(
+                batch,
+                config.executed_history_length,
+                config.action_dim,
+            ),
+            torch.randn(batch, config.state_dim),
+            torch.randn(
+                batch,
+                config.action_horizon,
+                config.action_dim,
+            ),
+            target_visual=torch.randn(
+                batch,
+                len(config.flow_jepa_effective_interval_support_offsets),
+                config.visual_history_length,
+                config.num_cameras,
+                config.patches_per_camera,
+                config.visual_token_dim,
+            ),
+            raw_visual=_raw_visual(config, batch=batch, side=32),
+            goal_language_tokens=torch.randn(
+                batch, 3, config.goal_language_dim
+            ),
+            goal_language_mask=torch.ones(
+                batch, 3, dtype=torch.bool
+            ),
+            make_counterfactuals=False,
+        )
+    assert owner_advance.call_count == 4
+    assert [
+        call.kwargs["depth"] for call in owner_advance.call_args_list
+    ] == [0, 1, 2, 3]
+    assert policy_value_read.call_count == 1
+    for key in (
+        "flow_jepa_pre_value_owner_routing",
+        "flow_jepa_pre_value_w0_appearance_state_rms",
+        "flow_jepa_pre_value_w1_appearance_state_rms",
+        "flow_jepa_pre_value_w2_appearance_state_rms",
+        "flow_jepa_pre_value_w3_appearance_state_rms",
+        "flow_jepa_typed_p1_appearance_pre_value_prior_rms",
+        "flow_jepa_typed_p1_world_appearance_candidate_logit_rms",
+    ):
+        assert key in output and torch.isfinite(output[key]).all()
+    output["pred_physical_velocity"].float().square().mean().backward()
+    organizer = encoder.progressive_grounding_address
+    assert organizer is not None
+    for parameter in (
+        organizer.g3_public_summary_out[-1].weight,
+        organizer.g3_typed_slot_score["appearance"][-1].weight,
+        organizer.world_typed_query["appearance"].weight,
+        organizer.world_owner_writes["appearance"].weight,
     ):
         assert parameter.grad is not None
         assert torch.isfinite(parameter.grad).all()
@@ -7983,7 +12684,10 @@ def test_v111_contract_launcher_and_v110_flag_off_ancestry() -> None:
         / "scripts"
         / "current_v111_structured_ownership_bottleneck.sh"
     ).read_text(encoding="utf-8")
-    assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=v111" in launcher
+    assert (
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${'
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"'
+    ) in launcher
     assert "--flow-jepa-structured-ownership-bottleneck 1" in launcher
     smoke = (
         Path(__file__).resolve().parents[1]

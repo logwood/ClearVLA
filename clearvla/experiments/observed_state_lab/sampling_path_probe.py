@@ -38,6 +38,7 @@ from .policy_runtime_v39 import (
 from .world_runtime import autocast_context
 
 _PRIMARY_PATH_STEPS = 5
+_FIXED_DIAGNOSTIC_TIMES = (0.05, 0.25, 0.50, 0.75, 0.95)
 
 
 def _sample_mse(lhs: Tensor, rhs: Tensor) -> Tensor:
@@ -373,6 +374,56 @@ def _probe_sampling_path_batch(
             codec_state,
         )
 
+    # These matched exact-bridge measurements diagnose the formal V116
+    # flow-time objective without multiplying the cost of every training
+    # batch.  They deliberately have no recursive state: each time holds the
+    # target/noise pair and bridge state fixed, then compares the training and
+    # deployment call contracts on the same input.
+    for time_value in _FIXED_DIAGNOSTIC_TIMES:
+        time = torch.full(
+            (batch,),
+            float(time_value),
+            device=visual.device,
+            dtype=visual.dtype,
+        )
+        bridge_flow = (
+            (1.0 - time[:, None, None]) * target_flow
+            + time[:, None, None] * noise_flow
+        )
+        teacher_flow_v, teacher_physical_v, _ = policy_velocity(
+            bridge_flow,
+            time,
+            training_call_contract=True,
+        )
+        deploy_flow_v, deploy_physical_v, _ = policy_velocity(
+            bridge_flow,
+            time,
+            training_call_contract=False,
+        )
+        prefix = f"fixed_time/{float(time_value):.2f}"
+        metrics[f"{prefix}/velocity/teacher_target"] = _sample_mse(
+            teacher_physical_v,
+            target_physical_velocity,
+        )
+        metrics[f"{prefix}/velocity/deploy_target"] = _sample_mse(
+            deploy_physical_v,
+            target_physical_velocity,
+        )
+        metrics[f"{prefix}/velocity/teacher_deploy_delta"] = _sample_mse(
+            teacher_flow_v,
+            deploy_flow_v,
+        )
+        for band_name, start, end in action_bands:
+            band_prefix = f"{prefix}/action_band/{band_name}"
+            metrics[f"{band_prefix}/teacher_target"] = _sample_mse(
+                teacher_physical_v[:, start:end],
+                target_physical_velocity[:, start:end],
+            )
+            metrics[f"{band_prefix}/deploy_target"] = _sample_mse(
+                deploy_physical_v[:, start:end],
+                target_physical_velocity[:, start:end],
+            )
+
     internal_primary_action = system.codec.decode(
         system._flow_decode(recursive_flow),
         codec_state,
@@ -659,6 +710,51 @@ def evaluate_sampling_path_probe(
             }
         matched_times[time_label] = row
 
+    fixed_time_velocity: dict[str, Any] = {}
+    for time_value in _FIXED_DIAGNOSTIC_TIMES:
+        time_label = f"{float(time_value):.2f}"
+        prefix = f"fixed_time/{time_label}"
+        teacher_mse = _mean_metric(
+            metric_rows,
+            f"{prefix}/velocity/teacher_target",
+        )
+        deploy_mse = _mean_metric(
+            metric_rows,
+            f"{prefix}/velocity/deploy_target",
+        )
+        row = {
+            "teacher_contract_target_mse": teacher_mse,
+            "teacher_contract_target_rmse": math.sqrt(max(teacher_mse, 0.0)),
+            "deploy_contract_target_mse": deploy_mse,
+            "deploy_contract_target_rmse": math.sqrt(max(deploy_mse, 0.0)),
+            "call_contract_excess_mse": deploy_mse - teacher_mse,
+            "teacher_vs_deploy_flow_velocity_rmse": _rmse_metric(
+                metric_rows,
+                f"{prefix}/velocity/teacher_deploy_delta",
+            ),
+            "action_bands": {},
+        }
+        for band_name in action_bands:
+            band_prefix = f"{prefix}/action_band/{band_name}"
+            band_teacher = _mean_metric(
+                metric_rows,
+                f"{band_prefix}/teacher_target",
+            )
+            band_deploy = _mean_metric(
+                metric_rows,
+                f"{band_prefix}/deploy_target",
+            )
+            row["action_bands"][band_name] = {
+                "teacher_contract_target_rmse": math.sqrt(
+                    max(band_teacher, 0.0)
+                ),
+                "deploy_contract_target_rmse": math.sqrt(
+                    max(band_deploy, 0.0)
+                ),
+                "call_contract_excess_mse": band_deploy - band_teacher,
+            }
+        fixed_time_velocity[time_label] = row
+
     teacher_keys = [
         f"time/{time_label}/velocity/teacher_target" for time_label in time_values
     ]
@@ -751,6 +847,7 @@ def evaluate_sampling_path_probe(
             "internal_vs_public_5_step_max_abs": internal_identity_max_abs,
         },
         "matched_times": matched_times,
+        "fixed_time_velocity": fixed_time_velocity,
         "solvers": solver_metrics,
         "planned_batches": int(planned_batches),
         "selected_batch_indices": sorted(selected_indices),

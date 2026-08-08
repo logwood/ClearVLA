@@ -744,7 +744,20 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 h,
                 int(getattr(config, "role_attnres_key_dim", 32)),
                 max_sources=(
-                    (int(getattr(config, "flow_jepa_policy_blocks", 2)) + 1)
+                    (
+                        5
+                        if int(
+                            getattr(
+                                config,
+                                "flow_jepa_object_intent_dynamics_mainline",
+                                0,
+                            )
+                        )
+                        else int(
+                            getattr(config, "flow_jepa_policy_blocks", 2)
+                        )
+                        + 1
+                    )
                     * int(getattr(config, "action_basis_tokens", 1))
                 ),
                 max_value_rms=role_value_rms,
@@ -1021,6 +1034,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         self,
         action_query: Tensor,
         bank: PolicyRoleDeltaBank,
+        *,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         if self.policy_delta_attnres is None:
             raise RuntimeError("typed policy-delta reader is disabled")
@@ -1033,7 +1048,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             int(batch), int(horizon), int(sources) * int(basis), int(hidden)
         )
         routed, route_metrics = self.policy_delta_attnres(
-            action_query, candidates
+            action_query,
+            candidates,
+            collect_diagnostics=collect_diagnostics,
         )
         scale = routed.new_tensor(
             float(
@@ -1064,8 +1081,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 self.protected_detail_basis_attnres(
                     action_query,
                     protected_values,
+                    collect_diagnostics=collect_diagnostics,
                 )
             )
+        if not collect_diagnostics:
+            return routed_update, protected_update, {}
         metrics = {
             "evidence_policy_delta_attnres_entropy": route_metrics["entropy"],
             "evidence_policy_delta_attnres_max": route_metrics["max"],
@@ -1662,6 +1682,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         self,
         value_field: Tensor,
         pointer_mass: Tensor,
+        terminal_logit_bias: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Propagate a differentiable monotonic execution pointer.
 
@@ -1681,6 +1702,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError("global execution value chart has the wrong shape")
         if tuple(pointer_mass.shape) != (batch, depth + 1):
             raise ValueError("execution pointer mass must be [B,depth+1]")
+        if terminal_logit_bias is not None and tuple(
+            terminal_logit_bias.shape
+        ) != (batch,):
+            raise ValueError("execution terminal logit bias must be [B]")
 
         # The policy plane owns probabilities, entropy and pointer occupancy in
         # FP32.  Do not inherit their dtype from the action stream: sampling
@@ -1716,6 +1741,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             index = torch.as_tensor(local_indices, device=scores.device, dtype=torch.long)
             local_logits = -scores.index_select(1, index) / temperature
             local_logits[:, -1] = local_logits[:, -1] + math.log(prior_weight)
+            if terminal_logit_bias is not None:
+                local_logits[:, -1] = (
+                    local_logits[:, -1] + terminal_logit_bias.float()
+                )
             local_probabilities = torch.softmax(local_logits, dim=-1)
             source_mass = policy_pointer_mass[:, pointer_index]
             contribution = source_mass[:, None] * local_probabilities
@@ -1797,6 +1826,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_value_tokens: Tensor,
         evidence_bias: Tensor,
         evidence_scale: float | Tensor,
+        execution_terminal_probability: Tensor | None = None,
+        execution_terminal_uncertainty: Tensor | None = None,
     ) -> dict[str, Any]:
         """Run one continuous monotonic execution contract.
 
@@ -1817,6 +1848,23 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         candidate_count = int(candidate_blocks.shape[1])
         operation_candidate_count = depth * dwell
         terminal_candidate = operation_candidate_count
+        terminal_logit_bias: Tensor | None = None
+        if execution_terminal_probability is not None:
+            if tuple(execution_terminal_probability.shape) != (batch, 1):
+                raise ValueError("execution terminal probability must be [B,1]")
+            if execution_terminal_uncertainty is None or tuple(
+                execution_terminal_uncertainty.shape
+            ) != (batch, 1):
+                raise ValueError("execution terminal uncertainty must be [B,1]")
+            probability = execution_terminal_probability.float().clamp(
+                1e-4, 1.0 - 1e-4
+            )[:, 0]
+            uncertainty = execution_terminal_uncertainty.float().clamp_min(0.0)[:, 0]
+            terminal_logit_bias = (
+                0.10
+                * torch.tanh(torch.logit(probability) / 4.0)
+                / (1.0 + uncertainty)
+            )
         eval_policy = self._execution_eval_policy()
         soft_contract = eval_policy in {"soft", "neutral"}
         controller_state: Tensor | None = None
@@ -2001,7 +2049,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     learned_skip,
                     learned_terminal,
                 ) = (
-                    self._mean_field_execution_policy(value_field, pointer_before)
+                    self._mean_field_execution_policy(
+                        value_field,
+                        pointer_before,
+                        terminal_logit_bias=terminal_logit_bias,
+                    )
                 )
                 terminal_mass = pointer_before[:, depth]
                 learned_action = self._mix_candidate_actions(
@@ -2304,11 +2356,19 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         action_state_factor: Tensor,
         evidence_tokens: Tensor,
         evidence_scale: float | Tensor,
+        collect_diagnostics: bool = True,
     ) -> dict[str, Tensor]:
         action = self.action_norm(result["action"])
         pred_velocity = self.velocity_head(action)
         event_logits = self.event_head(action)
         motion_logits = self.motion_head(action).squeeze(-1)
+        if not collect_diagnostics:
+            return {
+                "pred_velocity": pred_velocity,
+                "event_logits": event_logits,
+                "motion_logits": motion_logits,
+                "evidence_latent": organized["latent"],
+            }
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
             "event_logits": event_logits,
@@ -2561,6 +2621,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         trajectory_workspace_tokens: Tensor | None = None,
         policy_action_tokens: Tensor | None = None,
         policy_role_delta_bank: PolicyRoleDeltaBank | None = None,
+        execution_terminal_probability: Tensor | None = None,
+        execution_terminal_uncertainty: Tensor | None = None,
         rollout_tokens: Tensor,
         transition_memory: Tensor | list[Tensor] | tuple[Tensor, ...] | None,
         event_evidence: Tensor,
@@ -2574,7 +2636,6 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_scale: float | Tensor = 1.0,
         noisy_scale: float | Tensor = 1.0,
     ) -> dict[str, Tensor]:
-        del collect_diagnostics
         if not self.training:
             # Parent-module ``load_state_dict`` restores child buffers through
             # ``_load_from_state_dict`` and therefore does not invoke the
@@ -2675,7 +2736,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         if self.policy_delta_bridge_enabled:
             assert policy_role_delta_bank is not None
             policy_workspace_update, protected_detail_update, policy_delta_metrics = (
-                self._read_policy_delta_bank(action, policy_role_delta_bank)
+                self._read_policy_delta_bank(
+                    action,
+                    policy_role_delta_bank,
+                    collect_diagnostics=collect_diagnostics,
+                )
             )
             policy_workspace_scale = action.new_tensor(
                 float(
@@ -2721,6 +2786,29 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             self.dynamic_block_route_enabled
             and self.dwell_mode != "learned_shadow"
         ):
+            external_terminal_bias_metric = torch.zeros(
+                (), device=action.device, dtype=torch.float32
+            )
+            if execution_terminal_probability is not None:
+                if execution_terminal_uncertainty is None:
+                    raise ValueError(
+                        "external terminal probability requires uncertainty"
+                    )
+                external_terminal_bias_metric = (
+                    0.10
+                    * torch.tanh(
+                        torch.logit(
+                            execution_terminal_probability.float().clamp(
+                                1e-4, 1.0 - 1e-4
+                            )
+                        )
+                        / 4.0
+                    )
+                    / (
+                        1.0
+                        + execution_terminal_uncertainty.float().clamp_min(0.0)
+                    )
+                ).mean()
             dynamic_result = self._run_dynamic_execution(
                 action=action,
                 global_condition=global_condition,
@@ -2729,6 +2817,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_value_tokens=evidence_value_tokens,
                 evidence_bias=evidence_bias,
                 evidence_scale=evidence_scale,
+                execution_terminal_probability=(
+                    execution_terminal_probability
+                ),
+                execution_terminal_uncertainty=(
+                    execution_terminal_uncertainty
+                ),
             )
             dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,
@@ -2738,9 +2832,15 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 action_state_factor=action_state_factor,
                 evidence_tokens=evidence_tokens,
                 evidence_scale=evidence_scale,
+                collect_diagnostics=collect_diagnostics,
             )
+            if not collect_diagnostics:
+                return dynamic_output
             dynamic_output["evidence_top_policy_workspace_scale"] = (
                 policy_workspace_scale.detach().float()
+            )
+            dynamic_output["evidence_execution_terminal_external_bias"] = (
+                external_terminal_bias_metric.detach().float()
             )
             dynamic_output["evidence_top_policy_workspace_update_norm"] = (
                 policy_workspace_update.detach().float().norm(dim=-1).mean()
@@ -2990,6 +3090,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         pred_velocity = self.velocity_head(action)
         event_logits = self.event_head(action)
         motion_logits = self.motion_head(action).squeeze(-1)
+        if not collect_diagnostics:
+            return {
+                "pred_velocity": pred_velocity,
+                "event_logits": event_logits,
+                "motion_logits": motion_logits,
+                "evidence_latent": organized["latent"],
+            }
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
             "event_logits": event_logits,

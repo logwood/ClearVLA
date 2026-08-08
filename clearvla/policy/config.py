@@ -373,6 +373,97 @@ class V39PolicyConfig(V38PolicyConfig):
     # factorized source/fine addressing followed by typed local operations.
     # Zero preserves the serialized and numerical V110 graph exactly.
     flow_jepa_structured_ownership_bottleneck: int = 0
+    # Post-V111 ownership repair.  Keep the G3 public chart explicitly
+    # owner-neutral, carry semantic/appearance/geometry/interval selector
+    # states through W1-W3, and consume the appearance sidecar in P1's actual
+    # joint source/fine posterior before the single precision value read.
+    # Zero preserves the serialized and numerical V111 graph exactly.
+    flow_jepa_pre_value_owner_routing: int = 0
+    flow_jepa_pre_value_owner_update_scale: float = 0.10
+    # Functional mainline repair.  Route typed W owner innovations before one
+    # hidden-width reconstruction, require the W appearance verifier in P1,
+    # keep phase/goal/history distinct per horizon, and fuse typed P2 local
+    # operations through a protected policy carrier.  Zero is exact V112.
+    flow_jepa_functional_mainline_routing: int = 0
+    # Post-V113 utility/precision repair. P1 forms four action-invariant,
+    # basis-aware factual glimpses per horizon exactly once; P2 then lets all
+    # action basis tokens use that shared factual bank. RGB/detail base and
+    # zero-mean 3x3 precision lanes remain separately protected. Zero restores
+    # the serialized and numerical V113 graph.
+    flow_jepa_utility_precision_mainline: int = 0
+    flow_jepa_action_free_world_factual: int = 0
+    # V115 repairs the V114 shared read without duplicating it. Four explicitly
+    # typed factual queries form one basis-free P1 bank; every P2 action basis
+    # then performs its own soft cross-read over those four already-selected
+    # facts. Zero preserves the exact V114 query/concatenation path.
+    flow_jepa_shared_factual_glimpse_bank: int = 0
+    # V115 loss-only Teacher-G and the single online effect state. Future
+    # supports are associated to current G3 slots with same-camera soft
+    # semantic/geometric transport; fixed cell identity is no longer a
+    # supervision assumption.
+    flow_jepa_g_aligned_future_effect: int = 0
+    flow_jepa_teacher_g_ema_decay: float = 0.995
+    # V115 replaces the shallow mean-pooled phase adapter with an ordered
+    # four-state goal program replayed from observable state/action history
+    # and the completed G3 facts.  Goal, phase and history remain distinct
+    # selector operands and no future teacher enters this online machine.
+    flow_jepa_stateless_goal_phase_machine: int = 0
+    # Explicit topology contract.  The string is serialized so a checkpoint
+    # cannot silently reinterpret the third W block as a third P block.
+    flow_jepa_top_role_schedule: str = "3-3-2"
+    # The third policy stage is a typed plan compiler, not another generic
+    # visual/world block.  It writes four provenance-preserving delta lanes
+    # for the existing bottom Evidence-MMDiT/CVAE/workspace stack.
+    flow_jepa_policy_plan_compiler: int = 0
+    # V116 keeps the V115 3-2-3 graph but makes the future-effect boundary
+    # fully supervised, gives P2 a structured zero-preserving effect read,
+    # separates terminal evidence from action deltas, and uses a four-state
+    # non-terminal phase belief.  Zero preserves V115 exactly.
+    flow_jepa_supervised_effect_mainline: int = 0
+    # V117 replaces the recurrently multiplied phase belief with a three-block
+    # stateless intent controller. The four-state attention is audit-only;
+    # typed continuous goal/history/progress controls drive W and P.
+    flow_jepa_stateless_intent_controller: int = 0
+    # The online rollout retains four compact anchors, while the sole W->P
+    # effect object owns three near/mid/late window slots.
+    flow_jepa_window_effect_bank: int = 0
+    flow_jepa_future_slots: int = 4
+    # Move the structured effect read into the real P2 block. P3 then compiles
+    # already-formed P1/P2 innovations and cannot reopen the effect field.
+    flow_jepa_effect_read_in_p2: int = 0
+    # Post-V117 architectural capability.  This single flag replaces the
+    # scalar-positioned intent heads, repeated-current W targets, fixed P2
+    # temporal mass and optional P3 effect lane with the coherent differential
+    # intent/effect 3-2-3 graph.  Zero is the exact V117 parent.
+    flow_jepa_differential_intent_effect_mainline: int = 0
+    # Grounded intent/effect capability.  This is a sibling of the V118
+    # differential graph, not another historical layer on top of it.  It
+    # retains four real teacher intervals and object slots from G through W
+    # and P2, while S is an observable intent organizer without phase/progress
+    # forward variables.
+    flow_jepa_grounded_intent_effect_mainline: int = 0
+    # Capability-named successor to the V119 top.  It reuses the healthy
+    # observation-only pre-G/P1 foundation, but replaces the local-hypothesis
+    # "objects", pseudo-phase S, weakened W and three-lane P3 with a distinct
+    # global-object/plan-recognition/future-dynamics graph.  The historical
+    # grounded capability remains bit-for-bit selectable when this is zero.
+    flow_jepa_object_intent_dynamics_mainline: int = 0
+    # The formal V116 action-flow objective samples more late/noisy times.
+    # Uniform remains available for matched structural smoke and ancestry.
+    flow_matching_time_distribution: str = "uniform"
+    # Resource policy for the sole high-resolution P1 read. The query chunk is
+    # chosen so physical_batch * query_chunk stays near this budget; the old
+    # fixed chunk remains the minimum for flags-off ancestry.
+    flow_jepa_address_query_batch_budget: int = 32
+    # Bound the temporary microgrid contraction without launching one complete
+    # contraction per 3x3 cell.
+    flow_jepa_microgrid_tile: int = 3
+    # Keep selector logits, geometry, masking, normalization and diagnostics in
+    # FP32 while allowing selected RGB/detail value contractions in model dtype.
+    flow_jepa_p1_mixed_precision: int = 0
+    # Small physical batches have enough activation headroom and should not pay
+    # backward recomputation. Large production batches retain checkpointing.
+    flow_jepa_checkpoint_min_batch: int = 4
     # V106 replaces normalize-after-cancellation routing with a
     # zero-preserving variance-floor contract.  The complete numerical
     # contract extends that same bounded-Jacobian rule through learned
@@ -1184,6 +1275,17 @@ class V39PolicyConfig(V38PolicyConfig):
             "flow_jepa_progressive_grounding_address",
             "flow_jepa_coordinate_typed_raw_detail",
             "flow_jepa_structured_ownership_bottleneck",
+            "flow_jepa_pre_value_owner_routing",
+            "flow_jepa_functional_mainline_routing",
+            "flow_jepa_utility_precision_mainline",
+            "flow_jepa_action_free_world_factual",
+            "flow_jepa_shared_factual_glimpse_bank",
+            "flow_jepa_g_aligned_future_effect",
+            "flow_jepa_stateless_goal_phase_machine",
+            "flow_jepa_policy_plan_compiler",
+            "flow_jepa_supervised_effect_mainline",
+            "flow_jepa_object_intent_dynamics_mainline",
+            "flow_jepa_p1_mixed_precision",
             "flow_jepa_interval_stage_typed_value",
             "role_residual_amplitude_contract",
             "role_residual_contract_after_gate",
@@ -1274,6 +1376,267 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError(
                 "structured ownership requires the complete V110 typed path, "
                 "chronological horizon memory, and typed interval-delta supervision"
+            )
+        v115_role_schedule = (
+            str(self.flow_jepa_top_role_schedule).strip() == "3-2-3"
+        )
+        if str(self.flow_jepa_top_role_schedule).strip() not in {
+            "3-3-2",
+            "3-2-3",
+        }:
+            raise ValueError(
+                "flow_jepa_top_role_schedule must be 3-3-2 or 3-2-3"
+            )
+        if int(self.flow_jepa_pre_value_owner_routing) and not (
+            int(self.flow_jepa_structured_ownership_bottleneck)
+            and (
+                int(self.flow_jepa_world_blocks) == 3
+                or (
+                    v115_role_schedule
+                    and int(self.flow_jepa_world_blocks) == 2
+                )
+            )
+        ):
+            raise ValueError(
+                "pre-value owner routing requires the complete V111 ownership "
+                "graph and either the ancestral three-W or V115 two-W schedule"
+            )
+        if int(self.flow_jepa_functional_mainline_routing) and not (
+            int(self.flow_jepa_pre_value_owner_routing)
+            and int(self.stateless_phase_enabled)
+            and int(self.goal_conditioning_enabled)
+            and int(self.action_history_enabled)
+            and (
+                int(self.flow_jepa_world_blocks) == 3
+                or (
+                    v115_role_schedule
+                    and int(self.flow_jepa_world_blocks) == 2
+                )
+            )
+            and int(self.future_anchors) == int(self.stateless_phase_count)
+        ):
+            raise ValueError(
+                "functional mainline routing requires the complete V112 graph, "
+                "typed goal/history phase conditioning, a legal W schedule, and one "
+                "stateless phase query per future anchor"
+            )
+        if int(self.flow_jepa_utility_precision_mainline) and not (
+            int(self.flow_jepa_functional_mainline_routing)
+            and int(self.flow_jepa_action_free_world_factual)
+            and int(self.action_basis_tokens) > 1
+            and int(self.flow_jepa_raw_reader_heads) > 1
+        ):
+            raise ValueError(
+                "utility precision mainline requires the complete V113 graph, "
+                "an action-free factual W path, multiple action basis tokens, "
+                "and multiple factual glimpses"
+            )
+        if int(self.flow_jepa_action_free_world_factual) and not int(
+            self.flow_jepa_functional_mainline_routing
+        ):
+            raise ValueError(
+                "action-free factual W requires the functional V113 mainline"
+            )
+        if int(self.flow_jepa_shared_factual_glimpse_bank) and not (
+            int(self.flow_jepa_utility_precision_mainline)
+            and int(self.flow_jepa_raw_reader_heads) == 4
+        ):
+            raise ValueError(
+                "shared factual glimpse bank requires the V114 utility/precision "
+                "mainline and exactly four factual glimpses"
+            )
+        if int(self.flow_jepa_g_aligned_future_effect) and not (
+            int(self.flow_jepa_shared_factual_glimpse_bank)
+            and int(self.flow_jepa_progressive_grounding_address)
+            and int(self.flow_jepa_coordinate_typed_raw_detail)
+            and int(self.flow_jepa_interval_stage_delta)
+        ):
+            raise ValueError(
+                "G-aligned future effect requires the V115 factual glimpse "
+                "bank, completed G3 typed address state, and interval teacher"
+            )
+        if not 0.0 <= float(self.flow_jepa_teacher_g_ema_decay) < 1.0:
+            raise ValueError(
+                "flow_jepa_teacher_g_ema_decay must be in [0,1)"
+            )
+        if int(self.flow_jepa_stateless_goal_phase_machine) and not (
+            int(self.flow_jepa_g_aligned_future_effect)
+            and int(self.flow_jepa_functional_mainline_routing)
+            and int(self.goal_conditioning_enabled)
+            and int(self.stateless_phase_count) == 4
+            and int(self.future_anchors) == 4
+        ):
+            raise ValueError(
+                "stateless goal-phase machine requires the V115 G-aligned "
+                "functional path, precomputed language conditioning, four "
+                "program states, and four intervals"
+            )
+        if v115_role_schedule:
+            if not (
+                int(self.flow_jepa_grounding_blocks) == 3
+                and int(self.flow_jepa_world_blocks) == 2
+                and int(self.flow_jepa_policy_blocks) == 3
+                and int(self.depth) == 8
+                and int(self.flow_jepa_stateless_goal_phase_machine)
+                and int(self.flow_jepa_policy_plan_compiler)
+            ):
+                raise ValueError(
+                    "the 3-2-3 schedule requires depth=8, G/W/P=3/2/3, "
+                    "the stateless goal-phase machine, and policy plan compiler"
+                )
+        if int(self.flow_jepa_policy_plan_compiler) and not (
+            v115_role_schedule
+            and int(self.flow_jepa_g_aligned_future_effect)
+            and int(self.flow_jepa_shared_factual_glimpse_bank)
+        ):
+            raise ValueError(
+                "policy plan compiler requires the complete V115 3-2-3 "
+                "future-effect and shared-factual path"
+            )
+        if int(self.flow_jepa_supervised_effect_mainline) and not (
+            int(self.flow_jepa_policy_plan_compiler)
+            and int(self.flow_jepa_g_aligned_future_effect)
+            and int(self.flow_jepa_stateless_goal_phase_machine)
+            and v115_role_schedule
+        ):
+            raise ValueError(
+                "supervised effect mainline requires the complete V115 "
+                "G3/W2/P3 graph"
+            )
+        if int(self.flow_jepa_stateless_intent_controller) and not (
+            int(self.flow_jepa_supervised_effect_mainline)
+            and int(self.flow_jepa_stateless_goal_phase_machine)
+            and int(self.stateless_phase_count) == 4
+        ):
+            raise ValueError(
+                "stateless intent controller requires the complete V116 "
+                "four-program supervised-effect graph"
+            )
+        if int(self.flow_jepa_window_effect_bank) and not (
+            int(self.flow_jepa_stateless_intent_controller)
+            and int(self.flow_jepa_supervised_effect_mainline)
+            and int(self.flow_jepa_future_slots) == 3
+            and int(self.future_anchors) == 4
+        ):
+            raise ValueError(
+                "window effect bank requires V117 intent control, three "
+                "near/mid/late effect slots, and four online W anchors"
+            )
+        if int(self.flow_jepa_effect_read_in_p2) and not (
+            int(self.flow_jepa_window_effect_bank)
+            and int(self.flow_jepa_policy_plan_compiler)
+        ):
+            raise ValueError(
+                "P2 effect read requires the V117 window-effect bank and P3 compiler"
+            )
+        if int(self.flow_jepa_differential_intent_effect_mainline) and not (
+            int(self.flow_jepa_stateless_intent_controller)
+            and int(self.flow_jepa_window_effect_bank)
+            and int(self.flow_jepa_effect_read_in_p2)
+            and int(self.flow_jepa_future_slots) == 3
+            and v115_role_schedule
+        ):
+            raise ValueError(
+                "differential intent/effect mainline requires the complete "
+                "V117 3-2-3 parent with three effect slots"
+            )
+        if int(self.flow_jepa_grounded_intent_effect_mainline):
+            grounded_required = (
+                int(self.flow_jepa_progressive_grounding_address)
+                and int(self.flow_jepa_pre_value_owner_routing)
+                and int(self.flow_jepa_functional_mainline_routing)
+                and int(self.flow_jepa_shared_factual_glimpse_bank)
+                and int(self.flow_jepa_g_aligned_future_effect)
+                and int(self.flow_jepa_stateless_goal_phase_machine)
+                and int(self.flow_jepa_policy_plan_compiler)
+                and int(self.flow_jepa_supervised_effect_mainline)
+                and int(self.flow_jepa_action_free_world_factual)
+                and int(self.flow_jepa_future_slots) == 4
+                and int(self.future_anchors) == 4
+                and v115_role_schedule
+            )
+            if not grounded_required:
+                raise ValueError(
+                    "grounded intent/effect mainline requires the observable "
+                    "3-2-3 factual parent and four real effect intervals"
+                )
+            if int(self.flow_jepa_differential_intent_effect_mainline):
+                raise ValueError(
+                    "grounded and differential intent/effect mainlines are "
+                    "mutually exclusive capabilities"
+                )
+            if int(self.flow_jepa_window_effect_bank) or int(
+                self.flow_jepa_stateless_intent_controller
+            ):
+                raise ValueError(
+                    "grounded intent/effect does not use the V117 three-slot "
+                    "window bank or pseudo-program intent controller"
+                )
+        if int(self.flow_jepa_object_intent_dynamics_mainline):
+            object_required = (
+                int(self.flow_jepa_progressive_grounding_address)
+                and int(self.flow_jepa_coordinate_typed_raw_detail)
+                and int(self.flow_jepa_structured_ownership_bottleneck)
+                and int(self.flow_jepa_pre_value_owner_routing)
+                and int(self.flow_jepa_functional_mainline_routing)
+                and int(self.flow_jepa_shared_factual_glimpse_bank)
+                and int(self.flow_jepa_g_aligned_future_effect)
+                and int(self.flow_jepa_policy_plan_compiler)
+                and int(self.flow_jepa_action_free_world_factual)
+                and int(self.flow_jepa_future_slots) == 4
+                and int(self.future_anchors) == 4
+                and v115_role_schedule
+            )
+            if not object_required:
+                raise ValueError(
+                    "object-intent dynamics requires the typed observation/P1 "
+                    "foundation, four intervals, and the 3-2-3 schedule"
+                )
+            if int(self.flow_jepa_grounded_intent_effect_mainline) or int(
+                self.flow_jepa_differential_intent_effect_mainline
+            ):
+                raise ValueError(
+                    "object-intent dynamics is a distinct top capability and "
+                    "cannot be combined with V118/V119 top graphs"
+                )
+        if int(self.flow_jepa_future_slots) < 1:
+            raise ValueError("flow_jepa_future_slots must be positive")
+        if str(self.flow_matching_time_distribution) not in {
+            "uniform",
+            "beta_1_5_1",
+        }:
+            raise ValueError(
+                "flow_matching_time_distribution must be uniform or beta_1_5_1"
+            )
+        if int(self.flow_jepa_p1_mixed_precision) and not int(
+            self.flow_jepa_utility_precision_mainline
+        ):
+            raise ValueError(
+                "P1 mixed precision requires the utility precision mainline"
+            )
+        if min(
+            int(self.flow_jepa_address_query_batch_budget),
+            int(self.flow_jepa_microgrid_tile),
+            int(self.flow_jepa_checkpoint_min_batch),
+        ) < 1:
+            raise ValueError(
+                "P1 resource budgets and checkpoint batch threshold must be positive"
+            )
+        if int(self.flow_jepa_address_query_batch_budget) < int(
+            self.flow_jepa_address_query_chunk
+        ):
+            raise ValueError(
+                "P1 query batch budget cannot be smaller than the ancestry chunk"
+            )
+        if int(self.flow_jepa_microgrid_tile) > int(
+            self.flow_jepa_raw_micro_grid
+        ) ** 2:
+            raise ValueError(
+                "P1 microgrid tile cannot exceed the selected microgrid cells"
+            )
+        if not 0.0 < float(self.flow_jepa_pre_value_owner_update_scale) <= 0.25:
+            raise ValueError(
+                "flow_jepa_pre_value_owner_update_scale must be in (0,0.25]"
             )
         if not 0.0 < float(self.flow_jepa_horizon_address_update_scale) <= 1.0:
             raise ValueError(

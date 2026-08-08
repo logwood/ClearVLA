@@ -15,8 +15,10 @@ cd "${REPO_ROOT}"
 export OUT_DIR="${OUT_DIR:-runs/v111_structured_ownership_bottleneck}"
 export V111_BATCH_SIZE="${V111_BATCH_SIZE:-8}"
 export V110_BATCH_SIZE="${V111_BATCH_SIZE}"
-export FLOW_JEPA_PARENT_VERSION=v111
-export CLEARVLA_REQUIRED_MODEL_CONTRACT=v111
+export FLOW_JEPA_PARENT_VERSION="${FLOW_JEPA_PARENT_VERSION:-v111}"
+# Standalone default is V111.  Descendant launchers own stricter contracts and
+# must survive the complete parent chain (V112/V113 and future extensions).
+export CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"
 
 printf '[v111] base=v110 stage=single_end_to_end G=public_chart+typed_sidecars W=interval_innovations P=factorized_source_fine+typed_local_ops bottom=unchanged batch=%s\n' \
   "${V111_BATCH_SIZE}"

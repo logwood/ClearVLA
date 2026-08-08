@@ -7,6 +7,7 @@ import torch
 
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     V39PolicyTrainerConfig,
+    _attach_intent_frame_progress_audit,
     _attach_v94_loss_ledger,
     _evidence_epoch_log_line,
     _evidence_serial_log_line,
@@ -44,6 +45,29 @@ def test_v94_layer_contract_aux_schedule_is_independent_and_constant():
     assert _layer_contract_aux_scale(trainer, 1) == 0.03
     assert _layer_contract_aux_scale(trainer, 4) == 0.03
     assert _layer_contract_aux_scale(trainer, 40) == 0.03
+
+
+def test_intent_frame_progress_is_detached_audit_only() -> None:
+    backward_loss = torch.tensor(2.0, requires_grad=True)
+    losses = {"loss": backward_loss}
+    sample = {"frame_progress": torch.tensor([0.25, 0.75])}
+    output = {
+        "flow_jepa_intent_progress_coordinate_per_sample": torch.tensor(
+            [[0.50], [0.50]], requires_grad=True
+        )
+    }
+
+    _attach_intent_frame_progress_audit(losses, sample, output)
+
+    assert losses["loss"] is backward_loss
+    assert torch.isclose(losses["flow_jepa_frame_progress"], torch.tensor(0.50))
+    assert torch.isclose(
+        losses["flow_jepa_intent_frame_progress_gap"], torch.tensor(0.0)
+    )
+    assert torch.isclose(
+        losses["flow_jepa_intent_frame_progress_mae"], torch.tensor(0.25)
+    )
+    assert not losses["flow_jepa_intent_frame_progress_mae"].requires_grad
 
 
 def test_v95_future_teacher_does_not_imply_counterfactual_policy_graphs():
@@ -780,6 +804,26 @@ def test_v104_model_path_schema_is_supported_by_the_probe_summarizer() -> None:
         _model_path_version("clearvla-v109-model-path-intervention-v8")
         == "v109"
     )
+    assert (
+        _model_path_version("clearvla-v110-model-path-intervention-v9")
+        == "v110"
+    )
+    assert (
+        _model_path_version("clearvla-v111-model-path-intervention-v10")
+        == "v111"
+    )
+    assert (
+        _model_path_version("clearvla-v112-model-path-intervention-v11")
+        == "v112"
+    )
+    assert (
+        _model_path_version("clearvla-v113-model-path-intervention-v12")
+        == "v113"
+    )
+    assert (
+        _model_path_version("clearvla-v113-model-path-intervention-v13")
+        == "v113"
+    )
 
 
 def test_v95_resume_resolves_explicit_and_derived_hierarchy_identically():
@@ -842,6 +886,150 @@ def test_v94_evidence_console_log_uses_only_present_active_fields():
     assert "global_preclip=1.00e+00" in line
     assert "latent_cvae" not in line
     assert "hierarchical_mmdit" not in line
+
+
+def test_v114_console_log_reports_actual_p1_execution_contract() -> None:
+    line = _evidence_serial_log_line(
+        {
+            "loss": 0.4,
+            "physical_flow": 0.3,
+            "flow_jepa_p1_shared_factual": 1.0,
+            "flow_jepa_typed_p2_utility_precision": 1.0,
+            "flow_jepa_p1_query_rows": 24.0,
+            "flow_jepa_p2_query_rows": 96.0,
+            "flow_jepa_address_query_chunk_actual": 4.0,
+            "flow_jepa_typed_p1_activation_checkpoint": 1.0,
+            "flow_jepa_typed_p1_activation_checkpoint_active": 1.0,
+            "grad": 1.0,
+        },
+        epoch=1,
+        batch_index=20,
+        learning_rate=1e-4,
+        seconds_per_batch=4.0,
+    )
+    assert "[v114-train]" in line
+    assert "[v114-repr]" in line
+    assert "p1_query_rows=24" in line
+    assert "p2_query_rows=96" in line
+    assert "p1_query_chunk=4" in line
+    assert "p1_checkpoint_configured=1" in line
+    assert "p1_checkpoint_active=1" in line
+
+
+def test_v119_console_log_reports_grounded_capability_rows() -> None:
+    line = _evidence_serial_log_line(
+        {
+            "loss": 0.4,
+            "physical_flow": 0.3,
+            "grounded_intent_effect_active": 1.0,
+            "grounded_g2_g3_semantic_owner_l1": 0.05,
+            "grounded_s_interval_goal_attention_entropy": 0.80,
+            "grounded_w1_semantic_rms": 0.11,
+            "grounded_w2_semantic_rms": 0.22,
+            "grounded_p2_effect_read_rms": 0.13,
+            "grad_grounded_world_shared_inputs": 1e-3,
+            "grad_grounded_world_w1_blocks": 2e-3,
+            "grad_grounded_world_w2_blocks": 3e-3,
+            "grad_grounded_world_shared_heads": 4e-3,
+            "grad": 1.0,
+        },
+        epoch=1,
+        batch_index=20,
+        learning_rate=1e-4,
+        seconds_per_batch=4.0,
+    )
+    assert "[v119-train]" in line
+    assert "[v119-ground] active=1" in line
+    assert "[v119-intent]" in line
+    assert "[v119-effect]" in line
+    assert "[v119-policy]" in line
+    assert "grounded_w_inputs=1.00e-03" in line
+    assert "grounded_w1_blocks=2.00e-03" in line
+    assert "grounded_w2_blocks=3.00e-03" in line
+    assert "grounded_w_shared_heads=4.00e-03" in line
+
+
+def test_v116_console_log_reports_supervised_effect_and_terminal_semantics() -> None:
+    line = _evidence_serial_log_line(
+        {
+            "loss": 0.4,
+            "physical_flow": 0.3,
+            "flow_jepa_supervised_effect_mainline_active": 1.0,
+            "native_velocity_mse": 0.2,
+            "arm_tangent_mse": 0.18,
+            "arm_null_mse": 0.02,
+            "gripper_tangent_mse": 0.25,
+            "gripper_null_mse": 0.03,
+            "event_reweight_delta": -0.01,
+            "flow_jepa_future_effect_w1_current_loss": 0.04,
+            "flow_jepa_future_effect_w2_successor_loss": 0.05,
+            "flow_jepa_p2_structured_effect_read_rms": 0.12,
+            "flow_jepa_w1_typed_condition_proposal_mass": 0.24,
+            "flow_jepa_phase_terminal_mass": 0.08,
+            "flow_jepa_execution_terminal_probability": 0.08,
+            "evidence_execution_terminal_external_bias": -0.01,
+            "grad": 1.0,
+        },
+        epoch=1,
+        batch_index=20,
+        learning_rate=1e-4,
+        seconds_per_batch=4.0,
+    )
+    assert "[v116-train]" in line
+    assert "native_velocity_mse=0.200000" in line
+    assert "event_reweight_delta=-1.000e-02" in line
+    assert "effect_w1_current_loss=0.0400" in line
+    assert "effect_w2_successor_loss=0.0500" in line
+    assert "p2_effect_read=0.120" in line
+    assert "w1_proposal_mass=0.240" in line
+    assert "execution_terminal=0.080" in line
+    assert "execution_terminal_bias=-0.010" in line
+
+
+def test_v117_console_log_reports_three_slot_intent_effect_semantics() -> None:
+    line = _evidence_serial_log_line(
+        {
+            "loss": 0.4,
+            "physical_flow": 0.3,
+            "flow_jepa_stateless_intent_controller_active": 1.0,
+            "flow_jepa_future_effect_semantic_loss": 0.04,
+            "flow_jepa_future_effect_w1_semantic_loss": 0.03,
+            "flow_jepa_future_effect_w2_semantic_loss": 0.06,
+            "flow_jepa_future_effect_relative_transition_loss": 0.02,
+            "flow_jepa_p2_structured_effect_read_rms": 0.12,
+            "flow_jepa_p2_structured_effect_slot_variation": 0.04,
+            "flow_jepa_p2_effect_near_mass": 0.45,
+            "flow_jepa_p2_effect_mid_mass": 0.35,
+            "flow_jepa_p2_effect_late_mass": 0.20,
+            "flow_jepa_intent_progress_coordinate": 0.55,
+            "flow_jepa_frame_progress": 0.40,
+            "flow_jepa_intent_frame_progress_gap": 0.15,
+            "flow_jepa_intent_frame_progress_mae": 0.17,
+            "flow_jepa_intent_window_selector_max": 0.60,
+            "flow_jepa_intent_window_selector_entropy": 0.75,
+            "flow_jepa_intent_observation_steps": 5.0,
+            "grad": 1.0,
+        },
+        epoch=1,
+        batch_index=20,
+        learning_rate=1e-4,
+        seconds_per_batch=4.0,
+    )
+    assert "[v117-train]" in line
+    assert "effect_semantic_loss=0.0400" in line
+    assert "effect_w1_semantic_loss=0.0300" in line
+    assert "effect_w2_semantic_loss=0.0600" in line
+    assert "effect_relative_transition_loss=0.0200" in line
+    assert "p2_effect_slot_var=0.040" in line
+    assert "p2_effect_near=0.450" in line
+    assert "p2_effect_mid=0.350" in line
+    assert "p2_effect_late=0.200" in line
+    assert "intent_progress=0.550" in line
+    assert "frame_progress=0.400" in line
+    assert "progress_gap=+0.150" in line
+    assert "progress_mae=0.170" in line
+    assert "intent_selector_entropy=0.750" in line
+    assert "intent_observation_steps=5" in line
 
 
 def test_v94_sampling_diagnostics_keep_z_probe_and_drop_inactive_families():

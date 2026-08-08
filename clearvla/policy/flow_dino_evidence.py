@@ -26,8 +26,9 @@ positions for supervision.
 
 from __future__ import annotations
 
+import copy
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -35,8 +36,27 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from .differential_intent_effect import (
+    DifferentialWindowEffectBank,
+    DifferentialWindowRouteCompiler,
+    IntentWindowView,
+)
+from .grounded_intent_effect import (
+    FutureEffectField as GroundedFutureEffectField,
+)
+from .grounded_intent_effect import (
+    GroundedFactSet,
+    GroundedWorldEffectCompiler,
+    GroundedWorldWorkingState,
+    bounded_owner_update,
+    sample_spatial_slots,
+)
+from .grounded_intent_effect import (
+    StatelessIntentState as GroundedIntentState,
+)
 from .role_delta_attnres import (
     AffineVarianceFlooredCenteredNorm,
+    RoleDeltaAttnRes,
     VarianceFlooredCenteredNorm,
     rms_floored_l2_normalize,
     smooth_rms_contract,
@@ -125,6 +145,10 @@ class SoftAddressLatticeBank:
     # normalized image coordinates, so this chart can be sampled without a
     # fixed 8x8 -> patch ownership assumption.
     dense_current_rgb: Tensor | None = None
+    # Frozen target-space projection of the current DINO chart.  This is
+    # observation-only and sampled once by G3 at its continuous object-slot
+    # coordinates.  It prevents W from learning a free current-reference head.
+    dense_current_dino_content: Tensor | None = None
 
 
 @dataclass
@@ -147,6 +171,238 @@ class ProgressiveFineCandidates:
     geometry_keys: Tensor | None = None
     literal_rgb: Tensor | None = None
     source_coordinates: Tensor | None = None
+
+
+@dataclass(frozen=True)
+class FutureTeacherTrackPack:
+    """Loss-only, G-aligned future consequences for current canonical slots."""
+
+    stable_successor: Tensor
+    semantic_delta: Tensor
+    endpoint_delta: Tensor
+    transport_mean: Tensor
+    transport_covariance: Tensor
+    path_envelope: Tensor
+    persistence: Tensor
+    visibility: Tensor
+    uncertainty: Tensor
+    reliability: Tensor
+    association_entropy: Tensor
+    semantic_advantage: Tensor
+    effective_support: Tensor
+    support_count: Tensor
+    current_content: Tensor
+
+    def validate(self) -> None:
+        if self.stable_successor.ndim != 7:
+            raise ValueError(
+                "future teacher successor must be [B,A,C,G,G,M,H]"
+            )
+        prefix = tuple(self.stable_successor.shape[:-1])
+        hidden = int(self.stable_successor.shape[-1])
+        expected = {
+            "semantic_delta": (*prefix, hidden),
+            "endpoint_delta": (*prefix, hidden),
+            "transport_mean": (*prefix, 2),
+            "transport_covariance": (*prefix, 3),
+            "path_envelope": (*prefix, 1),
+            "persistence": (*prefix, 1),
+            "visibility": (*prefix, 1),
+            "uncertainty": (*prefix, 1),
+            "reliability": (*prefix, 1),
+            "association_entropy": (*prefix, 1),
+            "semantic_advantage": (*prefix, 1),
+        }
+        for name, shape in expected.items():
+            value = getattr(self, name)
+            if tuple(value.shape) != shape:
+                raise ValueError(
+                    f"future teacher {name} must be {shape}, "
+                    f"got {tuple(value.shape)}"
+                )
+        current_shape = (
+            int(prefix[0]),
+            int(prefix[2]),
+            int(prefix[3]),
+            int(prefix[4]),
+            int(prefix[5]),
+            hidden,
+        )
+        if tuple(self.current_content.shape) != current_shape:
+            raise ValueError(
+                "future teacher current content does not align with G slots"
+            )
+
+    def slot_reduced(
+        self,
+        slot_weights: Tensor,
+    ) -> dict[str, Tensor]:
+        """Expose legacy camera/cell targets without restoring cell identity."""
+
+        self.validate()
+        batch, anchors, cameras, grid_y, grid_x, slots, _ = (
+            self.stable_successor.shape
+        )
+        if tuple(slot_weights.shape) != (
+            batch,
+            cameras,
+            grid_y,
+            grid_x,
+            slots,
+        ):
+            raise ValueError(
+                "future teacher slot weights do not align with current G3"
+            )
+        weights = slot_weights.float()
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        weights = weights[:, None, ..., None]
+
+        def reduce(value: Tensor) -> Tensor:
+            return (value.float() * weights).sum(dim=-2)
+
+        def flatten(value: Tensor) -> Tensor:
+            return value.reshape(
+                batch,
+                anchors * cameras * grid_y * grid_x,
+                int(value.shape[-1]),
+            ).detach()
+
+        current_weights = weights[:, 0]
+        current = (
+            self.current_content.float() * current_weights
+        ).sum(dim=-2).reshape(
+            batch,
+            cameras * grid_y * grid_x,
+            int(self.current_content.shape[-1]),
+        )
+        return {
+            "flow_jepa_future_target": flatten(
+                reduce(self.stable_successor)
+            ),
+            "flow_jepa_interval_progress_target": flatten(
+                reduce(self.semantic_delta)
+            ),
+            "flow_jepa_interval_endpoint_target": flatten(
+                reduce(self.endpoint_delta)
+            ),
+            "flow_jepa_interval_current_target": current.detach(),
+            "flow_jepa_future_transport_target": flatten(
+                reduce(self.transport_mean)
+            ),
+            "flow_jepa_future_transport_covariance_target": flatten(
+                reduce(self.transport_covariance)
+            ),
+            "flow_jepa_future_persistence_target": flatten(
+                reduce(self.persistence)
+            ),
+            "flow_jepa_future_visibility_target": flatten(
+                reduce(self.visibility)
+            ),
+            "flow_jepa_future_uncertainty_target": flatten(
+                reduce(self.uncertainty)
+            ),
+            "flow_jepa_future_reliability": flatten(
+                reduce(self.reliability)
+            ),
+            "flow_jepa_future_association_entropy": flatten(
+                reduce(self.association_entropy)
+            ),
+            "flow_jepa_future_semantic_advantage": flatten(
+                reduce(self.semantic_advantage)
+            ),
+            "flow_jepa_interval_effective_support": (
+                self.effective_support.detach()
+            ),
+            "flow_jepa_interval_support_count": self.support_count.detach(),
+        }
+
+
+@dataclass(frozen=True)
+class WindowTeacherTrackPack(FutureTeacherTrackPack):
+    """V117 loss-only near/mid/late teacher with fixed slot ownership."""
+
+    slot_names: tuple[str, str, str] = ("near", "mid", "late")
+
+    def validate(self) -> None:
+        super().validate()
+        if int(self.stable_successor.shape[1]) != 3:
+            raise ValueError("window teacher must contain near/mid/late slots")
+
+
+@dataclass(frozen=True)
+class FutureEffectField:
+    """The one online W effect state supervised and consumed downstream."""
+
+    semantic_delta: Tensor
+    transport_mean: Tensor
+    transport_covariance: Tensor
+    persistence: Tensor
+    visibility: Tensor
+    uncertainty: Tensor
+    # V115 ancestry only. V116 forbids an unsupervised route-width carrier at
+    # P ingress and instead exposes current/successor content with direct
+    # teacher ownership.
+    state_innovation: Tensor | None = None
+    current_content: Tensor | None = None
+    successor_content: Tensor | None = None
+
+    def validate(self) -> None:
+        if self.semantic_delta.ndim != 7:
+            raise ValueError(
+                "future effect field must preserve [B,A,C,G,G,M,H]"
+            )
+        prefix = tuple(self.semantic_delta.shape[:-1])
+        expected = {
+            "transport_mean": (*prefix, 2),
+            "transport_covariance": (*prefix, 3),
+            "persistence": (*prefix, 1),
+            "visibility": (*prefix, 1),
+            "uncertainty": (*prefix, 1),
+        }
+        for name, shape in expected.items():
+            if tuple(getattr(self, name).shape) != shape:
+                raise ValueError(f"future effect field {name} is misaligned")
+        if self.state_innovation is not None and tuple(
+            self.state_innovation.shape[:-1]
+        ) != prefix:
+            raise ValueError("future effect state innovation is misaligned")
+        supervised = (
+            self.current_content is not None
+            and self.successor_content is not None
+        )
+        if supervised:
+            for name in ("current_content", "successor_content"):
+                if tuple(getattr(self, name).shape) != tuple(
+                    self.semantic_delta.shape
+                ):
+                    raise ValueError(
+                        f"future effect field {name} is misaligned"
+                    )
+            if self.state_innovation is not None:
+                raise ValueError(
+                    "supervised future effect cannot carry state_innovation"
+                )
+        elif self.state_innovation is None:
+            raise ValueError(
+                "future effect requires supervised content or legacy state innovation"
+            )
+
+
+@dataclass(frozen=True)
+class WindowEffectBank(FutureEffectField):
+    """The sole V117 W->P object with near/mid/late spatial effects."""
+
+    slot_valid: Tensor | None = None
+    slot_names: tuple[str, str, str] = ("near", "mid", "late")
+
+    def validate(self) -> None:
+        super().validate()
+        if int(self.semantic_delta.shape[1]) != 3:
+            raise ValueError("window effect bank must contain near/mid/late slots")
+        if self.slot_valid is None or tuple(self.slot_valid.shape) != (3,):
+            raise ValueError("window effect slot_valid must be present as [3]")
+        if not bool(torch.isfinite(self.slot_valid).all()):
+            raise ValueError("window effect slot_valid is non-finite")
 
 
 @dataclass
@@ -181,6 +437,11 @@ class ProgressiveGroundingAddressState:
     g2_semantic_probability: Tensor | None = None
     g2_appearance_probability: Tensor | None = None
     g2_geometry_probability: Tensor | None = None
+    # Grounded mainline: owner probability across the object-slot axis.  These
+    # are distinct from the within-slot fine-candidate posterior above.
+    g2_semantic_slot_probability: Tensor | None = None
+    g2_appearance_slot_probability: Tensor | None = None
+    g2_geometry_slot_probability: Tensor | None = None
     canonical_coarse_bias: Tensor | None = None
     canonical_fine_bias: Tensor | None = None
     canonical_slot_keys: Tensor | None = None
@@ -191,6 +452,7 @@ class ProgressiveGroundingAddressState:
     canonical_semantic_slot_weights: Tensor | None = None
     canonical_appearance_slot_weights: Tensor | None = None
     canonical_geometry_slot_weights: Tensor | None = None
+    grounded_fact_set: GroundedFactSet | None = None
     # W-owned, horizon-specific selector state.  The teacher-facing relevance
     # chart and the source-state bias are two marginals of the same W/G3
     # compatibility tensor; only the latter is consumed by the P value read.
@@ -201,6 +463,34 @@ class ProgressiveGroundingAddressState:
     world_geometry_source_bias: Tensor | None = None
     world_public_query: Tensor | None = None
     world_horizon_innovation: Tensor | None = None
+    # Post-V111 pre-value ownership state.  These route-width charts remain
+    # separate through every configured W block and are fused only as a
+    # bounded write into the
+    # shared rollout carrier.  The final states also parameterize the W/P
+    # selector posterior; none of them contains a raw/DINO value read.
+    world_semantic_state: Tensor | None = None
+    world_appearance_state: Tensor | None = None
+    world_geometry_state: Tensor | None = None
+    world_interval_state: Tensor | None = None
+    # V113: the hidden-width interval candidate presented to the same typed
+    # W router that writes the online carrier.  The interval teacher supervises
+    # this tensor directly; it is not produced by a post-W3 prediction sidecar.
+    world_interval_progress_prediction: Tensor | None = None
+    world_future_effect_w1_field: FutureEffectField | None = None
+    world_future_effect_field: FutureEffectField | None = None
+    # V117 compact private transition state. It never crosses W->P; P sees
+    # only ``world_future_effect_field`` after the supervised decoders.
+    world_window_effect_route_state: Tensor | None = None
+    # Differential intent/effect mainline.  The current reference is stored
+    # once and only slotwise changes cross W->P.
+    world_differential_effect_w1_field: DifferentialWindowEffectBank | None = None
+    world_differential_effect_field: DifferentialWindowEffectBank | None = None
+    world_differential_effect_route_state: Tensor | None = None
+    world_grounded_working_state: GroundedWorldWorkingState | None = None
+    world_grounded_effect_w1_field: GroundedFutureEffectField | None = None
+    world_grounded_effect_field: GroundedFutureEffectField | None = None
+    world_appearance_fine_query: Tensor | None = None
+    world_owner_depth: int = -1
     world_interval_offset_delta: Tensor | None = None
     world_interval_log_scale_delta: Tensor | None = None
     world_future_offset: Tensor | None = None
@@ -209,6 +499,92 @@ class ProgressiveGroundingAddressState:
     world_future_uncertainty: Tensor | None = None
     world_future_centers: Tensor | None = None
     metrics: dict[str, Tensor] | None = None
+
+
+_GROUNDED_G3_SLOT_INTERVENTIONS = {
+    "address_g3_slot_permute",
+    "address_g3_slot_mean",
+}
+
+
+def _intervene_grounded_fact_slots(
+    facts: GroundedFactSet,
+    mode: str,
+) -> tuple[GroundedFactSet, Tensor]:
+    """Change only G3's object sidecar while preserving the public/P1 base.
+
+    The intervention is deliberately narrower than ``address_g3_zero``.  It
+    leaves ``public_scene_base`` and the completed P1 address lattice intact,
+    so a deployed-action change cannot be attributed to damaging the sole
+    high-resolution factual read.  ``slot_permute`` reindexes every object
+    field consistently within each sample/camera/cell; ``slot_mean`` removes
+    only object-slot distinctions while preserving each field's slot mean.
+    """
+
+    normalized = str(mode).strip().lower()
+    if normalized not in _GROUNDED_G3_SLOT_INTERVENTIONS:
+        raise ValueError(f"unsupported grounded G3 slot intervention: {mode}")
+    facts.validate()
+
+    def changed(value: Tensor, *, slot_dim: int) -> Tensor:
+        resolved_dim = slot_dim if slot_dim >= 0 else value.ndim + slot_dim
+        if int(value.shape[resolved_dim]) <= 1:
+            return value
+        if normalized == "address_g3_slot_permute":
+            return value.roll(shifts=1, dims=resolved_dim)
+        mean = value.float().mean(dim=resolved_dim, keepdim=True)
+        return mean.to(dtype=value.dtype).expand_as(value)
+
+    intervened = replace(
+        facts,
+        content_slots=changed(facts.content_slots, slot_dim=-2),
+        semantic_slots=changed(facts.semantic_slots, slot_dim=-2),
+        appearance_slots=changed(facts.appearance_slots, slot_dim=-2),
+        geometry_slots=changed(facts.geometry_slots, slot_dim=-2),
+        semantic_owner_probs=changed(
+            facts.semantic_owner_probs,
+            slot_dim=-1,
+        ),
+        appearance_owner_probs=changed(
+            facts.appearance_owner_probs,
+            slot_dim=-1,
+        ),
+        geometry_owner_probs=changed(
+            facts.geometry_owner_probs,
+            slot_dim=-1,
+        ),
+        slot_coordinates=changed(facts.slot_coordinates, slot_dim=-2),
+        slot_support=changed(facts.slot_support, slot_dim=-1),
+        slot_validity=changed(facts.slot_validity, slot_dim=-2),
+        slot_transport_prior=(
+            changed(facts.slot_transport_prior, slot_dim=-2)
+            if facts.slot_transport_prior is not None
+            else None
+        ),
+    )
+    intervened.validate()
+    delta_rows = tuple(
+        (
+            getattr(intervened, name).detach().float()
+            - getattr(facts, name).detach().float()
+        )
+        .square()
+        .mean()
+        .sqrt()
+        for name in (
+            "content_slots",
+            "semantic_slots",
+            "appearance_slots",
+            "geometry_slots",
+            "semantic_owner_probs",
+            "appearance_owner_probs",
+            "geometry_owner_probs",
+            "slot_coordinates",
+            "slot_support",
+            "slot_validity",
+        )
+    )
+    return intervened, torch.stack(delta_rows).mean()
 
 
 @dataclass
@@ -2849,6 +3225,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         support: Tensor,
         variance: Tensor,
         aligned_keys: Tensor,
+        collect_diagnostics: bool = True,
     ) -> ProgressiveFineCandidates:
         """Materialize G2 candidates around the corrected G1 modes.
 
@@ -3032,7 +3409,9 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                     if literal_rgb is not None
                     else centers.new_zeros((), dtype=torch.float32)
                 ),
-            },
+            }
+            if collect_diagnostics
+            else {},
         )
 
     @staticmethod
@@ -3663,11 +4042,76 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
         self.cameras = int(config.num_cameras)
         self.anchors = int(config.future_anchors)
         self.slots = int(config.flow_jepa_address_slots)
+        self.world_blocks = int(config.flow_jepa_world_blocks)
         self.coordinate_typed_raw_detail = bool(
             int(getattr(config, "flow_jepa_coordinate_typed_raw_detail", 0))
         )
         self.structured_ownership = bool(
             int(getattr(config, "flow_jepa_structured_ownership_bottleneck", 0))
+        )
+        self.pre_value_owner_routing = bool(
+            int(getattr(config, "flow_jepa_pre_value_owner_routing", 0))
+        )
+        self.functional_mainline_routing = bool(
+            int(getattr(config, "flow_jepa_functional_mainline_routing", 0))
+        )
+        self.g_aligned_future_effect = bool(
+            int(getattr(config, "flow_jepa_g_aligned_future_effect", 0))
+        )
+        self.supervised_effect_mainline = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_supervised_effect_mainline",
+                    0,
+                )
+            )
+        )
+        self.window_effect_bank = bool(
+            int(getattr(config, "flow_jepa_window_effect_bank", 0))
+        )
+        self.differential_intent_effect_mainline = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_differential_intent_effect_mainline",
+                    0,
+                )
+            )
+        )
+        self.grounded_intent_effect_mainline = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_grounded_intent_effect_mainline",
+                    0,
+                )
+            )
+        )
+        self.object_intent_dynamics_mainline = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_object_intent_dynamics_mainline",
+                    0,
+                )
+            )
+        )
+        self.exports_grounded_facts = bool(
+            self.grounded_intent_effect_mainline
+            or self.object_intent_dynamics_mainline
+        )
+        self.effect_slots = int(
+            getattr(config, "flow_jepa_future_slots", self.anchors)
+        )
+        self.window_successor_cell: nn.Module | None = None
+        self.window_late_cell: nn.Module | None = None
+        self.differential_window_compiler: (
+            DifferentialWindowRouteCompiler | None
+        ) = None
+        self.grounded_world_compiler: GroundedWorldEffectCompiler | None = None
+        self.pre_value_owner_update_scale = float(
+            getattr(config, "flow_jepa_pre_value_owner_update_scale", 0.10)
         )
         floor = float(getattr(config, "flow_jepa_routing_norm_floor", 0.25))
         variance_safe = bool(
@@ -3746,6 +4190,22 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     for name in ("semantic", "appearance", "geometry")
                 }
             )
+            self.g3_owner_residual = (
+                nn.ModuleDict(
+                    {
+                        name: nn.Sequential(
+                            norm(self.route_dim, affine=True),
+                            nn.Linear(self.route_dim, 1, bias=False),
+                        )
+                        for name in ("semantic", "appearance", "geometry")
+                    }
+                )
+                if self.exports_grounded_facts
+                else None
+            )
+            if self.g3_owner_residual is not None:
+                for residual in self.g3_owner_residual.values():
+                    nn.init.zeros_(residual[-1].weight)
             self.world_typed_query = nn.ModuleDict(
                 {
                     name: nn.Linear(self.route_dim, self.route_dim, bias=False)
@@ -3760,23 +4220,497 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 nn.Linear(2 * self.route_dim, 5, bias=False),
             )
             nn.init.zeros_(self.future_transport[-1].weight)
+            if self.pre_value_owner_routing:
+                # The public chart is projected from the clean G3 query plus
+                # owner-neutral geometry.  Private semantic/appearance/
+                # geometry summaries never enter this projection.
+                self.g3_public_summary_out = nn.Sequential(
+                    norm(self.route_dim + 4, affine=True),
+                    nn.Linear(
+                        self.route_dim + 4,
+                        self.hidden,
+                        bias=False,
+                    ),
+                )
+                owner_names = (
+                    "semantic",
+                    "appearance",
+                    "geometry",
+                    "interval",
+                )
+                # One transition at the G3->W entry and one after each
+                # configured W block. States stay in route space; only their
+                # bounded deltas are reconstructed into the shared W carrier.
+                self.world_owner_transitions = nn.ModuleList(
+                    [
+                        nn.ModuleDict(
+                            {
+                                name: nn.Sequential(
+                                    norm(3 * self.route_dim, affine=True),
+                                    nn.Linear(
+                                        3 * self.route_dim,
+                                        2 * self.route_dim,
+                                        bias=False,
+                                    ),
+                                    nn.SiLU(),
+                                    nn.Linear(
+                                        2 * self.route_dim,
+                                        self.route_dim,
+                                        bias=False,
+                                    ),
+                                )
+                                for name in owner_names
+                            }
+                        )
+                        for _ in range(self.world_blocks + 1)
+                    ]
+                )
+                self.world_owner_writes = nn.ModuleDict(
+                    {
+                        name: nn.Linear(
+                            self.route_dim,
+                            self.hidden,
+                            bias=False,
+                        )
+                        for name in owner_names
+                    }
+                )
+                for transition_bank in self.world_owner_transitions:
+                    for transition in transition_bank.values():
+                        nn.init.normal_(
+                            transition[-1].weight,
+                            mean=0.0,
+                            std=1e-3,
+                        )
+                if self.functional_mainline_routing:
+                    self.world_owner_route_attnres = nn.ModuleList(
+                        [
+                            RoleDeltaAttnRes(
+                                self.route_dim,
+                                self.route_dim,
+                                max_sources=len(owner_names),
+                                max_value_rms=0.75,
+                                normalization_floor=floor,
+                            )
+                            for _ in range(self.world_blocks + 1)
+                        ]
+                    )
+                    self.world_owner_fused_writes = nn.ModuleList(
+                        [
+                            nn.Linear(
+                                self.route_dim,
+                                self.hidden,
+                                bias=False,
+                            )
+                            for _ in range(self.world_blocks + 1)
+                        ]
+                    )
+                    self.world_horizon_condition = nn.ModuleList(
+                        [
+                            nn.Linear(
+                                self.hidden,
+                                self.route_dim,
+                                bias=False,
+                            )
+                            for _ in range(self.world_blocks + 1)
+                        ]
+                    )
+                    for write in self.world_owner_fused_writes:
+                        nn.init.normal_(write.weight, mean=0.0, std=2e-2)
+                    # The full-width projections are retained only for
+                    # checkpoint ancestry. V113+ routes the compact owner bank
+                    # and reconstructs hidden width once.
+                    self.world_owner_writes.requires_grad_(False)
+                    if self.g_aligned_future_effect:
+                        effect_width = (
+                            self.route_dim
+                            if self.supervised_effect_mainline
+                            else 4 * self.route_dim
+                        )
+                        self.future_effect_semantic = nn.Sequential(
+                            norm(effect_width, affine=True),
+                            nn.Linear(
+                                effect_width,
+                                2 * self.route_dim,
+                                bias=False,
+                            ),
+                            nn.SiLU(),
+                            nn.Linear(
+                                2 * self.route_dim,
+                                self.hidden,
+                                bias=False,
+                            ),
+                        )
+                        self.future_effect_geometry = nn.Sequential(
+                            norm(effect_width, affine=True),
+                            nn.Linear(
+                                effect_width,
+                                2 * self.route_dim,
+                                bias=False,
+                            ),
+                            nn.SiLU(),
+                            nn.Linear(
+                                2 * self.route_dim,
+                                8,
+                                bias=False,
+                            ),
+                        )
+                        nn.init.normal_(
+                            self.future_effect_semantic[-1].weight,
+                            mean=0.0,
+                            std=1e-3,
+                        )
+                        nn.init.normal_(
+                            self.future_effect_geometry[-1].weight,
+                            mean=0.0,
+                            std=1e-3,
+                        )
+                        self.future_effect_current = (
+                            nn.Sequential(
+                                norm(self.route_dim, affine=True),
+                                nn.Linear(
+                                    self.route_dim,
+                                    self.hidden,
+                                    bias=False,
+                                ),
+                            )
+                            if self.supervised_effect_mainline
+                            else None
+                        )
+                        if self.future_effect_current is not None:
+                            nn.init.normal_(
+                                self.future_effect_current[-1].weight,
+                                mean=0.0,
+                                std=1e-3,
+                            )
+                        if self.window_effect_bank:
+                            if self.effect_slots != 3 or self.anchors != 4:
+                                raise ValueError(
+                                    "V117 window effects require 3 slots over 4 anchors"
+                                )
+                            self.window_successor_cell = nn.Sequential(
+                                norm(2 * self.route_dim, affine=True),
+                                nn.Linear(
+                                    2 * self.route_dim,
+                                    2 * self.route_dim,
+                                    bias=False,
+                                ),
+                                nn.SiLU(),
+                                nn.Linear(
+                                    2 * self.route_dim,
+                                    self.route_dim,
+                                    bias=False,
+                                ),
+                            )
+                            self.window_late_cell = nn.Sequential(
+                                norm(2 * self.route_dim, affine=True),
+                                nn.Linear(
+                                    2 * self.route_dim,
+                                    2 * self.route_dim,
+                                    bias=False,
+                                ),
+                                nn.SiLU(),
+                                nn.Linear(
+                                    2 * self.route_dim,
+                                    self.route_dim,
+                                    bias=False,
+                                ),
+                            )
+                            nn.init.normal_(
+                                self.window_successor_cell[-1].weight,
+                                mean=0.0,
+                                std=1e-2,
+                            )
+                            nn.init.normal_(
+                                self.window_late_cell[-1].weight,
+                                mean=0.0,
+                                std=1e-2,
+                            )
+                    else:
+                        self.future_effect_semantic = None
+                        self.future_effect_geometry = None
+                        self.future_effect_current = None
+                else:
+                    self.world_owner_route_attnres = None
+                    self.world_owner_fused_writes = None
+                    self.world_horizon_condition = None
+                    self.future_effect_semantic = None
+                    self.future_effect_geometry = None
+            else:
+                self.g3_public_summary_out = None
+                self.world_owner_transitions = None
+                self.world_owner_writes = None
+                self.world_owner_route_attnres = None
+                self.world_owner_fused_writes = None
+                self.world_horizon_condition = None
+                self.future_effect_semantic = None
+                self.future_effect_geometry = None
+                self.future_effect_current = None
             # Retain the V109 modules in the state dict for ancestry, but do
             # not give the optimizer dead owners once the typed V110 modules
             # replace their forward semantics.
             self.g2_rectifier.requires_grad_(False)
             self.g3_slot_score.requires_grad_(False)
             self.g3_summary_out.requires_grad_(False)
+            if self.pre_value_owner_routing:
+                # V112's public projection is explicitly independent of the
+                # V110/V111 private hidden summaries.  Retain those parameters
+                # for checkpoint ancestry without presenting dead owners to
+                # the optimizer.
+                self.g3_typed_summary_out.requires_grad_(False)
         else:
             self.g2_typed_rectifier = None
             self.g2_typed_query = None
             self.g3_typed_summary_out = None
             self.g3_typed_slot_score = None
+            self.g3_owner_residual = None
             self.world_typed_query = None
             self.future_transport = None
+            self.g3_public_summary_out = None
+            self.world_owner_transitions = None
+            self.world_owner_writes = None
+            self.world_owner_route_attnres = None
+            self.world_owner_fused_writes = None
+            self.world_horizon_condition = None
+            self.future_effect_semantic = None
+            self.future_effect_geometry = None
+            self.future_effect_current = None
+        if self.differential_intent_effect_mainline:
+            if not (
+                self.window_effect_bank
+                and self.supervised_effect_mainline
+                and self.functional_mainline_routing
+                and self.effect_slots == 3
+                and self.anchors == 4
+            ):
+                raise ValueError(
+                    "differential W requires the complete V117 four-anchor "
+                    "three-slot supervised routing parent"
+                )
+            self.differential_window_compiler = DifferentialWindowRouteCompiler(
+                route_dim=self.route_dim,
+                hidden=self.hidden,
+                heads=4,
+                slots_per_cell=self.slots,
+            )
+            # These V116/V117 decoders stay serializable for ancestry, but the
+            # differential graph must not optimizer-own dead parallel effects.
+            for legacy_module in (
+                self.future_effect_semantic,
+                self.future_effect_geometry,
+                self.future_effect_current,
+                self.window_successor_cell,
+                self.window_late_cell,
+            ):
+                if legacy_module is not None:
+                    legacy_module.requires_grad_(False)
+        if self.grounded_intent_effect_mainline:
+            if not (
+                self.g_aligned_future_effect
+                and self.supervised_effect_mainline
+                and self.functional_mainline_routing
+                and self.pre_value_owner_routing
+                and self.effect_slots == 4
+                and self.anchors == 4
+                and self.coordinate_typed_raw_detail
+                and self.structured_ownership
+            ):
+                raise ValueError(
+                    "grounded W requires typed G3 facts, four anchors/effects, "
+                    "and the observable supervised 3-2-3 parent"
+                )
+            self.grounded_world_compiler = GroundedWorldEffectCompiler(
+                hidden=self.hidden,
+                fact_dim=self.route_dim,
+                route_dim=self.route_dim,
+                content_dim=int(config.visual_token_dim),
+                heads=4,
+            )
+            if self.g3_typed_slot_score is not None:
+                self.g3_typed_slot_score.requires_grad_(False)
+            # The grounded compiler replaces the historical shared owner
+            # transition/AttnRes soup and every parallel effect decoder.
+            for legacy_module in (
+                self.world_owner_transitions,
+                self.world_owner_writes,
+                self.world_owner_route_attnres,
+                self.world_owner_fused_writes,
+                self.future_effect_semantic,
+                self.future_effect_geometry,
+                self.future_effect_current,
+                self.window_successor_cell,
+                self.window_late_cell,
+            ):
+                if legacy_module is not None:
+                    legacy_module.requires_grad_(False)
         self.horizon_query_norm = norm(self.hidden)
         self.horizon_query_proj = nn.Linear(
             self.hidden, self.route_dim, bias=False
         )
+        if self.grounded_intent_effect_mainline:
+            # G3 ownership is inherited through bounded residuals, while W is
+            # owned by GroundedWorldEffectCompiler. These serialized ancestor
+            # modules may still be evaluated to retain the parent state shape,
+            # but they are not optimization owners in the sibling graph.
+            self.query_projections[2].requires_grad_(False)
+            for ancestor in (
+                self.g3_public_summary_out,
+                self.world_horizon_condition,
+                self.horizon_query_norm,
+                self.horizon_query_proj,
+            ):
+                if ancestor is not None:
+                    ancestor.requires_grad_(False)
+        if self.g_aligned_future_effect:
+            # These modules own V109-V114's quadratic W target/source
+            # posterior. V115 addresses P1 from protected G3 facts and carries
+            # successor geometry in FutureEffectField, so the legacy posterior
+            # is neither executed nor optimizer-owned.
+            if self.world_typed_query is not None:
+                self.world_typed_query.requires_grad_(False)
+            if self.future_transport is not None:
+                self.future_transport.requires_grad_(False)
+        if self.object_intent_dynamics_mainline:
+            # The capability reuses G1/G2/G3's typed local-fact construction
+            # and the V114 P1 lattice only.  Historical W owner transitions,
+            # horizon queries and effect decoders are never called by the
+            # object graph; leaving them optimizer-owned would create a large
+            # dead parameter group and misleading zero-gradient diagnostics.
+            for ancestor in (
+                self.g3_public_summary_out,
+                self.g3_typed_slot_score,
+                self.world_owner_transitions,
+                self.world_owner_writes,
+                self.world_owner_route_attnres,
+                self.world_owner_fused_writes,
+                self.world_horizon_condition,
+                self.future_effect_semantic,
+                self.future_effect_geometry,
+                self.future_effect_current,
+                self.window_successor_cell,
+                self.window_late_cell,
+                self.world_typed_query,
+                self.future_transport,
+                self.horizon_query_norm,
+                self.horizon_query_proj,
+            ):
+                if ancestor is not None:
+                    ancestor.requires_grad_(False)
+
+    def _decode_supervised_effect_routes(
+        self,
+        route_state: Tensor,
+        state: ProgressiveGroundingAddressState,
+        *,
+        rollout_dtype: torch.dtype,
+    ) -> tuple[FutureEffectField, Tensor]:
+        """Decode only the W-owned slots presented by one causal stage."""
+
+        if (
+            self.future_effect_semantic is None
+            or self.future_effect_geometry is None
+            or self.future_effect_current is None
+            or state.canonical_semantic_keys is None
+        ):
+            raise RuntimeError("supervised effect route decoder is incomplete")
+        if route_state.ndim != 6 or int(route_state.shape[-1]) != self.route_dim:
+            raise ValueError("effect route state must be [B,W,C,G,G,R]")
+        slot_count = int(route_state.shape[1])
+        route_slots = route_state[..., None, :].expand(
+            -1, -1, -1, -1, -1, self.slots, -1
+        )
+        semantic_slots = state.canonical_semantic_keys[:, None].expand(
+            -1, slot_count, -1, -1, -1, -1, -1
+        )
+        raw_semantic_delta = self.future_effect_semantic(route_slots)
+        semantic_delta, semantic_contract = smooth_rms_contract(
+            raw_semantic_delta, 0.50
+        )
+        raw_geometry = self.future_effect_geometry(route_slots)
+        transport_mean = 0.50 * torch.tanh(raw_geometry[..., :2])
+        variance_diag = 0.01 + 0.99 * torch.sigmoid(raw_geometry[..., 2:4])
+        covariance_cross = (
+            0.50
+            * torch.tanh(raw_geometry[..., 4:5])
+            * variance_diag.prod(dim=-1, keepdim=True).sqrt()
+        )
+        transport_covariance = torch.cat(
+            (variance_diag, covariance_cross), dim=-1
+        )
+        persistence = torch.sigmoid(raw_geometry[..., 5:6])
+        visibility = torch.sigmoid(raw_geometry[..., 6:7])
+        uncertainty = 0.05 + 3.95 * torch.sigmoid(
+            raw_geometry[..., 7:8] - 1.5
+        )
+        current_content = self.future_effect_current(semantic_slots)
+        current_content, _ = smooth_rms_contract(current_content, 0.75)
+        effect = FutureEffectField(
+            semantic_delta=semantic_delta.to(dtype=rollout_dtype),
+            transport_mean=transport_mean.to(dtype=rollout_dtype),
+            transport_covariance=transport_covariance.to(dtype=rollout_dtype),
+            persistence=persistence.to(dtype=rollout_dtype),
+            visibility=visibility.to(dtype=rollout_dtype),
+            uncertainty=uncertainty.to(dtype=rollout_dtype),
+            current_content=current_content.to(dtype=rollout_dtype),
+            successor_content=(current_content + semantic_delta).to(
+                dtype=rollout_dtype
+            ),
+        )
+        effect.validate()
+        return effect, semantic_contract
+
+    @staticmethod
+    def _concat_effect_fields(
+        first: FutureEffectField,
+        second: FutureEffectField,
+        *,
+        slot_valid: Tensor,
+    ) -> WindowEffectBank:
+        """Concatenate independently owned effect slots without a hidden bypass."""
+
+        first.validate()
+        second.validate()
+        if first.current_content is None or first.successor_content is None:
+            raise ValueError("first effect field is not supervised")
+        if second.current_content is None or second.successor_content is None:
+            raise ValueError("second effect field is not supervised")
+
+        def combine(name: str) -> Tensor:
+            return torch.cat((getattr(first, name), getattr(second, name)), dim=1)
+
+        bank = WindowEffectBank(
+            semantic_delta=combine("semantic_delta"),
+            transport_mean=combine("transport_mean"),
+            transport_covariance=combine("transport_covariance"),
+            persistence=combine("persistence"),
+            visibility=combine("visibility"),
+            uncertainty=combine("uncertainty"),
+            current_content=combine("current_content"),
+            successor_content=combine("successor_content"),
+            slot_valid=slot_valid,
+        )
+        bank.validate()
+        return bank
+
+    @staticmethod
+    def _slice_effect_field(
+        field: FutureEffectField, window: slice
+    ) -> FutureEffectField:
+        field.validate()
+        if field.current_content is None or field.successor_content is None:
+            raise ValueError("cannot slice a legacy unsupervised effect field")
+        sliced = FutureEffectField(
+            semantic_delta=field.semantic_delta[:, window],
+            transport_mean=field.transport_mean[:, window],
+            transport_covariance=field.transport_covariance[:, window],
+            persistence=field.persistence[:, window],
+            visibility=field.visibility[:, window],
+            uncertainty=field.uncertainty[:, window],
+            current_content=field.current_content[:, window],
+            successor_content=field.successor_content[:, window],
+        )
+        sliced.validate()
+        return sliced
 
     def begin(self, bank: SoftAddressLatticeBank) -> ProgressiveGroundingAddressState:
         required = (
@@ -3845,6 +4779,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
         stage: int,
         intervention: str | None = None,
         candidate_sampler: Any | None = None,
+        collect_diagnostics: bool = True,
     ) -> ProgressiveGroundingAddressState:
         if stage != state.stage + 1 or stage not in (1, 2, 3):
             raise RuntimeError(
@@ -3897,14 +4832,14 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     probability,
                     bank.coarse_candidate_keys.float(),
                 )
+            if collect_diagnostics:
                 entropy = -(
-                    probability.clamp_min(1e-8)
-                    * probability.clamp_min(1e-8).log()
+                    probability.detach().float().clamp_min(1e-8)
+                    * probability.detach().float().clamp_min(1e-8).log()
                 ).sum(dim=-1) / math.log(
                     float(max(int(probability.shape[-1]), 2))
                 )
-            metrics.update(
-                {
+                metrics.update({
                     "flow_jepa_progressive_grounding_address": rollout.new_ones(
                         (), dtype=torch.float32
                     ),
@@ -3924,8 +4859,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     .sum(dim=-1)
                     .sqrt()
                     .mean(),
-                }
-            )
+                })
             state.stage = 1
             state.coarse_logits = logits.to(dtype=rollout.dtype)
             state.coarse_probability = probability.to(dtype=rollout.dtype)
@@ -4058,6 +4992,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 support=support,
                 variance=state.aligned_variance.float(),
                 aligned_keys=state.aligned_keys,
+                collect_diagnostics=collect_diagnostics,
             )
             if not isinstance(candidates, ProgressiveFineCandidates):
                 raise TypeError("G2 candidate sampler returned an invalid contract")
@@ -4066,9 +5001,14 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             dynamic_fine_valid = candidates.valid
             fine_coordinates = candidates.current_coordinates
             candidate_metrics = candidates.metrics
-            fine_key = self.candidate_norm(dynamic_fine_keys)
+            fine_key = (
+                None
+                if self.coordinate_typed_raw_detail
+                else self.candidate_norm(dynamic_fine_keys)
+            )
             typed_query_rows: dict[str, Tensor] = {}
             typed_key_rows: dict[str, Tensor] = {}
+            g2_slot_probability: dict[str, Tensor] = {}
             if self.coordinate_typed_raw_detail:
                 if (
                     self.g2_typed_query is None
@@ -4112,6 +5052,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                         content_logits = sum(typed_logits.values()) / math.sqrt(3.0)
                 else:
                     typed_logits = {}
+                    assert fine_key is not None
                     content_logits = torch.einsum(
                         "bcijmr,bcijmkr->bcijmk",
                         query.float(),
@@ -4161,6 +5102,35 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     geometry_probability = owner_probability(
                         typed_logits["geometry"]
                     )
+                    if self.exports_grounded_facts:
+                        valid_count = dynamic_fine_valid.float().sum(
+                            dim=-1
+                        ).clamp_min(1.0)
+                        for name in ("semantic", "appearance", "geometry"):
+                            owner_candidate_logit = (
+                                typed_logits[name] + spatial_prior
+                            ).masked_fill(
+                                ~dynamic_fine_valid,
+                                torch.finfo(typed_logits[name].dtype).min,
+                            )
+                            safe_candidate_logit = torch.where(
+                                any_valid,
+                                owner_candidate_logit,
+                                torch.zeros_like(owner_candidate_logit),
+                            )
+                            slot_evidence = torch.logsumexp(
+                                safe_candidate_logit,
+                                dim=-1,
+                            ) - valid_count.log()
+                            slot_evidence = torch.where(
+                                any_valid[..., 0],
+                                slot_evidence,
+                                torch.zeros_like(slot_evidence),
+                            )
+                            g2_slot_probability[name] = torch.softmax(
+                                slot_evidence,
+                                dim=-1,
+                            )
                 else:
                     semantic_probability = fine_probability
                     appearance_probability = fine_probability
@@ -4173,6 +5143,14 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     semantic_probability = fine_probability
                     appearance_probability = fine_probability
                     geometry_probability = fine_probability
+                    if g2_slot_probability:
+                        g2_slot_probability = {
+                            name: torch.full_like(
+                                probability,
+                                1.0 / float(max(self.slots, 1)),
+                            )
+                            for name, probability in g2_slot_probability.items()
+                        }
                 elif intervention == "address_g2_shuffle":
                     fine_probability = self._intervene(
                         fine_probability,
@@ -4225,6 +5203,11 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                                 dim=-1, keepdim=True
                             ).clamp_min(1.0)
                         )
+                        if g2_slot_probability:
+                            g2_slot_probability = {
+                                name: probability.roll(shifts=1, dims=-1)
+                                for name, probability in g2_slot_probability.items()
+                            }
                 rectified_keys = torch.einsum(
                     "bcijmk,bcijmkr->bcijmr",
                     fine_probability,
@@ -4235,14 +5218,14 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     geometry_probability,
                     fine_coordinates,
                 )
+            if collect_diagnostics:
                 fine_entropy = -(
-                    fine_probability.clamp_min(1e-8)
-                    * fine_probability.clamp_min(1e-8).log()
+                    fine_probability.detach().float().clamp_min(1e-8)
+                    * fine_probability.detach().float().clamp_min(1e-8).log()
                 ).sum(dim=-1) / math.log(
                     float(max(int(fine_probability.shape[-1]), 2))
                 )
-            metrics.update(
-                {
+                metrics.update({
                     **candidate_metrics,
                     "flow_jepa_progressive_g2_center_correction_rms": correction.detach()
                     .square()
@@ -4295,8 +5278,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                             - geometry_probability.detach()
                         ).abs().sum(dim=-1).mean()
                     ),
-                }
-            )
+                })
             state.stage = 2
             state.fine_logits = fine_logits.to(dtype=rollout.dtype)
             state.fine_probability = fine_probability.to(dtype=rollout.dtype)
@@ -4322,6 +5304,24 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 state.g2_geometry_probability = geometry_probability.to(
                     dtype=rollout.dtype
                 )
+                if self.exports_grounded_facts:
+                    if set(g2_slot_probability) != {
+                        "semantic",
+                        "appearance",
+                        "geometry",
+                    }:
+                        raise RuntimeError(
+                            "grounded G2 did not construct typed slot ownership"
+                        )
+                    state.g2_semantic_slot_probability = (
+                        g2_slot_probability["semantic"].to(dtype=rollout.dtype)
+                    )
+                    state.g2_appearance_slot_probability = (
+                        g2_slot_probability["appearance"].to(dtype=rollout.dtype)
+                    )
+                    state.g2_geometry_slot_probability = (
+                        g2_slot_probability["geometry"].to(dtype=rollout.dtype)
+                    )
             state.metrics = metrics
             return state
 
@@ -4385,18 +5385,61 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 + canonical_appearance
                 + canonical_geometry
             ) * 0.5
-            owner_slot_scores = {
-                "semantic": self.g3_typed_slot_score["semantic"](
-                    canonical_semantic
-                ).squeeze(-1).float(),
-                "appearance": self.g3_typed_slot_score["appearance"](
-                    canonical_appearance
-                ).squeeze(-1).float(),
-                "geometry": self.g3_typed_slot_score["geometry"](
-                    canonical_geometry
-                ).squeeze(-1).float(),
-            }
-            if self.structured_ownership:
+            owner_slot_scores = (
+                {}
+                if self.exports_grounded_facts
+                else {
+                    "semantic": self.g3_typed_slot_score["semantic"](
+                        canonical_semantic
+                    ).squeeze(-1).float(),
+                    "appearance": self.g3_typed_slot_score["appearance"](
+                        canonical_appearance
+                    ).squeeze(-1).float(),
+                    "geometry": self.g3_typed_slot_score["geometry"](
+                        canonical_geometry
+                    ).squeeze(-1).float(),
+                }
+            )
+            if self.exports_grounded_facts:
+                if self.g3_owner_residual is None:
+                    raise RuntimeError("grounded G3 has no bounded owner residual")
+                parent_owner = {
+                    "semantic": state.g2_semantic_slot_probability,
+                    "appearance": state.g2_appearance_slot_probability,
+                    "geometry": state.g2_geometry_slot_probability,
+                }
+                if any(value is None for value in parent_owner.values()):
+                    raise RuntimeError(
+                        "grounded G3 cannot inherit missing G2 slot ownership"
+                    )
+                updated_owner: dict[str, Tensor] = {}
+                for name, canonical_key in (
+                    ("semantic", canonical_semantic),
+                    ("appearance", canonical_appearance),
+                    ("geometry", canonical_geometry),
+                ):
+                    parent = parent_owner[name]
+                    assert parent is not None
+                    residual = self.g3_owner_residual[name](
+                        canonical_key
+                    ).squeeze(-1)
+                    updated_owner[name] = bounded_owner_update(
+                        parent,
+                        residual,
+                        maximum_residual=0.50,
+                    ).float()
+                # Store log probabilities as the score interface so the
+                # downstream softmax recovers the inherited/refined posterior
+                # exactly, rather than training a second independent owner.
+                owner_slot_scores = {
+                    name: probability.clamp_min(1e-8).log()
+                    for name, probability in updated_owner.items()
+                }
+                slot_score = 0.5 * (
+                    owner_slot_scores["semantic"]
+                    + owner_slot_scores["geometry"]
+                )
+            elif self.structured_ownership:
                 # Source/slot ownership is a semantic hypothesis constrained
                 # by geometry.  Appearance is retained for local verification
                 # and cannot seize the coarse source decision.
@@ -4504,18 +5547,22 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 state.rectified_support.float()[..., None],
                 fine_entropy[..., None],
             )
-            summary_by_type = {
-                name: self.g3_typed_summary_out[name](
-                    torch.cat((value.float(), *shared_geometry), dim=-1).to(
-                        dtype=rollout.dtype
+            summary_by_type = (
+                {}
+                if self.pre_value_owner_routing and self.structured_ownership
+                else {
+                    name: self.g3_typed_summary_out[name](
+                        torch.cat((value.float(), *shared_geometry), dim=-1).to(
+                            dtype=rollout.dtype
+                        )
                     )
-                )
-                for name, value in (
-                    ("semantic", canonical_semantic),
-                    ("appearance", canonical_appearance),
-                    ("geometry", canonical_geometry),
-                )
-            }
+                    for name, value in (
+                        ("semantic", canonical_semantic),
+                        ("appearance", canonical_appearance),
+                        ("geometry", canonical_geometry),
+                    )
+                }
+            )
         else:
             summary_input = torch.cat(
                 (
@@ -4544,18 +5591,67 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     owner_slot_weights[name] = torch.softmax(
                         owner_slot_scores[name], dim=-1
                     ).to(dtype=rollout.dtype)
-                    metrics[
-                        f"flow_jepa_progressive_g3_{name}_owner_sidecar_rms"
-                    ] = canonical_key.detach().float().square().mean().sqrt()
-                # Public W memory receives the common low-frequency scene
-                # chart, not a sum of three private selector decisions.  A
-                # uniform slot marginal preserves all chart support while the
-                # owner-weighted summaries/keys stay private to the sidecar.
-                public_rows = [
-                    summary_by_type[name].mean(dim=4)
-                    for name in ("semantic", "appearance", "geometry")
-                ]
-                summary = sum(public_rows) / math.sqrt(3.0)
+                    if collect_diagnostics:
+                        metrics[
+                            f"flow_jepa_progressive_g3_{name}_owner_sidecar_rms"
+                        ] = canonical_key.detach().float().square().mean().sqrt()
+                if self.pre_value_owner_routing:
+                    if self.exports_grounded_facts:
+                        # The grounded public base is the completed G3 chart
+                        # itself.  Projecting the typed slot summaries and then
+                        # averaging their object axis would recreate the public
+                        # information soup that GroundedFactSet is designed to
+                        # avoid.  ``clean`` retains camera/x/y identity and is
+                        # already in the model hidden width.
+                        summary, _ = smooth_rms_contract(clean, 0.35)
+                        if collect_diagnostics:
+                            metrics[
+                                "grounded_g3_public_base_direct"
+                            ] = summary.new_ones((), dtype=torch.float32)
+                    else:
+                        if self.g3_public_summary_out is None:
+                            raise RuntimeError(
+                                "pre-value owner routing has no public G3 projector"
+                            )
+                        # V112-V118 ancestry: retain the historical public
+                        # projection exactly outside the grounded capability.
+                        public_input = torch.cat(
+                            (
+                                query.float(),
+                                state.rectified_centers.float(),
+                                state.rectified_support.float()[..., None],
+                                fine_entropy[..., None],
+                            ),
+                            dim=-1,
+                        ).to(dtype=rollout.dtype)
+                        summary = self.g3_public_summary_out(public_input).mean(dim=4)
+                        if collect_diagnostics:
+                            metrics[
+                                "flow_jepa_progressive_g3_public_input_rms"
+                            ] = public_input.detach().float().square().mean().sqrt()
+                            private_reference = sum(
+                                value.mean(dim=4)
+                                for value in (
+                                    canonical_semantic,
+                                    canonical_appearance,
+                                    canonical_geometry,
+                                )
+                            ) / math.sqrt(3.0)
+                            metrics[
+                                "flow_jepa_progressive_g3_query_private_cosine"
+                            ] = F.cosine_similarity(
+                                query.detach().float().mean(dim=4),
+                                private_reference.detach().float(),
+                                dim=-1,
+                            ).mean()
+                else:
+                    # V111 compatibility path.  It is intentionally retained
+                    # byte-for-byte when the post-V111 contract is disabled.
+                    public_rows = [
+                        summary_by_type[name].mean(dim=4)
+                        for name in ("semantic", "appearance", "geometry")
+                    ]
+                    summary = sum(public_rows) / math.sqrt(3.0)
                 summary, _ = smooth_rms_contract(summary, 0.35)
             else:
                 typed_summary_rows = []
@@ -4565,9 +5661,10 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     ).sum(dim=4)
                     typed_summary, _ = smooth_rms_contract(typed_summary, 0.50)
                     typed_summary_rows.append(typed_summary)
-                    metrics[
-                        f"flow_jepa_progressive_g3_{name}_summary_rms"
-                    ] = typed_summary.detach().float().square().mean().sqrt()
+                    if collect_diagnostics:
+                        metrics[
+                            f"flow_jepa_progressive_g3_{name}_summary_rms"
+                        ] = typed_summary.detach().float().square().mean().sqrt()
                 owner_summary = torch.stack(typed_summary_rows, dim=4)
                 summary = owner_summary
         else:
@@ -4592,8 +5689,8 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 zero_name="address_g3_zero",
                 shuffle_name="address_g3_shuffle",
             )
-        metrics.update(
-            {
+        if collect_diagnostics:
+            metrics.update({
                 "flow_jepa_progressive_g3_coarse_bias_rms": coarse_bias.detach()
                 .square()
                 .mean()
@@ -4628,9 +5725,11 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 "flow_jepa_structured_ownership_bottleneck": summary.new_tensor(
                     float(self.structured_ownership), dtype=torch.float32
                 ),
-            }
-        )
-        if self.structured_ownership:
+                "flow_jepa_pre_value_owner_routing": summary.new_tensor(
+                    float(self.pre_value_owner_routing), dtype=torch.float32
+                ),
+            })
+        if collect_diagnostics and self.structured_ownership:
             for name, weights in owner_slot_weights.items():
                 metrics[f"flow_jepa_progressive_g3_{name}_slot_entropy"] = (
                     -(
@@ -4651,6 +5750,114 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 owner_slot_weights["appearance"].detach()
                 - owner_slot_weights["geometry"].detach()
             ).abs().sum(dim=-1).mean()
+            if self.exports_grounded_facts:
+                parent_rows = {
+                    "semantic": state.g2_semantic_slot_probability,
+                    "appearance": state.g2_appearance_slot_probability,
+                    "geometry": state.g2_geometry_slot_probability,
+                }
+                for name, parent in parent_rows.items():
+                    if parent is None:
+                        raise RuntimeError(
+                            "grounded G3 diagnostics lost G2 ownership"
+                        )
+                    metrics[
+                        f"grounded_g2_g3_{name}_owner_l1"
+                    ] = 0.5 * (
+                        owner_slot_weights[name].detach().float()
+                        - parent.detach().float()
+                    ).abs().sum(dim=-1).mean()
+        if (
+            intervention in _GROUNDED_G3_SLOT_INTERVENTIONS
+            and not self.exports_grounded_facts
+        ):
+            raise RuntimeError(
+                "G3 object-slot intervention requires grounded_intent_effect_323"
+            )
+        grounded_facts: GroundedFactSet | None = None
+        if self.exports_grounded_facts:
+            if (
+                state.bank.dense_current_dino_content is None
+                or state.dynamic_fine_valid is None
+                or canonical_semantic is None
+                or canonical_appearance is None
+                or canonical_geometry is None
+            ):
+                raise RuntimeError(
+                    "grounded G3 cannot form a complete object fact set"
+                )
+            content_slots = sample_spatial_slots(
+                state.bank.dense_current_dino_content,
+                state.rectified_centers,
+            )
+            slot_validity = state.dynamic_fine_valid.any(
+                dim=-1,
+                keepdim=True,
+            ).to(dtype=rollout.dtype)
+            grounded_facts = GroundedFactSet(
+                public_scene_base=summary.to(dtype=rollout.dtype),
+                content_slots=content_slots.to(dtype=rollout.dtype),
+                semantic_slots=canonical_semantic.to(dtype=rollout.dtype),
+                appearance_slots=canonical_appearance.to(dtype=rollout.dtype),
+                geometry_slots=canonical_geometry.to(dtype=rollout.dtype),
+                semantic_owner_probs=owner_slot_weights["semantic"].to(
+                    dtype=rollout.dtype
+                ),
+                appearance_owner_probs=owner_slot_weights["appearance"].to(
+                    dtype=rollout.dtype
+                ),
+                geometry_owner_probs=owner_slot_weights["geometry"].to(
+                    dtype=rollout.dtype
+                ),
+                slot_coordinates=state.rectified_centers.to(
+                    dtype=rollout.dtype
+                ),
+                slot_support=state.rectified_support.to(dtype=rollout.dtype),
+                slot_validity=slot_validity,
+                slot_transport_prior=(
+                    (
+                        state.bank.coarse_flow_centers
+                        - state.bank.coarse_source_centers
+                    )[..., None, :]
+                    .expand_as(state.rectified_centers)
+                    .to(dtype=rollout.dtype)
+                    if (
+                        state.bank.coarse_flow_centers is not None
+                        and state.bank.coarse_source_centers is not None
+                        and tuple(state.bank.coarse_flow_centers.shape)
+                        == tuple(state.bank.coarse_source_centers.shape)
+                        == tuple(state.rectified_centers.shape[:-2]) + (2,)
+                    )
+                    else torch.zeros_like(state.rectified_centers)
+                ),
+            )
+            grounded_facts.validate()
+            if intervention in _GROUNDED_G3_SLOT_INTERVENTIONS:
+                grounded_facts, slot_delta = _intervene_grounded_fact_slots(
+                    grounded_facts,
+                    str(intervention),
+                )
+                # Keep the exported typed sidecar aligned with the exact
+                # GroundedFactSet consumed by S/W.  The generic canonical
+                # address key, coarse/fine priors and dynamic value lattice
+                # remain untouched so P1 is an exact control path.
+                canonical_semantic = grounded_facts.semantic_slots
+                canonical_appearance = grounded_facts.appearance_slots
+                canonical_geometry = grounded_facts.geometry_slots
+                owner_slot_weights = {
+                    "semantic": grounded_facts.semantic_owner_probs,
+                    "appearance": grounded_facts.appearance_owner_probs,
+                    "geometry": grounded_facts.geometry_owner_probs,
+                }
+                metrics[
+                    "grounded_g3_slot_intervention_delta_norm"
+                ] = slot_delta
+                metrics[
+                    "grounded_g3_slot_intervention_public_base_delta_norm"
+                ] = (
+                    grounded_facts.public_scene_base.detach().float()
+                    - summary.detach().float()
+                ).square().mean().sqrt()
         state.stage = 3
         state.canonical_coarse_bias = coarse_bias.to(dtype=rollout.dtype)
         state.canonical_fine_bias = fine_bias.to(dtype=rollout.dtype)
@@ -4682,8 +5889,862 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
         state.canonical_geometry_slot_weights = owner_slot_weights.get(
             "geometry"
         )
+        state.grounded_fact_set = grounded_facts
         state.metrics = metrics
         return state
+
+    def advance_world_owner_state(
+        self,
+        rollout: Tensor,
+        state: ProgressiveGroundingAddressState,
+        *,
+        depth: int,
+        intervention: str | None = None,
+        horizon_query_context: Tensor | None = None,
+        intent_window_view: IntentWindowView | None = None,
+        grounded_intent_state: GroundedIntentState | None = None,
+        collect_diagnostics: bool = True,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Advance private selector state before values are available.
+
+        ``depth=0`` is the G3->W entry; later depths are the configured
+        post-W transitions.  Owner evidence remains in route space and is written to
+        the shared rollout only through a small, bounded reconstruction.  This
+        preserves a common W carrier without turning it into the sole owner of
+        semantic, appearance, geometry, or interval information.
+        """
+
+        if not self.pre_value_owner_routing:
+            return rollout, {}
+        if self.grounded_intent_effect_mainline:
+            if (
+                self.grounded_world_compiler is None
+                or state.grounded_fact_set is None
+            ):
+                raise RuntimeError(
+                    "grounded W has no compiler or completed G3 fact set"
+                )
+            if state.world_owner_depth != int(depth) - 1:
+                raise RuntimeError(
+                    "grounded W boundaries must advance exactly once; "
+                    f"previous={state.world_owner_depth}, requested={depth}"
+                )
+            batch = int(rollout.shape[0])
+            if int(depth) == 0:
+                if (
+                    horizon_query_context is None
+                    or tuple(horizon_query_context.shape)
+                    != (batch, self.anchors, self.hidden)
+                ):
+                    raise ValueError(
+                        "grounded W entry requires one [B,4,H] clean proposal"
+                    )
+                state.world_grounded_working_state = (
+                    self.grounded_world_compiler.initialize(
+                        horizon_query_context
+                    )
+                )
+                state.world_owner_depth = 0
+                return rollout, {
+                    "grounded_w_clean_proposal_built_once": rollout.new_ones(
+                        (),
+                        dtype=torch.float32,
+                    )
+                }
+            if grounded_intent_state is None:
+                raise RuntimeError("grounded W lost its stateless intent state")
+            working = state.world_grounded_working_state
+            if working is None:
+                raise RuntimeError("grounded W lost its private entry state")
+            world_tokens = rollout.reshape(
+                batch,
+                self.anchors,
+                self.cameras,
+                self.grid,
+                self.grid,
+                self.hidden,
+            )
+            if int(depth) == 1:
+                working, metrics = self.grounded_world_compiler.forward_w1(
+                    world_tokens=world_tokens,
+                    facts=state.grounded_fact_set,
+                    intent=grounded_intent_state,
+                    working=working,
+                    output_dtype=rollout.dtype,
+                    collect_diagnostics=collect_diagnostics,
+                )
+                state.world_grounded_effect_w1_field = working.effect_w1
+            elif int(depth) == self.world_blocks:
+                working, metrics = self.grounded_world_compiler.forward_w2(
+                    world_tokens=world_tokens,
+                    facts=state.grounded_fact_set,
+                    intent=grounded_intent_state,
+                    working=working,
+                    output_dtype=rollout.dtype,
+                    collect_diagnostics=collect_diagnostics,
+                )
+                state.world_grounded_effect_field = working.effect
+            else:
+                raise RuntimeError(
+                    "grounded effect decoding is owned only by W1/W2"
+                )
+            state.world_grounded_working_state = working
+            state.world_owner_depth = int(depth)
+            return rollout, metrics
+        if (
+            self.world_owner_transitions is None
+            or self.world_owner_writes is None
+        ):
+            raise RuntimeError("pre-value owner routing modules are missing")
+        if not 0 <= int(depth) < len(self.world_owner_transitions):
+            raise ValueError(
+                "world owner depth is outside the configured G3/W schedule"
+            )
+        if state.stage != 3:
+            raise RuntimeError("world owner routing requires the completed G3 state")
+        required = {
+            "semantic": (
+                state.canonical_semantic_keys,
+                state.canonical_semantic_slot_weights,
+            ),
+            "appearance": (
+                state.canonical_appearance_keys,
+                state.canonical_appearance_slot_weights,
+            ),
+            "geometry": (
+                state.canonical_geometry_keys,
+                state.canonical_geometry_slot_weights,
+            ),
+        }
+        if any(
+            key is None or weight is None
+            for key, weight in required.values()
+        ):
+            raise RuntimeError("world owner routing has an incomplete G3 sidecar")
+        if state.world_owner_depth != int(depth) - 1:
+            raise RuntimeError(
+                "world owner routing must advance exactly once at each "
+                f"G3/W boundary; got previous={state.world_owner_depth}, "
+                f"requested={depth}"
+            )
+
+        batch = int(rollout.shape[0])
+        query = self.horizon_query_proj(
+            self.horizon_query_norm(rollout)
+        ).reshape(
+            batch,
+            self.anchors,
+            self.cameras,
+            self.grid,
+            self.grid,
+            self.route_dim,
+        )
+        condition_rms = query.new_zeros((), dtype=torch.float32)
+        if self.functional_mainline_routing:
+            if (
+                self.world_horizon_condition is None
+                or horizon_query_context is None
+                or tuple(horizon_query_context.shape)
+                != (batch, self.anchors, self.hidden)
+            ):
+                raise ValueError(
+                    "functional W routing requires [B,anchor,H] online "
+                    "phase/goal/history selector context"
+                )
+            condition = self.world_horizon_condition[int(depth)](
+                horizon_query_context.to(
+                    device=query.device, dtype=rollout.dtype
+                )
+            )
+            condition, _ = smooth_rms_contract(condition, 0.35)
+            query = query + condition[:, :, None, None, None]
+            if collect_diagnostics:
+                condition_rms = (
+                    condition.detach().float().square().mean().sqrt()
+                )
+        owner_evidence: dict[str, Tensor] = {}
+        for name, (key, weight) in required.items():
+            assert key is not None and weight is not None
+            collapsed = (
+                weight.to(dtype=key.dtype)[..., None] * key
+            ).sum(dim=4)
+            owner_evidence[name] = collapsed[:, None].expand(
+                -1,
+                self.anchors,
+                -1,
+                -1,
+                -1,
+                -1,
+            )
+
+        # A causal interval innovation: the first state is anchored to the
+        # first real horizon query; every later state sees only its immediate
+        # predecessor, never a later anchor or a future teacher.
+        interval_evidence = torch.cat(
+            (
+                query[:, :1],
+                query[:, 1:] - query[:, :-1],
+            ),
+            dim=1,
+        )
+        owner_evidence["interval"] = interval_evidence
+        owner_names = (
+            "semantic",
+            "appearance",
+            "geometry",
+            "interval",
+        )
+        field_by_owner = {
+            "semantic": "world_semantic_state",
+            "appearance": "world_appearance_state",
+            "geometry": "world_geometry_state",
+            "interval": "world_interval_state",
+        }
+        transition_bank = self.world_owner_transitions[int(depth)]
+        written_rows: list[Tensor] = []
+        route_rows: list[Tensor] = []
+        metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            metrics["flow_jepa_pre_value_owner_routing"] = rollout.new_ones(
+                (), dtype=torch.float32
+            )
+        for name in owner_names:
+            evidence = owner_evidence[name].to(dtype=query.dtype)
+            previous = getattr(state, field_by_owner[name])
+            if previous is None:
+                if int(depth) != 0:
+                    raise RuntimeError(
+                        f"W{depth} has no previous {name} selector state"
+                    )
+                previous = evidence
+            elif tuple(previous.shape) != tuple(query.shape):
+                raise ValueError(f"{name} world owner state lost chart geometry")
+
+            transition_input = torch.cat(
+                (query, evidence, previous.to(dtype=query.dtype)),
+                dim=-1,
+            )
+            raw_delta = transition_bank[name](transition_input)
+            delta, delta_contract = smooth_rms_contract(raw_delta, 0.35)
+            updated, state_contract = smooth_rms_contract(
+                previous.to(dtype=delta.dtype) + delta,
+                0.75,
+            )
+            mode = "" if intervention is None else str(intervention)
+            interval_zero = (
+                self.functional_mainline_routing
+                and name == "interval"
+                and mode == "interval_stage_zero"
+            )
+            interval_shuffle = (
+                self.functional_mainline_routing
+                and name == "interval"
+                and mode == "interval_stage_shuffle"
+            )
+            if mode == f"{name}_owner_zero" or interval_zero:
+                updated = torch.zeros_like(updated)
+                delta = torch.zeros_like(delta)
+            elif mode == f"{name}_owner_shuffle" or interval_shuffle:
+                shifts = (
+                    max(self.grid // 2, 1),
+                    max(self.grid // 3, 1),
+                )
+                updated = updated.roll(shifts=shifts, dims=(3, 4))
+                delta = delta.roll(shifts=shifts, dims=(3, 4))
+            setattr(state, field_by_owner[name], updated.to(dtype=rollout.dtype))
+
+            write_source = updated if int(depth) == 0 else delta
+            if self.functional_mainline_routing:
+                route_rows.append(write_source)
+                owner_write = write_source
+                write_contract = write_source.new_ones(
+                    (*write_source.shape[:-1], 1), dtype=torch.float32
+                )
+            else:
+                owner_write, write_contract = smooth_rms_contract(
+                    self.world_owner_writes[name](write_source),
+                    0.35,
+                )
+                written_rows.append(owner_write)
+            if collect_diagnostics:
+                prefix = f"flow_jepa_pre_value_w{depth}_{name}"
+                metrics[f"{prefix}_state_rms"] = (
+                    updated.detach().float().square().mean().sqrt()
+                )
+                metrics[f"{prefix}_delta_rms"] = (
+                    delta.detach().float().square().mean().sqrt()
+                )
+                metrics[f"{prefix}_write_rms"] = (
+                    owner_write.detach().float().square().mean().sqrt()
+                )
+                metrics[f"{prefix}_delta_contract_min"] = (
+                    delta_contract.detach().float().amin()
+                )
+                metrics[f"{prefix}_state_contract_min"] = (
+                    state_contract.detach().float().amin()
+                )
+                metrics[f"{prefix}_write_contract_min"] = (
+                    write_contract.detach().float().amin()
+                )
+
+        if self.functional_mainline_routing:
+            if (
+                self.world_owner_route_attnres is None
+                or self.world_owner_fused_writes is None
+                or len(route_rows) != len(owner_names)
+            ):
+                raise RuntimeError("functional W owner router is incomplete")
+            route_values = torch.stack(route_rows, dim=-2)
+            selected_route, route_metrics = self.world_owner_route_attnres[
+                int(depth)
+            ](
+                query,
+                route_values,
+                collect_diagnostics=collect_diagnostics,
+            )
+            mode = "" if intervention is None else str(intervention)
+            baseline_selected_route = selected_route
+            if mode == f"functional_w{int(depth)}_route_zero":
+                selected_route = torch.zeros_like(selected_route)
+            elif mode == f"functional_w{int(depth)}_route_shuffle":
+                # Keep the intervention invariant to probe batch size.  This
+                # tests whether the selected owner write is attached to the
+                # correct spatial address without replacing it with another
+                # episode's representation when B > 1.
+                selected_route = selected_route.roll(
+                    shifts=(
+                        max(self.grid // 2, 1),
+                        max(self.grid // 3, 1),
+                    ),
+                    dims=(3, 4),
+                )
+            if mode in {
+                f"functional_w{int(depth)}_route_zero",
+                f"functional_w{int(depth)}_route_shuffle",
+            }:
+                metrics[
+                    f"flow_jepa_functional_w{depth}_route_"
+                    "intervention_delta_norm"
+                ] = (
+                    selected_route.detach().float()
+                    - baseline_selected_route.detach().float()
+                ).norm(dim=-1).mean()
+            combined_write, combined_contract = smooth_rms_contract(
+                self.world_owner_fused_writes[int(depth)](selected_route),
+                0.50,
+            )
+            interval_prediction, _ = smooth_rms_contract(
+                self.world_owner_fused_writes[int(depth)](route_rows[-1]),
+                0.50,
+            )
+            state.world_interval_progress_prediction = (
+                interval_prediction.to(dtype=rollout.dtype)
+            )
+            decode_effect = bool(
+                self.g_aligned_future_effect
+                and (
+                    int(depth) == self.world_blocks
+                    or (
+                        self.supervised_effect_mainline
+                        and 1 <= int(depth) <= self.world_blocks
+                    )
+                )
+            )
+            if (
+                decode_effect
+                and self.window_effect_bank
+                and self.differential_intent_effect_mainline
+            ):
+                if (
+                    self.differential_window_compiler is None
+                    or intent_window_view is None
+                    or state.canonical_semantic_keys is None
+                ):
+                    raise RuntimeError(
+                        "differential W lost its compiler, intent view, or "
+                        "protected current G3 keys"
+                    )
+                if int(depth) == 1:
+                    (
+                        effect_field,
+                        route_state,
+                        differential_metrics,
+                    ) = self.differential_window_compiler.forward_w1(
+                        selected_route,
+                        state.canonical_semantic_keys,
+                        intent_window_view,
+                        output_dtype=rollout.dtype,
+                        collect_diagnostics=collect_diagnostics,
+                    )
+                    state.world_differential_effect_w1_field = effect_field
+                    state.world_differential_effect_route_state = route_state
+                elif int(depth) == self.world_blocks:
+                    w1_field = state.world_differential_effect_w1_field
+                    route_state = state.world_differential_effect_route_state
+                    if w1_field is None or route_state is None:
+                        raise RuntimeError(
+                            "differential W2 has no completed near/mid state"
+                        )
+                    (
+                        effect_field,
+                        route_state,
+                        differential_metrics,
+                    ) = self.differential_window_compiler.forward_w2(
+                        selected_route,
+                        state.canonical_semantic_keys,
+                        intent_window_view,
+                        w1_bank=w1_field,
+                        w1_route_state=route_state,
+                        output_dtype=rollout.dtype,
+                        collect_diagnostics=collect_diagnostics,
+                    )
+                    state.world_differential_effect_field = effect_field
+                    state.world_differential_effect_route_state = route_state
+                else:
+                    raise RuntimeError(
+                        "differential effect decoding is owned only by W1/W2"
+                    )
+                metrics.update(differential_metrics)
+                semantic_contract = selected_route.new_ones(
+                    (),
+                    dtype=torch.float32,
+                )
+                if collect_diagnostics:
+                    semantic_interval = (
+                        effect_field.semantic_delta.detach().float().mean(
+                            dim=(2, 3, 4, 5)
+                        )
+                    )
+                    transport_interval = (
+                        effect_field.transport_mean.detach().float().mean(
+                            dim=(2, 3, 4, 5)
+                        )
+                    )
+                    metrics.update(
+                        {
+                            "flow_jepa_differential_effect_bank_active": (
+                                rollout.new_ones((), dtype=torch.float32)
+                            ),
+                            "flow_jepa_future_effect_semantic_rms": (
+                                effect_field.semantic_delta.detach()
+                                .float()
+                                .square()
+                                .mean()
+                                .sqrt()
+                            ),
+                            "flow_jepa_future_effect_transport_rms": (
+                                effect_field.transport_mean.detach()
+                                .float()
+                                .square()
+                                .mean()
+                                .sqrt()
+                            ),
+                            "flow_jepa_future_effect_pred_adjacent_cosine": (
+                                F.cosine_similarity(
+                                    semantic_interval[:, 1:],
+                                    semantic_interval[:, :-1],
+                                    dim=-1,
+                                    eps=1e-6,
+                                ).mean()
+                                if int(semantic_interval.shape[1]) > 1
+                                else semantic_interval.new_zeros(())
+                            ),
+                            "flow_jepa_future_effect_pred_interval_variation": (
+                                semantic_interval.std(
+                                    dim=1,
+                                    unbiased=False,
+                                ).mean()
+                            ),
+                            "flow_jepa_future_effect_pred_transport_variation": (
+                                transport_interval.std(
+                                    dim=1,
+                                    unbiased=False,
+                                ).mean()
+                            ),
+                        }
+                    )
+                decode_effect = False
+            elif decode_effect and self.window_effect_bank:
+                if (
+                    self.window_successor_cell is None
+                    or self.window_late_cell is None
+                    or not self.supervised_effect_mainline
+                ):
+                    raise RuntimeError("V117 window-effect cells are incomplete")
+                zero_route = torch.zeros_like(selected_route[:, 0])
+                if int(depth) == 1:
+                    near_route = self.window_successor_cell(
+                        torch.cat((selected_route[:, 0], zero_route), dim=-1)
+                    )
+                    near_route, _ = smooth_rms_contract(near_route, 0.75)
+                    mid_route = self.window_successor_cell(
+                        torch.cat((selected_route[:, 1], near_route), dim=-1)
+                    )
+                    mid_route, _ = smooth_rms_contract(mid_route, 0.75)
+                    route_state = torch.stack((near_route, mid_route), dim=1)
+                    near_mid_field, semantic_contract = (
+                        self._decode_supervised_effect_routes(
+                            route_state,
+                            state,
+                            rollout_dtype=rollout.dtype,
+                        )
+                    )
+                    placeholder_field, _ = self._decode_supervised_effect_routes(
+                        zero_route[:, None],
+                        state,
+                        rollout_dtype=rollout.dtype,
+                    )
+                    effect_field = self._concat_effect_fields(
+                        near_mid_field,
+                        placeholder_field,
+                        slot_valid=selected_route.new_tensor(
+                            (1.0, 1.0, 0.0), dtype=torch.float32
+                        ),
+                    )
+                    state.world_window_effect_route_state = route_state
+                    state.world_future_effect_w1_field = effect_field
+                elif int(depth) == self.world_blocks:
+                    route_state = state.world_window_effect_route_state
+                    w1_field = state.world_future_effect_w1_field
+                    if (
+                        route_state is None
+                        or int(route_state.shape[1]) != 2
+                        or w1_field is None
+                    ):
+                        raise RuntimeError(
+                            "W2 has no causally completed near/mid effect state"
+                        )
+                    late_seed = selected_route[:, 2:].mean(dim=1)
+                    near_mid_summary = route_state.mean(dim=1)
+                    late_route = self.window_late_cell(
+                        torch.cat((late_seed, near_mid_summary), dim=-1)
+                    )
+                    late_route, _ = smooth_rms_contract(late_route, 0.75)
+                    late_field, semantic_contract = (
+                        self._decode_supervised_effect_routes(
+                            late_route[:, None],
+                            state,
+                            rollout_dtype=rollout.dtype,
+                        )
+                    )
+                    effect_field = self._concat_effect_fields(
+                        self._slice_effect_field(w1_field, slice(0, 2)),
+                        late_field,
+                        slot_valid=selected_route.new_ones(3, dtype=torch.float32),
+                    )
+                    state.world_window_effect_route_state = torch.cat(
+                        (route_state, late_route[:, None]), dim=1
+                    )
+                    state.world_future_effect_field = effect_field
+                else:
+                    raise RuntimeError("V117 effect decoding is owned only by W1/W2")
+                if collect_diagnostics:
+                    semantic_interval = (
+                        effect_field.semantic_delta.detach().float().mean(
+                            dim=(2, 3, 4, 5)
+                        )
+                    )
+                    transport_interval = (
+                        effect_field.transport_mean.detach().float().mean(
+                            dim=(2, 3, 4, 5)
+                        )
+                    )
+                    metrics.update(
+                        {
+                            "flow_jepa_window_effect_bank_active": rollout.new_ones(
+                                (), dtype=torch.float32
+                            ),
+                            "flow_jepa_future_effect_field_active": rollout.new_ones(
+                                (), dtype=torch.float32
+                            ),
+                            "flow_jepa_future_effect_semantic_rms": (
+                                effect_field.semantic_delta.detach()
+                                .float()
+                                .square()
+                                .mean()
+                                .sqrt()
+                            ),
+                            "flow_jepa_future_effect_transport_rms": (
+                                effect_field.transport_mean.detach()
+                                .float()
+                                .square()
+                                .mean()
+                                .sqrt()
+                            ),
+                            "flow_jepa_future_effect_semantic_contract_min": (
+                                semantic_contract.detach().float().amin()
+                            ),
+                            "flow_jepa_future_effect_pred_adjacent_cosine": (
+                                F.cosine_similarity(
+                                    semantic_interval[:, 1:],
+                                    semantic_interval[:, :-1],
+                                    dim=-1,
+                                    eps=1e-6,
+                                ).mean()
+                            ),
+                            "flow_jepa_future_effect_pred_interval_variation": (
+                                semantic_interval.std(dim=1, unbiased=False).mean()
+                            ),
+                            "flow_jepa_future_effect_pred_transport_variation": (
+                                transport_interval.std(dim=1, unbiased=False).mean()
+                            ),
+                        }
+                    )
+                    for slot_index, slot_name in enumerate(
+                        ("near", "mid", "late")
+                    ):
+                        metrics[
+                            f"flow_jepa_window_effect_{slot_name}_semantic_rms"
+                        ] = (
+                            effect_field.semantic_delta[:, slot_index]
+                            .detach()
+                            .float()
+                            .square()
+                            .mean()
+                            .sqrt()
+                        )
+                # The V116 decoder below would decode every anchor again and
+                # overwrite W1-owned near/mid slots. V117 has already produced
+                # the complete stage-owned interface.
+                decode_effect = False
+            if decode_effect:
+                if (
+                    self.future_effect_semantic is None
+                    or self.future_effect_geometry is None
+                    or state.canonical_semantic_keys is None
+                    or (
+                        not self.supervised_effect_mainline
+                        and (
+                            state.canonical_appearance_keys is None
+                            or state.canonical_geometry_keys is None
+                        )
+                    )
+                ):
+                    raise RuntimeError(
+                        "completed W state has no V115 future-effect compiler"
+                    )
+                route_slots = selected_route[..., None, :].expand(
+                    -1, -1, -1, -1, -1, self.slots, -1
+                )
+                semantic_slots = state.canonical_semantic_keys[:, None].expand(
+                    -1, self.anchors, -1, -1, -1, -1, -1
+                )
+                appearance_slots = None
+                geometry_slots = None
+                if not self.supervised_effect_mainline:
+                    assert state.canonical_appearance_keys is not None
+                    assert state.canonical_geometry_keys is not None
+                    appearance_slots = (
+                        state.canonical_appearance_keys[:, None].expand_as(
+                            semantic_slots
+                        )
+                    )
+                    geometry_slots = (
+                        state.canonical_geometry_keys[:, None].expand_as(
+                            semantic_slots
+                        )
+                    )
+                effect_input = (
+                    route_slots
+                    if self.supervised_effect_mainline
+                    else torch.cat(
+                        (
+                            route_slots,
+                            semantic_slots,
+                            appearance_slots,
+                            geometry_slots,
+                        ),
+                        dim=-1,
+                    )
+                )
+                raw_semantic_delta = self.future_effect_semantic(
+                    effect_input
+                )
+                semantic_delta, semantic_contract = smooth_rms_contract(
+                    raw_semantic_delta, 0.50
+                )
+                raw_geometry = self.future_effect_geometry(effect_input)
+                transport_mean = 0.50 * torch.tanh(raw_geometry[..., :2])
+                variance_diag = (
+                    0.01
+                    + 0.99 * torch.sigmoid(raw_geometry[..., 2:4])
+                )
+                covariance_cross = (
+                    0.50
+                    * torch.tanh(raw_geometry[..., 4:5])
+                    * variance_diag.prod(dim=-1, keepdim=True).sqrt()
+                )
+                transport_covariance = torch.cat(
+                    (variance_diag, covariance_cross), dim=-1
+                )
+                persistence = torch.sigmoid(raw_geometry[..., 5:6])
+                visibility = torch.sigmoid(raw_geometry[..., 6:7])
+                uncertainty = (
+                    0.05
+                    + 3.95
+                    * torch.sigmoid(raw_geometry[..., 7:8] - 1.5)
+                )
+                if self.supervised_effect_mainline:
+                    if self.future_effect_current is None:
+                        raise RuntimeError(
+                            "V116 effect decoder has no current-content projection"
+                        )
+                    # G3 supplies only the protected current reference. The
+                    # successor delta and every geometric consequence are
+                    # decoded solely from the selected W innovation.
+                    current_content = self.future_effect_current(
+                        semantic_slots
+                    )
+                    current_content, _ = smooth_rms_contract(
+                        current_content, 0.75
+                    )
+                    successor_content = current_content + semantic_delta
+                    effect_field = FutureEffectField(
+                        semantic_delta=semantic_delta.to(dtype=rollout.dtype),
+                        transport_mean=transport_mean.to(dtype=rollout.dtype),
+                        transport_covariance=transport_covariance.to(
+                            dtype=rollout.dtype
+                        ),
+                        persistence=persistence.to(dtype=rollout.dtype),
+                        visibility=visibility.to(dtype=rollout.dtype),
+                        uncertainty=uncertainty.to(dtype=rollout.dtype),
+                        current_content=current_content.to(dtype=rollout.dtype),
+                        successor_content=successor_content.to(
+                            dtype=rollout.dtype
+                        ),
+                    )
+                else:
+                    effect_field = FutureEffectField(
+                        semantic_delta=semantic_delta.to(dtype=rollout.dtype),
+                        transport_mean=transport_mean.to(dtype=rollout.dtype),
+                        transport_covariance=transport_covariance.to(
+                            dtype=rollout.dtype
+                        ),
+                        persistence=persistence.to(dtype=rollout.dtype),
+                        visibility=visibility.to(dtype=rollout.dtype),
+                        uncertainty=uncertainty.to(dtype=rollout.dtype),
+                        # V115 ancestry: the selected route crossed as an
+                        # unsupervised state carrier.
+                        state_innovation=route_slots.to(dtype=rollout.dtype),
+                    )
+                effect_field.validate()
+                if self.supervised_effect_mainline and int(depth) == 1:
+                    state.world_future_effect_w1_field = effect_field
+                if int(depth) == self.world_blocks:
+                    state.world_future_effect_field = effect_field
+                if collect_diagnostics:
+                    semantic_interval = semantic_delta.detach().float().mean(
+                        dim=(2, 3, 4, 5)
+                    )
+                    transport_interval = transport_mean.detach().float().mean(
+                        dim=(2, 3, 4, 5)
+                    )
+                    metrics.update(
+                        {
+                            "flow_jepa_future_effect_field_active": (
+                                rollout.new_ones((), dtype=torch.float32)
+                            ),
+                            "flow_jepa_future_effect_semantic_rms": (
+                                semantic_delta.detach()
+                                .float()
+                                .square()
+                                .mean()
+                                .sqrt()
+                            ),
+                            "flow_jepa_future_effect_transport_rms": (
+                                transport_mean.detach()
+                                .float()
+                                .square()
+                                .mean()
+                                .sqrt()
+                            ),
+                            "flow_jepa_future_effect_visibility_mean": (
+                                visibility.detach().float().mean()
+                            ),
+                            "flow_jepa_future_effect_uncertainty_mean": (
+                                uncertainty.detach().float().mean()
+                            ),
+                            "flow_jepa_future_effect_semantic_contract_min": (
+                                semantic_contract.detach().float().amin()
+                            ),
+                            "flow_jepa_future_effect_pred_adjacent_cosine": (
+                                F.cosine_similarity(
+                                    semantic_interval[:, 1:],
+                                    semantic_interval[:, :-1],
+                                    dim=-1,
+                                    eps=1e-6,
+                                ).mean()
+                            ),
+                            "flow_jepa_future_effect_pred_interval_variation": (
+                                semantic_interval.std(
+                                    dim=1, unbiased=False
+                                ).mean()
+                            ),
+                            "flow_jepa_future_effect_pred_transport_variation": (
+                                transport_interval.std(
+                                    dim=1, unbiased=False
+                                ).mean()
+                            ),
+                        }
+                    )
+            written = combined_write
+            if collect_diagnostics:
+                for key, value in route_metrics.items():
+                    if key == "source_mass":
+                        for owner_index, owner_name in enumerate(
+                            ("semantic", "appearance", "geometry", "interval")
+                        ):
+                            metrics[
+                                f"flow_jepa_functional_w{depth}_{owner_name}_route_mass"
+                            ] = value[owner_index].detach()
+                    elif int(value.numel()) == 1:
+                        metrics[
+                            f"flow_jepa_functional_w{depth}_route_{key}"
+                        ] = value.detach()
+                metrics[
+                    f"flow_jepa_functional_w{depth}_selected_route_rms"
+                ] = selected_route.detach().float().square().mean().sqrt()
+                metrics[
+                    f"flow_jepa_functional_w{depth}_interval_prediction_rms"
+                ] = (
+                    interval_prediction.detach().float().square().mean().sqrt()
+                )
+        else:
+            combined_write = sum(written_rows) / math.sqrt(
+                float(len(written_rows))
+            )
+            combined_write, combined_contract = smooth_rms_contract(
+                combined_write,
+                0.50,
+            )
+            written = self.pre_value_owner_update_scale * combined_write
+        refined = rollout + written.reshape_as(rollout)
+        if collect_diagnostics:
+            carrier_rms = rollout.detach().float().square().mean().sqrt()
+            write_rms = written.detach().float().square().mean().sqrt()
+            metrics.update(
+                {
+                    f"flow_jepa_pre_value_w{depth}_combined_write_rms": (
+                        write_rms
+                    ),
+                    f"flow_jepa_pre_value_w{depth}_carrier_ratio": (
+                        write_rms / carrier_rms.clamp_min(1e-8)
+                    ),
+                    f"flow_jepa_pre_value_w{depth}_combined_contract_min": (
+                        combined_contract.detach().float().amin()
+                    ),
+                    f"flow_jepa_functional_w{depth}_condition_rms": condition_rms,
+                    "flow_jepa_functional_mainline_routing": rollout.new_tensor(
+                        float(self.functional_mainline_routing),
+                        dtype=torch.float32,
+                    ),
+                }
+            )
+        state.world_owner_depth = int(depth)
+        if state.metrics is None:
+            state.metrics = {}
+        state.metrics.update(metrics)
+        return refined, metrics
 
     def _predict_future_transport(
         self,
@@ -4933,6 +6994,47 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             public_query = query.mean(dim=1, keepdim=True)
             horizon_innovation = query - public_query
             owner_query = query
+        owner_query_rows: dict[str, Tensor] = {}
+        transport_query = query
+        if self.pre_value_owner_routing:
+            if state.world_owner_depth != self.world_blocks:
+                raise RuntimeError(
+                    "P posterior requires the final configured W owner state; "
+                    f"got depth={state.world_owner_depth}"
+                )
+            private_rows = {
+                "semantic": state.world_semantic_state,
+                "appearance": state.world_appearance_state,
+                "geometry": state.world_geometry_state,
+                "interval": state.world_interval_state,
+            }
+            if any(value is None for value in private_rows.values()):
+                raise RuntimeError("P posterior has an incomplete W private bundle")
+            for name in ("semantic", "appearance", "geometry"):
+                private = private_rows[name]
+                assert private is not None
+                private = private.reshape(
+                    batch,
+                    self.anchors,
+                    self.cameras,
+                    self.grid * self.grid,
+                    self.route_dim,
+                )
+                owner_query_rows[name] = (
+                    owner_query + private.to(dtype=owner_query.dtype)
+                ) / math.sqrt(2.0)
+            interval = private_rows["interval"]
+            assert interval is not None
+            transport_query = (
+                query
+                + interval.reshape(
+                    batch,
+                    self.anchors,
+                    self.cameras,
+                    self.grid * self.grid,
+                    self.route_dim,
+                ).to(dtype=query.dtype)
+            ) / math.sqrt(2.0)
         key = self.candidate_norm(state.canonical_slot_keys).reshape(
             batch,
             self.cameras,
@@ -4962,7 +7064,9 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 # Keep parameterized projections in autocast; the following
                 # disabled-autocast block is reserved for FP32 similarity and
                 # probability arithmetic over already-projected activations.
-                typed_query_rows[name] = self.world_typed_query[name](owner_query)
+                typed_query_rows[name] = self.world_typed_query[name](
+                    owner_query_rows.get(name, owner_query)
+                )
         bias = state.canonical_coarse_bias.float().reshape(
             batch,
             self.cameras,
@@ -4975,7 +7079,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             (
                 future_spatial_compatibility,
                 future_metrics,
-            ) = self._predict_future_transport(query, state)
+            ) = self._predict_future_transport(transport_query, state)
         with torch.autocast(device_type=rollout.device.type, enabled=False):
             # [B,A,C,target-cell,source-cell,slot].  Keeping both spatial axes
             # here is what lets one computation serve the JEPA target marginal
@@ -5005,6 +7109,38 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 else:
                     logits = sum(typed_world_logits.values()) / math.sqrt(3.0)
                     logits = logits + future_spatial_compatibility.float()
+                if self.pre_value_owner_routing:
+                    # Turn the W appearance state into a source/slot-aligned
+                    # verifier query without reading any value.  Soft target
+                    # aggregation retains the all-target/all-source address
+                    # contract; P1 later compares this query with every local
+                    # appearance candidate, so W appearance can change the
+                    # within-slot fine posterior rather than only a late P2
+                    # condition.
+                    appearance_target_logit = (
+                        typed_world_logits["appearance"]
+                        + future_spatial_compatibility.float()
+                    )
+                    appearance_target_weight = torch.softmax(
+                        appearance_target_logit,
+                        dim=3,
+                    )
+                    appearance_fine_query = torch.einsum(
+                        "bactsu,bactr->bacsur",
+                        appearance_target_weight,
+                        typed_query_rows["appearance"].float(),
+                    )
+                    state.world_appearance_fine_query = (
+                        appearance_fine_query.reshape(
+                            batch,
+                            self.anchors,
+                            self.cameras,
+                            self.grid,
+                            self.grid,
+                            self.slots,
+                            self.route_dim,
+                        ).to(dtype=rollout.dtype)
+                    )
             else:
                 typed_world_logits = {}
                 logits = torch.einsum(
@@ -5148,6 +7284,30 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 self.grid,
                 self.slots,
             ).to(dtype=rollout.dtype)
+        private_metrics: dict[str, Tensor] = {}
+        if self.pre_value_owner_routing:
+            private_states = (
+                state.world_semantic_state,
+                state.world_appearance_state,
+                state.world_geometry_state,
+                state.world_interval_state,
+            )
+            if any(value is None for value in private_states):
+                raise RuntimeError("final W private bundle is incomplete")
+            private_rms = torch.stack(
+                [
+                    value.detach().float().square().mean().sqrt()
+                    for value in private_states
+                    if value is not None
+                ]
+            ).mean()
+            public_rms = public_query.detach().float().square().mean().sqrt()
+            private_metrics = {
+                "flow_jepa_progressive_world_private_state_rms": private_rms,
+                "flow_jepa_progressive_world_public_private_ratio": (
+                    public_rms / (public_rms + private_rms).clamp_min(1e-8)
+                ),
+            }
         return teacher_relevance, {
             "flow_jepa_progressive_world_posterior_entropy": entropy.detach().mean(),
             "flow_jepa_progressive_world_posterior_max": probability.detach()
@@ -5238,6 +7398,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 if owner_source_contract_scales
                 else rollout.new_ones((), dtype=torch.float32)
             ),
+            **private_metrics,
             **future_metrics,
         }
 
@@ -6159,6 +8320,62 @@ class FlowDINOEvidenceEncoder(nn.Module):
         self.progressive_grounding_address_enabled = bool(
             int(getattr(config, "flow_jepa_progressive_grounding_address", 0))
         )
+        self.pre_value_owner_routing_enabled = bool(
+            int(getattr(config, "flow_jepa_pre_value_owner_routing", 0))
+        )
+        self.functional_mainline_routing_enabled = bool(
+            int(getattr(config, "flow_jepa_functional_mainline_routing", 0))
+        )
+        self.g_aligned_future_effect_enabled = bool(
+            int(getattr(config, "flow_jepa_g_aligned_future_effect", 0))
+        )
+        self.supervised_effect_mainline_enabled = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_supervised_effect_mainline",
+                    0,
+                )
+            )
+        )
+        self.window_effect_bank_enabled = bool(
+            int(getattr(config, "flow_jepa_window_effect_bank", 0))
+        )
+        self.differential_intent_effect_mainline_enabled = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_differential_intent_effect_mainline",
+                    0,
+                )
+            )
+        )
+        self.grounded_intent_effect_mainline_enabled = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_grounded_intent_effect_mainline",
+                    0,
+                )
+            )
+        )
+        self.object_intent_dynamics_mainline_enabled = bool(
+            int(
+                getattr(
+                    config,
+                    "flow_jepa_object_intent_dynamics_mainline",
+                    0,
+                )
+            )
+        )
+        self.exports_grounded_facts_enabled = bool(
+            self.grounded_intent_effect_mainline_enabled
+            or self.object_intent_dynamics_mainline_enabled
+        )
+        self.teacher_g_ema_decay = float(
+            getattr(config, "flow_jepa_teacher_g_ema_decay", 0.995)
+        )
+        self._teacher_g_build_count = 0
         self.online_horizon_address_enabled = bool(
             int(getattr(config, "flow_jepa_online_horizon_address", 0))
         ) and not self.progressive_grounding_address_enabled
@@ -6500,6 +8717,11 @@ class FlowDINOEvidenceEncoder(nn.Module):
             ),
             nn.Linear(h, h),
         )
+        if self.g_aligned_future_effect_enabled:
+            # V115 exposes the JEPA delta from the same FutureEffectField that
+            # P consumes.  The ancestral rollout-side decoder is retained for
+            # state-dict ancestry but cannot remain a trainable sidecar.
+            self.future_prediction.requires_grad_(False)
         self.horizon_address_jepa = (
             _HorizonSoftAddressJEPA(
                 config,
@@ -6521,6 +8743,15 @@ class FlowDINOEvidenceEncoder(nn.Module):
             if self.interval_stage_enabled
             else None
         )
+        if (
+            self.functional_mainline_routing_enabled
+            and self.interval_stage_organizer is not None
+        ):
+            # V113 supervises the interval candidate already consumed by the
+            # online W owner router.  Retain the V106-V112 module only for
+            # checkpoint ancestry; a trainable post-W3 organizer would restore
+            # the representation-without-action shortcut.
+            self.interval_stage_organizer.requires_grad_(False)
         self.stage_prediction = (
             None
             if self.late_bottleneck
@@ -6582,6 +8813,17 @@ class FlowDINOEvidenceEncoder(nn.Module):
         nn.init.orthogonal_(self.teacher_projection.weight)
         self.teacher_projection.weight.requires_grad_(False)
         self.teacher_norm.requires_grad_(False)
+        if self.g_aligned_future_effect_enabled:
+            if self.soft_address_compiler is None:
+                raise RuntimeError(
+                    "G-aligned teacher requires the soft address compiler"
+                )
+            self.teacher_g_semantic_projection = copy.deepcopy(
+                self.soft_address_compiler.target_dino_key
+            )
+            self.teacher_g_semantic_projection.requires_grad_(False)
+        else:
+            self.teacher_g_semantic_projection = None
 
     def set_raw_address_eval_intervention(self, mode: str) -> None:
         """Temporarily intervene on address experts or protected raw values."""
@@ -6600,14 +8842,17 @@ class FlowDINOEvidenceEncoder(nn.Module):
             "source_raw_key_zero",
             "source_raw_key_spatial_shuffle",
             "joint_address_key_spatial_shuffle",
+            "current_context_masked",
         }:
             raise ValueError(
                 "raw intervention must be none/zero/shuffle/spatial_shuffle/"
                 "detail_zero/detail_spatial_shuffle/dino_key_spatial_shuffle/"
                 "literal_rgb_zero/literal_rgb_spatial_shuffle/"
                 "source_raw_key_zero/source_raw_key_spatial_shuffle/"
-                "joint_address_key_spatial_shuffle"
+                "joint_address_key_spatial_shuffle/current_context_masked"
             )
+        if self.training:
+            raise RuntimeError("raw address intervention is evaluation-only")
         if not self.raw_enabled or getattr(self, "raw_address_reader", None) is None:
             raise RuntimeError("raw address intervention requires the V98 raw reader")
         if normalized in {
@@ -6618,6 +8863,14 @@ class FlowDINOEvidenceEncoder(nn.Module):
         } and not self.soft_address_lattice_enabled:
             raise RuntimeError(
                 "key-level address intervention requires the soft address lattice"
+            )
+        if normalized == "current_context_masked" and (
+            not self.predictive_change_contract
+            or not self.soft_address_lattice_enabled
+        ):
+            raise RuntimeError(
+                "current-context mask intervention requires predictive JEPA "
+                "and the soft address lattice"
             )
         self._raw_address_eval_intervention = normalized
         self._raw_address_eval_metrics = {}
@@ -7228,7 +9481,6 @@ class FlowDINOEvidenceEncoder(nn.Module):
         )
         confidence_grid = to_grid(raw_context.confidence)
         occlusion_grid = to_grid(raw_context.occlusion)
-        uncertainty_grid = to_grid(raw_context.uncertainty)
         entropy_grid = to_grid(raw_context.correlation_entropy)
         margin_grid = to_grid(raw_context.correlation_margin)
         cycle_grid = to_grid(raw_context.cycle_error) * (
@@ -7287,7 +9539,22 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 -1,
                 -1,
             )
+            if self._raw_address_eval_intervention == "current_context_masked":
+                if self.training:
+                    raise RuntimeError(
+                        "current-context mask intervention is evaluation-only"
+                    )
+                # Matched evaluation reuses the exact deterministic,
+                # observation-derived target mask. Only the latest online
+                # RGB/DINO context changes; model mode, weights, action noise,
+                # target coordinates and all future teachers remain fixed.
+                context_dropout = context_dropout.clone()
+                context_dropout[:, -1] = future_spatial_mask
         else:
+            if self._raw_address_eval_intervention == "current_context_masked":
+                raise RuntimeError(
+                    "current-context mask intervention requires predictive JEPA"
+                )
             future_score = future_motion_score[:, None].expand(
                 -1, int(self.config.future_anchors), -1, -1, -1
             )
@@ -7417,6 +9684,9 @@ class FlowDINOEvidenceEncoder(nn.Module):
             "flow_jepa_correlation_entropy": raw_context.correlation_entropy.float().mean().detach(),
             "flow_jepa_correlation_margin": raw_context.correlation_margin.float().mean().detach(),
             "flow_jepa_context_dropout_fraction": context_dropout.float().mean().detach(),
+            "flow_jepa_current_context_mask_fraction": (
+                context_dropout[:, -1].float().mean().detach()
+            ),
             "flow_jepa_future_target_fraction": future_mask.float().mean().detach(),
             "flow_jepa_predictive_change_contract": selector.new_tensor(
                 float(self.predictive_change_contract), dtype=torch.float32
@@ -7428,14 +9698,26 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 float(not self.predictive_change_contract), dtype=torch.float32
             ),
             "flow_jepa_context_target_mask_aligned": selector.new_tensor(
-                float(self.predictive_change_contract and self.training),
+                float(
+                    self.predictive_change_contract
+                    and (
+                        self.training
+                        or self._raw_address_eval_intervention
+                        == "current_context_masked"
+                    )
+                ),
                 dtype=torch.float32,
             ),
             "flow_jepa_future_shared_spatial_mask": selector.new_tensor(
                 float(self.predictive_change_contract), dtype=torch.float32
             ),
             "flow_jepa_deploy_context_unmasked": selector.new_tensor(
-                float(self.predictive_change_contract and not self.training),
+                float(
+                    self.predictive_change_contract
+                    and not self.training
+                    and self._raw_address_eval_intervention
+                    != "current_context_masked"
+                ),
                 dtype=torch.float32,
             ),
             "flow_jepa_evidence_token_count": selector.new_tensor(float(selector.shape[1])).float(),
@@ -7768,6 +10050,22 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 occlusion=context.occlusion[:, -1],
                 cycle_error=context.cycle_error[:, -1],
             )
+            if self.exports_grounded_facts_enabled:
+                current_visual = dino[:, 1].reshape(
+                    batch,
+                    self.cameras,
+                    dino_side * dino_side,
+                    int(dino.shape[-1]),
+                )[:, None]
+                # Grounded content stays in the complete normalized DINO
+                # width. Association keys use their own low-rank projection;
+                # the teacher/prediction content must not be compressed into
+                # the common policy hidden width before object supervision.
+                address_bank.dense_current_dino_content = (
+                    self._teacher_content_grid(current_visual)[:, 0].to(
+                        dtype=target.dtype
+                    )
+                )
             original_fine_values = address_bank.fine_values
             original_dense_detail = address_bank.dense_target_detail
             original_literal_rgb = address_bank.dense_current_rgb
@@ -7883,6 +10181,17 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 "flow_jepa_literal_rgb_intervention_delta_norm": (
                     literal_rgb_intervention_delta
                 ),
+                "flow_jepa_current_context_mask_fraction": pack.metrics[
+                    "flow_jepa_current_context_mask_fraction"
+                ],
+                "flow_jepa_current_context_mask_intervention_delta": (
+                    pack.context_dropout_mask[:, -1]
+                    .detach()
+                    .float()
+                    .mean()
+                    if intervention == "current_context_masked"
+                    else source.new_zeros((), dtype=torch.float32)
+                ),
             }
             if intervention is not None:
                 self._raw_address_eval_metrics = {
@@ -7906,6 +10215,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
                         "joint_address_key_spatial_shuffle": 9.0,
                         "literal_rgb_zero": 10.0,
                         "literal_rgb_spatial_shuffle": 11.0,
+                        "current_context_masked": 12.0,
                     }[intervention],
                     dtype=torch.float32,
                 )
@@ -8287,10 +10597,6 @@ class FlowDINOEvidenceEncoder(nn.Module):
             return value.reshape(batch, pair_count, cameras, *value.shape[1:])
 
         coarse_flow = unflatten(coarse_forward.flow)
-        coarse_confidence_u = unflatten(coarse_confidence)
-        coarse_entropy = unflatten(coarse_forward.correlation_entropy)
-        coarse_margin = unflatten(coarse_forward.correlation_margin)
-        coarse_uncertainty = unflatten(coarse_forward.uncertainty)
         coarse_magnitude = _stable_vector_norm(coarse_flow, dim=3)
         motion_score = torch.zeros(
             batch, history, cameras, grid, grid, device=visual.device, dtype=torch.float32
@@ -8357,7 +10663,6 @@ class FlowDINOEvidenceEncoder(nn.Module):
         forward_cycle = fine_grid_forward + warped_backward
         backward_cycle = fine_grid_backward + warped_forward
         forward_cycle_error = _stable_vector_norm(forward_cycle, dim=1, keepdim=True)
-        backward_cycle_error = _stable_vector_norm(backward_cycle, dim=1, keepdim=True)
         fine_confidence = (
             torch.exp(-fine_uncertainty_forward.float())
             * torch.exp(-forward_cycle_error)
@@ -8947,6 +11252,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
         *,
         stage: int,
         intervention: str | None = None,
+        collect_diagnostics: bool = True,
     ) -> ProgressiveGroundingAddressState:
         """Advance exactly one of the typed G1/G2/G3 selector transitions."""
 
@@ -8959,6 +11265,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             future_tokens,
             stage=stage,
             intervention=intervention,
+            collect_diagnostics=collect_diagnostics,
             candidate_sampler=(
                 self.soft_address_compiler.progressive_fine_candidates
                 if stage == 2 and self.soft_address_compiler is not None
@@ -8980,6 +11287,167 @@ class FlowDINOEvidenceEncoder(nn.Module):
         return self.progressive_grounding_address.score_horizon_posterior(
             future_tokens,
             state,
+        )
+
+    def advance_progressive_world_owner_state(
+        self,
+        future_tokens: Tensor,
+        state: ProgressiveGroundingAddressState,
+        *,
+        depth: int,
+        intervention: str | None = None,
+        horizon_query_context: Tensor | None = None,
+        intent_window_view: IntentWindowView | None = None,
+        grounded_intent_state: GroundedIntentState | None = None,
+        collect_diagnostics: bool = True,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Advance the G3-entry and configured-W private selector bundle."""
+
+        if not self.pre_value_owner_routing_enabled:
+            return future_tokens, {}
+        if self.progressive_grounding_address is None:
+            raise RuntimeError("pre-value owner routing has no progressive organizer")
+        return self.progressive_grounding_address.advance_world_owner_state(
+            future_tokens,
+            state,
+            depth=depth,
+            intervention=intervention,
+            horizon_query_context=horizon_query_context,
+            intent_window_view=intent_window_view,
+            grounded_intent_state=grounded_intent_state,
+            collect_diagnostics=collect_diagnostics,
+        )
+
+    def progressive_interval_prediction(
+        self,
+        state: ProgressiveGroundingAddressState,
+    ) -> Tensor:
+        """Return the supervised interval candidate from the online W path."""
+
+        if not self.functional_mainline_routing_enabled:
+            raise RuntimeError(
+                "online W interval prediction requires functional mainline routing"
+            )
+        if self.grounded_intent_effect_mainline_enabled:
+            effect_field = state.world_grounded_effect_field
+            facts = state.grounded_fact_set
+            if effect_field is None or facts is None:
+                raise RuntimeError(
+                    "grounded interval prediction has no completed effect field"
+                )
+            effect_field.validate()
+            weights = facts.semantic_owner_probs.float()
+            weights = weights / weights.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(1e-8)
+            prediction = (
+                effect_field.semantic_delta.float()
+                * weights[:, None, ..., None]
+            ).sum(dim=-2)
+            batch, anchors, cameras, rows, columns, content_dim = prediction.shape
+            if anchors != int(self.config.future_anchors):
+                raise RuntimeError(
+                    "grounded W prediction lost one of four real intervals"
+                )
+            # Even the slot-reduced compatibility diagnostic stays in the
+            # complete DINO content space. It is audit-only in this capability
+            # and must not silently redefine the object-level target width.
+            return prediction.reshape(
+                batch,
+                anchors * cameras * rows * columns,
+                content_dim,
+            ).to(dtype=effect_field.semantic_delta.dtype)
+        if self.differential_intent_effect_mainline_enabled:
+            effect_field = state.world_differential_effect_field
+            slot_weights = state.canonical_semantic_slot_weights
+            if effect_field is None or slot_weights is None:
+                raise RuntimeError(
+                    "differential interval prediction has no completed effect "
+                    "bank or canonical slot weights"
+                )
+            effect_field.validate(expected_slots=3)
+            weights = slot_weights.float()
+            weights = weights / weights.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(1e-8)
+            window_prediction = (
+                effect_field.semantic_delta.float()
+                * weights[:, None, ..., None]
+            ).sum(dim=-2)
+            batch, _, cameras, rows, columns, hidden = window_prediction.shape
+            flattened = window_prediction.permute(
+                0,
+                2,
+                3,
+                4,
+                5,
+                1,
+            ).reshape(-1, hidden, 3)
+            prediction = F.interpolate(
+                flattened,
+                size=int(self.config.future_anchors),
+                mode="linear",
+                align_corners=True,
+            ).reshape(
+                batch,
+                cameras,
+                rows,
+                columns,
+                hidden,
+                int(self.config.future_anchors),
+            ).permute(0, 5, 1, 2, 3, 4).to(
+                dtype=effect_field.semantic_delta.dtype
+            )
+        elif self.g_aligned_future_effect_enabled and not self.window_effect_bank_enabled:
+            effect_field = state.world_future_effect_field
+            slot_weights = state.canonical_semantic_slot_weights
+            if effect_field is None or slot_weights is None:
+                raise RuntimeError(
+                    "G-aligned interval prediction has no FutureEffectField"
+                )
+            effect_field.validate()
+            weights = slot_weights.float()
+            weights = weights / weights.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-8)
+            prediction = (
+                effect_field.semantic_delta.float()
+                * weights[:, None, ..., None]
+            ).sum(dim=-2).to(dtype=effect_field.semantic_delta.dtype)
+        else:
+            # V117 deliberately keeps the inherited four-anchor JEPA target
+            # separate from the three-slot near/mid/late effect bank.  The
+            # former remains an auxiliary W prediction and is never consumed
+            # by P2; collapsing it onto the three effect slots would silently
+            # change the old JEPA loss geometry.
+            prediction = state.world_interval_progress_prediction
+        expected_depth = int(self.config.flow_jepa_world_blocks)
+        if prediction is None or state.world_owner_depth != expected_depth:
+            raise RuntimeError(
+                "online W interval prediction requires the completed final W "
+                "owner state"
+            )
+        expected = (
+            int(prediction.shape[0]),
+            int(self.config.future_anchors),
+            int(self.config.num_cameras),
+            int(self.config.flow_jepa_grid_size),
+            int(self.config.flow_jepa_grid_size),
+            int(self.config.hidden_size),
+        )
+        if tuple(prediction.shape) != expected:
+            raise ValueError(
+                "online W interval prediction lost anchor/camera/spatial ownership"
+            )
+        return prediction.reshape(
+            int(prediction.shape[0]),
+            int(self.config.future_anchors)
+            * int(self.config.num_cameras)
+            * int(self.config.flow_jepa_grid_size)
+            * int(self.config.flow_jepa_grid_size),
+            int(self.config.hidden_size),
         )
 
     def predict_future_with_address(
@@ -9017,7 +11485,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             raise RuntimeError("stage prediction module is missing")
         return self.stage_prediction(stage_tokens)
 
-    def _teacher_project_grid(self, visual: Tensor) -> Tensor:
+    def _teacher_pool_grid(self, visual: Tensor) -> Tensor:
         if visual.ndim != 5:
             raise ValueError("teacher grid input must be [B,F,C,P,D]")
         batch, frames, cameras, patches, dim = visual.shape
@@ -9032,13 +11500,1006 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 .float(),
                 (grid, grid),
             ).permute(0, 2, 3, 1)
+        return pooled.reshape(
+            batch, frames, cameras, grid, grid, dim
+        )
+
+    def _teacher_project_grid(self, visual: Tensor) -> Tensor:
+        content = self._teacher_content_grid(visual)
+        batch, frames, cameras, grid, _, _ = content.shape
+        with torch.autocast(device_type=visual.device.type, enabled=False):
             projected = F.linear(
-                self.teacher_norm(pooled).to(
+                content.to(
                     device=self.teacher_projection.weight.device, dtype=torch.float32
                 ),
                 self.teacher_projection.weight.float(),
             )
         return projected.reshape(batch, frames, cameras, grid, grid, self.hidden)
+
+    def _teacher_content_grid(self, visual: Tensor) -> Tensor:
+        """Return full-width normalized DINO content for grounded targets."""
+
+        pooled = self._teacher_pool_grid(visual)
+        with torch.autocast(
+            device_type=visual.device.type,
+            enabled=False,
+        ):
+            return self.teacher_norm(pooled).float()
+
+    @torch.no_grad()
+    def object_teacher_supports(self, visual: Tensor) -> Tensor:
+        """Public full-width future support chart for the new teacher only.
+
+        ``visual`` is the existing cached future-DINO tensor [B,F,C,P,D].
+        The returned chart is detached, built once per training batch, and is
+        never called by deployment sampling.
+        """
+
+        return self._teacher_content_grid(visual).detach()
+
+    @torch.no_grad()
+    def _update_teacher_g_ema(self) -> None:
+        if not self.g_aligned_future_effect_enabled:
+            return
+        if (
+            self.teacher_g_semantic_projection is None
+            or self.soft_address_compiler is None
+        ):
+            raise RuntimeError("Teacher-G EMA modules are incomplete")
+        if not self.training:
+            return
+        decay = float(self.teacher_g_ema_decay)
+        for teacher, online in zip(
+            self.teacher_g_semantic_projection.parameters(),
+            self.soft_address_compiler.target_dino_key.parameters(),
+            strict=True,
+        ):
+            teacher.mul_(decay).add_(
+                online.detach().to(
+                    device=teacher.device, dtype=teacher.dtype
+                ),
+                alpha=1.0 - decay,
+            )
+
+    @torch.no_grad()
+    def _teacher_weighted_feature_dispersion(
+        self,
+        association: Tensor,
+        support_content: Tensor,
+        matched_content: Tensor,
+    ) -> Tensor:
+        """Return weighted feature RMS without materializing query/support pairs.
+
+        ``association`` owns the current-cell/slot to future-cell posterior:
+        [B,S,C,I,J,M,U,V].  Expanding both feature charts would append H to
+        that complete Cartesian product and costs 6 GiB for the production
+        B8/S12/C2/G8/M4/H512 contract.  The second-moment identity computes
+        exactly the same weighted squared distance while reducing H before
+        the current/future spatial product is formed.
+        """
+
+        if association.ndim != 8:
+            raise ValueError(
+                "Teacher-G association must be [B,S,C,I,J,M,U,V]"
+            )
+        if support_content.ndim != 6:
+            raise ValueError(
+                "Teacher-G support content must be [B,S,C,U,V,H]"
+            )
+        if matched_content.ndim != 7:
+            raise ValueError(
+                "Teacher-G matched content must be [B,S,C,I,J,M,H]"
+            )
+        if tuple(association.shape[:3]) != tuple(support_content.shape[:3]):
+            raise ValueError(
+                "Teacher-G association/support batch axes do not align"
+            )
+        if tuple(association.shape[-2:]) != tuple(
+            support_content.shape[-3:-1]
+        ):
+            raise ValueError(
+                "Teacher-G association/support spatial axes do not align"
+            )
+        if tuple(association.shape[:-2]) != tuple(
+            matched_content.shape[:-1]
+        ):
+            raise ValueError(
+                "Teacher-G association/matched query axes do not align"
+            )
+        if int(support_content.shape[-1]) != int(
+            matched_content.shape[-1]
+        ):
+            raise ValueError(
+                "Teacher-G support/matched feature widths do not align"
+            )
+
+        support_second_moment = (
+            support_content.float().square().mean(dim=-1)
+        )
+        expected_second_moment = torch.einsum(
+            "bscijmuv,bscuv->bscijm",
+            association.float(),
+            support_second_moment,
+        )
+        matched_second_moment = (
+            matched_content.float().square().mean(dim=-1)
+        )
+        return (
+            expected_second_moment - matched_second_moment
+        ).clamp_min(0.0).sqrt()
+
+    @torch.no_grad()
+    def _teacher_g_v116_track_pack(
+        self,
+        target_visual: Tensor,
+        current_visual: Tensor,
+        current_state: ProgressiveGroundingAddressState | None,
+    ) -> tuple[FutureTeacherTrackPack, Tensor]:
+        """Symmetric, ordered and streamed Teacher-G association.
+
+        Current and future semantic keys use the same EMA projection. G3 owns
+        only current slot weights/support/coordinates. Supports are processed
+        in time order, so the next association is conditioned on the previous
+        soft match without constructing a support-by-spatial-by-hidden tensor.
+        """
+
+        if self.teacher_g_semantic_projection is None:
+            raise RuntimeError("V116 Teacher-G projection is missing")
+        support_offsets = tuple(
+            int(value)
+            for value in self.config.flow_jepa_effective_interval_support_offsets
+        )
+        if target_visual.ndim != 6 or current_visual.ndim != 5:
+            raise ValueError("V116 Teacher-G inputs have invalid ranks")
+        if int(target_visual.shape[1]) != len(support_offsets):
+            raise ValueError("V116 Teacher-G support count does not match offsets")
+        self._update_teacher_g_ema()
+        self._teacher_g_build_count += 1
+
+        support_pooled = self._teacher_pool_grid(target_visual[:, :, -1]).float()
+        current_pooled = self._teacher_pool_grid(current_visual[:, -1:]).float()
+        with torch.autocast(device_type=support_pooled.device.type, enabled=False):
+            normalized_support_content = self.teacher_norm(
+                support_pooled
+            ).float()
+            normalized_current_content = self.teacher_norm(
+                current_pooled
+            ).float()
+            if self.grounded_intent_effect_mainline_enabled:
+                support_content = normalized_support_content
+                current_content_grid = normalized_current_content[:, 0]
+            else:
+                # Exact V116 ancestry: only the grounded sibling preserves
+                # the full DINO content width.
+                support_content = F.linear(
+                    normalized_support_content,
+                    self.teacher_projection.weight.float(),
+                )
+                current_content_grid = F.linear(
+                    normalized_current_content,
+                    self.teacher_projection.weight.float(),
+                )[:, 0]
+            if self.grounded_intent_effect_mainline_enabled:
+                # Association content and association keys are separate
+                # spaces. Both sides of the semantic comparison use the same
+                # frozen/EMA key projection over the same normalized DINO
+                # domain; the full-width content remains untouched.
+                support_semantic = self.teacher_g_semantic_projection(
+                    normalized_support_content
+                ).float()
+                current_semantic_grid = (
+                    self.teacher_g_semantic_projection(
+                        normalized_current_content
+                    ).float()[:, 0]
+                )
+            else:
+                support_semantic = self.teacher_g_semantic_projection(
+                    support_pooled
+                ).float()
+                current_semantic_grid = self.teacher_g_semantic_projection(
+                    current_pooled
+                ).float()[:, 0]
+
+        batch = int(current_visual.shape[0])
+        supports = len(support_offsets)
+        cameras = int(self.cameras)
+        grid = int(self.grid_size)
+        slots = int(self.config.flow_jepa_address_slots)
+        axis = torch.linspace(
+            -1.0,
+            1.0,
+            grid,
+            device=current_visual.device,
+            dtype=torch.float32,
+        )
+        coordinate_y, coordinate_x = torch.meshgrid(axis, axis, indexing="ij")
+        grid_coordinates = torch.stack((coordinate_x, coordinate_y), dim=-1)
+        fallback_centers = grid_coordinates.reshape(
+            1, 1, grid, grid, 1, 2
+        ).expand(batch, cameras, -1, -1, slots, -1)
+        fallback_support = current_content_grid.new_full(
+            (batch, cameras, grid, grid, slots),
+            2.0 / float(max(grid - 1, 1)),
+        )
+        fallback_slot_weights = current_content_grid.new_full(
+            (batch, cameras, grid, grid, slots),
+            1.0 / float(slots),
+        )
+        current_centers = fallback_centers
+        current_support = fallback_support
+        slot_weights = fallback_slot_weights
+        flow_delta = torch.zeros_like(current_centers)
+        if (
+            current_state is not None
+            and int(current_state.stage) == 3
+            and current_state.rectified_centers is not None
+            and current_state.rectified_support is not None
+        ):
+            current_centers = current_state.rectified_centers.detach().float()
+            current_support = current_state.rectified_support.detach().float()
+            if current_state.canonical_semantic_slot_weights is not None:
+                slot_weights = (
+                    current_state.canonical_semantic_slot_weights.detach().float()
+                )
+            source_centers = current_state.bank.coarse_source_centers
+            flow_centers = current_state.bank.coarse_flow_centers
+            if (
+                source_centers is not None
+                and flow_centers is not None
+                and tuple(source_centers.shape)
+                == (batch, cameras, grid, grid, 2)
+                and tuple(flow_centers.shape)
+                == (batch, cameras, grid, grid, 2)
+            ):
+                flow_delta = (
+                    flow_centers.detach().float()
+                    - source_centers.detach().float()
+                )[..., None, :].expand_as(current_centers)
+
+        grounded_facts = (
+            current_state.grounded_fact_set
+            if (
+                self.grounded_intent_effect_mainline_enabled
+                and current_state is not None
+                and int(current_state.stage) == 3
+            )
+            else None
+        )
+        if grounded_facts is not None:
+            grounded_facts.validate()
+            current_centers = grounded_facts.slot_coordinates.detach().float()
+            current_support = grounded_facts.slot_support.detach().float()
+            slot_weights = grounded_facts.semantic_owner_probs.detach().float()
+            current_semantic = self.teacher_g_semantic_projection(
+                grounded_facts.content_slots.detach().float()
+            ).float()
+            # The teacher's current reference is the exact completed-G3
+            # object content seen by the online path. Re-sampling an unmasked
+            # copy of the source frame here would make successor and delta
+            # losses disagree by the context-mask residual.
+            current_content = grounded_facts.content_slots.detach().float()
+            slot_validity = grounded_facts.slot_validity.detach().float()[..., 0]
+        else:
+            current_semantic = current_semantic_grid[..., None, :].expand(
+                -1, -1, -1, -1, slots, -1
+            )
+            current_content = current_content_grid[..., None, :].expand(
+                -1, -1, -1, -1, slots, -1
+            )
+            slot_validity = current_content.new_ones(
+                batch,
+                cameras,
+                grid,
+                grid,
+                slots,
+            )
+        track_semantic = current_semantic
+        track_center = current_centers
+        offset_tensor = torch.as_tensor(
+            support_offsets,
+            device=current_visual.device,
+            dtype=torch.float32,
+        )
+        max_offset = float(max(support_offsets[-1], 1))
+        candidate_coordinate = grid_coordinates.reshape(
+            1, 1, 1, 1, 1, grid, grid, 2
+        )
+
+        successor_rows: list[Tensor] = []
+        transport_rows: list[Tensor] = []
+        covariance_rows: list[Tensor] = []
+        persistence_rows: list[Tensor] = []
+        visibility_rows: list[Tensor] = []
+        uncertainty_rows: list[Tensor] = []
+        reliability_rows: list[Tensor] = []
+        entropy_rows: list[Tensor] = []
+        advantage_rows: list[Tensor] = []
+        previous_fraction = 0.0
+        for support_index, offset in enumerate(support_offsets):
+            fraction = float(offset) / max_offset
+            flow_increment = math.tanh(2.0 * fraction) - math.tanh(
+                2.0 * previous_fraction
+            )
+            previous_fraction = fraction
+            prior_center = (track_center + flow_increment * flow_delta).clamp(
+                -1.0, 1.0
+            )
+            query = F.normalize(track_semantic, dim=-1, eps=1e-4)
+            key = F.normalize(
+                support_semantic[:, support_index], dim=-1, eps=1e-4
+            )
+            semantic_logit = torch.einsum(
+                "bcijmr,bcuvr->bcijmuv", query, key
+            )
+            coordinate_delta = candidate_coordinate - prior_center[
+                ..., None, None, :
+            ]
+            width = (
+                current_support[..., None, None]
+                + 0.08
+                + 0.20 * fraction
+            ).clamp(0.05, 1.5)
+            geometry_logit = (
+                -0.5
+                * coordinate_delta.square().sum(dim=-1)
+                / width.square()
+            ).clamp(min=-8.0, max=0.0)
+            association = torch.softmax(
+                (2.0 * semantic_logit + geometry_logit).flatten(-2), dim=-1
+            ).reshape_as(semantic_logit)
+            entropy = -(
+                association.clamp_min(1e-8)
+                * association.clamp_min(1e-8).log()
+            ).sum(dim=(-2, -1)) / math.log(float(max(grid * grid, 2)))
+            association_max = association.flatten(-2).amax(dim=-1)
+            uniform_max = 1.0 / float(grid * grid)
+            concentration = (
+                (association_max - uniform_max) / max(1.0 - uniform_max, 1e-6)
+            ).clamp(0.0, 1.0)
+            semantic_expected = torch.einsum(
+                "bcijmuv,bcijmuv->bcijm", association, semantic_logit
+            )
+            semantic_background = semantic_logit.mean(dim=(-2, -1))
+            advantage = (
+                0.5 * (semantic_expected - semantic_background)
+            ).clamp(0.0, 1.0)
+            reliability = (
+                (1.0 - entropy).clamp(0.0, 1.0)
+                * concentration
+                * advantage
+                * semantic_expected.clamp(0.0, 1.0)
+            ).clamp_min(0.0).sqrt() * slot_validity
+            matched_content = torch.einsum(
+                "bcijmuv,bcuvh->bcijmh",
+                association,
+                support_content[:, support_index],
+            )
+            matched_semantic = torch.einsum(
+                "bcijmuv,bcuvr->bcijmr",
+                association,
+                support_semantic[:, support_index],
+            )
+            matched_coordinate = torch.einsum(
+                "bcijmuv,uvd->bcijmd", association, grid_coordinates
+            )
+            centered = candidate_coordinate - matched_coordinate[
+                ..., None, None, :
+            ]
+            covariance_xy = torch.einsum(
+                "bcijmuv,bcijmuvd->bcijmd",
+                association,
+                centered.square(),
+            )
+            covariance_cross = torch.einsum(
+                "bcijmuv,bcijmuv->bcijm",
+                association,
+                centered[..., 0] * centered[..., 1],
+            )[..., None]
+            covariance = torch.cat((covariance_xy, covariance_cross), dim=-1)
+            if self.grounded_intent_effect_mainline_enabled:
+                # A failed match is a zero covariance change, not a free
+                # positive geometry value that P2 could use as a shortcut.
+                covariance = covariance * reliability[..., None]
+            reliability_value = reliability[..., None]
+            successor = (
+                reliability_value * matched_content
+                + (1.0 - reliability_value) * current_content
+            )
+            transport = reliability_value * (
+                matched_coordinate - current_centers
+            )
+            persistence = (
+                0.5
+                * (
+                    1.0
+                    + F.cosine_similarity(
+                        matched_content, current_content, dim=-1
+                    )
+                ).clamp(0.0, 2.0)
+                * reliability
+            )[..., None]
+            dispersion = self._teacher_weighted_feature_dispersion(
+                association[:, None],
+                support_content[:, support_index : support_index + 1],
+                matched_content[:, None],
+            )[:, 0]
+            uncertainty = (
+                4.0
+                * torch.tanh(
+                    (dispersion + entropy + (1.0 - reliability)) / 4.0
+                )
+            )[..., None]
+            successor_rows.append(successor)
+            transport_rows.append(transport)
+            covariance_rows.append(covariance)
+            persistence_rows.append(persistence)
+            visibility_rows.append(reliability_value)
+            uncertainty_rows.append(uncertainty)
+            reliability_rows.append(reliability_value)
+            entropy_rows.append(entropy[..., None])
+            advantage_rows.append(advantage[..., None])
+            # Detached soft recurrent track. Low reliability preserves the
+            # previous hypothesis rather than jumping to a random support.
+            track_semantic = (
+                reliability_value * matched_semantic
+                + (1.0 - reliability_value) * track_semantic
+            )
+            track_center = (
+                reliability_value * matched_coordinate
+                + (1.0 - reliability_value) * prior_center
+            ).clamp(-1.0, 1.0)
+
+        successor_support = torch.stack(successor_rows, dim=1)
+        transport_support = torch.stack(transport_rows, dim=1)
+        covariance_support = torch.stack(covariance_rows, dim=1)
+        persistence_support = torch.stack(persistence_rows, dim=1)
+        visibility_support = torch.stack(visibility_rows, dim=1)
+        uncertainty_support = torch.stack(uncertainty_rows, dim=1)
+        reliability_support = torch.stack(reliability_rows, dim=1)
+        entropy_support = torch.stack(entropy_rows, dim=1)
+        advantage_support = torch.stack(advantage_rows, dim=1)
+
+        aggregated: dict[str, list[Tensor]] = {
+            name: []
+            for name in (
+                "successor",
+                "delta",
+                "endpoint",
+                "transport",
+                "covariance",
+                "envelope",
+                "persistence",
+                "visibility",
+                "uncertainty",
+                "reliability",
+                "entropy",
+                "advantage",
+                "effective",
+            )
+        }
+        for start, end in self.config.flow_jepa_interval_windows:
+            selected = [
+                index
+                for index, offset in enumerate(support_offsets)
+                if int(start) <= offset <= int(end)
+            ]
+            if len(selected) < 2:
+                raise ValueError(
+                    f"V116 G-aligned interval [{start},{end}] needs two supports"
+                )
+            times = offset_tensor[selected]
+            relative = (times - float(start)) / float(end - start)
+            if len(selected) == 2:
+                base_weight = torch.full_like(relative, 0.5)
+            else:
+                base_weight = torch.empty_like(relative)
+                base_weight[0] = 0.5 * (relative[1] - relative[0])
+                base_weight[-1] = 0.5 * (relative[-1] - relative[-2])
+                base_weight[1:-1] = 0.5 * (relative[2:] - relative[:-2])
+                base_weight = base_weight / base_weight.sum().clamp_min(1e-8)
+            preliminary = (
+                successor_support[:, selected]
+                * base_weight.reshape(1, len(selected), 1, 1, 1, 1, 1)
+            ).sum(dim=1)
+            residual = (
+                successor_support[:, selected] - preliminary[:, None]
+            ).square().mean(dim=-1).sqrt()
+            robust_scale = (
+                residual.square()
+                * base_weight.reshape(1, len(selected), 1, 1, 1, 1)
+            ).sum(dim=1, keepdim=True).sqrt().clamp_min(1e-3)
+            robust = torch.rsqrt(1.0 + (residual / robust_scale).square())
+            robust_weight = robust * base_weight.reshape(
+                1, len(selected), 1, 1, 1, 1
+            )
+            robust_weight = robust_weight / robust_weight.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1e-8)
+
+            def aggregate(value: Tensor) -> Tensor:
+                return (
+                    value[:, selected] * robust_weight[..., None]
+                ).sum(dim=1)
+
+            aggregated["successor"].append(aggregate(successor_support))
+            # The semantic delta is not an independent teacher object.  The
+            # robust weights sum to one, so deriving it from the aggregated
+            # successor is exact and avoids retaining another production-size
+            # [B,S,C,G,G,M,H] buffer (about 100 MiB at B8/S12/H512).
+            interval_successor = aggregated["successor"][-1]
+            aggregated["delta"].append(
+                interval_successor - current_content
+            )
+            aggregated["endpoint"].append(
+                successor_support[:, selected[-1]] - current_content
+            )
+            aggregated["transport"].append(aggregate(transport_support))
+            aggregated["covariance"].append(aggregate(covariance_support))
+            aggregated["envelope"].append(
+                transport_support[:, selected].norm(dim=-1).amax(dim=1)[..., None]
+            )
+            aggregated["persistence"].append(aggregate(persistence_support))
+            aggregated["visibility"].append(aggregate(visibility_support))
+            aggregated["uncertainty"].append(aggregate(uncertainty_support))
+            aggregated["reliability"].append(aggregate(reliability_support))
+            aggregated["entropy"].append(aggregate(entropy_support))
+            aggregated["advantage"].append(aggregate(advantage_support))
+            aggregated["effective"].append(
+                robust_weight.square().sum(dim=1).reciprocal()
+            )
+
+        pack = FutureTeacherTrackPack(
+            stable_successor=torch.stack(aggregated["successor"], dim=1).detach(),
+            semantic_delta=torch.stack(aggregated["delta"], dim=1).detach(),
+            endpoint_delta=torch.stack(aggregated["endpoint"], dim=1).detach(),
+            transport_mean=torch.stack(aggregated["transport"], dim=1).detach(),
+            transport_covariance=torch.stack(
+                aggregated["covariance"], dim=1
+            ).detach(),
+            path_envelope=torch.stack(aggregated["envelope"], dim=1).detach(),
+            persistence=torch.stack(aggregated["persistence"], dim=1).detach(),
+            visibility=torch.stack(aggregated["visibility"], dim=1).detach(),
+            uncertainty=torch.stack(aggregated["uncertainty"], dim=1).detach(),
+            reliability=torch.stack(aggregated["reliability"], dim=1).detach(),
+            association_entropy=torch.stack(
+                aggregated["entropy"], dim=1
+            ).detach(),
+            semantic_advantage=torch.stack(
+                aggregated["advantage"], dim=1
+            ).detach(),
+            effective_support=torch.stack(
+                aggregated["effective"], dim=1
+            ).mean().detach(),
+            support_count=current_content.new_tensor(float(supports)),
+            current_content=current_content.detach(),
+        )
+        pack.validate()
+        return pack, slot_weights.detach()
+
+    @torch.no_grad()
+    def teacher_g_aligned_track_pack(
+        self,
+        target_visual: Tensor,
+        current_visual: Tensor,
+        current_state: ProgressiveGroundingAddressState | None,
+    ) -> tuple[FutureTeacherTrackPack, Tensor]:
+        """Associate future supports to current G facts without fixed cells."""
+
+        if not self.g_aligned_future_effect_enabled:
+            raise RuntimeError("G-aligned future teacher is disabled")
+        if self.supervised_effect_mainline_enabled:
+            return self._teacher_g_v116_track_pack(
+                target_visual,
+                current_visual,
+                current_state,
+            )
+        if self.teacher_g_semantic_projection is None:
+            raise RuntimeError("G-aligned future teacher projection is missing")
+        if target_visual.ndim != 6:
+            raise ValueError(
+                "G-aligned target_visual must be [B,F,H,C,P,D]"
+            )
+        if current_visual.ndim != 5:
+            raise ValueError(
+                "G-aligned current_visual must be [B,H,C,P,D]"
+            )
+        support_offsets = tuple(
+            int(value)
+            for value in self.config.flow_jepa_effective_interval_support_offsets
+        )
+        if int(target_visual.shape[1]) != len(support_offsets):
+            raise ValueError(
+                "G-aligned future support count does not match offsets"
+            )
+        self._update_teacher_g_ema()
+        self._teacher_g_build_count += 1
+
+        support_pooled = self._teacher_pool_grid(
+            target_visual[:, :, -1]
+        ).float()
+        current_pooled = self._teacher_pool_grid(
+            current_visual[:, -1:]
+        ).float()
+        with torch.autocast(
+            device_type=support_pooled.device.type, enabled=False
+        ):
+            support_content = F.linear(
+                self.teacher_norm(support_pooled).float(),
+                self.teacher_projection.weight.float(),
+            )
+            current_content_grid = F.linear(
+                self.teacher_norm(current_pooled).float(),
+                self.teacher_projection.weight.float(),
+            )[:, 0]
+            support_semantic = self.teacher_g_semantic_projection(
+                support_pooled
+            ).float()
+            fallback_semantic = self.teacher_g_semantic_projection(
+                current_pooled
+            ).float()[:, 0]
+
+        batch = int(current_visual.shape[0])
+        supports = len(support_offsets)
+        cameras = int(self.cameras)
+        grid = int(self.grid_size)
+        slots = int(self.config.flow_jepa_address_slots)
+        route_dim = int(fallback_semantic.shape[-1])
+        axis = torch.linspace(
+            -1.0,
+            1.0,
+            grid,
+            device=current_visual.device,
+            dtype=torch.float32,
+        )
+        coordinate_y, coordinate_x = torch.meshgrid(
+            axis, axis, indexing="ij"
+        )
+        grid_coordinates = torch.stack(
+            (coordinate_x, coordinate_y), dim=-1
+        )
+        fallback_centers = grid_coordinates.reshape(
+            1, 1, grid, grid, 1, 2
+        ).expand(batch, cameras, -1, -1, slots, -1)
+        fallback_support = current_content_grid.new_full(
+            (batch, cameras, grid, grid, slots),
+            2.0 / float(max(grid - 1, 1)),
+        )
+        fallback_slot_weights = current_content_grid.new_full(
+            (batch, cameras, grid, grid, slots),
+            1.0 / float(slots),
+        )
+        fallback_semantic_slots = fallback_semantic[:, :, :, :, None].expand(
+            -1, -1, -1, -1, slots, -1
+        )
+
+        completed_g3 = bool(
+            current_state is not None
+            and int(current_state.stage) == 3
+            and current_state.canonical_semantic_keys is not None
+            and current_state.rectified_centers is not None
+            and current_state.rectified_support is not None
+        )
+        if completed_g3:
+            assert current_state is not None
+            assert current_state.canonical_semantic_keys is not None
+            assert current_state.rectified_centers is not None
+            assert current_state.rectified_support is not None
+            current_semantic = (
+                current_state.canonical_semantic_keys.detach().float()
+            )
+            current_centers = current_state.rectified_centers.detach().float()
+            current_support = current_state.rectified_support.detach().float()
+            slot_weights = current_state.canonical_semantic_slot_weights
+            if slot_weights is None:
+                slot_weights = fallback_slot_weights
+            else:
+                slot_weights = slot_weights.detach().float()
+            source_centers = current_state.bank.coarse_source_centers
+            flow_centers = current_state.bank.coarse_flow_centers
+            if (
+                source_centers is not None
+                and flow_centers is not None
+                and tuple(source_centers.shape)
+                == (batch, cameras, grid, grid, 2)
+                and tuple(flow_centers.shape)
+                == (batch, cameras, grid, grid, 2)
+            ):
+                flow_delta = (
+                    flow_centers.detach().float()
+                    - source_centers.detach().float()
+                )[..., None, :].expand_as(current_centers)
+            else:
+                flow_delta = torch.zeros_like(current_centers)
+        else:
+            current_semantic = fallback_semantic_slots
+            current_centers = fallback_centers
+            current_support = fallback_support
+            slot_weights = fallback_slot_weights
+            flow_delta = torch.zeros_like(current_centers)
+
+        expected_semantic = (
+            batch,
+            cameras,
+            grid,
+            grid,
+            slots,
+            route_dim,
+        )
+        if tuple(current_semantic.shape) != expected_semantic:
+            raise ValueError(
+                "current G semantic slots do not match Teacher-G route space"
+            )
+        current_content = current_content_grid[
+            :, :, :, :, None
+        ].expand(-1, -1, -1, -1, slots, -1)
+        query = F.normalize(
+            current_semantic, dim=-1, eps=1e-4
+        )
+        key = F.normalize(
+            support_semantic, dim=-1, eps=1e-4
+        )
+        semantic_logit = torch.einsum(
+            "bcijmr,bscuvr->bscijmuv",
+            query,
+            key,
+        )
+        offset_tensor = torch.as_tensor(
+            support_offsets,
+            device=current_visual.device,
+            dtype=torch.float32,
+        )
+        relative_offset = offset_tensor / float(max(support_offsets[-1], 1))
+        flow_factor = torch.tanh(2.0 * relative_offset).reshape(
+            1, supports, 1, 1, 1, 1, 1
+        )
+        prior_center = (
+            current_centers[:, None]
+            + flow_factor * flow_delta[:, None]
+        ).clamp(-1.0, 1.0)
+        candidate_coordinate = grid_coordinates.reshape(
+            1, 1, 1, 1, 1, 1, grid, grid, 2
+        )
+        coordinate_delta = candidate_coordinate - prior_center[
+            ..., None, None, :
+        ]
+        width = (
+            current_support[:, None, ..., None, None]
+            + 0.08
+            + 0.20
+            * relative_offset.reshape(1, supports, 1, 1, 1, 1, 1, 1)
+        ).clamp(0.05, 1.5)
+        geometry_logit = (
+            -0.5
+            * coordinate_delta.square().sum(dim=-1)
+            / width.square()
+        ).clamp(min=-8.0, max=0.0)
+        association_logit = 2.0 * semantic_logit + geometry_logit
+        association = torch.softmax(
+            association_logit.flatten(-2), dim=-1
+        ).reshape_as(association_logit)
+        association_entropy = -(
+            association.clamp_min(1e-8)
+            * association.clamp_min(1e-8).log()
+        ).sum(dim=(-2, -1)) / math.log(float(max(grid * grid, 2)))
+        association_max = association.flatten(-2).max(dim=-1).values
+        uniform_max = 1.0 / float(grid * grid)
+        concentration = (
+            (association_max - uniform_max)
+            / float(max(1.0 - uniform_max, 1e-6))
+        ).clamp(0.0, 1.0)
+        spatial_reliability = (
+            (1.0 - association_entropy).clamp(0.0, 1.0)
+            * concentration
+        ).clamp_min(0.0).sqrt()
+        semantic_expected = torch.einsum(
+            "bscijmuv,bscijmuv->bscijm",
+            association,
+            semantic_logit,
+        )
+        semantic_background = semantic_logit.mean(dim=(-2, -1))
+        # A geometric prior can concentrate the posterior even when every
+        # future semantic key is equally incompatible.  Reliability therefore
+        # requires both positive semantic agreement and an advantage over the
+        # same-camera candidate background.  Flat semantics yields exactly
+        # zero reliability rather than a disguised fixed-cell teacher.
+        semantic_advantage_support = (
+            0.5 * (semantic_expected - semantic_background)
+        ).clamp(0.0, 1.0)
+        semantic_positive = semantic_expected.clamp(0.0, 1.0)
+        semantic_reliability = (
+            semantic_advantage_support * semantic_positive
+        ).clamp_min(0.0).sqrt()
+        reliability_support = (
+            spatial_reliability * semantic_reliability
+        ).clamp(0.0, 1.0)
+        matched_content = torch.einsum(
+            "bscijmuv,bscuvh->bscijmh",
+            association,
+            support_content,
+        )
+        matched_coordinate = torch.einsum(
+            "bscijmuv,uvd->bscijmd",
+            association,
+            grid_coordinates,
+        )
+        centered_coordinate = (
+            grid_coordinates.reshape(1, 1, 1, 1, 1, 1, grid, grid, 2)
+            - matched_coordinate[..., None, None, :]
+        )
+        covariance_xy = torch.einsum(
+            "bscijmuv,bscijmuvd->bscijmd",
+            association,
+            centered_coordinate.square(),
+        )
+        covariance_cross = torch.einsum(
+            "bscijmuv,bscijmuv->bscijm",
+            association,
+            centered_coordinate[..., 0] * centered_coordinate[..., 1],
+        )[..., None]
+        covariance = torch.cat((covariance_xy, covariance_cross), dim=-1)
+        reliability_expanded = reliability_support[..., None]
+        successor_support = (
+            reliability_expanded * matched_content
+            + (1.0 - reliability_expanded) * current_content[:, None]
+        )
+        delta_support = (
+            reliability_expanded
+            * (matched_content - current_content[:, None])
+        )
+        transport_support = reliability_expanded * (
+            matched_coordinate - current_centers[:, None]
+        )
+        persistence_support = (
+            (
+                0.5
+                * (
+                1.0
+                + F.cosine_similarity(
+                    matched_content,
+                    current_content[:, None],
+                    dim=-1,
+                )
+                )
+            ).clamp(0.0, 1.0)
+            * reliability_support
+        )[..., None]
+        visibility_support = reliability_expanded
+        teacher_dispersion_support = (
+            self._teacher_weighted_feature_dispersion(
+                association,
+                support_content,
+                matched_content,
+            )
+        )
+        raw_uncertainty_support = (
+            teacher_dispersion_support
+            + association_entropy
+            + (1.0 - reliability_support)
+        )
+        uncertainty_support = (
+            4.0 * torch.tanh(raw_uncertainty_support / 4.0)
+        )[..., None]
+
+        successors: list[Tensor] = []
+        deltas: list[Tensor] = []
+        endpoint_deltas: list[Tensor] = []
+        transports: list[Tensor] = []
+        covariances: list[Tensor] = []
+        envelopes: list[Tensor] = []
+        persistences: list[Tensor] = []
+        visibilities: list[Tensor] = []
+        uncertainties: list[Tensor] = []
+        reliabilities: list[Tensor] = []
+        entropies: list[Tensor] = []
+        semantic_advantages: list[Tensor] = []
+        effective_supports: list[Tensor] = []
+        for start, end in self.config.flow_jepa_interval_windows:
+            selected = [
+                index
+                for index, offset in enumerate(support_offsets)
+                if int(start) <= offset <= int(end)
+            ]
+            if len(selected) < 2:
+                raise ValueError(
+                    f"G-aligned interval [{start},{end}] needs two supports"
+                )
+            times = offset_tensor[selected]
+            relative = (times - float(start)) / float(end - start)
+            if int(relative.numel()) == 2:
+                base_weight = torch.full_like(relative, 0.5)
+            else:
+                base_weight = torch.empty_like(relative)
+                base_weight[0] = 0.5 * (relative[1] - relative[0])
+                base_weight[-1] = 0.5 * (relative[-1] - relative[-2])
+                base_weight[1:-1] = 0.5 * (
+                    relative[2:] - relative[:-2]
+                )
+                base_weight = base_weight / base_weight.sum().clamp_min(1e-8)
+            interval_successor = successor_support[:, selected]
+            weight_shape = (
+                1,
+                len(selected),
+                1,
+                1,
+                1,
+                1,
+            )
+            preliminary = (
+                interval_successor
+                * base_weight.reshape(*weight_shape, 1)
+            ).sum(dim=1)
+            residual = (
+                interval_successor - preliminary[:, None]
+            ).square().mean(dim=-1).sqrt()
+            robust_scale = (
+                residual.square()
+                * base_weight.reshape(weight_shape)
+            ).sum(dim=1, keepdim=True).sqrt().clamp_min(1e-3)
+            robust = torch.rsqrt(
+                1.0 + (residual / robust_scale).square()
+            )
+            robust_weight = (
+                robust * base_weight.reshape(weight_shape)
+            )
+            robust_weight = robust_weight / robust_weight.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1e-8)
+
+            def aggregate(value: Tensor) -> Tensor:
+                return (
+                    value[:, selected]
+                    * robust_weight[..., None]
+                ).sum(dim=1)
+
+            successors.append(aggregate(successor_support))
+            deltas.append(aggregate(delta_support))
+            endpoint_deltas.append(
+                successor_support[:, selected[-1]] - current_content
+            )
+            transports.append(aggregate(transport_support))
+            covariances.append(aggregate(covariance))
+            envelopes.append(
+                transport_support[:, selected]
+                .norm(dim=-1)
+                .amax(dim=1)[..., None]
+            )
+            persistences.append(aggregate(persistence_support))
+            visibilities.append(aggregate(visibility_support))
+            uncertainties.append(aggregate(uncertainty_support))
+            reliabilities.append(aggregate(reliability_expanded))
+            entropies.append(
+                aggregate(association_entropy[..., None])
+            )
+            semantic_advantages.append(
+                aggregate(semantic_advantage_support[..., None])
+            )
+            effective_supports.append(
+                robust_weight.square().sum(dim=1).reciprocal()
+            )
+
+        pack = FutureTeacherTrackPack(
+            stable_successor=torch.stack(successors, dim=1).detach(),
+            semantic_delta=torch.stack(deltas, dim=1).detach(),
+            endpoint_delta=torch.stack(endpoint_deltas, dim=1).detach(),
+            transport_mean=torch.stack(transports, dim=1).detach(),
+            transport_covariance=torch.stack(covariances, dim=1).detach(),
+            path_envelope=torch.stack(envelopes, dim=1).detach(),
+            persistence=torch.stack(persistences, dim=1).detach(),
+            visibility=torch.stack(visibilities, dim=1).detach(),
+            uncertainty=torch.stack(uncertainties, dim=1).detach(),
+            reliability=torch.stack(reliabilities, dim=1).detach(),
+            association_entropy=torch.stack(entropies, dim=1).detach(),
+            semantic_advantage=torch.stack(
+                semantic_advantages, dim=1
+            ).detach(),
+            effective_support=torch.stack(
+                effective_supports, dim=1
+            ).mean().detach(),
+            support_count=current_content.new_tensor(float(supports)),
+            current_content=current_content.detach(),
+        )
+        pack.validate()
+        return pack, slot_weights.detach()
 
     def _teacher_stage_summary(self, projected: Tensor) -> Tensor:
         """Pool to one token while retaining coarse camera/spatial movement."""
@@ -9075,11 +12536,78 @@ class FlowDINOEvidenceEncoder(nn.Module):
             self.hidden,
         ).detach()
 
+    @staticmethod
+    @torch.no_grad()
+    def _window_teacher_track_pack(
+        pack: FutureTeacherTrackPack,
+    ) -> WindowTeacherTrackPack:
+        """Compile four legacy intervals into fixed near/mid/late targets.
+
+        The original four-interval pack remains available to the inherited
+        JEPA objective. Only the supervised W effect interface receives this
+        three-slot view. The late slot preserves both 16-32 and 32-48 moments
+        through an equal, student-independent robust aggregate.
+        """
+
+        pack.validate()
+        if int(pack.stable_successor.shape[1]) != 4:
+            raise ValueError("V117 window teacher requires four parent intervals")
+
+        def mean_late(value: Tensor) -> Tensor:
+            return 0.5 * (value[:, 2:3] + value[:, 3:4])
+
+        def near_mid_late(value: Tensor) -> Tensor:
+            return torch.cat((value[:, :2], mean_late(value)), dim=1)
+
+        successor = near_mid_late(pack.stable_successor)
+        current = pack.current_content
+        semantic = successor - current[:, None]
+        endpoint = torch.cat(
+            (pack.endpoint_delta[:, :2], pack.endpoint_delta[:, 3:4]),
+            dim=1,
+        )
+        envelope = torch.cat(
+            (
+                pack.path_envelope[:, :2],
+                torch.maximum(
+                    pack.path_envelope[:, 2:3],
+                    pack.path_envelope[:, 3:4],
+                ),
+            ),
+            dim=1,
+        )
+        window = WindowTeacherTrackPack(
+            stable_successor=successor.detach(),
+            semantic_delta=semantic.detach(),
+            endpoint_delta=endpoint.detach(),
+            transport_mean=near_mid_late(pack.transport_mean).detach(),
+            transport_covariance=near_mid_late(
+                pack.transport_covariance
+            ).detach(),
+            path_envelope=envelope.detach(),
+            persistence=near_mid_late(pack.persistence).detach(),
+            visibility=near_mid_late(pack.visibility).detach(),
+            uncertainty=near_mid_late(pack.uncertainty).detach(),
+            reliability=near_mid_late(pack.reliability).detach(),
+            association_entropy=near_mid_late(
+                pack.association_entropy
+            ).detach(),
+            semantic_advantage=near_mid_late(
+                pack.semantic_advantage
+            ).detach(),
+            effective_support=pack.effective_support.detach(),
+            support_count=pack.support_count.detach(),
+            current_content=current.detach(),
+        )
+        window.validate()
+        return window
+
     @torch.no_grad()
     def teacher_interval_targets(
         self,
         target_visual: Tensor,
         current_visual: Tensor,
+        current_state: ProgressiveGroundingAddressState | None = None,
     ) -> dict[str, Tensor]:
         """Build spatial interval content, progression, and endpoint targets.
 
@@ -9104,6 +12632,172 @@ class FlowDINOEvidenceEncoder(nn.Module):
             raise ValueError(
                 "interval target frame count does not match serialized support offsets"
             )
+        if self.g_aligned_future_effect_enabled:
+            track_pack, slot_weights = self.teacher_g_aligned_track_pack(
+                target_visual,
+                current_visual,
+                current_state,
+            )
+            targets = track_pack.slot_reduced(slot_weights)
+            effect_pack: FutureTeacherTrackPack = (
+                self._window_teacher_track_pack(track_pack)
+                if self.window_effect_bank_enabled
+                else track_pack
+            )
+            targets.update(
+                {
+                    "flow_jepa_future_effect_successor_target_slots": (
+                        effect_pack.stable_successor
+                    ),
+                    "flow_jepa_future_effect_semantic_target_slots": (
+                        effect_pack.semantic_delta
+                    ),
+                    "flow_jepa_future_effect_transport_target_slots": (
+                        effect_pack.transport_mean
+                    ),
+                    "flow_jepa_future_effect_transport_covariance_target_slots": (
+                        effect_pack.transport_covariance
+                    ),
+                    "flow_jepa_future_effect_persistence_target_slots": (
+                        effect_pack.persistence
+                    ),
+                    "flow_jepa_future_effect_visibility_target_slots": (
+                        effect_pack.visibility
+                    ),
+                    "flow_jepa_future_effect_uncertainty_target_slots": (
+                        effect_pack.uncertainty
+                    ),
+                    "flow_jepa_future_effect_reliability_target_slots": (
+                        effect_pack.reliability
+                    ),
+                    "flow_jepa_g_aligned_future_teacher": (
+                        track_pack.support_count.new_ones(())
+                    ),
+                    "flow_jepa_g_aligned_teacher_used_completed_g3": (
+                        track_pack.support_count.new_tensor(
+                            float(
+                                current_state is not None
+                                and int(current_state.stage) == 3
+                            )
+                        )
+                    ),
+                    "flow_jepa_teacher_g_builds_this_pack": (
+                        track_pack.support_count.new_ones(())
+                    ),
+                    "flow_jepa_future_effect_teacher_reliability_mean": (
+                        effect_pack.reliability.float().mean()
+                    ),
+                    "flow_jepa_future_effect_teacher_association_entropy": (
+                        effect_pack.association_entropy.float().mean()
+                    ),
+                    "flow_jepa_future_effect_teacher_semantic_advantage": (
+                        effect_pack.semantic_advantage.float().mean()
+                    ),
+                    "flow_jepa_future_effect_target_adjacent_cosine": (
+                        F.cosine_similarity(
+                            effect_pack.semantic_delta.float().mean(
+                                dim=(2, 3, 4, 5)
+                            )[:, 1:],
+                            effect_pack.semantic_delta.float().mean(
+                                dim=(2, 3, 4, 5)
+                            )[:, :-1],
+                            dim=-1,
+                            eps=1e-6,
+                        ).mean()
+                    ),
+                    "flow_jepa_future_effect_target_interval_variation": (
+                        effect_pack.semantic_delta.float().mean(
+                            dim=(2, 3, 4, 5)
+                        ).std(dim=1, unbiased=False).mean()
+                    ),
+                    "flow_jepa_future_effect_target_transport_variation": (
+                        effect_pack.transport_mean.float().mean(
+                            dim=(2, 3, 4, 5)
+                        ).std(dim=1, unbiased=False).mean()
+                    ),
+                    "flow_jepa_window_teacher_slots": (
+                        effect_pack.support_count.new_tensor(
+                            float(effect_pack.stable_successor.shape[1])
+                        )
+                    ),
+                }
+            )
+            if self.grounded_intent_effect_mainline_enabled:
+                if int(effect_pack.stable_successor.shape[1]) != 4:
+                    raise RuntimeError(
+                        "grounded teacher must preserve all four intervals"
+                    )
+                # The grounded FutureEffect interface is algebraically
+                # zero-centred.  A currently visible/persistent fact is the
+                # identity state (1.0), so only its future change may cross
+                # W -> P2.  Keep the absolute quantities inside the detached
+                # teacher pack for diagnostics; expose changes to the student.
+                targets[
+                    "flow_jepa_future_effect_persistence_target_slots"
+                ] = effect_pack.persistence - 1.0
+                targets[
+                    "flow_jepa_future_effect_visibility_target_slots"
+                ] = effect_pack.visibility - 1.0
+                targets[
+                    "flow_jepa_future_effect_current_reference_target"
+                ] = effect_pack.current_content
+                targets["grounded_intent_effect_active"] = (
+                    effect_pack.support_count.new_ones(())
+                )
+                for interval_index, interval_name in enumerate(
+                    ("h4_8", "h8_16", "h16_32", "h32_48")
+                ):
+                    targets[
+                        f"grounded_future_effect_target_{interval_name}_rms"
+                    ] = (
+                        effect_pack.semantic_delta[:, interval_index]
+                        .float()
+                        .square()
+                        .mean()
+                        .sqrt()
+                    )
+                    targets[
+                        f"grounded_future_effect_teacher_reliability_{interval_name}"
+                    ] = (
+                        effect_pack.reliability[:, interval_index]
+                        .float()
+                        .mean()
+                    )
+            elif self.differential_intent_effect_mainline_enabled:
+                targets[
+                    "flow_jepa_future_effect_intent_summary_target_slots"
+                ] = effect_pack.semantic_delta.float().mean(
+                    dim=(2, 3, 4, 5)
+                ).to(dtype=effect_pack.semantic_delta.dtype)
+                targets[
+                    "flow_jepa_future_effect_current_reference_target"
+                ] = effect_pack.current_content
+                for slot_index, slot_name in enumerate(
+                    ("near", "mid", "late")
+                ):
+                    targets[
+                        f"flow_jepa_future_effect_target_{slot_name}_rms"
+                    ] = (
+                        effect_pack.semantic_delta[:, slot_index]
+                        .float()
+                        .square()
+                        .mean()
+                        .sqrt()
+                    )
+                    targets[
+                        f"flow_jepa_future_effect_teacher_reliability_{slot_name}"
+                    ] = (
+                        effect_pack.reliability[:, slot_index]
+                        .float()
+                        .mean()
+                    )
+            else:
+                targets[
+                    "flow_jepa_future_effect_current_target_slots"
+                ] = effect_pack.current_content[:, None].expand_as(
+                    effect_pack.stable_successor
+                )
+            return {key: value.detach() for key, value in targets.items()}
         support_grid = self._teacher_project_grid(
             target_visual[:, :, -1]
         ).float()

@@ -24,6 +24,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 RESULT_JSON="${RESULT_JSON:-${DIAGNOSTICS_DIR}/probe_v2_${PROBE_BATCHES}b.json}"
 MODEL_PATH_PROBE_LABEL="${MODEL_PATH_PROBE_LABEL:-v103}"
 MODEL_PATH_REQUIRED_CONTRACT="${MODEL_PATH_REQUIRED_CONTRACT:-v103}"
+MODEL_PATH_MODES="${MODEL_PATH_MODES:-}"
 
 if [[ ! -f "${CHECKPOINT}" ]]; then
   printf 'checkpoint not found: %s\n' "${CHECKPOINT}" >&2
@@ -37,6 +38,15 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 printf '[%s-model-path-probe] checkpoint=%s batches=%s max_val_batches=%s batch_size=%s result=%s\n' \
   "${MODEL_PATH_PROBE_LABEL}" "${CHECKPOINT}" "${PROBE_BATCHES}" \
   "${MAX_VAL_BATCHES}" "${BATCH_SIZE}" "${RESULT_JSON}"
+
+declare -a MODEL_PATH_MODE_ARGS=()
+if [[ -n "${MODEL_PATH_MODES}" && "${MODEL_PATH_MODES}" != "all" ]]; then
+  read -r -a REQUESTED_MODEL_PATH_MODES <<< "${MODEL_PATH_MODES}"
+  MODEL_PATH_MODE_ARGS=(
+    --model-path-intervention-modes
+    "${REQUESTED_MODEL_PATH_MODES[@]}"
+  )
+fi
 
 "${PYTHON_BIN}" -m clearvla.cli.eval_v39_policy \
   --checkpoint "${CHECKPOINT}" \
@@ -54,6 +64,7 @@ printf '[%s-model-path-probe] checkpoint=%s batches=%s max_val_batches=%s batch_
   --max-val-batches "${MAX_VAL_BATCHES}" \
   --model-path-intervention-batches "${PROBE_BATCHES}" \
   --model-path-required-contract "${MODEL_PATH_REQUIRED_CONTRACT}" \
+  "${MODEL_PATH_MODE_ARGS[@]}" \
   --action-path-bootstrap-reps "${BOOTSTRAP_REPS}" \
   --action-path-bootstrap-seed "${BOOTSTRAP_SEED}" \
   --out-json "${RESULT_JSON}"

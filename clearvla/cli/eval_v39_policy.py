@@ -26,6 +26,14 @@ from clearvla.experiments.observed_state_lab.dataset import (
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     POLICY_CHECKPOINT_SCHEMAS,
     V39PolicyTrainerConfig,
+    _validate_complete_v112_model_contract,
+    _validate_complete_v113_model_contract,
+    _validate_complete_v114_model_contract,
+    _validate_complete_v115_model_contract,
+    _validate_complete_v116_model_contract,
+    _validate_complete_v117_model_contract,
+    _validate_differential_intent_effect_323_model_contract,
+    _validate_grounded_intent_effect_323_model_contract,
     evaluate_model_path_intervention,
     evaluate_v39_policy,
     evaluate_v98_flow_address_intervention,
@@ -36,6 +44,68 @@ from clearvla.experiments.observed_state_lab.sampling_path_probe import (
 from clearvla.experiments.observed_state_lab.world_runtime import jsonable
 from clearvla.policy.config import V39PolicyConfig
 from clearvla.policy.system import V39PolicySystem
+
+_VERSIONED_MODEL_PATH_CONTRACTS = tuple(f"v{version}" for version in range(103, 118))
+_DIFFERENTIAL_INTENT_EFFECT_CONTRACT = "differential_intent_effect_323"
+_GROUNDED_INTENT_EFFECT_CONTRACT = "grounded_intent_effect_323"
+
+
+def _serialized_model_path_capability(policy_config: V39PolicyConfig) -> str | None:
+    """Return the live capability marker without replaying vXXX ancestry.
+
+    Capability validators own the complete graph check.  In particular, both
+    current capabilities deliberately disable the legacy V105 fixed-chart
+    horizon-address loss, so using the historical V105->V117 boolean chain as
+    their serialization marker makes a valid checkpoint appear older than
+    V111 before its own validator can run.
+    """
+
+    if int(
+        getattr(
+            policy_config,
+            "flow_jepa_grounded_intent_effect_mainline",
+            0,
+        )
+    ) == 1:
+        return _GROUNDED_INTENT_EFFECT_CONTRACT
+    if int(
+        getattr(
+            policy_config,
+            "flow_jepa_differential_intent_effect_mainline",
+            0,
+        )
+    ) == 1:
+        return _DIFFERENTIAL_INTENT_EFFECT_CONTRACT
+    return None
+
+
+def _resolve_model_path_contract(
+    requested_contract: str,
+    *,
+    policy_config: V39PolicyConfig,
+    newest_versioned_contract: str,
+) -> str:
+    if requested_contract != "auto":
+        return requested_contract
+    return (
+        _serialized_model_path_capability(policy_config)
+        or newest_versioned_contract
+    )
+
+
+def _versioned_contract_at_least(contract: str, minimum: str) -> bool:
+    """Whether a vXXX contract needs a versioned ancestor precheck.
+
+    Named capabilities are sibling graphs and intentionally return ``False``.
+    Their direct validators check the live graph instead.
+    """
+
+    try:
+        contract_index = _VERSIONED_MODEL_PATH_CONTRACTS.index(contract)
+        minimum_index = _VERSIONED_MODEL_PATH_CONTRACTS.index(minimum)
+    except ValueError:
+        return False
+    return contract_index >= minimum_index
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +149,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "Run the paired V103-V111 goal/history/phase/interval/"
+            "Run the paired V103-V113 goal/history/phase/interval/"
             "flow/address/G-W-P causal model-path probe on N selected "
             "validation batches. The newest complete serialized contract is "
             "selected unless explicitly required."
@@ -98,11 +168,28 @@ def parse_args() -> argparse.Namespace:
             "v109",
             "v110",
             "v111",
+            "v112",
+            "v113",
+            "v114",
+            "v115",
+            "v116",
+            "v117",
+            "differential_intent_effect_323",
+            "grounded_intent_effect_323",
         ),
         default="auto",
         help=(
             "Formal contract required before a model-path probe. 'auto' uses "
-            "the newest complete serialized V111-to-V103 contract."
+            "the newest complete serialized capability/V117-to-V103 contract."
+        ),
+    )
+    parser.add_argument(
+        "--model-path-intervention-modes",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional subset of model-path intervention names. Baseline is "
+            "always included. Omit this argument to run the complete contract."
         ),
     )
     parser.add_argument(
@@ -177,22 +264,16 @@ def main() -> None:
         )
     )
     if selected_probe_count > 1:
-        raise ValueError(
-            "choose only one flow-address/action-path/model-path/sampling-path probe"
-        )
+        raise ValueError("choose only one flow-address/action-path/model-path/sampling-path probe")
     checkpoint_probe = (
         int(args.flow_address_intervention_batches) > 0
         or int(args.action_path_intervention_batches) > 0
         or int(args.model_path_intervention_batches) > 0
         or int(args.sampling_path_probe_batches) > 0
     )
-    if (
-        args.sampling_path_require_v104_contract
-        and int(args.sampling_path_probe_batches) <= 0
-    ):
+    if args.sampling_path_require_v104_contract and int(args.sampling_path_probe_batches) <= 0:
         raise ValueError(
-            "--sampling-path-require-v104-contract applies only to "
-            "--sampling-path-probe-batches"
+            "--sampling-path-require-v104-contract applies only to --sampling-path-probe-batches"
         )
     checkpoint_stat_before = args.checkpoint.stat() if checkpoint_probe else None
     checkpoint_sha256_before = _sha256_file(args.checkpoint) if checkpoint_probe else None
@@ -307,26 +388,24 @@ def main() -> None:
             probe_batches=sampling_path_batches,
             solver_steps=tuple(int(value) for value in args.sampling_path_probe_steps),
             max_batches=args.max_val_batches,
-            require_complete_v104_contract=bool(
-                args.sampling_path_require_v104_contract
-            ),
+            require_complete_v104_contract=bool(args.sampling_path_require_v104_contract),
         )
         metrics = {
-            "sampling_path_teacher_contract_velocity_rmse": sampling_path_result[
-                "summary"
-            ]["teacher_contract_velocity_rmse"],
-            "sampling_path_deploy_bridge_velocity_rmse": sampling_path_result[
-                "summary"
-            ]["deploy_bridge_velocity_rmse"],
-            "sampling_path_recursive_velocity_rmse": sampling_path_result[
-                "summary"
-            ]["recursive_velocity_rmse"],
-            "sampling_path_call_contract_excess_mse": sampling_path_result[
-                "summary"
-            ]["call_contract_excess_mse"],
-            "sampling_path_off_path_excess_mse": sampling_path_result[
-                "summary"
-            ]["off_path_excess_mse"],
+            "sampling_path_teacher_contract_velocity_rmse": sampling_path_result["summary"][
+                "teacher_contract_velocity_rmse"
+            ],
+            "sampling_path_deploy_bridge_velocity_rmse": sampling_path_result["summary"][
+                "deploy_bridge_velocity_rmse"
+            ],
+            "sampling_path_recursive_velocity_rmse": sampling_path_result["summary"][
+                "recursive_velocity_rmse"
+            ],
+            "sampling_path_call_contract_excess_mse": sampling_path_result["summary"][
+                "call_contract_excess_mse"
+            ],
+            "sampling_path_off_path_excess_mse": sampling_path_result["summary"][
+                "off_path_excess_mse"
+            ],
         }
     elif model_path_batches > 0 or action_path_batches > 0:
         requested_model_contract = str(args.model_path_required_contract)
@@ -340,10 +419,7 @@ def main() -> None:
         )
         serialized_v105 = bool(
             serialized_v104
-            and int(
-                getattr(policy_config, "flow_jepa_horizon_soft_address", 0)
-            )
-            == 1
+            and int(getattr(policy_config, "flow_jepa_horizon_soft_address", 0)) == 1
             and int(
                 getattr(
                     trainer,
@@ -363,14 +439,8 @@ def main() -> None:
         )
         serialized_v106 = bool(
             serialized_v105
-            and int(
-                getattr(policy_config, "flow_jepa_interval_stage_delta", 0)
-            )
-            == 1
-            and int(
-                getattr(policy_config, "flow_jepa_variance_safe_routing", 0)
-            )
-            == 1
+            and int(getattr(policy_config, "flow_jepa_interval_stage_delta", 0)) == 1
+            and int(getattr(policy_config, "flow_jepa_variance_safe_routing", 0)) == 1
             and float(
                 getattr(
                     trainer,
@@ -394,10 +464,7 @@ def main() -> None:
         )
         serialized_v108 = bool(
             serialized_v107
-            and int(
-                getattr(policy_config, "flow_jepa_online_horizon_address", 0)
-            )
-            == 1
+            and int(getattr(policy_config, "flow_jepa_online_horizon_address", 0)) == 1
         )
         serialized_v109 = bool(
             serialized_v108
@@ -433,69 +500,190 @@ def main() -> None:
             )
             == 1
         )
-        required_model_contract = (
-            (
-                "v111"
-                if serialized_v111
-                else "v110"
-                if serialized_v110
-                else "v109"
-                if serialized_v109
-                else "v108"
-                if serialized_v108
-                else "v107"
-                if serialized_v107
-                else "v106"
-                if serialized_v106
-                else "v105"
-                if serialized_v105
-                else "v104"
-                if serialized_v104
-                else "v103"
+        serialized_v112 = bool(
+            serialized_v111
+            and int(
+                getattr(
+                    policy_config,
+                    "flow_jepa_pre_value_owner_routing",
+                    0,
+                )
             )
-            if requested_model_contract == "auto"
-            else requested_model_contract
+            == 1
         )
-        complete_v110_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v110"
-        )
-        complete_v111_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v111"
-        )
-        complete_v109_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v109"
-        )
-        complete_v108_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v108"
-        )
-        complete_v107_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v107"
-        )
-        complete_v106_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v106"
-        )
-        complete_v105_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v105"
-        )
-        complete_v104_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v104"
-        )
-        complete_v103_candidate = bool(
-            model_path_batches > 0 and required_model_contract == "v103"
-        )
-        if model_path_batches <= 0 and requested_model_contract != "auto":
-            raise ValueError(
-                "--model-path-required-contract applies only to "
-                "--model-path-intervention-batches"
+        serialized_v113 = bool(
+            serialized_v112
+            and int(
+                getattr(
+                    policy_config,
+                    "flow_jepa_functional_mainline_routing",
+                    0,
+                )
             )
-        if complete_v104_candidate and not all(
+            == 1
+        )
+        serialized_v114 = bool(
+            serialized_v113
+            and int(
+                getattr(
+                    policy_config,
+                    "flow_jepa_utility_precision_mainline",
+                    0,
+                )
+            )
+            == 1
+            and int(
+                getattr(
+                    policy_config,
+                    "flow_jepa_action_free_world_factual",
+                    0,
+                )
+            )
+            == 1
+        )
+        serialized_v115 = bool(
+            serialized_v114
+            and all(
                 int(getattr(policy_config, name, 0)) == 1
                 for name in (
-                    "flow_jepa_bounded_flow_coordinates",
-                    "flow_jepa_sequential_horizon_memory",
-                    "role_residual_amplitude_contract",
+                    "flow_jepa_shared_factual_glimpse_bank",
+                    "flow_jepa_g_aligned_future_effect",
+                    "flow_jepa_stateless_goal_phase_machine",
+                    "flow_jepa_policy_plan_compiler",
                 )
-            ):
+            )
+            and str(
+                getattr(
+                    policy_config,
+                    "flow_jepa_top_role_schedule",
+                    "",
+                )
+            )
+            == "3-2-3"
+            and int(getattr(policy_config, "flow_jepa_grounding_blocks", 0)) == 3
+            and int(getattr(policy_config, "flow_jepa_world_blocks", 0)) == 2
+            and int(getattr(policy_config, "flow_jepa_policy_blocks", 0)) == 3
+            and int(getattr(policy_config, "depth", 0)) == 8
+        )
+        serialized_v116 = bool(
+            serialized_v115
+            and int(
+                getattr(
+                    policy_config,
+                    "flow_jepa_supervised_effect_mainline",
+                    0,
+                )
+            )
+            == 1
+            and str(
+                getattr(
+                    policy_config,
+                    "flow_matching_time_distribution",
+                    "uniform",
+                )
+            )
+            == "beta_1_5_1"
+        )
+        serialized_v117 = bool(
+            serialized_v116
+            and all(
+                int(getattr(policy_config, name, 0)) == 1
+                for name in (
+                    "flow_jepa_stateless_intent_controller",
+                    "flow_jepa_window_effect_bank",
+                    "flow_jepa_effect_read_in_p2",
+                )
+            )
+            and int(getattr(policy_config, "flow_jepa_future_slots", 0)) == 3
+            and int(getattr(policy_config, "future_anchors", 0)) == 4
+        )
+        serialized_capability = _serialized_model_path_capability(policy_config)
+        serialized_differential_intent_effect = (
+            serialized_capability == _DIFFERENTIAL_INTENT_EFFECT_CONTRACT
+        )
+        serialized_grounded_intent_effect = (
+            serialized_capability == _GROUNDED_INTENT_EFFECT_CONTRACT
+        )
+        newest_versioned_contract = (
+            "v117"
+            if serialized_v117
+            else "v116"
+            if serialized_v116
+            else "v115"
+            if serialized_v115
+            else "v114"
+            if serialized_v114
+            else "v113"
+            if serialized_v113
+            else "v112"
+            if serialized_v112
+            else "v111"
+            if serialized_v111
+            else "v110"
+            if serialized_v110
+            else "v109"
+            if serialized_v109
+            else "v108"
+            if serialized_v108
+            else "v107"
+            if serialized_v107
+            else "v106"
+            if serialized_v106
+            else "v105"
+            if serialized_v105
+            else "v104"
+            if serialized_v104
+            else "v103"
+        )
+        required_model_contract = _resolve_model_path_contract(
+            requested_model_contract,
+            policy_config=policy_config,
+            newest_versioned_contract=newest_versioned_contract,
+        )
+        complete_v110_candidate = bool(model_path_batches > 0 and required_model_contract == "v110")
+        differential_intent_effect_candidate = bool(
+            model_path_batches > 0
+            and required_model_contract == "differential_intent_effect_323"
+        )
+        grounded_intent_effect_candidate = bool(
+            model_path_batches > 0
+            and required_model_contract == "grounded_intent_effect_323"
+        )
+        complete_v112_candidate = bool(
+            model_path_batches > 0
+            and _versioned_contract_at_least(required_model_contract, "v112")
+        )
+        complete_v113_candidate = bool(
+            model_path_batches > 0
+            and _versioned_contract_at_least(required_model_contract, "v113")
+        )
+        complete_v114_candidate = bool(model_path_batches > 0 and required_model_contract == "v114")
+        complete_v115_candidate = bool(model_path_batches > 0 and required_model_contract == "v115")
+        complete_v116_candidate = bool(model_path_batches > 0 and required_model_contract == "v116")
+        complete_v117_candidate = bool(model_path_batches > 0 and required_model_contract == "v117")
+        complete_v111_candidate = bool(
+            model_path_batches > 0
+            and _versioned_contract_at_least(required_model_contract, "v111")
+        )
+        complete_v109_candidate = bool(model_path_batches > 0 and required_model_contract == "v109")
+        complete_v108_candidate = bool(model_path_batches > 0 and required_model_contract == "v108")
+        complete_v107_candidate = bool(model_path_batches > 0 and required_model_contract == "v107")
+        complete_v106_candidate = bool(model_path_batches > 0 and required_model_contract == "v106")
+        complete_v105_candidate = bool(model_path_batches > 0 and required_model_contract == "v105")
+        complete_v104_candidate = bool(model_path_batches > 0 and required_model_contract == "v104")
+        complete_v103_candidate = bool(model_path_batches > 0 and required_model_contract == "v103")
+        if model_path_batches <= 0 and requested_model_contract != "auto":
+            raise ValueError(
+                "--model-path-required-contract applies only to --model-path-intervention-batches"
+            )
+        if complete_v104_candidate and not all(
+            int(getattr(policy_config, name, 0)) == 1
+            for name in (
+                "flow_jepa_bounded_flow_coordinates",
+                "flow_jepa_sequential_horizon_memory",
+                "role_residual_amplitude_contract",
+            )
+        ):
             # Keep the error at the CLI boundary explicit. The complete V104
             # validator below still checks the full V103 parent and RMS limits.
             raise ValueError(
@@ -537,6 +725,72 @@ def main() -> None:
                 "the requested V111 model-path probe checkpoint does not "
                 "serialize functional public/owner evidence separation"
             )
+        if complete_v112_candidate and not serialized_v112:
+            raise ValueError(
+                "the requested V112 model-path probe checkpoint does not "
+                "serialize pre-value W owner routing and the P1 appearance factor"
+            )
+        if complete_v113_candidate and not serialized_v113:
+            raise ValueError(
+                "the requested V113 model-path probe checkpoint does not "
+                "serialize functional W/P1/P2 routing and per-horizon conditions"
+            )
+        if complete_v114_candidate and not serialized_v114:
+            raise ValueError(
+                "the requested V114 model-path probe checkpoint does not "
+                "serialize shared factual P1 and utility/precision P2"
+            )
+        if complete_v115_candidate and not serialized_v115:
+            raise ValueError(
+                "the requested V115 model-path probe checkpoint does not "
+                "serialize the G-aligned FutureEffect, stateless goal-phase "
+                "machine, and 3-2-3 P3 compiler"
+            )
+        if complete_v116_candidate and not serialized_v116:
+            raise ValueError(
+                "the requested V116 model-path probe checkpoint does not "
+                "serialize the supervised-effect and Beta-time contract"
+            )
+        if complete_v117_candidate and not serialized_v117:
+            raise ValueError(
+                "the requested V117 model-path probe checkpoint does not "
+                "serialize the stateless-intent/window-effect/P2-read contract"
+            )
+        if (
+            differential_intent_effect_candidate
+            and not serialized_differential_intent_effect
+        ):
+            raise ValueError(
+                "the requested differential-intent/effect probe checkpoint "
+                "does not serialize the complete capability graph"
+            )
+        if grounded_intent_effect_candidate and not serialized_grounded_intent_effect:
+            raise ValueError(
+                "the requested grounded-intent/effect probe checkpoint does "
+                "not serialize the complete capability graph"
+            )
+        if grounded_intent_effect_candidate:
+            _validate_grounded_intent_effect_323_model_contract(
+                policy_config,
+                trainer,
+            )
+        elif differential_intent_effect_candidate:
+            _validate_differential_intent_effect_323_model_contract(
+                policy_config,
+                trainer,
+            )
+        elif complete_v117_candidate:
+            _validate_complete_v117_model_contract(policy_config, trainer)
+        elif complete_v116_candidate:
+            _validate_complete_v116_model_contract(policy_config, trainer)
+        elif complete_v115_candidate:
+            _validate_complete_v115_model_contract(policy_config, trainer)
+        elif complete_v114_candidate:
+            _validate_complete_v114_model_contract(policy_config, trainer)
+        elif complete_v113_candidate:
+            _validate_complete_v113_model_contract(policy_config, trainer)
+        elif complete_v112_candidate:
+            _validate_complete_v112_model_contract(policy_config, trainer)
         action_path_result = evaluate_model_path_intervention(
             system=system,
             loader=loader,
@@ -552,6 +806,7 @@ def main() -> None:
             max_batches=args.max_val_batches,
             bootstrap_reps=int(args.action_path_bootstrap_reps),
             bootstrap_seed=int(args.action_path_bootstrap_seed),
+            intervention_modes=args.model_path_intervention_modes,
             require_complete_v103_contract=complete_v103_candidate,
             require_complete_v104_contract=complete_v104_candidate,
             require_complete_v105_contract=complete_v105_candidate,
@@ -560,7 +815,19 @@ def main() -> None:
             require_complete_v108_contract=complete_v108_candidate,
             require_complete_v109_contract=complete_v109_candidate,
             require_complete_v110_contract=complete_v110_candidate,
-            require_complete_v111_contract=complete_v111_candidate,
+            require_complete_v111_contract=bool(required_model_contract == "v111"),
+            require_complete_v112_contract=bool(required_model_contract == "v112"),
+            require_complete_v113_contract=bool(required_model_contract == "v113"),
+            require_complete_v114_contract=complete_v114_candidate,
+            require_complete_v115_contract=complete_v115_candidate,
+            require_complete_v116_contract=complete_v116_candidate,
+            require_complete_v117_contract=complete_v117_candidate,
+            require_differential_intent_effect_contract=(
+                differential_intent_effect_candidate
+            ),
+            require_grounded_intent_effect_contract=(
+                grounded_intent_effect_candidate
+            ),
         )
         metrics = action_path_result["modes"]["baseline"]
     elif int(args.flow_address_intervention_batches) > 0:
@@ -664,6 +931,21 @@ def main() -> None:
             "complete_v111_contract_verified": bool(
                 probe_result.get("complete_v111_contract_verified", False)
             ),
+            "complete_v112_contract_verified": bool(
+                probe_result.get("complete_v112_contract_verified", False)
+            ),
+            "complete_v113_contract_verified": bool(
+                probe_result.get("complete_v113_contract_verified", False)
+            ),
+            "complete_v114_contract_verified": bool(
+                probe_result.get("complete_v114_contract_verified", False)
+            ),
+            "complete_v115_contract_verified": bool(
+                probe_result.get("complete_v115_contract_verified", False)
+            ),
+            "complete_v116_contract_verified": bool(
+                probe_result.get("complete_v116_contract_verified", False)
+            ),
             "flow_jepa_raw_image_enabled": int(policy_config.flow_jepa_raw_image_enabled),
             "flow_jepa_coordinate_typed_raw_detail": int(
                 getattr(policy_config, "flow_jepa_coordinate_typed_raw_detail", 0)
@@ -675,9 +957,14 @@ def main() -> None:
                     0,
                 )
             ),
-            "flow_jepa_raw_micro_grid": int(
-                getattr(policy_config, "flow_jepa_raw_micro_grid", 0)
+            "flow_jepa_pre_value_owner_routing": int(
+                getattr(
+                    policy_config,
+                    "flow_jepa_pre_value_owner_routing",
+                    0,
+                )
             ),
+            "flow_jepa_raw_micro_grid": int(getattr(policy_config, "flow_jepa_raw_micro_grid", 0)),
             "flow_jepa_zero_flow_guard": int(
                 getattr(policy_config, "flow_jepa_zero_flow_guard", 0)
             ),
@@ -773,9 +1060,7 @@ def main() -> None:
             "flow_jepa_horizon_value_max_rms": float(
                 getattr(policy_config, "flow_jepa_horizon_value_max_rms", 0.0)
             ),
-            "role_attnres_enabled": int(
-                getattr(policy_config, "role_attnres_enabled", 0)
-            ),
+            "role_attnres_enabled": int(getattr(policy_config, "role_attnres_enabled", 0)),
             "role_attnres_ground_to_world": int(
                 getattr(policy_config, "role_attnres_ground_to_world", 0)
             ),
@@ -795,16 +1080,12 @@ def main() -> None:
                     0,
                 )
             ),
-            "stateless_phase_enabled": int(
-                getattr(policy_config, "stateless_phase_enabled", 0)
-            ),
+            "stateless_phase_enabled": int(getattr(policy_config, "stateless_phase_enabled", 0)),
             "action_normalizer_fingerprint": normalizer_fingerprint,
             "split": args.split,
             "split_episode_ids": [int(value) for value in split_ids],
             "planned_batches": probe_result["planned_batches"],
-            "finished_intervention_batches": probe_result[
-                "finished_intervention_batches"
-            ],
+            "finished_intervention_batches": probe_result["finished_intervention_batches"],
             "intervention_samples": probe_result["intervention_samples"],
             "intervention_coverage": probe_result["intervention_coverage"],
             "selection_strategy": probe_result.get("selection_strategy"),
@@ -812,9 +1093,7 @@ def main() -> None:
             "selected_event_batches": probe_result.get("selected_event_batches"),
             "selected_episode_count": probe_result.get("selected_episode_count"),
             "selected_episode_ids": probe_result.get("selected_episode_ids"),
-            "selected_event_episode_ids": probe_result.get(
-                "selected_event_episode_ids"
-            ),
+            "selected_event_episode_ids": probe_result.get("selected_event_episode_ids"),
         }
     if flow_address_result is not None:
         out["flow_address_intervention"] = flow_address_result
@@ -834,6 +1113,12 @@ def main() -> None:
                 "clearvla-v109-model-path-intervention-v8",
                 "clearvla-v110-model-path-intervention-v9",
                 "clearvla-v111-model-path-intervention-v10",
+                "clearvla-v112-model-path-intervention-v11",
+                "clearvla-v113-model-path-intervention-v12",
+                "clearvla-v113-model-path-intervention-v13",
+                "clearvla-v114-model-path-intervention-v14",
+                "clearvla-v115-model-path-intervention-v15",
+                "clearvla-v116-model-path-intervention-v16",
             }
             else "action_path_intervention"
         )

@@ -281,6 +281,12 @@ class ObservedStateWindowDataset(Dataset):
             "sample_index": torch.tensor(int(index), dtype=torch.long),
             "episode_idx": torch.tensor(ref.episode_idx, dtype=torch.long),
             "center": torch.tensor(center, dtype=torch.long),
+            # Factual episode position for detached logging only. The policy
+            # wrappers preserve this scalar, but no model forward consumes it.
+            "frame_progress": torch.tensor(
+                float(center + cfg.image_offset) / float(max(int(episode.length) - 1, 1)),
+                dtype=torch.float32,
+            ),
             "state": torch.from_numpy(self.state_normalizer.encode(state_raw)),
             "state_raw": torch.from_numpy(state_raw.copy()),
             "action_state": torch.from_numpy(self.action_normalizer.encode(state_raw)),
@@ -376,6 +382,7 @@ class PolicyWindowDataset(Dataset):
             "sample_index",
             "episode_idx",
             "center",
+            "frame_progress",
             "state",
             "state_raw",
             "action_state",
@@ -384,6 +391,8 @@ class PolicyWindowDataset(Dataset):
             "executed_action_history_raw",
             "policy_action",
             "policy_action_raw",
+            "action",
+            "future_state",
             "future_offsets",
             "history_keys",
             "history_obs_image",

@@ -64,6 +64,12 @@ def variance_floored_centered_norm(
         raise ValueError("variance-floored normalization requires a positive floor")
     value_f = value.float()
     centered = value_f - value_f.mean(dim=-1, keepdim=True)
+    # A representable constant does not necessarily survive the first
+    # subtraction as bit-exact zero: the reduction can round its mean by one
+    # ULP.  Re-centering the already tiny residual is numerically cheap and
+    # preserves the advertised exact-zero contract for constant inputs without
+    # introducing a threshold or a detached branch.
+    centered = centered - centered.mean(dim=-1, keepdim=True)
     variance = centered.square().mean(dim=-1, keepdim=True)
     denominator = torch.sqrt(variance + minimum * minimum)
     normalized = centered / denominator
@@ -286,6 +292,8 @@ class RoleDeltaAttnRes(nn.Module):
         self,
         query: Tensor,
         delta_values: Tensor,
+        *,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         if query.ndim < 3 or int(query.shape[-1]) != self.hidden_size:
             raise ValueError("role-delta query must be [B,...,H]")
@@ -367,6 +375,8 @@ class RoleDeltaAttnRes(nn.Module):
         routed = torch.einsum(
             "...s,...sh->...h", source_probability, routed_values
         )
+        if not collect_diagnostics:
+            return routed, {}
 
         probability_f = probabilities.detach().float()
         entropy_raw = -(

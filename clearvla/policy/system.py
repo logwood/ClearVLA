@@ -8,7 +8,7 @@ from torch import Tensor, nn
 from .codec import DCTFlowCodec, PhysicalActionCodec
 from .config import V39PolicyConfig
 from .proposal import RejectableHistoryProposal
-from .trunk import TemporalMidcutWorldActionDiT
+from .trunk import TemporalMidcutWorldActionDiT, V115StaticEvidenceCache
 
 
 @torch.no_grad()
@@ -156,6 +156,7 @@ _EVIDENCE_SAMPLING_DIAGNOSTIC_KEYS = frozenset(
         "flow_jepa_online_horizon_address",
         "flow_jepa_online_horizon_address_write_rms",
         "flow_jepa_progressive_grounding_address",
+        "flow_jepa_pre_value_owner_routing",
         "flow_jepa_coordinate_typed_raw_detail",
         "flow_jepa_literal_rgb_chart_rms",
         "flow_jepa_online_address_boundary_seed_rms",
@@ -529,7 +530,12 @@ class V39PolicySystem(nn.Module):
         enable_layer_contracts: bool = True,
         enable_final_action_decoder: bool = True,
         collect_diagnostics: bool = True,
+        collect_audit_metrics: bool = True,
         visual_context=None,
+        future_training_pack: dict[str, Tensor] | None = None,
+        allow_future_training_evidence: bool = False,
+        v115_static_evidence_cache: V115StaticEvidenceCache | None = None,
+        build_v115_static_evidence_cache: bool = False,
     ) -> dict[str, Tensor]:
         return self.planner(
             noisy_physical,
@@ -551,7 +557,14 @@ class V39PolicySystem(nn.Module):
             enable_layer_contracts=enable_layer_contracts,
             enable_final_action_decoder=enable_final_action_decoder,
             collect_diagnostics=collect_diagnostics,
+            collect_audit_metrics=collect_audit_metrics,
             visual_context=visual_context,
+            future_training_pack=future_training_pack,
+            allow_future_training_evidence=allow_future_training_evidence,
+            v115_static_evidence_cache=v115_static_evidence_cache,
+            build_v115_static_evidence_cache=(
+                build_v115_static_evidence_cache
+            ),
         )
 
     def _policy_proposal_tokens(self, tokens: Tensor) -> Tensor:
@@ -583,10 +596,20 @@ class V39PolicySystem(nn.Module):
                 )
             )
             if interval_stage:
+                current_address_state = (
+                    visual_context.late_raw_detail.progressive_address
+                    if (
+                        visual_context.late_raw_detail is not None
+                        and visual_context.late_raw_detail.progressive_address
+                        is not None
+                    )
+                    else None
+                )
                 interval_targets = (
                     self.planner.flow_jepa_interval_teacher_targets(
                         target_visual,
                         visual,
+                        current_address_state,
                     )
                 )
                 pack.update(
@@ -834,8 +857,8 @@ class V39PolicySystem(nn.Module):
         proposal_keep: Tensor | None = None,
         make_counterfactuals: bool = True,
         stop_at_midcut: bool = False,
+        collect_audit_metrics: bool = True,
     ) -> dict[str, Tensor]:
-        del future_training_pack
         proposal = self.proposal(executed_history)
         goal_language_tokens, goal_language_mask = self._goal_language_batch(
             int(executed_history.shape[0]),
@@ -929,9 +952,25 @@ class V39PolicySystem(nn.Module):
         target_flow = self._flow_encode(target_physical)
         noise_flow = self._flow_encode(noise)
         if training_time is None:
-            t = torch.rand(
+            uniform_time = torch.rand(
                 target_physical.shape[0], device=target_physical.device, dtype=target_physical.dtype
             )
+            time_distribution = str(
+                getattr(
+                    self.policy_config,
+                    "flow_matching_time_distribution",
+                    "uniform",
+                )
+            )
+            if time_distribution == "beta_1_5_1":
+                t = uniform_time.pow(1.0 / 1.5)
+                t = 0.999 * t + 0.001
+            elif time_distribution == "uniform":
+                t = uniform_time
+            else:
+                raise ValueError(
+                    f"unknown flow matching time distribution: {time_distribution}"
+                )
         else:
             if tuple(training_time.shape) != (int(target_physical.shape[0]),):
                 raise ValueError("training_time must be [B]")
@@ -988,6 +1027,8 @@ class V39PolicySystem(nn.Module):
                     consequence_physical=noisy_physical.detach(),
                     cvae_target_physical=None,
                     enable_layer_contracts=False,
+                    collect_diagnostics=False,
+                    collect_audit_metrics=False,
                     visual_context=visual_context,
                 )
                 preview_velocity = preview["pred_physical_velocity"].detach()
@@ -1011,7 +1052,14 @@ class V39PolicySystem(nn.Module):
             stop_at_midcut=stop_at_midcut,
             consequence_physical=consequence_input,
             cvae_target_physical=target_physical,
+            collect_audit_metrics=collect_audit_metrics,
             visual_context=visual_context,
+            future_training_pack=future_training_pack,
+            # ``flow_training_forward`` is the sole public teacher-forced
+            # entry point.  It is also used under ``eval``/``no_grad`` for
+            # deterministic representation validation, so module mode cannot
+            # be the authority boundary between training evidence and deploy.
+            allow_future_training_evidence=(future_training_pack is not None),
         )
         pred_flow_velocity = self._flow_velocity_from_output(action_policy)
         pred_physical_velocity = self._flow_decode(pred_flow_velocity)
@@ -1048,6 +1096,19 @@ class V39PolicySystem(nn.Module):
             "clean_physical_estimate": clean_physical_estimate,
             "proposal_action": proposal["action"],
             "time": t,
+            "flow_matching_beta_1_5_1": t.new_tensor(
+                float(
+                    str(
+                        getattr(
+                            self.policy_config,
+                            "flow_matching_time_distribution",
+                            "uniform",
+                        )
+                    )
+                    == "beta_1_5_1"
+                ),
+                dtype=torch.float32,
+            ),
             "noisy_physical_action": noisy_physical,
             "source_physical_noise": noise,
             "pred_action_estimate": decoded_action,
@@ -1125,7 +1186,16 @@ class V39PolicySystem(nn.Module):
                 entry["pred_action_estimate"] = self.codec.decode(clean, codec_state)
 
         pack = rollout_target_pack
-        if pack is None and target_visual is not None:
+        object_dynamics_mainline = bool(
+            int(
+                getattr(
+                    self.policy_config,
+                    "flow_jepa_object_intent_dynamics_mainline",
+                    0,
+                )
+            )
+        )
+        if pack is None and target_visual is not None and not object_dynamics_mainline:
             pack = self.build_rollout_target_pack(
                 visual, target_visual, visual_context=visual_context
             )
@@ -1208,9 +1278,26 @@ class V39PolicySystem(nn.Module):
                 for key in (
                     "flow_jepa_interval_effective_support",
                     "flow_jepa_interval_support_count",
+                    "flow_jepa_g_aligned_future_teacher",
+                    "flow_jepa_g_aligned_teacher_used_completed_g3",
+                    "flow_jepa_teacher_g_builds_this_pack",
                 ):
                     if key in pack:
                         out[key] = pack[key].to(
+                            device=target_physical.device,
+                            dtype=torch.float32,
+                        )
+                for key, value in pack.items():
+                    if key.startswith("flow_jepa_future_effect_") or key in {
+                        "flow_jepa_future_transport_target",
+                        "flow_jepa_future_transport_covariance_target",
+                        "flow_jepa_future_persistence_target",
+                        "flow_jepa_future_visibility_target",
+                        "flow_jepa_future_uncertainty_target",
+                        "flow_jepa_future_reliability",
+                        "flow_jepa_future_association_entropy",
+                    }:
+                        out[key] = value.to(
                             device=target_physical.device,
                             dtype=torch.float32,
                         )
@@ -1246,6 +1333,7 @@ class V39PolicySystem(nn.Module):
                     stop_at_midcut=stop_at_midcut,
                     consequence_physical=hold_physical,
                     enable_final_action_decoder=False,
+                    collect_audit_metrics=False,
                     visual_context=visual_context,
                 )
                 out["rollout_effect_pred_hold_action"] = hold_policy["rollout_effect_pred"]
@@ -1322,6 +1410,7 @@ class V39PolicySystem(nn.Module):
                     stop_at_midcut=stop_at_midcut,
                     consequence_physical=shuffle_physical,
                     enable_final_action_decoder=False,
+                    collect_audit_metrics=False,
                     visual_context=visual_context,
                 )
                 out["rollout_effect_pred_shuffle_action"] = shuffle_policy["rollout_effect_pred"]
@@ -1360,6 +1449,7 @@ class V39PolicySystem(nn.Module):
         collect_diagnostics: bool | None = None,
         goal_language_tokens: Tensor | None = None,
         goal_language_mask: Tensor | None = None,
+        reuse_static_evidence: bool = True,
     ) -> Tensor | dict[str, Tensor]:
         """Sample an action chunk without teacher-forcing target actions.
 
@@ -1482,6 +1572,29 @@ class V39PolicySystem(nn.Module):
         evidence_sampling = (
             getattr(self.planner, "evidence_latent_mmdit_action_decoder", None) is not None
         )
+        v115_static_evidence_cache: V115StaticEvidenceCache | None = None
+        build_v115_static_evidence_cache = (
+            bool(reuse_static_evidence)
+            and
+            getattr(self.planner, "policy_plan_compiler", None) is not None
+        )
+
+        def update_v115_static_cache(
+            output: dict[str, Tensor],
+        ) -> None:
+            nonlocal v115_static_evidence_cache
+            candidate = output.pop(
+                "_v115_static_evidence_cache",
+                None,
+            )
+            if candidate is None:
+                return
+            if not isinstance(candidate, V115StaticEvidenceCache):
+                raise TypeError(
+                    "planner returned an invalid V115 static evidence cache"
+                )
+            v115_static_evidence_cache = candidate
+
         for index in range(steps, 0, -1):
             t = torch.full(
                 (visual.shape[0],),
@@ -1510,8 +1623,16 @@ class V39PolicySystem(nn.Module):
                     consequence_physical=x_physical,
                     enable_layer_contracts=False,
                     collect_diagnostics=False,
+                    collect_audit_metrics=False,
                     visual_context=visual_context,
+                    v115_static_evidence_cache=(
+                        v115_static_evidence_cache
+                    ),
+                    build_v115_static_evidence_cache=(
+                        build_v115_static_evidence_cache
+                    ),
                 )
+                update_v115_static_cache(preview)
                 consequence_input = (
                     x_physical - t[:, None, None] * preview["pred_physical_velocity"]
                 ).detach()
@@ -1534,8 +1655,16 @@ class V39PolicySystem(nn.Module):
                 consequence_physical=consequence_input,
                 enable_layer_contracts=False,
                 collect_diagnostics=bool(collect_diagnostics),
+                collect_audit_metrics=bool(collect_diagnostics),
                 visual_context=visual_context,
+                v115_static_evidence_cache=(
+                    v115_static_evidence_cache
+                ),
+                build_v115_static_evidence_cache=(
+                    build_v115_static_evidence_cache
+                ),
             )
+            update_v115_static_cache(out)
             pred_flow_velocity = self._flow_velocity_from_output(out)
             raw_next = x_flow - pred_flow_velocity / float(steps)
             projected_next = self._flow_project_state(raw_next, codec_state)
@@ -1609,8 +1738,16 @@ class V39PolicySystem(nn.Module):
                 stop_at_midcut=stop_at_midcut,
                 enable_layer_contracts=False,
                 collect_diagnostics=False,
+                collect_audit_metrics=False,
                 visual_context=visual_context,
+                v115_static_evidence_cache=(
+                    v115_static_evidence_cache
+                ),
+                build_v115_static_evidence_cache=(
+                    build_v115_static_evidence_cache
+                ),
             )
+            update_v115_static_cache(event)
             result = {
                 "action": action,
                 "physical_action": final_physical,

@@ -23,6 +23,9 @@ export FLOW_JEPA_RAW_HIGH_RADIUS="${FLOW_JEPA_RAW_HIGH_RADIUS:-1}"
 export FLOW_JEPA_RAW_READER_RADIUS="${FLOW_JEPA_RAW_READER_RADIUS:-3}"
 export FLOW_JEPA_RAW_READER_HEADS="${FLOW_JEPA_RAW_READER_HEADS:-4}"
 export FLOW_JEPA_RAW_ACTIVATION_CHECKPOINT="${FLOW_JEPA_RAW_ACTIVATION_CHECKPOINT:-1}"
+export FLOW_JEPA_GROUNDING_BLOCKS="${FLOW_JEPA_GROUNDING_BLOCKS:-3}"
+export FLOW_JEPA_WORLD_BLOCKS="${FLOW_JEPA_WORLD_BLOCKS:-3}"
+export FLOW_JEPA_POLICY_BLOCKS="${FLOW_JEPA_POLICY_BLOCKS:-2}"
 export FLOW_JEPA_POLICY_WORKSPACE_SCALE="${FLOW_JEPA_POLICY_WORKSPACE_SCALE:-0.10}"
 export FLOW_JEPA_IDENTITY_ADVANTAGE_WEIGHT="${FLOW_JEPA_IDENTITY_ADVANTAGE_WEIGHT:-0.02}"
 export T5_CONDITION_PATH="${T5_CONDITION_PATH:-/home/sen.wang/workspace/robotics/clear/data/grasp_pen_embed.pt}"
@@ -55,7 +58,7 @@ exec bash "${SCRIPT_DIR}/current_v96_late_bottleneck_jepa.sh" \
   --flow-jepa-raw-reader-radius "${FLOW_JEPA_RAW_READER_RADIUS}" \
   --flow-jepa-raw-reader-heads "${FLOW_JEPA_RAW_READER_HEADS}" \
   --flow-jepa-raw-activation-checkpoint "${FLOW_JEPA_RAW_ACTIVATION_CHECKPOINT}" \
-  --flow-jepa-grounding-blocks 3 \
-  --flow-jepa-world-blocks 3 \
-  --flow-jepa-policy-blocks 2 \
+  --flow-jepa-grounding-blocks "${FLOW_JEPA_GROUNDING_BLOCKS}" \
+  --flow-jepa-world-blocks "${FLOW_JEPA_WORLD_BLOCKS}" \
+  --flow-jepa-policy-blocks "${FLOW_JEPA_POLICY_BLOCKS}" \
   --flow-jepa-policy-workspace-scale "${FLOW_JEPA_POLICY_WORKSPACE_SCALE}"

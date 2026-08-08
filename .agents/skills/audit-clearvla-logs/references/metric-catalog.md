@@ -491,10 +491,17 @@ Known compatibility aliases require care: historical `future_latent` and `action
   compiled W source prior. They are not a full intervention on the W teacher
   relevance; interpret their stated boundary exactly.
 - `flow_jepa_typed_p1_activation_checkpoint=1` records that the typed P
-  micro-grid contraction is configured for activation recomputation during
-  training. It is a memory-execution contract, not a learned gate, objective,
-  pruning decision or evidence of task utility. The value should not change
-  posterior outputs or gradients relative to the materialized reference.
+  micro-grid contraction is configured for activation recomputation.
+  `flow_jepa_typed_p1_activation_checkpoint_active` records whether it was
+  actually active in that forward; V114 deliberately leaves it inactive
+  below `flow_jepa_checkpoint_min_batch`. The configured value alone must not
+  be read as proof that a B1/B2 run paid checkpoint recomputation.
+  `flow_jepa_address_query_chunk_actual` is the actual shared factual P1 query
+  chunk after the V114 physical-batch budget is applied (24 at B1 and 4 at
+  B8 under the default budget of 32). These are memory-execution contracts,
+  not learned gates, objectives, pruning decisions or evidence of task
+  utility. Neither choice may change posterior outputs or gradients relative
+  to its materialized reference.
 
 ## V111 functional evidence ownership
 
@@ -529,6 +536,286 @@ Known compatibility aliases require care: historical `future_latent` and `action
 - `[v111-owner-grad]` also expands the semantic/appearance/geometry G2 query,
   G3 slot and W query gradients. This prevents a healthy aggregate G2/G3/W
   norm from hiding one disconnected owner.
+
+## V112 pre-value owner routing
+
+- `pre_value_owner=1` identifies the opt-in V112 graph. G3 generic memory is
+  built by its independent public projector; semantic, appearance and geometry
+  sidecars are not averaged into that public token. Read
+  `g3_query_private_cosine`, `g3_public_input`, and
+  `g3_public_private_rms_ratio` together: they describe overlap and scale, not
+  action causality.
+- `pre_value_w0_*` is the G3-to-W entry state. `pre_value_w1_*` through
+  `pre_value_w3_*` are the states after the three chronological W blocks.
+  Every boundary must report semantic, appearance, geometry and interval
+  state/delta/write RMS. A missing depth is a wiring failure; an exact-zero
+  owner gradient with nonzero siblings is a disconnected private lane.
+- `pre_value_w*_carrier_ratio` is the bounded private reconstruction written
+  into the shared W carrier. It is not an execution/capacity gate and is not a
+  target to maximize. Persistent growth toward the configured cap should be
+  treated as renewed common-carrier takeover.
+- `p1_appearance_pre_value_prior` proves the W appearance state changed the
+  source/slot factor of P's sole high-resolution value read.
+  `p1_world_appearance_candidate_logit` proves that a source-aligned W
+  appearance query also scored every local high-resolution candidate. Require
+  both; a broadcast source prior alone cannot own within-patch precision.
+- V112 adds owner-specific zero/shuffle interventions before the value read.
+  Internal posterior movement is insufficient: claim utility only when the
+  matched deployed action changes with full probe coverage.
+
+## V113 functional mainline routing
+
+- `functional_mainline=1` and
+  `flow_jepa_interval_stage_online_w_candidate=1` identify the complete V113
+  path. The second field proves interval supervision comes from the online W
+  owner candidate, not the frozen post-W3 organizer.
+- `functional_w{0..3}_{semantic|appearance|geometry|interval}_route_mass`,
+  `functional_w{0..3}_route_null_mass`, and
+  `functional_w{0..3}_selected_route_rms` describe null-capable selection in
+  route width. They are factual routing statistics, not mass or entropy
+  targets. Read every boundary; W0 is G3->W1 and W3 is W3->P.
+- `phase_horizon_variation`, `goal_horizon_variation`, and
+  `history_horizon_variation` must be paired with their adjacent-cosine and
+  context-norm fields. Nonzero variation proves ordered queries differ; only
+  zero/shuffle checkpoint interventions establish action use.
+- `p1_appearance_gateway_query_rms` reports the mandatory W-conditioned
+  appearance query. The former direct policy appearance scorer is absent in
+  V113, so do not search for or compare its old candidate-logit field.
+  `p1_app_gateway` is its ordinary gradient norm; a healthy aggregate
+  `typed_p1_selector` does not excuse an exact-zero gateway gradient.
+- `p2_policy_carrier` is protected outside typed survival competition.
+  `p2_routed_delta`, `p2_route_null`, and the four P2 route masses describe the
+  optional semantic/appearance/geometry/horizon innovations. Different source
+  permissions are architectural; equal route masses are neither expected nor
+  desired. `p2_owner_router` isolates the null-capable typed router from the
+  larger `typed_p2_refiner` gradient.
+- `horizon_phase`, `horizon_goal`, and `horizon_history` split the ordinary
+  gradient of the per-horizon adapter. Read them with the corresponding
+  horizon variation and causal intervention: the combined
+  `horizon_condition` norm can otherwise hide one disconnected operand.
+- `grad_interval_stage` is the gradient of the online W interval transitions
+  and shared route-to-hidden projections in V113. It no longer refers to the
+  frozen `_IntervalStageDeltaOrganizer`.
+- `future_h4/h12/h24/h48` is the active predictive-JEPA composite for V113:
+  raw delta plus reliability-weighted normalized magnitude plus `0.10` times
+  the scale-floored direction term. Read
+  `flow_jepa_future_horizon_*_active_direction`,
+  `*_active_loss`, and `*_direction_floor` together. They reuse the exact
+  backward calculation rather than a separately reimplemented cosine gauge.
+- V113 model-path schema v13 adds
+  `p1_appearance_gateway_zero` and
+  `p1_appearance_gateway_spatial_shuffle`. They intervene after the mandatory
+  W appearance projection and before candidate scoring, leaving upstream W
+  state, policy query, candidate keys and RGB/detail values fixed. This is
+  narrower than the whole-owner `appearance_owner_*` modes.
+- `current_context_masked` is a matched deployed-action intervention. It
+  reuses the deterministic observation-derived JEPA target mask only on the
+  latest online RGB/DINO context. The result also contains
+  `current_context_mask_comparison`, which compares unmasked and masked
+  teacher-forced JEPA metrics with the same checkpoint, eval mode, action
+  noise, flow time, target tensors and conditions. Treat a changed internal
+  loss with a null action delta as downstream robustness or compensation, not
+  as proof that the train/eval visibility mismatch is harmless.
+
+## V114-V116 factual/effect ownership
+
+- V114 makes P1 the sole shared high-resolution factual read. Read
+  `p1_query_rows`, `p2_query_rows`, `p1_query_chunk`, and
+  `p1_checkpoint_active` as execution/memory contracts, not learned capacity.
+  The protected RGB/detail base must be interpreted separately from optional
+  P2 owner deltas.
+- V115 changes the top schedule to 3-2-3 and introduces the Goal-Phase machine,
+  FutureEffectField and typed P3 plan compiler. Its historical
+  `state_innovation` is not teacher-owned; do not use a low future loss as
+  proof that the W state reaching action is supervised.
+- V116 is identified by `flow_jepa_supervised_effect_mainline_active=1`.
+  `effect_w1_*_loss` and `effect_w2_*_loss` report the two supervised W depths;
+  `p2_effect_read/entropy/interval_var` report P2's structured spatial read.
+  `w{0..2}_proposal_mass` is the clean-proposal share of W condition routing,
+  not an action-usage quota.
+- V116 `phase_terminal` and `execution_terminal` both refer to the separate
+  completion probability; neither is the fourth phase-state mass or an action
+  delta. `execution_terminal_bias` is the small bounded logit prior actually
+  applied by the execution controller.
+- `native_velocity_mse`, arm/gripper `*_tangent_mse`/`*_null_mse`, and
+  `event_reweight_delta` are semantic aliases over the real action-flow ledger,
+  not additional losses. The frozen sampling-path probe's
+  `fixed_time_velocity` rows at `0.05/0.25/0.50/0.75/0.95` diagnose time-local
+  error without multiplying training cost.
+- V116 model-path component modes isolate `future_effect_current`,
+  `future_effect_semantic`, `future_effect_transport`, and
+  `future_effect_reliability`. Whole-field zero/shuffle alone cannot identify
+  which consequence channel reaches action.
+
+## V117-V118 intent/effect differentiation
+
+- V117's `intent_progress` is a diagnostic barycentre and `frame_progress` is
+  a detached dataset statistic. Neither is a routing input or a loss target.
+  Read `intent_program_cos`, `intent_window_cos`,
+  `intent_attention_entropy`, the three program argmax rows, and the
+  observable-history intervention together; a progress correlation alone
+  does not establish a learned stage program.
+- V118 is identified by `flow_jepa_differential_effect_bank_active=1`. Its
+  `IntentStateBank` has four canonical program tokens and three typed
+  near/mid/late reads. `intent_language_innovation`,
+  `intent_history_innovation`, `intent_grounding_innovation`, and
+  `intent_ordered_innovation` are typed write diagnostics, not parallel W
+  carriers.
+- `w0/w1/w2_clean_proposal` reports the only non-intent operand entering the
+  differential W owner query. The old `w*_proposal_mass` belongs to the
+  V115-V117 multi-source router and is absent in V118. The
+  `w*_direct_intent_bypass`, `p1_direct_condition_bypass`,
+  `g_to_p_goal_bypass`, and `g_to_p_history_bypass` fields are structural
+  invariants and must remain zero when explicitly retained in a serialized
+  diagnostic row; the corresponding projection modules are absent.
+- `effect_pred_near/mid/late` and `effect_target_near/mid/late` are RMS
+  magnitudes, while `effect_near/mid/late_contrib` are the actual internally
+  weighted contributions to the shared external future-effect loss. Compare
+  all three with `w1_effect_cos/var`, `w2_effect_cos/var`, teacher reliability,
+  and per-slot zero/shuffle probes. A low target reliability weakens only the
+  calibrated semantic/transport rows; it does not erase successor,
+  visibility, uncertainty, or intent-summary pressure.
+- `p2_diff_content_score`, `p2_diff_intent_score`, and
+  `p2_diff_coordinate_score` are learned logit components before the one
+  effect posterior. They are not probability mass or fixed temporal priors.
+  `p2_effect_near/mid/late` is the resulting posterior mass and must be
+  interpreted with effect-slot intervention deltas, not optimized toward a
+  prescribed distribution.
+- `consequence_effect` is the bounded effect value entering the protected P2
+  base; `consequence_organized` is the bounded factual/effect/P2
+  reorganization. V118 has no P3 effect lane. `plan_precision` and
+  `plan_temporal` are optional typed innovations around
+  `plan_protected_base`; a `p3_effect_*` field in a V118 row is a schema
+  mismatch.
+- `intent_g_to_p_query` and `intent_p1_query` isolate the two legal reads of
+  the canonical intent view outside W/P2. The separate
+  `w_clean_proposal`, `differential_w1/w2`, `effect_decoder`,
+  `p2_effect_reader`, `consequence_organizer`, and `p3_compiler` gradient
+  fields must be read together. A healthy aggregate S or Flow-DINO gradient
+  cannot hide a disconnected boundary.
+- The V118 frozen model-path probe deliberately includes both zero and shuffle
+  modes for learned flow, DINO/raw keys, literal RGB, whole and component
+  effects, each near/mid/late effect slot, each near/mid/late intent read,
+  protected detail, and P3 precision/temporal lanes. Require nonzero
+  representation-boundary delta, full coverage, and a matched deployed-action
+  delta before assigning utility.
+
+## Grounded Intent-Effect 3-2-3
+
+- The capability identity is `grounded_intent_effect_323`; `v119` is only its
+  historical run/log label. Verify the serialized architecture manifest rather
+  than inferring the graph from the prefix.
+- `[v119-ground]` reports G2/G3 semantic/appearance/geometry owner entropy and
+  pairwise typed-owner differences. G2-to-G3 continuity is an executable
+  posterior contract, not a target entropy.
+- `[v119-intent]` reports each of the four interval reads and the separate
+  goal/history/G innovations. There is no phase class or scalar progress
+  input. Frame-progress correlations are detached audit evidence only.
+- `grounded_s_interval_goal_attention_entropy` is the real interval-query to
+  protected-goal attention entropy. Its per-interval/per-head variants must be
+  checked before calling every S head uniform.
+- `grounded_s_<interval>_<goal|appearance|geometry|history>_attention_mass`
+  reports source-specific interval reads. These are routing diagnostics, not
+  phase probabilities, target entropies, or usage quotas.
+- `[v119-effect]` reports prediction and target error with interval, camera,
+  spatial and object axes retained. Historical slot-reduced
+  `future_h4/h12/h24/h48`, change, and interval summaries remain audit-only in
+  this capability; they no longer own backward.
+- The existing future weight owns the full object-level FutureEffect core.
+  The existing interval-stage weight owns only adjacent four-interval
+  transitions. Read their exact loss-ledger contributions before judging
+  optimization dominance.
+- `[v119-policy]` reports bounded content/intent/coordinate score maxima,
+  bounded temperatures, posterior entropy/max and interval mass.
+  `grounded_p2_query_coordinate_std` verifies that the coordinate query is
+  predicted from the post-P1 action query. It is not an address-accuracy
+  target.
+- A neutral/all-invalid FutureEffect must produce exactly zero P2 effect and
+  interaction, making protected consequence exactly equal to the P1 fact.
+  Nonzero default geometry, reliability, validity or projection bias is a
+  structural regression.
+- Effect usefulness requires the chain
+  `FutureEffect boundary -> P2 -> consequence -> P3 -> deployed action`.
+  A W loss decrease, nonzero W gradient, or changed P2 representation alone
+  is insufficient.
+- `grounded_p2_effect_value_pre_mask_rms`,
+  `grounded_p2_effect_value_post_validity_rms`, and
+  `grounded_p2_effect_value_post_reliability_rms` locate where an otherwise
+  nonzero FutureEffect is attenuated. Read them with
+  `grounded_p2_effect_reliability_valid_mean` and
+  `grounded_p2_effect_reliability_attenuation_ratio`; an exact equality
+  between whole-effect zero and reliability-zero is expected when reliability
+  is the final multiplicative value mask.
+- Grounded frozen-probe results are valid only when
+  `baseline_identity_checked_batches == finished_intervention_batches` and
+  `patched_baseline_max_abs_delta <= baseline_identity_tolerance` (currently
+  `1e-8`). `boundary_changed` is based only on the mode's explicit
+  `boundary_metric_contract`, not every diagnostic key containing `delta`.
+- `goal_zero` and `goal_episode_shuffle` intervene on the actual T5 tensor
+  before S. `intent_goal_set_zero/shuffle` intervene on S's compiled protected
+  goal output and therefore audit only the optional second landing.
+- `future_effect_reliability_one` is an evaluation-only bypass: it sets the
+  online predicted reliability to one after W while holding effect content,
+  transport, validity and uncertainty fixed. Compare its paired action error
+  with both baseline and `future_effect_reliability_zero`; do not interpret it
+  as authorization to remove reliability from training or deployment.
+- `address_g3_slot_permute` consistently reindexes the within-sample G3 object
+  sidecar, while `address_g3_slot_mean` removes its slot distinctions by
+  broadcasting the within-cell mean. Both preserve the public G3 base and the
+  P1 address/value lattice. Their first-boundary metric is
+  `grounded_g3_slot_intervention_delta_norm`; the separate public-base delta
+  must remain exactly zero.
+
+## Object Intent-Dynamics 3-2-3
+
+- The active candidate capability is `object_intent_dynamics_323`; `v120` is
+  only the run/log label. Its compact families are `[v120-ground]`,
+  `[v120-intent]`, `[v120-dynamics]`, `[v120-dynamics-error]` and
+  `[v120-policy]`.
+- `object_grounding_reconstruction_mse` is the full-DINO dense-chart
+  reconstruction owner for K=4 global objects. Interpret it with existence,
+  null mass, owner/chart entropy and object-content pair cosine. No individual
+  entropy or cosine is a target or usage quota.
+- `object_grounding_existence_mean` is the object-vs-null confidence evaluated
+  on each object's own read support. `object_grounding_allocation_share_mean`
+  is the different audit quantity measuring its fraction of valid chart mass.
+  `object_grounding_validity_mean` is physical support of that read and is the
+  only one of these three values that may mask W/Teacher/loss/P2. Never use
+  allocation or existence as that mask. Null mass is summed over the mutually
+  exclusive local-M hypotheses per cell;
+  `object_grounding_mass_conservation_error` must stay at numerical zero.
+- S has four interval queries but no phase/progress variable.
+  `object_intent_*_attention_entropy` reports normalized read dispersion;
+  `goal/history/object/typed_innovation_rms` reports actual writes.
+  `online_match`, `plan_recognition` and `coarse_action` are structure terms
+  inside the existing interval budget, not new outer objectives.
+- `observed_state_delta_rms` and `observed_transport_rms` are the two legal
+  raw sources of object-S state change. Read them with
+  `state_change_history_rms`, `state_change_transport_rms` and
+  `state_change_evidence_rms`. This is zero-centred adjustment evidence, not a
+  completion probability, phase estimate, or terminal decision.
+- W1 owns `4-8/8-16`; W2 owns `16-32/32-48`. Read W1/W2 interval and object
+  cosine together with the four per-interval target-normalized errors. A high
+  prediction cosine is a failure only when the corresponding teacher targets
+  have materially lower cosine/greater variation.
+- Teacher `visibility_change` and `persistence_change` are zero-centred around
+  the current visible object. `uncertainty` is calibration; it does not scale
+  the online P2 value. `null_probability` and supports-per-interval describe
+  association difficulty, not action-path gates.
+- P2 content/intent/coordinate score maxima are construction-bounded to 1;
+  temperatures are bounded to `[0.25,4]`. The combined bounded score excludes
+  the negative validity log-mask and cannot exceed 12. Semantic/geometry/status
+  mass and four interval masses are descriptive posterior ownership, never
+  optimization targets.
+- `object_p2_effect_rms`, consequence effect/interaction and the five P3 lane
+  RMS values locate the W-to-action handoff. The fifth object lane is
+  `p3_state_change`, weakly scaled at `0.05`; `p3_terminal` and an external
+  completion-derived execution bias are schema mismatches for this capability.
+  Neutral FutureObjectDynamics must give exact-zero P2 effect and interaction;
+  a nonzero neutral value is a structural failure.
+- Production acceptance needs complete train/validation curves plus a frozen
+  effect zero/shuffle chain. Local BF16 gradients, nonzero W loss improvement
+  or a changed P2 boundary do not by themselves prove deployed-action utility.
 
 ## Gradients and interventions
 

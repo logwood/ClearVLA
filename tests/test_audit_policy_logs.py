@@ -78,13 +78,126 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertNotIn("capacity-saturated", codes)
         self.assertNotIn("z-probe-missing", codes)
 
+    def test_v119_rows_preserve_grounded_boundaries_and_interval_errors(self) -> None:
+        path = _write(
+            self.tmp_path / "v119.log",
+            "\n".join(
+                (
+                    "[v119-train] epoch=001 batch=0020 loss_total=0.500000 "
+                    "flow_loss=0.400000",
+                    "[v119-repr] warp=0.01000 p1_spatial_var=0.120",
+                    "[v119-ground] active=1 g2_fine_H=0.700 "
+                    "g2g3_sem=0.050 current_ref_align=1.0e-04",
+                    "[v119-intent] goal_attention_H=0.800 interval_var=0.040 "
+                    "h4_8_goal_H=0.750 h32_48_source_H=0.650",
+                    "[v119-effect] w1_sem=0.110 w2_sem=0.220 "
+                    "loss_semantic=0.0300 loss_interval_transition=0.0400",
+                    "[v119-effect-error] interval=h4_8 teacher_reliability=0.300 "
+                    "successor=0.400 semantic=0.500 transport=0.600",
+                    "[v119-effect-error] interval=h32_48 teacher_reliability=0.700 "
+                    "successor=0.800 semantic=0.900 transport=1.000",
+                    "[v119-policy] effect_read=0.130 posterior_H=0.810 "
+                    "mass_h4_8=0.300 p3_precision=0.140",
+                    "[v119-exec] capacity_gate_mass=1.00000 "
+                    "effective_basis_mass=32.000",
+                    "[v119-grad] grounded_w_inputs=1.00e-03 "
+                    "grounded_w1_blocks=2.00e-03 grounded_w2_blocks=3.00e-03 "
+                    "grounded_w_shared_heads=4.00e-03 global_preclip=1.00e+00",
+                    "[v119-epoch] epoch=001 step=20 loss_total=0.500000 "
+                    "flow_loss=0.400000",
+                    "[v119-val] action_rmse=0.10000",
+                )
+            ),
+        )
+
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        self.assertEqual(run.batch_points[0].source, "v119")
+        row = run.batch_points[0].metrics
+        self.assertEqual(row["grounded_intent_effect_active"], 1.0)
+        self.assertEqual(row["grounded_g2_g3_semantic_owner_l1"], 0.05)
+        self.assertEqual(row["grounded_s_h4_8_goal_attention_entropy"], 0.75)
+        self.assertEqual(row["grounded_w2_semantic_rms"], 0.22)
+        self.assertEqual(
+            row["grounded_future_effect_semantic_h4_8_target_normalized_error"],
+            0.5,
+        )
+        self.assertEqual(
+            row[
+                "grounded_future_effect_teacher_reliability_h32_48"
+            ],
+            0.7,
+        )
+        self.assertEqual(row["grounded_p2_effect_read_rms"], 0.13)
+        self.assertEqual(row["grad_grounded_world_shared_inputs"], 0.001)
+        self.assertEqual(row["grad_grounded_world_w2_blocks"], 0.003)
+        self.assertEqual(len(run.epoch_records), 1)
+        self.assertEqual(run.epoch_records[0]["val"]["full_rmse"], 0.1)
+
+    def test_v120_rows_preserve_object_intent_dynamics_boundaries(self) -> None:
+        path = _write(
+            self.tmp_path / "v120.log",
+            "\n".join(
+                (
+                    "[v120-train] epoch=001 batch=0020 loss_total=0.500000 "
+                    "flow_loss=0.400000",
+                    "[v120-ground] reconstruction=0.03000 existence=0.700 "
+                    "validity=1.000 allocation=0.200 null=0.200 mass_error=0.0e+00 "
+                    "object_pair_cos=0.400 g3_parent_l1=0.000e+00",
+                    "[v120-intent] goal_H=0.800 interval_var=0.040 "
+                    "state_delta=0.120 transport=0.030 state_change=0.050 "
+                    "online_match=0.02000 recognizer=0.03000 coarse_action=0.04000",
+                    "[v120-dynamics] w1_delta=0.110 w2_delta=0.220 "
+                    "teacher_visibility_change=-0.300 teacher_supports=3.00 "
+                    "semantic_loss=0.0300 transition_loss=0.0400",
+                    "[v120-dynamics-error] interval=h4_8 successor=0.400 "
+                    "semantic=0.500 transport=0.600 visibility=0.700",
+                    "[v120-dynamics-error] interval=h32_48 successor=0.800 "
+                    "semantic=0.900 transport=1.000 uncertainty=1.100",
+                    "[v120-policy] content_score_max=0.900 intent_score_max=0.800 "
+                    "coordinate_score_max=0.700 combined_logit_max=4.200 "
+                    "semantic_mass=0.400 h4_8_mass=0.300 p3_effect=0.140 "
+                    "p3_state_change=0.004",
+                    "[v120-grad] object_w_inputs=1.00e-03 global_preclip=1.00e+00",
+                    "[v120-epoch] epoch=001 step=20 loss_total=0.500000 "
+                    "flow_loss=0.400000",
+                    "[v120-val] action_rmse=0.10000",
+                )
+            ),
+        )
+
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        self.assertEqual(run.batch_points[0].source, "v120")
+        row = run.batch_points[0].metrics
+        self.assertEqual(row["object_grounding_reconstruction_mse"], 0.03)
+        self.assertEqual(row["object_grounding_validity_mean"], 1.0)
+        self.assertEqual(row["object_grounding_allocation_share_mean"], 0.2)
+        self.assertEqual(row["object_grounding_mass_conservation_error"], 0.0)
+        self.assertEqual(row["object_intent_interval_variation"], 0.04)
+        self.assertEqual(row["object_intent_observed_state_delta_rms"], 0.12)
+        self.assertEqual(row["object_intent_observed_transport_rms"], 0.03)
+        self.assertEqual(row["object_intent_state_change_evidence_rms"], 0.05)
+        self.assertEqual(row["object_w2_semantic_delta_rms"], 0.22)
+        self.assertEqual(row["object_teacher_visibility_change"], -0.3)
+        self.assertEqual(
+            row["object_future_semantic_h4_8_normalized_error"], 0.5
+        )
+        self.assertEqual(
+            row["object_future_uncertainty_h32_48_normalized_error"], 1.1
+        )
+        self.assertEqual(row["object_p2_combined_logit_max_abs"], 4.2)
+        self.assertEqual(row["object_p3_effect_rms"], 0.14)
+        self.assertEqual(row["object_p3_state_change_rms"], 0.004)
+        self.assertEqual(len(run.epoch_records), 1)
+        self.assertEqual(run.epoch_records[0]["val"]["full_rmse"], 0.1)
+
     def test_unhandled_nonfinite_backward_is_a_critical_finding(self) -> None:
         log = _write(
             self.tmp_path / "nonfinite.log",
             "\n".join(
                 (
-                    "[v96-train] epoch=001 batch=2500 loss_total=0.138861 "
-                    "flow_loss=0.081567",
+                    "[v96-train] epoch=001 batch=2500 loss_total=0.138861 flow_loss=0.081567",
                     "[v96-grad] global_preclip=1.14e+00",
                     "Traceback (most recent call last):",
                     '  File "train.py", line 7, in <module>',
@@ -255,6 +368,66 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(row.metrics["flow_jepa_future_prediction"], 0.5)
         self.assertEqual(row.metrics["grad_flow_dino_evidence"], 0.1)
 
+    def test_v118_differential_boundary_labels_map_to_canonical_metrics(
+        self,
+    ) -> None:
+        log = _write(
+            self.tmp_path / "v118_differential.log",
+            "\n".join(
+                (
+                    "[v118-train] epoch=001 batch=0020 loss_total=1.200000 "
+                    "flow_loss=1.000000 loss_groups=action:1.00000/"
+                    "representation:0.20000",
+                    "[v118-repr] w0_clean_proposal=0.1200 "
+                    "w1_clean_proposal=0.1300 w2_clean_proposal=0.1400 "
+                    "w0_direct_intent_bypass=0.0000 "
+                    "w1_direct_intent_bypass=0.0000 "
+                    "w2_direct_intent_bypass=0.0000 "
+                    "p1_intent_query=0.2100 "
+                    "p1_direct_condition_bypass=0.0000 "
+                    "g_to_p_intent_query=0.2200 "
+                    "g_to_p_goal_bypass=0.0000 "
+                    "g_to_p_history_bypass=0.0000",
+                    "[v118-grad] w_clean_proposal=1.00e-02 "
+                    "intent_g_to_p_query=2.00e-02 "
+                    "intent_p1_query=3.00e-02 "
+                    "global_preclip=9.00e-01 sec_per_batch=1.000",
+                )
+            ),
+        )
+
+        parsed = parse_log(log)
+        self.assertEqual(len(parsed.batch_points), 1)
+        row = parsed.batch_points[0].metrics
+        self.assertEqual(
+            row["flow_jepa_w0_clean_proposal_context_rms"],
+            0.12,
+        )
+        self.assertEqual(row["flow_jepa_w2_direct_intent_bypass"], 0.0)
+        self.assertEqual(row["flow_jepa_phase_detail_query_norm"], 0.21)
+        self.assertEqual(
+            row["flow_jepa_differential_p1_direct_condition_bypass"],
+            0.0,
+        )
+        self.assertEqual(
+            row["attnres_world_to_policy_phase_query_norm"],
+            0.22,
+        )
+        self.assertEqual(
+            row["attnres_world_to_policy_condition_query_norm"],
+            0.0,
+        )
+        self.assertEqual(
+            row["attnres_world_to_policy_history_query_norm"],
+            0.0,
+        )
+        self.assertEqual(
+            row["grad_differential_clean_proposal_world_condition"],
+            0.01,
+        )
+        self.assertEqual(row["grad_intent_canonical_g_to_p_query"], 0.02)
+        self.assertEqual(row["grad_intent_canonical_p1_query"], 0.03)
+
     def test_preledger_loss_budget_is_explicitly_estimated(self) -> None:
         context = {
             "schema": "test",
@@ -325,7 +498,6 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(val["sample_evidence_z_shuffle_condition_delta"], 0.03)
         self.assertEqual(val["event_head_accuracy"], 0.9)
 
-
     def test_v96_rows_preserve_late_reader_metrics(self) -> None:
         path = _write(
             self.tmp_path / "v96.log",
@@ -360,8 +532,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
             self.tmp_path / "v100.log",
             "\n".join(
                 (
-                    "[v100-train] epoch=001 batch=0020 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v100-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
                     "[v100-repr] future_pred=0.40000 change_dir=0.30000 "
                     "change_obj=0.50000 static_identity=0.02000 "
                     "raw_detail_share=0.370 raw_base_share=0.630 "
@@ -370,8 +541,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
                     "raw_dino_fused=1 refined_visual_tokens=320",
                     "[v100-grad] grounding_blocks=1.0e-02 world_blocks=2.0e-02 "
                     "policy_blocks=3.0e-02",
-                    "[v100-epoch] epoch=001 step=20 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v100-epoch] epoch=001 step=20 loss_total=1.000000 flow_loss=0.800000",
                     "[v100-val] action_rmse=0.20000 change_obj=0.48000",
                     "[v100-probe] z_zero_cond_delta=1.0e-02",
                 )
@@ -387,9 +557,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(row.metrics["flow_jepa_raw_address_fallback_mass"], 0.63)
         self.assertEqual(row.metrics["flow_jepa_raw_address_entropy"], 0.81)
         self.assertEqual(row.metrics["flow_jepa_raw_address_logit_advantage"], 0.22)
-        self.assertEqual(
-            row.metrics["flow_jepa_raw_detail_fused_with_latest_dino"], 1.0
-        )
+        self.assertEqual(row.metrics["flow_jepa_raw_detail_fused_with_latest_dino"], 1.0)
         self.assertEqual(row.metrics["flow_jepa_refined_evidence_token_count"], 320.0)
         self.assertEqual(row.metrics["grad_dit_grounding_blocks"], 0.01)
         self.assertEqual(row.metrics["grad_dit_world_blocks"], 0.02)
@@ -401,8 +569,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
             self.tmp_path / "v98.log",
             "\n".join(
                 (
-                    "[v98-train] epoch=001 batch=0020 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v98-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
                     "[v98-repr] future_pred=0.40000 raw_high_grid=84 "
                     "future_h4=0.31000 future_h48=0.52000 "
                     "raw_mid_grid=42 raw_coarse_grid=8 raw_flow=3.200 "
@@ -415,8 +582,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
                     "raw_high_flow=2.0e-02 raw_address_reader=3.0e-02 "
                     "grounding_blocks=4.0e-02 world_blocks=5.0e-02 "
                     "policy_blocks=6.0e-02",
-                    "[v98-epoch] epoch=001 step=20 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v98-epoch] epoch=001 step=20 loss_total=1.000000 flow_loss=0.800000",
                     "[v98-val] action_rmse=0.20000 jepa_future=0.30000 "
                     "raw_high_grid=84 raw_flow=3.100",
                     "[v98-probe] z_zero_cond_delta=1.0e-02",
@@ -444,8 +610,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
             self.tmp_path / "v99.log",
             "\n".join(
                 (
-                    "[v99-train] epoch=001 batch=0020 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v99-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
                     "[v99-repr] future_pred=0.40000 identity_adv=0.02000 "
                     "raw_flow_grid=0.270 zero_warp=0.1200 warp_gain=+0.0300 "
                     "moving_gain=+0.0800 static_gain=+0.0020 "
@@ -455,8 +620,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
                     "address_logit_gain=+0.220 address_zero_delta=0.140 "
                     "address_shuffle_delta=0.190",
                     "[v99-grad] semantic_coarse_flow=1.0e-02 raw_high_flow=2.0e-02",
-                    "[v99-epoch] epoch=001 step=20 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v99-epoch] epoch=001 step=20 loss_total=1.000000 flow_loss=0.800000",
                     "[v99-val] action_rmse=0.20000 identity_adv=0.01900 "
                     "warp_gain=+0.0280 moving_gain=+0.0750",
                     "[v99-probe] z_zero_cond_delta=1.0e-02",
@@ -476,23 +640,121 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(row.metrics["flow_jepa_raw_moving_correlation_margin"], 0.14)
         self.assertEqual(row.metrics["flow_jepa_raw_observable_motion_fraction"], 0.18)
         self.assertEqual(row.metrics["flow_jepa_raw_address_center_separation"], 0.42)
-        self.assertEqual(
-            row.metrics["flow_jepa_raw_address_lane_value_difference"], 0.31
-        )
+        self.assertEqual(row.metrics["flow_jepa_raw_address_lane_value_difference"], 0.31)
         self.assertEqual(row.metrics["flow_jepa_raw_address_logit_advantage"], 0.22)
         self.assertEqual(row.metrics["flow_jepa_raw_address_zero_flow_value_delta"], 0.14)
+        self.assertEqual(row.metrics["flow_jepa_raw_address_shuffled_flow_value_delta"], 0.19)
+        self.assertEqual(len(run.epoch_records), 1)
+
+    def test_v113_rows_preserve_active_per_horizon_jepa_components(self) -> None:
+        path = _write(
+            self.tmp_path / "v113.log",
+            "\n".join(
+                (
+                    "[v113-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
+                    "[v113-repr] future_h4=0.21000 future_h12=0.32000 "
+                    "future_direction=4:0.4000/12:0.5000 "
+                    "future_active=4:0.2100/12:0.3200 "
+                    "future_scale=4:0.020/12:0.040 "
+                    "future_norm_scale=4:0.060/12:0.080 "
+                    "future_rel=4:0.250/12:0.500",
+                    "[v113-grad] global_preclip=1.00e+00",
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        row = run.batch_points[0].metrics
+        self.assertEqual(row["flow_jepa_future_horizon_4"], 0.21)
         self.assertEqual(
-            row.metrics["flow_jepa_raw_address_shuffled_flow_value_delta"], 0.19
+            row["flow_jepa_future_horizon_4_active_direction"],
+            0.4,
+        )
+        self.assertEqual(
+            row["flow_jepa_future_horizon_12_active_loss"],
+            0.32,
+        )
+        self.assertEqual(
+            row["flow_jepa_future_horizon_4_target_scale"],
+            0.02,
+        )
+        self.assertEqual(
+            row["flow_jepa_future_horizon_12_normalization_scale"],
+            0.08,
+        )
+        self.assertEqual(
+            row["flow_jepa_future_horizon_12_reliability"],
+            0.5,
+        )
+
+    def test_v114_compact_rows_are_not_silently_ignored(self) -> None:
+        path = _write(
+            self.tmp_path / "v114.log",
+            "\n".join(
+                (
+                    "[v114-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
+                    "[v114-repr] future_pred=0.31000",
+                    "[v114-balance] p1_query_rows=24 p2_basis_rows=96",
+                    "[v114-grad] global_preclip=1.00e+00",
+                    "[v114-epoch] epoch=001 step=20 loss_total=1.000000 flow_loss=0.800000",
+                    "[v114-val] action_rmse=0.20000 jepa_future=0.31000",
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        self.assertEqual(run.batch_points[0].source, "v114")
+        self.assertEqual(
+            run.batch_points[0].metrics["flow_jepa_future_prediction"],
+            0.31,
         )
         self.assertEqual(len(run.epoch_records), 1)
+        self.assertEqual(run.epoch_records[0]["val"]["full_rmse"], 0.2)
+
+    def test_v116_compact_rows_keep_supervised_effect_semantics(self) -> None:
+        path = _write(
+            self.tmp_path / "v116.log",
+            "\n".join(
+                (
+                    "[v116-train] epoch=001 batch=0020 loss_total=1.000000 "
+                    "flow_loss=0.800000 native_velocity_mse=0.700000",
+                    "[v116-repr] effect_w1_current_loss=0.0400 "
+                    "effect_w2_successor_loss=0.0500 p2_effect_read=0.120 "
+                    "w1_proposal_mass=0.240 phase_terminal=0.080 "
+                    "execution_terminal=0.080 execution_terminal_bias=-0.010",
+                    "[v116-grad] global_preclip=1.00e+00",
+                    "[v116-epoch] epoch=001 step=20 loss_total=1.000000 "
+                    "flow_loss=0.800000",
+                    "[v116-val] action_rmse=0.19000",
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        self.assertEqual(run.batch_points[0].source, "v116")
+        row = run.batch_points[0].metrics
+        self.assertEqual(row["native_velocity_mse"], 0.7)
+        self.assertEqual(
+            row["flow_jepa_future_effect_w1_current_loss"],
+            0.04,
+        )
+        self.assertEqual(
+            row["flow_jepa_p2_structured_effect_read_rms"],
+            0.12,
+        )
+        self.assertEqual(
+            row["flow_jepa_execution_terminal_probability"],
+            0.08,
+        )
+        self.assertEqual(len(run.epoch_records), 1)
+        self.assertEqual(run.epoch_records[0]["val"]["full_rmse"], 0.19)
 
     def test_v101_rows_preserve_temporal_balance_contract(self) -> None:
         path = _write(
             self.tmp_path / "v101.log",
             "\n".join(
                 (
-                    "[v101-train] epoch=001 batch=0020 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v101-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
                     "[v101-repr] future_pred=0.40000 future_h4=0.31000 "
                     "future_h12=0.36000 future_h24=0.42000",
                     "[v101-balance] flow_without_info_balance=0.790000 "
@@ -505,8 +767,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
                     "action_h13_24=0.880000",
                     "[v101-exec] top_policy_fixed_fusion=1",
                     "[v101-grad] top_policy_lift=2.0e-02",
-                    "[v101-epoch] epoch=001 step=20 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v101-epoch] epoch=001 step=20 loss_total=1.000000 flow_loss=0.800000",
                     "[v101-val] action_rmse=0.20000 "
                     "action_band_rmse=1_4:0.12000/5_12:0.18000/13_24:0.26000",
                     "[v101-probe] z_zero_cond_delta=1.0e-02",
@@ -524,17 +785,14 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(row.metrics["evidence_top_policy_workspace_fixed_fusion"], 1.0)
         self.assertEqual(row.metrics["grad_evidence_top_policy_workspace_lift"], 0.02)
         self.assertEqual(len(run.epoch_records), 1)
-        self.assertEqual(
-            run.epoch_records[0]["val"]["action_band_13_24_rmse"], 0.26
-        )
+        self.assertEqual(run.epoch_records[0]["val"]["action_band_13_24_rmse"], 0.26)
 
     def test_v102_rows_preserve_late_detail_and_world_contract(self) -> None:
         path = _write(
             self.tmp_path / "v102.log",
             "\n".join(
                 (
-                    "[v102-train] epoch=001 batch=0020 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v102-train] epoch=001 batch=0020 loss_total=1.000000 flow_loss=0.800000",
                     "[v102-repr] world_xy_residual=0.000e+00 "
                     "world_anchor_residual=0.420 late_detail_entropy=0.610 "
                     "late_detail_max=0.120 late_detail_update=0.330 "
@@ -543,8 +801,7 @@ class AuditPolicyLogsTest(unittest.TestCase):
                     "[v102-balance] flow_without_info_balance=0.790000",
                     "[v102-exec] top_policy_fixed_fusion=1",
                     "[v102-grad] late_detail_reader=2.0e-02",
-                    "[v102-epoch] epoch=001 step=20 loss_total=1.000000 "
-                    "flow_loss=0.800000",
+                    "[v102-epoch] epoch=001 step=20 loss_total=1.000000 flow_loss=0.800000",
                     "[v102-val] action_rmse=0.20000 world_xy_residual=0.000e+00 "
                     "late_detail_update=0.330",
                     "[v102-probe] late_detail_update=0.330 "
@@ -565,12 +822,8 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(row.metrics["grad_late_raw_detail_reader"], 0.02)
         self.assertEqual(len(run.epoch_records), 1)
         val = run.epoch_records[0]["val"]
-        self.assertEqual(
-            val["sample_flow_jepa_late_detail_attention_entropy"], 0.6
-        )
-        self.assertEqual(
-            val["sample_flow_jepa_world_anchor_camera_residual_norm"], 0.41
-        )
+        self.assertEqual(val["sample_flow_jepa_late_detail_attention_entropy"], 0.6)
+        self.assertEqual(val["sample_flow_jepa_world_anchor_camera_residual_norm"], 0.41)
 
 
 if __name__ == "__main__":

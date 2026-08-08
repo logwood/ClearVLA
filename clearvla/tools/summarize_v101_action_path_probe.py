@@ -38,13 +38,25 @@ def _model_path_version(schema: str) -> str:
         "clearvla-v108-model-path-intervention-v7": "v108",
         "clearvla-v109-model-path-intervention-v8": "v109",
         "clearvla-v110-model-path-intervention-v9": "v110",
+        "clearvla-v111-model-path-intervention-v10": "v111",
+        "clearvla-v112-model-path-intervention-v11": "v112",
+        "clearvla-v113-model-path-intervention-v12": "v113",
+        "clearvla-v113-model-path-intervention-v13": "v113",
+        "clearvla-v114-model-path-intervention-v14": "v114",
+        "clearvla-v115-model-path-intervention-v15": "v115",
+        "clearvla-v116-model-path-intervention-v16": "v116",
+        "clearvla-v117-model-path-intervention-v17": "v117",
+        "clearvla-differential-intent-effect-model-path-v18": (
+            "differential-intent-effect-323"
+        ),
+        "clearvla-grounded-intent-effect-323-model-path-v1": (
+            "grounded-intent-effect-323"
+        ),
     }
     try:
         return supported[str(schema)]
     except KeyError as exc:
-        raise ValueError(
-            "input is not a supported model-path intervention result"
-        ) from exc
+        raise ValueError("input is not a supported model-path intervention result") from exc
 
 
 def main() -> None:
@@ -62,12 +74,8 @@ def main() -> None:
     version = _model_path_version(str(probe.get("schema", "")))
 
     identity = payload.get("run_identity", {})
-    episode_clusters = probe.get(
-        "episode_clusters", probe.get("selected_episode_count", "unknown")
-    )
-    candidate_episode_count: int | str = (
-        len(probe.get("candidate_episode_ids", [])) or "unknown"
-    )
+    episode_clusters = probe.get("episode_clusters", probe.get("selected_episode_count", "unknown"))
+    candidate_episode_count: int | str = len(probe.get("candidate_episode_ids", [])) or "unknown"
     print(
         f"[{version}-{'action-path' if version == 'v101' else 'model-path'}-summary] "
         f"checkpoint_epoch={identity.get('checkpoint_epoch')} "
@@ -80,8 +88,24 @@ def main() -> None:
         f"{probe.get('event_candidate_batches', 'unknown')} "
         f"episodes={episode_clusters}/{candidate_episode_count} "
         f"target_events={probe['modes']['baseline'].get('gripper_target_events')} "
-        f"baseline_identity_max={probe['patched_baseline_max_abs_delta']:.3e}"
+        f"baseline_identity_max={probe['patched_baseline_max_abs_delta']:.3e} "
+        f"replay_batches={probe.get('baseline_identity_checked_batches', 'legacy')}"
     )
+    replay_tolerance = float(probe.get("baseline_identity_tolerance", 1e-8))
+    replay_checked = probe.get("baseline_identity_checked_batches")
+    replay_coverage_valid = (
+        replay_checked is None
+        or int(replay_checked) == int(probe["finished_intervention_batches"])
+    )
+    if (
+        float(probe["patched_baseline_max_abs_delta"]) > replay_tolerance
+        or not replay_coverage_valid
+    ):
+        print(
+            "[model-path-replay-invalid] explicit none does not match ordinary "
+            "deployment on every selected batch; intervention effect sizes "
+            "and confidence intervals are provisional"
+        )
     mode_width = max(33, *(len(str(mode)) for mode in probe["modes"]))
     print(
         f"{'mode':{mode_width}s} full_rmse   band_1_4   band_5_12  "
@@ -99,10 +123,7 @@ def main() -> None:
     for mode, row in probe["paired"].items():
         metrics = probe["modes"][mode]
         interval = row["mse_delta_ci"]
-        ci = (
-            f"[{float(interval['ci95_low']):+.3e},"
-            f"{float(interval['ci95_high']):+.3e}]"
-        )
+        ci = f"[{float(interval['ci95_low']):+.3e},{float(interval['ci95_high']):+.3e}]"
         print(
             f"{mode:{mode_width}s} "
             f"{metrics['full_rmse']:9.6f} "
@@ -152,17 +173,76 @@ def main() -> None:
                 f"value_delta="
                 f"{float(row.get('flow_jepa_raw_post_reader_detail_value_intervention_delta', 0.0)):.6f}"
             )
+    representation = probe.get("representation", {})
+    reliability_keys = (
+        "grounded_p2_effect_value_pre_mask_rms",
+        "grounded_p2_effect_value_post_validity_rms",
+        "grounded_p2_effect_value_post_reliability_rms",
+        "grounded_p2_effect_reliability_valid_mean",
+        "grounded_p2_effect_reliability_attenuation_ratio",
+    )
+    if any(key in representation for key in reliability_keys):
+        print("\nGrounded P2 reliability boundary:")
+        print(
+            "- "
+            + " ".join(
+                f"{key}={float(representation[key]):.6g}"
+                for key in reliability_keys
+                if key in representation
+            )
+        )
     boundary = probe.get("boundary_diagnostics", {})
     if boundary:
         print("\nIntervened boundary deltas:")
         for mode, row in boundary.items():
             if not row:
                 continue
-            values = " ".join(
-                f"{key}={float(value):.6g}"
-                for key, value in sorted(row.items())
-            )
+            values = " ".join(f"{key}={float(value):.6g}" for key, value in sorted(row.items()))
             print(f"- {mode}: {values}")
+
+    current_mask = probe.get("current_context_mask_comparison")
+    if current_mask:
+        print("\nMatched current-context mask comparison:")
+        modes = current_mask.get("modes", {})
+        deltas = current_mask.get("masked_minus_unmasked", {})
+        for key in (
+            "flow_jepa_future_prediction",
+            "flow_jepa_future_active_direction_loss",
+            "flow_jepa_future_active_composite_loss",
+            "flow_jepa_horizon_address",
+        ):
+            if key in modes.get("unmasked", {}) and key in modes.get("masked", {}):
+                print(
+                    f"- {key}: "
+                    f"unmasked={float(modes['unmasked'][key]):.6g} "
+                    f"masked={float(modes['masked'][key]):.6g} "
+                    f"delta={float(deltas[key]):+.6g}"
+                )
+        active_offsets = sorted(
+            {
+                int(key.split("_")[4])
+                for key in modes.get("masked", {})
+                if key.startswith("flow_jepa_future_horizon_") and key.endswith("_active_loss")
+            }
+        )
+        for offset in active_offsets:
+            active_key = f"flow_jepa_future_horizon_{offset}_active_loss"
+            direction_key = f"flow_jepa_future_horizon_{offset}_active_direction"
+            print(
+                f"- H{offset}: "
+                f"active={float(modes['unmasked'][active_key]):.6g}->"
+                f"{float(modes['masked'][active_key]):.6g} "
+                f"direction={float(modes['unmasked'][direction_key]):.6g}->"
+                f"{float(modes['masked'][direction_key]):.6g}"
+            )
+        mask_boundary = current_mask.get("masked_boundary", {})
+        if mask_boundary:
+            print(
+                "- mask boundary: "
+                + " ".join(
+                    f"{key}={float(value):.6g}" for key, value in sorted(mask_boundary.items())
+                )
+            )
 
     matrix = probe.get("acceptance_matrix", {})
     if matrix:
@@ -194,6 +274,30 @@ def main() -> None:
                 "history_proposal_path_reaches_action",
             ),
             ("phase path reaches action", "phase_path_reaches_action"),
+            (
+                "functional W routes accessible",
+                "functional_world_route_boundary_changed",
+            ),
+            (
+                "functional W routes reach action",
+                "functional_world_route_reaches_action",
+            ),
+            (
+                "P1 appearance gateway accessible",
+                "p1_appearance_gateway_boundary_changed",
+            ),
+            (
+                "P1 appearance gateway reaches action",
+                "p1_appearance_gateway_reaches_action",
+            ),
+            (
+                "current-context mask changes boundary",
+                "current_context_mask_boundary_changed",
+            ),
+            (
+                "current-context mask reaches action",
+                "current_context_mask_reaches_action",
+            ),
         ):
             value = aggregate.get(key)
             status = "not enabled" if value is None else "pass" if value else "fail"
@@ -222,9 +326,7 @@ def main() -> None:
                     f"policy_mass={'pass' if slots.get('policy_uses_multiple_slots_numerically') else 'fail'} "
                     f"query_conditioning={'pass' if slots.get('policy_slot_route_varies_by_query') else 'fail'}"
                 )
-        for route_name, route in matrix.get(
-            "typed_route_structure", {}
-        ).items():
+        for route_name, route in matrix.get("typed_route_structure", {}).items():
             print(
                 f"- typed route {route_name}: "
                 f"observed={route.get('observed')} "

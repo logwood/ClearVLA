@@ -141,6 +141,18 @@
   complete V108 ancestry plus the progressive-address flag.
 - `scripts/run_v109_model_path_probe.sh` selects the V109/v8 probe contract
   and the progressive checkpoint path.
+- `scripts/run_v113_model_path_probe.sh` selects the V113/v13 probe contract.
+  It includes W0-W3 selected-route zero/spatial-shuffle, a P1
+  appearance-gateway-only intervention, and a deterministic matched
+  unmasked/masked-current JEPA comparison. The latter keeps eval mode,
+  checkpoint, action noise, training time, future teachers, and all other
+  conditions fixed.
+- V106+ predictive-JEPA rows expose
+  `flow_jepa_future_horizon_*_active_direction` and
+  `flow_jepa_future_horizon_*_active_loss`. These are computed by the same
+  helper as the scalar sent to backward; the short `future_h*` field now
+  denotes that active composite for predictive-change runs rather than the
+  older ordinary-cosine approximation.
 - `flow_dino_evidence.py::_ProgressiveGroundingAddressOrganizer` owns the
   typed G1/G2/G3 selector transitions. The soft compiler's
   `progressive_fine_candidates` rematerializes unaggregated candidates around
@@ -289,3 +301,171 @@ Re-check these against current source rather than assuming they remain true:
     retaining separate typed owner posteriors for the five local P2 readouts.
     RGB/detail are the only values; coordinates and modality identities may
     affect keys but jointly zero RGB/detail must still yield exact zero.
+36. V112 separates the G3 public chart from the private typed sidecars before
+    W. The public projection may use clean G3 rollout context and observed
+    geometry, but it must not be reconstructed by averaging private semantic,
+    appearance and geometry summaries.
+37. V112 advances four route-width private states exactly four times:
+    G3-entry, post-W1, post-W2 and post-W3. Semantic, appearance, geometry and
+    causal interval states remain separately parameterized. Only a bounded,
+    small reconstruction enters the shared W carrier; no future teacher or
+    high-resolution value is available at these boundaries.
+38. V112's completed W appearance state must affect both source/slot ownership
+    and each local P1 high-resolution candidate before the one RGB/detail value
+    contraction. A source prior broadcast uniformly over candidates is not a
+    complete precision path. P2 remains the inherited typed local organizer;
+    V112 does not add a second value read or a new owner loss.
+39. V113 selects semantic/appearance/geometry/interval W innovations in
+    route width at G3->W1, W1->W2, W2->W3 and W3->P, then performs one
+    hidden-width reconstruction. The public rollout is an additive carrier
+    outside the selector. Four simultaneous full-hidden owner charts indicate
+    a memory regression.
+40. V113 P1 has no direct policy-to-appearance candidate scorer parallel to
+    the W verifier. The policy query must pass through W appearance state, and
+    the W source/slot factor must remain outside the generic fine-evidence
+    scale before the sole high-resolution value read.
+41. V113 interval supervision is read from
+    `ProgressiveGroundingAddressState.world_interval_progress_prediction`,
+    which is produced by the same route-to-hidden projection used by the
+    online W owner router. `_IntervalStageDeltaOrganizer` is serialized but
+    frozen; finding it in the active loss graph is a shortcut regression.
+42. V113 P2 keeps RGB and learned-detail as two 9-token lanes. Policy reads
+    both, semantic reads detail, appearance reads literal RGB, geometry uses a
+    coordinate-conditioned dual-lane read, and horizon uses the lane contrast.
+    The policy carrier is outside the null-capable four-delta router. Jointly
+    zero RGB/detail must still yield exact zero.
+43. Descendant launchers own the strongest required model contract. Parent
+    scripts must use a default-only assignment and may not downgrade V113 to
+    V111/V112 while chaining.
+44. V114 performs exactly one basis-free high-resolution factual read and
+    exposes it through a shared glimpse bank. Basis expansion occurs only
+    after selection for P2 consumption; query-count and checkpoint metrics are
+    execution contracts, not learned gates.
+45. V115 changes the top schedule to 3-2-3. Its FutureEffectField is the
+    intended W->P object, but the ancestral `state_innovation` member remains
+    unsupervised and therefore cannot be credited from future-head loss alone.
+46. V116 is active only with `flow_jepa_supervised_effect_mainline=1` and
+    `flow_matching_time_distribution=beta_1_5_1`. Current/future Teacher-G
+    semantics share one EMA projection; W1/W2 expose supervised
+    current/successor/effect fields with no `state_innovation`; P2 uses a
+    bias-free zero-preserving spatial effect read; P3 has only
+    precision/effect/temporal action lanes; terminal completion reaches only
+    execution. Teacher-G must be absent from deployment and built once per
+    training batch after the online action forward.
+47. V117's three window tokens are reads from one stateless intent controller,
+    but its historical selector and fixed temporal prior are not evidence of
+    stage ownership. Verify the exact online tensor consumed by W and P2,
+    per-window gradients, and the frozen intent zero/shuffle interventions.
+48. The `differential_intent_effect_323` capability is implemented in
+    `clearvla/policy/differential_intent_effect.py` and wired by
+    `clearvla/policy/trunk.py`. Four canonical S tokens produce one
+    `IntentWindowView`; W1 owns near/mid, W2 owns late, and the same
+    `DifferentialWindowEffectBank` is consumed by the loss and P2. Language
+    and history innovations may remain observable in `IntentStateBank`, but
+    must not have separate W, P1, or G-to-P projection modules.
+49. Differential W owner queries receive only a clean proposal operand plus
+    current G route evidence. S enters W exactly once through
+    `IntentWindowView`. A source review finding
+    `horizon_phase/goal/history_world_block_query_proj` or the old typed
+    horizon router active in this capability is a forbidden bypass.
+50. Differential P1 and the factual G-to-P bridge may be conditioned by the
+    canonical intent view because goal relevance belongs in address queries.
+    They must not separately add language and history innovations. The
+    differential contract therefore requires the legacy condition/history
+    query projections to be absent and their bypass diagnostics to remain
+    zero.
+51. V118 loss construction lives in
+    `flow_jepa_interval_stage_terms` in
+    `clearvla/experiments/observed_state_lab/policy_runtime_v39.py`.
+    Teacher-G targets and reliability are detached; current reference remains
+    online for action queries but is detached only inside successor target
+    accounting. Replacing future teacher tensors with fixed online inputs must
+    change loss targets and leave deployed action exactly unchanged.
+52. V118 deployment caches S, G, W, P1 and Teacher-free static evidence once.
+    P2/P3 and the bottom action path remain ODE-time consumers. Five-step
+    deployment must report zero Teacher-G calls and must not rebuild
+    high-resolution factual values.
+53. `grounded_intent_effect_323` is implemented by
+    `clearvla/policy/grounded_intent_effect.py`. Its typed objects are
+    `GroundedFactSet`, `StatelessIntentState`, `FutureTeacherTrackPack`,
+    `FutureEffectField`, `ConsequencePlanState`, and `PolicyPlanDeltaBank`.
+    The capability is selected by manifest/config, while `v119` remains only a
+    launcher and log label.
+54. Grounded G2->G3 ownership continuity and full-width current object content
+    are materialized in `clearvla/policy/flow_dino_evidence.py`. Teacher-G uses
+    low-rank normalized association keys but streams full-DINO target content
+    under no-grad exactly once per training batch.
+55. Grounded placement, the one V114 P1 high-resolution read, disabled generic
+    W/P blocks, zero-preserving consequence and bottom ingress live in
+    `clearvla/policy/trunk.py`. The grounded G attention provenance mask lives
+    in `clearvla/policy/trunk_primitives.py`.
+56. Grounded FutureEffect loss ownership, compact `[v119-*]` logging and the
+    frozen causal probe live in
+    `clearvla/experiments/observed_state_lab/policy_runtime_v39.py`.
+    Historical slot-reduced future/change/interval terms are audit-only for
+    this capability.
+57. Formal and smoke launchers are
+    `scripts/current_grounded_intent_effect_323.sh` and
+    `scripts/current_grounded_intent_effect_323_smoke.sh`. Frozen causal
+    interventions are launched by
+    `scripts/run_grounded_intent_effect_323_model_path_probe.sh`.
+58. Grounded probe replay validity and explicit first-boundary allow-lists live
+    in `_model_path_boundary_metric_names`,
+    `_model_path_acceptance_matrix`, and
+    `evaluate_v101_action_path_intervention` in
+    `clearvla/experiments/observed_state_lab/policy_runtime_v39.py`. Grounded
+    runs compare ordinary deployment against explicit `none` on every selected
+    batch and fail before returning causal statistics if they differ.
+59. S attention diagnostics use
+    `_BoundedCrossBlock.diagnostic_attention_weights`, and P2 pre-/post-mask
+    effect diagnostics live in `BoundedFutureEffectReader.forward`, both in
+    `clearvla/policy/grounded_intent_effect.py`. These side diagnostics must
+    not select a different BF16 value kernel or alter the deployed action.
+60. Grounded follow-up interventions are split by ownership: the G3 object
+    slot permutation/mean-collapse implementation lives in
+    `_intervene_grounded_fact_slots` in
+    `clearvla/policy/flow_dino_evidence.py`; the reliability-one W->P bypass is
+    applied in `_intervene_future_effect_field` in
+    `clearvla/policy/trunk.py`. Public names, explicit boundary contracts and
+    semantics live in `policy_runtime_v39.py`; the focused selection is
+    `PROBE_PROFILE=intent_effect_followup` in the grounded probe launcher.
+61. `object_intent_dynamics_323` typed interfaces and active G/S/recognizer/W/
+    P2/P3 modules live only in
+    `clearvla/policy/object_intent_dynamics_323/`. `v120` is a log label, not a
+    source branch. Historical Grounded/Differential modules remain sibling
+    replay paths.
+62. The object package separates local dense hypotheses from K=4 global
+    objects, exports a no-grad full-DINO future teacher, uses a training-only
+    future plan recognizer, and exposes one supervised `FutureObjectDynamics`
+    value to P2. Do not use historical `flow_jepa_future_pred` keys to audit
+    this capability; emitting a slot-reduced compatibility tensor would be a
+    regression.
+63. Object graph placement, skipped generic W/P blocks, static five-step cache,
+    one P1 high-resolution read, restricted bottom ingress and active output
+    fields live in `clearvla/policy/trunk.py`. Capability optimizer ownership,
+    loss accounting and `[v120-*]` logging live in
+    `clearvla/experiments/observed_state_lab/policy_runtime_v39.py`.
+64. P2 uses a smooth 0.25 vector-norm floor rather than `F.normalize` on the
+    zero-initialized effect. W2 attends to the complete W1 near-interval
+    sequence instead of its mean. These numerical/identity boundaries and the
+    five-step Teacher-free cache have executable regressions in
+    `tests/test_object_intent_dynamics_323.py` and
+    `tests/test_flow_dino_evidence.py`.
+65. Formal and smoke launchers are
+    `scripts/current_object_intent_dynamics_323.sh` and
+    `scripts/current_object_intent_dynamics_323_smoke.sh`. Their defaults keep
+    raw HDF5 under `/data/liang.zhang/dataset/...`, caches under
+    `/data/senwang/data`, and T5/model weights under `/data/senwang/checkpoint`.
+66. In the object binder, `candidate_owner_prior` is a conditional mixture over
+    local-M alternatives; only `candidate_validity` may transfer mass to null.
+    `ObjectFactSet.existence` is read-conditioned object-vs-null confidence,
+    chart allocation share is audit-only, and `ObjectFactSet.validity` alone
+    carries physical support into W/Teacher/loss/P2. Folding prior into
+    validity or feeding confidence/allocation to P2 recreates the batch-640
+    null-path failure.
+67. Object S no longer exports an unsupervised completion probability. Its
+    fifth P3 source is `p3_state_change`, built only from observed state deltas
+    and G transport by bias-free value projections. Zero change must give an
+    exact-zero lane, and `object_intent_dynamics_323` must pass no external
+    execution-terminal probability. Historical completion/terminal semantics
+    remain valid only for their sibling replay capabilities.

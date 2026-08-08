@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.log
 runs/
+/history_log/
 /data/
 /data_test/
 clearvla_backup/
@@ -35,6 +36,8 @@ policy_semantic_map/
 *.onnx
 *.h5
 *.hdf5
+*.zip
+/probe_*.json
 checkpoints/
 outputs/
 wandb/

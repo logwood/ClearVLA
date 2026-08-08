@@ -1,9 +1,64 @@
 # ClearVLA Current Policy Run
 
+## Current Object Intent–Dynamics 3-2-3 Mainline
+
+The current experiment candidate is the `object_intent_dynamics_323`
+capability, logged as V120. The numeric label is bookkeeping; source selection
+and checkpoint identity use the capability manifest. The top graph has K=4
+global grounded objects, a stateless online intent organizer plus a
+training-only future recognizer, W1/W2 object dynamics over
+`4-8 / 8-16 / 16-32 / 32-48`, one P1 high-resolution factual read, bounded
+zero-preserving P2 routing and a five-lane P3 compiler. The Evidence
+MMDiT/CVAE/workspace bottom remains intact behind a restricted typed ingress.
+The fifth P3 lane is a weak, zero-centred observable state-change lane; this
+capability no longer exports an unsupervised completion probability or an
+external execution-terminal bias.
+
+Batch-eight memory smoke (diagnostic synchronization is enabled, so do not use
+its timing as throughput):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+OBJECT_323_BATCH_SIZE=8 \
+SMOKE_TRAIN_BATCHES=2 \
+OUT_DIR=runs/v120_object_323_state_change_b8_memory_smoke \
+nohup bash scripts/current_object_intent_dynamics_323_smoke.sh \
+  > v120_object_323_state_change_b8_memory_smoke.log 2>&1 &
+```
+
+Long run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+OBJECT_323_BATCH_SIZE=8 \
+OUT_DIR=runs/v120_object_intent_dynamics_323_state_change_b8 \
+nohup bash scripts/current_object_intent_dynamics_323.sh \
+  > v120_object_323_state_change_b8.log 2>&1 &
+```
+
+The raw HDF5 default remains
+`/data/liang.zhang/dataset/grab_pen_single/grab_pen_single`. The current
+launchers use `/data/senwang/data` only for decoded/DINO caches and
+`/data/senwang/checkpoint` for T5/model weights. `DATA_ROOT`, `CACHE_DIR`,
+`DINO_CACHE_DIR` and `T5_CONDITION_PATH` remain individually overridable.
+Top resume is intentionally rejected because the object graph is fresh-only.
+
+Do not start the long run unless the batch-eight smoke remains below 22.0 GiB
+total device use and completes backward plus five-step deployment. The
+compact architecture and resource contract is in
+`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
+
+## Development Environment
+
+The repository uses Python 3.12 and uv for dependency locking and development
+tools. See `docs/development/uv_environment.md` for clean installation, reuse
+of an existing CUDA Torch environment, and lightweight checks that do not run
+the full policy trunk.
+
 ## Current Layout
 
-当前 policy 主线已经迁移到 `clearvla/policy/`。当前 DCT/typed-reader 实验入口是
-`scripts/current_v87_spectral_controller.sh`；根目录下的 V53 命令保留为历史回放参考，
+当前 policy 主线已经迁移到 `clearvla/policy/`；训练与烟测入口就是上一节的两个
+capability 脚本。V53、V87、V118 和 V119 脚本只保留作历史回放，
 不应被当作当前默认实验。
 
 性能审计与 reader/DCT 的保留边界见：
@@ -12,7 +67,7 @@
 已完成阶段的设计文档已归档到 `history_design/archive/`，实验脚本仍按版本保留在
 `scripts/`，避免破坏历史复现实验。
 
-Current entry point:
+Historical V53 replay entry point:
 
 ```bash
 bash run_current_policy.sh

@@ -300,6 +300,35 @@ class UnifiedCanvasSeed(nn.Module):
             persistent=True,
         )
 
+    def clean_action_basis_tokens(
+        self,
+        batch: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Return action-basis identity without the noisy physical trajectory.
+
+        P1 factual addressing may use horizon and basis identity, but it must
+        not let a flow-matching sample or a hold/shuffle counterfactual redefine
+        the observed scene.  Role dropout is deliberately excluded as well so
+        one factual read can be reused within a counterfactual bundle.
+        """
+
+        batch = int(batch)
+        if batch < 1:
+            raise ValueError("clean action basis requires a positive batch")
+        horizon = (
+            self.horizon_position.to(device=device, dtype=dtype)
+            + self.horizon_role(batch, device=device, dtype=dtype)
+            + self.role_embed[self.ROLE_NOISY_ACTION].to(
+                device=device, dtype=dtype
+            ).reshape(1, 1, -1)
+        )
+        return horizon[:, :, None] + self.action_basis_embed.to(
+            device=device, dtype=dtype
+        )
+
     def forward(
         self,
         *,
@@ -537,6 +566,58 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             int(getattr(config, "flow_jepa_enabled", 0))
             and int(getattr(config, "flow_jepa_directed_canvas_attention", 0))
         )
+        self.action_free_world_factual = bool(
+            role == "world"
+            and int(
+                getattr(
+                    config,
+                    "flow_jepa_action_free_world_factual",
+                    0,
+                )
+            )
+        )
+        self.grounded_fact_only = bool(
+            role == "grounding"
+            and (
+                int(
+                    getattr(
+                        config,
+                        "flow_jepa_grounded_intent_effect_mainline",
+                        0,
+                    )
+                )
+                or int(
+                    getattr(
+                        config,
+                        "flow_jepa_object_intent_dynamics_mainline",
+                        0,
+                    )
+                )
+            )
+        )
+        self.policy_explicit_handoff_only = bool(
+            role == "policy"
+            and int(getattr(config, "flow_jepa_policy_plan_compiler", 0))
+        )
+        self.grounded_policy_explicit_only = bool(
+            role == "policy"
+            and (
+                int(
+                    getattr(
+                        config,
+                        "flow_jepa_grounded_intent_effect_mainline",
+                        0,
+                    )
+                )
+                or int(
+                    getattr(
+                        config,
+                        "flow_jepa_object_intent_dynamics_mainline",
+                        0,
+                    )
+                )
+            )
+        )
         self.visual_cross_enabled = not (
             role == "policy"
             and bool(int(getattr(config, "flow_jepa_strict_role_visual_path", 0)))
@@ -630,6 +711,10 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         *,
         device: torch.device,
         role: str = "shared",
+        action_free_world_factual: bool = False,
+        policy_explicit_handoff_only: bool = False,
+        grounded_fact_only: bool = False,
+        grounded_policy_explicit_only: bool = False,
     ) -> Tensor:
         """Enforce clean-context -> action -> future ownership.
 
@@ -658,6 +743,21 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             # enter future/consequence organization at the W boundary.
             mask[future, action] = True
             mask[future, slices["proposal"]] = True
+            # The stage token is immediately written back into the window by
+            # ``stage_to_window``.  Masking only the final window query would
+            # therefore leave trajectory/proposal -> stage -> window as a
+            # one-block bypass around the directed ownership contract.
+            mask[stage, action] = True
+            mask[stage, slices["proposal"]] = True
+            if grounded_fact_only:
+                # The grounded G group owns current facts, not intent or
+                # temporal organization.  T5/task, historical state and
+                # executed actions enter only through S after the literal G3
+                # boundary.  Mask both G outputs because stage is written
+                # directly into rollout later in this same block.
+                for name in ("task", "state_history", "executed"):
+                    mask[future, slices[name]] = True
+                    mask[stage, slices[name]] = True
             # Grounding modulation/dynamics reuse the clean context slices on
             # the next block. Keep those slices from becoming an indirect
             # proposal carrier (proposal -> context -> rollout).
@@ -669,11 +769,37 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
                 "registers",
             ):
                 mask[slices[name], slices["proposal"]] = True
+        if role == "world" and action_free_world_factual:
+            # W owns an observation/intent-conditioned factual chart.  The
+            # flow-matching sample x_t enters only at P2/policy; otherwise P1
+            # could recover it indirectly through the W rollout.
+            mask[future, action] = True
+            # W also writes stage into the factual window in the same block.
+            # Keep that intermediate carrier action-free as well.
+            mask[stage, action] = True
         if role == "policy":
             # World/future tokens are online predictions, not teacher targets.
-            # The policy group may read them, while the write mask below keeps
-            # the policy group from modifying the world state in return.
-            mask[action, future] = False
+            # Ancestral P blocks may read them directly.  V115 instead owns an
+            # explicit W->P bridge/FutureEffect handoff, so retaining this
+            # attention edge would restore the unsupervised world-residual
+            # bypass that the new interface removes.
+            if not policy_explicit_handoff_only:
+                mask[action, future] = False
+            if grounded_policy_explicit_only:
+                # Grounded P1 receives Goal/History/G only through the
+                # StatelessIntentState-conditioned precision reader that has
+                # already written the trajectory query.  Letting the following
+                # generic P1 refinement attend task/history/proposal directly
+                # would recreate a parallel condition path around S.
+                for name in (
+                    "task",
+                    "state",
+                    "state_history",
+                    "executed",
+                    "proposal",
+                    "registers",
+                ):
+                    mask[action, slices[name]] = True
         if int(stage.stop) > int(stage.start):
             mask[stage, future] = True
         return mask
@@ -769,6 +895,8 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         slices: dict[str, slice],
         *,
         visual_value_memory: Tensor | None = None,
+        rollout_query_context: Tensor | None = None,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         role_mod = (
             0.0
@@ -815,10 +943,11 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
                 gain = (
                     bounded_weight.abs().amax() / self.normalization_floor
                 ).detach()
-            normalization_denominator_rows.append(
-                denominator.detach().float().amin()
-            )
-            normalization_gain_rows.append(gain.detach().float())
+            if collect_diagnostics:
+                normalization_denominator_rows.append(
+                    denominator.detach().float().amin()
+                )
+                normalization_gain_rows.append(gain.detach().float())
             return normalized.to(dtype=value.dtype)
 
         def stabilize(
@@ -829,28 +958,30 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             gate: Tensor | None = None,
             write_mask: Tensor | None = None,
         ) -> Tensor:
-            raw_token_rms = (
-                residual.detach().float().square().mean(dim=-1).sqrt()
-            )
             proposal = residual
             if self.residual_contract_after_gate:
                 if gate is not None:
                     proposal = proposal * gate[:, None]
                 if write_mask is not None:
                     proposal = proposal * write_mask
-            proposed_token_rms = (
-                proposal.detach().float().square().mean(dim=-1).sqrt()
-            )
             bounded, scale = self._contract_residual(proposal)
-            bounded_token_rms = (
-                bounded.detach().float().square().mean(dim=-1).sqrt()
-            )
             written = bounded
             if not self.residual_contract_after_gate:
                 if gate is not None:
                     written = written * gate[:, None]
                 if write_mask is not None:
                     written = written * write_mask
+            if not collect_diagnostics:
+                return written
+            raw_token_rms = (
+                residual.detach().float().square().mean(dim=-1).sqrt()
+            )
+            proposed_token_rms = (
+                proposal.detach().float().square().mean(dim=-1).sqrt()
+            )
+            bounded_token_rms = (
+                bounded.detach().float().square().mean(dim=-1).sqrt()
+            )
             written_token_rms = (
                 written.detach().float().square().mean(dim=-1).sqrt()
             )
@@ -901,9 +1032,76 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
 
         value = normalize(self.n1, canvas)
         qk = self.modulate(value, sa_s, sa_c)
+        query_context_rms = canvas.new_zeros((), dtype=torch.float32)
+        if rollout_query_context is not None:
+            rollout_slice = slices["rollout"]
+            full_expected = (
+                int(canvas.shape[0]),
+                int(rollout_slice.stop) - int(rollout_slice.start),
+                int(canvas.shape[-1]),
+            )
+            compact_expected = (
+                int(canvas.shape[0]),
+                self.future_anchors,
+                int(canvas.shape[-1]),
+            )
+            context_shape = tuple(rollout_query_context.shape)
+            if self.role != "world" or context_shape not in {
+                full_expected,
+                compact_expected,
+            }:
+                raise ValueError(
+                    "rollout query context is world-only and must be either "
+                    "[B,anchor,H] or the complete rollout chart"
+                )
+            selector_context = rollout_query_context.to(
+                device=qk.device, dtype=qk.dtype
+            )
+            if context_shape == compact_expected:
+                rollout_qk = qk[:, rollout_slice].reshape(
+                    int(canvas.shape[0]),
+                    self.future_anchors,
+                    self.num_cameras,
+                    self.future_grid_size,
+                    self.future_grid_size,
+                    int(canvas.shape[-1]),
+                )
+                rollout_qk = (
+                    rollout_qk
+                    + selector_context[:, :, None, None, None]
+                ).reshape(
+                    int(canvas.shape[0]),
+                    int(rollout_slice.stop) - int(rollout_slice.start),
+                    int(canvas.shape[-1]),
+                )
+            else:
+                rollout_qk = qk[:, rollout_slice] + selector_context
+            qk = torch.cat(
+                (
+                    qk[:, : int(rollout_slice.start)],
+                    rollout_qk,
+                    qk[:, int(rollout_slice.stop) :],
+                ),
+                dim=1,
+            )
+            if collect_diagnostics:
+                query_context_rms = (
+                    selector_context.detach().float().square().mean().sqrt()
+                )
         attention_mask = (
             self._directed_attention_mask(
-                int(canvas.shape[1]), slices, device=canvas.device, role=self.role
+                int(canvas.shape[1]),
+                slices,
+                device=canvas.device,
+                role=self.role,
+                action_free_world_factual=self.action_free_world_factual,
+                policy_explicit_handoff_only=(
+                    self.policy_explicit_handoff_only
+                ),
+                grounded_fact_only=self.grounded_fact_only,
+                grounded_policy_explicit_only=(
+                    self.grounded_policy_explicit_only
+                ),
             )
             if self.directed_canvas_attention
             else None
@@ -950,21 +1148,31 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             else:
                 update = stabilize("visual", update, write_mask)
                 canvas = canvas + write_mask * g_ca[:, None] * update
-            effective_visual_gate = g_ca.mean()
+            effective_visual_gate = (
+                g_ca.mean()
+                if collect_diagnostics
+                else canvas.new_zeros((), dtype=torch.float32)
+            )
         else:
             # In the strict role path the policy group can read the world
             # rollout through directed canvas self-attention, but it cannot
             # re-read raw/DINO memory and bypass the grounding/world owners.
             effective_visual_gate = g_ca.mean() * 0.0
 
-        context_names = [
-            "task",
-            "state",
-            "state_history",
-            "executed",
-        ]
+        context_names = (
+            ["state"]
+            if self.grounded_fact_only
+            else [
+                "task",
+                "state",
+                "state_history",
+                "executed",
+            ]
+        )
         if self.role != "grounding":
-            context_names.extend(("proposal", "trajectory"))
+            context_names.append("proposal")
+        if self.role != "grounding" and not self.action_free_world_factual:
+            context_names.append("trajectory")
         context_parts = [
             canvas[:, slices[name]] for name in context_names
         ]
@@ -1026,6 +1234,28 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             q = self.modulate(
                 normalize(self.n_dyn_q, rollout), dy_s, dy_c
             )
+            if rollout_query_context is not None:
+                selector_context = rollout_query_context.to(
+                    device=q.device, dtype=q.dtype
+                )
+                if tuple(selector_context.shape) == (
+                    int(q.shape[0]),
+                    self.future_anchors,
+                    int(q.shape[-1]),
+                ):
+                    q = (
+                        q.reshape(
+                            int(q.shape[0]),
+                            self.future_anchors,
+                            self.num_cameras,
+                            self.future_grid_size,
+                            self.future_grid_size,
+                            int(q.shape[-1]),
+                        )
+                        + selector_context[:, :, None, None, None]
+                    ).reshape_as(q)
+                else:
+                    q = q + selector_context
             update, _ = self.rollout_cross(q, kv, kv, need_weights=False)
             update = self._structure_world_rollout_update(self.drop(update))
             if self.residual_contract_after_gate:
@@ -1075,6 +1305,8 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         else:
             update = stabilize("ffn", update, write_mask)
             canvas = canvas + write_mask * g_ff[:, None] * update
+        if not collect_diagnostics:
+            return canvas, {}
         summary_zero = canvas.new_zeros((), dtype=torch.float32)
         residual_contract_metrics.update(
             {
@@ -1143,6 +1375,7 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             "role_grounding": canvas.new_tensor(float(self.role == "grounding")),
             "role_world": canvas.new_tensor(float(self.role == "world")),
             "role_policy": canvas.new_tensor(float(self.role == "policy")),
+            "rollout_query_context_rms": query_context_rms,
             "world_anchor_write_only": canvas.new_tensor(
                 float(self.world_anchor_write_only)
             ),

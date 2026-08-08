@@ -47,10 +47,22 @@ from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     _validate_complete_v109_model_contract,
     _validate_complete_v110_model_contract,
     _validate_complete_v111_model_contract,
+    _validate_complete_v112_model_contract,
+    _validate_complete_v113_model_contract,
+    _validate_complete_v114_model_contract,
+    _validate_complete_v115_model_contract,
+    _validate_complete_v116_model_contract,
+    _validate_complete_v117_model_contract,
+    _validate_differential_intent_effect_323_model_contract,
+    _validate_grounded_intent_effect_323_model_contract,
     train_v39_policy,
 )
 from clearvla.policy.config import V39PolicyConfig
 from clearvla.policy.goal_conditioning import load_precomputed_t5_condition
+from clearvla.policy.grounded_intent_effect import GROUNDING_MANIFEST
+from clearvla.policy.object_intent_dynamics_323 import (
+    ARCHITECTURE_MANIFEST as OBJECT_INTENT_DYNAMICS_MANIFEST,
+)
 from clearvla.policy.system import V39PolicySystem
 
 
@@ -106,9 +118,81 @@ def _validate_required_model_contract(
         "v109",
         "v110",
         "v111",
+        "v112",
+        "v113",
+        "v114",
+        "v115",
+        "v116",
+        "v117",
+        "differential_intent_effect_323",
+        "grounded_intent_effect_323",
+        "object_intent_dynamics_323",
     }:
         raise ValueError(f"unknown required model contract: {required_contract!r}")
-    if normalized == "v111":
+    if normalized == "object_intent_dynamics_323":
+        OBJECT_INTENT_DYNAMICS_MANIFEST.validate()
+        if not int(policy_config.flow_jepa_object_intent_dynamics_mainline):
+            raise ValueError(
+                "object_intent_dynamics_323 launcher resolved to another top graph"
+            )
+        if int(policy_config.flow_jepa_grounded_intent_effect_mainline) or int(
+            policy_config.flow_jepa_differential_intent_effect_mainline
+        ):
+            raise ValueError(
+                "object_intent_dynamics_323 cannot share a historical top graph"
+            )
+        if not int(policy_config.goal_conditioning_enabled):
+            raise ValueError(
+                "object_intent_dynamics_323 requires the complete T5 condition"
+            )
+        if int(trainer.future_latent_loss_start_epoch) != 1 or int(
+            trainer.future_latent_max_batches
+        ) != 0:
+            raise ValueError(
+                "object-intent training requires its future teacher on every batch"
+            )
+        if float(trainer.flow_jepa_future_loss_weight) <= 0.0 or float(
+            trainer.flow_jepa_interval_stage_loss_weight
+        ) <= 0.0:
+            raise ValueError(
+                "object-intent W and G/S supervision require the existing "
+                "future and interval objective budgets"
+            )
+        if str(policy_config.flow_matching_time_distribution) != "beta_1_5_1":
+            raise ValueError(
+                "object-intent formal training requires beta_1_5_1 flow time"
+            )
+        if str(trainer.training_stage).lower().replace("-", "_") not in {
+            "policy",
+            "stage2",
+        }:
+            raise ValueError(
+                "object-intent dynamics is a single-stage end-to-end policy "
+                "graph; the historical representation-only Stage1 is invalid"
+            )
+    elif normalized == "grounded_intent_effect_323":
+        _validate_grounded_intent_effect_323_model_contract(
+            policy_config,
+            trainer,
+        )
+    elif normalized == "differential_intent_effect_323":
+        _validate_differential_intent_effect_323_model_contract(
+            policy_config,
+            trainer,
+        )
+    elif normalized == "v117":
+        _validate_complete_v117_model_contract(policy_config, trainer)
+    elif normalized == "v116":
+        _validate_complete_v116_model_contract(policy_config, trainer)
+    elif normalized == "v115":
+        _validate_complete_v115_model_contract(policy_config, trainer)
+    elif normalized == "v114":
+        _validate_complete_v114_model_contract(policy_config, trainer)
+    elif normalized == "v113":
+        _validate_complete_v113_model_contract(policy_config, trainer)
+    elif normalized == "v112":
+        _validate_complete_v112_model_contract(policy_config, trainer)
+    elif normalized == "v111":
         _validate_complete_v111_model_contract(policy_config, trainer)
     elif normalized == "v110":
         _validate_complete_v110_model_contract(policy_config, trainer)
@@ -143,6 +227,15 @@ def _source_fingerprint() -> dict[str, str]:
         "clearvla/policy/codec.py",
         "clearvla/policy/config.py",
         "clearvla/policy/controller.py",
+        "clearvla/policy/differential_intent_effect.py",
+        "clearvla/policy/grounded_intent_effect.py",
+        "clearvla/policy/object_intent_dynamics_323/__init__.py",
+        "clearvla/policy/object_intent_dynamics_323/types.py",
+        "clearvla/policy/object_intent_dynamics_323/grounding.py",
+        "clearvla/policy/object_intent_dynamics_323/intent.py",
+        "clearvla/policy/object_intent_dynamics_323/teacher.py",
+        "clearvla/policy/object_intent_dynamics_323/dynamics.py",
+        "clearvla/policy/object_intent_dynamics_323/compiler.py",
         "clearvla/policy/flow_dino_evidence.py",
         "clearvla/policy/goal_conditioning.py",
         "clearvla/policy/proposal.py",
@@ -178,6 +271,30 @@ def _source_fingerprint() -> dict[str, str]:
         "scripts/current_v111_structured_ownership_bottleneck.sh",
         "scripts/current_v111_structured_ownership_bottleneck_smoke.sh",
         "scripts/run_v111_model_path_probe.sh",
+        "scripts/current_v112_pre_value_owner_routing.sh",
+        "scripts/current_v112_pre_value_owner_routing_smoke.sh",
+        "scripts/run_v112_model_path_probe.sh",
+        "scripts/current_v113_functional_mainline_routing.sh",
+        "scripts/current_v113_functional_mainline_routing_smoke.sh",
+        "scripts/run_v113_model_path_probe.sh",
+        "scripts/current_v114_shared_factual_utility_precision.sh",
+        "scripts/current_v114_shared_factual_utility_precision_smoke.sh",
+        "scripts/current_v115_g_aligned_goal_phase_323.sh",
+        "scripts/current_v115_g_aligned_goal_phase_323_smoke.sh",
+        "scripts/current_v116_supervised_effect_mainline.sh",
+        "scripts/current_v116_supervised_effect_mainline_smoke.sh",
+        "scripts/run_v116_model_path_probe.sh",
+        "scripts/current_v117_window_effect_intent_p2.sh",
+        "scripts/current_v117_window_effect_intent_p2_smoke.sh",
+        "scripts/run_v117_model_path_probe.sh",
+        "scripts/current_v118_differential_intent_effect_323.sh",
+        "scripts/current_v118_differential_intent_effect_323_smoke.sh",
+        "scripts/run_v118_model_path_probe.sh",
+        "scripts/current_grounded_intent_effect_323.sh",
+        "scripts/current_grounded_intent_effect_323_smoke.sh",
+        "scripts/current_object_intent_dynamics_323.sh",
+        "scripts/current_object_intent_dynamics_323_smoke.sh",
+        "scripts/run_grounded_intent_effect_323_model_path_probe.sh",
     )
     result: dict[str, str] = {}
     for relative in relative_paths:
@@ -891,6 +1008,134 @@ def parse_args() -> argparse.Namespace:
         type=int,
         choices=[0, 1],
         default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-pre-value-owner-routing",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-pre-value-owner-update-scale",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--flow-jepa-functional-mainline-routing",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-utility-precision-mainline",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-action-free-world-factual",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-shared-factual-glimpse-bank",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-g-aligned-future-effect",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-teacher-g-ema-decay",
+        type=float,
+        default=0.995,
+    )
+    parser.add_argument(
+        "--flow-jepa-stateless-goal-phase-machine",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-top-role-schedule",
+        choices=["3-3-2", "3-2-3"],
+        default="3-3-2",
+    )
+    parser.add_argument(
+        "--flow-jepa-policy-plan-compiler",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-supervised-effect-mainline",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-stateless-intent-controller",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-window-effect-bank",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument("--flow-jepa-future-slots", type=int, default=4)
+    parser.add_argument(
+        "--flow-jepa-effect-read-in-p2",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-differential-intent-effect-mainline",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-grounded-intent-effect-mainline",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-object-intent-dynamics-mainline",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-matching-time-distribution",
+        choices=["uniform", "beta_1_5_1"],
+        default="uniform",
+    )
+    parser.add_argument(
+        "--flow-jepa-address-query-batch-budget",
+        type=int,
+        default=32,
+    )
+    parser.add_argument("--flow-jepa-microgrid-tile", type=int, default=3)
+    parser.add_argument(
+        "--flow-jepa-p1-mixed-precision",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
+    parser.add_argument(
+        "--flow-jepa-checkpoint-min-batch",
+        type=int,
+        default=4,
     )
     parser.add_argument("--flow-jepa-raw-micro-grid", type=int, default=3)
     parser.add_argument(
@@ -2075,6 +2320,68 @@ def main() -> None:
         flow_jepa_structured_ownership_bottleneck=(
             args.flow_jepa_structured_ownership_bottleneck
         ),
+        flow_jepa_pre_value_owner_routing=(
+            args.flow_jepa_pre_value_owner_routing
+        ),
+        flow_jepa_pre_value_owner_update_scale=(
+            args.flow_jepa_pre_value_owner_update_scale
+        ),
+        flow_jepa_functional_mainline_routing=(
+            args.flow_jepa_functional_mainline_routing
+        ),
+        flow_jepa_utility_precision_mainline=(
+            args.flow_jepa_utility_precision_mainline
+        ),
+        flow_jepa_action_free_world_factual=(
+            args.flow_jepa_action_free_world_factual
+        ),
+        flow_jepa_shared_factual_glimpse_bank=(
+            args.flow_jepa_shared_factual_glimpse_bank
+        ),
+        flow_jepa_g_aligned_future_effect=(
+            args.flow_jepa_g_aligned_future_effect
+        ),
+        flow_jepa_teacher_g_ema_decay=(
+            args.flow_jepa_teacher_g_ema_decay
+        ),
+        flow_jepa_stateless_goal_phase_machine=(
+            args.flow_jepa_stateless_goal_phase_machine
+        ),
+        flow_jepa_top_role_schedule=(
+            args.flow_jepa_top_role_schedule
+        ),
+        flow_jepa_policy_plan_compiler=(
+            args.flow_jepa_policy_plan_compiler
+        ),
+        flow_jepa_supervised_effect_mainline=(
+            args.flow_jepa_supervised_effect_mainline
+        ),
+        flow_jepa_stateless_intent_controller=(
+            args.flow_jepa_stateless_intent_controller
+        ),
+        flow_jepa_window_effect_bank=args.flow_jepa_window_effect_bank,
+        flow_jepa_future_slots=args.flow_jepa_future_slots,
+        flow_jepa_effect_read_in_p2=args.flow_jepa_effect_read_in_p2,
+        flow_jepa_differential_intent_effect_mainline=(
+            args.flow_jepa_differential_intent_effect_mainline
+        ),
+        flow_jepa_grounded_intent_effect_mainline=(
+            args.flow_jepa_grounded_intent_effect_mainline
+        ),
+        flow_jepa_object_intent_dynamics_mainline=(
+            args.flow_jepa_object_intent_dynamics_mainline
+        ),
+        flow_matching_time_distribution=(
+            args.flow_matching_time_distribution
+        ),
+        flow_jepa_address_query_batch_budget=(
+            args.flow_jepa_address_query_batch_budget
+        ),
+        flow_jepa_microgrid_tile=args.flow_jepa_microgrid_tile,
+        flow_jepa_p1_mixed_precision=args.flow_jepa_p1_mixed_precision,
+        flow_jepa_checkpoint_min_batch=(
+            args.flow_jepa_checkpoint_min_batch
+        ),
         flow_jepa_raw_micro_grid=args.flow_jepa_raw_micro_grid,
         flow_jepa_variance_safe_routing=(
             args.flow_jepa_variance_safe_routing
@@ -2510,6 +2817,17 @@ def main() -> None:
         "stage1_checkpoint": None if stage1_checkpoint is None else str(stage1_checkpoint),
         "stage1_initialization_enabled": bool(int(args.stage1_initialization_enabled)),
         "required_model_contract": required_model_contract,
+        "architecture_manifest": (
+            OBJECT_INTENT_DYNAMICS_MANIFEST.as_dict()
+            if int(policy_config.flow_jepa_object_intent_dynamics_mainline)
+            else (
+                GROUNDING_MANIFEST.as_dict()
+                if int(
+                    policy_config.flow_jepa_grounded_intent_effect_mainline
+                )
+                else None
+            )
+        ),
         "splits": {"train": train_ids, "val": val_ids, "test": test_ids},
         "dataset": asdict(dataset_config),
         "visual_geometry": visual_geometry,
@@ -2714,6 +3032,74 @@ def main() -> None:
             ),
             "flow_jepa_structured_ownership_bottleneck": bool(
                 int(args.flow_jepa_structured_ownership_bottleneck)
+            ),
+            "flow_jepa_pre_value_owner_routing": bool(
+                int(args.flow_jepa_pre_value_owner_routing)
+            ),
+            "flow_jepa_pre_value_owner_update_scale": float(
+                args.flow_jepa_pre_value_owner_update_scale
+            ),
+            "flow_jepa_functional_mainline_routing": bool(
+                int(args.flow_jepa_functional_mainline_routing)
+            ),
+            "flow_jepa_utility_precision_mainline": bool(
+                int(args.flow_jepa_utility_precision_mainline)
+            ),
+            "flow_jepa_action_free_world_factual": bool(
+                int(args.flow_jepa_action_free_world_factual)
+            ),
+            "flow_jepa_shared_factual_glimpse_bank": bool(
+                int(args.flow_jepa_shared_factual_glimpse_bank)
+            ),
+            "flow_jepa_g_aligned_future_effect": bool(
+                int(args.flow_jepa_g_aligned_future_effect)
+            ),
+            "flow_jepa_stateless_goal_phase_machine": bool(
+                int(args.flow_jepa_stateless_goal_phase_machine)
+            ),
+            "flow_jepa_top_role_schedule": str(
+                args.flow_jepa_top_role_schedule
+            ),
+            "flow_jepa_policy_plan_compiler": bool(
+                int(args.flow_jepa_policy_plan_compiler)
+            ),
+            "flow_jepa_supervised_effect_mainline": bool(
+                int(args.flow_jepa_supervised_effect_mainline)
+            ),
+            "flow_jepa_stateless_intent_controller": bool(
+                int(args.flow_jepa_stateless_intent_controller)
+            ),
+            "flow_jepa_window_effect_bank": bool(
+                int(args.flow_jepa_window_effect_bank)
+            ),
+            "flow_jepa_future_slots": int(args.flow_jepa_future_slots),
+            "flow_jepa_effect_read_in_p2": bool(
+                int(args.flow_jepa_effect_read_in_p2)
+            ),
+            "flow_jepa_differential_intent_effect_mainline": bool(
+                int(args.flow_jepa_differential_intent_effect_mainline)
+            ),
+            "flow_jepa_grounded_intent_effect_mainline": bool(
+                int(args.flow_jepa_grounded_intent_effect_mainline)
+            ),
+            "flow_jepa_object_intent_dynamics_mainline": bool(
+                int(args.flow_jepa_object_intent_dynamics_mainline)
+            ),
+            "flow_matching_time_distribution": str(
+                args.flow_matching_time_distribution
+            ),
+            "flow_jepa_teacher_g_ema_decay": float(
+                args.flow_jepa_teacher_g_ema_decay
+            ),
+            "flow_jepa_address_query_batch_budget": int(
+                args.flow_jepa_address_query_batch_budget
+            ),
+            "flow_jepa_microgrid_tile": int(args.flow_jepa_microgrid_tile),
+            "flow_jepa_p1_mixed_precision": bool(
+                int(args.flow_jepa_p1_mixed_precision)
+            ),
+            "flow_jepa_checkpoint_min_batch": int(
+                args.flow_jepa_checkpoint_min_batch
             ),
             "flow_jepa_raw_micro_grid": int(args.flow_jepa_raw_micro_grid),
             "flow_jepa_variance_safe_routing": bool(
