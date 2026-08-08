@@ -271,7 +271,8 @@ successor-versus-delta targets, query-only innovation zero semantics,
 object-owned W conditioning, disjoint W1/W2 heads, common-status invariance,
 typed P2 independence and bounded scores, exact-neutral consequence, centred
 P3 precision/temporal zero semantics, full BF16 forward/backward, optimizer
-ownership, teacher-forced boundaries, future-target/action isolation,
+ownership, schema-aligned gradient diagnostics, teacher-forced boundaries,
+future-target/action isolation,
 audit-switch bit-exactness and five-step cache behavior.
 
 This source still requires a fresh server smoke and long run. No action-quality

@@ -7830,6 +7830,16 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
         + terms["object_intent_structure"]
     )
     objective.backward()
+    gradient_diagnostics = {"loss": objective.detach()}
+    _attach_grad_diagnostics(gradient_diagnostics, system)
+    for name in (
+        "grad_object_w_inputs",
+        "grad_object_p3_precision",
+        "grad_object_p3_temporal",
+        "grad_object_p3_state_change",
+    ):
+        assert name in gradient_diagnostics
+        assert torch.isfinite(gradient_diagnostics[name])
     for module in (
         system.planner.object_grounder,
         system.planner.object_intent_organizer,

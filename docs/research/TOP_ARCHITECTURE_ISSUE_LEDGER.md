@@ -37,6 +37,7 @@ V121 最关键的非 RMSE 证据是：W prediction 的区间差异弱于 teacher
 | `G-TYPED-UNDERIDENTIFIED` | semantic/appearance/geometry verifier 只有远端下游压力，G reconstruction 只约束 DINO content/position | 保留唯一 physical K；在原 G reconstruction 预算内加入三类 target-normalized typed-field consistency，不强迫三 posterior 不同 | 源码已修，普通 autograd/字段 loss 测试通过 |
 | `COARSE-ACTION-INTERVAL-UNKNOWN` | 只有总 loss/RMS，且 query carrier 可进入 W | CoarseAction 改为 causal innovation-only；新增 interval variation、adjacent cosine、target-normalized error | 源码已修，待日志验证可识别性 |
 | `ATTENTION-ENTROPY-SEMANTICS` | `object_H/semantic_H/...` 是事后 cosine-softmax audit，却被命名为真实 attention | V122 改名为 `*_sim_H`，内部 canonical key 明确为 `audit_similarity_entropy` | 日志语义已修 |
+| `GRAD-AUDIT-SCHEMA-DRIFT` | P3 重构后梯度诊断仍访问已删除的 `precision_fact/precision_consequence`，且漏掉新增的 W object/camera 参数；真实训练会在第一次诊断挂钩时退出 | 梯度分组改为 schema-4 实际成员，并让完整 BF16 系统回归在 backward 后强制执行 `_attach_grad_diagnostics` | 源码与回归测试已修 |
 
 ## 3. 修正后的真实张量边界
 
