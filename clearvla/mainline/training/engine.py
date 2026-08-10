@@ -1,0 +1,392 @@
+"""Single-stage training engine for the capability-named mainline."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+from torch import Tensor
+
+from ..config import ExperimentConfig
+from ..interfaces import TrainingBatch
+from ..model.policy import (
+    ClearVLAMainlinePolicy,
+    OnlinePolicyCache,
+    OnlineTrainingState,
+)
+from ..runtime.logging import tensor_scalars
+from ..runtime.numerics import resolve_compute_dtype
+from .losses import LossLedger, compose_losses, sample_flow_matching
+from .optimizer import WarmupCosineSchedule, gradient_diagnostics
+
+
+def _autocast(device: torch.device, dtype: torch.dtype):
+    enabled = device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    return torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled)
+
+
+def validate_finite_training_batch(batch: TrainingBatch) -> None:
+    """Expensive value audit for preflight only, never the hot path."""
+
+    values = {
+        "online.dino": batch.online.observation.dino_tokens,
+        "online.raw": batch.online.observation.raw_rgb,
+        "online.state": batch.online.history.state,
+        "online.state_history": batch.online.history.state_history,
+        "online.executed_history": batch.online.history.executed_action_history,
+        "online.goal": batch.online.goal.tokens,
+        "target.action": batch.action_target.normalized,
+        "target.action_raw_units": batch.action_target.raw_units,
+        "target.current_raw_units": batch.action_target.current_raw_units,
+        "future.dino": batch.future.dino_supports,
+        "future.action": batch.future.action_sequence,
+        "future.state": batch.future.state_sequence,
+    }
+    invalid = [name for name, value in values.items() if not bool(torch.isfinite(value).all())]
+    if invalid:
+        raise ValueError(f"training batch contains non-finite tensors: {', '.join(invalid)}")
+    expected_offsets = torch.arange(
+        4,
+        49,
+        4,
+        device=batch.future.offsets.device,
+        dtype=torch.long,
+    )[None].expand(batch.future.batch, -1)
+    if not torch.equal(batch.future.offsets, expected_offsets):
+        raise ValueError("future teacher offsets must be exactly 4,8,...,48")
+
+
+@dataclass(frozen=True)
+class TrainStepResult:
+    loss: Tensor
+    gradient_norm: Tensor
+    learning_rate: float
+    metrics: dict[str, Tensor]
+
+    def materialize(self) -> dict[str, float]:
+        """Synchronize scalar metrics only when the logger actually emits."""
+
+        values = {
+            "loss_total": self.loss,
+            "gradient_global_preclip_l2": self.gradient_norm,
+            **self.metrics,
+        }
+        result = tensor_scalars(values)
+        result["learning_rate"] = float(self.learning_rate)
+        return result
+
+
+@dataclass(frozen=True)
+class EncodedTrainingBatch:
+    """One current-only static graph shared by validation loss and sampling."""
+
+    cache: OnlinePolicyCache
+    training_state: OnlineTrainingState
+    metrics: dict[str, Tensor]
+
+
+class MainlineTrainingEngine:
+    """Own one forward/backward/update without legacy runtime side effects."""
+
+    def __init__(
+        self,
+        *,
+        model: ClearVLAMainlinePolicy,
+        config: ExperimentConfig,
+        optimizer: torch.optim.Optimizer,
+        schedule: WarmupCosineSchedule,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+        train_flow_generator: torch.Generator | None = None,
+        train_condition_generator: torch.Generator | None = None,
+    ) -> None:
+        config.validate()
+        self.model = model
+        self.config = config
+        self.optimizer = optimizer
+        self.schedule = schedule
+        self.device = device
+        self.dtype = resolve_compute_dtype(config, dtype)
+        self.train_flow_generator = train_flow_generator
+        self.train_condition_generator = train_condition_generator
+        self.global_step = 0
+
+    @staticmethod
+    def _tensor_metrics(
+        ledger: LossLedger,
+        values: dict[str, Tensor],
+    ) -> dict[str, Tensor]:
+        tensors = {
+            "loss_total": ledger.total,
+            **{f"loss_group_{name}": value for name, value in ledger.groups.items()},
+            **{f"loss_{name}": value for name, value in ledger.terms.items()},
+            **values,
+        }
+        result: dict[str, Tensor] = {}
+        for name, value in tensors.items():
+            if value.ndim != 0:
+                continue
+            result[name] = value.detach().float()
+        result["loss_ledger_gap"] = ledger.total.detach().float() - sum(
+            value.detach().float() for value in ledger.groups.values()
+        )
+        return result
+
+    @staticmethod
+    def _detached_pearson(left: Tensor, right: Tensor) -> Tensor:
+        """Batch-local audit correlation with a legal zero-variance result."""
+
+        left_f = left.detach().float().flatten()
+        right_f = right.detach().float().flatten()
+        if left_f.numel() != right_f.numel():
+            raise ValueError("audit correlation rows must align")
+        if left_f.numel() < 2:
+            return left_f.new_zeros(())
+        left_centered = left_f - left_f.mean()
+        right_centered = right_f - right_f.mean()
+        denominator = (left_centered.square().sum() * right_centered.square().sum()).sqrt()
+        correlation = (left_centered * right_centered).sum() / denominator.clamp_min(1e-8)
+        return torch.where(denominator > 1e-8, correlation, correlation.new_zeros(()))
+
+    @classmethod
+    def _audit_progress_metrics(
+        cls,
+        batch: TrainingBatch,
+        encoded: EncodedTrainingBatch,
+    ) -> dict[str, Tensor]:
+        """Compare real frame position with S/W behaviour without training on it.
+
+        The derived interval centroid is explicitly an energy audit, not a
+        phase estimate and not a forward input.  It answers whether S keeps
+        emitting one fixed interval pattern as trajectories advance.  Every
+        value is detached and this function is called only on logging rows.
+        """
+
+        if batch.audit.frame_progress is None:
+            return {}
+        intent = encoded.training_state.top.intent
+        dynamics = encoded.training_state.top.predicted_dynamics
+        progress = batch.audit.frame_progress.to(
+            device=intent.interval_queries.device,
+            dtype=torch.float32,
+        )
+
+        def sample_rms(value: Tensor) -> Tensor:
+            return value.detach().float().flatten(1).square().mean(dim=1).sqrt()
+
+        action_energy = intent.interval_action_innovations.detach().float().square().mean(dim=-1)
+        state_energy = intent.interval_state_innovations.detach().float().square().mean(dim=-1)
+        object_energy = intent.interval_object_values.detach().float().square().mean(dim=(-2, -1))
+        interval_energy = (action_energy + state_energy + object_energy).sqrt()
+        centers = interval_energy.new_tensor((6.0, 12.0, 24.0, 40.0)) / 48.0
+        energy_total = interval_energy.sum(dim=1)
+        centroid = (interval_energy * centers[None]).sum(dim=1) / energy_total.clamp_min(1e-8)
+        centroid = torch.where(energy_total > 1e-8, centroid, centroid.new_zeros(centroid.shape))
+
+        interval_variation = sample_rms(
+            intent.interval_action_innovations.detach().float()
+            - intent.interval_action_innovations.detach().float().mean(dim=1, keepdim=True)
+        )
+        state_change = sample_rms(intent.state_change_evidence)
+        successor_innovation = sample_rms(
+            dynamics.successor_content.detach().float()
+            - dynamics.current_reference.detach().float()[:, None]
+        )
+        w_interval_variation = sample_rms(
+            dynamics.semantic_delta.detach().float()
+            - dynamics.semantic_delta.detach().float().mean(dim=1, keepdim=True)
+        )
+        return {
+            "object_intent_audit_frame_progress_mean": progress.mean(),
+            "object_intent_audit_frame_progress_std": progress.std(unbiased=False),
+            "object_intent_audit_interval_energy_centroid": centroid.mean(),
+            "object_intent_audit_interval_energy_centroid_std": centroid.std(unbiased=False),
+            "object_intent_audit_interval_centroid_frame_absolute_gap": (centroid - progress)
+            .abs()
+            .mean(),
+            "object_intent_audit_frame_progress_centroid_correlation": cls._detached_pearson(
+                progress, centroid
+            ),
+            "object_intent_audit_frame_progress_interval_variation_correlation": (
+                cls._detached_pearson(progress, interval_variation)
+            ),
+            "object_intent_audit_frame_progress_state_change_correlation": (
+                cls._detached_pearson(progress, state_change)
+            ),
+            "object_w_audit_frame_progress_successor_correlation": cls._detached_pearson(
+                progress, successor_innovation
+            ),
+            "object_w_audit_frame_progress_interval_variation_correlation": (
+                cls._detached_pearson(progress, w_interval_variation)
+            ),
+        }
+
+    def _forward(
+        self,
+        batch: TrainingBatch,
+        *,
+        training: bool,
+        collect_diagnostics: bool,
+        generator: torch.Generator | None,
+        condition_generator: torch.Generator | None = None,
+    ) -> tuple[LossLedger, dict[str, Tensor]]:
+        batch.validate(self.config)
+        cache, training_state, static_metrics = self.model.encode_online(
+            batch.online,
+            training_mask=training,
+            collect_diagnostics=collect_diagnostics,
+            condition_generator=condition_generator,
+        )
+        return self._forward_encoded(
+            batch,
+            encoded=EncodedTrainingBatch(cache, training_state, static_metrics),
+            collect_diagnostics=collect_diagnostics,
+            generator=generator,
+        )
+
+    def _forward_encoded(
+        self,
+        batch: TrainingBatch,
+        *,
+        encoded: EncodedTrainingBatch,
+        collect_diagnostics: bool,
+        generator: torch.Generator | None,
+    ) -> tuple[LossLedger, dict[str, Tensor]]:
+        encoded.cache.validate(self.config)
+        encoded.training_state.validate(self.config)
+        top_targets, teacher_metrics = self.model.build_training_targets(
+            encoded.training_state,
+            batch.future,
+            collect_diagnostics=collect_diagnostics,
+        )
+        flow_state = sample_flow_matching(
+            batch.action_target.normalized,
+            action_state=batch.online.history.action_state,
+            codec=self.model.action_codec,
+            distribution=self.config.bottom.flow_time_distribution,
+            generator=generator,
+        )
+        output = self.model.velocity(
+            encoded.cache,
+            noisy_action_field=flow_state.noisy_physical,
+            time=flow_state.time,
+            collect_diagnostics=collect_diagnostics,
+        )
+        ledger = compose_losses(
+            self.config,
+            policy_output=output,
+            action_target=batch.action_target,
+            history=batch.online.history,
+            flow_state=flow_state,
+            observation=encoded.training_state.observation,
+            top_targets=top_targets,
+            predicted_dynamics=encoded.cache.top.predicted_dynamics,
+            action_codec=self.model.action_codec,
+        )
+        metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
+        if collect_diagnostics:
+            metrics.update(self._audit_progress_metrics(batch, encoded))
+        return ledger, metrics
+
+    @torch.no_grad()
+    def encode_eval(
+        self,
+        batch: TrainingBatch,
+        *,
+        collect_diagnostics: bool,
+    ) -> EncodedTrainingBatch:
+        """Build the static validation graph once for loss and deployment."""
+
+        batch.validate(self.config)
+        self.model.eval()
+        with _autocast(self.device, self.dtype):
+            cache, training_state, metrics = self.model.encode_online(
+                batch.online,
+                training_mask=False,
+                collect_diagnostics=collect_diagnostics,
+            )
+        return EncodedTrainingBatch(cache, training_state, metrics)
+
+    def train_step(
+        self,
+        batch: TrainingBatch,
+        *,
+        collect_diagnostics: bool = False,
+    ) -> TrainStepResult:
+        self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
+        with _autocast(self.device, self.dtype):
+            ledger, metrics = self._forward(
+                batch,
+                training=True,
+                collect_diagnostics=collect_diagnostics,
+                generator=self.train_flow_generator,
+                condition_generator=self.train_condition_generator,
+            )
+        ledger.total.backward()
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(),
+            self.config.optimizer.grad_clip,
+            error_if_nonfinite=True,
+            foreach=True,
+        )
+        if collect_diagnostics:
+            metrics.update(gradient_diagnostics(self.model))
+        # Record the LR that owns this update.  Advancing the scheduler first
+        # and then logging the optimizer group reported the *next* batch's LR
+        # beside the current batch loss, an off-by-one semantic error during
+        # the entire warmup.
+        learning_rate = float(self.optimizer.param_groups[0]["lr"])
+        self.optimizer.step()
+        self.schedule.step()
+        self.global_step += 1
+        return TrainStepResult(
+            loss=ledger.total.detach().float(),
+            gradient_norm=gradient_norm.detach().float(),
+            learning_rate=learning_rate,
+            metrics=self._tensor_metrics(ledger, metrics),
+        )
+
+    @torch.no_grad()
+    def eval_step(
+        self,
+        batch: TrainingBatch,
+        *,
+        collect_diagnostics: bool = True,
+        generator: torch.Generator | None = None,
+        encoded: EncodedTrainingBatch | None = None,
+    ) -> TrainStepResult:
+        self.model.eval()
+        with _autocast(self.device, self.dtype):
+            if encoded is None:
+                ledger, metrics = self._forward(
+                    batch,
+                    training=False,
+                    collect_diagnostics=collect_diagnostics,
+                    generator=generator,
+                    condition_generator=None,
+                )
+            else:
+                ledger, metrics = self._forward_encoded(
+                    batch,
+                    encoded=encoded,
+                    collect_diagnostics=collect_diagnostics,
+                    generator=generator,
+                )
+        return TrainStepResult(
+            loss=ledger.total.detach().float(),
+            gradient_norm=ledger.total.new_zeros((), dtype=torch.float32),
+            learning_rate=float(self.optimizer.param_groups[0]["lr"]),
+            metrics=self._tensor_metrics(ledger, metrics),
+        )
+
+
+__all__ = [
+    "EncodedTrainingBatch",
+    "MainlineTrainingEngine",
+    "TrainStepResult",
+    "validate_finite_training_batch",
+]

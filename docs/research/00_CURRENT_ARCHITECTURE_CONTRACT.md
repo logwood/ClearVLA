@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-09
+Updated: 2026-08-10
 
 This is the compact source of truth for the active top representation. Run
 labels identify experiments; they do not select source semantics. Historical
@@ -17,7 +17,7 @@ training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
 global object slots:    K=4 plus an explicit null
 formal language:        precomputed T5 .pt required
-bottom compatibility:   evidence_mmdit_cvae_workspace_v1
+bottom implementation:  deterministic Evidence-Latent MMDiT + capacity/execution
 launcher:               scripts/current_object_intent_dynamics_323.sh
 smoke launcher:         scripts/current_object_intent_dynamics_323_smoke.sh
 required capability:    object_intent_dynamics_323
@@ -35,7 +35,8 @@ version-wide `_validate_vXXX_*` contract.
 ```text
 current RGB / DINO / raw pair / learned flow
   -> unchanged Pre-G observation bank and local [C,8,8,M] chart
-  -> G1-G3 DenseObjectGrounder
+  -> G1-G3 typed role hosts, then DenseObjectGrounder
+       self / visual / current-state transition / FFN sublayers preserved
        one physical K+null assignment
        semantic / appearance / geometry bounded verification reads
        reversible K -> [C,8,8,M] correspondence
@@ -47,12 +48,17 @@ current RGB / DINO / raw pair / learned flow
        zero-centred observable state-change evidence
   -> CoarseActionIntent
        causal online innovation only; its learned query is not W-visible
+  -> HistoryActionProposal
+       eight executed-action rows at -24/-16/-12/-8/-6/-4/-2/-1
+       four recent plus three learned summary tokens; 24-step clean proposal
+       consumed only by P1 query and controlled transition
   -> W1: 4-8 and 8-16 object effects
   -> W2: 16-32 and 32-48 object effects
        separate near/far output heads; W2 reads the ordered W1 sequence
   -> FutureObjectDynamics
        object semantic/status plus per-camera geometry/validity
   -> P1: one current high-resolution read
+       one static typed policy-role host precedes the micro-read
        K object -> local chart -> existing 3x3 RGB/detail micro-read
        emits ObjectFactualDock on the same K basis as W
   -> P2: separate semantic and geometry selectors over that dock
@@ -62,8 +68,19 @@ current RGB / DINO / raw pair / learned flow
   -> P3: centred object-detail precision / temporal / state-change innovations
        around one protected consequence
   -> exactly one protected-consequence bottom ingress
-  -> unchanged Evidence MMDiT / CVAE / workspace / adaptive execution
+  -> action-centred controlled transition as a separate read-only evidence lane
+  -> deterministic condition organizer and three time-domain Evidence MMDiT blocks
+  -> low-rank operator capacity and learned execution controller
 ```
+
+The formal V122 decoder class retains historical `latent_cvae_*` option names,
+but its selected `evidence_latent_mmdit_action` forward does not execute a CVAE
+posterior, variational sampling, the hierarchical workspace, or adaptive-CVAE
+refinement.  Those names are compatibility ancestry, not missing active
+algorithms.  The independent mainline preserves the executed deterministic
+organizer, three Evidence MMDiT blocks, low-rank capacity, execution control,
+event/motion heads and action-flow readout; its recorded runtime repair removes
+only differentiable candidate replay.
 
 Training-only graph:
 
@@ -146,6 +163,11 @@ action.
     P2 and P3 also query with that pre-top trajectory seed under ordinary
     autograd; P1 facts and W consequences reach them only through their
     explicit typed operands. A provenance snapshot is not a gradient detach.
+    The eight-row history proposal remains a separate causal algorithm: it may
+    shape the static P1 query and controlled transition, but it cannot enter W
+    as a second action condition or enter the bottom directly. Controlled
+    transition values are `coeff(clean proposal)-coeff(neutral context)` over
+    typed W transition directions and are read-only evidence.
     Historical mid-cut and layer-contract towers are not constructed or
     executed for this capability, and the bottom evidence adapter receives an
     explicit typed-null layer row rather than a hidden second P carrier.
@@ -315,6 +337,110 @@ tests:
 active issue ledger:
   docs/research/TOP_ARCHITECTURE_ISSUE_LEDGER.md
 ```
+
+## Mainline extraction boundary
+
+The active graph above is being extracted into `clearvla/mainline/` as one
+complete model/training/runtime vertical slice.  Until the atomic cutover
+gates in `clearvla/mainline/README.md` pass, the V122 launcher remains the
+formal experiment entry and the new package is not allowed to create a second
+partially active graph.
+
+The extraction may repair a source-proven architectural, numerical, contract
+or runtime defect, but each behavior change must be recorded in the focused
+issue ledger with its old evidence, new owner and executable acceptance test.
+Unresolved empirical questions remain experiments.  In particular, the
+refactor is not permission to add gates, quotas, entropy targets, artificial
+gradients or another version-wide contract.
+
+The final active package must own its configuration, manifest, typed online
+and teacher boundaries, G/S/W/P composition, bottom ingress, objectives,
+optimizer, diagnostics, sampling and checkpoint runtime.  Historical V39
+CLI/runtime/trunk code may be used as a frozen comparison source only; it may
+not remain in the final mainline import graph.
+
+Candidate status (not the public launcher):
+
+- capability manifest schema `17`;
+- observation ABI `current_dino_raw_pair_current_aligned_flow_pre_g_v4`;
+- top ABI `object_intent_dynamics_323_conditional_object_writes_v11`;
+- bottom ABI `typed_read_only_physical_evidence_mmdit_controlled_transition_v6`;
+- training ABI `single_stage_physical_action_band_event_balanced_exact_null_v9`;
+- runtime ABI `minimal_cached_physical_transition_five_step_ode_v8`;
+- active source identity currently closes over 50 mainline/generic data files
+  plus the resolved JSON spec (51 hashed artifacts total) and contains no V39
+  runtime, versioned CLI or launcher script;
+- 86 local CPU/BF16-shape, provenance, zero-semantics, optimizer, exact-resume,
+  five-step-cache and runtime regressions pass; the production mainline package
+  passes scoped Ruff and Pyright with zero error-level diagnostics.  A
+  schema-16 production-shape synthetic batch-one CUDA BF16 update with 336 RGB,
+  576 DINO patches, 12 future supports and the real 4,096-wide T5 condition
+  peaked at 2.674 GiB allocated / 2.785 GiB reserved on the local 8 GiB GPU.
+  Schema 17 adds only one 512x512 writer, but its local memory measurement,
+  production batch-eight memory/throughput and fresh server smoke remain
+  cutover blockers.
+
+The frozen-launcher argv audit found three fixed training/action algorithms
+that schema 14 had not migrated.  Schema 15 now owns all three: the exact
+18-D `legacy_independent + legacy_handcrafted(6)` physical action field, the
+`(4,12,24)` anchor-band active action objectives, and the deterministic
+`0.50/0.125/0.375` information-balanced train sampler.  They are no longer
+implicit launcher ancestry.  Differentiable block-by-dwell candidate replay
+is the one execution behavior intentionally removed; the three Evidence
+MMDiT blocks, rank-32/group-32 capacity operators and learned
+capacity/continue controller remain active and receive direct non-zero action
+gradients.
+
+The completed formal V122 run serialized 230,717,082 total / 168,064,059
+trainable parameters with the real 4,096-wide T5 condition.  Schema 17
+contains 171,355,774 total / 171,253,374 trainable.  The total reduction is
+59,361,308 parameters and the candidate has 3,189,315 more trainable
+parameters than the actual run.  The previously quoted 227,466,394 /
+166,360,123 inventory was a synthetic/default-width accounting and must not
+be used as the formal V122 baseline.  The reduction remains accounted for by
+the frozen-and-skipped generic blocks 4/5/7/8 and frozen legacy heads, net of
+their typed replacements.  Relative to schema 14, schema 15 added exactly
+11,275 trainable parameters for the 7-to-18 action field.  Schema 16 adds
+another 1,703,936 trainable parameters by replacing the incorrect 768-wide
+goal placeholder with the actual 4,096-wide T5-XXL `.pt` boundary used by
+V122.  No G/S/W/P host, history proposal, controlled transition, Evidence
+MMDiT block, capacity operator or execution controller is removed by these
+changes.
+
+Schema 17 replaces three source-proven V122 optimization shortcuts without
+adding new outer loss budget.  Global-K prototypes now minimize conditional
+distortion on their own competitive read posterior rather than relying only on
+a post-mixture reconstruction.  S uses action/goal only to form object keys and
+observable state only to form object values.  W forms separately contracted,
+bias-free intent-object and coarse-action-object interactions before their
+fixed variance-preserving sum, so a large action carrier cannot saturate away
+the intent derivative.  The action/proposal objectives allocate exact unit-mean
+mass across the three semantic horizon bands, and inverse-root event/hold row
+weights reach the physical and decoded gripper objectives while preserving the
+same total action budget; an all-hold batch remains bit-exact to the unbalanced
+loss.
+
+The candidate also keeps relative history position on the selector side of S.
+It is not an intent value: with zero goal/state/executed-action evidence the
+four interval innovations, temporal innovation and coarse intent remain exact
+zero.  This closes the fixed temporal-prior shortcut without adding a progress
+loss, entropy target or route quota.
+
+The flow boundary is now explicit in both axes and units.  The recurrent
+solver estimates current-to-previous correspondence once for deployment and
+exports its inverse as a previous-to-current displacement indexed on the
+current chart.  Exported values are true normalized-coordinate deltas, not
+the recurrent source-relative parameter.  The raw pair spans four frames, so
+Teacher-G extrapolates support offset `h` by `h/4`, not `h/48`.  Geometry loss
+retains learned-feature warp and adds literal-RGB photometric anchoring inside
+the same external flow budget, preventing the shared feature encoder from
+solving the objective by erasing temporal detail.  Local correlation samples
+are vectorized into two `grid_sample` calls per refinement iteration without
+changing their ordering or values.
+
+`frame_progress` remains detached CPU audit metadata.  It is transferred only
+on diagnostic rows to compare real frame position with S interval-energy and
+W successor variation; it is not accepted by any model forward or loss.
 
 ## Historical boundary
 

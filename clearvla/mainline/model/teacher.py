@@ -1,0 +1,465 @@
+"""No-grad object-aligned multi-frame future teacher for the mainline."""
+
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from .types import INTERVAL_BOUNDS, FutureObjectDynamics, ObjectFactSet
+
+
+class ObjectFutureTeacher(nn.Module):
+    """Associate every current object with future DINO supports.
+
+    The content projection is fixed and used only as a low-rank association
+    key.  Full-width DINO values are retained in the target.  The association
+    contains a legal null candidate, supports non-equal pixel positions and
+    never enters the deployment forward path.
+    """
+
+    def __init__(
+        self,
+        *,
+        content_dim: int,
+        key_dim: int = 64,
+        flow_reference_frames: int = 4,
+    ) -> None:
+        super().__init__()
+        self.content_dim = int(content_dim)
+        self.key_dim = int(key_dim)
+        self.flow_reference_frames = int(flow_reference_frames)
+        if self.flow_reference_frames <= 0:
+            raise ValueError("teacher flow reference frames must be positive")
+        self.semantic_content_key = nn.Linear(content_dim, key_dim, bias=False)
+        self.appearance_content_key = nn.Linear(content_dim, key_dim, bias=False)
+        with torch.no_grad():
+            for module in (
+                self.semantic_content_key,
+                self.appearance_content_key,
+            ):
+                nn.init.orthogonal_(module.weight)
+        for module in (
+            self.semantic_content_key,
+            self.appearance_content_key,
+        ):
+            module.requires_grad_(False)
+
+    @staticmethod
+    def _offsets(offsets: Tensor, *, batch: int, supports: int) -> Tensor:
+        if offsets.ndim == 1:
+            if int(offsets.shape[0]) != supports:
+                raise ValueError("future offsets do not match teacher supports")
+            return offsets[None].expand(batch, -1)
+        if tuple(offsets.shape) != (batch, supports):
+            raise ValueError("future offsets must be [F] or [B,F]")
+        # Per-example offsets are legal and handled by the vectorized interval
+        # masks below.  Avoid a tensor-to-Python equality check here: Teacher
+        # runs once per training batch and such a check would force a device
+        # synchronization without protecting an actual semantic invariant.
+        return offsets
+
+    def _flow_horizon_scale(self, offsets: Tensor) -> Tensor:
+        """Convert a raw-pair displacement into each future support horizon."""
+
+        return offsets.float() / float(self.flow_reference_frames)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        *,
+        facts: ObjectFactSet,
+        future_supports: Tensor,
+        future_offsets: Tensor,
+        collect_diagnostics: bool = True,
+    ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
+        # Teacher association is a target-construction plane, not an online
+        # BF16 value path.  An outer training autocast would otherwise cast
+        # Linear/einsum outputs back to BF16 even though their operands were
+        # explicitly converted with ``.float()``.  Keep semantic similarity,
+        # the 129-way softmax, moments, and exported targets in FP32.
+        if future_supports.device.type in {"cpu", "cuda"}:
+            with torch.autocast(
+                device_type=future_supports.device.type,
+                enabled=False,
+            ):
+                return self._forward_fp32(
+                    facts=facts,
+                    future_supports=future_supports,
+                    future_offsets=future_offsets,
+                    collect_diagnostics=collect_diagnostics,
+                )
+        return self._forward_fp32(
+            facts=facts,
+            future_supports=future_supports,
+            future_offsets=future_offsets,
+            collect_diagnostics=collect_diagnostics,
+        )
+
+    def _forward_fp32(
+        self,
+        *,
+        facts: ObjectFactSet,
+        future_supports: Tensor,
+        future_offsets: Tensor,
+        collect_diagnostics: bool,
+    ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
+        facts.validate()
+        if future_supports.ndim != 6:
+            raise ValueError("future supports must be [B,F,C,Y,X,D]")
+        batch, supports, cameras, rows, columns, width = future_supports.shape
+        if batch != facts.batch or width != self.content_dim:
+            raise ValueError("future supports do not match current object content")
+        offsets = self._offsets(
+            future_offsets.to(device=future_supports.device),
+            batch=batch,
+            supports=supports,
+        )
+        objects = facts.objects
+        candidate_content = facts.dense_chart.candidate_content.detach().float()
+
+        def typed_current(assignment: Tensor, value: Tensor) -> Tensor:
+            weight = assignment.detach().float().flatten(2)
+            weight = weight / weight.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            flat_value = value.detach().float().flatten(1, -2)
+            return torch.einsum("bkn,bnd->bkd", weight, flat_value)
+
+        # The typed G posterior selects full-DINO current content before the
+        # fixed association projection.  This keeps current/future keys in one
+        # measurable space; comparing a learned route vector with an unrelated
+        # random DINO projection would only manufacture an appearance score.
+        semantic_current_content = typed_current(
+            facts.semantic_candidate_assignment, candidate_content
+        )
+        appearance_current_content = typed_current(
+            facts.appearance_candidate_assignment, candidate_content
+        )
+        current_semantic_key = F.normalize(
+            self.semantic_content_key(semantic_current_content),
+            dim=-1,
+            eps=1e-4,
+        )
+        support_semantic_key = F.normalize(
+            self.semantic_content_key(future_supports.detach().float()),
+            dim=-1,
+            eps=1e-4,
+        )
+        semantic = torch.einsum(
+            "bkr,bfcyxr->bfkcyx",
+            current_semantic_key,
+            support_semantic_key,
+        )
+        current_appearance_key = F.normalize(
+            self.appearance_content_key(appearance_current_content),
+            dim=-1,
+            eps=1e-4,
+        )
+        support_appearance_key = F.normalize(
+            self.appearance_content_key(future_supports.detach().float()),
+            dim=-1,
+            eps=1e-4,
+        )
+        appearance = torch.einsum(
+            "bkr,bfcyxr->bfkcyx",
+            current_appearance_key,
+            support_appearance_key,
+        )
+        axis_y = torch.linspace(-1.0, 1.0, rows, device=future_supports.device)
+        axis_x = torch.linspace(-1.0, 1.0, columns, device=future_supports.device)
+        coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
+        coordinate = torch.stack((coordinate_x, coordinate_y), dim=-1)
+        coordinate = coordinate.reshape(1, 1, 1, 1, rows, columns, 2)
+        # Learned flow spans ``flow_reference_frames`` in the observable raw
+        # pair.  Future supports are absolute frame offsets from the current
+        # image, so constant-velocity extrapolation uses offset/reference,
+        # not offset/max_future.  The latter silently shrank the H4 prior by
+        # 12x and still supplied only one four-frame displacement at H48.
+        fraction = self._flow_horizon_scale(offsets)
+        # This is the explicit previous->current displacement exported by G3,
+        # indexed on the current fact chart and already expressed in true
+        # normalized-coordinate units.  It is only a prior: semantic matching
+        # remains global within the camera, so zero flow and non-equal-pixel
+        # motion are legal.
+        geometry_coordinate = facts.camera_coordinates.detach().float()
+        geometry_support = facts.camera_support.detach().float()
+        flow_hint = facts.camera_transport_prior.detach().float()
+        prior = geometry_coordinate[:, None] + (
+            fraction[:, :, None, None, None] * flow_hint[:, None]
+        )
+        prior = prior.clamp(-1.0, 1.0)
+        delta = coordinate - prior[:, :, :, :, None, None]
+        support_width = geometry_support.detach().float().clamp(0.03, 1.0)
+        geometry = (
+            -0.5
+            * delta.square().sum(dim=-1)
+            / (
+                support_width[..., 0][:, None, :, :, None, None].square()
+                + 0.08
+                + 0.20 * fraction[:, :, None, None, None, None]
+            )
+        )
+        geometry = geometry.clamp(-8.0, 0.0)
+        camera_prior = facts.object_to_chart.detach().float().sum(dim=(-2, -1))
+        camera_prior = camera_prior / camera_prior.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        camera_log = camera_prior.clamp_min(1e-5).log()[:, None, :, :, None, None]
+        # Camera prior already integrates to one across cameras.  Normalize
+        # the spatial candidate partition so one null hypothesis does not lose
+        # merely because it competes with Y*X cells.  A fixed contrastive
+        # temperature then rewards genuinely matching DINO evidence.
+        candidate_logit = (
+            4.5 * semantic
+            + 1.5 * appearance
+            + geometry
+            + camera_log
+            - math.log(float(max(rows * columns, 1)))
+        )
+        candidate_flat = candidate_logit.flatten(3)
+        null_logit = torch.zeros(
+            batch,
+            supports,
+            objects,
+            1,
+            device=future_supports.device,
+            dtype=candidate_flat.dtype,
+        )
+        posterior = torch.softmax(torch.cat((candidate_flat, null_logit), dim=-1), dim=-1)
+        candidate_posterior = posterior[..., :-1].reshape(
+            batch, supports, objects, cameras, rows, columns
+        )
+        null_probability = posterior[..., -1:]
+        support_content = (
+            future_supports.detach()
+            .float()
+            .reshape(batch, supports, cameras * rows * columns, width)
+        )
+        candidate_flat_probability = candidate_posterior.flatten(3)
+        matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
+        successor_per_support = matched + null_probability * facts.content.detach().float()[:, None]
+        candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
+        camera_probability = candidate_posterior.sum(dim=(-2, -1), keepdim=False)
+        destination_coordinate = torch.einsum(
+            "bfkcyx,cyxd->bfkcd",
+            candidate_posterior,
+            candidate_coordinate,
+        ) / camera_probability[..., None].clamp_min(1e-6)
+        transport_per_support = torch.where(
+            camera_probability[..., None] > 1e-6,
+            destination_coordinate - facts.camera_coordinates.detach().float()[:, None],
+            torch.zeros_like(destination_coordinate),
+        )
+        centered = coordinate - (
+            facts.camera_coordinates.detach().float()[:, None, :, :, None, None]
+            + transport_per_support[:, :, :, :, None, None]
+        )
+        covariance_xx = torch.einsum(
+            "bfkcyx,bfkcyx->bfkc",
+            candidate_posterior,
+            centered[..., 0].square(),
+        ) / camera_probability.clamp_min(1e-6)
+        covariance_xy = torch.einsum(
+            "bfkcyx,bfkcyx->bfkc",
+            candidate_posterior,
+            centered[..., 0] * centered[..., 1],
+        ) / camera_probability.clamp_min(1e-6)
+        covariance_yy = torch.einsum(
+            "bfkcyx,bfkcyx->bfkc",
+            candidate_posterior,
+            centered[..., 1].square(),
+        ) / camera_probability.clamp_min(1e-6)
+        covariance_per_support = torch.stack((covariance_xx, covariance_xy, covariance_yy), dim=-1)
+        entropy = -(posterior.clamp_min(1e-8) * posterior.clamp_min(1e-8).log()).sum(
+            dim=-1, keepdim=True
+        ) / math.log(float(cameras * rows * columns + 1))
+        visibility_per_support = 1.0 - null_probability
+        # A confident null match is still epistemically uncertain about the
+        # future object state.  Plain posterior entropy would incorrectly call
+        # it certain, so null mass supplies the fallback uncertainty floor.
+        uncertainty_per_support = null_probability + visibility_per_support * entropy
+        reliability_per_support = visibility_per_support * (1.0 - entropy).clamp(0.0, 1.0)
+
+        successor_rows: list[Tensor] = []
+        transport_rows: list[Tensor] = []
+        covariance_rows: list[Tensor] = []
+        visibility_rows: list[Tensor] = []
+        persistence_rows: list[Tensor] = []
+        uncertainty_rows: list[Tensor] = []
+        reliability_rows: list[Tensor] = []
+        address_rows: list[Tensor] = []
+        semantic_end_rows: list[Tensor] = []
+        support_counts: list[Tensor] = []
+        for lower, upper in INTERVAL_BOUNDS:
+            selected = ((offsets >= lower) & (offsets <= upper)).float()
+            # Configured support sets normally cover every interval.  The
+            # fallback selects the nearest support deterministically without
+            # creating a zero/random target.
+            midpoint = 0.5 * float(lower + upper)
+            nearest = (offsets.float() - midpoint).abs().argmin(dim=1)
+            fallback = F.one_hot(nearest, num_classes=supports).float()
+            selected = torch.where(
+                (selected.sum(dim=1, keepdim=True) > 0.0),
+                selected,
+                fallback,
+            )
+            weight = selected / selected.sum(dim=1, keepdim=True).clamp_min(1.0)
+            # Reliability is object-owned.  Averaging it across K before the
+            # temporal aggregation made every object choose the same support
+            # frames and was a direct common-mode pressure on W targets.
+            reliability = reliability_per_support[..., 0].clamp_min(0.05)
+            content_weight = selected[:, :, None] * reliability
+            content_weight = content_weight / content_weight.sum(dim=1, keepdim=True).clamp_min(
+                1e-6
+            )
+            interval_offset = offsets.float().clamp(float(lower), float(upper))
+            interval_position = (interval_offset - float(lower)) / float(max(upper - lower, 1))
+            end_weight = (
+                selected[:, :, None] * reliability * torch.exp(2.0 * interval_position)[:, :, None]
+            )
+            end_weight = end_weight / end_weight.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            interval_successor = torch.einsum(
+                "bfk,bfkd->bkd", content_weight, successor_per_support
+            )
+            interval_end = torch.einsum("bfk,bfkd->bkd", end_weight, successor_per_support)
+            successor_rows.append(interval_successor)
+            interval_transport = torch.einsum(
+                "bfk,bfkcd->bkcd", content_weight, transport_per_support
+            )
+            transport_rows.append(interval_transport)
+            transport_delta = transport_per_support - interval_transport[:, None]
+            between_support_covariance = torch.stack(
+                (
+                    transport_delta[..., 0].square(),
+                    transport_delta[..., 0] * transport_delta[..., 1],
+                    transport_delta[..., 1].square(),
+                ),
+                dim=-1,
+            )
+            covariance_rows.append(
+                torch.einsum(
+                    "bfk,bfkcd->bkcd",
+                    content_weight,
+                    covariance_per_support + between_support_covariance,
+                )
+            )
+            interval_visibility = torch.einsum("bf,bfkd->bkd", weight, visibility_per_support)
+            visibility_rows.append(interval_visibility)
+            # Mean visibility and track continuity must not collapse into the
+            # same target.  The geometric mean drops when any sampled support
+            # loses the object and therefore measures persistence across the
+            # complete interval rather than average observability.
+            persistence_rows.append(
+                torch.exp(
+                    torch.einsum(
+                        "bf,bfkd->bkd",
+                        weight,
+                        visibility_per_support.clamp_min(1e-6).log(),
+                    )
+                )
+            )
+            uncertainty_rows.append(
+                torch.einsum("bf,bfkd->bkd", weight, uncertainty_per_support)
+                + (
+                    torch.einsum(
+                        "bfk,bfkd->bkd",
+                        content_weight,
+                        (successor_per_support - interval_successor[:, None])
+                        .square()
+                        .mean(dim=-1, keepdim=True),
+                    )
+                ).sqrt()
+            )
+            reliability_rows.append(torch.einsum("bf,bfkd->bkd", weight, reliability_per_support))
+            address_rows.append(
+                torch.einsum(
+                    "bfk,bfkcyx->bkcyx",
+                    content_weight,
+                    candidate_posterior,
+                )
+            )
+            # The end-biased successor is kept locally so semantic change is
+            # ordered rather than algebraically identical to the interval
+            # stable-content target.
+            semantic_end_rows.append(interval_end)
+            support_counts.append(selected.sum(dim=1).float().mean())
+        successor = torch.stack(successor_rows, dim=1)
+        transport = torch.stack(transport_rows, dim=1)
+        covariance = torch.stack(covariance_rows, dim=1)
+        visibility = torch.stack(visibility_rows, dim=1)
+        persistence_probability = torch.stack(persistence_rows, dim=1)
+        uncertainty = torch.stack(uncertainty_rows, dim=1)
+        reliability = torch.stack(reliability_rows, dim=1)
+        future_address = torch.stack(address_rows, dim=1)
+        semantic_end = torch.stack(semantic_end_rows, dim=1)
+        current_validity = facts.camera_validity.detach().float()[:, None]
+        # Current object facts are visible and persistent by construction.
+        # Export changes around that current state so a neutral/static future
+        # is exactly zero and cannot become a constant P2 value shortcut.
+        visibility_change = visibility - 1.0
+        persistence_change = persistence_probability - 1.0
+        validity = current_validity.expand(-1, len(INTERVAL_BOUNDS), -1, -1, -1)
+        target = FutureObjectDynamics(
+            current_reference=facts.content.detach().float(),
+            successor_content=successor,
+            semantic_delta=(semantic_end - facts.content.detach().float()[:, None]),
+            transport_mean=transport,
+            transport_covariance=covariance,
+            visibility=visibility_change,
+            persistence=persistence_change,
+            uncertainty=uncertainty,
+            reliability=reliability,
+            validity=validity,
+            future_address=future_address,
+            object_coordinates=facts.camera_coordinates.detach().float(),
+        )
+        target.validate()
+        if not collect_diagnostics:
+            return target, {}
+        metrics = {
+            "object_teacher_visibility": visibility.mean(),
+            "object_teacher_visibility_change": visibility_change.mean(),
+            "object_teacher_persistence_change": persistence_change.mean(),
+            "object_teacher_uncertainty": uncertainty.mean(),
+            "object_teacher_reliability": reliability.mean(),
+            "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
+            "object_teacher_transport_rms": transport.square().mean().sqrt(),
+            "object_teacher_null_probability": null_probability.mean(),
+            "object_teacher_semantic_max": semantic.detach().float().amax(dim=(-3, -2, -1)).mean(),
+            "object_teacher_semantic_margin": (
+                semantic.detach().float().amax(dim=(-3, -2, -1))
+                - semantic.detach().float().mean(dim=(-3, -2, -1))
+            ).mean(),
+            "object_teacher_appearance_max": appearance.detach()
+            .float()
+            .amax(dim=(-3, -2, -1))
+            .mean(),
+            "object_teacher_appearance_margin": (
+                appearance.detach().float().amax(dim=(-3, -2, -1))
+                - appearance.detach().float().mean(dim=(-3, -2, -1))
+            ).mean(),
+            "object_teacher_geometry_margin": (
+                geometry.detach().float().amax(dim=(-3, -2, -1))
+                - geometry.detach().float().mean(dim=(-3, -2, -1))
+            ).mean(),
+            "object_teacher_supports_per_interval": torch.stack(support_counts).mean(),
+            "object_teacher_flow_horizon_scale_mean": fraction.detach().float().mean(),
+            "object_teacher_flow_horizon_scale_max": fraction.detach().float().amax(),
+            "object_teacher_adjacent_cosine": F.cosine_similarity(
+                successor[:, 1:].flatten(2), successor[:, :-1].flatten(2), dim=-1
+            ).mean(),
+        }
+        successor_innovation = successor - target.current_reference[:, None]
+        for index in range(len(INTERVAL_BOUNDS)):
+            row = f"object_teacher_interval_{index}"
+            metrics[f"{row}_successor_innovation_rms"] = (
+                successor_innovation[:, index].square().mean().sqrt()
+            )
+            metrics[f"{row}_semantic_delta_rms"] = (
+                target.semantic_delta[:, index].square().mean().sqrt()
+            )
+            metrics[f"{row}_transport_rms"] = transport[:, index].square().mean().sqrt()
+            metrics[f"{row}_visibility_change"] = visibility_change[:, index].mean()
+            metrics[f"{row}_persistence_change"] = persistence_change[:, index].mean()
+            metrics[f"{row}_reliability"] = reliability[:, index].mean()
+            metrics[f"{row}_address_mass"] = future_address[:, index].sum(dim=(-3, -2, -1)).mean()
+        return target, metrics
