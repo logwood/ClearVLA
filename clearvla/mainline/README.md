@@ -152,11 +152,12 @@ Completed local gates:
 - formal goal/history/proposal condition dropout is exact-null on the policy
   path, leaves the full proposal target supervised, and owns a separately
   serialized training generator;
-- the schema-16 production-shape synthetic batch-one CUDA BF16 train update
-  with 336 RGB, 576 DINO patches, 12 future supports and the real 4,096-wide
-  T5 condition peaked at 2.674 GiB allocated / 2.785 GiB reserved on the local
-  8 GiB GPU; schema 17 adds only one 512x512 writer, but its memory figure is
-  deliberately treated as pending until the smoke is rerun;
+- an earlier schema-16 conservative synthetic batch-one CUDA BF16 train update
+  used 336 RGB and an oversized 24x24 DINO chart, so its 2.674 GiB allocated /
+  2.785 GiB reserved result is not the formal cache measurement; the active
+  `dinov2_cache_336` ABI is 16x16 (256 patches/camera), with 12 future
+  supports and the real 4,096-wide T5 condition, and its memory figure remains
+  pending until the server smoke is rerun;
 - the formal 18-D legacy-independent physical action field, anchor-band
   action objectives and deterministic information-balanced sampler are owned
   by the new data/training/runtime path; capacity and soft continuation retain

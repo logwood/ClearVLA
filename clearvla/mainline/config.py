@@ -108,7 +108,10 @@ class ModelDimensions:
     goal_token_dim: int = 4096
     goal_max_tokens: int = 32
     num_cameras: int = 2
-    patches_per_camera: int = 576
+    # ``dinov2_cache_336`` stores the backbone's 16x16 patch chart.  The
+    # 336-pixel decoded image size is a preprocessing boundary, not evidence
+    # for a 24x24 cached-token chart.
+    patches_per_camera: int = 256
     future_supports: int = 12
 
     def validate(self) -> None:

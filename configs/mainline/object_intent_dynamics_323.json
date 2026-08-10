@@ -39,7 +39,7 @@
     "goal_token_dim": 4096,
     "goal_max_tokens": 32,
     "num_cameras": 2,
-    "patches_per_camera": 576,
+    "patches_per_camera": 256,
     "future_supports": 12
   },
   "observation": {

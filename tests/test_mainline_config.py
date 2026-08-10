@@ -15,6 +15,9 @@ def test_mainline_config_loads_one_flat_active_preset() -> None:
     assert config.optimizer.batch_size == 8
     assert config.dimensions.hidden_size == 512
     assert config.dimensions.goal_token_dim == 4096
+    # The formal ``dinov2_cache_336`` metadata is a 16x16 token chart.  Do not
+    # infer token count from the decoded 336-pixel image side.
+    assert config.dimensions.patches_per_camera == 256
     assert config.observation.grid_size == 8
     assert config.observation.flow_reference_frames == 4
     assert config.data.information_uniform_fraction == 0.50

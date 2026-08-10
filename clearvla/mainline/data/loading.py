@@ -203,7 +203,11 @@ def load_mainline_data(
             f"DINO cache width {token_store.token_dim} != model width {dims.visual_token_dim}"
         )
     if token_store.tokens_per_camera != dims.patches_per_camera:
-        raise ValueError("DINO cache patch count does not match the configured native chart")
+        raise ValueError(
+            "DINO cache has "
+            f"{token_store.tokens_per_camera} patches/camera, but the configured "
+            f"native chart expects {dims.patches_per_camera}"
+        )
     split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
     datasets: dict[str, CachedTokenPolicyWindowDataset] = {}
     for name, ids in split_ids.items():

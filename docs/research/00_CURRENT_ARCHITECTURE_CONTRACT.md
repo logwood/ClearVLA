@@ -372,13 +372,13 @@ Candidate status (not the public launcher):
   runtime, versioned CLI or launcher script;
 - 86 local CPU/BF16-shape, provenance, zero-semantics, optimizer, exact-resume,
   five-step-cache and runtime regressions pass; the production mainline package
-  passes scoped Ruff and Pyright with zero error-level diagnostics.  A
-  schema-16 production-shape synthetic batch-one CUDA BF16 update with 336 RGB,
-  576 DINO patches, 12 future supports and the real 4,096-wide T5 condition
-  peaked at 2.674 GiB allocated / 2.785 GiB reserved on the local 8 GiB GPU.
-  Schema 17 adds only one 512x512 writer, but its local memory measurement,
-  production batch-eight memory/throughput and fresh server smoke remain
-  cutover blockers.
+  passes scoped Ruff and Pyright with zero error-level diagnostics.  An earlier
+  schema-16 conservative synthetic batch-one CUDA BF16 update used 336 RGB and
+  an oversized 24x24 DINO chart; its 2.674 GiB allocated / 2.785 GiB reserved
+  result is therefore not a formal cache measurement.  The active
+  `dinov2_cache_336` ABI is 16x16 (256 patches/camera).  Schema 17 local
+  memory at the corrected geometry, production batch-eight memory/throughput
+  and fresh server smoke remain cutover blockers.
 
 The frozen-launcher argv audit found three fixed training/action algorithms
 that schema 14 had not migrated.  Schema 15 now owns all three: the exact
