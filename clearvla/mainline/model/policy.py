@@ -25,7 +25,7 @@ from .top import (
 )
 from .transition import ControlledTransitionDynamics
 from .types import (
-    ControlledTransitionState,
+    ControlledTransitionSource,
     HistoryActionProposalState,
     ObjectFactualDock,
     ObjectTopTrainingTargets,
@@ -38,8 +38,10 @@ class OnlinePolicyCache:
 
     top: DeploymentTopCache
     factual_dock: ObjectFactualDock
-    transition: ControlledTransitionState
+    transition_source: ControlledTransitionSource
     history: ObservableHistory
+    executed_memory: Tensor
+    action_history_keep: Tensor
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
@@ -48,7 +50,16 @@ class OnlinePolicyCache:
             horizon=config.dimensions.action_horizon,
         )
         self.factual_dock.validate()
-        self.transition.validate(hidden=config.dimensions.hidden_size)
+        self.transition_source.validate(hidden=config.dimensions.hidden_size)
+        expected_memory = (
+            int(self.history.state.shape[0]),
+            config.top.proposal_summary_tokens + config.top.proposal_recent_tokens,
+            config.dimensions.hidden_size,
+        )
+        if tuple(self.executed_memory.shape) != expected_memory:
+            raise ValueError("online cache lost compressed executed-action memory")
+        if tuple(self.action_history_keep.shape) != (expected_memory[0],):
+            raise ValueError("online cache action-history keep mask must be [B]")
 
 
 @dataclass(frozen=True)
@@ -153,6 +164,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             basis=dims.action_basis_tokens,
             rank=config.bottom.controlled_delta_rank,
             action_tokens=config.bottom.controlled_action_tokens,
+            normalization_floor=config.bottom.normalization_floor,
             dropout=config.bottom.controlled_delta_dropout,
         )
         self.bottom = RestoredV120EvidenceBottom(
@@ -229,22 +241,6 @@ class ClearVLAMainlinePolicy(nn.Module):
             history=conditioned_history,
             goal=conditioned_goal,
         )
-        proposal_policy_keep = history_keep * proposal_keep
-        conditioned_history_proposal = replace(
-            history_proposal,
-            tokens=(
-                history_proposal.tokens
-                * proposal_policy_keep.to(dtype=history_proposal.tokens.dtype)[
-                    :, None, None
-                ]
-            ),
-            history_tokens=(
-                history_proposal.history_tokens
-                * history_keep.to(dtype=history_proposal.history_tokens.dtype)[
-                    :, None, None
-                ]
-            ),
-        )
         evidence, observation_metrics = self.observation(
             conditioned_policy_input.observation,
             context_mask=context_mask,
@@ -265,22 +261,24 @@ class ClearVLAMainlinePolicy(nn.Module):
             evidence=evidence,
             facts=context.facts,
             intent=context.intent,
-            coarse_action=context.coarse_action,
-            history_proposal=conditioned_history_proposal,
+            clean_action_basis=self.bottom.clean_action_basis_tokens(
+                batch,
+                device=context.intent.interval_queries.device,
+                dtype=context.intent.interval_queries.dtype,
+            ),
             collect_diagnostics=collect_diagnostics,
         )
-        transition, transition_metrics = self.transition(
-            dynamics=context.predicted_dynamics,
+        transition_source, transition_metrics = self.transition.build_source(
             facts=context.facts,
-            proposal=conditioned_history_proposal,
-            history=conditioned_policy_input.history,
             collect_diagnostics=collect_diagnostics,
         )
         cache = OnlinePolicyCache(
             top=context.deployment_cache(),
             factual_dock=factual_dock,
-            transition=transition,
+            transition_source=transition_source,
             history=conditioned_policy_input.history,
+            executed_memory=history_proposal.history_tokens,
+            action_history_keep=history_keep,
         )
         training_state = OnlineTrainingState(
             observation=evidence,
@@ -351,33 +349,49 @@ class ClearVLAMainlinePolicy(nn.Module):
         noisy_action_field: Tensor,
         time: Tensor,
         execution_mode: str = "learned",
+        require_execution_supervision: bool = False,
         collect_diagnostics: bool = False,
     ) -> PolicyStepOutput:
         """Run only the ODE-dependent P2/P3 and action bottom."""
 
         cache.validate(self.config)
-        action_query = self.bottom.action_query(noisy_action_field, time)
+        action_query, seed_context = self.bottom.action_and_context(
+            noisy_action_field,
+            time,
+            cache.history,
+            executed_memory=cache.executed_memory,
+            action_history_keep=cache.action_history_keep,
+        )
         compiled, top_metrics = self.top.compile_policy(
             cache.top,
             factual_dock=cache.factual_dock,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,
         )
+        transition, transition_metrics = self.transition(
+            source=cache.transition_source,
+            action_query=action_query,
+            plan=compiled.plan,
+            seed=seed_context,
+            collect_diagnostics=collect_diagnostics,
+        )
         bottom, bottom_metrics = self.bottom(
             noisy_action_field=noisy_action_field,
             time=time,
             action_query=action_query,
+            p1_fact=compiled.consequence.factual_base,
             plan=compiled.plan,
             intent=cache.top.intent,
-            history=cache.history,
-            transition=cache.transition,
+            seed=seed_context,
+            transition=transition,
             execution_mode=execution_mode,
+            require_execution_supervision=require_execution_supervision,
             collect_diagnostics=collect_diagnostics,
         )
         return PolicyStepOutput(
             bottom=bottom,
             compiled=compiled,
-            metrics={**top_metrics, **bottom_metrics},
+            metrics={**top_metrics, **transition_metrics, **bottom_metrics},
         )
 
     @torch.no_grad()
@@ -386,44 +400,21 @@ class ClearVLAMainlinePolicy(nn.Module):
         cache: OnlinePolicyCache,
         training_state: OnlineTrainingState,
     ) -> OnlinePolicyCache:
-        """Rebuild only the proposal-owned P1/transition boundary with zero value.
+        """Return the unchanged V120 object cache for a proposal intervention.
 
-        This is a validation intervention, not a deployment alternative.  The
-        direct observable action history remains intact in S and the bottom;
-        only the clean history-proposal tokens consumed by P1 and controlled
-        transition are removed.
+        In the recovered object path the auxiliary 24-row future proposal is
+        not a P1 query and is not the controlled action.  S still reads
+        observable executed history, the V120 seed retains the separately
+        compressed history memory, and transition reads the current noisy
+        action at each ODE step.  Treating proposal-zero as either boundary
+        would recreate the schema-20 alias this repair removes.
         """
 
         if self.training:
             raise ValueError("proposal ablation cache is evaluation-only")
         cache.validate(self.config)
         training_state.validate(self.config)
-        proposal = replace(
-            training_state.history_proposal,
-            tokens=torch.zeros_like(training_state.history_proposal.tokens),
-        )
-        factual_dock, _ = self.factual_reader(
-            evidence=training_state.observation,
-            facts=training_state.top.facts,
-            intent=training_state.top.intent,
-            coarse_action=training_state.top.coarse_action,
-            history_proposal=proposal,
-            collect_diagnostics=False,
-        )
-        transition, _ = self.transition(
-            dynamics=training_state.top.predicted_dynamics,
-            facts=training_state.top.facts,
-            proposal=proposal,
-            history=cache.history,
-            collect_diagnostics=False,
-        )
-        ablated = replace(
-            cache,
-            factual_dock=factual_dock,
-            transition=transition,
-        )
-        ablated.validate(self.config)
-        return ablated
+        return cache
 
 
 __all__ = [

@@ -43,24 +43,26 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 20
+    assert ARCHITECTURE_MANIFEST.schema == 21
     assert components.observation == "restored_v120_three_frame_flow_dino_raw_local_chart"
     assert (
         components.top
-        == "global_object_intent_four_interval_dynamics_local_p1_additive_p3"
+        == "v120_cumulative_intent_four_interval_dynamics_full_candidate_p1_five_lane_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_evidence_mmdit_dense512_execution_value_capacity"
+        == "restored_v120_shared_seed_p1_p2_contracts_evidence_mmdit_dense512_execution"
     )
     assert (
         components.training
-        == "v120_physical_flow_interval_transition_execution_value_role_lr"
+        == "v120_physical_flow_attainable_direction_interval_transition_execution_value_exact_role_lr"
     )
-    assert components.runtime == "cached_five_step_teacher_isolated_exact_resume_semantic_logging"
+    assert components.runtime == (
+        "cached_observation_gsw_p1_per_ode_shared_seed_transition_contracts_teacher_isolated"
+    )
 
 
-def test_schema_20_active_parameter_inventory_cannot_silently_shrink() -> None:
+def test_schema_21_active_parameter_inventory_cannot_silently_shrink() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):
@@ -70,13 +72,13 @@ def test_schema_20_active_parameter_inventory_cannot_silently_shrink() -> None:
             sum(parameter.numel() for parameter in parameters if parameter.requires_grad),
         )
 
-    assert counts(model) == (182_267_215, 167_031_918)
+    assert counts(model) == (177_732_213, 161_152_873)
     assert {name: counts(module) for name, module in model.named_children()} == {
         "observation": (13_543_661, 3_819_155),
         "action_codec": (0, 0),
-        "top": (98_808_785, 98_710_481),
+        "top": (92_909_001, 92_810_697),
         "history_proposal": (10_014_727, 10_010_631),
-        "factual_reader": (8_763_904, 8_763_904),
-        "transition": (8_825_993, 8_690_697),
-        "bottom": (42_310_145, 37_037_050),
+        "factual_reader": (8_768_000, 8_768_000),
+        "transition": (8_029_833, 7_897_097),
+        "bottom": (44_466_991, 37_847_293),
     }

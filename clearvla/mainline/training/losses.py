@@ -303,6 +303,10 @@ def flow_geometry_terms(evidence: ObservationEvidence) -> dict[str, Tensor]:
         previous_literal_rgb=evidence.previous_literal_rgb,
         current_literal_rgb=evidence.literal_rgb,
     )
+    if evidence.earlier_detail_features is None:
+        raise ValueError(
+            "explicit flow fallback requires real t=-8 detail features"
+        )
     earlier = _flow_pair_terms(
         flow=evidence.earlier_flow,
         previous=evidence.earlier_detail_features,
@@ -339,9 +343,8 @@ def future_dynamics_terms(
 ) -> dict[str, Tensor]:
     prediction.validate()
     target.validate()
-    validity = target.validity.detach().float()
-    object_validity = validity.amax(dim=3)
-    reliability_weight = target.reliability.detach().float().clamp(0.0, 1.0)
+    camera_validity = target.validity.detach().float().clamp(0.0, 1.0)
+    object_validity = camera_validity.amax(dim=3)
 
     def masked(error: Tensor, weight: Tensor) -> Tensor:
         expanded = weight
@@ -350,103 +353,91 @@ def future_dynamics_terms(
         expanded = expanded.expand_as(error)
         return (error * expanded).sum() / expanded.sum().clamp_min(1.0)
 
-    successor_error = F.smooth_l1_loss(
-        prediction.successor_content.float(),
-        target.successor_content.detach().float(),
-        reduction="none",
-    )
-    successor = masked(
-        successor_error,
-        # Teacher-G has already blended both confident-null and high-entropy
-        # associations to the current fact.  Multiplying by reliability here
-        # would discount the same uncertainty twice and make W nearly
-        # unsupervised on precisely the neutral rows it must learn.
-        object_validity,
-    )
-    delta_target = target.semantic_delta.detach().float()
-    delta_scale = delta_target.square().mean(dim=-1, keepdim=True).sqrt().clamp_min(0.05)
-    semantic_delta_error = F.smooth_l1_loss(
-        prediction.semantic_delta.float() / delta_scale,
-        delta_target / delta_scale,
-        reduction="none",
-    )
-    semantic_delta = masked(
-        semantic_delta_error,
-        # Semantic delta is likewise zero-centred after the confidence
-        # fallback, so it remains a valid target when association is weak.
-        object_validity,
-    )
-    transport_error = F.smooth_l1_loss(
-        prediction.transport_mean.float(),
-        target.transport_mean.detach().float(),
-        reduction="none",
-    )
-    transport = masked(
-        transport_error,
-        # Teacher-G has already converted ambiguous geometry to identity
-        # transport.  It must remain supervised, otherwise action gradients
-        # can repurpose W transport as a free carrier on low-confidence rows.
-        validity,
-    )
-    covariance = masked(
-        F.smooth_l1_loss(
-            prediction.transport_covariance.float(),
-            target.transport_covariance.detach().float(),
+    def row_loss(
+        prediction_value: Tensor,
+        target_value: Tensor,
+        *,
+        scale_floored: bool,
+    ) -> Tensor:
+        prediction_f = prediction_value.float()
+        target_f = target_value.detach().float()
+        raw = F.smooth_l1_loss(
+            prediction_f,
+            target_f,
             reduction="none",
-        ),
-        validity,
-    )
-    visibility = masked(
-        F.smooth_l1_loss(
-            prediction.visibility.float(),
-            target.visibility.detach().float(),
+        ).mean(dim=-1, keepdim=True)
+        if not scale_floored:
+            return raw
+        target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
+        scale_floor = (
+            0.25 * target_rms.mean(dim=(0, 2), keepdim=True)
+        ).clamp_min(1e-3)
+        scale = torch.sqrt(target_rms.square() + scale_floor.square())
+        normalized = F.smooth_l1_loss(
+            prediction_f / scale,
+            target_f / scale,
             reduction="none",
-        ),
-        object_validity,
-    )
-    persistence = masked(
-        F.smooth_l1_loss(
-            prediction.persistence.float(),
-            target.persistence.detach().float(),
-            reduction="none",
-        ),
-        object_validity,
-    )
-    uncertainty = masked(
-        F.smooth_l1_loss(
-            prediction.uncertainty.float(),
-            target.uncertainty.detach().float(),
-            reduction="none",
-        ),
-        object_validity,
-    )
-    reliability = masked(
-        F.smooth_l1_loss(
-            prediction.reliability.float(),
-            reliability_weight,
-            reduction="none",
-        ),
-        object_validity,
-    )
+        ).mean(dim=-1, keepdim=True)
+        prediction_direction = prediction_f / torch.sqrt(
+            prediction_f.square().mean(dim=-1, keepdim=True)
+            + scale_floor.square()
+        )
+        target_direction = target_f / torch.sqrt(
+            target_f.square().mean(dim=-1, keepdim=True)
+            + scale_floor.square()
+        )
+        # The historical cosine-like expression was positive even when the
+        # prediction exactly equalled the target because the variance floor
+        # makes each smoothed direction shorter than unit length.  Compare the
+        # two smoothed directions directly so the supervised optimum is an
+        # attainable exact zero while retaining the same bounded denominator.
+        direction = 0.5 * (
+            prediction_direction - target_direction
+        ).square().mean(dim=-1, keepdim=True)
+        return raw + normalized + 0.10 * direction
 
-    def address_distribution(address: Tensor, *, detached: bool) -> Tensor:
-        candidate = address.detach().float() if detached else address.float()
-        candidate = candidate.clamp_min(0.0).flatten(-3)
-        total = candidate.sum(dim=-1, keepdim=True)
-        candidate = candidate / total.clamp_min(1.0)
-        null = (1.0 - candidate.sum(dim=-1, keepdim=True)).clamp(0.0, 1.0)
-        return torch.cat((candidate, null), dim=-1)
-
-    predicted_address = address_distribution(prediction.future_address, detached=False)
-    target_address = address_distribution(target.future_address, detached=True)
-    address_error = 0.5 * (
-        predicted_address.clamp_min(1e-8).sqrt() - target_address.clamp_min(1e-8).sqrt()
-    ).square().sum(dim=-1)
-    # Teacher-G confidence-blends a null/diffuse association to the current
-    # unit-mass address.  That identity fallback is an actual target: masking
-    # it by reliability would again leave an action-owned free address on the
-    # rows where W is supposed to be neutral.
-    address = masked(address_error, object_validity.squeeze(-1))
+    successor_error = row_loss(
+        prediction.successor_content,
+        target.successor_content,
+        scale_floored=False,
+    )
+    successor = masked(successor_error, object_validity)
+    semantic_delta_error = row_loss(
+        prediction.semantic_delta,
+        target.semantic_delta,
+        scale_floored=True,
+    )
+    semantic_delta = masked(semantic_delta_error, object_validity)
+    transport_error = row_loss(
+        prediction.transport_mean,
+        target.transport_mean,
+        scale_floored=False,
+    )
+    transport = masked(transport_error, camera_validity)
+    covariance_error = row_loss(
+        prediction.transport_covariance,
+        target.transport_covariance,
+        scale_floored=False,
+    )
+    covariance = masked(covariance_error, camera_validity)
+    visibility_error = row_loss(
+        prediction.visibility,
+        target.visibility,
+        scale_floored=False,
+    )
+    visibility = masked(visibility_error, object_validity)
+    persistence_error = row_loss(
+        prediction.persistence,
+        target.persistence,
+        scale_floored=False,
+    )
+    persistence = masked(persistence_error, object_validity)
+    uncertainty_error = row_loss(
+        prediction.uncertainty,
+        target.uncertainty,
+        scale_floored=False,
+    )
+    uncertainty = masked(uncertainty_error, object_validity)
     semantic_transition_prediction = (
         prediction.semantic_delta.float()[:, 1:]
         - prediction.semantic_delta.float()[:, :-1]
@@ -455,13 +446,10 @@ def future_dynamics_terms(
         target.semantic_delta.detach().float()[:, 1:]
         - target.semantic_delta.detach().float()[:, :-1]
     )
-    transition_scale = (
-        semantic_transition_target.square().mean(dim=-1, keepdim=True).sqrt()
-    ).clamp_min(0.05)
-    transition_error = F.smooth_l1_loss(
-        semantic_transition_prediction / transition_scale,
-        semantic_transition_target / transition_scale,
-        reduction="none",
+    transition_error = row_loss(
+        semantic_transition_prediction,
+        semantic_transition_target,
+        scale_floored=True,
     )
     transition_validity = torch.minimum(
         object_validity[:, 1:],
@@ -470,14 +458,12 @@ def future_dynamics_terms(
     transition = masked(transition_error, transition_validity)
     total = (
         0.30 * successor
-        + 0.22 * semantic_delta
+        + 0.25 * semantic_delta
         + 0.15 * transport
         + 0.05 * covariance
-        + 0.06 * visibility
-        + 0.06 * persistence
-        + 0.05 * uncertainty
-        + 0.06 * reliability
-        + 0.05 * address
+        + 0.08 * visibility
+        + 0.07 * persistence
+        + 0.10 * uncertainty
     )
     terms = {
         "future_dynamics": total,
@@ -488,8 +474,6 @@ def future_dynamics_terms(
         "future_visibility": visibility,
         "future_persistence": persistence,
         "future_uncertainty": uncertainty,
-        "future_reliability": reliability,
-        "future_address": address,
         "future_transition": transition,
     }
     if collect_diagnostics:
@@ -503,10 +487,8 @@ def future_dynamics_terms(
                 semantic_delta_error[:, interval_slice], interval_validity
             ).detach()
             terms[f"future_interval_{index}_transport"] = masked(
-                transport_error[:, interval_slice], validity[:, interval_slice]
-            ).detach()
-            terms[f"future_interval_{index}_address"] = masked(
-                address_error[:, interval_slice], interval_validity.squeeze(-1)
+                transport_error[:, interval_slice],
+                camera_validity[:, interval_slice],
             ).detach()
     return terms
 

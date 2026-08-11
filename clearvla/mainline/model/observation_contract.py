@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from ..v120_core.flow_dino_evidence import ProgressiveFineCandidates
 from .types import LocalFactSet
 
 
@@ -84,9 +85,10 @@ class ObservationEvidence:
     """Current facts plus the sole high-resolution bank available to P1."""
 
     local_facts: LocalFactSet
+    progressive_candidates: ProgressiveFineCandidates
     detail_features: Tensor
     previous_detail_features: Tensor
-    earlier_detail_features: Tensor
+    earlier_detail_features: Tensor | None
     literal_rgb: Tensor
     previous_literal_rgb: Tensor
     earlier_literal_rgb: Tensor
@@ -106,7 +108,9 @@ class ObservationEvidence:
             raise ValueError("detail features must be [B,C,F,H,W]")
         if tuple(self.previous_detail_features.shape) != tuple(self.detail_features.shape):
             raise ValueError("previous/current detail features must align")
-        if tuple(self.earlier_detail_features.shape) != tuple(self.detail_features.shape):
+        if self.earlier_detail_features is not None and tuple(
+            self.earlier_detail_features.shape
+        ) != tuple(self.detail_features.shape):
             raise ValueError("causal detail history must align")
         if self.literal_rgb.ndim != 5 or tuple(self.literal_rgb.shape[:2]) != (
             batch,
@@ -121,6 +125,34 @@ class ObservationEvidence:
             raise ValueError("context mask must preserve [B,C,8,8]")
         self.flow.validate()
         self.earlier_flow.validate()
+        candidates = self.progressive_candidates
+        candidate_prefix = (
+            batch,
+            cameras,
+            8,
+            8,
+            self.local_facts.local_hypotheses,
+        )
+        if candidates.learned_detail.ndim != 7 or tuple(
+            candidates.learned_detail.shape[:5]
+        ) != candidate_prefix:
+            raise ValueError(
+                "progressive fine candidates must preserve [B,C,8,8,M,N,*]"
+            )
+        fine_prefix = tuple(candidates.learned_detail.shape[:-1])
+        if tuple(candidates.valid.shape) != fine_prefix:
+            raise ValueError("progressive fine validity lost the N candidate axis")
+        if tuple(candidates.current_coordinates.shape) != (*fine_prefix, 2):
+            raise ValueError("progressive fine coordinates are misaligned")
+        for name in (
+            "semantic_keys",
+            "appearance_keys",
+            "geometry_keys",
+            "literal_rgb",
+        ):
+            value = getattr(candidates, name)
+            if value is None or tuple(value.shape[:-1]) != fine_prefix:
+                raise ValueError(f"progressive candidate {name} is missing or misaligned")
         if self.native_flow_losses is not None:
             required = {
                 "flow_jepa_warp_loss",
@@ -138,6 +170,10 @@ class ObservationEvidence:
                 )
             if any(value.ndim != 0 for value in self.native_flow_losses.values()):
                 raise ValueError("native V120 flow losses must be scalar")
+        elif self.earlier_detail_features is None:
+            raise ValueError(
+                "explicit fallback flow losses require a real earlier detail feature"
+            )
 
 
 __all__ = [

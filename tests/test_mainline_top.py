@@ -113,10 +113,43 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
         camera_coordinates=coordinates,
         aggregate_fact=torch.einsum("btqk,btqkh->btqh", object_posterior[..., :-1], fact_by_object),
     )
-    compiled, _ = top.compile_policy(
-        context.deployment_cache(),
-        factual_dock=dock,
-        action_query=torch.randn(batch, horizon, basis, hidden),
+    action_query = torch.randn(batch, horizon, basis, hidden)
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_p2(_module, args, _kwargs):
+        captured["p2_query"] = args[0].detach().clone()
+
+    def capture_p3(_module, _args, kwargs):
+        captured["p3_query"] = kwargs["action_query"].detach().clone()
+
+    p2_hook = top.effect_reader.register_forward_pre_hook(
+        capture_p2,
+        with_kwargs=True,
     )
+    p3_hook = top.plan_compiler.register_forward_pre_hook(
+        capture_p3,
+        with_kwargs=True,
+    )
+    try:
+        compiled, _ = top.compile_policy(
+            context.deployment_cache(),
+            factual_dock=dock,
+            action_query=action_query,
+        )
+    finally:
+        p2_hook.remove()
+        p3_hook.remove()
     compiled.validate()
     assert tuple(compiled.plan.protected_base.shape) == (batch, horizon, basis, hidden)
+    torch.testing.assert_close(
+        captured["p2_query"],
+        action_query + dock.aggregate_fact,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        captured["p3_query"],
+        action_query + compiled.consequence.protected_consequence,
+        atol=0.0,
+        rtol=0.0,
+    )

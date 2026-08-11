@@ -15,6 +15,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..interfaces import ObservableHistory
+from ..v120_core.codec import PhysicalActionTokenLift
+from ..v120_core.primitives import sinusoidal_positions as v120_sinusoidal_positions
+from ..v120_core.trunk_primitives import HorizonRoleEmbedding
 
 
 def canonical_state_history(history: ObservableHistory) -> Tensor:
@@ -73,22 +76,219 @@ class TimeCondition(nn.Module):
         return self.network(embedding[:, : self.hidden].to(dtype=network_dtype))
 
 
-class ActionQueryEncoder(nn.Module):
-    """Create the sole noisy physical-field query shared by P2/P3/bottom."""
+@dataclass(frozen=True)
+class V120SeedContext:
+    """Observable canvas rows created beside the noisy-action seed.
 
-    def __init__(self, *, action_dim: int, hidden: int, horizon: int, basis: int) -> None:
+    V120 used one ``UnifiedCanvasSeed`` for the noisy trajectory, current
+    state, causal state history and compressed executed-action history.  These
+    rows are consumed by both the controlled transition and the final evidence
+    decoder, so giving each consumer an unrelated projection changes the
+    input distribution and breaks the original shared-gradient geometry.
+    """
+
+    state: Tensor  # [B,1,H]
+    state_history: Tensor  # [B,3,H]
+    executed: Tensor  # [B,7,H]
+
+    def validate(self, *, hidden: int, state_history: int, executed: int) -> None:
+        if self.state.ndim != 3:
+            raise ValueError("V120 seed state must be [B,1,H]")
+        batch = int(self.state.shape[0])
+        expected = {
+            "state": (batch, 1, int(hidden)),
+            "state_history": (batch, int(state_history), int(hidden)),
+            "executed": (batch, int(executed), int(hidden)),
+        }
+        for name, shape in expected.items():
+            if tuple(getattr(self, name).shape) != shape:
+                raise ValueError(f"V120 seed {name} must be {shape}")
+
+
+class ActionQueryEncoder(nn.Module):
+    """Recovered V120 action and observable-context canvas seed.
+
+    Only the rows that are active in the object mainline are materialized.
+    They retain the exact V120 role identities and exact-null executed-history
+    transform, while dead task/proposal/register canvas rows stay absent.
+    """
+
+    ROLE_STATE = 1
+    ROLE_STATE_HISTORY = 2
+    ROLE_EXECUTED = 3
+    ROLE_NOISY_ACTION = 5
+
+    def __init__(self, core_config) -> None:
         super().__init__()
-        self.action_dim = int(action_dim)
-        self.hidden = int(hidden)
-        self.horizon = int(horizon)
-        self.basis = int(basis)
-        self.action = nn.Linear(action_dim, hidden, bias=False)
-        self.time = TimeCondition(hidden)
-        self.basis_identity = nn.Parameter(torch.randn(1, 1, basis, hidden) * 0.02)
+        self.action_dim = int(core_config.physical_action_dim)
+        self.hidden = int(core_config.hidden_size)
+        self.horizon = int(core_config.action_horizon)
+        self.basis = int(core_config.action_basis_tokens)
+        self.state_dim = int(core_config.state_dim)
+        self.state_history_rows = int(core_config.visual_history_length)
+        self.executed_rows = int(core_config.action_history_token_count)
+        self.state_projection = nn.Linear(self.state_dim, self.hidden)
+        self.state_history_projection = nn.Linear(self.state_dim, self.hidden)
+        self.physical_lift = PhysicalActionTokenLift(core_config)
+        self.horizon_role = HorizonRoleEmbedding(core_config)
+        self.basis_identity = nn.Parameter(
+            torch.randn(1, 1, self.basis, self.hidden) * 0.02
+        )
+        self.role_embed = nn.Parameter(torch.randn(8, self.hidden) * 0.02)
+        self.role_drop = nn.Dropout(float(core_config.role_dropout))
+        self.action_private_condition = nn.Sequential(
+            nn.LayerNorm(self.hidden),
+            nn.Linear(self.hidden, self.hidden),
+        )
+        self.shared_condition_mixer = nn.Sequential(
+            nn.LayerNorm(self.hidden),
+            nn.Linear(self.hidden, 2 * self.hidden),
+            nn.SiLU(),
+            nn.Linear(2 * self.hidden, self.hidden),
+        )
+        # V120 exact-null semantics evaluate f(x)-f(0); this affine bias
+        # cancels identically and was therefore frozen in the source model.
+        final_mixer = self.shared_condition_mixer[-1]
+        if not isinstance(final_mixer, nn.Linear):
+            raise TypeError("V120 shared condition mixer must end in Linear")
+        if final_mixer.bias is not None:
+            final_mixer.bias.requires_grad_(False)
+        self.state_history_identity = nn.Parameter(
+            torch.randn(1, self.state_history_rows, self.hidden) * 0.02
+        )
         self.register_buffer(
             "horizon_position",
-            sinusoidal_positions(horizon, hidden, device=torch.device("cpu"))[None, :, None],
+            v120_sinusoidal_positions(
+                range(1, self.horizon + 1), self.hidden
+            )[None],
             persistent=True,
+        )
+
+    def clean_action_basis_tokens(
+        self,
+        batch: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """V120 action-basis identity without noisy physical coordinates."""
+
+        if int(batch) < 1:
+            raise ValueError("clean action basis requires a positive batch")
+        horizon = (
+            self.horizon_position.to(device=device, dtype=dtype)
+            + self.horizon_role(int(batch), device=device, dtype=dtype)
+            + self.role_embed[self.ROLE_NOISY_ACTION]
+            .to(device=device, dtype=dtype)
+            .reshape(1, 1, -1)
+        )
+        return horizon[:, :, None] + self.basis_identity.to(
+            device=device, dtype=dtype
+        )
+
+    def _action_from_role(self, noisy_action_field: Tensor, role: Tensor) -> Tensor:
+        batch = int(noisy_action_field.shape[0])
+        action = (
+            self.physical_lift(noisy_action_field)
+            + self.horizon_position.to(
+                device=noisy_action_field.device, dtype=noisy_action_field.dtype
+            )
+            + self.horizon_role(
+                batch,
+                device=noisy_action_field.device,
+                dtype=noisy_action_field.dtype,
+            )
+            + role[self.ROLE_NOISY_ACTION]
+        )
+        return action[:, :, None] + self.basis_identity.to(
+            device=action.device, dtype=action.dtype
+        )
+
+    def _context_from_role(
+        self,
+        history: ObservableHistory,
+        *,
+        executed_memory: Tensor,
+        action_history_keep: Tensor,
+        role: Tensor,
+    ) -> V120SeedContext:
+        batch = int(history.state.shape[0])
+        expected_memory = (batch, self.executed_rows, self.hidden)
+        if tuple(executed_memory.shape) != expected_memory:
+            raise ValueError(
+                f"V120 compressed action history must be {expected_memory}"
+            )
+        if tuple(action_history_keep.shape) != (batch,):
+            raise ValueError("V120 action-history keep mask must be [B]")
+        device = role.device
+        dtype = role.dtype
+        state = (
+            self.state_projection(history.state.to(device=device, dtype=dtype))[:, None]
+            + role[self.ROLE_STATE]
+        )
+        state_history = (
+            self.state_history_projection(
+                history.state_history.to(device=device, dtype=dtype)
+            )
+            + self.state_history_identity.to(device=device, dtype=dtype)
+            + role[self.ROLE_STATE_HISTORY]
+        )
+        memory = executed_memory.to(device=device, dtype=dtype)
+        conditioned = self.shared_condition_mixer(
+            self.action_private_condition(memory)
+        )
+        null = self.shared_condition_mixer(
+            self.action_private_condition(torch.zeros_like(memory))
+        )
+        executed = (
+            (conditioned - null)
+            * action_history_keep.to(device=device, dtype=dtype)[:, None, None]
+            + role[self.ROLE_EXECUTED]
+        )
+        context = V120SeedContext(
+            state=state,
+            state_history=state_history,
+            executed=executed,
+        )
+        context.validate(
+            hidden=self.hidden,
+            state_history=self.state_history_rows,
+            executed=self.executed_rows,
+        )
+        return context
+
+    def forward_with_context(
+        self,
+        noisy_action_field: Tensor,
+        time: Tensor,
+        history: ObservableHistory,
+        *,
+        executed_memory: Tensor,
+        action_history_keep: Tensor,
+    ) -> tuple[Tensor, V120SeedContext]:
+        """Build action and context with one shared V120 role-drop sample."""
+
+        if tuple(noisy_action_field.shape[1:]) != (self.horizon, self.action_dim):
+            raise ValueError("noisy physical action field must be [B,T,Aphysical]")
+        batch = int(noisy_action_field.shape[0])
+        if tuple(time.shape) != (batch,):
+            raise ValueError("flow time and noisy action batch do not align")
+        if int(history.state.shape[0]) != batch:
+            raise ValueError("V120 action and context batches do not align")
+        del time
+        role = self.role_drop(
+            self.role_embed.to(
+                device=noisy_action_field.device, dtype=noisy_action_field.dtype
+            )
+        )
+        return (
+            self._action_from_role(noisy_action_field, role),
+            self._context_from_role(
+                history,
+                executed_memory=executed_memory,
+                action_history_keep=action_history_keep,
+                role=role,
+            ),
         )
 
     def forward(self, noisy_action_field: Tensor, time: Tensor) -> Tensor:
@@ -97,14 +297,18 @@ class ActionQueryEncoder(nn.Module):
         batch = int(noisy_action_field.shape[0])
         if tuple(time.shape) != (batch,):
             raise ValueError("flow time and noisy action batch do not align")
-        action = self.action(noisy_action_field)[:, :, None]
-        return (
-            action
-            + self.time(time).to(dtype=action.dtype)[:, None, None]
-            + self.horizon_position.to(device=action.device, dtype=action.dtype)
-            + self.basis_identity.to(device=action.device, dtype=action.dtype)
+        # V120 injected time through the downstream modulated blocks and
+        # decoder, not by replacing the typed physical seed with one generic
+        # affine action+time sum.  The physical flow state itself remains the
+        # only action value here; ``time`` is still checked and is consumed by
+        # the restored bottom decoder.
+        del time
+        role = self.role_drop(
+            self.role_embed.to(
+                device=noisy_action_field.device, dtype=noisy_action_field.dtype
+            )
         )
-
+        return self._action_from_role(noisy_action_field, role)
 
 @dataclass(frozen=True)
 class BottomOutput:
@@ -128,4 +332,9 @@ class BottomOutput:
             raise ValueError("bottom action query lost its basis axis")
 
 
-__all__ = ["ActionQueryEncoder", "BottomOutput", "canonical_state_history"]
+__all__ = [
+    "ActionQueryEncoder",
+    "BottomOutput",
+    "V120SeedContext",
+    "canonical_state_history",
+]

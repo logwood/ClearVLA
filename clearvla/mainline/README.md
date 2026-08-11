@@ -1,221 +1,146 @@
-# ClearVLA mainline extraction
+# ClearVLA independent mainline
 
-This directory is the only destination for the new active implementation.
-The existing V39 CLI, runtime and version-switched trunk are frozen migration
-references; they are not architectural parents of this package.
+`clearvla/mainline/` is the only active capability-named implementation. The
+historical V39 CLI/runtime/trunk and V-numbered launchers are migration or
+comparison references, not runtime parents of this package.
 
-## Purpose
+The compact architecture source of truth is
+[`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`](../../docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md).
 
-Build one self-contained vertical path in execution order:
+## Active vertical path
 
 ```text
-experiment spec / manifest
-  -> batch and language inputs
-  -> current observation encoder and Pre-G evidence
-  -> three active typed G role hosts and global-object grounding
-  -> stateless intent S
-  -> W1-W2 supervised future dynamics
-  -> eight-row executed-history clean proposal
-  -> static P1 role host and one high-resolution factual read
-  -> action-centred controlled transition from W + clean proposal
-  -> minimal deployment cache (S / W / P1 / transition / observable history)
-  -> P2 consequence read
-  -> P3 typed plan compiler
-  -> one protected consequence plus typed optional lanes
-  -> deterministic read-only Evidence MMDiT / execution controller
+config / manifest / typed online and training inputs
+  -> three-frame current observation + two learned flows
+  -> Pre-G local chart
+  -> G1-G3 global K+null grounding
+  -> V120 cumulative stateless intent S
+  -> W1/W2 four-interval future object dynamics
+  -> P1 one query-specific read over all progressive candidates
+  -> P2 bounded consequence read
+  -> P3 five V120 typed lanes
+  -> shared V120 action/context canvas seed
+  -> true P1/P2 terminal layer contracts
+  -> per-ODE noisy-action controlled transition
+  -> V120 Evidence MMDiT / execution value / capacity bottom
 ```
 
-Training adds a separate, no-grad future-teacher branch.  Future evidence is
-not an optional argument to the online forward API.
+Training adds one no-grad future-teacher branch. Future evidence has a separate
+typed input and cannot enter the online/deployment API.
+
+The 24-row executed-history future proposal is an auxiliary supervised
+prediction in the recovered V120 object path. Its separate 4-recent +
+3-summary history encoding remains the observable executed-history condition
+used by the shared V120 canvas seed; it is not a P1 or controlled-action alias.
 
 ## Package boundaries
 
 ```text
 clearvla/mainline/
-  config.py          nested active configuration only
-  manifest.py        compact serialized architecture identity
-  interfaces.py      online/training typed boundaries
-  model/             observation, G/S/W/P and bottom composition
-  training/          objectives, optimizer, diagnostics and engine
-  runtime/           deployment sampling, evaluation and checkpoints
+  config.py          active nested configuration
+  manifest.py        compact architecture identity
+  interfaces.py      disjoint online/training inputs
+  model/             observation, G/S/W/P, transition and bottom
+  training/          objectives, optimizer and engine
+  runtime/           sampling, evaluation, logs and checkpoints
+  train.py           direct entry point
 ```
 
-The active implementation must not import:
+This package must not import the legacy trainer/runtime/trunk or a
+`current_vXXX` launcher. Audited low-level numerical primitives are extracted
+under `v120_core/`; their callers still own explicit typed boundaries.
 
-- `clearvla.cli.train_v40_policy`;
-- `clearvla.experiments.observed_state_lab.policy_runtime_v39`;
-- `TemporalMidcutWorldActionDiT` from the historical trunk;
-- a `current_vXXX` launcher or a version-wide validator.
+## Change policy
 
-Low-level, version-independent numerical primitives may be reused after their
-input/output semantics are audited.  Temporary migration adapters are allowed
-only in parity tests and are never part of the public mainline runtime.
+The recovery reference is V120 `long`, commit
+`0b92d359a2889a0a1b1eba256007c00ccbc54f3c`.
 
-## Change policy during extraction
+- Preserve active V120 tensor semantics, source ordering, residual positions,
+  dynamic frequency and loss ownership.
+- Repair a behavior only when source semantics are self-contradictory or the
+  source/log evidence is recorded before the change.
+- Remove inactive ancestry and diagnostic aliases only when they cannot alter
+  the active graph.
+- Show the old/new path before any change to input statistics, gradient
+  geometry, attention competition, counterfactual or source bank.
+- Do not use gates, quotas, entropy targets, artificial gradients or extra
+  loss weight to hide an unresolved connection problem.
 
-The extraction is not a blind bit-for-bit copy.  Each migrated section is
-classified as one of:
+## Active identity
 
-1. **Preserve**: mathematics and tensor ownership are already correct.
-2. **Repair**: source inspection proves an architectural, numerical, contract
-   or runtime defect.  The defect, old evidence, new owner and acceptance test
-   must be recorded before changing behavior.
-3. **Remove**: inactive ancestry, duplicate aliases, version dispatch or a
-   diagnostic-only path that leaks into normal execution.
+```text
+capability:    object_intent_dynamics_323
+schema:        21
+topology:      3-2-3
+intervals:     4-8 / 8-16 / 16-32 / 32-48
+parameters:    177,732,213 total / 161,152,873 trainable
+```
 
-Unresolved empirical questions are not repaired by adding gates, quotas,
-entropy targets or artificial gradients.  They remain experiment questions.
+Schema 20 is not an exact-resume source for schema 21. Formal runs start fresh
+unless the complete manifest, model, optimizer, scheduler and RNG identity
+matches. Bottom-only migration is explicit and emits a report.
 
-## Non-negotiable migration rules
+## Runtime contract
 
-- Preserve the current G/S/W/P semantic boundaries and every invariant in
-  `docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md` unless a recorded source
-  defect requires an explicit replacement.
-- Keep local hypothesis, global object, camera, space, interval and type axes
-  real until their named consumer.
-- Build the training teacher once per batch and zero times in deployment.
-- Perform the current high-resolution P1 read once per observation.
-- Build observation/G/S/W/P1 once, but retain only S/W/P1 and observable
-  history across deployment ODE steps.  Raw RGB, DINO, flow charts and
-  reconstruction targets belong to the ephemeral training plane.
-- Pass one protected consequence and typed P3 innovations to the bottom.
-- Give every trainable parameter exactly one optimizer owner.
-- Preserve V120's resolved optimization geometry explicitly: proposal `0.625x`,
-  active bottom decoder `0.7x`, and no-decay capacity basis `1.4x`; keep the
-  G/S/W/P owners at the public base LR.
-- Let modules publish their own diagnostic parameter groups; diagnostics may
-  not reach into another module's private attributes.
-- A run label is metadata and never selects source semantics.
+- Observation/G/S/W/P1 and the 512-row transition source build once per
+  observation.
+- The shared action/context seed, P2/P3, two terminal layer contracts, the
+  action-conditioned transition and bottom run on every ODE step.
+- Execution candidate/value charts are mandatory for every train/eval loss
+  forward, even after the optional diagnostic-batch budget is exhausted; they
+  stay disabled during ordinary five-step deployment sampling.
+- Teacher builds once per training batch and zero times in deployment.
+- P1 retains N=49 until each action/object query chooses a candidate; chunks
+  are checkpointed rather than materializing the complete backward graph.
+- Batch-eight production process peak must remain at or below 22 GiB.
 
-## Release gates and current status
+## Run
 
-`scripts/train_mainline.sh` and `scripts/smoke_mainline.sh` are the direct
-entry points for this package.  They resolve one JSON config and do not inherit
-a V-numbered launcher chain.  A formal result still requires all of:
+Both launchers use the established server defaults:
 
-1. independent online and teacher-forced APIs;
-2. complete G/S/W/P/transition/bottom forward and backward;
-3. canonical loss, optimizer and full active diagnostics;
-4. five-step deployment with static evidence built once;
-5. exact checkpoint/resume identity and explicit migration behavior;
-6. provenance, zero-semantics, numerical and gradient regressions;
-7. local BF16 memory below 8 GiB and production batch-eight below 22 GiB;
-8. a controlled eight-epoch comparison against the V120 recovery baseline.
+```text
+data:          /data/liang.zhang/dataset/grab_pen_single/grab_pen_single
+decoded cache: /data/senwang/data/cache_336
+DINO cache:    /data/senwang/data/dinov2_cache_336
+T5:            /data/senwang/checkpoint/grasp_pen_embed.pt
+```
 
-The active candidate is manifest schema `20` and contains 182,267,215 total /
-167,031,918 trainable parameters.  Its current component identities and graph
-invariants are recorded in
-`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
-
-Schema 20 retains the independent typed layout and the source-proven numerical
-repairs, while restoring or repairing the active mechanisms that the first
-extraction weakened:
-
-- three-frame causal DINO/raw history and both adjacent learned flows;
-- G1-G3 hosted public context enters the address key, while object-owned
-  candidate values remain private rather than receiving a copied public value;
-- G reconstruction that cannot reduce its target by copying a public carrier
-  or moving its own responsibility target;
-- query/global-object-specific P1 reads over the complete local chart;
-- additive factual/temporal P3 bases with zero-preserving W interactions;
-- P2 selects intervals from observable intent innovations, and noisy ODE
-  action can modulate P3 temporal content only through a nonzero consequence;
-- ambiguous Teacher-G associations continuously fall back to the current
-  object fact and zero geometry before becoming supervision, so neutral W
-  rows remain learnable without fitting a diffuse future-patch average;
-- all 512 dense spatial transition selector/value rows retained to the V120
-  evidence bank; only the event auxiliary context uses four milestone pools;
-- V120's full-residual ordered rank-32 contraction: full depth is identity,
-  reduced depth is nested/non-expansive, and capacity is never misnamed as a
-  whole-block amplitude gate;
-- V120's supervised candidate execution-value reader at weight `0.05`, with
-  execution cost retained as audit-only;
-- V120 per-row horizon mass and raw-unit event semantics;
-- V120 role-specific optimizer pressure, without restoring the legacy launcher
-  or allowing optimizer ownership to overlap;
-- complete semantic logging and parser support for mainline JSONL/console
-  output; JSONL keeps active exact zeros losslessly while the console remains
-  compact;
-- exact weighted `loss_contrib_*` accounting; the formal action/decoded loss is
-  V120-exact while event-balanced alternatives are explicit detached audits;
-- matched-noise validation ablations for proposal-zero, a true pre-block
-  prefix no-update, and bottom full-update on the bounded diagnostic subset,
-  with signed utility, action delta and coverage rather than a bare "path
-  active" flag.
-
-The lower total parameter count relative to the old monolith is removed frozen
-ancestry, not a deleted active G/P/bottom path.  The three Evidence MMDiT
-blocks, G1-G3/P1 role hosts, history proposal, controlled transition,
-capacity/continuation and event/motion heads are present.
-
-Still pending before an empirical recovery claim:
-
-- CUDA BF16 memory validation (the complete local regression, scoped static
-  checks and CPU BF16 forward/backward already pass);
-- production CUDA batch-eight process memory and throughput;
-- fresh server smoke and five-step deployment smoke;
-- a fresh full eight-epoch comparison, including all V120 action, horizon,
-  gripper/motion, flow, ownership and gradient metrics.
-
-Run those two stages from a fresh output directory:
+Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema20_recovery_smoke \
-MAINLINE_BATCH_SIZE=1 \
-bash scripts/smoke_mainline.sh
-
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema20_recovery_b8 \
-MAINLINE_BATCH_SIZE=8 \
-bash scripts/train_mainline.sh
+OUT_DIR=runs/schema21_v120_recovery_smoke \
+nohup bash scripts/smoke_mainline.sh > schema21_smoke.log 2>&1 &
 ```
 
-After all eight epochs, compare the complete archival streams rather than a
-single best RMSE:
+Formal batch-eight run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+OUT_DIR=runs/schema21_v120_recovery_b8 \
+nohup bash scripts/train_mainline.sh > schema21_long.log 2>&1 &
+```
+
+Each fresh output directory must be absent or empty. Override
+`DATA_ROOT`, `CACHE_DIR`, `DINO_CACHE_DIR`, `T5_CONDITION_PATH`,
+`MAINLINE_BATCH_SIZE` or `MAINLINE_NUM_WORKERS` only when the server layout
+actually differs.
+
+Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema20_recovery_b8 \
+  runs/schema21_v120_recovery_b8 \
   --recovery-baseline v120_long.log \
-  --tail 120 \
-  --require-recovery \
-  --format text
+  --tail 120 --require-recovery --format text
 ```
 
-Passing the run directory loads both `metrics.jsonl` and
-`run_context.json`.  The recovery gate checks the serialized public identity,
-all eight epochs, V120-sized metric coverage, final and eight-epoch mean
-action/horizon/arm/gripper/event behavior, train-tail scales, G/S/W/P owner
-health, owner gradients and matched-noise proposal/execution ablations.  It
-also compares wall-time batch-window median/p90 against the same batch-eight
-V120 log (limits `1.5x`/`2.0x`) and requires the dedicated-GPU process peak
-estimate to remain at or below `22 GiB`.  The estimate is PyTorch's exact peak
-reservation plus the visible non-PyTorch CUDA-context occupancy; another
-process on the GPU therefore makes this conservative and invalidates a clean
-performance comparison.  `[mainline-train-performance]` and
-`[mainline-runtime]` preserve these values in copied console logs, while the
-JSONL remains authoritative.  The command returns exit code `3` for either a
-demonstrated regression or missing proof; one improved RMSE cannot pass the
-gate by itself.
+## Release gates
 
-## Frozen-mainline early-loss comparison
-
-Run the two full graphs sequentially on one GPU with the same formal data,
-sampler seed, batch size and public optimizer/objective settings:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-COMPARE_BATCHES=20 \
-COMPARE_BATCH_SIZE=1 \
-bash scripts/compare_v122_mainline_early_loss.sh
-```
-
-The report is written to
-`runs/v122_mainline_early_loss_compare/comparison.md`.  This comparison does
-not require bitwise-equal losses: model initialization and private graph RNG
-consumption differ after extraction.  It first requires exact parity of the
-7-D/18-D physical action codec, then compares the early mean scale and
-first-half/second-half direction of shared action losses.  G/S/W/P-private
-objectives are reported only through their top-level representation group and
-are not treated as tensor-equivalent terms.
+- full finite forward/backward and unique optimizer ownership;
+- teacher isolation and five-step deployment call-frequency checks;
+- typed axis, object permutation, P2 bounds and neutral consequence checks;
+- fresh CUDA BF16 smoke and batch-eight memory measurement;
+- complete eight-epoch comparison against V120, including action/native,
+  first/tail, horizon bands, arm/gripper, event/motion, G/S/W/P and gradients;
+- no early divergence or later rebound hidden by aggregate/best RMSE.

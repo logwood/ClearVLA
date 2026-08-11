@@ -1,4 +1,4 @@
-"""Causal executed-history proposal preserved from the formal V122 graph."""
+"""Causal executed-history proposal preserved from the active V120 graph."""
 
 from __future__ import annotations
 

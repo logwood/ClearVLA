@@ -1126,7 +1126,12 @@ GRADIENT_KEYS = (
     "gradient_postclip_p2_effect_reader_l2",
     "gradient_postclip_consequence_l2",
     "gradient_postclip_p3_compiler_l2",
+    "gradient_postclip_v120_canvas_seed_l2",
+    "gradient_postclip_v120_layer_contracts_l2",
     "gradient_postclip_bottom_query_l2",
+    "gradient_postclip_bottom_evidence_adapter_l2",
+    "gradient_postclip_bottom_policy_bridge_l2",
+    # Historical pre-recovery role names remain readable when comparing old logs.
     "gradient_postclip_bottom_protected_reader_l2",
     "gradient_postclip_bottom_evidence_compiler_l2",
     "gradient_postclip_bottom_organizer_l2",
@@ -3555,6 +3560,10 @@ def _recovery_assessment(
         "gradient_postclip_p1_factual_l2",
         "gradient_postclip_p2_effect_reader_l2",
         "gradient_postclip_p3_compiler_l2",
+        "gradient_postclip_v120_canvas_seed_l2",
+        "gradient_postclip_v120_layer_contracts_l2",
+        "gradient_postclip_bottom_evidence_adapter_l2",
+        "gradient_postclip_bottom_policy_bridge_l2",
         "gradient_postclip_bottom_capacity_l2",
         "gradient_postclip_bottom_execution_l2",
     )

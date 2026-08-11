@@ -185,7 +185,6 @@ class JsonlRunLogger:
             "loss_future_successor",
             "loss_future_semantic_delta",
             "loss_future_transition",
-            "loss_future_address",
             "loss_execution_value",
             "loss_object_reconstruction",
             "object_grounding_object_content_pair_cosine",
@@ -508,7 +507,6 @@ class JsonlRunLogger:
                 f"loss_future_interval_{index}_successor",
                 f"loss_future_interval_{index}_semantic_delta",
                 f"loss_future_interval_{index}_transport",
-                f"loss_future_interval_{index}_address",
             )
             interval_fields = [
                 f"{name}={metrics[name]:.6g}" for name in interval_names if name in metrics

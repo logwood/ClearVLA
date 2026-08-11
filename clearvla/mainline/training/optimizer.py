@@ -24,19 +24,17 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("p2_effect_reader", ("top.effect_reader.",)),
     ("consequence", ("top.consequence.",)),
     ("p3_compiler", ("top.plan_compiler.",)),
+    ("v120_canvas_seed", ("bottom.query_encoder.",)),
+    ("v120_layer_contracts", ("bottom.layer_contract_heads.",)),
     (
         "bottom_query",
         (
-            "bottom.query_encoder.",
             "bottom.decoder.noisy_lift.",
         ),
     ),
     (
         "bottom_evidence_adapter",
         (
-            "bottom.state_projection.",
-            "bottom.executed_projection.",
-            "bottom.event_evidence.",
             "bottom.decoder.evidence_adapter.",
         ),
     ),

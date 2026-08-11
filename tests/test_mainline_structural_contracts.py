@@ -127,7 +127,7 @@ def test_masked_reconstruction_keeps_target_without_reopening_candidates() -> No
     assert reconstruction_grad > 0
 
 
-def test_future_recognizer_keeps_interval_and_object_axes_distinct() -> None:
+def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:
     torch.manual_seed(2)
     batch, intervals, objects, content, cameras = 1, 4, 3, 8, 1
     scalar = torch.ones(batch, intervals, objects, 1)
@@ -157,8 +157,10 @@ def test_future_recognizer_keeps_interval_and_object_axes_distinct() -> None:
         future_state=torch.randn(batch, 48, 2),
         teacher=teacher,
     )
-    assert tuple(result.object_key_targets.shape) == (batch, intervals, objects, 16)
-    assert tuple(result.object_value_targets.shape) == (batch, intervals, objects, 16)
+    assert tuple(result.interval_targets.shape) == (batch, intervals, 16)
+    assert tuple(result.action_summary.shape) == (batch, intervals, 2)
+    assert tuple(result.state_summary.shape) == (batch, intervals, 2)
+    assert tuple(result.effect_summary.shape) == (batch, intervals, content)
 
 
 def test_future_recognizer_supervises_neutral_objects_without_reliability_discount() -> None:
@@ -168,7 +170,7 @@ def test_future_recognizer_supervises_neutral_objects_without_reliability_discou
     teacher = FutureObjectDynamics(
         current_reference=current,
         successor_content=current[:, None].expand(-1, intervals, -1, -1),
-        semantic_delta=torch.zeros(batch, intervals, objects, content),
+        semantic_delta=torch.ones(batch, intervals, objects, content),
         transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
         transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
         visibility=scalar,
@@ -191,12 +193,7 @@ def test_future_recognizer_supervises_neutral_objects_without_reliability_discou
         future_state=torch.randn(batch, 48, 2),
         teacher=teacher,
     )
-    torch.testing.assert_close(
-        result.object_validity,
-        torch.ones_like(result.object_validity),
-        atol=0.0,
-        rtol=0.0,
-    )
+    torch.testing.assert_close(result.effect_summary, torch.ones_like(result.effect_summary))
 
 
 def test_final_object_posterior_is_recomputed_after_last_slot_update() -> None:
@@ -679,13 +676,12 @@ def test_w_zero_initialized_camera_mass_residual_preserves_current_camera_prior(
     dynamics = ObjectFutureDynamicsCompiler(
         hidden=16,
         content_dim=8,
+        route_dim=4,
         heads=4,
     )
     field = dynamics._field(
         facts=facts,
         hidden=torch.zeros(1, 2, 4, 16),
-        global_start=0,
-        heads=dynamics.near_heads,
     )
     expected = facts.object_to_chart[:, None].expand(-1, 2, -1, -1, -1, -1)
     assert torch.allclose(field.future_address, expected, atol=1e-5, rtol=1e-5)
@@ -701,12 +697,12 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
         iterations=1,
     )(_local_facts(cameras=2, content=8, route=4, hidden=16))
     facts.content.retain_grad()
-    dynamics = ObjectFutureDynamicsCompiler(hidden=16, content_dim=8, heads=4)
+    dynamics = ObjectFutureDynamicsCompiler(
+        hidden=16, content_dim=8, route_dim=4, heads=4
+    )
     field = dynamics._field(
         facts=facts,
         hidden=torch.zeros(1, 2, 4, 16, requires_grad=True),
-        global_start=0,
-        heads=dynamics.near_heads,
     )
     innovation = field.successor_content - field.current_reference[:, None]
     assert torch.count_nonzero(innovation) == 0
@@ -714,8 +710,7 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
     assert facts.content.grad is None or torch.count_nonzero(facts.content.grad) == 0
 
 
-def test_w_intent_write_is_not_erased_by_large_coarse_action() -> None:
-    """W must combine causal operands after, not before, their nonlinearities."""
+def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> None:
 
     torch.manual_seed(31)
     top = ObjectIntentDynamicsTop(
@@ -742,18 +737,15 @@ def test_w_intent_write_is_not_erased_by_large_coarse_action() -> None:
     )
     blank_intent = replace(
         intent,
-        interval_action_innovations=torch.zeros_like(intent.interval_action_innovations),
-        interval_state_innovations=torch.zeros_like(intent.interval_state_innovations),
-        interval_object_keys=torch.zeros_like(intent.interval_object_keys),
-        interval_object_values=torch.zeros_like(intent.interval_object_values),
+        interval_queries=torch.zeros_like(intent.interval_queries),
     )
     signal_intent = replace(
         blank_intent,
-        interval_action_innovations=torch.randn_like(intent.interval_action_innovations),
+        interval_queries=torch.randn_like(intent.interval_queries),
     )
     coarse = top.coarse_action(blank_intent)
-    zero_action = replace(coarse, innovations=torch.zeros_like(coarse.innovations))
-    large_action = replace(coarse, innovations=torch.full_like(coarse.innovations, 1.0e6))
+    zero_action = replace(coarse, tokens=torch.zeros_like(coarse.tokens))
+    signal_action = replace(coarse, tokens=torch.randn_like(coarse.tokens))
 
     signal_zero, _ = top.dynamics._base(
         facts,
@@ -767,28 +759,17 @@ def test_w_intent_write_is_not_erased_by_large_coarse_action() -> None:
         zero_action,
         collect_diagnostics=False,
     )
-    signal_large, _ = top.dynamics._base(
-        facts,
-        signal_intent,
-        large_action,
-        collect_diagnostics=False,
-    )
-    blank_large, _ = top.dynamics._base(
+    blank_action, _ = top.dynamics._base(
         facts,
         blank_intent,
-        large_action,
+        signal_action,
         collect_diagnostics=False,
     )
-    torch.testing.assert_close(
-        signal_zero - blank_zero,
-        signal_large - blank_large,
-        atol=2e-5,
-        rtol=2e-5,
-    )
+    assert not torch.equal(signal_zero, blank_zero)
+    assert not torch.equal(blank_action, blank_zero)
 
 
-def test_relative_history_position_cannot_synthesize_intent_values() -> None:
-    """History ordering may address evidence but is not progress evidence itself."""
+def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
 
     torch.manual_seed(30)
     top = ObjectIntentDynamicsTop(
@@ -804,7 +785,7 @@ def test_relative_history_position_cannot_synthesize_intent_values() -> None:
         teacher_key_dim=8,
     )
     facts, _ = top.grounder(_local_facts(cameras=2))
-    intent, _ = top.intent(
+    kwargs = dict(
         goal_tokens=torch.zeros(1, 6, 12),
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.zeros(1, 3, 7),
@@ -813,17 +794,13 @@ def test_relative_history_position_cannot_synthesize_intent_values() -> None:
         facts=facts,
         collect_diagnostics=False,
     )
-    assert torch.count_nonzero(intent.interval_action_innovations) == 0
-    assert torch.count_nonzero(intent.interval_state_innovations) == 0
-    assert torch.count_nonzero(intent.interval_object_keys) == 0
-    assert torch.count_nonzero(intent.interval_object_values) == 0
-    assert torch.count_nonzero(intent.temporal_innovations) == 0
-    coarse = top.coarse_action(intent)
-    assert torch.count_nonzero(coarse.innovations) == 0
+    first, _ = top.intent(**kwargs)
+    second, _ = top.intent(**kwargs)
+    torch.testing.assert_close(first.interval_queries, second.interval_queries)
+    torch.testing.assert_close(first.temporal_queries, second.temporal_queries)
 
 
-def test_goal_intent_cannot_synthesize_observable_object_state_values() -> None:
-    """S object keys may use goal intent; object values require observed state."""
+def test_goal_changes_interval_intent_without_rewriting_object_facts() -> None:
 
     torch.manual_seed(32)
     top = ObjectIntentDynamicsTop(
@@ -839,8 +816,7 @@ def test_goal_intent_cannot_synthesize_observable_object_state_values() -> None:
         teacher_key_dim=8,
     )
     facts, _ = top.grounder(_local_facts(cameras=2))
-    intent, _ = top.intent(
-        goal_tokens=torch.randn(1, 6, 12),
+    common = dict(
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.zeros(1, 3, 7),
         state=torch.zeros(1, 7),
@@ -848,10 +824,16 @@ def test_goal_intent_cannot_synthesize_observable_object_state_values() -> None:
         facts=facts,
         collect_diagnostics=False,
     )
-    assert torch.count_nonzero(intent.interval_action_innovations) > 0
-    assert torch.count_nonzero(intent.interval_state_innovations) == 0
-    assert torch.count_nonzero(intent.interval_object_keys) > 0
-    assert torch.count_nonzero(intent.interval_object_values) == 0
+    zero_goal, _ = top.intent(
+        goal_tokens=torch.zeros(1, 6, 12),
+        **common,
+    )
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        **common,
+    )
+    torch.testing.assert_close(intent.object_tokens, zero_goal.object_tokens)
+    assert not torch.equal(intent.interval_queries, zero_goal.interval_queries)
 
 
 def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -> None:
@@ -883,8 +865,8 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
         transport_mean=torch.ones_like(target.transport_mean),
     )
     unreliable = future_dynamics_terms(prediction, target)
-    assert unreliable["future_address"] > 0
     assert unreliable["future_transport"] > 0
+    assert "future_address" not in unreliable
 
     # The teacher's null association already turns content into the current
     # fact/zero-delta fallback.  That fallback remains an actual supervised W
@@ -901,7 +883,6 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
     reliable_target = replace(target, reliability=torch.ones_like(scalar))
     reliable_prediction = replace(prediction, reliability=torch.ones_like(scalar))
     reliable = future_dynamics_terms(reliable_prediction, reliable_target)
-    torch.testing.assert_close(unreliable["future_address"], reliable["future_address"])
     torch.testing.assert_close(unreliable["future_transport"], reliable["future_transport"])
 
 
@@ -1083,8 +1064,8 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     coarse = top.coarse_action(intent)
     relabeled_coarse = top.coarse_action(relabeled_intent)
     assert torch.allclose(
-        relabeled_coarse.innovations,
-        coarse.innovations,
+        relabeled_coarse.tokens,
+        coarse.tokens,
         atol=2e-5,
         rtol=2e-5,
     )
@@ -1232,14 +1213,9 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     assert torch.count_nonzero(compiled.plan.precision) > 0
     assert torch.count_nonzero(compiled.plan.temporal) > 0
     assert torch.count_nonzero(compiled.plan.state_change) > 0
-    # With no W consequence, a noisy ODE query cannot turn S temporal into an
-    # action-adapter bypass.  The legal observable temporal base remains.
-    torch.testing.assert_close(
-        compiled.plan.temporal,
-        neutral_other_query.plan.temporal,
-        atol=0.0,
-        rtol=0.0,
-    )
+    # V120 keeps noisy-action modulation in its typed temporal lane.  The
+    # protected factual consequence remains available independently.
+    assert not torch.equal(compiled.plan.temporal, neutral_other_query.plan.temporal)
     identity_only_intent = replace(
         context.intent,
         interval_queries=context.intent.interval_queries + 1000.0 * torch.randn_like(
@@ -1311,22 +1287,20 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
     neutral = FutureObjectDynamics.neutral(context.facts)
     changed = replace(
         neutral,
-        successor_content=neutral.successor_content
-        + 0.25 * torch.randn_like(neutral.successor_content),
+        semantic_delta=neutral.semantic_delta
+        + 0.25 * torch.randn_like(neutral.semantic_delta),
     )
     action_query = torch.randn(1, horizon, basis, hidden)
     neutral_effect, _ = top.effect_reader(
         action_query,
         neutral,
         context.intent,
-        dock,
         collect_diagnostics=False,
     )
     changed_effect, _ = top.effect_reader(
         action_query,
         changed,
         context.intent,
-        dock,
         collect_diagnostics=False,
     )
     assert torch.count_nonzero(neutral_effect) == 0
@@ -1475,8 +1449,10 @@ def test_deployment_cache_has_no_source_or_training_charts() -> None:
     assert {field.name for field in fields(OnlinePolicyCache)} == {
         "top",
         "factual_dock",
-        "transition",
+        "transition_source",
         "history",
+        "executed_memory",
+        "action_history_keep",
     }
     assert {field.name for field in fields(DeploymentTopCache)} == {
         "intent",

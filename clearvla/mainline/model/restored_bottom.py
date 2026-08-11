@@ -10,7 +10,7 @@ The translation keeps the repaired ownership boundaries:
 
 * P2's protected consequence is written once through V120's protected-detail
   reader while the historical generic trajectory ingress remains neutral;
-* P3 precision/temporal/state-change are optional typed innovations;
+* all five V120 P3 lanes are optional typed innovations;
 * all 512 W transition rows reach the evidence bank without pooling;
 * observation banks are never reopened below P1;
 * teacher/future tensors cannot be represented by this online signature.
@@ -19,6 +19,7 @@ The translation keeps the repaired ownership boundaries:
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import torch
 from torch import Tensor, nn
@@ -27,11 +28,11 @@ from ..config import ExperimentConfig
 from ..interfaces import ObservableHistory
 from ..v120_core.profile import build_v120_policy_config
 from ..v120_core.role_delta_attnres import PolicyRoleDeltaBank
+from ..v120_core.layer_contracts import LayerContractAdapterHeads
 from ..v120_core.time_domain_mmdit import (
     EvidenceLatentMMDiTActionDecoder,
-    EvidenceViewAdapter,
 )
-from .action_contract import ActionQueryEncoder, BottomOutput, canonical_state_history
+from .action_contract import ActionQueryEncoder, BottomOutput, V120SeedContext
 from .compiler import ObjectPolicyPlanDeltaBank
 from .types import ControlledTransitionState, ObjectIntentState
 
@@ -78,80 +79,6 @@ def _build_decoder_config(config: ExperimentConfig):
     return resolved
 
 
-class _IntegratedEvidenceViewAdapter(EvidenceViewAdapter):
-    """Keep type identity in K while making optional V streams exact-zero."""
-
-    @staticmethod
-    def _replace_range(value: Tensor, replacement: Tensor, bounds: tuple[int, int]) -> Tensor:
-        start, stop = bounds
-        if tuple(value[:, start:stop].shape) != tuple(replacement.shape):
-            raise ValueError("integrated evidence replacement lost source alignment")
-        return torch.cat((value[:, :start], replacement, value[:, stop:]), dim=1)
-
-    def forward(self, **kwargs):
-        view = super().forward(**kwargs)
-        reference = kwargs["trajectory_tokens"]
-        value_tokens = view.value_tokens
-
-        # V120 deliberately supplies an all-zero generic trajectory source in
-        # the object mainline.  Retain its source-type token as selector/null
-        # geometry, but do not let the memory bank's learned type embedding
-        # manufacture a value from that zero source.
-        trajectory_value = reference.new_zeros(reference.shape)
-        value_tokens = self._replace_range(
-            value_tokens,
-            trajectory_value,
-            view.ranges["trajectory"],
-        )
-
-        # ``rollout_tokens`` are the 512 source-resolved transition selectors.
-        # V120's generic adapter normally projects every rollout row into both
-        # K and V.  In the integrated graph that would let the selector bypass
-        # the centered ``transition.value`` and become a second free W/current
-        # carrier.  Keep all selector geometry, but make its value lane an
-        # algebraic null; the following named transition range is the sole
-        # controlled transition writer.
-        rollout_value = value_tokens[:, slice(*view.ranges["rollout"])].new_zeros(
-            value_tokens[:, slice(*view.ranges["rollout"])].shape
-        )
-        value_tokens = self._replace_range(
-            value_tokens,
-            rollout_value,
-            view.ranges["rollout"],
-        )
-
-        transition = self._cat_memory(
-            kwargs["transition_memory"],
-            name="transition",
-            hidden=self.hidden_size,
-        )
-        if transition is None:
-            raise RuntimeError("integrated bottom requires controlled transition values")
-        transition_value = self.source_proj["transition"](
-            transition.to(device=reference.device, dtype=reference.dtype)
-        )
-        # The bank's source type embedding belongs to selector geometry.  Its
-        # value-side copy was the non-zero default that survived effect-zero.
-        transition_value = self.bank.source_norm(transition_value)
-        value_tokens = self._replace_range(
-            value_tokens,
-            transition_value,
-            view.ranges["transition"],
-        )
-
-        event = kwargs["event_evidence"]
-        event_value = self.event_proj(
-            event.to(device=reference.device, dtype=reference.dtype)
-        )
-        event_value = self.bank.source_norm(event_value)
-        value_tokens = self._replace_range(
-            value_tokens,
-            event_value,
-            view.ranges["event"],
-        )
-        return replace(view, value_tokens=value_tokens)
-
-
 class RestoredV120EvidenceBottom(nn.Module):
     """V120 Evidence-MMDiT with a capability-named typed ingress."""
 
@@ -167,76 +94,54 @@ class RestoredV120EvidenceBottom(nn.Module):
         if self.physical_action_dim != int(self.core_config.physical_action_dim):
             raise ValueError("typed physical action width does not match V120")
 
-        # This query is used only by P2/P3.  The restored decoder owns its own
+        # This shared V120 query seeds P2/P3, the controlled transition and
+        # the two layer contracts.  The restored decoder still owns its own
         # native physical-action lift, exactly as V120 did.
-        self.query_encoder = ActionQueryEncoder(
-            action_dim=self.physical_action_dim,
-            hidden=self.hidden,
-            horizon=self.horizon,
-            basis=self.basis,
+        self.query_encoder = ActionQueryEncoder(self.core_config)
+        policy_start = int(self.core_config.depth) - int(
+            self.core_config.flow_jepa_policy_blocks
         )
-        self.state_projection = nn.Linear(dims.state_dim, self.hidden, bias=False)
-        self.executed_projection = nn.Linear(dims.action_dim, self.hidden, bias=False)
-        # V120 obtained this source from the controlled rollout contract.  The
-        # independent graph restores that same centered-transition boundary;
-        # the final event prediction remains owned by the V120 decoder.
-        self.event_evidence = nn.Linear(self.hidden, 3, bias=False)
+        # Strict V120 exposed P1/P2 contracts and replaced P3 with the typed
+        # compiler.  Materialize exactly those two active heads, with their
+        # original depth identities, instead of keeping six frozen ancestry
+        # heads plus a frozen duplicate P3 head.
+        self.layer_contract_heads = nn.ModuleList(
+            (
+                LayerContractAdapterHeads(
+                    self.core_config,
+                    layer_index=policy_start,
+                ),
+                LayerContractAdapterHeads(
+                    self.core_config,
+                    layer_index=policy_start + 1,
+                ),
+            )
+        )
+        for head in self.layer_contract_heads:
+            # V120 trained only the small residual adapters in active P1/P2;
+            # their weak probe/readout weights were fixed selector geometry.
+            head.readout.requires_grad_(False)
         self.decoder = EvidenceLatentMMDiTActionDecoder(self.core_config)
-        integrated_adapter = _IntegratedEvidenceViewAdapter(self.core_config)
-        integrated_adapter.load_state_dict(self.decoder.evidence_adapter.state_dict())
-        self.decoder.evidence_adapter = integrated_adapter
-        # The object-mainline bottom intentionally exposes only current state
-        # and the last executed action to the generic intent compiler.  Freeze
-        # extracted projections for the disallowed aliases instead of leaving
-        # dead trainable tensors in optimizer/checkpoint ownership.
-        for source_name in ("task", "state_history", "proposal", "visual"):
-            self.decoder.evidence_adapter.intent_proj[source_name].requires_grad_(False)
-        # In object-mainline V120 the generic trajectory source is an explicit
-        # zero/null alternative.  Make that semantic structural: its selector
-        # comes only from the shared source-type embedding, and its value is
-        # replaced by exact zero in ``_IntegratedEvidenceViewAdapter``.  A
-        # trainable affine projection here is otherwise a dead parameter (or,
-        # through bias, an action-independent learned shortcut).
-        trajectory_projection = self.decoder.evidence_adapter.source_proj["trajectory"]
-        for module in trajectory_projection.modules():
-            if isinstance(module, (nn.LayerNorm, nn.Linear)) and module.bias is not None:
-                nn.init.zeros_(module.bias)
-        trajectory_projection.requires_grad_(False)
-        # V120's shared selector/value projections carried affine biases.  A
-        # zero controlled delta could therefore reappear as a non-zero value
-        # after the evidence adapter.  Keep the mature projection weights but
-        # make the two optional value sources algebraically zero-preserving.
-        for source_name in ("transition",):
-            source_projection = self.decoder.evidence_adapter.source_proj[source_name]
-            if not isinstance(source_projection, nn.Sequential):
-                raise TypeError("V120 evidence source projection must be sequential")
-            source_norm = source_projection[0]
-            projection = source_projection[-1]
-            if not isinstance(source_norm, nn.LayerNorm):
-                raise TypeError("V120 evidence source normalization changed unexpectedly")
-            if source_norm.bias is not None:
-                nn.init.zeros_(source_norm.bias)
-                source_norm.bias.requires_grad_(False)
-            if not isinstance(projection, nn.Linear):
-                raise TypeError("V120 evidence source projection changed unexpectedly")
-            if projection.bias is not None:
-                nn.init.zeros_(projection.bias)
-                projection.bias.requires_grad_(False)
-        event_source = self.decoder.evidence_adapter.event_proj
-        if not isinstance(event_source, nn.Sequential):
-            raise TypeError("V120 event projection must be sequential")
-        event_norm = event_source[0]
-        event_projection = event_source[-1]
-        if not isinstance(event_norm, nn.LayerNorm):
-            raise TypeError("V120 event evidence normalization changed unexpectedly")
-        if event_norm.bias is not None:
-            nn.init.zeros_(event_norm.bias)
-            event_norm.bias.requires_grad_(False)
-        if not isinstance(event_projection, nn.Linear):
-            raise TypeError("V120 event evidence projection changed unexpectedly")
-        if event_projection.bias is not None:
-            nn.init.zeros_(event_projection.bias)
-            event_projection.bias.requires_grad_(False)
+        # These generic intent aliases are structurally absent from the V120
+        # object path (which passes only current state and last execution).
+        # Freezing unreachable projections changes no forward value and keeps
+        # optimizer ownership honest without reintroducing the aliases.
+        for source_name in ("task", "state_history", "proposal"):
+            self.decoder.evidence_adapter.intent_proj[source_name].requires_grad_(
+                False
+            )
+        # Generic trajectory is an exact-zero source in this path.  Its first
+        # LayerNorm scale multiplies zero forever, while the affine biases and
+        # following projection remain the trainable V120 null-value geometry.
+        trajectory_projection = cast(
+            nn.Sequential,
+            self.decoder.evidence_adapter.source_proj["trajectory"],
+        )
+        trajectory_norm = trajectory_projection[0]
+        if not isinstance(trajectory_norm, nn.LayerNorm):
+            raise TypeError("V120 trajectory projection must start with LayerNorm")
+        if trajectory_norm.weight is not None:
+            trajectory_norm.weight.requires_grad_(False)
 
     @property
     def blocks(self) -> nn.ModuleList:
@@ -253,20 +158,54 @@ class RestoredV120EvidenceBottom(nn.Module):
     def action_query(self, noisy_action_field: Tensor, time: Tensor) -> Tensor:
         return self.query_encoder(noisy_action_field, time)
 
+    def action_and_context(
+        self,
+        noisy_action_field: Tensor,
+        time: Tensor,
+        history: ObservableHistory,
+        *,
+        executed_memory: Tensor,
+        action_history_keep: Tensor,
+    ) -> tuple[Tensor, V120SeedContext]:
+        """Build the one shared V120 seed consumed by top and bottom."""
+
+        return self.query_encoder.forward_with_context(
+            noisy_action_field,
+            time,
+            history,
+            executed_memory=executed_memory,
+            action_history_keep=action_history_keep,
+        )
+
+    def clean_action_basis_tokens(
+        self,
+        batch: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        return self.query_encoder.clean_action_basis_tokens(
+            batch,
+            device=device,
+            dtype=dtype,
+        )
+
     def set_training_step(self, global_step: int) -> float:
         return self.decoder.set_execution_training_step(global_step)
 
     def _state_memory(
         self,
-        history: ObservableHistory,
-    ) -> tuple[Tensor, Tensor]:
-        # The V120 object-mainline boundary intentionally exposed only the
-        # current state and final executed action to the generic bottom intent
-        # compiler.  Full ordered history is already owned by S, P1, proposal
-        # and controlled transition; replaying it here is a direct bypass.
-        state = self.state_projection(canonical_state_history(history)[:, -1:])
-        executed = self.executed_projection(history.executed_action_history[:, -1:])
-        return state, executed
+        seed: V120SeedContext,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        seed.validate(
+            hidden=self.hidden,
+            state_history=int(self.core_config.visual_history_length),
+            executed=int(self.core_config.action_history_token_count),
+        )
+        # Match the active V120 object path: current state plus the final
+        # causal state-history row, and only the final compressed execution
+        # row in the compact intent bank.
+        return seed.state, seed.state_history[:, -1:], seed.executed[:, -1:]
 
     def _neutral_trajectory_memory(self, plan: ObjectPolicyPlanDeltaBank) -> Tensor:
         """Restore V120's neutral generic proposal ingress.
@@ -312,39 +251,96 @@ class RestoredV120EvidenceBottom(nn.Module):
         plan.validate()
         return PolicyRoleDeltaBank(
             values=torch.stack(
-                (plan.precision, plan.temporal, plan.state_change),
+                (
+                    plan.factual,
+                    plan.precision,
+                    plan.effect,
+                    plan.temporal,
+                    plan.state_change,
+                ),
                 dim=1,
             ),
             source_names=plan.source_names,
-            source_depths=(7, 7, 7),
+            source_depths=(7, 7, 7, 7, 7),
             protected_detail=plan.protected_base,
         )
 
-    @staticmethod
+    def _layer_contract_canvas(
+        self,
+        *,
+        trajectory: Tensor,
+        rollout: Tensor,
+        seed: V120SeedContext,
+    ) -> tuple[Tensor, dict[str, slice]]:
+        """Build only regions read by the position-wise V120 contract head.
+
+        The adapter has no token mixing.  Task/stage/register/proposal rows
+        cannot influence trajectory, rollout or state outputs, so omitted
+        inactive regions are represented by empty slices rather than by a
+        second legacy canvas implementation.
+        """
+
+        batch = int(trajectory.shape[0])
+        expected_trajectory = (
+            batch,
+            self.horizon * self.basis,
+            self.hidden,
+        )
+        if tuple(trajectory.shape) != expected_trajectory:
+            raise ValueError("V120 layer-contract trajectory has invalid shape")
+        if tuple(rollout.shape) != (
+            batch,
+            int(self.core_config.future_token_count),
+            self.hidden,
+        ):
+            raise ValueError("V120 layer-contract rollout has invalid shape")
+        empty = trajectory[:, :0]
+        parts = (
+            ("state", seed.state),
+            ("state_history", seed.state_history),
+            ("executed", seed.executed),
+            ("proposal", empty),
+            ("trajectory", trajectory),
+            ("rollout", rollout),
+            ("registers", empty),
+        )
+        slices: dict[str, slice] = {}
+        offset = 0
+        for name, value in parts:
+            slices[name] = slice(offset, offset + int(value.shape[1]))
+            offset += int(value.shape[1])
+        return torch.cat([value for _, value in parts], dim=1), slices
+
     def _layer_contracts(
+        self,
+        *,
+        action_query: Tensor,
+        p1_fact: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
-        state_tokens: Tensor,
-        executed_tokens: Tensor,
+        rollout: Tensor,
+        seed: V120SeedContext,
     ) -> list[dict[str, Tensor]]:
-        batch, horizon, basis, hidden = plan.protected_base.shape
-        protected = plan.protected_base.reshape(batch, horizon * basis, hidden)
-        innovations = torch.cat(
-            (plan.precision, plan.temporal, plan.state_change),
-            dim=2,
-        ).reshape(batch, horizon * basis * 3, hidden)
-        # V120 exposed the two generic terminal policy records beside the P3
-        # typed bank.  Here they remain selector geometry: EvidenceViewAdapter
-        # compiles their values from the clean intent memory below.
-        return [
-            {
-                "rollout_tokens": protected,
-                "state_history_tokens": state_tokens,
-            },
-            {
-                "rollout_tokens": innovations,
-                "state_tokens": executed_tokens,
-            },
-        ]
+        plan.validate()
+        expected = tuple(plan.protected_base.shape)
+        if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
+            raise ValueError("P1/P2 layer contracts lost [B,T,Q,H]")
+        trajectories = (
+            action_query + p1_fact,
+            action_query + plan.protected_base,
+        )
+        contracts: list[dict[str, Tensor]] = []
+        for head, trajectory in zip(
+            self.layer_contract_heads,
+            trajectories,
+            strict=True,
+        ):
+            canvas, slices = self._layer_contract_canvas(
+                trajectory=trajectory.flatten(1, 2),
+                rollout=rollout,
+                seed=seed,
+            )
+            contracts.append(head(canvas, slices))
+        return contracts
 
     @staticmethod
     def _intent_memory(
@@ -383,24 +379,32 @@ class RestoredV120EvidenceBottom(nn.Module):
     def compile_evidence_view(
         self,
         *,
+        action_query: Tensor,
+        p1_fact: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
-        history: ObservableHistory,
+        seed: V120SeedContext,
         transition: ControlledTransitionState,
     ):
         """Compile the exact V120 evidence boundary for structural audits."""
 
-        state_tokens, executed_tokens = self._state_memory(history)
+        state_tokens, state_history_tokens, executed_tokens = self._state_memory(seed)
         trajectory = self._neutral_trajectory_memory(plan)
+        event_context = self._transition_event_context(transition)
+        layer_contracts = self._layer_contracts(
+            action_query=action_query,
+            p1_fact=p1_fact,
+            plan=plan,
+            rollout=transition.selector,
+            seed=seed,
+        )
         return self.decoder.evidence_adapter(
             trajectory_tokens=trajectory,
             rollout_tokens=transition.selector,
-            transition_memory=[transition.value],
-            event_evidence=self.event_evidence(
-                self._transition_event_context(transition)
-            ),
-            state_memory=[state_tokens, executed_tokens],
-            layer_contracts=self._layer_contracts(plan, state_tokens, executed_tokens),
+            transition_memory=[transition.value, event_context],
+            event_evidence=layer_contracts[-1]["event_logits"],
+            state_memory=[state_tokens, state_history_tokens],
+            layer_contracts=layer_contracts,
             intent_memory=self._intent_memory(intent, state_tokens, executed_tokens),
             visual_selector_tokens=None,
             visual_value_tokens=None,
@@ -413,11 +417,13 @@ class RestoredV120EvidenceBottom(nn.Module):
         noisy_action_field: Tensor,
         time: Tensor,
         action_query: Tensor,
+        p1_fact: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
-        history: ObservableHistory,
+        seed: V120SeedContext,
         transition: ControlledTransitionState,
         execution_mode: str = "learned",
+        require_execution_supervision: bool = False,
         collect_diagnostics: bool = False,
     ) -> tuple[BottomOutput, dict[str, Tensor]]:
         expected_query = (
@@ -429,17 +435,28 @@ class RestoredV120EvidenceBottom(nn.Module):
         if tuple(action_query.shape) != expected_query:
             raise ValueError("bottom and P2/P3 must share one action query")
         plan.validate()
+        if tuple(p1_fact.shape) != tuple(plan.protected_base.shape):
+            raise ValueError("bottom P1 fact does not align with the P2 consequence")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         transition.validate(hidden=self.hidden)
-        state_tokens, executed_tokens = self._state_memory(history)
+        state_tokens, state_history_tokens, executed_tokens = self._state_memory(seed)
         role_bank = self._role_bank(plan)
         role_bank.validate(hidden_size=self.hidden, horizon=self.horizon)
         trajectory = self._neutral_trajectory_memory(plan)
-        event_evidence = self.event_evidence(
-            self._transition_event_context(transition)
+        event_context = self._transition_event_context(transition)
+        layer_contracts = self._layer_contracts(
+            action_query=action_query,
+            p1_fact=p1_fact,
+            plan=plan,
+            rollout=transition.selector,
+            seed=seed,
         )
+        event_evidence = layer_contracts[-1]["event_logits"]
         run_diagnostics = bool(
-            collect_diagnostics or self.training or execution_mode != "learned"
+            collect_diagnostics
+            or self.training
+            or require_execution_supervision
+            or execution_mode != "learned"
         )
 
         self._set_eval_intervention(execution_mode)
@@ -454,14 +471,10 @@ class RestoredV120EvidenceBottom(nn.Module):
                 execution_terminal_probability=None,
                 execution_terminal_uncertainty=None,
                 rollout_tokens=transition.selector,
-                transition_memory=[transition.value],
+                transition_memory=[transition.value, event_context],
                 event_evidence=event_evidence,
-                state_memory=[state_tokens, executed_tokens],
-                layer_contracts=self._layer_contracts(
-                    plan,
-                    state_tokens,
-                    executed_tokens,
-                ),
+                state_memory=[state_tokens, state_history_tokens],
+                layer_contracts=layer_contracts,
                 intent_memory=self._intent_memory(
                     intent,
                     state_tokens,
@@ -548,8 +561,13 @@ class RestoredV120EvidenceBottom(nn.Module):
         metrics["bottom_generic_trajectory_neutral"] = (
             noisy_action_field.new_ones((), dtype=torch.float32)
         )
-        metrics["bottom_event_from_centered_transition"] = (
+        metrics["bottom_event_from_p2_layer_contract"] = (
             noisy_action_field.new_ones((), dtype=torch.float32)
+        )
+        metrics["bottom_terminal_layer_contract_count"] = (
+            noisy_action_field.new_tensor(
+                float(len(layer_contracts)), dtype=torch.float32
+            )
         )
         metrics["bottom_execution_output_block_count"] = noisy_action_field.new_tensor(
             0.0 if execution_mode == "no_updates" else float(len(self.blocks)),

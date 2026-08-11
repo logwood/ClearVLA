@@ -37,6 +37,7 @@ from .intent import (
     FuturePlanRecognizer,
     StatelessObjectIntentOrganizer,
 )
+from .routing import smooth_rms_contract
 from .role_hosts import TypedGroundingRoleHost
 from .teacher import ObjectFutureTeacher
 from .types import (
@@ -70,8 +71,8 @@ class OnlineTopContext:
         self.intent.validate(horizon=horizon, hidden=hidden)
         self.predicted_dynamics.validate()
         expected = (self.facts.batch, 4, hidden)
-        if tuple(self.coarse_action.innovations.shape) != expected:
-            raise ValueError("coarse action innovations lost the interval axis")
+        if tuple(self.coarse_action.tokens.shape) != expected:
+            raise ValueError("coarse action tokens lost the interval axis")
         if self.coarse_action.target is not None:
             raise ValueError("online context cannot carry a future action target")
         if self.coarse_action.loss.ndim != 0:
@@ -173,6 +174,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.dynamics = ObjectFutureDynamicsCompiler(
             hidden=hidden,
             content_dim=content_dim,
+            route_dim=route_dim,
             heads=heads,
         )
         self.teacher = ObjectFutureTeacher(
@@ -270,32 +272,6 @@ class ObjectIntentDynamicsTop(nn.Module):
         }
         return context, metrics
 
-    @staticmethod
-    def _object_match(
-        online: Tensor,
-        target: Tensor,
-        validity: Tensor,
-    ) -> Tensor:
-        row = F.smooth_l1_loss(
-            online.float(),
-            target.detach().float(),
-            reduction="none",
-        ).mean(dim=-1, keepdim=True)
-        weight = validity.detach().float()
-        return (row * weight).sum() / weight.sum().clamp_min(1.0)
-
-    @staticmethod
-    def _interval_endpoint_summary(sequence: Tensor) -> Tensor:
-        if sequence.ndim != 3 or int(sequence.shape[1]) < 48:
-            raise ValueError("future sequence must be [B,T>=48,D]")
-        rows: list[Tensor] = []
-        for lower, upper in ((4, 8), (8, 16), (16, 32), (32, 48)):
-            segment = sequence[:, lower - 1 : upper]
-            start = segment[:, 0]
-            end = segment[:, -1]
-            rows.append(torch.cat((start, end, end - start), dim=-1))
-        return torch.stack(rows, dim=1)
-
     def build_training_targets(
         self,
         context: OnlineTopContext,
@@ -320,32 +296,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             future_state=future_state,
             teacher=teacher,
         )
-        action_match = F.smooth_l1_loss(
-            context.intent.interval_action_innovations.float(),
-            recognition.action_targets.detach().float(),
+        online_intent_loss = F.smooth_l1_loss(
+            context.intent.interval_queries.float(),
+            recognition.interval_targets.detach().float(),
         )
-        state_match = F.smooth_l1_loss(
-            context.intent.interval_state_innovations.float(),
-            recognition.state_targets.detach().float(),
+        supervised_coarse = self.coarse_action(
+            context.intent,
+            future_action=future_action,
         )
-        object_key_match = self._object_match(
-            context.intent.interval_object_keys,
-            recognition.object_key_targets,
-            recognition.object_validity,
-        )
-        object_value_match = self._object_match(
-            context.intent.interval_object_values,
-            recognition.object_value_targets,
-            recognition.object_validity,
-        )
-        online_intent_loss = 0.25 * (
-            action_match + state_match + object_key_match + object_value_match
-        )
-        coarse_target = self._interval_endpoint_summary(future_action).detach()
-        coarse_loss = F.mse_loss(
-            context.coarse_action.action_prediction.float(),
-            coarse_target.float(),
-        )
+        coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
             plan_recognition=recognition,
@@ -359,10 +318,6 @@ class ObjectIntentDynamicsTop(nn.Module):
             return targets, {}
         metrics = {
             **teacher_metrics,
-            "object_intent_action_match_loss": action_match.detach(),
-            "object_intent_state_match_loss": state_match.detach(),
-            "object_intent_object_key_match_loss": object_key_match.detach(),
-            "object_intent_object_value_match_loss": object_value_match.detach(),
             "object_intent_online_match_loss": online_intent_loss.detach(),
             "object_plan_recognition_loss": recognition.reconstruction_loss.detach(),
             "object_coarse_action_loss": coarse_loss.detach(),
@@ -380,23 +335,37 @@ class ObjectIntentDynamicsTop(nn.Module):
         """Run dynamic P2/P3; no observation or teacher input is accepted."""
 
         context.validate(hidden=self.hidden, horizon=self.horizon)
-        effect, effect_metrics = self.effect_reader(
-            action_query,
+        # V120's P2 query was the live trajectory *after* the P1 factual
+        # write, not the untouched noisy-action seed.  Keeping that residual
+        # order is important: it lets the future-effect reader ask questions
+        # in the factual chart that P1 actually selected.
+        p1_action_query = action_query + factual_dock.aggregate_fact
+        raw_effect, effect_metrics = self.effect_reader(
+            p1_action_query,
             context.predicted_dynamics,
             context.intent,
-            factual_dock,
             collect_diagnostics=collect_diagnostics,
         )
+        # The original object path contracts the P2 write at the caller
+        # boundary before it enters the zero-preserving consequence.  Applying
+        # the bound only inside P3 (or omitting it) changes both the trajectory
+        # seen by P3 and the controlled-transition coefficient geometry.
+        effect, effect_contract = smooth_rms_contract(raw_effect, 0.35)
         consequence, consequence_metrics = self.consequence(
             factual_base=factual_dock.aggregate_fact,
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
+        # P3 likewise read the trajectory after the P2 write.  The protected
+        # consequence is the complete P1+P2 residual, so adding it to the
+        # original seed reconstructs that exact boundary without rebuilding a
+        # generic canvas.
+        p3_action_query = action_query + consequence.protected_consequence
         plan, plan_metrics = self.plan_compiler(
-            factual_dock=factual_dock,
+            p1_fact=factual_dock.aggregate_fact,
             consequence=consequence,
             intent=context.intent,
-            action_query=action_query,
+            action_query=p3_action_query,
             collect_diagnostics=collect_diagnostics,
         )
         state = CompiledPolicyState(
@@ -407,7 +376,17 @@ class ObjectIntentDynamicsTop(nn.Module):
         state.validate()
         if not collect_diagnostics:
             return state, {}
-        return state, {**effect_metrics, **consequence_metrics, **plan_metrics}
+        return state, {
+            **effect_metrics,
+            **consequence_metrics,
+            **plan_metrics,
+            "object_p2_effect_contract_min": effect_contract.detach().float().amin(),
+            "object_p2_effect_postcontract_rms": effect.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+        }
 
 
 __all__ = [

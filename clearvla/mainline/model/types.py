@@ -204,6 +204,24 @@ class ObjectFactSet:
     def objects(self) -> int:
         return int(self.content.shape[1])
 
+    @property
+    def coordinates(self) -> Tensor:
+        """V120 object coordinate reduced only over physical camera support."""
+
+        weight = self.camera_validity.float() * self.camera_support.float()
+        return (
+            self.camera_coordinates.float() * weight
+        ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
+
+    @property
+    def transport_prior(self) -> Tensor:
+        """V120 object transport prior reduced only over valid cameras."""
+
+        weight = self.camera_validity.float() * self.camera_support.float()
+        return (
+            self.camera_transport_prior.float() * weight
+        ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
+
     def validate(self) -> None:
         self.dense_chart.validate()
         if self.content.ndim != 3:
@@ -369,52 +387,41 @@ class ObjectFactualDock:
 
 @dataclass(frozen=True)
 class ObjectIntentState:
-    """Online, stateless intent state; no phase/progress forward variable."""
+    """Recovered V120 stateless intent with cumulative typed queries."""
 
+    protected_goal_set: Tensor  # [B,4,H]
+    history_tokens: Tensor  # [B,L,H]
+    object_tokens: Tensor  # [B,K,H]
+    semantic_object_tokens: Tensor  # [B,K,H]
+    appearance_object_tokens: Tensor  # [B,K,H]
+    geometry_object_tokens: Tensor  # [B,K,H]
     interval_queries: Tensor  # [B,4,H]
-    interval_action_innovations: Tensor  # [B,4,H], identity-free
-    interval_state_innovations: Tensor  # [B,4,H], identity-free
-    interval_object_keys: Tensor  # [B,4,K,H]
-    interval_object_values: Tensor  # [B,4,K,H]
     temporal_queries: Tensor  # [B,T,H]
-    temporal_innovations: Tensor  # [B,T,H], the only temporal value exported to P3
-    # A zero-centred value built only from observed state deltas and current
-    # transport.  It is not a phase, progress, completion, or terminal score.
     state_change_evidence: Tensor  # [B,H]
+    goal_attention: Tensor  # [B,4,Lg]
+    interval_goal_attention: Tensor  # [B,4,4]
+    interval_history_attention: Tensor  # [B,4,L]
+    interval_object_attention: Tensor  # [B,4,K]
+    interval_semantic_attention: Tensor  # [B,4,K]
+    interval_appearance_attention: Tensor  # [B,4,K]
+    interval_geometry_attention: Tensor  # [B,4,K]
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         batch = int(self.interval_queries.shape[0])
+        _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
         _shape(self.interval_queries, (batch, 4, hidden), "interval queries")
-        _shape(
-            self.interval_action_innovations,
-            (batch, 4, hidden),
-            "interval action innovations",
-        )
-        _shape(
-            self.interval_state_innovations,
-            (batch, 4, hidden),
-            "interval state innovations",
-        )
         _shape(self.temporal_queries, (batch, horizon, hidden), "temporal queries")
-        _shape(
-            self.temporal_innovations,
-            (batch, horizon, hidden),
-            "temporal innovations",
-        )
         _shape(self.state_change_evidence, (batch, hidden), "state-change evidence")
-        if self.interval_object_keys.ndim != 4:
-            raise ValueError("interval object keys must preserve [B,I,K,H]")
-        objects = int(self.interval_object_keys.shape[2])
-        _shape(
-            self.interval_object_keys,
-            (batch, 4, objects, hidden),
-            "interval object keys",
-        )
-        _shape(
-            self.interval_object_values,
-            (batch, 4, objects, hidden),
-            "interval object values",
-        )
+        if self.object_tokens.ndim != 3:
+            raise ValueError("object intent public tokens must be [B,K,H]")
+        object_shape = tuple(self.object_tokens.shape)
+        for name in (
+            "semantic_object_tokens",
+            "appearance_object_tokens",
+            "geometry_object_tokens",
+        ):
+            if tuple(getattr(self, name).shape) != object_shape:
+                raise ValueError(f"{name} lost the global-object axis")
 
     def permute(self, permutation: Tensor) -> "ObjectIntentState":
         """Return the same intent state under a relabeling of global K slots.
@@ -425,85 +432,72 @@ class ObjectIntentState:
         rebuilding a synthetic object axis after pooling.
         """
 
-        objects = int(self.interval_object_keys.shape[2])
+        objects = int(self.object_tokens.shape[1])
         if permutation.ndim != 1 or int(permutation.numel()) != objects:
             raise ValueError("intent permutation must cover every K slot")
         index = permutation.to(
-            device=self.interval_object_keys.device,
+            device=self.object_tokens.device,
             dtype=torch.long,
         )
         return ObjectIntentState(
+            protected_goal_set=self.protected_goal_set,
+            history_tokens=self.history_tokens,
+            object_tokens=self.object_tokens[:, index],
+            semantic_object_tokens=self.semantic_object_tokens[:, index],
+            appearance_object_tokens=self.appearance_object_tokens[:, index],
+            geometry_object_tokens=self.geometry_object_tokens[:, index],
             interval_queries=self.interval_queries,
-            interval_action_innovations=self.interval_action_innovations,
-            interval_state_innovations=self.interval_state_innovations,
-            interval_object_keys=self.interval_object_keys[:, :, index],
-            interval_object_values=self.interval_object_values[:, :, index],
             temporal_queries=self.temporal_queries,
-            temporal_innovations=self.temporal_innovations,
             state_change_evidence=self.state_change_evidence,
+            goal_attention=self.goal_attention,
+            interval_goal_attention=self.interval_goal_attention,
+            interval_history_attention=self.interval_history_attention,
+            interval_object_attention=self.interval_object_attention[:, :, index],
+            interval_semantic_attention=self.interval_semantic_attention[:, :, index],
+            interval_appearance_attention=self.interval_appearance_attention[:, :, index],
+            interval_geometry_attention=self.interval_geometry_attention[:, :, index],
         )
 
 
 @dataclass(frozen=True)
 class FuturePlanRecognition:
-    """Factorized training-only targets for the online intent organizer."""
+    """Recovered V120 whole-segment target for online interval intent."""
 
-    action_targets: Tensor  # [B,4,H]
-    state_targets: Tensor  # [B,4,H]
-    object_key_targets: Tensor  # [B,4,K,H]
-    object_value_targets: Tensor  # [B,4,K,H]
-    action_summary: Tensor  # [B,4,3*A] start/end/change
-    state_summary: Tensor  # [B,4,3*S] start/end/change
-    effect_summary: Tensor  # [B,4,K,2D+2] stable/delta/transport
-    object_validity: Tensor  # [B,4,K,1]
+    interval_targets: Tensor  # [B,4,H]
+    action_summary: Tensor  # [B,4,A]
+    state_summary: Tensor  # [B,4,S]
+    effect_summary: Tensor  # [B,4,D]
     reconstruction_loss: Tensor
 
     def validate(self, *, hidden: int) -> None:
-        if self.action_targets.ndim != 3:
-            raise ValueError("recognizer action target must be [B,4,H]")
-        batch = int(self.action_targets.shape[0])
-        _shape(self.action_targets, (batch, 4, hidden), "action targets")
-        _shape(self.state_targets, (batch, 4, hidden), "state targets")
-        if (
-            self.object_key_targets.ndim != 4
-            or tuple(self.object_key_targets.shape[:2]) != (batch, 4)
-            or int(self.object_key_targets.shape[-1]) != hidden
-        ):
-            raise ValueError("recognizer object keys must be [B,4,K,H]")
-        _shape(
-            self.object_value_targets,
-            tuple(self.object_key_targets.shape),
-            "recognizer object values",
-        )
-        _shape(
-            self.object_validity,
-            (*self.object_key_targets.shape[:-1], 1),
-            "recognizer object validity",
-        )
+        if self.interval_targets.ndim != 3:
+            raise ValueError("recognizer interval target must be [B,4,H]")
+        batch = int(self.interval_targets.shape[0])
+        _shape(self.interval_targets, (batch, 4, hidden), "interval targets")
         if self.action_summary.ndim != 3 or self.state_summary.ndim != 3:
             raise ValueError("recognizer action/state summaries lost interval axis")
-        if self.effect_summary.ndim != 4:
-            raise ValueError("recognizer effect summary lost object axis")
+        if self.effect_summary.ndim != 3:
+            raise ValueError("recognizer effect summary lost interval axis")
         if self.reconstruction_loss.ndim != 0:
             raise ValueError("recognizer reconstruction loss must be scalar")
 
 
 @dataclass(frozen=True)
 class CoarseActionIntentState:
-    tokens: Tensor  # [B,4,H], query plus innovation for diagnostics/reconstruction
-    innovations: Tensor  # [B,4,H], the only W-visible value
-    action_prediction: Tensor  # [B,4,3*A] start/end/change
+    tokens: Tensor  # [B,4,H]
+    action_prediction: Tensor  # [B,4,A]
     target: Tensor | None
     loss: Tensor
 
 
 @dataclass(frozen=True)
 class HistoryActionProposalState:
-    """The preserved clean 24-step proposal from executed-action history.
+    """Auxiliary causal prediction reconstructed from executed-action history.
 
-    This is an online, causal condition.  It may shape P1's factual query and
-    the controlled transition, but it is not a second W value or bottom action
-    shortcut.
+    The recovered V120 object-policy path supervises this prediction but does
+    not feed its tokens into G/S/W/P, controlled transition or the bottom.
+    Keeping that distinction explicit prevents the schema-20 proposal alias
+    from silently returning through a typed container.
     """
 
     tokens: Tensor  # [B,T,H]
@@ -566,6 +560,21 @@ class ControlledTransitionState:
             expected,
             "controlled neutral coefficients",
         )
+
+
+@dataclass(frozen=True)
+class ControlledTransitionSource:
+    """ODE-invariant protected G3 chart for the dynamic transition."""
+
+    selector: Tensor  # [B,4*C*8*8,H]
+
+    def validate(self, *, hidden: int, rows: int = 512) -> None:
+        if self.selector.ndim != 3:
+            raise ValueError("controlled transition source must be [B,N,H]")
+        if tuple(self.selector.shape[1:]) != (int(rows), int(hidden)):
+            raise ValueError(
+                "controlled transition source must retain every G3 spatial row"
+            )
 
 
 @dataclass(frozen=True)

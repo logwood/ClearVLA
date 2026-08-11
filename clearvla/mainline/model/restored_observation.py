@@ -5,10 +5,11 @@ Flow-DINO/raw-address path with a small local ConvGRU and a second set of G
 blocks.  This module extracts the actual V120 observation compiler and adapts
 its lossless camera/cell/local-slot address bank to :class:`LocalFactSet`.
 
-Only one new boundary exists here: the V120 49-point fine lattice is reduced
-softly *inside each existing local slot*.  Camera, 8x8 cell and M=4 axes are
-never pooled or recreated.  The global K objects and the sole three-block G
-host remain owned by ``ObjectIntentDynamicsTop``.
+The V120 local fact summary reduces the 49-point fine lattice softly *inside
+each existing local slot*, while the complete ``N=49`` candidate bank is kept
+as a separate typed boundary for P1.  Camera, 8x8 cell and M=4 axes are never
+pooled or recreated.  The global K objects and the sole three-block G host
+remain owned by ``ObjectIntentDynamicsTop``.
 """
 
 from __future__ import annotations
@@ -558,15 +559,19 @@ class RestoredV120ObservationCompiler(nn.Module):
                 mode="bilinear",
                 align_corners=True,
             ).reshape_as(current_detail)
-        earlier_detail = previous_detail
         literal = bank.dense_current_rgb
         previous_literal = 2.0 * observation.raw_rgb[:, -2].float() - 1.0
         earlier_literal = 2.0 * observation.raw_rgb[:, -3].float() - 1.0
         evidence = ObservationEvidence(
             local_facts=local,
+            progressive_candidates=candidates,
             detail_features=current_detail,
             previous_detail_features=previous_detail,
-            earlier_detail_features=earlier_detail,
+            # V120's retained high-resolution cache contains current and
+            # previous detail only.  Do not label the previous tensor as a
+            # distinct earlier frame; the complete native two-pair flow loss
+            # ledger below owns the real -8/-4/0 geometry supervision.
+            earlier_detail_features=None,
             literal_rgb=literal,
             previous_literal_rgb=previous_literal.to(dtype=literal.dtype),
             earlier_literal_rgb=earlier_literal.to(dtype=literal.dtype),

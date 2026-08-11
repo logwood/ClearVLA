@@ -202,6 +202,8 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "p2_effect_reader",
         "consequence",
         "p3_compiler",
+        "v120_canvas_seed",
+        "v120_layer_contracts",
         "bottom_query",
         "bottom_evidence_adapter",
         "bottom_policy_bridge",
@@ -231,6 +233,8 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert result.learning_rate == config.optimizer.learning_rate / 2.0
     group_lrs = {str(group["name"]): float(group["lr"]) for group in optimizer.param_groups}
     assert group_lrs["grounder/decay"] == config.optimizer.learning_rate
+    assert group_lrs["v120_canvas_seed/decay"] == config.optimizer.learning_rate
+    assert group_lrs["v120_layer_contracts/decay"] == config.optimizer.learning_rate
     assert group_lrs["history_proposal/decay"] == config.optimizer.learning_rate * 0.625
     assert group_lrs["bottom_mmdit/decay"] == config.optimizer.learning_rate * 0.7
     assert group_lrs["bottom_capacity/nodecay"] == config.optimizer.learning_rate * 1.4
@@ -282,10 +286,10 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "object_grounding_": 20,
         "object_intent_": 40,
         "object_teacher_": 30,
-        "object_w": 50,
+        "object_w": 30,
         "p1_": 10,
         "object_p2_": 20,
-        "object_p3_": 8,
+        "object_p3_": 5,
         "controlled_transition_": 5,
         "bottom_": 4,
         "evidence_": 40,
@@ -364,9 +368,13 @@ def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
     base = config.optimizer.learning_rate
     assert role_lr_scale("grounder", config) == 1.0
     assert role_lr_scale("history_proposal", config) == 0.625
+    assert role_lr_scale("v120_canvas_seed", config) == 1.0
+    assert role_lr_scale("v120_layer_contracts", config) == 1.0
     assert role_lr_scale("bottom_mmdit", config) == 0.7
     assert role_lr_scale("bottom_capacity", config) == 1.4
     assert groups["history_proposal/decay"]["lr"] == base * 0.625
+    assert groups["v120_canvas_seed/decay"]["lr"] == base
+    assert groups["v120_layer_contracts/decay"]["lr"] == base
     assert groups["bottom_mmdit/decay"]["lr"] == base * 0.7
     assert groups["bottom_capacity/nodecay"]["lr"] == base * 1.4
     assert groups["bottom_capacity/nodecay"]["weight_decay"] == 0.0
@@ -406,6 +414,43 @@ def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
     assert torch.isfinite(result.loss)
     assert torch.isfinite(result.gradient_norm)
     assert result.gradient_norm > 0
+
+
+def test_eval_step_retains_v120_execution_candidate_supervision() -> None:
+    """Regression for schema-20 validation dropping non-scalar decoder rows."""
+
+    torch.manual_seed(45)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config)
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    # The historical failure appeared immediately after the configured four
+    # diagnostic validation batches.  Exercise the non-diagnostic path.
+    result = engine.eval_step(_batch(config), collect_diagnostics=False)
+
+    assert torch.isfinite(result.loss)
+    for name in (
+        "loss_execution_value",
+        "loss_execution_value_target_spread",
+        "loss_execution_value_predicted_spread",
+        "loss_execution_value_pairwise_accuracy",
+    ):
+        assert name in result.metrics
+        assert torch.isfinite(torch.as_tensor(result.metrics[name]))
 
 
 def test_formal_eight_row_history_proposal_is_preserved_and_supervised() -> None:
@@ -469,9 +514,6 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
         model.factual_reader.register_forward_pre_hook(
             capture("factual"), with_kwargs=True
         ),
-        model.transition.register_forward_pre_hook(
-            capture("transition"), with_kwargs=True
-        ),
     ]
 
     def zero_random(*size, **kwargs):
@@ -492,10 +534,9 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
 
     assert torch.count_nonzero(captured["intent"]["goal_tokens"]) == 0
     assert torch.count_nonzero(captured["intent"]["executed_history"]) == 0
-    factual_proposal = captured["factual"]["history_proposal"]
-    transition_proposal = captured["transition"]["proposal"]
-    assert torch.count_nonzero(factual_proposal.tokens) == 0
-    assert torch.count_nonzero(transition_proposal.tokens) == 0
+    assert "history_proposal" not in captured["factual"]
+    assert "proposal" not in captured["factual"]
+    assert torch.count_nonzero(captured["factual"]["clean_action_basis"]) > 0
     assert torch.count_nonzero(cache.history.executed_action_history) == 0
     assert torch.equal(
         training_state.history_proposal.action_prediction,
@@ -529,8 +570,11 @@ def test_p1_protected_fact_cannot_be_attenuated_by_grounding_existence() -> None
             evidence=training_state.observation,
             facts=replace(facts, existence=existence),
             intent=training_state.top.intent,
-            coarse_action=training_state.top.coarse_action,
-            history_proposal=training_state.history_proposal,
+            clean_action_basis=model.bottom.clean_action_basis_tokens(
+                1,
+                device=facts.content.device,
+                dtype=facts.content.dtype,
+            ),
         )[0]
 
     low = read(torch.full_like(facts.existence, 1.0e-4))
@@ -546,10 +590,11 @@ def test_p1_protected_fact_cannot_be_attenuated_by_grounding_existence() -> None
         torch.testing.assert_close(getattr(low, name), getattr(high, name), rtol=0, atol=0)
 
 
-def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
+def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() -> None:
     torch.manual_seed(42)
     config = _config()
     model = ClearVLAMainlinePolicy(config)
+    model.eval()
     batch = _batch(config)
     cache, training_state, _ = model.encode_online(batch.online)
     time = torch.full((1,), 0.5)
@@ -557,38 +602,144 @@ def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
         batch.action_target.normalized,
         batch.online.history.action_state,
     )
-    query = model.bottom.action_query(physical, time)
+    query, seed_context = model.bottom.action_and_context(
+        physical,
+        time,
+        cache.history,
+        executed_memory=cache.executed_memory,
+        action_history_keep=cache.action_history_keep,
+    )
     compiled, _ = model.top.compile_policy(
         cache.top,
         factual_dock=cache.factual_dock,
         action_query=query,
     )
-    evidence = model.bottom.compile_evidence_view(
-        plan=compiled.plan,
-        intent=cache.top.intent,
-        history=cache.history,
-        transition=cache.transition,
+    captured_transition: dict[str, torch.Tensor] = {}
+
+    def capture_transition(_module, _args, kwargs):
+        captured_transition["action_tokens"] = kwargs["action_tokens"].detach().clone()
+
+    transition_hook = model.transition.v120_transition.register_forward_pre_hook(
+        capture_transition,
+        with_kwargs=True,
+    )
+    try:
+        transition, transition_metrics = model.transition(
+            source=cache.transition_source,
+            action_query=query,
+            plan=compiled.plan,
+            seed=seed_context,
+            collect_diagnostics=True,
+        )
+    finally:
+        transition_hook.remove()
+    expected_transition_action = model.transition.trajectory_norm(
+        query + compiled.plan.protected_base
+    ).flatten(1, 2)
+    torch.testing.assert_close(
+        captured_transition["action_tokens"],
+        expected_transition_action,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert transition_metrics["controlled_transition_action_token_rows"] == (
+        config.dimensions.action_horizon * config.dimensions.action_basis_tokens
+    )
+    contract_inputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    contract_outputs: list[dict[str, torch.Tensor]] = []
+    captured_event: dict[str, torch.Tensor] = {}
+
+    def capture_contract_input(_module, args):
+        canvas, slices = args
+        contract_inputs.append(
+            (
+                canvas[:, slices["trajectory"]].detach().clone(),
+                canvas[:, slices["rollout"]].detach().clone(),
+            )
+        )
+
+    def capture_contract_output(_module, _args, output):
+        contract_outputs.append(output)
+
+    def capture_evidence_input(_module, _args, kwargs):
+        captured_event["value"] = kwargs["event_evidence"].detach().clone()
+
+    contract_hooks = []
+    for head in model.bottom.layer_contract_heads:
+        contract_hooks.append(head.register_forward_pre_hook(capture_contract_input))
+        contract_hooks.append(head.register_forward_hook(capture_contract_output))
+    evidence_hook = model.bottom.decoder.evidence_adapter.register_forward_pre_hook(
+        capture_evidence_input,
+        with_kwargs=True,
+    )
+    try:
+        evidence = model.bottom.compile_evidence_view(
+            action_query=query,
+            p1_fact=compiled.consequence.factual_base,
+            plan=compiled.plan,
+            intent=cache.top.intent,
+            seed=seed_context,
+            transition=transition,
+        )
+    finally:
+        evidence_hook.remove()
+        for hook in contract_hooks:
+            hook.remove()
+    assert [head.layer_index for head in model.bottom.layer_contract_heads] == [5, 6]
+    assert len(contract_inputs) == len(contract_outputs) == 2
+    torch.testing.assert_close(
+        contract_inputs[0][0],
+        (query + compiled.consequence.factual_base).flatten(1, 2),
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        contract_inputs[1][0],
+        (query + compiled.plan.protected_base).flatten(1, 2),
+        atol=0.0,
+        rtol=0.0,
+    )
+    for _, rollout in contract_inputs:
+        torch.testing.assert_close(
+            rollout,
+            transition.selector,
+            atol=0.0,
+            rtol=0.0,
+        )
+    torch.testing.assert_close(
+        captured_event["value"],
+        contract_outputs[-1]["event_logits"],
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert all(
+        parameter.requires_grad
+        for head in model.bottom.layer_contract_heads
+        for parameter in head.adapter.parameters()
+    )
+    assert not any(
+        parameter.requires_grad
+        for head in model.bottom.layer_contract_heads
+        for parameter in head.readout.parameters()
     )
     trajectory_start, trajectory_stop = evidence.ranges["trajectory"]
-    assert torch.count_nonzero(
-        evidence.value_tokens[:, trajectory_start:trajectory_stop]
-    ) == 0
-    assert all(
-        not parameter.requires_grad
-        for parameter in model.bottom.decoder.evidence_adapter.source_proj[
-            "trajectory"
-        ].parameters()
-    )
+    trajectory_projection = model.bottom.decoder.evidence_adapter.source_proj[
+        "trajectory"
+    ]
+    assert not trajectory_projection[0].weight.requires_grad
+    assert any(parameter.requires_grad for parameter in trajectory_projection.parameters())
     rollout_start, rollout_stop = evidence.ranges["rollout"]
     assert torch.count_nonzero(
         evidence.tokens[:, rollout_start:rollout_stop]
     ) > 0
-    assert torch.count_nonzero(
-        evidence.value_tokens[:, rollout_start:rollout_stop]
-    ) == 0
+    assert torch.count_nonzero(evidence.value_tokens[:, rollout_start:rollout_stop]) > 0
     role_bank = model.bottom._role_bank(compiled.plan)
+    assert role_bank.source_names == compiled.plan.source_names
+    assert len(role_bank.source_names) == 5
     assert torch.equal(role_bank.protected_detail, compiled.plan.protected_base)
-    state_tokens, executed_tokens = model.bottom._state_memory(cache.history)
+    state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
+        seed_context
+    )
     intent_memory = model.bottom._intent_memory(
         cache.top.intent,
         state_tokens,
@@ -597,17 +748,21 @@ def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
     assert set(intent_memory) == {"state", "executed"}
     start, stop = evidence.ranges["transition"]
     assert torch.count_nonzero(evidence.value_tokens[:, start:stop]) > 0
-    neutral_transition = replace(
-        cache.transition,
-        value=torch.zeros_like(cache.transition.value),
+    alternate_query, alternate_seed = model.bottom.action_and_context(
+        torch.zeros_like(physical),
+        time,
+        cache.history,
+        executed_memory=cache.executed_memory,
+        action_history_keep=cache.action_history_keep,
     )
-    neutral_evidence = model.bottom.compile_evidence_view(
+    alternate_transition, _ = model.transition(
+        source=cache.transition_source,
+        action_query=alternate_query,
         plan=compiled.plan,
-        intent=cache.top.intent,
-        history=cache.history,
-        transition=neutral_transition,
+        seed=alternate_seed,
     )
-    assert torch.count_nonzero(neutral_evidence.value_tokens[:, start:stop]) == 0
+    assert not torch.equal(transition.action_coefficients, alternate_transition.action_coefficients)
+    assert not torch.equal(transition.value, alternate_transition.value)
 
     anchors = int(model.bottom.core_config.future_anchors)
     spatial = (
@@ -617,10 +772,10 @@ def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
     marker = torch.arange(
         1,
         anchors + 1,
-        dtype=cache.transition.value.dtype,
+        dtype=transition.value.dtype,
     )[None, :, None, None].expand(1, anchors, spatial, config.dimensions.hidden_size)
     marked_transition = replace(
-        cache.transition,
+        transition,
         value=marker.reshape(1, anchors * spatial, config.dimensions.hidden_size),
     )
     event_context = model.bottom._transition_event_context(marked_transition)
@@ -632,24 +787,8 @@ def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
         )
         lower = int(upper)
     assert lower == config.dimensions.action_horizon
-    zero_proposal = replace(
-        training_state.history_proposal,
-        tokens=torch.zeros_like(training_state.history_proposal.tokens),
-    )
-    zero_transition, _ = model.transition(
-        dynamics=cache.top.predicted_dynamics,
-        facts=training_state.top.facts,
-        proposal=zero_proposal,
-        history=cache.history,
-    )
-    assert torch.equal(
-        zero_transition.action_coefficients,
-        zero_transition.neutral_coefficients,
-    )
-    assert torch.count_nonzero(zero_transition.value) == 0
     assert len(model.top.grounding_host.blocks) == 3
     assert model.top.dynamics.w1 is not model.top.dynamics.w2
-    assert model.top.dynamics.near_heads is not model.top.dynamics.far_heads
     assert model.history_proposal.OFFSETS == (-24, -16, -12, -8, -6, -4, -2, -1)
     assert len(model.history_proposal.blocks) == 2
     assert model.history_proposal.recent_tokens == 4
@@ -739,7 +878,7 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert grounding_host_calls == 1
     assert history_proposal_calls == 1
     assert p1_host_calls == 1
-    assert transition_calls == 1
+    assert transition_calls == config.runtime.inference_steps
     # Both V120 correspondence scales batch all adjacent pairs/directions in
     # one invocation and are built once outside the five ODE steps.
     assert semantic_flow.call_count == 1
@@ -779,17 +918,14 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
         retain_graph=True,
     )[0]
     assert torch.count_nonzero(assignment_gradient) > 0
-    assert tuple(cache.transition.value.shape[1:]) == (
+    assert tuple(cache.transition_source.selector.shape[1:]) == (
         4 * config.dimensions.num_cameras * 8 * 8,
         config.dimensions.hidden_size,
     )
-    assert metrics["controlled_transition_dense_rows"] == (
+    assert metrics["controlled_transition_source_spatial_variation"] >= 0
+    assert cache.transition_source.selector.shape[1] == (
         4 * config.dimensions.num_cameras * 8 * 8
     )
-    assert metrics["controlled_transition_retained_rows"] == (
-        4 * config.dimensions.num_cameras * 8 * 8
-    )
-    assert metrics["controlled_transition_pool_removed"] == 0
 
 
 def test_sampling_rejects_dtype_that_differs_from_serialized_runtime() -> None:
@@ -894,7 +1030,7 @@ def test_validation_execution_interventions_reach_the_native_v120_controller() -
     assert full_updates.metrics["bottom_execution_output_block_count"] == 3
 
 
-def test_proposal_ablation_rebuilds_only_the_proposal_owned_cache_boundary() -> None:
+def test_proposal_ablation_does_not_alias_p1_or_controlled_transition() -> None:
     torch.manual_seed(232)
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
@@ -909,8 +1045,11 @@ def test_proposal_ablation_rebuilds_only_the_proposal_owned_cache_boundary() -> 
         ablated.top.predicted_dynamics.semantic_delta,
         cache.top.predicted_dynamics.semantic_delta,
     )
-    assert not torch.equal(ablated.factual_dock.aggregate_fact, cache.factual_dock.aggregate_fact)
-    assert not torch.equal(ablated.transition.value, cache.transition.value)
+    assert torch.equal(ablated.factual_dock.aggregate_fact, cache.factual_dock.aggregate_fact)
+    assert torch.equal(
+        ablated.transition_source.selector,
+        cache.transition_source.selector,
+    )
 
 
 def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlations() -> None:

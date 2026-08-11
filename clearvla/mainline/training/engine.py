@@ -184,18 +184,21 @@ class MainlineTrainingEngine:
         def sample_rms(value: Tensor) -> Tensor:
             return value.detach().float().flatten(1).square().mean(dim=1).sqrt()
 
-        action_energy = intent.interval_action_innovations.detach().float().square().mean(dim=-1)
-        state_energy = intent.interval_state_innovations.detach().float().square().mean(dim=-1)
-        object_energy = intent.interval_object_values.detach().float().square().mean(dim=(-2, -1))
-        interval_energy = (action_energy + state_energy + object_energy).sqrt()
+        # V120 exports the completed cumulative interval state rather than
+        # three factorized value heads.  Audit the tensor W actually consumes;
+        # reconstructing synthetic action/state/object energies here would
+        # recreate the retired schema-20 contract in logging only.
+        interval_energy = intent.interval_queries.detach().float().square().mean(
+            dim=-1
+        ).sqrt()
         centers = interval_energy.new_tensor((6.0, 12.0, 24.0, 40.0)) / 48.0
         energy_total = interval_energy.sum(dim=1)
         centroid = (interval_energy * centers[None]).sum(dim=1) / energy_total.clamp_min(1e-8)
         centroid = torch.where(energy_total > 1e-8, centroid, centroid.new_zeros(centroid.shape))
 
         interval_variation = sample_rms(
-            intent.interval_action_innovations.detach().float()
-            - intent.interval_action_innovations.detach().float().mean(dim=1, keepdim=True)
+            intent.interval_queries.detach().float()
+            - intent.interval_queries.detach().float().mean(dim=1, keepdim=True)
         )
         state_change = sample_rms(intent.state_change_evidence)
         successor_innovation = sample_rms(
@@ -280,6 +283,11 @@ class MainlineTrainingEngine:
             encoded.cache,
             noisy_action_field=flow_state.noisy_physical,
             time=flow_state.time,
+            # Execution-value regression is part of the loss on every train
+            # and validation batch.  It owns non-scalar candidate tensors and
+            # therefore cannot be coupled to the optional diagnostic-batch
+            # budget used only for logging and interventions.
+            require_execution_supervision=True,
             collect_diagnostics=collect_diagnostics,
         )
         ledger = compose_losses(
