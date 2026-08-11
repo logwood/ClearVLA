@@ -19,6 +19,7 @@ from clearvla.mainline.runtime.logging import (
     JsonlRunLogger,
     active_metrics,
     archival_metrics,
+    validate_resume_metric_boundary,
 )
 from clearvla.mainline.train import _prepare_output_directory
 
@@ -74,7 +75,7 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
     }
 
 
-def test_compact_logging_exposes_the_schema19_failure_boundaries() -> None:
+def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     values = {
         "loss_future_successor": 0.12,
         "object_grounding_object_content_pair_cosine": 0.34,
@@ -185,6 +186,53 @@ def test_exact_resume_requires_context_in_a_nonempty_output_directory(
         assert "without run_context.json" in str(error)
     else:
         raise AssertionError("resume must not append to an unowned output directory")
+
+
+def test_exact_resume_metric_stream_must_end_at_checkpoint(tmp_path) -> None:
+    output = tmp_path / "run"
+    logger = JsonlRunLogger(output)
+    logger.write("train", epoch=2, batch=20, step=120, metrics={})
+    try:
+        validate_resume_metric_boundary(
+            output,
+            checkpoint_epoch=1,
+            checkpoint_step=100,
+        )
+    except ValueError as error:
+        assert "committed epoch row" in str(error)
+    else:
+        raise AssertionError("partial next-epoch logging must reject exact resume")
+
+    (output / "metrics.jsonl").write_text(
+        '{"kind":"epoch","epoch":2,"step":200}\n',
+        encoding="utf-8",
+    )
+    try:
+        validate_resume_metric_boundary(
+            output,
+            checkpoint_epoch=1,
+            checkpoint_step=100,
+        )
+    except ValueError as error:
+        assert "metrics/checkpoint boundary differs" in str(error)
+    else:
+        raise AssertionError("an older checkpoint must not append after newer metrics")
+
+
+def test_exact_resume_metric_stream_accepts_matching_or_new_output(tmp_path) -> None:
+    output = tmp_path / "run"
+    logger = JsonlRunLogger(output)
+    logger.write("epoch", epoch=3, step=300, train={}, validation={})
+    validate_resume_metric_boundary(
+        output,
+        checkpoint_epoch=3,
+        checkpoint_step=300,
+    )
+    validate_resume_metric_boundary(
+        tmp_path / "new-run",
+        checkpoint_epoch=3,
+        checkpoint_step=300,
+    )
 
 
 def test_validation_reports_explicit_normalized_and_physical_units() -> None:

@@ -24,20 +24,52 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("p2_effect_reader", ("top.effect_reader.",)),
     ("consequence", ("top.consequence.",)),
     ("p3_compiler", ("top.plan_compiler.",)),
-    ("bottom_query", ("bottom.query_encoder.",)),
-    ("bottom_protected_reader", ("bottom.protected_reader.",)),
-    ("bottom_evidence_compiler", ("bottom.evidence_compiler.",)),
-    ("bottom_organizer", ("bottom.organizer.",)),
-    ("bottom_mmdit", ("bottom.blocks.",)),
-    ("bottom_capacity", ("bottom.capacity.",)),
-    ("bottom_execution", ("bottom.execution.",)),
+    (
+        "bottom_query",
+        (
+            "bottom.query_encoder.",
+            "bottom.decoder.noisy_lift.",
+        ),
+    ),
+    (
+        "bottom_evidence_adapter",
+        (
+            "bottom.state_projection.",
+            "bottom.executed_projection.",
+            "bottom.event_evidence.",
+            "bottom.decoder.evidence_adapter.",
+        ),
+    ),
+    (
+        "bottom_policy_bridge",
+        (
+            "bottom.decoder.policy_delta_attnres.",
+            "bottom.decoder.protected_detail_basis_attnres.",
+        ),
+    ),
+    (
+        "bottom_organizer",
+        (
+            "bottom.decoder.organizer.",
+            "bottom.decoder.intent_seed_norm.",
+        ),
+    ),
+    (
+        "bottom_mmdit",
+        (
+            "bottom.decoder.blocks.",
+            "bottom.decoder.horizon_query",
+        ),
+    ),
+    ("bottom_capacity", ("bottom.decoder.operator_contractions.",)),
+    ("bottom_execution", ("bottom.decoder.execution_controller.",)),
     (
         "bottom_heads",
         (
-            "bottom.final_norm.",
-            "bottom.velocity_head.",
-            "bottom.event_head.",
-            "bottom.motion_head.",
+            "bottom.decoder.action_norm.",
+            "bottom.decoder.velocity_head.",
+            "bottom.decoder.event_head.",
+            "bottom.decoder.motion_head.",
         ),
     ),
 )
@@ -45,8 +77,8 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
 BOTTOM_DECODER_ROLES = frozenset(
     {
         "bottom_query",
-        "bottom_protected_reader",
-        "bottom_evidence_compiler",
+        "bottom_evidence_adapter",
+        "bottom_policy_bridge",
         "bottom_organizer",
         "bottom_mmdit",
         "bottom_execution",

@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.interfaces import CurrentObservation
 from clearvla.mainline.model.bottom import (
-    NestedCapacityOperator,
     ReadOnlyEvidenceMMDiTBlock,
     TypedEvidenceBank,
 )
@@ -32,6 +31,7 @@ from clearvla.mainline.model.types import (
     ObjectFactualDock,
 )
 from clearvla.mainline.training.losses import flow_geometry_terms, future_dynamics_terms
+from clearvla.mainline.v120_core.refinement import NestedLowRankContractionBank
 
 
 def _assert_same_typed_value(left, right) -> None:
@@ -905,6 +905,38 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
     torch.testing.assert_close(unreliable["future_transport"], reliable["future_transport"])
 
 
+def test_future_interval_transition_penalizes_temporal_collapse_not_common_offset() -> None:
+    batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
+    current = torch.zeros(batch, objects, content)
+    scalar = torch.zeros(batch, intervals, objects, 1)
+    interval = torch.arange(intervals, dtype=torch.float32)[None, :, None, None]
+    semantic = interval.expand(batch, intervals, objects, content).clone()
+    address = torch.zeros(batch, intervals, objects, cameras, 2, 2)
+    address[..., 0, 0] = 1.0
+    target = FutureObjectDynamics(
+        current_reference=current,
+        successor_content=current[:, None].expand(-1, intervals, -1, -1),
+        semantic_delta=semantic,
+        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
+        visibility=scalar,
+        persistence=scalar,
+        uncertainty=scalar,
+        reliability=scalar,
+        validity=torch.ones(batch, intervals, objects, cameras, 1),
+        future_address=address,
+        object_coordinates=torch.zeros(batch, objects, cameras, 2),
+    )
+    shifted = replace(target, semantic_delta=semantic + 7.0)
+    collapsed = replace(target, semantic_delta=torch.zeros_like(semantic))
+
+    torch.testing.assert_close(
+        future_dynamics_terms(shifted, target)["future_transition"],
+        torch.zeros(()),
+    )
+    assert future_dynamics_terms(collapsed, target)["future_transition"] > 0
+
+
 def test_teacher_reliability_falls_for_semantically_opposed_supports() -> None:
     torch.manual_seed(3)
     local = _local_facts(content=8, route=4, hidden=16)
@@ -1341,29 +1373,51 @@ def test_bottom_optional_values_preserve_zero_and_do_not_expand_near_zero() -> N
     assert near_update.abs().amax() < 1e-5
 
 
-def test_capacity_is_zero_full_identity_and_nonexpansive_between() -> None:
+def test_active_v120_capacity_is_full_identity_and_nested_nonexpansive() -> None:
     torch.manual_seed(23)
-    operator = NestedCapacityOperator(hidden=16, rank=4, groups=4)
-    update = torch.randn(2, 5, 16)
-    zero, _ = operator(
-        update,
-        torch.zeros(2),
-        collect_diagnostics=False,
+    operator = NestedLowRankContractionBank(
+        hidden_size=16,
+        condition_size=8,
+        stage_count=1,
+        rank=4,
+        group_count=4,
+        depth_logit_init=2.0,
     )
-    assert torch.count_nonzero(zero) == 0
+    update = torch.randn(2, 5, 16)
+    condition = torch.randn(2, 8)
+    stage = torch.zeros(2, dtype=torch.long)
+    closed, closed_metrics = operator(
+        update,
+        condition,
+        stage,
+        depth_ratio_override=0.0,
+    )
+    basis = operator.prepare_factors()[0]
+    expected_closed = update.float() - torch.einsum(
+        "bnr,hr->bnh",
+        torch.einsum("bnh,hr->bnr", update.float(), basis),
+        basis,
+    )
+    torch.testing.assert_close(closed.float(), expected_closed, atol=2e-6, rtol=2e-6)
+    # Capacity is ordered rank retention, not a host-residual amplitude gate.
+    assert torch.count_nonzero(closed) > 0
+    assert closed_metrics["effective_depth"] == 0
+
     full, metrics = operator(
         update,
-        torch.ones(2),
-        collect_diagnostics=True,
+        condition,
+        stage,
+        depth_ratio_override=1.0,
     )
     torch.testing.assert_close(full, update, atol=2e-6, rtol=2e-6)
-    assert metrics["effective_basis_mass"] == 4
+    assert metrics["effective_depth"] == 4
     assert metrics["nonexpansive_violation"] < 1e-6
 
     middle, middle_metrics = operator(
         update,
-        torch.full((2,), 0.375),
-        collect_diagnostics=True,
+        condition,
+        stage,
+        depth_ratio_override=0.375,
     )
     input_rms = update.float().square().mean(dim=(1, 2)).sqrt()
     output_rms = middle.float().square().mean(dim=(1, 2)).sqrt()
@@ -1371,21 +1425,50 @@ def test_capacity_is_zero_full_identity_and_nonexpansive_between() -> None:
     assert middle_metrics["nonexpansive_violation"] < 1e-6
 
 
-def test_capacity_reuses_exact_qr_basis_only_in_frozen_eval() -> None:
+def test_active_v120_capacity_reuses_explicit_prepared_basis_within_a_forward() -> None:
     torch.manual_seed(231)
-    operator = NestedCapacityOperator(hidden=16, rank=4, groups=4).eval()
+    operator = NestedLowRankContractionBank(
+        hidden_size=16,
+        condition_size=8,
+        stage_count=1,
+        rank=4,
+        group_count=4,
+        depth_logit_init=2.0,
+    ).eval()
     update = torch.randn(2, 5, 16)
+    condition = torch.randn(2, 8)
+    stage = torch.zeros(2, dtype=torch.long)
     capacity = torch.full((2,), 0.75)
+    prepared = operator.prepare_factors()
     with mock.patch("torch.linalg.qr", wraps=torch.linalg.qr) as qr:
         with torch.no_grad():
-            first, _ = operator(update, capacity, collect_diagnostics=False)
-            second, _ = operator(update, capacity, collect_diagnostics=False)
-        assert qr.call_count == 1
+            first, _ = operator(
+                update,
+                condition,
+                stage,
+                depth_ratio_override=capacity,
+                prepared_factors=prepared,
+                collect_diagnostics=False,
+            )
+            second, _ = operator(
+                update,
+                condition,
+                stage,
+                depth_ratio_override=capacity,
+                prepared_factors=prepared,
+                collect_diagnostics=False,
+            )
+        assert qr.call_count == 0
         assert torch.equal(first, second)
-        operator.train()
         with torch.no_grad():
-            operator(update, capacity, collect_diagnostics=False)
-        assert qr.call_count == 2
+            operator(
+                update,
+                condition,
+                stage,
+                depth_ratio_override=capacity,
+                collect_diagnostics=False,
+            )
+        assert qr.call_count == 1
 
 
 def test_deployment_cache_has_no_source_or_training_charts() -> None:

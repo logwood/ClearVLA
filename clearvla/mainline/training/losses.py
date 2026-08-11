@@ -11,9 +11,14 @@ from torch import Tensor
 from ..config import ExperimentConfig
 from ..interfaces import ActionSupervision, ObservableHistory
 from ..model.action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
-from ..model.observation import ObservationEvidence, PatchFlowField, _coordinate_grid
+from ..model.observation_contract import (
+    ObservationEvidence,
+    PatchFlowField,
+    _coordinate_grid,
+)
 from ..model.policy import PolicyStepOutput
 from ..model.types import FutureObjectDynamics, ObjectTopTrainingTargets
+from ..v120_core.gauges import masked_candidate_center
 
 _STANDARD_GAMMA = getattr(torch, "_standard_gamma")
 
@@ -28,17 +33,15 @@ class FlowMatchingState:
 
 
 def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Tensor:
-    """Return inverse-root-frequency gripper weights with exact budget closure.
+    """Return audit-only inverse-root-frequency gripper weights.
 
     Information-balanced sampling operates at the *window* level.  A selected
-    event window still contains mostly hold rows, so an auxiliary event head
-    does not make the decoded gripper trajectory care about the transition
-    row.  This helper balances event/hold rows only inside the gripper part of
-    the physical and decoded action objectives.  Root-frequency balancing is
-    intentionally milder than inverse-frequency weighting, and the final
-    normalization makes ``mean(weight * horizon_weight)`` exactly match the
-    original horizon budget.  No model prediction, gate or detached gradient
-    surrogate is involved.
+    event window still contains mostly hold rows.  Schema 20 keeps the exact
+    V120 action and decoded objectives formal, so this geometry is serialized
+    only as a counterfactual audit.  Root-frequency balancing is intentionally
+    milder than inverse-frequency weighting, and the final normalization makes
+    ``mean(weight * horizon_weight)`` exactly match the original horizon
+    budget.  It is never registered in ``loss_contrib_*``.
     """
 
     if event_mask.ndim != 2 or horizon_weight.ndim != 1:
@@ -268,6 +271,31 @@ def flow_geometry_terms(evidence: ObservationEvidence) -> dict[str, Tensor]:
     """Average both -8->-4 and -4->0 observable geometry objectives."""
 
     evidence.validate()
+    # The active restored observation contract publishes the source-resolved
+    # V120 ledger.  The preserved pre-extraction observation prototype does
+    # not own that optional field and remains useful for isolated geometry
+    # regressions; absence means "compute the explicit fallback below", not
+    # an invalid runtime contract.
+    native_flow_losses = getattr(evidence, "native_flow_losses", None)
+    if native_flow_losses is not None:
+        native = native_flow_losses
+        # Preserve the source-resolved V120 arithmetic instead of rebuilding
+        # another photometric/feature objective from compatibility charts.
+        # The V120 SEA-RAFT core already batches both adjacent pairs and both
+        # directions in every scalar below.
+        return {
+            "flow_warp": native["flow_jepa_warp_loss"],
+            "flow_identity_advantage": native[
+                "flow_jepa_identity_advantage_loss"
+            ],
+            "flow_static_identity": native["flow_jepa_static_identity_loss"],
+            "flow_cycle": native["flow_jepa_cycle_loss"],
+            "flow_smoothness": native["flow_jepa_smoothness_loss"],
+            "flow_uncertainty": native["flow_jepa_uncertainty_nll"],
+            "flow_refinement_sequence": native[
+                "flow_jepa_refinement_sequence_loss"
+            ],
+        }
     recent = _flow_pair_terms(
         flow=evidence.flow,
         previous=evidence.previous_detail_features,
@@ -419,6 +447,27 @@ def future_dynamics_terms(
     # it by reliability would again leave an action-owned free address on the
     # rows where W is supposed to be neutral.
     address = masked(address_error, object_validity.squeeze(-1))
+    semantic_transition_prediction = (
+        prediction.semantic_delta.float()[:, 1:]
+        - prediction.semantic_delta.float()[:, :-1]
+    )
+    semantic_transition_target = (
+        target.semantic_delta.detach().float()[:, 1:]
+        - target.semantic_delta.detach().float()[:, :-1]
+    )
+    transition_scale = (
+        semantic_transition_target.square().mean(dim=-1, keepdim=True).sqrt()
+    ).clamp_min(0.05)
+    transition_error = F.smooth_l1_loss(
+        semantic_transition_prediction / transition_scale,
+        semantic_transition_target / transition_scale,
+        reduction="none",
+    )
+    transition_validity = torch.minimum(
+        object_validity[:, 1:],
+        object_validity[:, :-1],
+    )
+    transition = masked(transition_error, transition_validity)
     total = (
         0.30 * successor
         + 0.22 * semantic_delta
@@ -441,6 +490,7 @@ def future_dynamics_terms(
         "future_uncertainty": uncertainty,
         "future_reliability": reliability,
         "future_address": address,
+        "future_transition": transition,
     }
     if collect_diagnostics:
         for index in range(prediction.intervals):
@@ -459,6 +509,250 @@ def future_dynamics_terms(
                 address_error[:, interval_slice], interval_validity.squeeze(-1)
             ).detach()
     return terms
+
+
+def execution_value_terms(
+    config: ExperimentConfig,
+    codec: PhysicalActionFieldCodec,
+    output: PolicyStepOutput,
+    flow_state: FlowMatchingState,
+) -> dict[str, Tensor]:
+    """Restore V120's centered physical candidate-value supervision.
+
+    Candidate action predictions are detached targets.  Only the controller's
+    typed ``[arm, gripper]`` value field receives gradients.  Near-tie rows are
+    down-weighted by their physical spread, and common candidate offsets are
+    removed before both regression and selection diagnostics.
+    """
+
+    tensors = output.bottom.decoder_tensors
+    names = (
+        "evidence_mmd_it_execution_candidate_value_field",
+        "evidence_mmd_it_dwell_candidate_pred_velocity",
+        "evidence_mmd_it_execution_candidate_value_mask",
+        "evidence_mmd_it_execution_baseline_pred_velocity",
+    )
+    missing = [name for name in names if name not in tensors]
+    if missing:
+        raise ValueError(
+            "restored V120 execution supervision is missing " + ", ".join(missing)
+        )
+    predicted = tensors[names[0]].float()
+    candidates = tensors[names[1]].detach().float()
+    valid = tensors[names[2]].detach().bool()
+    baseline = tensors[names[3]].detach().float()
+    target = flow_state.target_physical_velocity.detach().float()
+    if (
+        predicted.ndim != 5
+        or candidates.ndim != 5
+        or valid.ndim != 3
+        or baseline.ndim != 4
+        or int(predicted.shape[-1]) != 2
+    ):
+        raise ValueError("V120 execution candidate tensors have invalid ranks")
+    if tuple(predicted.shape[:4]) != tuple(candidates.shape[:4]):
+        raise ValueError("execution value field and candidate predictions are misaligned")
+    if tuple(valid.shape) != tuple(candidates.shape[:3]):
+        raise ValueError("execution candidate validity has the wrong shape")
+    if tuple(target.shape) != (
+        int(candidates.shape[0]),
+        int(candidates.shape[3]),
+        int(candidates.shape[4]),
+    ):
+        raise ValueError("execution candidate target has the wrong physical shape")
+    if tuple(baseline.shape) != (
+        int(candidates.shape[0]),
+        int(candidates.shape[1]),
+        int(candidates.shape[3]),
+        int(candidates.shape[4]),
+    ):
+        raise ValueError("execution baseline has the wrong physical shape")
+
+    batch, blocks, candidate_count, horizon, physical = candidates.shape
+    residual = candidates - target[:, None, None]
+    flat = residual.reshape(batch * blocks * candidate_count, horizon, physical)
+    parts = codec.split(flat)
+    arm_error = 0.5 * (
+        parts.arm_absolute.square() + parts.arm_delta.square()
+    ).sum(dim=-1) / float(codec.arm_dim)
+    gripper_error = parts.gripper_field.square().mean(dim=-1)
+    target_value = torch.stack((arm_error, gripper_error), dim=-1).reshape(
+        batch,
+        blocks,
+        candidate_count,
+        horizon,
+        2,
+    )
+    target_centered, _ = masked_candidate_center(
+        target_value,
+        valid,
+        candidate_dim=2,
+    )
+    predicted_centered, predicted_mean = masked_candidate_center(
+        predicted,
+        valid,
+        candidate_dim=2,
+    )
+    valid_field = valid[..., None, None].expand_as(predicted)
+    component_weight = predicted.new_tensor([float(codec.arm_dim), 1.0]) / float(
+        codec.arm_dim + 1
+    )
+    physical_weight = valid_field.float() * component_weight[None, None, None, None]
+    active = valid.float().sum(dim=2) > 1.0
+    active_float = active.float()
+    active_denominator = active_float.sum().clamp_min(1.0)
+    row_denominator = (
+        valid[..., None]
+        .expand(-1, -1, -1, horizon)
+        .float()
+        .sum(dim=(2, 3))
+        .clamp_min(1.0)
+    )
+    target_spread = torch.sqrt(
+        (target_centered.square() * physical_weight).sum(dim=(2, 3, 4))
+        / row_denominator
+    )
+    reliability_scale = (
+        (target_spread.detach() * active_float).sum() / active_denominator
+    ).clamp_min(1e-6)
+    reliability = (
+        target_spread / (target_spread + reliability_scale)
+    ) * active_float
+    reliability_denominator = reliability.sum().clamp_min(1e-6)
+    normalization_scale = torch.maximum(
+        target_spread.detach(),
+        reliability_scale.detach(),
+    )
+    normalized_target = target_centered / normalization_scale[..., None, None, None]
+    value_field = F.smooth_l1_loss(
+        predicted_centered,
+        normalized_target,
+        reduction="none",
+        beta=float(config.objectives.execution_value_huber_delta),
+    ) * physical_weight
+    value_rows = value_field.sum(dim=(2, 3, 4)) / row_denominator
+    value_loss = (value_rows * reliability).sum() / reliability_denominator
+
+    predicted_scalar = (
+        (predicted * component_weight[None, None, None, None])
+        .sum(dim=-1)
+        .mean(dim=-1)
+    )
+    target_scalar = (
+        (normalized_target * component_weight[None, None, None, None])
+        .sum(dim=-1)
+        .mean(dim=-1)
+    )
+    invalid_max = torch.finfo(predicted_scalar.dtype).max
+    predicted_best = predicted_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
+    target_best = target_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
+    decision_accuracy = (
+        (predicted_best == target_best).float() * active_float
+    ).sum() / active_denominator
+    target_difference = target_scalar[..., :, None] - target_scalar[..., None, :]
+    predicted_difference = (
+        predicted_scalar[..., :, None] - predicted_scalar[..., None, :]
+    )
+    pair_mask = valid[..., :, None] & valid[..., None, :]
+    pair_mask = pair_mask & torch.triu(
+        torch.ones(candidate_count, candidate_count, device=valid.device, dtype=torch.bool),
+        diagonal=1,
+    )
+    informative = pair_mask & target_difference.ne(0.0)
+    pairwise_accuracy = (
+        (predicted_difference * target_difference > 0.0).float()
+        * informative.float()
+    ).sum() / informative.float().sum().clamp_min(1.0)
+    correlation = (
+        predicted_centered * normalized_target * physical_weight
+    ).sum() / (
+        (predicted_centered.square() * physical_weight).sum().sqrt()
+        * (normalized_target.square() * physical_weight).sum().sqrt()
+    ).clamp_min(1e-8)
+    predicted_rms = (
+        (predicted.square() * physical_weight).sum()
+        / row_denominator.sum().clamp_min(1.0)
+    ).sqrt()
+    active_common = active_float[..., None, None, None]
+    predicted_common_rms = (
+        (
+            predicted_mean.square()
+            * active_common
+            * component_weight[None, None, None, None]
+        ).sum()
+        / (active_common.sum() * horizon).clamp_min(1.0)
+    ).sqrt()
+    predicted_standardized_spread = torch.sqrt(
+        (predicted_centered.square() * physical_weight).sum(dim=(2, 3, 4))
+        / row_denominator
+    )
+    predicted_spread = predicted_standardized_spread * normalization_scale
+    selected_spread = target_spread[active]
+    if int(selected_spread.numel()) > 0:
+        spread_p25, spread_p50, spread_p75 = (
+            torch.quantile(selected_spread, quantile)
+            for quantile in (0.25, 0.50, 0.75)
+        )
+    else:
+        spread_p25 = spread_p50 = spread_p75 = target_spread.new_zeros(())
+    terminal_valid = valid[..., -1] & active
+    operation_scalar = target_scalar[..., :-1].masked_fill(
+        ~valid[..., :-1], invalid_max
+    )
+    terminal_target_margin = target_scalar[..., -1] - operation_scalar.amin(dim=-1)
+    predicted_operation = predicted_scalar[..., :-1].masked_fill(
+        ~valid[..., :-1], invalid_max
+    )
+    terminal_predicted_margin = (
+        predicted_scalar[..., -1] - predicted_operation.amin(dim=-1)
+    )
+    terminal_denominator = terminal_valid.float().sum().clamp_min(1.0)
+    execution_cost = tensors.get("evidence_mmd_it_execution_cost")
+    if not isinstance(execution_cost, Tensor) or execution_cost.ndim != 0:
+        execution_cost = value_loss.new_zeros(())
+    return {
+        "execution_value": value_loss,
+        "execution_cost_audit": execution_cost.detach().float(),
+        "execution_value_reliability_scale": reliability_scale.detach(),
+        "execution_value_reliability": (
+            reliability.sum() / active_denominator
+        ).detach(),
+        "execution_value_target_spread": (
+            (target_spread * active_float).sum() / active_denominator
+        ).detach(),
+        "execution_value_predicted_spread": (
+            (predicted_spread * active_float).sum() / active_denominator
+        ).detach(),
+        "execution_value_predicted_standardized_spread": (
+            (predicted_standardized_spread * active_float).sum()
+            / active_denominator
+        ).detach(),
+        "execution_value_target_spread_p25": spread_p25.detach(),
+        "execution_value_target_spread_p50": spread_p50.detach(),
+        "execution_value_target_spread_p75": spread_p75.detach(),
+        "execution_value_correlation": correlation.detach(),
+        "execution_value_pairwise_accuracy": pairwise_accuracy.detach(),
+        "execution_value_decision_accuracy": decision_accuracy.detach(),
+        "execution_value_common_mode_ratio": (
+            predicted_common_rms / predicted_rms.clamp_min(1e-8)
+        ).detach(),
+        "execution_candidate_coverage": valid.float().mean().detach(),
+        "execution_terminal_identity_error": (
+            candidates[:, :, -1] - baseline
+        ).square().mean().sqrt().detach(),
+        "execution_terminal_target_cost_margin": (
+            (terminal_target_margin * terminal_valid.float()).sum()
+            / terminal_denominator
+        ).detach(),
+        "execution_terminal_predicted_cost_margin": (
+            (terminal_predicted_margin * terminal_valid.float()).sum()
+            / terminal_denominator
+        ).detach(),
+        "execution_terminal_target_preferred_fraction": (
+            ((terminal_target_margin < 0.0) & terminal_valid).float().sum()
+            / terminal_denominator
+        ).detach(),
+    }
 
 
 def action_terms(
@@ -510,10 +804,9 @@ def action_terms(
     ) / float(codec.arm_dim + 1)
     physical_error = (arm_error.sum(dim=-1) + gripper_error) / float(codec.arm_dim + 1)
     flow = (physical_error * step_weight).mean()
-    # V120 used no event-row boost in its physical flow objective.  Keep the
-    # new event-balanced objective, but also serialize the exact comparable
-    # scale so recovery checks do not mistake a deliberate reweighting for a
-    # worse velocity fit.
+    # V120 used no event-row boost in its physical flow objective.  Serialize
+    # the balanced counterfactual under an explicit audit name; it is not sent
+    # to backward and cannot be mistaken for the recovered formal geometry.
     flow_v120_comparable = (physical_error_unweighted * step_weight).mean()
     arm = (arm_error.mean(dim=-1) * step_weight).mean()
     grip = (gripper_error * step_weight).mean()
@@ -522,8 +815,15 @@ def action_terms(
     grip_value_balanced = (
         residual_parts.gripper_field[..., 0].square() * event_row_weight * step_weight
     ).mean()
+    grip_delta_unweighted = (
+        residual_parts.gripper_field[..., 1].square() * step_weight
+    ).mean()
     grip_delta = (
         residual_parts.gripper_field[..., 1].square() * event_row_weight * step_weight
+    ).mean()
+    grip_auxiliary_unweighted = (
+        residual_parts.gripper_field[..., 2:].square().mean(dim=-1)
+        * step_weight
     ).mean()
     grip_auxiliary = (
         residual_parts.gripper_field[..., 2:].square().mean(dim=-1)
@@ -649,13 +949,13 @@ def action_terms(
     start = 0
     for end in (4, 12, 24):
         # Preserve the historical metric as an unweighted diagnostic.  The
-        # actual event-balanced objective is reported under an explicit name.
+        # counterfactual event-balanced geometry is reported as audit-only.
         band_metrics[f"action_flow_band_{start + 1}_{end}"] = physical_error_unweighted[
             :, start:end
         ].mean()
-        band_metrics[f"action_flow_balanced_band_{start + 1}_{end}"] = physical_error[
-            :, start:end
-        ].mean()
+        band_metrics[
+            f"action_flow_event_balanced_audit_band_{start + 1}_{end}"
+        ] = physical_error[:, start:end].mean()
         band_metrics[f"action_horizon_weight_band_{start + 1}_{end}"] = horizon_weight[
             start:end
         ].mean()
@@ -665,18 +965,26 @@ def action_terms(
         start = end
     return {
         **band_metrics,
-        "action_flow": flow,
+        # The formal objective is the exact V120 physical metric.  Event-row
+        # balancing remains an audit, not an alternative training geometry.
+        "action_flow": flow_v120_comparable,
         "action_flow_v120_comparable": flow_v120_comparable,
         "action_flow_event_balance_delta": flow - flow_v120_comparable,
+        "action_flow_event_balanced_audit": flow,
         "action_flow_uniform_field_mse": uniform_flow,
         "action_flow_native": native_flow,
         "action_arm_flow": arm,
-        "action_gripper_flow": grip,
+        "action_gripper_flow": grip_unweighted,
+        "action_gripper_flow_v120_comparable": grip_unweighted,
         "action_gripper_flow_unweighted": grip_unweighted,
-        "action_gripper_value_flow": grip_value_balanced,
+        "action_gripper_flow_event_balanced_audit": grip,
+        "action_gripper_value_flow": grip_value,
         "action_gripper_value_flow_unweighted": grip_value,
-        "action_gripper_delta_flow": grip_delta,
-        "action_gripper_auxiliary_flow": grip_auxiliary,
+        "action_gripper_value_flow_event_balanced_audit": grip_value_balanced,
+        "action_gripper_delta_flow": grip_delta_unweighted,
+        "action_gripper_delta_flow_event_balanced_audit": grip_delta,
+        "action_gripper_auxiliary_flow": grip_auxiliary_unweighted,
+        "action_gripper_auxiliary_flow_event_balanced_audit": grip_auxiliary,
         "action_gripper_event_flow": event_gripper_flow,
         "action_gripper_hold_flow": hold_gripper_flow,
         "action_decoded_gripper_event": event_decoded_gripper,
@@ -684,11 +992,12 @@ def action_terms(
         "action_gripper_event_row_weight": event_row_weight_mean,
         "action_gripper_hold_row_weight": hold_row_weight_mean,
         "action_gripper_event_rate": event_mask.mean(),
-        "decoded_action": decoded_action,
+        "decoded_action": decoded_action_v120_comparable,
         "decoded_action_v120_comparable": decoded_action_v120_comparable,
         "decoded_action_event_balance_delta": (
             decoded_action - decoded_action_v120_comparable
         ),
+        "decoded_action_event_balanced_audit": decoded_action,
         "smooth_delta": smooth_delta,
         "physical_delta_consistency": physical_delta_consistency,
         "event": event,
@@ -704,9 +1013,9 @@ def action_terms(
         "action_flow_first4": physical_error_unweighted[:, :4].mean(),
         "action_flow_first8": physical_error_unweighted[:, :8].mean(),
         "action_flow_tail": physical_error_unweighted[:, 8:].mean(),
-        "action_flow_balanced_first": physical_error[:, 0].mean(),
-        "action_flow_balanced_first8": physical_error[:, :8].mean(),
-        "action_flow_balanced_tail": physical_error[:, 8:].mean(),
+        "action_flow_event_balanced_audit_first": physical_error[:, 0].mean(),
+        "action_flow_event_balanced_audit_first8": physical_error[:, :8].mean(),
+        "action_flow_event_balanced_audit_tail": physical_error[:, 8:].mean(),
     }
 
 
@@ -720,7 +1029,7 @@ class LossLedger:
     def validate(self) -> None:
         if self.total.ndim != 0:
             raise ValueError("total loss must be scalar")
-        if set(self.groups) != {"action", "representation"}:
+        if set(self.groups) != {"action", "representation", "execution"}:
             raise ValueError("loss ledger has an inactive or unknown group")
         if any(value.ndim != 0 for value in self.groups.values()):
             raise ValueError("loss groups must be scalar")
@@ -744,6 +1053,12 @@ def compose_losses(
     collect_diagnostics: bool = False,
 ) -> LossLedger:
     action = action_terms(config, action_codec, policy_output, action_target, history, flow_state)
+    execution = execution_value_terms(
+        config,
+        action_codec,
+        policy_output,
+        flow_state,
+    )
     geometry = flow_geometry_terms(observation)
     if top_targets.teacher_dynamics is None:
         raise ValueError("formal training requires future teacher dynamics")
@@ -762,15 +1077,21 @@ def compose_losses(
         + objective.physical_delta_consistency * action["physical_delta_consistency"]
         + objective.proposal * top_targets.history_proposal_loss
     )
+    intent_structure_core = (
+        0.25 * top_targets.object_reconstruction_loss
+        + 0.35 * top_targets.online_intent_loss
+        + 0.20 * top_targets.plan_recognition_loss
+        + 0.20 * top_targets.coarse_action_loss
+    )
+    # Restore V120's interval ledger exactly: half of the existing 0.02
+    # budget supervises chronological changes between adjacent W intervals;
+    # the other half owns the small G/S/recognizer/coarse scaffold.  Giving
+    # the whole budget to the easy scalar scaffold both over-trained it and
+    # removed W1/W2's only explicit differentiation pressure.
+    interval_structure = 0.50 * future["future_transition"] + 0.50 * intent_structure_core
     representation_group = (
         objective.future_dynamics * future["future_dynamics"]
-        + objective.intent_structure
-        * (
-            0.25 * top_targets.object_reconstruction_loss
-            + 0.35 * top_targets.online_intent_loss
-            + 0.20 * top_targets.plan_recognition_loss
-            + 0.20 * top_targets.coarse_action_loss
-        )
+        + objective.intent_structure * interval_structure
         + objective.flow_warp * geometry["flow_warp"]
         + objective.flow_identity_advantage * geometry["flow_identity_advantage"]
         + objective.flow_static_identity * geometry["flow_static_identity"]
@@ -779,7 +1100,12 @@ def compose_losses(
         + objective.flow_uncertainty * geometry["flow_uncertainty"]
         + objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
     )
-    groups = {"action": action_group, "representation": representation_group}
+    execution_group = objective.execution_value * execution["execution_value"]
+    groups = {
+        "action": action_group,
+        "representation": representation_group,
+        "execution": execution_group,
+    }
     contributions = {
         "action_flow": action["action_flow"],
         "decoded_action": objective.decoded_action * action["decoded_action"],
@@ -791,18 +1117,34 @@ def compose_losses(
             * action["physical_delta_consistency"]
         ),
         "proposal": objective.proposal * top_targets.history_proposal_loss,
+        "execution_value": execution_group,
         "future_dynamics": objective.future_dynamics * future["future_dynamics"],
+        "future_transition": (
+            objective.intent_structure * 0.50 * future["future_transition"]
+        ),
         "object_reconstruction": (
-            objective.intent_structure * 0.25 * top_targets.object_reconstruction_loss
+            objective.intent_structure
+            * 0.50
+            * 0.25
+            * top_targets.object_reconstruction_loss
         ),
         "intent_online": (
-            objective.intent_structure * 0.35 * top_targets.online_intent_loss
+            objective.intent_structure
+            * 0.50
+            * 0.35
+            * top_targets.online_intent_loss
         ),
         "intent_recognizer": (
-            objective.intent_structure * 0.20 * top_targets.plan_recognition_loss
+            objective.intent_structure
+            * 0.50
+            * 0.20
+            * top_targets.plan_recognition_loss
         ),
         "coarse_action": (
-            objective.intent_structure * 0.20 * top_targets.coarse_action_loss
+            objective.intent_structure
+            * 0.50
+            * 0.20
+            * top_targets.coarse_action_loss
         ),
         "flow_warp": objective.flow_warp * geometry["flow_warp"],
         "flow_identity_advantage": (
@@ -822,6 +1164,7 @@ def compose_losses(
         **action,
         **geometry,
         **future,
+        **execution,
         "intent_online": top_targets.online_intent_loss,
         "intent_recognizer": top_targets.plan_recognition_loss,
         "object_reconstruction": top_targets.object_reconstruction_loss,
@@ -829,7 +1172,7 @@ def compose_losses(
         "history_action_proposal": top_targets.history_proposal_loss,
     }
     ledger = LossLedger(
-        total=action_group + representation_group,
+        total=action_group + representation_group + execution_group,
         groups=groups,
         contributions=contributions,
         terms=terms,
@@ -844,6 +1187,7 @@ __all__ = [
     "action_terms",
     "balanced_event_row_weights",
     "compose_losses",
+    "execution_value_terms",
     "flow_geometry_terms",
     "future_dynamics_terms",
     "sample_flow_matching",

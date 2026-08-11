@@ -13,10 +13,13 @@
 - `clearvla/mainline/manifest.py`, `config.py`, `interfaces.py`
   - compact graph identity, resolved capability settings and typed online /
     teacher boundaries;
-- `clearvla/mainline/model/observation.py`, `grounding.py`, `intent.py`,
-  `dynamics.py`, `factual_reader.py`, `compiler.py`, `transition.py`, `bottom.py`
+- `clearvla/mainline/model/restored_observation.py`, `grounding.py`, `intent.py`,
+  `dynamics.py`, `factual_reader.py`, `compiler.py`, `transition.py`,
+  `restored_bottom.py`, plus `clearvla/mainline/v120_core/`
   - the active current-only observation -> G/S/W/P -> controlled transition ->
-    three-block Evidence MMDiT graph;
+    extracted V120 three-block Evidence MMDiT graph;
+  - `model/observation.py` and `model/bottom.py` are retained inactive
+    prototypes and are not part of the schema-20 source closure;
 - `clearvla/mainline/model/policy.py`, `top.py`
   - static online cache, training-only target plane and ODE-step-dependent
     P2/P3/bottom composition;
@@ -498,3 +501,10 @@ Re-check these against current source rather than assuming they remain true:
     exact-zero lane, and `object_intent_dynamics_323` must pass no external
     execution-terminal probability. Historical completion/terminal semantics
     remain valid only for their sibling replay capabilities.
+68. Independent-mainline wall time and CUDA peaks are produced in
+    `clearvla/mainline/train.py`, preserved by
+    `clearvla/mainline/runtime/logging.py`, and summarized/enforced by
+    `_performance_summary` and `_recovery_assessment` in
+    `clearvla/tools/audit_policy_logs.py`.  The `22 GiB` process estimate is a
+    dedicated-GPU release check; it is not a model-side memory loss or a
+    substitute for recording batch size and hardware conditions.

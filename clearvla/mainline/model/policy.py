@@ -11,10 +11,12 @@ from torch import Tensor, nn
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
-from .bottom import BottomOutput, EvidenceMMDiTBottom
+from .action_contract import BottomOutput
 from .factual_reader import ObjectFactualReader
-from .observation import CurrentObservationCompiler, ObservationEvidence
+from .observation_contract import ObservationEvidence
 from .proposal import HistoryActionProposal
+from .restored_bottom import RestoredV120EvidenceBottom
+from .restored_observation import RestoredV120ObservationCompiler
 from .top import (
     CompiledPolicyState,
     DeploymentTopCache,
@@ -91,7 +93,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         dims = config.dimensions
         obs = config.observation
         top = config.top
-        self.observation = CurrentObservationCompiler(config)
+        self.observation = RestoredV120ObservationCompiler(config)
         self.action_codec = PhysicalActionFieldCodec(
             action_dim=dims.action_dim,
             horizon=dims.action_horizon,
@@ -130,7 +132,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         self.factual_reader = ObjectFactualReader(
             hidden=dims.hidden_size,
             content_dim=dims.visual_token_dim,
-            raw_dim=obs.feature_dim,
+            raw_dim=self.observation.detail_dim,
             route_dim=obs.address_route_dim,
             horizon=dims.action_horizon,
             basis=dims.action_basis_tokens,
@@ -153,10 +155,15 @@ class ClearVLAMainlinePolicy(nn.Module):
             action_tokens=config.bottom.controlled_action_tokens,
             dropout=config.bottom.controlled_delta_dropout,
         )
-        self.bottom = EvidenceMMDiTBottom(
+        self.bottom = RestoredV120EvidenceBottom(
             config,
             physical_action_dim=self.action_codec.physical_dim,
         )
+
+    def set_training_step(self, global_step: int) -> float:
+        """Advance the serialized V120 execution warm-up/transition schedule."""
+
+        return self.bottom.set_training_step(global_step)
 
     def encode_online(
         self,
@@ -187,7 +194,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             ).to(dtype=dtype)
 
         # These three masks are the fixed formal-launcher semantics inherited
-        # from V103 by the V122 script chain.  Build the proposal from complete
+        # by the V120 reference from V103.  Build the proposal from complete
         # observable history so its auxiliary target remains fully supervised;
         # exact-null only the values that enter the policy graph.  Deployment
         # and validation never sample these masks and therefore always keep 1.
@@ -361,6 +368,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             time=time,
             action_query=action_query,
             plan=compiled.plan,
+            intent=cache.top.intent,
             history=cache.history,
             transition=cache.transition,
             execution_mode=execution_mode,

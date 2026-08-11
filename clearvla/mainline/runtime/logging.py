@@ -30,6 +30,9 @@ ACTIVE_PREFIXES = (
     "object_consequence_",
     "object_p3_",
     "bottom_",
+    # Native V120 Evidence-MMDiT/controller metrics retain their established
+    # names so old and recovered runs remain directly comparable.
+    "evidence_",
     "validation_",
     "runtime_",
     "action_",
@@ -181,7 +184,9 @@ class JsonlRunLogger:
             "loss_future_dynamics",
             "loss_future_successor",
             "loss_future_semantic_delta",
+            "loss_future_transition",
             "loss_future_address",
+            "loss_execution_value",
             "loss_object_reconstruction",
             "object_grounding_object_content_pair_cosine",
             "object_intent_interval_variation",
@@ -235,6 +240,13 @@ class JsonlRunLogger:
                 ),
             ),
             (
+                "performance",
+                (
+                    "runtime_window_seconds_per_batch",
+                    "runtime_window_samples_per_second",
+                ),
+            ),
+            (
                 "action",
                 (
                     "loss_action_arm_flow",
@@ -262,12 +274,28 @@ class JsonlRunLogger:
                     "loss_flow_identity_advantage",
                     "loss_flow_static_identity",
                     "loss_flow_cycle",
+                    "observation_flow_grid_cell_magnitude",
+                    "observation_flow_native_patch_magnitude",
+                    "observation_flow_confidence",
+                    "observation_flow_occlusion",
+                    "observation_flow_correlation_entropy",
+                    "observation_flow_correlation_margin",
                     "loss_flow_recent_warp",
                     "loss_flow_earlier_warp",
                     "observation_flow_rms",
                     "observation_earlier_flow_rms",
                     "observation_flow_acceleration_rms",
                     "observation_visual_history_innovation_rms",
+                    "observation_recent_motion_rms",
+                    "observation_earlier_motion_aligned_rms",
+                    "observation_address_flow_mass",
+                    "observation_address_fallback_mass",
+                    "observation_address_entropy",
+                    "observation_raw_detail_emphasis",
+                    "observation_raw_detail_precision",
+                    "observation_raw_address_flow_mass",
+                    "observation_raw_address_fallback_mass",
+                    "observation_raw_address_entropy",
                 ),
             ),
             (
@@ -317,9 +345,11 @@ class JsonlRunLogger:
                     "object_teacher_transport_rms",
                     "object_w2_interval_adjacent_cosine",
                     "object_w2_object_pair_cosine",
+                    "loss_future_transition",
                     "p1_query_chart_variation",
                     "p1_query_coordinate_variation",
                     "p1_detail_rms",
+                    "p1_existence_is_diagnostic_only",
                 ),
             ),
             (
@@ -363,6 +393,18 @@ class JsonlRunLogger:
                     "bottom_continue_mean",
                     "bottom_continue_block_std",
                     "bottom_execution_cost_audit",
+                    "loss_execution_value",
+                    "loss_execution_value_target_spread",
+                    "loss_execution_value_predicted_spread",
+                    "loss_execution_value_correlation",
+                    "loss_execution_value_pairwise_accuracy",
+                    "loss_execution_value_decision_accuracy",
+                    "loss_execution_value_common_mode_ratio",
+                    "loss_execution_candidate_coverage",
+                    "loss_execution_terminal_target_cost_margin",
+                    "loss_execution_terminal_predicted_cost_margin",
+                    "loss_execution_terminal_target_preferred_fraction",
+                    "loss_execution_terminal_identity_error",
                     "bottom_controller_common_ratio",
                     "bottom_controller_private_ratio",
                     "bottom_controller_ownership_max",
@@ -482,6 +524,64 @@ class JsonlRunLogger:
                     )
                 )
         return tuple(rows)
+
+
+def validate_resume_metric_boundary(
+    output_dir: str | Path,
+    *,
+    checkpoint_epoch: int,
+    checkpoint_step: int,
+) -> None:
+    """Require an existing metric stream to end at the resumed checkpoint.
+
+    Checkpoints are committed only at epoch boundaries. A crash after an
+    epoch metric row was appended but before the checkpoint was atomically
+    replaced leaves the stream ahead of ``latest.pt``; a crash in the next
+    epoch leaves trailing train rows. Appending after either state would
+    silently duplicate or reorder measurements. Resuming into a new output
+    directory remains legal because there is no pre-existing stream to own.
+    """
+
+    path = Path(output_dir) / "metrics.jsonl"
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    last_row: object | None = None
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    last_row = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"exact resume metrics stream has invalid JSON at line {line_number}"
+                    ) from error
+    except OSError as error:
+        raise ValueError("exact resume metrics stream is unreadable") from error
+    if last_row is None:
+        return
+    if not isinstance(last_row, dict):
+        raise ValueError("exact resume metrics stream ends with a non-object row")
+    kind = last_row.get("kind")
+    epoch = last_row.get("epoch")
+    step = last_row.get("step")
+    if (
+        kind != "epoch"
+        or isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or isinstance(step, bool)
+        or not isinstance(step, int)
+    ):
+        raise ValueError(
+            "exact resume metrics stream must end with a committed epoch row"
+        )
+    if epoch != int(checkpoint_epoch) or step != int(checkpoint_step):
+        raise ValueError(
+            "exact resume metrics/checkpoint boundary differs: "
+            f"metrics=epoch{epoch}/step{step}, "
+            f"checkpoint=epoch{checkpoint_epoch}/step{checkpoint_step}"
+        )
 
 
 def tensor_scalars(values: Mapping[str, Tensor]) -> dict[str, float]:

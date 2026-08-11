@@ -23,6 +23,12 @@ def test_mainline_config_loads_one_flat_active_preset() -> None:
     assert config.dimensions.patches_per_camera == 256
     assert config.observation.grid_size == 8
     assert config.observation.flow_reference_frames == 4
+    assert config.bottom.max_dwell == 2
+    assert config.bottom.execution_warmup_steps == 200
+    assert config.bottom.execution_transition_steps == 1000
+    assert config.bottom.execution_eval_policy == "soft"
+    assert config.objectives.execution_value == 0.05
+    assert config.objectives.execution_value_huber_delta == 0.10
     assert config.data.information_uniform_fraction == 0.50
     assert config.data.information_event_fraction == 0.125
     assert config.data.information_motion_quantile == 0.70

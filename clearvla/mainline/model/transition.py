@@ -1,14 +1,27 @@
-"""Action-centred controlled transition preserved at the P-to-bottom boundary."""
+"""V120 512-row action-centred transition at the P-to-bottom boundary.
+
+The spatial transition chart is never pooled before the Evidence-MMDiT.  The
+only action-dependent value is produced by the extracted V120
+``ControlledResidualLatentDynamics`` as ``coeff(real) - coeff(zero)`` through
+one shared network.  Current object/W improvements may change the 512 source
+rows, but they cannot replace the mature V120 transition operator.
+"""
 
 from __future__ import annotations
 
-import math
+from dataclasses import replace
+from typing import cast
 
 import torch
 from torch import Tensor, nn
 
 from ..interfaces import ObservableHistory
-from .bottom import canonical_state_history
+from ..v120_core.profile import build_v120_policy_config
+from ..v120_core.trunk_primitives import (
+    ControlledResidualLatentDynamics,
+    TrunkPrimitiveConfig,
+)
+from .action_contract import canonical_state_history
 from .types import (
     ControlledTransitionState,
     FutureObjectDynamics,
@@ -18,15 +31,13 @@ from .types import (
 
 
 class ControlledTransitionDynamics(nn.Module):
-    """Low-rank W transition directions controlled by a clean action proposal.
+    """Typed W source rows feeding the exact extracted V120 transition core."""
 
-    This is the typed equivalent of the active
-    ``ControlledResidualLatentDynamics`` path.  The action-independent base is
-    fixed to zero.  Values are produced by
-    ``coeff(real proposal) - coeff(zero proposal)`` through the same network
-    and enter the bottom as
-    read-only evidence.
-    """
+    @property
+    def action_queries(self) -> nn.Parameter:
+        """Expose the mature core query bank at the typed mainline boundary."""
+
+        return self.v120_transition.action_queries
 
     def __init__(
         self,
@@ -50,77 +61,55 @@ class ControlledTransitionDynamics(nn.Module):
         self.cameras = int(cameras)
         self.horizon = int(horizon)
         self.basis = int(basis)
+        if self.cameras != 2:
+            raise ValueError("the restored V120 transition requires two camera charts")
         self.current_projection = nn.Linear(content_dim, hidden, bias=False)
         self.effect_projection = nn.Linear(content_dim, hidden, bias=False)
         self.geometry_projection = nn.Linear(7, hidden, bias=False)
         self.interval_key = nn.Parameter(
             torch.randn(1, self.intervals, 1, 1, 1, hidden) * 0.02
         )
-        # Retain one transition read per action basis.  Collapsing the full
-        # 4*C*8*8 transition chart directly to one row per horizon recreated a
-        # premature global bottleneck; keeping H*B rows preserves the same four
-        # typed action bases used by P1/P3 without sending all 512 rows through
-        # every bottom cross-attention.
-        self.pool_query = nn.Parameter(
-            torch.randn(1, self.horizon, self.basis, hidden) * 0.02
-        )
-        self.pool_key = nn.Linear(hidden, hidden, bias=False)
         self.state_projection = nn.Linear(state_dim, hidden, bias=False)
         self.action_projection = nn.Linear(action_dim, hidden, bias=False)
-        self.basis_head = nn.Sequential(
-            nn.LayerNorm(hidden),
-            nn.Linear(hidden, 2 * hidden),
-            nn.SiLU(),
-            nn.Linear(2 * hidden, rank * hidden),
+        reference_config = build_v120_policy_config()
+        core_config = replace(
+            reference_config,
+            hidden_size=self.hidden,
+            num_heads=int(heads),
+            controlled_delta_rank=self.rank,
+            latent_action_tokens=int(action_tokens),
+            # The two centered coefficient evaluations must be the same
+            # function, including stochastic semantics.  V120's generic 0.05
+            # transformer dropout made ``coeff(zero) - coeff(zero)`` non-zero
+            # during training because the two calls sampled different masks.
+            # The transition-specific dropout knob is zero in the recovered
+            # profile, so use it for the coefficient attentions as well.
+            dropout=float(dropout),
+            controlled_delta_dropout=float(dropout),
+            base_effect_hidden=min(
+                int(reference_config.base_effect_hidden),
+                max(self.hidden, 8),
+            ),
         )
-        self.action_queries = nn.Parameter(
-            torch.randn(1, int(action_tokens), hidden) * 0.02
+        core_config.validate()
+        self.v120_transition = ControlledResidualLatentDynamics(
+            cast(TrunkPrimitiveConfig, core_config)
         )
-        self.action_memory_norm = nn.LayerNorm(hidden)
-        # Real and zero-proposal counterfactuals traverse the same
-        # deterministic coefficient network.  Attention dropout here would
-        # make identical zero proposals differ; optional regularization is
-        # applied only after the centered delta has been formed.
-        self.action_cross = nn.MultiheadAttention(
-            hidden,
-            heads,
-            batch_first=True,
-            dropout=0.0,
+        # The integrated path deliberately replaces V120's learned neutral
+        # query with the same coefficient network evaluated on an explicit
+        # zero proposal.  Keep the mechanically extracted module intact, but
+        # remove the superseded neutral-only tensors from optimizer ownership.
+        # Leaving them trainable would create silent dead parameters and would
+        # make the serialized optimizer contract depend on a disabled branch.
+        self.v120_transition.neutral_queries.requires_grad_(False)
+        self.v120_transition.neutral_bias.requires_grad_(False)
+        self.v120_exact_profile = bool(
+            self.hidden == int(reference_config.hidden_size)
+            and int(heads) == int(reference_config.num_heads)
+            and self.rank == int(reference_config.controlled_delta_rank)
+            and int(action_tokens) == int(reference_config.latent_action_tokens)
+            and float(dropout) == float(reference_config.controlled_delta_dropout)
         )
-        self.transition_query_norm = nn.LayerNorm(hidden)
-        self.action_latent_norm = nn.LayerNorm(hidden)
-        self.coefficient_cross = nn.MultiheadAttention(
-            hidden,
-            heads,
-            batch_first=True,
-            dropout=0.0,
-        )
-        self.direct_action_norm = nn.LayerNorm(hidden)
-        self.direct_action_mlp = nn.Sequential(
-            nn.LayerNorm(hidden),
-            nn.Linear(hidden, hidden),
-            nn.SiLU(),
-            nn.Linear(hidden, hidden),
-        )
-        self.coefficient_head = nn.Sequential(
-            nn.LayerNorm(2 * hidden),
-            nn.Linear(2 * hidden, hidden),
-            nn.SiLU(),
-            nn.Linear(hidden, rank),
-        )
-        self.delta_dropout = nn.Dropout(dropout)
-        self.delta_gain = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
-        initialized = (
-            (self.basis_head, 3e-2),
-            (self.coefficient_head, 5e-2),
-            (self.direct_action_mlp, 5e-2),
-        )
-        for head, standard_deviation in initialized:
-            output = head[-1]
-            if not isinstance(output, nn.Linear) or output.bias is None:
-                raise TypeError("controlled-transition heads must end in biased linears")
-            nn.init.normal_(output.weight, mean=0.0, std=standard_deviation)
-            nn.init.zeros_(output.bias)
 
     def _transition_tokens(
         self,
@@ -175,95 +164,10 @@ class ControlledTransitionDynamics(nn.Module):
         )
         return transition.reshape(batch, intervals * self.cameras * int(address.shape[-2]) * int(address.shape[-1]), self.hidden)
 
-    def _pool_dense_transition(
-        self,
-        selector: Tensor,
-        value: Tensor,
-        action_coefficients: Tensor,
-        neutral_coefficients: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        query = torch.nn.functional.normalize(
-            self.pool_query.expand(int(selector.shape[0]), -1, -1, -1)
-            .reshape(int(selector.shape[0]), self.horizon * self.basis, self.hidden)
-            .float(),
-            dim=-1,
-            eps=0.25,
-        )
-        key = torch.nn.functional.normalize(
-            self.pool_key(selector).float(),
-            dim=-1,
-            eps=0.25,
-        )
-        probability = torch.softmax(
-            torch.einsum("bth,bnh->btn", query, key) / float(self.hidden) ** 0.5,
-            dim=-1,
-        )
-        pooled_selector = self.pool_query.to(
-            device=selector.device, dtype=selector.dtype
-        ).reshape(1, self.horizon * self.basis, self.hidden) + torch.einsum(
-            "btn,bnh->bth",
-            probability.to(dtype=selector.dtype),
-            selector,
-        )
-        pooled_value = torch.einsum(
-            "btn,bnh->bth",
-            probability.to(dtype=value.dtype),
-            value,
-        )
-        pooled_action = torch.einsum(
-            "btn,bnr->btr",
-            probability.to(dtype=action_coefficients.dtype),
-            action_coefficients,
-        )
-        pooled_neutral = torch.einsum(
-            "btn,bnr->btr",
-            probability.to(dtype=neutral_coefficients.dtype),
-            neutral_coefficients,
-        )
-        return pooled_selector, pooled_value, pooled_action, pooled_neutral, probability
-
     def _context_tokens(self, history: ObservableHistory) -> Tensor:
         state = self.state_projection(canonical_state_history(history))
         action = self.action_projection(history.executed_action_history)
         return torch.cat((state, action), dim=1)
-
-    def _coefficients(
-        self,
-        transition: Tensor,
-        context: Tensor,
-        *,
-        action_tokens: Tensor,
-    ) -> Tensor:
-        batch, rows = transition.shape[:2]
-        if action_tokens.ndim != 3 or int(action_tokens.shape[0]) != batch:
-            raise ValueError("controlled transition action tokens must be [B,A,H]")
-        queries = self.action_queries.expand(batch, -1, -1).to(
-            device=transition.device,
-            dtype=transition.dtype,
-        )
-        memory_source = torch.cat((context, action_tokens), dim=1)
-        direct_action = self.direct_action_mlp(
-            self.direct_action_norm(action_tokens).mean(dim=1)
-        )
-        direct = direct_action[:, None].expand(-1, rows, -1)
-        memory = self.action_memory_norm(memory_source)
-        latent_action, _ = self.action_cross(
-            queries,
-            memory,
-            memory,
-            need_weights=False,
-        )
-        query = self.transition_query_norm(transition)
-        latent = self.action_latent_norm(latent_action)
-        action_context, _ = self.coefficient_cross(
-            query,
-            latent,
-            latent,
-            need_weights=False,
-        )
-        return torch.tanh(
-            self.coefficient_head(torch.cat((query, action_context + direct), dim=-1))
-        )
 
     def forward(
         self,
@@ -276,19 +180,28 @@ class ControlledTransitionDynamics(nn.Module):
     ) -> tuple[ControlledTransitionState, dict[str, Tensor]]:
         transition = self._transition_tokens(dynamics, facts)
         context = self._context_tokens(history)
-        action_coefficients = self._coefficients(
+        batch, rows, hidden = transition.shape
+        if rows != 4 * self.cameras * 8 * 8 or hidden != self.hidden:
+            raise ValueError("the restored transition must retain all 512 spatial rows")
+
+        # Layer the proven zero-proposal improvement on the extracted V120
+        # operator: both operands use the same queries, attention and heads.
+        # This removes the old learned-neutral-query alias without replacing
+        # the mature basis/coefficient network.
+        action_coefficients, _, _ = self.v120_transition._coeff(
             transition,
             context,
             action_tokens=proposal.tokens,
+            neutral=False,
         )
-        neutral_coefficients = self._coefficients(
+        neutral_coefficients, _, _ = self.v120_transition._coeff(
             transition,
             context,
             action_tokens=torch.zeros_like(proposal.tokens),
+            neutral=False,
         )
         coefficient_delta = action_coefficients - neutral_coefficients
-        batch, rows = transition.shape[:2]
-        basis = self.basis_head(transition).reshape(
+        basis = self.v120_transition.basis_head(transition).reshape(
             batch,
             rows,
             self.rank,
@@ -296,33 +209,24 @@ class ControlledTransitionDynamics(nn.Module):
         )
         value = torch.einsum("bnr,bnrh->bnh", coefficient_delta, basis)
         value = value / float(self.rank) ** 0.5
-        value = self.delta_dropout(
+        value = self.v120_transition.delta_drop(
             value
-            * self.delta_gain.to(device=value.device, dtype=value.dtype)
-        )
-        (
-            pooled_transition,
-            pooled_value,
-            pooled_action_coefficients,
-            pooled_neutral_coefficients,
-            pool_probability,
-        ) = self._pool_dense_transition(
-            transition,
-            value,
-            action_coefficients,
-            neutral_coefficients,
+            * self.v120_transition.delta_gain.to(
+                device=value.device,
+                dtype=value.dtype,
+            )
         )
         result = ControlledTransitionState(
-            selector=pooled_transition,
-            value=pooled_value,
-            action_coefficients=pooled_action_coefficients,
-            neutral_coefficients=pooled_neutral_coefficients,
+            selector=transition,
+            value=value,
+            action_coefficients=action_coefficients,
+            neutral_coefficients=neutral_coefficients,
         )
         result.validate(hidden=self.hidden)
         if not collect_diagnostics:
             return result, {}
         return result, {
-            "controlled_transition_value_rms": pooled_value.detach()
+            "controlled_transition_value_rms": value.detach()
             .float()
             .square()
             .mean()
@@ -336,17 +240,15 @@ class ControlledTransitionDynamics(nn.Module):
             .float()
             .abs()
             .mean(),
-            "controlled_transition_delta_gain": self.delta_gain.detach().float().abs(),
+            "controlled_transition_delta_gain": self.v120_transition.delta_gain.detach()
+            .float()
+            .abs(),
             "controlled_transition_dense_rows": value.new_tensor(float(value.shape[1])),
-            "controlled_transition_pooled_rows": pooled_value.new_tensor(
-                float(pooled_value.shape[1])
+            "controlled_transition_retained_rows": value.new_tensor(float(value.shape[1])),
+            "controlled_transition_pool_removed": value.new_zeros(()),
+            "controlled_transition_v120_exact_profile": value.new_tensor(
+                float(self.v120_exact_profile)
             ),
-            "controlled_transition_pool_entropy": (
-                -(pool_probability.detach().float().clamp_min(1e-8)
-                  * pool_probability.detach().float().clamp_min(1e-8).log())
-                .sum(dim=-1)
-                / math.log(float(max(int(pool_probability.shape[-1]), 2)))
-            ).mean(),
             "controlled_transition_spatial_value_variation": value.detach()
             .float()
             .std(dim=1, unbiased=False)

@@ -49,6 +49,18 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert "clearvla/vision/image_io.py" in paths
     assert "clearvla/data/__init__.py" in paths
     assert "clearvla/vision/__init__.py" in paths
+    assert "clearvla/mainline/v120_core/time_domain_mmdit.py" in paths
+    assert "clearvla/mainline/v120_core/flow_dino_evidence.py" in paths
+    assert "clearvla/mainline/v120_core/profile.py" in paths
+    assert "clearvla/mainline/model/action_contract.py" in paths
+    assert "clearvla/mainline/model/observation_contract.py" in paths
+    # These superseded independent rewrites are retained only as source
+    # archaeology.  The formal entry point has no dependency on either one.
+    assert "clearvla/mainline/model/bottom.py" not in paths
+    assert "clearvla/mainline/model/observation.py" not in paths
+    assert "clearvla/mainline/v120_core/trunk.py" not in paths
+    assert "clearvla/mainline/v120_core/system.py" not in paths
+    assert not any("clearvla/mainline/v120_core/legacy/" in path for path in paths)
     assert not any("policy_runtime_v39.py" in path for path in paths)
     assert not any("train_v40_policy.py" in path for path in paths)
     assert not any("scripts/current_v" in path for path in paths)

@@ -11,14 +11,14 @@ evidence and reasons behind repairs live in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        19
+manifest schema:        20
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
 global object slots:    K=4 plus explicit null mass
 visual history:         DINO/raw at -8 / -4 / 0, two adjacent learned flows
 formal language:        precomputed 4096-wide T5 .pt required
-bottom:                 deterministic 3-block Evidence MMDiT + capacity/execution
+bottom:                 extracted V120 3-block Evidence MMDiT + value/execution/capacity
 long launcher:          scripts/train_mainline.sh
 smoke launcher:         scripts/smoke_mainline.sh
 resolved config:        configs/mainline/object_intent_dynamics_323.json
@@ -82,12 +82,13 @@ protected consequence + local P1 detail + S temporal/state change
 
 W dense chart + clean proposal - same-network zero proposal
     -> 512 spatial controlled-transition directions
-    -> 24 horizons x 4 action bases = 96 read-only transition tokens
+    -> 512 selector rows + 512 centered value rows retained to bottom attention
 
 one protected consequence + typed P3 lanes + transition + observable history
     -> deterministic organizer
     -> three read-only Evidence MMDiT blocks
-    -> full-width nested capacity + monotone soft continuation
+    -> V120 ordered low-rank contraction + soft/hard/neutral continuation
+    -> supervised candidate execution-value reader
     -> 18-D physical action velocity + event head + motion head
 ```
 
@@ -175,19 +176,23 @@ change targets and losses only; it cannot change a deployment action.
 12. Controlled transition first constructs all `4*2*8*8=512` spatial W
     directions.  It uses `coeff(clean proposal)-coeff(zero proposal)` through
     the same deterministic coefficient network, so a
-    neutral proposal produces exact zero value.  Pooling retains four action
-    bases per horizon (96 tokens) before bottom attention; it may not collapse
-    directly to one global token per horizon.
-13. Capacity is exact-zero, full-identity and non-expansive:
+    neutral proposal produces exact zero value.  All 512 selector and value
+    rows reach bottom attention.  Only the event auxiliary context pools them
+    into four causal milestones; that pool is not the transition value path.
+13. Capacity preserves V120's ordered contraction semantics:
 
     ```text
-    output = c*u + Q diag(g-c) Q^T u
-    c=0 -> 0
+    output = u - Q diag(1-m(c)) Q^T u
     c=1 -> u
+    reducing c closes an ordered prefix inside span(Q)
     ```
 
-    Rank 32 controls ordered anisotropy; it is not a rank-32 truncation of the
-    entire 512-wide block residual.  Execution cost remains audit-only.
+    The orthogonal complement is always retained, so `c=0` is not a block
+    no-op and rank 32 is not a truncation of the entire 512-wide residual.
+    Every intermediate contraction is non-expansive.  A true no-update
+    validation intervention selects the prefix velocity before all host
+    blocks; it must never be implemented by setting capacity to zero.
+    Execution cost remains audit-only.
 14. The protected consequence enters the bottom exactly once.  P3 optional
     lanes and controlled transition are read-only evidence.  The bottom never
     reopens RGB/DINO, reads a future teacher, or receives a second free W base.
@@ -241,8 +246,8 @@ ObjectPolicyPlanDeltaBank
   protected_base / precision / temporal / state_change
 
 ControlledTransitionState
-  selector / value                                       [B,24*4,H]
-  real / neutral coefficients                            [B,24*4,R]
+  selector / value                                       [B,4*2*8*8,H]
+  real / neutral coefficients                            [B,4*2*8*8,R]
 ```
 
 ## Provenance table
@@ -285,27 +290,26 @@ ControlledTransitionState
   diagnostic batches it also reuses the primary cache and initial noise for
   proposal-zero, bottom no-updates and bottom full-updates action ablations;
   each reports coverage, action delta and signed MSE gain versus primary.
-- A diagnostic training step currently serializes 568 finite active archival
+- A diagnostic training step currently serializes 699 finite active archival
   metrics, versus 287 parsed batch metrics in V120.  Executable coverage locks
   both that V120 observability floor and per-owner G/S/W/P/transition/bottom/
   gradient prefix floors; compact console filtering never removes the JSONL
   record, including exact-zero active paths.
-- The active gripper objective uses event/hold row balancing to address the
-  conservative-event failure seen in V120/V122.  JSONL therefore records both
-  the real event-balanced action/decoded losses and exact event-unweighted
-  `*_v120_comparable` rows.  Cross-run recovery uses the latter; the former
-  remains the quantity sent to backward.  Nineteen `loss_contrib_*` rows and a
-  separate contribution gap expose every applied objective weight exactly.
+- The formal action and decoded objectives are the exact V120 physical metric.
+  Event/hold-balanced variants remain detached audit rows so they cannot
+  silently change the action geometry while being compared as if they were
+  V120.  Nineteen `loss_contrib_*` rows and a separate contribution gap expose
+  every applied objective weight exactly.
 - Active logs cover action/flow/G/S/W/P/transition/bottom/owner-gradient
   boundaries.  Exact zero is hidden only for inactive ancestry; legal zero
   contracts, conservation errors and owner gradients remain visible.
-- V120's supervised execution-value reader was active and learned a useful
-  candidate ranking, but it depended on an expensive multi-candidate action
-  chart and did not prevent V122 capacity collapse.  The current one-graph
-  controller therefore remains directly action-gradient trained; matched-noise
-  no-update/full-update ablations and controller/capacity/basis gradients are
-  the required equivalence evidence.  Do not reintroduce execution cost into
-  the loss or restore the old candidate chart without causal failure evidence.
+- V120's supervised execution-value reader and differentiable candidate chart
+  are restored because the reference run trained them with weight `0.05` and
+  their ranking metrics improved materially.  Candidate physical predictions
+  are detached targets; only the value reader receives this auxiliary
+  gradient.  Terminal identity, target/predicted spread, margins, correlation,
+  pairwise and top-1 accuracy are logged.  This mechanism is useful but not
+  sufficient by itself; execution cost remains audit-only.
 
 ## Runtime and storage
 
@@ -343,13 +347,13 @@ Do not redirect raw HDF5 merely because cache and checkpoint roots moved.
 ## Architecture identity and inventory
 
 ```text
-schema:       19
-observation:  causal_three_frame_dino_raw_two_flow_pre_g_v5
-top:          object_intent_dynamics_323_keyed_g_local_p1_additive_p3_v14
-bottom:       typed_evidence_mmdit_dense_transition4basis_zero_proposal_fullwidth_capacity_v9
-training:     single_stage_physical_action_v120_role_lr_horizon_event_v12
-runtime:      cached_five_step_ode_lossless_semantic_logging_v11
-parameters:   171,940,734 total / 171,838,334 trainable
+schema:       20
+observation:  restored_v120_three_frame_flow_dino_raw_local_chart
+top:          global_object_intent_four_interval_dynamics_local_p1_additive_p3
+bottom:       restored_v120_evidence_mmdit_dense512_execution_value_capacity
+training:     v120_physical_flow_interval_transition_execution_value_role_lr
+runtime:      cached_five_step_teacher_isolated_exact_resume_semantic_logging
+parameters:   182,267,215 total / 167,031,918 trainable
 ```
 
 The difference from V120's total parameter count is primarily removed frozen
@@ -358,21 +362,33 @@ G1-G3/P1 hosts, proposal and controlled transition are present.
 
 ## Verification and run
 
-Local executable coverage (124 focused regressions) includes typed shape/provenance, G/P1 autograd,
+Local executable coverage (132 focused regressions) includes typed shape/provenance, G/P1 autograd,
 teacher isolation, object permutation, neutral W/P3 semantics, capacity
-zero/identity/non-expansion, two-flow history alignment, dense transition,
+identity/nested non-expansion, true prefix no-update, two-flow history alignment,
+dense transition,
 single static cache, optimizer ownership, exact resume and semantic log
 parsing.  A complete CPU BF16 forward/backward is finite; this is a dtype
 boundary check, not a CUDA memory measurement.  A fresh server smoke and
 controlled eight-epoch comparison against V120 are still required before
-claiming recovered action quality.
+claiming recovered action quality.  The strict comparison now treats runtime
+as part of recovery: batch-window median and p90 wall time may be at most
+`1.5x` and `2.0x` the same batch-eight V120 run, and the dedicated-GPU process
+peak estimate must be at most `22 GiB`.  Missing runtime or memory evidence is
+an incomplete result rather than a pass.
+
+The current integration/adaptor boundary is Pyright-clean under the repository
+configuration.  The mechanically extracted V120 core intentionally retains its
+legacy dynamic `ModuleDict`/configuration typing diagnostics; behavioral
+equivalence, source provenance and executable contracts validate that core.
+Do not rewrite its numerical path merely to make the historical implementation
+pass a modern static type checker.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 nohup bash scripts/smoke_mainline.sh > mainline_smoke.log 2>&1 &
 CUDA_VISIBLE_DEVICES=0 nohup bash scripts/train_mainline.sh > mainline.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema19_recovery_b8 \
+  runs/schema20_recovery_b8 \
   --recovery-baseline v120_long.log \
   --tail 120 --require-recovery --format text
 ```

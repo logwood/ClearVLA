@@ -102,12 +102,12 @@ a V-numbered launcher chain.  A formal result still requires all of:
 7. local BF16 memory below 8 GiB and production batch-eight below 22 GiB;
 8. a controlled eight-epoch comparison against the V120 recovery baseline.
 
-The active candidate is manifest schema `19` and contains 171,940,734 total /
-171,838,334 trainable parameters.  Its current component identities and graph
+The active candidate is manifest schema `20` and contains 182,267,215 total /
+167,031,918 trainable parameters.  Its current component identities and graph
 invariants are recorded in
 `docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
 
-Schema 19 retains the independent typed layout and the source-proven numerical
+Schema 20 retains the independent typed layout and the source-proven numerical
 repairs, while restoring or repairing the active mechanisms that the first
 extraction weakened:
 
@@ -123,21 +123,25 @@ extraction weakened:
 - ambiguous Teacher-G associations continuously fall back to the current
   object fact and zero geometry before becoming supervision, so neutral W
   rows remain learnable without fitting a diffuse future-patch average;
-- 512 dense spatial transition directions pooled to 96 typed action-basis
-  rows instead of one global row per horizon;
-- a full-width, exact-zero/identity/non-expansive capacity operator;
+- all 512 dense spatial transition selector/value rows retained to the V120
+  evidence bank; only the event auxiliary context uses four milestone pools;
+- V120's full-residual ordered rank-32 contraction: full depth is identity,
+  reduced depth is nested/non-expansive, and capacity is never misnamed as a
+  whole-block amplitude gate;
+- V120's supervised candidate execution-value reader at weight `0.05`, with
+  execution cost retained as audit-only;
 - V120 per-row horizon mass and raw-unit event semantics;
 - V120 role-specific optimizer pressure, without restoring the legacy launcher
   or allowing optimizer ownership to overlap;
 - complete semantic logging and parser support for mainline JSONL/console
   output; JSONL keeps active exact zeros losslessly while the console remains
   compact;
-- exact weighted `loss_contrib_*` accounting and separate event-balanced versus
-  V120-comparable action/decoded rows, so the gripper-event repair does not
-  corrupt cross-run train-scale comparisons;
-- matched-noise validation ablations for proposal-zero, bottom no-updates and
-  bottom full-updates on the bounded diagnostic subset, with signed utility,
-  action delta and coverage rather than a bare "path active" flag.
+- exact weighted `loss_contrib_*` accounting; the formal action/decoded loss is
+  V120-exact while event-balanced alternatives are explicit detached audits;
+- matched-noise validation ablations for proposal-zero, a true pre-block
+  prefix no-update, and bottom full-update on the bounded diagnostic subset,
+  with signed utility, action delta and coverage rather than a bare "path
+  active" flag.
 
 The lower total parameter count relative to the old monolith is removed frozen
 ancestry, not a deleted active G/P/bottom path.  The three Evidence MMDiT
@@ -157,12 +161,12 @@ Run those two stages from a fresh output directory:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema19_recovery_smoke \
+OUT_DIR=runs/schema20_recovery_smoke \
 MAINLINE_BATCH_SIZE=1 \
 bash scripts/smoke_mainline.sh
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema19_recovery_b8 \
+OUT_DIR=runs/schema20_recovery_b8 \
 MAINLINE_BATCH_SIZE=8 \
 bash scripts/train_mainline.sh
 ```
@@ -172,7 +176,7 @@ single best RMSE:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema19_recovery_b8 \
+  runs/schema20_recovery_b8 \
   --recovery-baseline v120_long.log \
   --tail 120 \
   --require-recovery \
@@ -184,8 +188,16 @@ Passing the run directory loads both `metrics.jsonl` and
 all eight epochs, V120-sized metric coverage, final and eight-epoch mean
 action/horizon/arm/gripper/event behavior, train-tail scales, G/S/W/P owner
 health, owner gradients and matched-noise proposal/execution ablations.  It
-returns exit code `3` for either a demonstrated regression or missing proof;
-one improved RMSE cannot pass the gate by itself.
+also compares wall-time batch-window median/p90 against the same batch-eight
+V120 log (limits `1.5x`/`2.0x`) and requires the dedicated-GPU process peak
+estimate to remain at or below `22 GiB`.  The estimate is PyTorch's exact peak
+reservation plus the visible non-PyTorch CUDA-context occupancy; another
+process on the GPU therefore makes this conservative and invalidates a clean
+performance comparison.  `[mainline-train-performance]` and
+`[mainline-runtime]` preserve these values in copied console logs, while the
+JSONL remains authoritative.  The command returns exit code `3` for either a
+demonstrated regression or missing proof; one improved RMSE cannot pass the
+gate by itself.
 
 ## Frozen-mainline early-loss comparison
 

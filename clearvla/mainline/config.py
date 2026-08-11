@@ -240,6 +240,10 @@ class BottomConfig:
     controller_tokens: int = 8
     controller_depth: int = 2
     controller_heads: int = 8
+    max_dwell: int = 2
+    execution_warmup_steps: int = 200
+    execution_transition_steps: int = 1000
+    execution_eval_policy: str = "soft"
     initial_exit_probability: float = 0.10
     controlled_delta_rank: int = 8
     controlled_action_tokens: int = 8
@@ -258,12 +262,20 @@ class BottomConfig:
             self.controller_tokens,
             self.controller_depth,
             self.controller_heads,
+            self.max_dwell,
+            self.execution_transition_steps,
             self.controlled_delta_rank,
             self.controlled_action_tokens,
             self.gripper_field_dim,
         )
         if any(int(value) <= 0 for value in integer_fields):
             raise ValueError("bottom dimensions must be positive")
+        if self.execution_warmup_steps < 0:
+            raise ValueError("bottom execution warmup cannot be negative")
+        if self.max_dwell != 2 or self.execution_eval_policy != "soft":
+            raise ValueError("the recovered V120 execution contract is dwell=2/eval=soft")
+        if self.execution_warmup_steps != 200 or self.execution_transition_steps != 1000:
+            raise ValueError("the recovered V120 execution schedule is warmup=200/transition=1000")
         if self.operator_rank % self.operator_groups:
             raise ValueError("operator rank must be divisible by groups")
         if (
@@ -308,6 +320,10 @@ class ObjectiveConfig:
     decoded_action: float = 0.08
     smooth_delta: float = 0.02
     physical_delta_consistency: float = 0.03
+    # V120 trains the candidate value reader; execution cost itself is audit
+    # only and therefore has no weight here.
+    execution_value: float = 0.05
+    execution_value_huber_delta: float = 0.10
     event_positive_weight: float = 4.0
     event_focal_gamma: float = 1.0
     gripper_event_threshold: float = 0.10
@@ -327,6 +343,8 @@ class ObjectiveConfig:
             raise ValueError("the resolved event/motion thresholds are 0.10 raw and 0.02 normalized")
         if self.horizon_tail_emphasis != 0.20 or self.horizon_first_step_protection != 0.05:
             raise ValueError("the resolved anchor-band emphasis is tail=0.20 and first=0.05")
+        if self.execution_value != 0.05 or self.execution_value_huber_delta != 0.10:
+            raise ValueError("the recovered V120 execution-value contract is weight=.05 beta=.10")
 
 
 @dataclass(frozen=True)

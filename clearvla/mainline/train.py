@@ -33,6 +33,7 @@ from .runtime.logging import (
     JsonlRunLogger,
     active_metrics,
     archival_metrics,
+    validate_resume_metric_boundary,
 )
 from .runtime.numerics import resolve_compute_dtype
 from .runtime.sampling import sample_cached_action
@@ -147,11 +148,25 @@ def _cuda_memory_metrics(device: torch.device) -> dict[str, float]:
         return {}
     index = device.index if device.index is not None else torch.cuda.current_device()
     gib = float(1024**3)
+    allocated = torch.cuda.memory_allocated(index) / gib
+    reserved = torch.cuda.memory_reserved(index) / gib
+    peak_allocated = torch.cuda.max_memory_allocated(index) / gib
+    peak_reserved = torch.cuda.max_memory_reserved(index) / gib
+    free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+    device_used = (total_bytes - free_bytes) / gib
+    # On the dedicated experiment GPU this is a conservative process peak:
+    # PyTorch's exact peak reservation plus the currently visible CUDA context
+    # overhead.  If another process occupies the device it deliberately grows
+    # and the production-memory gate refuses to claim a controlled result.
+    non_pytorch_context = max(device_used - reserved, 0.0)
     return {
-        "runtime_cuda_allocated_gib": torch.cuda.memory_allocated(index) / gib,
-        "runtime_cuda_reserved_gib": torch.cuda.memory_reserved(index) / gib,
-        "runtime_cuda_peak_allocated_gib": torch.cuda.max_memory_allocated(index) / gib,
-        "runtime_cuda_peak_reserved_gib": torch.cuda.max_memory_reserved(index) / gib,
+        "runtime_cuda_allocated_gib": allocated,
+        "runtime_cuda_reserved_gib": reserved,
+        "runtime_cuda_peak_allocated_gib": peak_allocated,
+        "runtime_cuda_peak_reserved_gib": peak_reserved,
+        "runtime_cuda_device_used_gib": device_used,
+        "runtime_cuda_non_pytorch_context_estimate_gib": non_pytorch_context,
+        "runtime_cuda_peak_process_estimate_gib": peak_reserved + non_pytorch_context,
     }
 
 
@@ -556,6 +571,11 @@ def main() -> None:
         start_epoch = restored.epoch + 1
         engine.global_step = restored.global_step
         best_metric = restored.best_metric
+        validate_resume_metric_boundary(
+            output_dir,
+            checkpoint_epoch=restored.epoch,
+            checkpoint_step=restored.global_step,
+        )
     elif args.migrate_bottom is not None:
         report = migrate_bottom_only(args.migrate_bottom, model, identity=identity)
         print(
@@ -706,7 +726,6 @@ def main() -> None:
         train_values["runtime_epoch_seconds"] = epoch_seconds
         train_values["runtime_seconds_per_batch"] = epoch_seconds / max(epoch_batches, 1)
         train_values["runtime_samples_per_second"] = epoch_samples / max(epoch_seconds, 1e-8)
-        train_values.update(_cuda_memory_metrics(device))
         validation = archival_metrics(
             _validate(
                 engine=engine,
@@ -717,12 +736,23 @@ def main() -> None:
                 dtype=dtype,
             )
         )
+        # Capture the peak after validation as well: a production memory claim
+        # covers the complete train/eval epoch, not only the backward path.
+        train_values.update(_cuda_memory_metrics(device))
         logger.write(
             "epoch",
             epoch=epoch,
             step=engine.global_step,
             train=train_values,
             validation=validation,
+        )
+        runtime_values = {
+            name: value for name, value in train_values.items() if name.startswith("runtime_")
+        }
+        print(
+            f"[mainline-runtime] epoch={epoch:03d} step={engine.global_step} "
+            + " ".join(f"{name}={value:.6g}" for name, value in runtime_values.items()),
+            flush=True,
         )
         print(
             logger.compact_line(

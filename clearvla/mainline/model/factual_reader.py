@@ -15,7 +15,7 @@ import math
 import torch
 from torch import Tensor, nn
 
-from .observation import ObservationEvidence, _sample_feature_chart
+from .observation_contract import ObservationEvidence, _sample_feature_chart
 from .role_hosts import StaticP1RoleHost
 from .routing import smooth_rms_contract, variance_floored_centered_norm
 from .types import (
@@ -325,9 +325,15 @@ class ObjectFactualReader(nn.Module):
         object_score = torch.einsum("btqh,btqkh->btqk", object_query, object_key)
         object_score = object_score / math.sqrt(float(self.hidden))
         physical = facts.validity[..., 0].float().clamp(0.0, 1.0)
-        existence = facts.existence[..., 0].float().clamp(1e-6, 1.0)
         local_available = local_valid.flatten(2).any(dim=-1).float()
-        object_prior = physical * existence * local_available
+        # ``existence`` is a read-conditioned confidence derived from the same
+        # K+null competition, not an independently observed fact.  Multiplying
+        # it into P1 made G's global common mode attenuate the only protected
+        # factual path a second time (V120 logs ranged from existence 0.23 to
+        # 0.63 while physical validity stayed exactly 1).  P1 may mask only a
+        # physically invalid object or one with no local support; object/null
+        # confidence is recomputed here from the query-specific content score.
+        object_prior = physical * local_available
         object_logit = object_score.float() + torch.where(
             object_prior[:, None, None] > 0,
             object_prior[:, None, None].clamp_min(1e-30).log(),
@@ -379,6 +385,9 @@ class ObjectFactualReader(nn.Module):
             "p1_local_content_rms": object_base.detach().float().square().mean().sqrt(),
             "p1_detail_rms": selected_detail.detach().float().square().mean().sqrt(),
             "p1_fact_rms": aggregate.detach().float().square().mean().sqrt(),
+            "p1_existence_is_diagnostic_only": aggregate.new_ones(
+                (), dtype=torch.float32
+            ),
         }
 
 

@@ -325,6 +325,11 @@ class MainlineTrainingEngine:
         collect_diagnostics: bool = False,
     ) -> TrainStepResult:
         self.model.train()
+        # V120 intentionally keeps the execution controller and ordered
+        # capacity bank out of the task graph for 200 steps, then opens them
+        # continuously over 1000 steps.  Omitting this call left the recovered
+        # mainline permanently at the warm-up identity boundary.
+        self.model.set_training_step(self.global_step)
         self.optimizer.zero_grad(set_to_none=True)
         with _autocast(self.device, self.dtype):
             ledger, metrics = self._forward(
@@ -393,7 +398,13 @@ class MainlineTrainingEngine:
         return TrainStepResult(
             loss=ledger.total.detach().float(),
             gradient_norm=ledger.total.new_zeros((), dtype=torch.float32),
-            learning_rate=float(self.optimizer.param_groups[0]["lr"]),
+            # Optimizer group zero is alphabetic, not the public/base role.
+            # Report the same base schedule semantic as train_step instead of
+            # whichever role-specific LR happens to sort first.
+            learning_rate=float(
+                self.config.optimizer.learning_rate
+                * self.schedule.ratio(self.schedule.step_index)
+            ),
             metrics=self._tensor_metrics(ledger, metrics),
         )
 

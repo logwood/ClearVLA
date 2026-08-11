@@ -108,6 +108,17 @@ def _complete_recovery_summary(label: str) -> dict[str, Any]:
             for name in structure_names
         },
         "gradients": {name: {"tail_median": 0.01} for name in gradient_names},
+        "performance": {
+            "seconds_per_batch": {
+                "count": 100,
+                "source": "legacy-window",
+                "median": 2.0,
+                "p90": 2.4,
+                "minimum": 1.8,
+                "maximum": 2.8,
+            },
+            "cuda_peak_process_estimate_gib": 10.0,
+        },
     }
 
 
@@ -1072,6 +1083,10 @@ class AuditPolicyLogsTest(unittest.TestCase):
                                 "loss_action_gripper_flow_unweighted": 0.31,
                                 "loss_decoded_action": 0.20,
                                 "loss_decoded_action_v120_comparable": 0.15,
+                                "loss_execution_value": 0.07,
+                                "loss_execution_value_target_spread": 0.11,
+                                "loss_execution_value_predicted_spread": 0.09,
+                                "loss_execution_terminal_target_cost_margin": -0.03,
                                 "object_grounding_reconstruction_mse": 0.12,
                                 "object_intent_interval_variation": 0.08,
                                 "object_w2_object_pair_cosine": 0.6,
@@ -1115,6 +1130,24 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(run.batch_points[0].metrics["decoded_action"], 0.15)
         self.assertEqual(
             run.batch_points[0].metrics["decoded_action_event_balanced"], 0.20
+        )
+        self.assertEqual(
+            run.batch_points[0].metrics[
+                "evidence_mmd_it_execution_value_loss"
+            ],
+            0.07,
+        )
+        self.assertEqual(
+            run.batch_points[0].metrics[
+                "evidence_mmd_it_execution_value_predicted_spread"
+            ],
+            0.09,
+        )
+        self.assertEqual(
+            run.batch_points[0].metrics[
+                "evidence_mmd_it_terminal_target_cost_margin"
+            ],
+            -0.03,
         )
         self.assertEqual(len(run.epoch_records), 1)
         self.assertEqual(run.epoch_records[0]["validation"]["full_rmse"], 0.081)
@@ -1170,7 +1203,14 @@ class AuditPolicyLogsTest(unittest.TestCase):
                     "kind": "epoch",
                     "epoch": 1,
                     "step": 100,
-                    "train": {"loss_total": 0.9},
+                    "train": {
+                        "loss_total": 0.9,
+                        "runtime_seconds_per_batch": 1.25,
+                        "runtime_samples_per_second": 6.4,
+                        "runtime_cuda_peak_allocated_gib": 8.0,
+                        "runtime_cuda_peak_reserved_gib": 9.0,
+                        "runtime_cuda_peak_process_estimate_gib": 9.8,
+                    },
                     "validation": {"validation_action_rmse_physical": 0.08},
                 }
             ),
@@ -1223,6 +1263,39 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(manifest["rank"], 32)
         self.assertEqual(manifest["groups"], 32)
         self.assertEqual(manifest["warmup"], 500)
+        self.assertEqual(summary["performance"]["seconds_per_batch"]["median"], 1.25)
+        self.assertEqual(summary["performance"]["cuda_peak_reserved_gib"], 9.0)
+        self.assertEqual(
+            summary["performance"]["cuda_peak_process_estimate_gib"],
+            9.8,
+        )
+
+    def test_mainline_console_runtime_rows_remain_auditable(self) -> None:
+        log = _write(
+            self.tmp_path / "mainline_runtime.log",
+            "\n".join(
+                (
+                    "[mainline] capability=object_intent_dynamics_323 batch=8",
+                    "[mainline-train] epoch=001 batch=0020 step=20 loss_total=1",
+                    "[mainline-train-performance] epoch=001 batch=0020 step=20 "
+                    "runtime_window_seconds_per_batch=1.2 "
+                    "runtime_window_samples_per_second=6.66667",
+                    "[mainline-runtime] epoch=001 step=100 "
+                    "runtime_seconds_per_batch=1.3 "
+                    "runtime_cuda_peak_reserved_gib=9.1 "
+                    "runtime_cuda_peak_process_estimate_gib=9.8",
+                    "[mainline-val] epoch=001 step=100 validation_action_rmse_physical=0.1",
+                )
+            ),
+        )
+        summary = build_summary(parse_log(log))
+        self.assertEqual(summary["performance"]["seconds_per_batch"]["source"], "window")
+        self.assertEqual(summary["performance"]["seconds_per_batch"]["median"], 1.2)
+        self.assertEqual(summary["performance"]["cuda_peak_reserved_gib"], 9.1)
+        self.assertEqual(
+            summary["performance"]["cuda_peak_process_estimate_gib"],
+            9.8,
+        )
 
     def test_v120_recovery_assessment_requires_complete_behavior_not_one_rmse(self) -> None:
         baseline = _complete_recovery_summary("v120")
@@ -1261,6 +1334,31 @@ class AuditPolicyLogsTest(unittest.TestCase):
             "gradient/gradient_postclip_bottom_capacity_l2",
             failed,
         )
+
+    def test_v120_recovery_assessment_enforces_runtime_and_memory_envelope(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "candidate"
+        candidate["performance"]["seconds_per_batch"]["median"] = 3.01
+        candidate["performance"]["seconds_per_batch"]["p90"] = 4.81
+        candidate["performance"]["cuda_peak_process_estimate_gib"] = 22.01
+        assessment = _recovery_assessment(baseline, candidate)
+        failed = {
+            item["name"] for item in assessment["checks"] if item["status"] == "fail"
+        }
+        self.assertIn("performance/seconds_per_batch_median", failed)
+        self.assertIn("performance/seconds_per_batch_p90", failed)
+        self.assertIn("performance/cuda_peak_process_gib", failed)
+
+        candidate = deepcopy(baseline)
+        candidate["performance"]["cuda_peak_process_estimate_gib"] = None
+        assessment = _recovery_assessment(baseline, candidate)
+        incomplete = {
+            item["name"]
+            for item in assessment["checks"]
+            if item["status"] == "incomplete"
+        }
+        self.assertIn("performance/cuda_peak_process_gib", incomplete)
 
 
 if __name__ == "__main__":

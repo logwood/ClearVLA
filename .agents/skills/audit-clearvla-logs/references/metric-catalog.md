@@ -826,20 +826,20 @@ Known compatibility aliases require care: historical `future_latent` and `action
   effect zero/shuffle chain. Local BF16 gradients, nonzero W loss improvement
   or a changed P2 boundary do not by themselves prove deployed-action utility.
 
-## Independent mainline schema 19
+## Independent mainline schema 20
 
 The current capability-named package is selected by the serialized
 `ArchitectureManifest` and lives under `clearvla/mainline/`.  Its archival
-record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-epoch-*]` and
-`[mainline-validation-*]` are console projections of that record.
+record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
+`[mainline-runtime]` are console projections of that record.
 
-- The audit utility's text report must project active schema-19 G/S/W/P,
+- The audit utility's text report must project active schema-20 G/S/W/P,
   teacher, transition, bottom and per-owner gradient tails, plus normalized,
   physical and three-band validation values.  `metric_index` remains the
   lossless machine-readable inventory; a sparse text projection must not be
   interpreted as a sparse training log.
 
-- Treat an absent active metric differently from an exact zero.  Schema 19's
+- Treat an absent active metric differently from an exact zero.  Schema 20's
   JSONL retains every active zero so a collapsed W/P2/flow/owner path remains
   auditable; the compact console may omit ordinary zeros.  Prefer JSONL for
   observability and always-zero conclusions.
@@ -851,14 +851,12 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-epoch-*]` and
   action, arm/gripper, event/hold rows and the exact horizon mass.  The
   V120-compatible per-row weighting gives the unequal-length bands different
   total mass; do not reinterpret this as equal-band weighting.
-- Schema 19 deliberately balances gripper event/hold rows in the active action
-  and decoded objectives.  `loss_action_flow_v120_comparable`,
-  `loss_action_gripper_flow_unweighted`, and
-  `loss_decoded_action_v120_comparable` remove only that new row weighting and
-  are the valid train-scale comparison with V120.  The audit parser maps these
-  to historical `physical_flow`, `gripper_fm_field`, and `decoded_action`, while
-  retaining the real backward quantities under explicit `*_event_balanced`
-  aliases.  Never compare the balanced objective directly to V120 pflow.
+- Schema 20 restores the exact V120 physical action and decoded objectives.
+  Event/hold-balanced variants are detached audit rows only.  The audit parser
+  maps the formal quantities to historical `physical_flow`,
+  `gripper_fm_field`, and `decoded_action`, while retaining balanced gauges
+  under explicit `*_event_balanced_audit` aliases.  Never report an audit row
+  as a contribution sent to backward.
 - `loss_contrib_*` rows are the exact weighted components sent to backward;
   `loss_contribution_gap` must close independently of the group-level
   `loss_ledger_gap`.
@@ -882,21 +880,21 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-epoch-*]` and
   the global-K boundary.  P2 reports bounded semantic/geometry/intent/
   coordinate scores, temperatures, posterior mass and null mass.  P3 reports
   factual/temporal bases separately from consequence interactions.
-- `controlled_transition_dense_rows=512` and `pooled_rows=96` describe the
-  active spatial-to-action-basis transition.  A zero proposal must give exact
-  zero centered coefficients/value.
+- `controlled_transition_dense_rows=512` describes the active
+  spatial-to-bottom transition.  All 512 selector rows and all 512 centered
+  value rows reach Evidence MMDiT; any 96-row pooling belongs only to the
+  auxiliary event context.  A zero proposal must give exact-zero centered
+  coefficients/value.
 - Capacity is a full-width non-expansive contraction.  Read capacity,
   effective basis mass, contraction ratio and non-expansive violation with
   post-clip capacity/bottom gradients; effective basis mass is not hardware
   rank or measured compute reduction.
-- V120's `execution_value_*` family was an active supervised ranking of an
-  expensive differentiable candidate chart, not execution cost.  The schema-19
-  one-graph controller deliberately has no direct same-name value reader; its
-  required equivalence evidence is matched-noise learned/no-update/full-update
-  action error plus controller/capacity/basis gradients and per-block update
-  RMS.  Do not report the old metric as "missing by accident", but treat a
-  forced mode beating learned or persistent capacity-gradient zero as evidence
-  that a lightweight prefix-value calibration may be needed.
+- V120's `execution_value_*` family is restored in schema 20 as active
+  supervised ranking of the differentiable candidate chart; it is not
+  execution cost.  Read target/predicted spread, terminal margins,
+  correlation, pairwise/top-1 accuracy and candidate coverage together with
+  matched-noise learned/no-update/full-update action error and controller,
+  capacity and basis gradients.  Execution cost remains audit-only.
 - Flow diagnostics include both observable pairs (`-8->-4`, `-4->0`), literal
   RGB zero-warp baselines, moving/static gains and flow acceleration.  Never
   infer useful spatial addressing from flow magnitude alone.
@@ -920,13 +918,21 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-epoch-*]` and
 - A performance recovery claim requires every completed epoch and the same
   data/seed/batch/action-normalizer contract as V120.  Shape tests, early loss,
   nonzero gradients and one best checkpoint are insufficient.
+- Runtime is part of that claim.  Schema 20 archives
+  `runtime_window_seconds_per_batch`, `runtime_seconds_per_batch`, throughput,
+  PyTorch allocated/reserved peaks and a dedicated-GPU process peak estimate.
+  The estimate adds exact peak reservation to visible non-PyTorch context
+  occupancy; GPU contention therefore makes it conservative.  The strict gate
+  allows at most `1.5x` V120 median and `2.0x` V120 p90 batch wall time and an
+  absolute process estimate of `22 GiB`.  These are audit/release limits, not
+  losses, gates inside the model or claims of compute-rank reduction.
 - For the formal recovery decision, pass the run directory (not only a copied
   nohup file) to `audit_policy_logs --recovery-baseline v120_long.log
   --require-recovery`.  Directory mode reads `metrics.jsonl` together with
   `run_context.json`; exit code `3` means either a failed V120 threshold or
   missing evidence.  The gate requires both the final value and the complete
   eight-epoch mean for core validation metrics, plus active structure,
-  gradient and matched-noise causal-ablation evidence.
+  gradient, matched-noise causal-ablation, throughput and CUDA-memory evidence.
 - V120 emitted a 12-character MD5 after rounding normalizer statistics to six
   decimals.  Schema 19 therefore serializes both the exact V120-compatible
   fingerprint used for cross-run comparison and the full SHA-256 used for

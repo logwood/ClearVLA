@@ -30,6 +30,13 @@ UNHANDLED_EXCEPTION_RE = re.compile(
 )
 COMPACT_POLICY_VERSIONS = tuple(range(94, 123))
 
+# A recovery run is allowed moderate implementation overhead, but cannot hide
+# the four-times-slower regressions that motivated the independent mainline.
+# These are release gates, not optimization losses or model-side constraints.
+RECOVERY_MEDIAN_SECONDS_RATIO_MAX = 1.5
+RECOVERY_P90_SECONDS_RATIO_MAX = 2.0
+RECOVERY_CUDA_PROCESS_GIB_MAX = 22.0
+
 
 def _compact_prefixes(family: str) -> tuple[str, ...]:
     return tuple(f"[v{version}-{family}]" for version in COMPACT_POLICY_VERSIONS)
@@ -1251,6 +1258,7 @@ class ParsedRun:
     init_counts: dict[str, int] = field(default_factory=dict)
     batch_points: list[BatchPoint] = field(default_factory=list)
     epoch_records: list[dict[str, Any]] = field(default_factory=list)
+    runtime_points: list[dict[str, float]] = field(default_factory=list)
     malformed_json: int = 0
     unclosed_json: int = 0
     traceback_count: int = 0
@@ -1276,6 +1284,19 @@ def _median(values: Iterable[float]) -> float | None:
 def _mean(values: Iterable[float]) -> float | None:
     finite = [value for value in values if math.isfinite(value)]
     return statistics.fmean(finite) if finite else None
+
+
+def _percentile(values: Iterable[float], quantile: float) -> float | None:
+    finite = sorted(value for value in values if math.isfinite(value))
+    if not finite:
+        return None
+    position = min(max(float(quantile), 0.0), 1.0) * (len(finite) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return finite[lower]
+    fraction = position - lower
+    return finite[lower] * (1.0 - fraction) + finite[upper] * fraction
 
 
 def _relative_change(first: float | None, last: float | None) -> float | None:
@@ -1487,14 +1508,19 @@ def _parse_v120_dynamics_error(line: str) -> dict[str, float]:
 
 _MAINLINE_ALIASES: dict[str, str] = {
     "loss_total": "loss",
-    "loss_action_flow": "physical_flow_event_balanced",
+    "loss_action_flow": "physical_flow",
     "loss_action_flow_v120_comparable": "physical_flow",
+    "loss_action_flow_event_balanced_audit": "physical_flow_event_balanced",
     "loss_action_flow_native": "physical_flow_native",
     "loss_action_arm_flow": "arm_fm_per_dim",
-    "loss_action_gripper_flow": "gripper_fm_field_event_balanced",
+    "loss_action_gripper_flow": "gripper_fm_field",
+    "loss_action_gripper_flow_event_balanced_audit": (
+        "gripper_fm_field_event_balanced"
+    ),
     "loss_action_gripper_flow_unweighted": "gripper_fm_field",
-    "loss_decoded_action": "decoded_action_event_balanced",
+    "loss_decoded_action": "decoded_action",
     "loss_decoded_action_v120_comparable": "decoded_action",
+    "loss_decoded_action_event_balanced_audit": "decoded_action_event_balanced",
     "loss_future_successor": "flow_jepa_future_prediction",
     "loss_future_semantic_delta": "flow_jepa_future_change",
     "loss_flow_warp": "flow_jepa_warp_loss",
@@ -1504,6 +1530,52 @@ _MAINLINE_ALIASES: dict[str, str] = {
     "bottom_capacity_mean": "evidence_mmd_it_capacity_ratio",
     "bottom_expected_depth": "evidence_mmd_it_effective_depth",
     "bottom_execution_cost_audit": "evidence_mmd_it_execution_cost",
+    "loss_execution_value": "evidence_mmd_it_execution_value_loss",
+    "loss_execution_value_target_spread": (
+        "evidence_mmd_it_execution_value_target_spread"
+    ),
+    "loss_execution_value_predicted_spread": (
+        "evidence_mmd_it_execution_value_predicted_spread"
+    ),
+    "loss_execution_value_predicted_standardized_spread": (
+        "evidence_mmd_it_execution_value_predicted_standardized_spread"
+    ),
+    "loss_execution_value_target_spread_p25": (
+        "evidence_mmd_it_execution_value_target_spread_p25"
+    ),
+    "loss_execution_value_target_spread_p50": (
+        "evidence_mmd_it_execution_value_target_spread_p50"
+    ),
+    "loss_execution_value_target_spread_p75": (
+        "evidence_mmd_it_execution_value_target_spread_p75"
+    ),
+    "loss_execution_value_correlation": (
+        "evidence_mmd_it_execution_value_correlation"
+    ),
+    "loss_execution_value_pairwise_accuracy": (
+        "evidence_mmd_it_execution_value_pairwise_accuracy"
+    ),
+    "loss_execution_value_decision_accuracy": (
+        "evidence_mmd_it_execution_value_decision_accuracy"
+    ),
+    "loss_execution_value_common_mode_ratio": (
+        "evidence_mmd_it_execution_value_common_mode_ratio"
+    ),
+    "loss_execution_candidate_coverage": (
+        "evidence_mmd_it_execution_candidate_coverage"
+    ),
+    "loss_execution_terminal_identity_error": (
+        "evidence_mmd_it_terminal_identity_velocity_error"
+    ),
+    "loss_execution_terminal_target_cost_margin": (
+        "evidence_mmd_it_terminal_target_cost_margin"
+    ),
+    "loss_execution_terminal_predicted_cost_margin": (
+        "evidence_mmd_it_terminal_predicted_cost_margin"
+    ),
+    "loss_execution_terminal_target_preferred_fraction": (
+        "evidence_mmd_it_terminal_target_preferred_fraction"
+    ),
 }
 
 
@@ -1518,6 +1590,49 @@ def _canonicalize_mainline_metrics(values: Mapping[str, Any]) -> dict[str, float
     for source, target in _MAINLINE_ALIASES.items():
         if source in metrics:
             metrics.setdefault(target, metrics[source])
+
+    # Schema 19 trained the event-balanced rows and carried the V120 rows as
+    # explicit comparables. Schema 20 restored the V120 rows as the formal
+    # objective. Prefer the semantic comparable whenever it is present, while
+    # retaining the older formal row under its event-balanced audit name.
+    if "loss_action_flow_v120_comparable" in metrics:
+        metrics["physical_flow"] = metrics["loss_action_flow_v120_comparable"]
+        metrics.setdefault(
+            "physical_flow_event_balanced",
+            metrics.get(
+                "loss_action_flow_event_balanced_audit",
+                metrics.get(
+                    "loss_action_flow",
+                    metrics["loss_action_flow_v120_comparable"],
+                ),
+            ),
+        )
+    if "loss_decoded_action_v120_comparable" in metrics:
+        metrics["decoded_action"] = metrics["loss_decoded_action_v120_comparable"]
+        metrics.setdefault(
+            "decoded_action_event_balanced",
+            metrics.get(
+                "loss_decoded_action_event_balanced_audit",
+                metrics.get(
+                    "loss_decoded_action",
+                    metrics["loss_decoded_action_v120_comparable"],
+                ),
+            ),
+        )
+    if "loss_action_gripper_flow_unweighted" in metrics:
+        metrics["gripper_fm_field"] = metrics[
+            "loss_action_gripper_flow_unweighted"
+        ]
+        metrics.setdefault(
+            "gripper_fm_field_event_balanced",
+            metrics.get(
+                "loss_action_gripper_flow_event_balanced_audit",
+                metrics.get(
+                    "loss_action_gripper_flow",
+                    metrics["loss_action_gripper_flow_unweighted"],
+                ),
+            ),
+        )
 
     # Pre-schema-19-recovery mainline logs did not serialize the separate
     # V120-comparable event-unweighted rows.  Preserve their historical parser
@@ -1719,6 +1834,9 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                     )
                 else:
                     _ingest_json(run, payload)
+                continue
+            if line.startswith(("[mainline-runtime]", "[mainline-memory]")):
+                run.runtime_points.append(_parse_mainline_tokens(line))
                 continue
             if line.startswith("[mainline-train]"):
                 flush_v94()
@@ -2697,6 +2815,79 @@ def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[F
     return findings
 
 
+def _performance_summary(run: ParsedRun) -> dict[str, Any]:
+    """Summarize wall-time and CUDA evidence without conflating their sources.
+
+    Mainline JSONL supplies per-window wall time and per-epoch CUDA peaks.  A
+    captured console supplies the same data through explicit runtime rows.
+    Historical V120 logs expose ``seconds_per_batch`` on their gradient rows.
+    The priority below therefore preserves like-for-like window measurements
+    when available and falls back to epoch wall time only when necessary.
+    """
+
+    def epoch_values(name: str) -> list[float]:
+        values: list[float] = []
+        for record in run.epoch_records:
+            for section in (_train_section(record), _val_section(record)):
+                value = section.get(name)
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    values.append(float(value))
+        return values
+
+    def runtime_values(name: str) -> list[float]:
+        values: list[float] = []
+        for point in run.runtime_points:
+            value = point.get(name)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                values.append(float(value))
+        return values
+
+    def distribution(values: Sequence[float], *, source: str) -> dict[str, Any]:
+        return {
+            "count": len(values),
+            "source": source,
+            "median": _median(values),
+            "p90": _percentile(values, 0.90),
+            "minimum": min(values) if values else None,
+            "maximum": max(values) if values else None,
+        }
+
+    seconds_sources = (
+        ("window", _series(run, "runtime_window_seconds_per_batch")),
+        ("legacy-window", _series(run, "seconds_per_batch")),
+        ("console-epoch", runtime_values("runtime_seconds_per_batch")),
+        ("epoch", epoch_values("runtime_seconds_per_batch")),
+    )
+    seconds_source, seconds_values = next(
+        ((source, values) for source, values in seconds_sources if values),
+        ("missing", []),
+    )
+    sample_sources = (
+        ("window", _series(run, "runtime_window_samples_per_second")),
+        ("console-epoch", runtime_values("runtime_samples_per_second")),
+        ("epoch", epoch_values("runtime_samples_per_second")),
+    )
+    sample_source, sample_values = next(
+        ((source, values) for source, values in sample_sources if values),
+        ("missing", []),
+    )
+
+    def peak(name: str) -> float | None:
+        values = runtime_values(name) + epoch_values(name)
+        return max(values) if values else None
+
+    return {
+        "seconds_per_batch": distribution(seconds_values, source=seconds_source),
+        "samples_per_second": distribution(sample_values, source=sample_source),
+        "cuda_peak_allocated_gib": peak("runtime_cuda_peak_allocated_gib"),
+        "cuda_peak_reserved_gib": peak("runtime_cuda_peak_reserved_gib"),
+        "cuda_device_used_gib": peak("runtime_cuda_device_used_gib"),
+        "cuda_peak_process_estimate_gib": peak(
+            "runtime_cuda_peak_process_estimate_gib"
+        ),
+    }
+
+
 def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
     observability = _observability(run)
     findings = _health_findings(run, observability)
@@ -2827,6 +3018,7 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
         "trajectories": trajectories,
         "structure": structure,
         "gradients": gradients,
+        "performance": _performance_summary(run),
         "metric_index": metric_index,
         "epochs": epochs,
         "latest_epoch_metrics": (
@@ -2851,6 +3043,22 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
         f"batch_rows={coverage['batch_rows']} epoch_records={coverage['epoch_records']} "
         f"range={coverage['batch_range']}",
     ]
+    performance = summary.get("performance", {})
+    seconds = performance.get("seconds_per_batch", {})
+    if seconds.get("median") is not None:
+        lines.append(
+            "performance: "
+            f"seconds_per_batch median={_format_number(seconds.get('median'), 3)} "
+            f"p90={_format_number(seconds.get('p90'), 3)} "
+            f"source={seconds.get('source')} count={seconds.get('count')}"
+        )
+    process_peak = performance.get("cuda_peak_process_estimate_gib")
+    if process_peak is not None:
+        lines.append(
+            "cuda memory: "
+            f"process_peak_estimate={_format_number(process_peak, 3)} GiB "
+            f"reserved_peak={_format_number(performance.get('cuda_peak_reserved_gib'), 3)} GiB"
+        )
     manifest = {key: value for key, value in summary["manifest"].items() if value is not None}
     if manifest:
         lines.append("manifest: " + " ".join(f"{key}={value}" for key, value in manifest.items()))
@@ -2963,6 +3171,12 @@ def _comparison(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "val_gripper_rmse": latest_val.get("gripper_full_rmse"),
                 "tail_first_ratio": latest_val.get("tail_first_ratio"),
                 "gripper_event_ratio": latest_val.get("gripper_event_ratio"),
+                "seconds_per_batch": summary.get("performance", {})
+                .get("seconds_per_batch", {})
+                .get("median"),
+                "cuda_peak_process_estimate_gib": summary.get("performance", {}).get(
+                    "cuda_peak_process_estimate_gib"
+                ),
                 "decoder": summary["manifest"].get("decoder"),
                 "action_normalizer_fingerprint": summary["manifest"].get(
                     "action_normalizer_fingerprint"
@@ -3131,6 +3345,71 @@ def _recovery_assessment(
         "pass" if fatal_count == 0 else "fail",
         baseline_value=0,
         candidate_value=fatal_count,
+    )
+
+    baseline_performance = baseline.get("performance", {})
+    candidate_performance = candidate.get("performance", {})
+    old_seconds = baseline_performance.get("seconds_per_batch", {})
+    new_seconds = candidate_performance.get("seconds_per_batch", {})
+    for statistic, ratio_limit in (
+        ("median", RECOVERY_MEDIAN_SECONDS_RATIO_MAX),
+        ("p90", RECOVERY_P90_SECONDS_RATIO_MAX),
+    ):
+        old_value = old_seconds.get(statistic)
+        new_value = new_seconds.get(statistic)
+        old_valid = (
+            isinstance(old_value, (int, float))
+            and math.isfinite(float(old_value))
+            and float(old_value) > 0.0
+        )
+        new_valid = isinstance(new_value, (int, float)) and math.isfinite(
+            float(new_value)
+        )
+        allowed = float(old_value) * ratio_limit if old_valid else None
+        if not old_valid or not new_valid:
+            status = "incomplete"
+        else:
+            assert allowed is not None
+            status = "pass" if float(new_value) <= allowed else "fail"
+        record(
+            f"performance/seconds_per_batch_{statistic}",
+            status,
+            baseline_value={
+                "seconds": old_value,
+                "source": old_seconds.get("source"),
+                "allowed_ratio": ratio_limit,
+                "allowed_seconds": allowed,
+            },
+            candidate_value={
+                "seconds": new_value,
+                "source": new_seconds.get("source"),
+            },
+            detail=(
+                "wall time includes model compute and data wait; recovery runs must use "
+                "the same batch size, GPU class and logging cadence"
+            ),
+        )
+
+    process_peak = candidate_performance.get("cuda_peak_process_estimate_gib")
+    if not isinstance(process_peak, (int, float)) or not math.isfinite(
+        float(process_peak)
+    ):
+        memory_status = "incomplete"
+    else:
+        memory_status = (
+            "pass"
+            if float(process_peak) <= RECOVERY_CUDA_PROCESS_GIB_MAX
+            else "fail"
+        )
+    record(
+        "performance/cuda_peak_process_gib",
+        memory_status,
+        baseline_value=RECOVERY_CUDA_PROCESS_GIB_MAX,
+        candidate_value=process_peak,
+        detail=(
+            "batch-eight dedicated-GPU process estimate must stay within the 22 GiB "
+            "production envelope"
+        ),
     )
 
     validation_metrics: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
@@ -3354,6 +3633,7 @@ def _merge_runs(runs: Sequence[ParsedRun], *, path: Path, label: str) -> ParsedR
         merged.init_counts.update(run.init_counts)
         merged.batch_points.extend(run.batch_points)
         merged.epoch_records.extend(run.epoch_records)
+        merged.runtime_points.extend(run.runtime_points)
         merged.malformed_json += run.malformed_json
         merged.unclosed_json += run.unclosed_json
         merged.traceback_count += run.traceback_count
@@ -3368,6 +3648,12 @@ def _merge_runs(runs: Sequence[ParsedRun], *, path: Path, label: str) -> ParsedR
     merged.epoch_records.sort(
         key=lambda record: (int(record.get("epoch", 0)), int(record.get("global_step", 0)))
     )
+    unique_runtime: dict[tuple[float, float, tuple[str, ...]], dict[str, float]] = {}
+    for point in merged.runtime_points:
+        metric_names = tuple(sorted(name for name in point if name not in {"epoch", "step"}))
+        key = (float(point.get("epoch", 0.0)), float(point.get("step", 0.0)), metric_names)
+        unique_runtime[key] = point
+    merged.runtime_points = list(unique_runtime.values())
     return merged
 
 
@@ -3474,6 +3760,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"val_rmse={_format_number(row['val_full_rmse'])} "
                     f"tail/first={_format_number(row['tail_first_ratio'])} "
                     f"event_ratio={_format_number(row['gripper_event_ratio'])} "
+                    f"sec/batch={_format_number(row['seconds_per_batch'], 3)} "
+                    f"cuda_peak={_format_number(row['cuda_peak_process_estimate_gib'], 3)}GiB "
                     f"critical={row['critical']} warnings={row['warnings']}\n"
                 )
             rendered = rendered.rstrip()

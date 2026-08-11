@@ -4,7 +4,7 @@ The final package owns observation preparation, G/S/W/P composition and the
 single typed ingress into the retained bottom action model.
 """
 
-from .bottom import BottomOutput, EvidenceMMDiTBottom
+from .action_contract import BottomOutput
 from .compiler import (
     ObjectConsequenceState,
     ObjectFutureEffectReader,
@@ -20,9 +20,11 @@ from .intent import (
     FuturePlanRecognizer,
     StatelessObjectIntentOrganizer,
 )
-from .observation import CurrentObservationCompiler, ObservationEvidence, PatchFlowField
+from .observation_contract import ObservationEvidence, PatchFlowField
 from .policy import ClearVLAMainlinePolicy, OnlinePolicyCache, PolicyStepOutput
 from .proposal import HistoryActionProposal
+from .restored_bottom import RestoredV120EvidenceBottom
+from .restored_observation import RestoredV120ObservationCompiler
 from .role_hosts import StaticP1RoleHost, TypedGroundingRoleHost
 from .teacher import ObjectFutureTeacher
 from .top import CompiledPolicyState, ObjectIntentDynamicsTop, OnlineTopContext
@@ -51,8 +53,8 @@ __all__ = [
     "ControlledTransitionState",
     "DenseFactChart",
     "DenseObjectGrounder",
-    "CurrentObservationCompiler",
-    "EvidenceMMDiTBottom",
+    "RestoredV120EvidenceBottom",
+    "RestoredV120ObservationCompiler",
     "FutureObjectDynamics",
     "FuturePlanRecognition",
     "FuturePlanRecognizer",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -18,6 +19,10 @@ from clearvla.mainline.interfaces import (
     TrainingBatch,
 )
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
+from clearvla.mainline.model.restored_observation import (
+    _align_chart_to_later_frame,
+    _v120_flow_field,
+)
 from clearvla.mainline.runtime.logging import archival_metrics
 from clearvla.mainline.runtime.sampling import sample_action, sample_cached_action
 from clearvla.mainline.train import _optimizer_group_context
@@ -77,6 +82,42 @@ def _config() -> ExperimentConfig:
     return config
 
 
+def test_v120_exported_flow_is_reindexed_and_scaled_by_chart_side() -> None:
+    source_forward = torch.full((1, 2, 1, 2, 8, 8), 2.0)
+    source_backward = torch.full((1, 2, 1, 2, 8, 8), -2.0)
+    scalar = torch.ones(1, 2, 1, 1, 8, 8)
+    pack = SimpleNamespace(
+        patch_flow_forward=source_forward,
+        patch_flow_backward=source_backward,
+        flow_confidence=scalar,
+        flow_occlusion=torch.zeros_like(scalar),
+    )
+
+    field = _v120_flow_field(pack, -1)
+
+    expected = 4.0 / 7.0
+    assert torch.allclose(field.forward, torch.full_like(field.forward, expected))
+    assert field.backward is not None
+    assert torch.allclose(field.backward, torch.full_like(field.backward, -expected))
+    # The exported pack has already converted the raw high-resolution flow to
+    # 8x8 chart cells. Applying a second 24x24/native-patch conversion would
+    # incorrectly shrink this two-cell displacement to 4/23.
+    assert not torch.allclose(field.forward, torch.full_like(field.forward, 4.0 / 23.0))
+
+
+def test_destination_indexed_forward_flow_aligns_source_chart() -> None:
+    x = torch.arange(8, dtype=torch.float32)[None, None, None, :, None]
+    value = x.expand(1, 1, 8, 8, 1).clone()
+    flow = torch.zeros(1, 1, 2, 8, 8)
+    flow[:, :, 0] = 2.0 / 7.0  # one 8x8 chart cell to the right
+
+    aligned = _align_chart_to_later_frame(value, flow)
+
+    # Destination x=1 samples source x=0; border padding defines x=0.
+    assert torch.allclose(aligned[0, 0, :, 1:, 0], value[0, 0, :, :-1, 0])
+    assert torch.allclose(aligned[0, 0, :, :1, 0], value[0, 0, :, :1, 0])
+
+
 def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
     dims = config.dimensions
     device = torch.device("cpu")
@@ -95,8 +136,8 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
                 dims.visual_history_length,
                 dims.num_cameras,
                 3,
-                32,
-                32,
+                48,
+                48,
                 device=device,
             ),
         ),
@@ -162,8 +203,8 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "consequence",
         "p3_compiler",
         "bottom_query",
-        "bottom_protected_reader",
-        "bottom_evidence_compiler",
+        "bottom_evidence_adapter",
+        "bottom_policy_bridge",
         "bottom_organizer",
         "bottom_mmdit",
         "bottom_capacity",
@@ -199,11 +240,32 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     archived = archival_metrics(result.materialize())
     assert "loss_action_flow_v120_comparable" in archived
     assert "loss_action_flow_event_balance_delta" in archived
+    assert archived["loss_action_gripper_flow"] == archived[
+        "loss_action_gripper_flow_unweighted"
+    ]
+    assert "loss_action_gripper_flow_event_balanced_audit" in archived
+    assert "loss_action_flow_event_balanced_audit_first" in archived
+    assert "loss_action_flow_event_balanced_audit_band_1_4" in archived
+    assert "loss_action_flow_balanced_first" not in archived
     assert "loss_decoded_action_v120_comparable" in archived
     assert "loss_decoded_action_event_balance_delta" in archived
     assert "loss_contrib_action_flow" in archived
     assert "loss_contrib_future_dynamics" in archived
+    assert "loss_contrib_future_transition" in archived
     assert "loss_contrib_object_reconstruction" in archived
+    assert "loss_contrib_execution_value" in archived
+    for name in (
+        "loss_execution_value_target_spread",
+        "loss_execution_value_predicted_spread",
+        "loss_execution_value_correlation",
+        "loss_execution_value_pairwise_accuracy",
+        "loss_execution_value_decision_accuracy",
+        "loss_execution_value_common_mode_ratio",
+        "loss_execution_terminal_target_cost_margin",
+        "loss_execution_terminal_predicted_cost_margin",
+        "loss_execution_terminal_target_preferred_fraction",
+    ):
+        assert name in archived
     assert abs(archived["loss_contribution_gap"]) < 1e-5
     contribution_sum = sum(
         value for name, value in archived.items() if name.startswith("loss_contrib_")
@@ -225,7 +287,8 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "object_p2_": 20,
         "object_p3_": 8,
         "controlled_transition_": 5,
-        "bottom_": 40,
+        "bottom_": 4,
+        "evidence_": 40,
         "gradient_postclip_": 20,
     }
     for prefix, minimum in minimum_prefix_counts.items():
@@ -244,7 +307,17 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         for name, parameter in model.named_parameters()
         if parameter.requires_grad and parameter.grad is None
     ]
-    assert missing == []
+    # V120 deliberately keeps only the capacity/operation selector out of the
+    # task graph during its first 200 steps.  The candidate value reader is
+    # already supervised during this interval.
+    assert missing
+    assert all(
+        name.startswith("bottom.decoder.operator_contractions.")
+        or name.startswith("bottom.decoder.execution_controller.operation_")
+        or name == "bottom.decoder.execution_controller.block_queries"
+        or name.startswith("bottom.decoder.execution_controller.capacity_head.")
+        for name in missing
+    )
     dormant = [
         name
         for name, parameter in model.named_parameters()
@@ -253,22 +326,31 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         and not bool(parameter.grad.detach().abs().sum() > 0)
     ]
     assert dormant == []
+
+    # Cross the serialized V120 warm-up boundary and verify that the same
+    # ordinary task graph opens every mature execution owner.
+    engine.global_step = 201
+    engine.train_step(_batch(config), collect_diagnostics=True)
+    engine.train_step(_batch(config), collect_diagnostics=True)
     capacity_gradient = sum(
         parameter.grad.detach().abs().sum()
         for operator in model.bottom.capacity
         for parameter in operator.parameters()
+        if parameter.requires_grad and parameter.grad is not None
     )
     execution_capacity_gradient = sum(
         parameter.grad.detach().abs().sum()
-        for parameter in model.bottom.execution.capacity.parameters()
+        for parameter in model.bottom.execution.capacity_head.parameters()
+        if parameter.requires_grad and parameter.grad is not None
     )
-    execution_continue_gradient = sum(
+    execution_value_gradient = sum(
         parameter.grad.detach().abs().sum()
-        for parameter in model.bottom.execution.continue_head.parameters()
+        for parameter in model.bottom.execution.value_reader.parameters()
+        if parameter.requires_grad and parameter.grad is not None
     )
     assert capacity_gradient > 0
     assert execution_capacity_gradient > 0
-    assert execution_continue_gradient > 0
+    assert execution_value_gradient > 0
     assert len(ownership.trainable_names) == len(
         [parameter for parameter in model.parameters() if parameter.requires_grad]
     )
@@ -434,6 +516,36 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
     assert torch.equal(generator_state, deployment_generator.get_state())
 
 
+def test_p1_protected_fact_cannot_be_attenuated_by_grounding_existence() -> None:
+    torch.manual_seed(47)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    _, training_state, _ = model.encode_online(batch.online)
+    facts = training_state.top.facts
+
+    def read(existence: torch.Tensor):
+        return model.factual_reader(
+            evidence=training_state.observation,
+            facts=replace(facts, existence=existence),
+            intent=training_state.top.intent,
+            coarse_action=training_state.top.coarse_action,
+            history_proposal=training_state.history_proposal,
+        )[0]
+
+    low = read(torch.full_like(facts.existence, 1.0e-4))
+    high = read(torch.ones_like(facts.existence))
+    for name in (
+        "fact_by_object",
+        "object_posterior",
+        "null_posterior",
+        "chart_posterior",
+        "camera_coordinates",
+        "aggregate_fact",
+    ):
+        torch.testing.assert_close(getattr(low, name), getattr(high, name), rtol=0, atol=0)
+
+
 def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
     torch.manual_seed(42)
     config = _config()
@@ -451,23 +563,75 @@ def test_controlled_transition_is_a_real_zero_preserving_bottom_lane() -> None:
         factual_dock=cache.factual_dock,
         action_query=query,
     )
-    evidence = model.bottom.evidence_compiler(
-        compiled.plan,
-        cache.history,
-        cache.transition,
+    evidence = model.bottom.compile_evidence_view(
+        plan=compiled.plan,
+        intent=cache.top.intent,
+        history=cache.history,
+        transition=cache.transition,
     )
-    start, stop = evidence.lane_ranges["controlled_transition"]
-    assert torch.count_nonzero(evidence.value[:, start:stop]) > 0
+    trajectory_start, trajectory_stop = evidence.ranges["trajectory"]
+    assert torch.count_nonzero(
+        evidence.value_tokens[:, trajectory_start:trajectory_stop]
+    ) == 0
+    assert all(
+        not parameter.requires_grad
+        for parameter in model.bottom.decoder.evidence_adapter.source_proj[
+            "trajectory"
+        ].parameters()
+    )
+    rollout_start, rollout_stop = evidence.ranges["rollout"]
+    assert torch.count_nonzero(
+        evidence.tokens[:, rollout_start:rollout_stop]
+    ) > 0
+    assert torch.count_nonzero(
+        evidence.value_tokens[:, rollout_start:rollout_stop]
+    ) == 0
+    role_bank = model.bottom._role_bank(compiled.plan)
+    assert torch.equal(role_bank.protected_detail, compiled.plan.protected_base)
+    state_tokens, executed_tokens = model.bottom._state_memory(cache.history)
+    intent_memory = model.bottom._intent_memory(
+        cache.top.intent,
+        state_tokens,
+        executed_tokens,
+    )
+    assert set(intent_memory) == {"state", "executed"}
+    start, stop = evidence.ranges["transition"]
+    assert torch.count_nonzero(evidence.value_tokens[:, start:stop]) > 0
     neutral_transition = replace(
         cache.transition,
         value=torch.zeros_like(cache.transition.value),
     )
-    neutral_evidence = model.bottom.evidence_compiler(
-        compiled.plan,
-        cache.history,
-        neutral_transition,
+    neutral_evidence = model.bottom.compile_evidence_view(
+        plan=compiled.plan,
+        intent=cache.top.intent,
+        history=cache.history,
+        transition=neutral_transition,
     )
-    assert torch.count_nonzero(neutral_evidence.value[:, start:stop]) == 0
+    assert torch.count_nonzero(neutral_evidence.value_tokens[:, start:stop]) == 0
+
+    anchors = int(model.bottom.core_config.future_anchors)
+    spatial = (
+        int(model.bottom.core_config.num_cameras)
+        * int(model.bottom.core_config.future_grid_size) ** 2
+    )
+    marker = torch.arange(
+        1,
+        anchors + 1,
+        dtype=cache.transition.value.dtype,
+    )[None, :, None, None].expand(1, anchors, spatial, config.dimensions.hidden_size)
+    marked_transition = replace(
+        cache.transition,
+        value=marker.reshape(1, anchors * spatial, config.dimensions.hidden_size),
+    )
+    event_context = model.bottom._transition_event_context(marked_transition)
+    lower = 0
+    for index, upper in enumerate(model.bottom.core_config.flow_jepa_action_offsets):
+        assert torch.equal(
+            event_context[:, lower:upper],
+            torch.full_like(event_context[:, lower:upper], float(index + 1)),
+        )
+        lower = int(upper)
+    assert lower == config.dimensions.action_horizon
     zero_proposal = replace(
         training_state.history_proposal,
         tokens=torch.zeros_like(training_state.history_proposal.tokens),
@@ -555,10 +719,14 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
 
         handles.append(block.register_forward_hook(count_call))
     with mock.patch.object(
-        model.observation.flow,
-        "_estimate",
-        wraps=model.observation.flow._estimate,
-    ) as flow_estimate:
+        model.observation.encoder.flow,
+        "forward",
+        wraps=model.observation.encoder.flow.forward,
+    ) as semantic_flow, mock.patch.object(
+        model.observation.encoder.raw_flow,
+        "forward",
+        wraps=model.observation.encoder.raw_flow.forward,
+    ) as raw_flow:
         result = sample_action(
             model,
             batch.online,
@@ -572,11 +740,18 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert history_proposal_calls == 1
     assert p1_host_calls == 1
     assert transition_calls == 1
-    assert flow_estimate.call_count == 2
+    # Both V120 correspondence scales batch all adjacent pairs/directions in
+    # one invocation and are built once outside the five ODE steps.
+    assert semantic_flow.call_count == 1
+    assert raw_flow.call_count == 1
     assert tuple(result.step_times.shape) == (5,)
     assert tuple(result.action.shape) == tuple(batch.action_target.normalized.shape)
     assert torch.isfinite(result.action).all()
-    assert calls == [config.runtime.inference_steps] * len(model.bottom.blocks)
+    # The restored learned V120 execution chart may evaluate several
+    # block/dwell candidates inside one ODE step.  Those are dynamic bottom
+    # operations; the expensive observation/G/S/W/P1 sources above must still
+    # be built exactly once.
+    assert all(value >= config.runtime.inference_steps for value in calls)
     for handle in handles:
         handle.remove()
 
@@ -605,15 +780,16 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
     )[0]
     assert torch.count_nonzero(assignment_gradient) > 0
     assert tuple(cache.transition.value.shape[1:]) == (
-        config.dimensions.action_horizon * config.dimensions.action_basis_tokens,
+        4 * config.dimensions.num_cameras * 8 * 8,
         config.dimensions.hidden_size,
     )
     assert metrics["controlled_transition_dense_rows"] == (
         4 * config.dimensions.num_cameras * 8 * 8
     )
-    assert metrics["controlled_transition_pooled_rows"] == (
-        config.dimensions.action_horizon * config.dimensions.action_basis_tokens
+    assert metrics["controlled_transition_retained_rows"] == (
+        4 * config.dimensions.num_cameras * 8 * 8
     )
+    assert metrics["controlled_transition_pool_removed"] == 0
 
 
 def test_sampling_rejects_dtype_that_differs_from_serialized_runtime() -> None:
@@ -669,10 +845,11 @@ def test_cached_deployment_forces_eval_mode_and_is_repeatable() -> None:
     assert torch.equal(first.action, second.action)
 
 
-def test_validation_execution_interventions_have_literal_update_semantics() -> None:
+def test_validation_execution_interventions_reach_the_native_v120_controller() -> None:
     torch.manual_seed(231)
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
+    model.set_training_step(1200)
     batch = _batch(config)
     with torch.no_grad():
         cache, _, _ = model.encode_online(batch.online)
@@ -687,15 +864,34 @@ def test_validation_execution_interventions_have_literal_update_semantics() -> N
             noisy_action_field=physical,
             time=time,
             execution_mode="no_updates",
+            collect_diagnostics=True,
         )
         full_updates = model.velocity(
             cache,
             noisy_action_field=physical,
             time=time,
             execution_mode="full_updates",
+            collect_diagnostics=True,
         )
-    assert all(torch.count_nonzero(value) == 0 for value in no_updates.bottom.block_updates)
-    assert any(torch.count_nonzero(value) > 0 for value in full_updates.bottom.block_updates)
+    # V120 capacity is rank retention, not block amplitude.  The no-update
+    # intervention therefore selects prefix row zero instead of pretending
+    # that capacity=0 disables the host operation.
+    assert no_updates.metrics["evidence_mmd_it_capacity_ratio"] == 1
+    assert full_updates.metrics["evidence_mmd_it_capacity_ratio"] == 1
+    assert no_updates.metrics["evidence_mmd_it_execution_eval_policy_code"] == 2
+    assert full_updates.metrics["evidence_mmd_it_execution_eval_policy_code"] == 1
+    assert not torch.equal(
+        no_updates.bottom.physical_velocity,
+        full_updates.bottom.physical_velocity,
+    )
+    torch.testing.assert_close(
+        no_updates.bottom.physical_velocity,
+        no_updates.bottom.decoder_tensors[
+            "evidence_mmd_it_prefix_pred_velocity"
+        ][:, 0],
+    )
+    assert no_updates.metrics["bottom_execution_output_block_count"] == 0
+    assert full_updates.metrics["bottom_execution_output_block_count"] == 3
 
 
 def test_proposal_ablation_rebuilds_only_the_proposal_owned_cache_boundary() -> None:
@@ -747,10 +943,11 @@ def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlati
     assert all(torch.isfinite(value) for value in audit_metrics.values())
 
 
-def test_execution_survival_is_monotone_across_bottom_depth() -> None:
+def test_native_execution_probabilities_and_dwell_are_bounded() -> None:
     torch.manual_seed(24)
     config = _config()
     model = ClearVLAMainlinePolicy(config)
+    model.set_training_step(1200)
     batch = _batch(config)
     cache, _, _ = model.encode_online(batch.online)
     time = torch.full((1,), 0.5)
@@ -758,31 +955,19 @@ def test_execution_survival_is_monotone_across_bottom_depth() -> None:
         batch.action_target.normalized,
         batch.online.history.action_state,
     )
-    query = model.bottom.action_query(physical, time)
-    compiled, _ = model.top.compile_policy(
-        cache.top,
-        factual_dock=cache.factual_dock,
-        action_query=query,
+    output = model.velocity(
+        cache,
+        noisy_action_field=physical,
+        time=time,
+        collect_diagnostics=True,
     )
-    evidence = model.bottom.evidence_compiler(
-        compiled.plan,
-        cache.history,
-        cache.transition,
-    )
-    condition, _ = model.bottom.organizer(cache.history, time, collect_diagnostics=False)
-    action = query.mean(dim=2)
-    protected, _ = model.bottom.protected_reader(
-        query,
-        compiled.plan.protected_base,
-        collect_diagnostics=False,
-    )
-    _, continuation, _ = model.bottom.execution(
-        evidence=evidence,
-        action=action + protected,
-        condition=condition,
-        collect_diagnostics=False,
-    )
-    assert torch.all(continuation[:, 1:] <= continuation[:, :-1])
+    operation = output.metrics["evidence_mmd_it_operation_probability"]
+    terminal = output.metrics["evidence_mmd_it_terminal_probability"]
+    capacity = output.metrics["evidence_mmd_it_capacity_ratio"]
+    dwell = output.metrics["evidence_mmd_it_dwell_expected"]
+    assert torch.allclose(operation + terminal, operation.new_ones(()), atol=1e-6)
+    assert 0 <= capacity <= 1
+    assert 0 <= dwell <= model.bottom.decoder.max_dwell
 
 
 def test_scheduler_applies_warmup_before_first_optimizer_update() -> None:

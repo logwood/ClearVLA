@@ -93,10 +93,17 @@ def _local_imports(root: Path, source: Path) -> set[Path]:
     return imports
 
 
-def _active_python_closure(root: Path, package: Path) -> set[Path]:
-    """Return all local Python files reachable from the mainline package."""
+def _active_python_closure(root: Path, seeds: list[Path]) -> set[Path]:
+    """Return local Python files recursively reachable from explicit seeds.
 
-    pending = list(package.rglob("*.py"))
+    The independent mainline intentionally keeps a mechanically extracted
+    V120 oracle beside its adapters.  Only a small, audited subset of that
+    oracle is executable.  Seeding the closure with every oracle file made an
+    edit to an unimported historical CVAE or trunk reject an otherwise exact
+    resume, despite having no route into the current graph.
+    """
+
+    pending = list(seeds)
     closure: set[Path] = set()
     while pending:
         source = pending.pop()
@@ -215,7 +222,16 @@ def active_source_snapshot(repo_root: str | Path) -> SourceSnapshot:
     package = root / "clearvla" / "mainline"
     if not package.is_dir():
         raise FileNotFoundError(f"mainline package does not exist under {root}")
-    sources = list(_active_python_closure(root, package))
+    # Source identity follows the executable entry point.  This is stricter
+    # than hashing a hand-maintained file list and more accurate than hashing
+    # every prototype that happens to remain under ``mainline``: only modules
+    # reachable from the formal trainer (including imported V120 extraction
+    # modules and package initializers) can alter a run's graph identity.
+    # Archived/inactive alternatives must not make an exact resume fail.
+    seeds = [package / "train.py"]
+    if not seeds[0].is_file():
+        raise FileNotFoundError("mainline training entry point is missing")
+    sources = list(_active_python_closure(root, seeds))
     preset = root / "configs" / "mainline" / "object_intent_dynamics_323.json"
     if preset.is_file():
         sources.append(preset)
