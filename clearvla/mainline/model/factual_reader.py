@@ -64,10 +64,12 @@ class ObjectFactualReader(nn.Module):
         self.content_key = nn.Linear(content_dim, hidden, bias=False)
         self.semantic_key = nn.Linear(route_dim, hidden, bias=False)
         self.appearance_key = nn.Linear(route_dim, hidden, bias=False)
+        self.geometry_key = nn.Linear(route_dim, hidden, bias=False)
         self.detail_key = nn.Linear(raw_dim, hidden, bias=False)
         self.detail_value = nn.Linear(raw_dim, hidden, bias=False)
         self.rgb_value = nn.Linear(3, hidden, bias=False)
         self.object_value = nn.Linear(content_dim, hidden, bias=False)
+        self.fact_key = nn.Linear(hidden, hidden, bias=False)
         self.position_key = nn.Linear(2, hidden, bias=False)
         self.basis_identity = nn.Parameter(torch.randn(1, 1, basis, hidden) * 0.02)
         self.camera_identity = nn.Parameter(torch.randn(1, 1, cameras, 1, hidden) * 0.02)
@@ -123,20 +125,38 @@ class ObjectFactualReader(nn.Module):
     def _microgrid(
         self,
         evidence: ObservationEvidence,
-        facts: ObjectFactSet,
+        coordinates: Tensor,
+        support: Tensor,
+        camera_validity: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        batch, objects, cameras = facts.camera_coordinates.shape[:3]
+        if coordinates.ndim != 6 or int(coordinates.shape[-1]) != 2:
+            raise ValueError("P1 local coordinates must be [B,T,Q,K,C,2]")
+        batch, horizon, basis, objects, cameras = coordinates.shape[:5]
         if cameras != self.cameras:
             raise ValueError("P1 object facts use an unexpected camera count")
-        support = facts.camera_support.float().clamp(0.01, 0.35)
-        offsets = self.microgrid_offset.to(device=support.device)[None, None, None]
-        coordinates = facts.camera_coordinates.float()[..., None, :]
-        coordinates = coordinates + (1.0 - coordinates.square()).clamp_min(0.0) * (
-            offsets * support[..., None, :]
+        if tuple(support.shape) != (batch, horizon, basis, objects, cameras):
+            raise ValueError("P1 local support must align with query-specific coordinates")
+        if tuple(camera_validity.shape) != (batch, objects, cameras, 1):
+            raise ValueError("P1 camera validity must preserve physical [B,K,C,1]")
+        support = support.float().clamp(0.01, 0.35)
+        offsets = self.microgrid_offset.to(device=support.device)[None, None, None, None, None]
+        micro_coordinates = coordinates.float()[..., None, :]
+        micro_coordinates = micro_coordinates + (
+            1.0 - micro_coordinates.square()
+        ).clamp_min(0.0) * (
+            offsets * support[..., None, None]
         )
-        # The generic sampler owns B,C,Y,X,M.  Reinterpret K as Y and a
-        # singleton X, then restore the object/camera layout.
-        sampler_coordinates = coordinates.permute(0, 2, 1, 3, 4)[:, :, :, None]
+        samples = int(self.microgrid_offset.shape[0])
+        # The generic sampler owns [B,C,Y,X,M].  Pack the static T/Q/K query
+        # rows into Y so each source bank is sampled by one grid_sample call.
+        sampler_coordinates = micro_coordinates.permute(0, 4, 1, 2, 3, 5, 6).reshape(
+            batch,
+            cameras,
+            horizon * basis * objects,
+            1,
+            samples,
+            2,
+        )
         detail, detail_valid = _sample_feature_chart(
             evidence.detail_features,
             sampler_coordinates,
@@ -145,12 +165,20 @@ class ObjectFactualReader(nn.Module):
             evidence.literal_rgb,
             sampler_coordinates,
         )
-        # [B,C,K,1,N,D] -> [B,K,C,N,D]
-        detail = detail[:, :, :, 0].permute(0, 2, 1, 3, 4).contiguous()
-        rgb = rgb[:, :, :, 0].permute(0, 2, 1, 3, 4).contiguous()
-        valid = (detail_valid & rgb_valid)[:, :, :, 0].permute(0, 2, 1, 3, 4)
-        valid = valid & (facts.camera_validity[..., None, :] > 0)
-        return detail, rgb, coordinates, valid
+        detail = detail[:, :, :, 0].reshape(
+            batch, cameras, horizon, basis, objects, samples, -1
+        )
+        rgb = rgb[:, :, :, 0].reshape(
+            batch, cameras, horizon, basis, objects, samples, -1
+        )
+        detail = detail.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
+        rgb = rgb.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
+        valid = (detail_valid & rgb_valid)[:, :, :, 0].reshape(
+            batch, cameras, horizon, basis, objects, samples, 1
+        )
+        valid = valid.permute(0, 2, 3, 4, 1, 5, 6)
+        valid = valid & (camera_validity[:, None, None, :, :, None] > 0)
+        return detail, rgb, micro_coordinates, valid
 
     def forward(
         self,
@@ -171,36 +199,108 @@ class ObjectFactualReader(nn.Module):
         )
         batch, horizon, basis = queries.shape[:3]
         objects = facts.objects
-        detail, rgb, coordinates, valid = self._microgrid(evidence, facts)
-        samples = int(detail.shape[3])
-
-        detail_key = self.detail_key(detail)
-        coordinate_key = self.position_key(coordinates)
-        key = (
-            detail_key
-            + coordinate_key
-            + self.camera_identity.to(device=detail.device, dtype=detail.dtype)
-        )
+        local = evidence.local_facts
         object_context = (
             self.content_key(facts.content)
             + self.semantic_key(facts.semantic)
             + self.appearance_key(facts.appearance)
         ) / math.sqrt(3.0)
-        fine_query, _ = variance_floored_centered_norm(
-            self.object_query(queries)[:, :, :, None, None, None]
-            + object_context[:, None, None, :, None, None],
+        local_query, _ = variance_floored_centered_norm(
+            self.object_query(queries)[:, :, :, None]
+            + self.object_key(object_context)[:, None, None],
             0.25,
         )
+        candidate_key = (
+            self.content_key(local.content_slots)
+            + self.semantic_key(local.semantic_slots)
+            + self.appearance_key(local.appearance_slots)
+            + self.geometry_key(local.geometry_slots)
+            + self.position_key(local.slot_coordinates)
+        ) / math.sqrt(5.0)
+        candidate_key, _ = variance_floored_centered_norm(
+            candidate_key,
+            0.25,
+        )
+        local_score = torch.einsum(
+            "btqkh,bcyxmh->btqkcyxm",
+            local_query.float(),
+            candidate_key.float(),
+        ) / math.sqrt(float(self.hidden))
+        # Keep the physical G assignment as a differentiable prior.  P1 owns
+        # its query-specific local refinement, but action supervision must be
+        # able to tell G which object support was useful; detaching here would
+        # recreate the "named owner without proximal pressure" failure seen in
+        # the V122/current logs.
+        local_prior = facts.candidate_assignment.float().clamp_min(0.0)
+        local_valid = (
+            (local.slot_validity[..., 0][:, None] > 0)
+            & (local_prior > 0)
+        )
+        local_score = local_score + local_prior[:, None, None].clamp_min(1e-30).log()
+        local_score = local_score.masked_fill(~local_valid[:, None, None], -1.0e4)
+        flat_local_score = local_score.flatten(4)
+        flat_local_valid = local_valid[:, None, None].expand(
+            -1, horizon, basis, -1, -1, -1, -1, -1
+        ).flatten(4)
+        local_probability = torch.softmax(flat_local_score, dim=-1) * flat_local_valid.float()
+        local_probability = local_probability / local_probability.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1.0)
+        local_probability = local_probability.reshape_as(local_score)
+        chart_posterior = local_probability.sum(dim=-1)
+        camera_mass = local_probability.sum(dim=(-3, -2, -1))
+        camera_coordinates = torch.einsum(
+            "btqkcyxm,bcyxmd->btqkcd",
+            local_probability,
+            local.slot_coordinates.float(),
+        ) / camera_mass[..., None].clamp_min(1e-6)
+        fallback_coordinates = facts.camera_coordinates[:, None, None].float()
+        camera_coordinates = torch.where(
+            camera_mass[..., None] > 1e-6,
+            camera_coordinates,
+            fallback_coordinates,
+        )
+        camera_support = torch.einsum(
+            "btqkcyxm,bcyxm->btqkc",
+            local_probability,
+            local.slot_support.float(),
+        ) / camera_mass.clamp_min(1e-6)
+        fallback_support = facts.camera_support[:, None, None, :, :, 0].float()
+        camera_support = torch.where(
+            camera_mass > 1e-6,
+            camera_support,
+            fallback_support,
+        )
+        local_content = torch.einsum(
+            "btqkcyxm,bcyxmd->btqkd",
+            local_probability.to(dtype=local.content_slots.dtype),
+            local.content_slots,
+        )
+
+        detail, rgb, micro_coordinates, valid = self._microgrid(
+            evidence,
+            camera_coordinates,
+            camera_support,
+            facts.camera_validity,
+        )
+        samples = int(detail.shape[5])
+        detail_key = self.detail_key(detail)
+        coordinate_key = self.position_key(micro_coordinates)
+        camera_identity = self.camera_identity.to(
+            device=detail.device,
+            dtype=detail.dtype,
+        ).reshape(1, 1, 1, 1, self.cameras, 1, self.hidden)
         fine_key, _ = variance_floored_centered_norm(
-            key[:, None, None],
+            detail_key + coordinate_key + camera_identity,
             0.25,
         )
         fine_score = torch.einsum(
-            "btqkcnh,btqkcnh->btqkcn",
-            fine_query.expand(-1, -1, -1, -1, self.cameras, samples, -1),
-            fine_key.expand(-1, horizon, basis, -1, -1, -1, -1),
+            "btqkh,btqkcnh->btqkcn",
+            local_query.float(),
+            fine_key.float(),
         ) / math.sqrt(float(self.hidden))
-        fine_valid = valid[..., 0][:, None, None].expand(-1, horizon, basis, -1, -1, -1)
+        fine_valid = valid[..., 0]
+        fine_score = fine_score + camera_mass[..., None].clamp_min(1e-30).log()
         fine_score = fine_score.masked_fill(~fine_valid, -1.0e4)
         flat_score = fine_score.flatten(-2)
         flat_valid = fine_valid.flatten(-2)
@@ -209,24 +309,25 @@ class ObjectFactualReader(nn.Module):
             1.0
         )
         detail_value = self.detail_value(detail) + self.rgb_value(rgb)
-        detail_value = detail_value.reshape(batch, objects, self.cameras * samples, self.hidden)
+        detail_value = detail_value.reshape(
+            batch, horizon, basis, objects, self.cameras * samples, self.hidden
+        )
         selected_detail = torch.einsum(
-            "btqkn,bknh->btqkh",
+            "btqkn,btqknh->btqkh",
             fine_probability.to(dtype=detail_value.dtype),
             detail_value,
         )
-        object_base = self.object_value(facts.content)[:, None, None]
+        object_base = self.object_value(local_content)
         fact_by_object, _ = smooth_rms_contract(object_base + selected_detail, 1.0)
 
         object_query, _ = variance_floored_centered_norm(queries, 0.25)
-        # Centering prevents a common K carrier from pretending to be object
-        # ownership.  Global support/existence stays as the factual prior.
-        centered_object = object_context - object_context.mean(dim=1, keepdim=True)
-        object_key, _ = variance_floored_centered_norm(self.object_key(centered_object), 0.25)
-        object_score = torch.einsum("btqh,bkh->btqk", object_query, object_key)
+        object_key, _ = variance_floored_centered_norm(self.fact_key(fact_by_object), 0.25)
+        object_score = torch.einsum("btqh,btqkh->btqk", object_query, object_key)
+        object_score = object_score / math.sqrt(float(self.hidden))
         physical = facts.validity[..., 0].float().clamp(0.0, 1.0)
         existence = facts.existence[..., 0].float().clamp(1e-6, 1.0)
-        object_prior = physical * existence
+        local_available = local_valid.flatten(2).any(dim=-1).float()
+        object_prior = physical * existence * local_available
         object_logit = object_score.float() + torch.where(
             object_prior[:, None, None] > 0,
             object_prior[:, None, None].clamp_min(1e-30).log(),
@@ -243,12 +344,6 @@ class ObjectFactualReader(nn.Module):
             "btqk,btqkh->btqh",
             object_posterior.to(dtype=fact_by_object.dtype),
             fact_by_object,
-        )
-        chart_posterior = facts.object_to_chart[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1, -1
-        )
-        camera_coordinates = facts.camera_coordinates[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1
         )
         dock = ObjectFactualDock(
             fact_by_object=fact_by_object,
@@ -267,6 +362,21 @@ class ObjectFactualReader(nn.Module):
             "p1_object_posterior_max": posterior.detach().amax(dim=-1).mean(),
             "p1_null_mass": null_posterior.detach().float().mean(),
             "p1_microgrid_valid_fraction": fine_valid.detach().float().mean(),
+            "p1_local_chart_entropy": normalized_entropy(
+                local_probability.flatten(4), dim=-1
+            )
+            .detach()
+            .mean(),
+            "p1_local_chart_max": local_probability.detach().flatten(4).amax(dim=-1).mean(),
+            "p1_query_chart_variation": chart_posterior.detach()
+            .float()
+            .std(dim=(1, 2), unbiased=False)
+            .mean(),
+            "p1_query_coordinate_variation": camera_coordinates.detach()
+            .float()
+            .std(dim=(1, 2), unbiased=False)
+            .mean(),
+            "p1_local_content_rms": object_base.detach().float().square().mean().sqrt(),
             "p1_detail_rms": selected_detail.detach().float().square().mean().sqrt(),
             "p1_fact_rms": aggregate.detach().float().square().mean().sqrt(),
         }

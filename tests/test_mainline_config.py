@@ -13,6 +13,9 @@ def test_mainline_config_loads_one_flat_active_preset() -> None:
     config = load_config(ROOT / "configs" / "mainline" / "object_intent_dynamics_323.json")
     config.validate()
     assert config.optimizer.batch_size == 8
+    assert config.optimizer.history_proposal_lr_scale == 0.625
+    assert config.optimizer.bottom_decoder_lr_scale == 0.7
+    assert config.optimizer.bottom_capacity_relative_lr_scale == 2.0
     assert config.dimensions.hidden_size == 512
     assert config.dimensions.goal_token_dim == 4096
     # The formal ``dinov2_cache_336`` metadata is a 16x16 token chart.  Do not
@@ -79,12 +82,12 @@ def test_mainline_config_enforces_fixed_graph_boundaries() -> None:
         raise AssertionError("P1 ownership cannot be changed by a loose flag")
     broken_history = replace(
         config,
-        dimensions=replace(config.dimensions, raw_pair_length=3),
+        dimensions=replace(config.dimensions, visual_history_length=2),
     )
     try:
         broken_history.validate()
     except ValueError as error:
-        assert "previous/current raw frames" in str(error)
+        assert "causal visual history" in str(error)
     else:
         raise AssertionError("fixed dataset history cannot masquerade as configurable")
     broken_flow_span = replace(

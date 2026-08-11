@@ -258,6 +258,10 @@ class ObjectIntentDynamicsTop(nn.Module):
             **intent_metrics,
             **w1_metrics,
             **w2_metrics,
+            "object_w_prediction_interval_variation": predicted.semantic_delta.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
             "object_coarse_action_rms": coarse.action_prediction.detach()
             .float()
             .square()

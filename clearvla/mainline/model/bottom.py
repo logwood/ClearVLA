@@ -617,16 +617,24 @@ class NestedCapacityOperator(nn.Module):
         index = torch.arange(self.groups, device=update.device, dtype=torch.float32)
         group_transparency = (group_depth[:, None] - index[None]).clamp(0.0, 1.0)
         transparency = group_transparency.repeat_interleave(self.channels_per_group, dim=-1)
-        coordinates = torch.einsum("bth,hr->btr", update.float(), basis)
-        # Capacity owns an ordered low-rank update, not the complement of one.
-        # The former subtraction implementation let the H-rank orthogonal
-        # complement pass unchanged, so capacity=0 still retained almost the
-        # complete host residual while reporting effective_basis_mass=0.
-        # Projecting the transparent coordinates is both non-expansive and
-        # algebraically zero when no basis group is active.
-        contracted = torch.einsum(
+        update_f = update.float()
+        coordinates = torch.einsum("bth,hr->btr", update_f, basis)
+        # Capacity is a nested full-width contraction with ordered low-rank
+        # directions, not a rank-R projector.  In the learned Q subspace the
+        # eigenvalues are the ordered group transparencies ``g``; in Q's
+        # orthogonal complement the eigenvalue is the scalar capacity ``c``:
+        #
+        #   c*u + Q diag(g-c) Q^T u
+        #
+        # This preserves all three semantics simultaneously: c=0 is exact
+        # zero, c=1 is the full identity, and every intermediate eigenvalue is
+        # in [0,1].  The previous projector silently discarded H-R directions
+        # even at full capacity (480 of 512 dimensions in the production
+        # model), despite reporting an almost-full effective basis mass.
+        capacity_f = capacity.float().clamp(0.0, 1.0)
+        contracted = capacity_f[:, None, None] * update_f + torch.einsum(
             "btr,hr->bth",
-            coordinates * transparency[:, None],
+            coordinates * (transparency - capacity_f[:, None])[:, None],
             basis,
         )
         contracted = contracted.to(dtype=update.dtype)
@@ -909,6 +917,7 @@ class EvidenceMMDiTBottom(nn.Module):
         plan: ObjectPolicyPlanDeltaBank,
         history: ObservableHistory,
         transition: ControlledTransitionState,
+        execution_mode: str = "learned",
         collect_diagnostics: bool = False,
     ) -> tuple[BottomOutput, dict[str, Tensor]]:
         expected_query = (
@@ -940,6 +949,19 @@ class EvidenceMMDiTBottom(nn.Module):
             condition=condition,
             collect_diagnostics=collect_diagnostics,
         )
+        if execution_mode not in {"learned", "no_updates", "full_updates"}:
+            raise ValueError(
+                "bottom execution_mode must be learned/no_updates/full_updates"
+            )
+        if execution_mode != "learned":
+            if self.training:
+                raise ValueError("bottom execution interventions are evaluation-only")
+            if execution_mode == "no_updates":
+                capacity = torch.zeros_like(capacity)
+                continuation = torch.ones_like(continuation)
+            else:
+                capacity = torch.ones_like(capacity)
+                continuation = torch.ones_like(continuation)
         updates: list[Tensor] = []
         block_metrics: dict[str, Tensor] = {}
         for index, (block, operator) in enumerate(zip(self.blocks, self.capacity, strict=True)):
@@ -996,6 +1018,9 @@ class EvidenceMMDiTBottom(nn.Module):
             **optional_rms,
             "bottom_evidence_value_rms": evidence.value.detach().float().square().mean().sqrt(),
             "bottom_action_rms": action.detach().float().square().mean().sqrt(),
+            "bottom_execution_intervention_active": action.new_tensor(
+                float(execution_mode != "learned")
+            ),
         }
         return output, metrics
 

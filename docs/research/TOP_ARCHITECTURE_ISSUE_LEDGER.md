@@ -1,217 +1,299 @@
-# ClearVLA 顶层问题账本
+# ClearVLA 顶层与主线问题账本
 
-更新：2026-08-10
+更新：2026-08-11
 
-对象：`object_intent_dynamics_323` schema 4，默认实验标签 V122。
+当前对象：独立 `clearvla/mainline/`，能力名 `object_intent_dynamics_323`。
 
-范围：Pre-G 之后的 G / S / Teacher / W / P1 / P2 / P3、相邻 loss、静态缓存和 bottom ingress。底层 Evidence MMDiT、CVAE、workspace 与 execution controller 不在本轮重做范围。
+比较基准：V120 commit `0b92d359a2889a0a1b1eba256007c00ccbc54f3c`；失效迁移对照：V122 commit `ced6f23`；当前候选：HEAD `07ff3e7`。
 
-当前目标图和不可违反的边界以
-[`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)
-为准。本账本只保留仍能指导实现或实验判断的信息；V117–V120 的已失效局部契约和重复历史已清除。
+本账本只记录仍能指导实现或实验归因的问题。已经被完整长跑否证的 schema 完成声明、重复版本契约和只证明 shape/非零梯度的条目已删除。当前结构真值见 [`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)。
 
-## 1. 本轮证据与结论边界
+## 1. 本轮任务边界
 
-直接证据来自：
+本轮不是把旧单体源码原样搬回新包，也不是继续添加版本 validator。目标是：
 
-- 当前工作区源码；
-- 完整 V117、V118、V119、三条 V120 日志；
-- V121 完整 epoch 1、验证与 epoch 2 训练段；
-- 完整 V122 八轮长跑（22,768 train steps，63/5 train/val episodes）；
-- 冻结 checkpoint 的历史路径干预结论只在当前边界仍相同时引用。
+1. 沿真实数据流逐块比较 V120 与当前独立主线；
+2. 保留 V120 中对性能有证据的活动算法，保留新主线中已经更正确的边界与数值实现；
+3. 修正当前新增但已由源码和完整日志共同证明有害的机制；
+4. 让行为、完整日志和验证结果至少恢复到 V120 的水平，再讨论额外收益。
 
-V121 epoch 1 的 action RMSE 为 `0.10004`，同口径 V120 为 `0.09762`。V121 的 first `1–4` 略好（`0.04018` 对 `0.04122`），middle 近似持平，tail 更差（`0.12609` 对 `0.12219`）。因此 V121 是定位实现问题的证据 run，不是性能改进基线。
+范围包含当前观测、G/S/W/P1/P2/P3、controlled transition、bottom capacity、训练目标与日志。底层三层 Evidence MMDiT 仍是主路，不重建历史上实际未启用的 variational CVAE posterior 或 hierarchical workspace。
 
-V121 最关键的非 RMSE 证据是：W prediction 的区间差异弱于 teacher，P2 null 逐渐升高，P3 temporal 的幅度/梯度压过 precision，global K 后 typed evidence 的字段差异很弱，而 P1 的 micro/detail 读取本身非零。这些量与源码共同把问题定位在 G 后的语义边界，而不是“底层没训练”或“P1 没读细节”。
+## 2. 受控实验事实
 
-完整 V122 把若干待验证项变成了实际结论：
+### 2.0 本轮初步结论的地位
 
-- validation RMSE 为 `0.09760 -> 0.08914(best, E6) -> 0.09109(E8)`；同数据、seed、batch 的 V120 best/final 为 `0.07931/0.08145`，因此 V122 的最佳点仍差约 `12.4%`，不是仅由最后两轮反弹造成。
-- `1-4 / 5-12 / 13-24` action-band RMSE 从 E1 的 `0.04064/0.07355/0.12205` 到 E8 的 `0.02672/0.06479/0.11644`。近端改善约 `34%`，远端只改善约 `4.6%`；tail/first 从 `3.31` 升到 `9.24` 主要是 near 继续拟合而 far 停滞，并非 tail 数值突然爆炸。
-- decoded gripper event 从 `1424/1357` 变成 `438/1357`，precision `0.365 -> 0.591`、recall `0.383 -> 0.191`、F1 `0.374 -> 0.289`；motion F1 仍约 `0.81`。这是夹爪逐渐保守化的独立问题，不能用整体 action loss 下降掩盖。
-- global-K content pair cosine `0.493 -> 0.710`，chart pair overlap `0.282 -> 0.575`；semantic/appearance/geometry posterior 的总变差距离仍只有约 `0.02-0.04`。四槽没有数值死亡，但越来越共享同一内容和空间支持，真实数据没有验证“稳定对象”假设。
-- W 的 supervised content/transport/covariance/visibility/persistence/uncertainty 项均下降；prediction interval variation `0.030 -> 0.082`，但 teacher 为 `0.106 -> 0.139`，prediction adjacent cosine E8 仍约 `0.918`、teacher 约 `0.821`。因此 W 并非未训练，而是比 teacher 更公共化。
-- W coarse-action innovation RMS `0.805 -> 1.595`，S interval innovation `0.573 -> 0.769`，而 condition interaction 只到约 `0.211`。源码先相加再 `tanh`，所以 action 大幅值会降低较小 S innovation 的局部灵敏度；这是一项当前候选仍需处理或由首轮日志否证的尺度风险，不等价于“coarse action 无用”。
-- learned flow 的 E8 moving/static warp gain 为 `+0.0618/+0.0227`，明显优于零流；但 global-object transport prior RMS 从约 `0.0149` 降至 `0.0054`。几何 flow 有信号，旧 G 落点使用得弱。候选已经修正 flow frame/time units 与 RGB anchor，不能据此删除 flow。
-- V122 的自由 uncertainty NLL 在尾部形成约 `-0.01091` 的负抵消，execution value 约 `+0.01065`；这两项几乎互相抵账。候选已经把 uncertainty 改为 detached photometric-dispersion 回归，并删除 differentiable execution candidate replay。
-- 正式 V122 实际参数账为 `230,717,082 total / 168,064,059 trainable`；旧文档的 `227,466,394 / 166,360,123` 是 synthetic/default-width 口径，不能再用于主线迁移差额。
+刚开始对照时提出的初步结论不是事后附注，而是本轮逐段审查的待证假设：
 
-这些结论不授权加入 slot diversity、route quota、progress/entropy loss 或增大 future 外部权重。V122 没有 W-specific frozen action intervention，因此“W 对最终 action 有正收益”仍未被证明；只可把 G 槽公共化、W 条件尺度、远端动作和 gripper event 作为下一主线的明确验收项。
+1. 新主线没有简单“丢掉整个旧 policy”，但抽取时削弱了若干真实活动机制；
+2. V122 的失效不只是 RMSE 波动，而是 G 槽公共化、远端动作停滞、夹爪保守化、P3/capacity 梯度消失的联合结构退化；
+3. 当前 mainline 比 V120 差，不是因为总参数更少或 CVAE/workspace 没搬回来，而是活动信息路径、目标语义和消费边界发生了漂移；
+4. 新主线的 teacher isolation、真实 warp、source-relative flow、typed ownership、静态部署缓存等实现比旧单体更正确，不能为追求早期 loss 相似而退回；
+5. 恢复目标必须同时覆盖行为与完整日志；只恢复 aggregate RMSE、shape 或非零梯度不算恢复。
 
-## 2. 已完成的 schema-4 源码修正
+后续源码审查已确认第 1–5 条。它们构成本账本的比较基础；下面每个问题条目记录具体源码证据、修复和仍需长跑验证的部分。
 
-| 原问题 | 源码根因 | schema-4 修正 | 当前状态 |
-| --- | --- | --- | --- |
-| `P2-DELTA-CALIBRATION` | 将零中心 visibility/persistence change 和正 uncertainty 直接乘候选先验，静态正确预测反而偏向 null | 只让 physical camera validity 决定合法性；status 去公共模后仅作为有界相对排序分数，null prior 不受其单向惩罚 | 源码已修，待 V122 验证 |
-| `CAMERA-COORDINATE-COLLAPSE` | G 后把双相机坐标、transport 和 P1 source coordinate 压成 `[K,2]`，随后再对各相机广播 | `ObjectFactSet`、Teacher、W geometry、`ObjectFactualDock`、P2 geometry 全程保留真实 `[K,C,*]` | 源码已修，shape/等变测试通过 |
-| `FUTURE-LOSS-UNIT-IMBALANCE` | content、normalized coordinate、covariance、status 用 raw unit 混合；有效优化压力几乎由 content 独占 | 七个 future 字段先按 detached variance floor 变为无量纲误差，再使用原内部系数；外部 future 总权重不增加；native-unit error 只记日志 | 源码已修，零目标测试通过 |
-| `P3-PRECISION-REDUNDANCY` | 同一 aggregate P1 fact 已在 protected consequence 中，却又经 `precision_fact` 和 cumulative consequence 重投影 | precision 只读取现成 `ObjectFactualDock.fact_by_object` 的 K-centred 细节；`effect+interaction` 只条件化 query；aggregate fact 不再作为 optional value | 源码已修，代数零测试通过 |
-| `P3-TEMPORAL-FUNCTIONAL-BYPASS` | learned temporal identity 与 action query 即使无 S/W innovation 也能产生 temporal value | P3 只消费 `temporal_innovations` 与 `effect+interaction`；action 只能乘性调制，不能合成 value | 源码已修，query-only 零语义测试通过 |
-| `S-INTERVAL-COMMON-MODE` | online S 非 causal；online/recognizer 匹配包含 identity 的累计 state；更深一层是 CrossRead FFN 与 self-attention V 仍可从 query identity 制造“update” | online/recognizer/CoarseAction 统一 causal；Q/K identity 与 V innovation 在算子内部拆开；CrossRead FFN 只处理真实 attention update；训练只做 innovation-to-innovation matching | 源码已修，query-only 零语义测试通过 |
-| `W-STATE-COMMON-MODE` | full state/action carrier 作为 additive/broadcast W value；W interval/decoder identity 也可形成 object-free 默认方向 | W 只读 S/CoarseAction innovation；state 必须与 object K/V 乘性交互；action/interval/decoder identity 只能调制当前 object-owned value | 源码已修，零条件回到 object base 测试通过 |
-| `G-TYPED-UNDERIDENTIFIED` | semantic/appearance/geometry verifier 只有远端下游压力，G reconstruction 只约束 DINO content/position | 保留唯一 physical K；在原 G reconstruction 预算内加入三类 target-normalized typed-field consistency，不强迫三 posterior 不同 | 源码已修，普通 autograd/字段 loss 测试通过 |
-| `COARSE-ACTION-INTERVAL-UNKNOWN` | 只有总 loss/RMS，且 query carrier 可进入 W | CoarseAction 改为 causal innovation-only；新增 interval variation、adjacent cosine、target-normalized error | 源码已修，待日志验证可识别性 |
-| `ATTENTION-ENTROPY-SEMANTICS` | `object_H/semantic_H/...` 是事后 cosine-softmax audit，却被命名为真实 attention | V122 改名为 `*_sim_H`，内部 canonical key 明确为 `audit_similarity_entropy` | 日志语义已修 |
-| `GRAD-AUDIT-SCHEMA-DRIFT` | P3 重构后梯度诊断仍访问已删除的 `precision_fact/precision_consequence`，且漏掉新增的 W object/camera 参数；真实训练会在第一次诊断挂钩时退出 | 梯度分组改为 schema-4 实际成员，并让完整 BF16 系统回归在 backward 后强制执行 `_attach_grad_diagnostics` | 源码与回归测试已修 |
+三条正式日志均为同一数据、seed、batch size 8、24-step action horizon、2846 step/epoch、8 epoch：
 
-## 3. 修正后的真实张量边界
+| 版本 | E1 physical RMSE | best | E8 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| V120 | 0.09762 | 0.07931 (E7) | 0.08145 | 当前恢复基线 |
+| V122 | 0.09760 | 0.08914 (E6) | 0.09109 | best/final 比 V120 差约 12.4%/11.8% |
+| 当前 mainline | 0.10933 | 0.09107 (E7) | 0.09127 | 每轮都差于 V120；best/final 差约 14.8%/12.1% |
+
+### 2.1 V120 的有效状态
+
+- global-K content pair cosine 从 E1 `0.340` 到 E8 `0.508`，没有同质化成单一对象。
+- S interval variation 为 `0.068 -> 0.133`，temporal variation 为 `0.024 -> 0.078`，区间信号虽不强但真实存在。
+- W2 object pair cosine 从约 `0.508` 到 `0.445`；W2 interval adjacent cosine E8 约 `0.945`。W 不完美，但对象轴仍有内容差异。
+- E8 的 `1–4 / 5–12 / 13–24` RMSE 为 `0.02575/0.05959/0.10334`；decoded gripper event F1 为 `0.351`，motion F1 为 `0.830`。
+- P3 precision 梯度在 E8 仍约 `1.04e-3`，capacity control/operator 梯度仍非零。
+- V120 选中路径是确定性 organizer + 三层 Evidence MMDiT；配置中 `latent_cvae_variational=0`、`latent_cvae_hierarchical_workspace=0`。不能把未运行的历史选项误判成当前缺失算法。
+- V120 的日志虽然序列化过一个历史 Stage1 checkpoint 路径，但同一运行身份明确记录 `fresh=1`、`stage1_init=off`、`stage1_initialization_enabled=0`，最终 resolved context 也将 `stage1_checkpoint` 置为 `null`。因此 V120 的优势不是旧 checkpoint 初始化带来的，恢复工作不能依赖古董权重。
+
+### 2.2 V122 暴露的问题
+
+- E8 的 `1–4 / 5–12 / 13–24` RMSE 为 `0.02672/0.06479/0.11644`。近端从 E1 改善约 34%，远端只改善约 4.6%；tail/first 从 `3.31` 升到 `9.24`，是 near 继续拟合而 far 停滞。
+- decoded gripper event 预测从 `1424/1357` 退化到 `438/1357`；recall `0.383 -> 0.191`，F1 `0.374 -> 0.289`，说明夹爪越训越保守，而非简单随机波动。
+- global-K content cosine `0.625 -> 0.711`，chart overlap `0.381 -> 0.590`，typed posterior L1 仅约 `0.02–0.04`：对象槽越来越公共。
+- W 的监督项确实下降，所以“W 没训练”不成立；但 prediction interval variation E8 约 `0.082`，teacher 约 `0.139`，W2 object cosine 约 `0.605`，说明 W 学会的是更公共的默认未来。
+- W/coarse-action RMS 增长而 condition interaction 仍约 `0.2`，较大的 action carrier 在旧 `tanh` 合流中会压低 S 的边际灵敏度。
+- flow E8 moving/static warp gain 约 `+0.0618/+0.0227`，几何 flow 有价值；global transport prior 却继续减弱。不能删除 flow，应修正它在对象/局部地址中的落点。
+- 表征预算从 V120 E8 约 `0.00254` 增到 V122 约 `0.00608`，动作却更差。问题是监督对象和消费路径错误，不是辅助损失太少。
+- P3 precision 梯度降到约 `7e-6`，capacity 梯度从 E4 起为零；V122 的“旁路修正”把有用的精细/容量路径一并压断。
+
+### 2.3 当前独立 mainline 的新增证据
+
+- physical RMSE 八轮为 `0.10933, 0.10194, 0.09491, 0.09834, 0.09340, 0.09337, 0.09107, 0.09127`，不是偶发末轮反弹。
+- E8 normalized RMSE `0.23622`，first `0.10345`，tail `0.27285`；远端仍是主要残差。
+- global-K content pair cosine 在每轮验证都精确为 `1.0`，同时 G reconstruction 从约 `0.938` 降到 `0.759`。这直接证明当前 G loss 可以在完全同质化下继续优化；旧 synthetic 测试没有覆盖这一真实捷径。
+- S interval variation `0.0169 -> 0.0418`：比 V122 略有恢复，但远低于 V120，并且输入已经继承同质化 K。
+- W2 object pair cosine 同样为 `1.0`；W2 interval adjacent cosine 后期约 `0.970`。W 的对象公共化主要是 G 上游确定性传导，区间公共化还受 S 和 W 写入共同影响。
+- E8 W intent/action object interaction RMS 为 `0.234/0.232`，表明两路接线非空，但非空不等于具有对象或区间信息。
+- 当前代码的 source-relative flow、真实 warp、RGB photometric anchor、mask target isolation、Teacher no-grad/部署隔离、静态缓存和 typed optimizer ownership 比 V120 更正确，必须保留。
+- 逐行核对 V120 已解析配置与 commit 源码后，动作坐标本身不是性能差异来源：V120 正式运行的是 `arm_flow_mode=legacy_independent`、`gripper_field_mode=legacy_handcrafted`、六通道 gripper field、18-D physical chart、独立标准高斯 source 和 `physical_decode_delta_blend=0.25`；当前 codec 的 encode/noise/decode 与该活动分支逐项一致。V120 的 physical flow 也确实按 `0.5*(arm_abs²+arm_delta²)` 与六通道 gripper 均方压回七维尺度，当前 `*_v120_comparable` 使用同一公式和同一 horizon 权重。新的 event/hold row balance 只存在于显式 `*_event_balanced` 目标，不能再把其较大数值误判为 codec 或基础动作拟合退化。
+- 修复前独立主线参数为 `171,355,774 total / 171,253,374 trainable`；V120 为 `235,662,476 / 166,611,570`。总参数减少主要来自删除冻结/跳过 ancestry；修复前 trainable 反而多约 4.64M。性能下降不能用“参数少了”概括。当前工作树的精确参数清单由 architecture manifest 测试锁定。
+- 优化器对照确认了一个与日志退化方向一致的实现漂移：V120 对 history proposal 使用 `5e-5 = 0.625×base`，Evidence decoder 常规参数使用 `0.7×base`，operator factor/depth 使用 decoder 的 `2× = 1.4×base` 且显式 no-decay；抽取后的主线却把 proposal、bottom 和 capacity 全部设成 `1.0×base`，capacity basis 还参与 AdamW decay。这会让历史/底部捷径相对 G/S/W 更快，并改变 capacity 的方向学习。修复后 G/S/W/P/transition 保持 `1.0×`，proposal 为 `0.625×`，bottom 为 `0.7×`，capacity basis 为 no-decay `1.4×`；`learning_rate` 始终记录公共 base，三个私有倍率另行记录。
+
+### 2.4 V120 全部批次指标的语义处置
+
+V120 parser 实际得到 `287` 个批次指标；不能把未同名的 `205` 项直接判成缺失，因为其中大部分在新主线中改成了更明确的 owner 名。当前 diagnostic forward/backward 实际产生 `568` 个有限 archival 指标。逐类处置如下：
+
+| V120 类别 | 当前处置 |
+| --- | --- |
+| action、first/first8/tail、三 horizon band、arm/gripper、decoded/event/motion | 保留并扩展为 physical/normalized、event-balanced/unweighted 及完整验证统计；实际 backward 与 `*_v120_comparable` 口径分开，避免把新的 event 权重误判为误差退化 |
+| flow warp/cycle/smooth/uncertainty/refinement、confidence/occlusion/magnitude | 保留；新增 `-8→-4` 与 `-4→0` 两段以及 feature/RGB、zero-flow 对照 |
+| G/S/W/P 和四区间 future normalized error | 保留并按 object/camera/interval/owner 展开，不用旧合并别名作为唯一记录 |
+| capacity/effective mass/dwell/operation probability | 以 `bottom_capacity/continue/expected_depth/block update/contraction` 记录；validation 另有 matched-noise no-update/full-update 因果消融 |
+| execution value reader/candidate ranking | 确认是唯一重要且非同名替代的活动 V120 机制；具体决策见 `P1-7`，不把昂贵候选图静默搬回 |
+| trajectory information weight | V120 正式配置为 `0.0`；旧 score/min/max/effective-fraction 是无效权重诊断。当前保留相同 information-balanced sampler 配置与 run-context summary，不恢复零权重 loss 别名 |
+| old workspace/role-compress/typed-refiner/checkpoint-active 等 | 属于被替代接口或未启用 ancestry；只在旧日志 parser 中保留，不污染当前 JSONL |
+
+因此“日志不差于 V120”的验收不是要求复制 287 个旧名字，而是：V120 的活动语义必须有当前、可解释且可因果定位的记录；当前 JSONL 总量及每个 owner 分组下限由执行测试锁定，恢复 gate 再检查八轮行为、结构、梯度和消融。
+
+## 3. 已确认的源码因果链
+
+### P0-1 `G-BINDER-COLLAPSE`
+
+当前 `DenseObjectGrounder` 把同一个 `public_scene_base` 投影后以 `0.5` 加到每个局部候选；所有 K 从一开始就共享强公共方向。主 reconstruction 又以 attached read responsibility 构建 conditional prototype target，assignment 可以和 prototype 一起移动来降低损失。结果是完整数据上 K 全同质，reconstruction 仍下降。
+
+修复决定：
+
+- public scene 只作为受 mask 的全局上下文，不注入每个 binder candidate value；
+- 恢复 V120 有证据的 dense spatial mixture reconstruction 为主要当前事实压力；
+- conditional prototype 仍保留，但其 responsibility 对 target 构建 detach，阻止 assignment 通过移动 target 逃逸；
+- typed consistency 保持近端字段解释压力；不加入 diversity、entropy、slot quota 或硬分配。
+
+验收：真实 smoke 中 K cosine 不再精确为 1；相同事实仍允许相同槽，异质事实的重叠 assignment 必须付出损失。
+
+### P0-2 `P1-GLOBAL-K-ADDRESS-BOTTLENECK`
+
+当前 P1 只围绕 global-K 的单个 camera coordinate 做 3x3 采样，再对 K fact 做中心化。K 一旦相同，坐标、crop 和中心化 key 都相同，精细 RGB/detail 即使被读取也无法形成对象或 query 特异信息。
+
+修复决定：
+
+- P1 的四个 action-basis query 对完整 `[camera,8,8,local-M]` chart 做 query-specific 软读取；
+- global-K assignment 只作为先验，不是唯一地址；
+- 每个 query/K 得到真实 local posterior、相机条件坐标和一次 3x3 RGB/detail 采样；
+- 不重开第二次视觉 bank，不削弱当前高分辨率细节。
+
+验收：P1 chart posterior 和坐标随 query/K 改变；局部 perturbation 只改变对应事实；单次高分辨率读取仍成立。
+
+### P0-3 `BOTTOM-RANK32-CAPACITY-TRUNCATION`
+
+当前 `NestedCapacityOperator` 只输出 `Q diag(m) Q^T u`。即使 capacity=1，也只保留 512 维中的 32 维；对近似各向同性更新，RMS 保留比例理论上约 `sqrt(32/512)=0.25`。初始化 effective mass 约 29 并不表示保留了 29/32 的完整 residual，而是只打开 29 个低秩方向。
+
+修复决定：使用 exact-zero、full-identity、non-expansive 的嵌套算子：
 
 ```text
-G physical object:
-  one K+null assignment
-  semantic / appearance / geometry = typed evidence reads, not three identities
-  camera_coordinates / camera_transport / camera_validity [B,K,C,*]
-
-S / recognizer / CoarseAction:
-  learned identities = Q/K/index only
-  action/state/object/temporal/coarse innovations = legal downstream values
-  online and training target share the same ordered causal interval structure
-
-W:
-  protected current object + object-conditioned intent/action modulation
-  state can only modulate object K/V
-  W1 = 4–8, 8–16; W2 = 16–32, 32–48
-  only supervised FutureObjectDynamics crosses W→P
-
-P1/P2/P3:
-  P1 reads high-resolution observation once and exports one ObjectFactualDock
-  P2 semantic selects [I,K]; geometry selects [I,K,C]
-  consequence = protected P1 fact + effect + interaction
-  P3 precision = centred unresolved K detail
-  P3 temporal = S temporal innovation + consequence innovation
-  protected consequence enters bottom exactly once
+c = capacity
+g = ordered group transparency
+output = c*u + Q diag(g-c) Q^T u
 ```
 
-## 4. 当前日志口径
+在 Q 子空间中特征值为 `g`，正交补中特征值为 `c`；`c=0 -> 0`，`c=1 -> u`，中间态范数不扩张。
 
-V122 需要重点观察：
+### P1-1 `CAUSAL-VISUAL-HISTORY-OMISSION`
 
-- G：`typed_consistency` 与三字段 consistency、physical K pair cosine/chart overlap、三 typed posterior L1、camera coordinate variation；
-- S：action/state/temporal innovation RMS 与四区间 variation；`*_sim_H` 只是 read-only similarity audit；
-- CoarseAction：innovation RMS、interval variation、adjacent cosine、target-normalized error；
-- W：condition interaction、state-object interaction、object K/V innovation，W1/W2 interval/object cosine；
-- loss：每字段优化 loss、每区间 target-normalized error，以及单独的 native-unit error；
-- P2：semantic/geometry null、`relative_status_abs/mean`、相机几何 interval mass、effect RMS；
-- P3：centred-detail RMS、consequence-innovation RMS、precision null、precision/temporal/state-change RMS；
-- action：完整 train/val loss、first/middle/tail、arm/gripper/event，不以单个 RMSE 下结论。
+V120 使用 DINO/raw history `(-8,-4,0)` 和两个相邻 flow 区间。当前主线仍保留三行 state history，却只加载 current DINO 和 raw `(-4,0)`，丢掉一帧视觉状态和一段运动变化。S/W 只能从状态/动作历史推断长期变化，更容易退化成 action/history shortcut。
 
-禁止再把下列现象单独当作“接通”：张量非空、梯度非零、RMS 非零、接口名字不同或 attention audit entropy 不为 1。边界干预必须先改变自己的 typed state，再改变下一消费者，最终 action 变化的置信区间脱离零后才能声称有策略收益。
+修复决定：恢复三帧 DINO/raw 的 grouped cache read；在线 current fact 取最后一帧，两段 adjacent flow/视觉变化进入 observation/G/S 的合法可观测边界。Teacher 仍单独读取未来 supports，部署不含 future。
 
-## 5. 尚未由源码修正自动保证的实验问题
+### P1-2 `P3-MULTIPLICATIVE-ANNIHILATION`
 
-以下问题仍需 V122 smoke/长跑，而不能靠本次静态修正提前宣布解决：
+当前 P3 为杜绝旁路，把 centred P1 detail 乘上 consequence gate，把 S temporal 又乘 consequence/action gate。W 弱或公共时，precision 与 temporal 不是“受后果约束”，而是被一起归零；这与 V122 precision 梯度坍缩和当前性能不恢复一致。
 
-1. **global K 是否在真实数据上形成稳定对象**：字段一致性提供近端压力，但数据可能仍不足以唯一识别四个 object slots；不使用 forced diversity、slot quota 或 entropy target。
-2. **W 四区间是否达到 teacher 的可识别差异**：接口已阻断公共 carrier，但未来变化本身可能弱；比较 prediction/target variation、adjacent cosine 和四区间 normalized error。
-3. **P2 是否真正把 W effect 传给 action**：修正 null 语义不等于必然产生动作增益；需要 effect zero/shuffle 的 boundary→consequence→action 因果链。
-4. **tail/event 是否恢复**：V121 的时间退化与旧旁路相容，但也可能包含 gripper/event 分布因素；必须看至少三个验证点。
-5. **learned flow 的 action 增益**：本轮修复了它的相机几何落点，没有设置非零流配额；仍需独立 zero/spatial-shuffle 干预。
+修复决定：
 
-若上述边界探针正确、W normalized error 确实下降，但 action 仍无增益，应归类为数据可识别性或任务收益问题，而不是继续增加 contract、硬门控或辅助 loss。
+- precision value = query-specific centred local detail + bias-free(detail × consequence interaction)；
+- temporal value = S temporal innovation + bias-free(S × consequence interaction)，action 只作有界调制；
+- W effect 仍通过 protected consequence 独立进入一次，不恢复 free W residual；
+- neutral W 时保留当前精细事实与可观测 temporal，不凭空制造 future effect。
 
-## 6. 明确排除与禁止回归
+这会明确废止旧“neutral effect 必须让所有 P3 optional lane 都为零”的过强契约；正确零语义是“不产生 W 交互”，不是删除合法当前事实和历史。
 
-- 不恢复 scalar progress、phase label、completion terminal、LSTM cache 或训练期未来值到部署路径。
-- 不把 local M 当 global K；不混用 prior、allocation、existence 和 validity。
-- 不 reduce 后 `expand` 伪造 object、interval、camera 或 type 轴。
-- 不加入 hard gate、route quota、固定 entropy、forced diversity、forced flow 或人工梯度。
-- 不削弱 P1 的一次高分辨率事实读取，不重新打开第二次 RGB/DINO bank。
-- 不增加 `_validate_vXXX_*` 或按版本号选择源码；manifest 只记录 capability schema。
-- 不恢复未监督 public W residual、重复 P1 fact、cumulative temporal identity 或第二个 protected-consequence bottom ingress。
+### P1-3 `CONTROLLED-TRANSITION-SPATIAL-COLLAPSE`
 
-## 7. 验证状态与下一步
+当前 controlled transition 只使用 `4 intervals × 4 global-K = 16` 个方向；K 同质后这些方向也高度公共。V120 的活动实现以 `future anchors × cameras × 8×8` 的 dense spatial basis 组织转移，再压到 action horizon。
 
-本地已通过：
+修复决定：恢复局部空间 basis，在 P1/G 的 dense fact chart 上形成 action-minus-neutral 的 fixed-zero transition；随后池化/对齐成 typed bottom tokens，避免把 512 个 token 全部常驻 bottom attention。
 
-- schema-4 manifest/reject；
-- G mass、typed consistency、camera-axis shape、object permutation；
-- Teacher FP32/no-grad 与 future-target/action isolation；
-- S/CoarseAction query-only 零语义；
-- W object-owned zero-condition；
-- P2 common-status offset invariance、typed selector 独立性与有界 score；
-- P3 centred-detail/temporal 代数零；
-- 完整 capability BF16 forward/backward、optimizer ownership、teacher-forced boundary 与五步静态缓存；
-- 日志解析回归。
+### P1-4 `HORIZON-WEIGHT-SEMANTIC-DRIFT`
 
-仍需服务器 fresh smoke 和 batch-8 长跑。默认命令见当前架构契约；schema 3 的 top checkpoint 不允许 resume 到 schema 4。
+当前 `anchor_horizon_weights` 按 band 等总质量分配，三个 band 的质量约 `31/33/36%`。V120 的实际 per-row 轻微远端强调给三个 band 约 `15/32/53%`。当前实现以“纠正行数别名”为名改变了训练目标，实际上削弱了本来就停滞的远端监督。
 
-## 8. 主干重构问题账
+修复决定：恢复 V120 的 per-row 线性 band 权重和 first-step protection，24 行均值仍精确为 1；gripper event/hold 平衡保持为独立的行内机制，不再改写 horizon 总质量。
 
-这组问题是本轮独立 `clearvla/mainline/` 重构必须消除的源码缺陷，不能再用新版本号或附加 validator 覆盖：
+### P1-5 `ACTIVE-LOGGING-BLIND-SPOT`
 
-| 问题 | 当前源码证据 | 新主干要求 |
+当前 losses 已计算 action band、arm/gripper/event、flow 等大量指标，但 `ACTIVE_PREFIXES` 缺少裸 `action_`，compact priority 也使用了和 ledger 实际键不一致的名字；主线 audit 工具无法解析 `[mainline-*]`。因此当前日志只显示少数 RMSE/G/S/W 指标，不能达到 V120 的观测能力。
+
+修复决定：
+
+- 恢复 V120 等价的 train/epoch/validation 指标组：physical/native、first/tail、arm/gripper、event/motion、三个 horizon band、flow geometry、G/S/W/P、bottom capacity/controller、owner gradient；
+- `metrics.jsonl` 无损保留所有活动指标及精确零值，使 W/P2/flow 真正坍缩与“从未接入”可以区分；nohup 控制台继续隐藏普通零，只保留 owner 梯度、质量守恒和 non-expansive 等决定性契约零值；
+- audit 工具支持 mainline JSONL 与 compact lines，不再把 8 epoch 主线解析为 0 rows。
+- audit 文本摘要显式投影 schema-19 的 G/S/W/P、teacher、transition、bottom、全部 owner 梯度，以及 normalized/physical/三段 horizon validation；完整 `metric_index` 继续无损保留全部活跃字段。这样“JSONL 里有但人工报告看不到”不再形成第二层观测盲区。
+- 正式恢复验收读取运行目录中的 `metrics.jsonl + run_context.json`，严格核对 V120 的 seed/batch/data/split/normalizer 身份、八轮完整性、final 与八轮均值、train-tail、结构/owner 梯度及 matched-noise ablation；缺失证据和实际退化分开报告，但二者都不能宣称恢复。
+- V120 的 normalizer 身份是“统计量六位小数后取 12 位 MD5”，新 checkpoint 身份是完整 SHA-256；正式 run context 同时序列化二者。恢复门槛使用 V120-compatible 指纹，checkpoint/resume 继续使用 SHA-256，避免把哈希算法不同误判为数据不同。
+- 验证前 `eval_diagnostic_batches` 个 batch 复用同一静态 cache 与同一初始 action noise，分别执行 proposal-zero、bottom no-updates 和 bottom full-updates；记录 physical/normalized RMSE、相对 primary 的 MSE gain、action delta RMSE 与 coverage。它们只用于判断活动路径对动作是正是负，不进入 loss，也不改变正式部署 API。
+
+### P1-6 `V120-OPTIMIZER-GEOMETRY-DRIFT`
+
+源码和完整 launcher 继承链确认，V120 并不是所有活动参数统一学习率：history proposal 为 `5e-5`，G/S/W/P 等新主干为 `8e-5`，Evidence decoder 为主干的 `0.7×`，contraction factor/depth 为 decoder 的 `2×` 且不衰减。独立主线抽取时虽然正确建立了互斥 owner，却把所有 owner 都设成 `8e-5`，并按二维权重的一般规则衰减 capacity basis。该差异会同时提高 history/bottom 相对 G/S/W 的更新速度，并改变低秩方向的 AdamW 动量，不能再当作无关的实现细节。
+
+修复决定：
+
+- 保持 G/S/W/P、observation、controlled transition 的公共 `1.0×base`；
+- history proposal 恢复 `0.625×base`；
+- bottom query/protected reader/evidence compiler/organizer/MMDiT/execution/heads 使用 `0.7×base`；
+- capacity basis 使用 no-decay `1.4×base`；capacity/continue 的控制头仍属于 bottom execution 的 `0.7×base`；
+- 公共 `learning_rate` 不再错误取排序后的第一个私有 optimizer group；运行身份保存所有 group 的 LR、weight decay 和参数数，日志单列 proposal/bottom/capacity LR。
+
+这项恢复只对齐 V120 已实际运行的优化压力，不恢复旧 launcher、重叠 owner 或失活模块。它能消除一个明确的对照混杂因素，但动作质量仍必须由同条件八轮长跑验证。
+
+进一步核对 V120 的 active Evidence MMDiT 后确认：启用 execution controller 时，旧 `NestedLowRankContractionBank.depth_weight/depth_bias` 会被显式冻结；日志中的 `grad_evidence_mmdit_operator_capacity` 是整个 contraction module 的梯度，而 `grad_evidence_mmdit_operator_basis` 是其中 basis 的梯度，因此两者在 V120 日志中数值相同。旧 per-operator depth control 不是一条被抽取遗漏的活动能力，不应恢复。当前主线保留唯一的 execution capacity head，并让它控制 exact-zero/full-identity 的全宽嵌套算子；basis 仍按 V120 的有效优化尺度训练和记录。
+
+### P1-7 `EXECUTION-VALUE-PARITY-DECISION`
+
+逐项核对 V120 的 287 个真实批次指标后确认：`latent_cvae_mmdit_execution_value_loss_weight=0.05` 在 V120 正式长跑中确实启用，它不是 audit-only execution cost。该 reader 对显式 differentiable candidate chart 的物理动作误差排序进行监督；V120 的 epoch-median value correlation 从 `0.605` 升到 `0.840`，pairwise accuracy 从 `0.85` 升到 `0.94`，top-1 accuracy 从 `0.62` 升到 `0.88`，因此不能把它归类为未使用 ancestry。V122 中该 reader 同样继续学习，但 capacity/operator 梯度从 E4 起归零并且动作性能退化，说明它是健康但不充分的机制，不能单独解释 V120 优势。
+
+当前 mainline 以一次可微的 soft capacity/continue 直接接受 action loss，已经没有旧的多候选动作 chart，也没有 execution value reader。这里暂不机械搬回旧 chart：它会重新引入每个 ODE step 的候选执行分支，违背已经确认的单图、五步静态缓存与吞吐边界。等价验收由 matched-noise `no_updates/full_updates` 消融、capacity/continue/basis owner 梯度及 block update RMS 共同承担。若正式长跑显示 capacity 梯度再次消失、任一强制执行模式稳定优于 learned，才实现一次前向内的轻量 prefix-value calibration；不得恢复旧候选图或把 execution cost 重新写入 loss。
+
+### P0-4 `G-HOST-POLICY-DISCONNECTION`
+
+三层 G role host 确实执行，也确实改写 `public_scene_base`，但修复前 grounder 的在线 competition、candidate value、G3 correction、导出的 K facts 都不消费 hosted public state；它只在 reconstruction query 中出现。于是三个“G 块”可以有梯度和日志，却不改变进入 S/W/P 的对象地址。
+
+修复决定：hosted public context 只进入独立 `public_address_key`，参与 K+null competition 和 G3 correction；candidate update/value 仍只由局部 content/semantic/appearance/geometry/coordinate 构成。这样 G1-G3 真正进入策略地址，同时不会把同一 public value 复制进全部 K。
+
+### P0-5 `P2-INTERVAL-IDENTITY-PRIOR-BYPASS`
+
+P2 原先用 S 的累计 `interval_queries` 作 intent key。该张量含 learned interval identity，即使 goal/history/object innovation 为零也能产生固定时间偏好；这与日志中 P2 窗口分布主要来自固定 temporal prior 一致。
+
+修复决定：P2 只用可观测、数据依赖的 `interval_action_innovations` 排序 W 四区间；W 的 interval 轴仍保留物理时间身份。只替换 learned query identity 不能再改变 P2 effect。
+
+### P0-6 `P3-NOISY-ACTION-TEMPORAL-BYPASS`
+
+P3 temporal base 曾直接乘 noisy ODE action gate。即使 W consequence 为零，temporal lane 也会随 noisy action 改变，从而成为 time-conditioned action adapter，绕开有效 S/W innovation。
+
+修复决定：合法的 S temporal innovation 作为 additive base；noisy action 只能参与 `S × consequence × action` 的 bias-free interaction。neutral W 时 temporal base 保留，但 noisy action 不能从该 lane 制造额外变化。
+
+### P0-7 `TEACHER-RELIABILITY-DOUBLE-DISCOUNT`
+
+原实现只在 null posterior 较大时把 successor 退回 current reference；对“可见但关联熵很高”的样本，它仍会把多个无关 future patch 的空间平均值输出为 target。随后 successor、semantic-delta 和 S recognizer 又各自乘 reliability，导致两种相反错误同时存在：可信度低的含混目标仍不具备中性语义，而真正应学的 current/zero-effect 行又被重复降权。日志中 teacher reliability 偏低、S/W 越来越公共，正符合这一组合缺陷。
+
+修复决定：Teacher-G 先以 association confidence 连续地把高熵 successor 退回 current reference，把 transport/covariance 退回零，并把 future address 退回 unit-mass current address；这些已经中性化的 value/address 与 S recognizer 都使用物理 object validity。reliability 本身仍被校准并作为诊断，但不再二次擦掉 neutral target。这样 reliability 为零时，W 的内容、几何和地址都不能变成 action-owned 自由载体，也不会被迫拟合空间平均 future 或噪声地址。
+
+### P0-8 `CONTROLLED-TRANSITION-NEUTRAL-BIAS`
+
+旧抽取给 real 与 neutral counterfactual 使用不同或带随机性的 coefficient 路径；即使 proposal 为零，两边也可产生不同系数，破坏“动作增量”的零语义。
+
+修复决定：real/neutral 经过同一确定性 coefficient network；neutral 输入为 `zeros_like(proposal.tokens)`；dropout 只作用于相减后的 delta。proposal 为零时 transition value 必须精确为零。
+
+## 4. 保留、恢复和明确不恢复
+
+### 必须保留的新主线实现
+
+- 独立 package/config/train/runtime 与 typed API；
+- current-only online API、Teacher no-grad 且每 batch 一次、部署零次；
+- source-relative flow 单位、真实 warp、RGB photometric anchor、mask target isolation；
+- 18-D physical action codec、三层 Evidence MMDiT、event/motion heads；
+- V120 的八个 proposal offsets `(-24,-16,-12,-8,-6,-4,-2,-1)`、4 recent + 3 summary、两层 proposal；
+- information-balanced sampler 与 event row weighting 的基本思想；
+- checkpoint source closure、fresh/resume 拒绝与 optimizer 单一所有权。
+
+### 从 V120 恢复或等价重建
+
+- 三帧 causal visual history 与两段 adjacent motion；
+- 对真实 local chart 的 P1 多 glimpse 地址读取；
+- dense spatial controlled-transition basis；
+- V120 horizon per-row 权重；
+- 完整指标和验证口径。
+
+### 不恢复
+
+- differentiable execution candidate replay；
+- 自由 uncertainty NLL；
+- 未监督 public W residual；
+- 实际未启用的 variational CVAE posterior / hierarchical workspace；
+- scalar progress、phase label、completion terminal、hard gate、route quota、固定 entropy、forced slot diversity、forced nonzero flow 或人工梯度。
+
+## 5. 实施顺序与状态
+
+| 顺序 | 项目 | 状态 |
 | --- | --- | --- |
-| `LAUNCHER-INHERITANCE-GRAPH` | V122 正式入口向下继承 25 层 shell，累计约 1504 行、566 次 CLI 参数赋值和 191 个环境变量导出 | 一份可序列化的 active experiment spec；主机路径允许少量显式 override；run label 不选择源码 |
-| `CONFIG-FLAG-ACCUMULATION` | V39 policy config 连同父类约 399 个字段，训练 CLI 有 415 个 `add_argument` | 新配置只声明当前图真实消费的字段，并按 data/model/teacher/train/runtime 嵌套；legacy 字段不得进入 active manifest |
-| `MONOLITHIC-TOP-DISPATCH` | 当前 planner 类约 7986 行，object mainline 在初始化、八块循环、缓存、P1/P2/P3 和 bottom ingress 多处按布尔条件穿插 | 新 composer 按 G1-G3/S/W1-W2/P1-P3/bottom 的执行顺序显式拥有模块；active forward 内无版本或 competing-mainline 分支 |
-| `TRAIN-TEACHER-BOOLEAN-BOUNDARY` | online 与 teacher 共用 planner forward，并依赖 `future_training_pack` 与 `allow_future_training_evidence` 组合授权 | online API 的类型签名不能接收 future；teacher 由 training engine 单独构建一次，只进入 objective target |
-| `RUNTIME-MULTI-OWNERSHIP` | loss、optimizer、grad diagnostics、日志和训练循环集中在 2 万行 runtime；P3 改名曾使诊断访问已删除成员后崩溃 | objectives、optimizer、diagnostics、metrics 分离；模块发布自己的参数/诊断 group，外部不得访问私有成员 |
-| `LEGACY-SOURCE-FINGERPRINT` | 当前 fingerprint 包含 V94-V118 等无关旧启动脚本，legacy 修改可改变当前实验身份 | checkpoint 只记录 active import closure、精简 spec、component ABI、Git commit 与数据/T5 identity |
-| `STATIC-CACHE-VERSION-OWNERSHIP` | 部署缓存仍名为 `V115StaticEvidenceCache`，同时容纳多代 goal/effect 类型 | 新 `OnlineContext` 只包含当前 G/S/W/P1 在线产物；P2/P3/bottom 保持 ODE-step 动态 |
-| `BOTTOM-COMPATIBILITY-MISLABEL` | 正式入口最终选择 `EvidenceLatentMMDiTActionDecoder`；该类是确定性 latent organizer + time-domain Evidence MMDiT，明确不运行 CVAE posterior、旧 hierarchical workspace 或 adaptive CVAE refine，但 manifest/文档仍宣称 `evidence_mmdit_cvae_workspace_v1` | ABI 按真实运行能力命名；保留三层 time-domain Evidence MMDiT、确定性 condition bottleneck、typed selector/value、低秩容量和可微 execution，禁止以历史类名前缀冒充实际图 |
-| `BOTTOM-CANDIDATE-REPLAY` | 旧 `_run_dynamic_execution` 在每个 decision 上为全局 block×dwell 候选重复执行完整 action block，并保留 differentiable candidate graph；这与历史上新增 execution 后数倍吞吐/显存膨胀一致 | 训练主路每个 host block 只执行一次；controller 只给出有界连续 capacity/continue，execution cost 仅 audit，不再通过候选重放制造计算图 |
-| `BOTTOM-STATE-DUPLICATION` | 数据 `state_history` 已含当前 offset，旧 S 构造又拼接 `state[:,None]`，新提取版 bottom 也再次追加 current state | `ObservableHistory` 以最后一项被当前 `state` 替换的 canonical 序列作为唯一状态历史；任何消费者不得再次 append current |
-| `BOTTOM-TYPE-AS-VALUE` | 提取初稿把 learned `source_identity` 直接加到 protected/precision/temporal/state-change value；即使 optional lane 为零也会向 action 注入非零常量 | 类型、basis、位置身份只进入 Q/K/selector；所有 optional V 使用 bias-free 投影并保持 `input=0 -> value=0`；protected consequence 只经一个专用 basis read 进入 bottom |
-| `BOTTOM-NOISY-EVIDENCE-WRITE` | 提取初稿前两层同时执行 `evidence_from_action`，让 noisy action 改写随后层的 evidence value，违反 action/noisy 只能作为 query 的边界 | Evidence MMDiT 的 selector/value bank 全程只读；每层只更新 action stream，controller 也只能选择计算，不得写 evidence value |
-| `MASK-TARGET-ERASURE` | 新观察编译器把 `visible` 同时并入在线候选合法性和 `DenseFactChart.dino_content` 的构造；被 mask 的格子因此既不可见、target 也变成零，而且 reconstruction owner 同样为零，名义 JEPA mask 没有任何被遮事实恢复压力 | 单独保存 detached 全当前 DINO target 与 `cell_observed`；在线 G 仍只能读可见候选，masked reconstruction 只能由上下文化 public query 读取全局 K prototype，不能从被遮 candidate value 泄漏 |
-| `INTERVAL-OBJECT-AXIS-ALIAS` | `FuturePlanRecognizer` 将 `[1,I,H]` 的 interval identity 直接 `expand(B,I,K,H)`，遗漏 singleton object 轴；由于 `I=K=4`，shape contract 全部通过，但原 interval 维实际对齐到了 object 维 | 所有新增轴必须先 `unsqueeze` 再 expand；增加 `I != K` 的轴语义回归，区间置换只置换 interval、对象置换只置换 K |
-| `W-ADDRESS-SELF-CONFIRMATION` | W 的 `future_address` 由 `current_address + transport` 生成，P2 又用同一 transport 构造 `transported_source` 与该地址矩比较；该 coordinate 分数是代数自证。旧生成器还用“原分布乘新中心高斯”而非真正平移，所以地址几乎留在源位置 | W 使用可微 backward warp 真正平移 object chart，并以 teacher address loss 约束；P2 由 action query 独立提出 destination/transport 请求，再与 W effect 比较，禁止一个字段和自己的确定性重写互证 |
-| `FUTURE-RELIABILITY-OMISSION` | Teacher 已有 null/entropy，但导出的 `FutureObjectDynamics` 没有 reliability；future loss 对低置信匹配与可靠匹配使用同一 current-validity 权重，P2/W 日志也无法区分“静态事实”与“匹配失败” | 导出 object/interval reliability；内容、delta、transport/address 由 detached teacher reliability 加权，reliability/uncertainty 自身仍在物理 validity 上校准；reliability 只作 loss/selector calibration，不作非零 effect value |
-| `P3-EFFECT-BYPASS` | precision 的 action query 可在 `effect=0` 时重新选择 K-detail；temporal 可由 S temporal 单独产生 value。两条 optional lane 因而都能绕开 W consequence，和账本中宣称的“必须同时读取 consequence”不一致 | precision 与 temporal value 都以 consequence innovation 作乘性、bias-free 条件；neutral FutureEffect 时二者精确为零，P1 protected fact 仍原样保留，因此修复不删除当前事实能力 |
-| `BOTTOM-NEARZERO-RENORMALIZATION` | 新 bottom 在 optional evidence V 与 controller V 上使用普通 LayerNorm；一个刚学到的微小非零 lane 会立刻被扩成单位方差，重现历史近零 residual 高增益问题 | selector 可归一化，value 必须使用固定 RMS floor 的零保持归一化；零值精确为零，近零值局部 Jacobian 有显式上界 |
-| `DEPLOYMENT-CACHE-RETENTION` | `OnlinePolicyCache` 保存完整 `OnlinePolicyInput` 与 `ObservationEvidence`；五步部署只需要 history/G/S/W/P1，却让 raw RGB、DINO history、flow 特征和 local chart 一直存活 | deployment cache 只拥有 history、G/S/W/P1；训练 evidence 作为训练返回值由 objective 单独持有，进入五步采样前即可释放 |
-| `RESUME-RNG-NONEXACT` | checkpoint 保存全局 RNG，却不保存 DataLoader 专用 generator；启动 preflight 和每轮随机 validation 又消费训练随机流。所谓 exact resume 会重复/改变 shuffle 与 flow/noise 序列 | train-loader、flow-matching、preflight、validation sampling 分别拥有可序列化 generator；preflight 不改变训练流，epoch-boundary resume 恢复下一轮 loader/flow 状态 |
-| `UNVERIFIED-BOTTOM-MIGRATION` | `--migrate-bottom` 只按 `bottom.*` 名字和 shape 加载任意文件，不检查 mainline manifest 或 bottom ABI；历史同名张量可绕过 fresh-run 边界 | migration source 必须是带 identity 的 mainline checkpoint且 bottom ABI 完全相同；否则完整拒绝，不提供“shape 看起来一样”的静默迁移 |
-| `SOURCE-CLOSURE-OMISSION` | source snapshot 只 hash `clearvla/mainline`，但 active data path仍直接导入 HDF5、split、decoded-store 和 preprocessing 基础模块；这些依赖变化不会改变 checkpoint source identity | snapshot 显式包含经审查的外部基础依赖，或把它们迁入 package；active import closure 与 source identity 必须一致 |
-| `RUNTIME-CONFIG-AND-EVAL-DRIFT` | compact config 仍有未消费的 proposal/execution diagnostic 与 memory 字段；公共 `evaluate_loader` 声称接收 mainline loader，实际 loader 返回 raw mapping 而函数强制要求 `TrainingBatch` | 删除死字段并只保留一个真实 diagnostic-batch 预算；evaluation 在唯一 typed conversion 边界转换 raw batch，CLI 和库函数共享同一路径 |
-| `ACTIVE-G-HOST-OMISSION` | V122 默认图的第 1–3 个 grounding `TemporalDynamicsBoundDiTBlock` 都实际执行且可训练，共 25,210,368 个参数；提取版仅保留 Pre-G 局部块和 global-K binder，没有这三个 state-conditioned self/visual/transition/FFN 宿主 | 在 typed local-chart → global-K 边界恢复三个完整 grounding host；只允许读取当前事实与当前 state，不恢复 task/history/proposal/noisy-action canvas 汤 |
-| `ACTIVE-P1-HOST-OMISSION` | V122 第 6 个 policy block 实际执行且有 6,300,160 个可训练参数；它在一次 high-resolution reader 前组织 action-basis factual query。提取版直接从小线性 query 进入 micro-read | 在 `ObjectFactualReader` 内恢复一个静态、typed 的 P1 self-attention/AdaLN/FFN host；它作用于 clean action-basis query，仍不得读取 noisy action、teacher 或第二次视觉 bank |
-| `ACTION-HISTORY-PROPOSAL-OMISSION` | 正式链固定使用 8 个 executed-action offsets `(-24,-16,-12,-8,-6,-4,-2,-1)`、4 recent + 3 summary token 和两层 history proposal；提取版把历史缩为 `(-8,-4,-1)`，并完全删除了 10,010,631 参数的活动 proposal 与原 proposal loss | 恢复完整 8-row causal history encoder、summary cross-attention、24-step clean proposal 和原 action proposal loss；proposal 只作为 P1 clean query 与 controlled transition 的动作条件，禁止重建 W/bottom 旁路 |
-| `CONTROLLED-TRANSITION-OMISSION` | V122 的 7,894,025 参数 `ControlledResidualLatentDynamics` 在 P3 后始终执行；其 action-centred low-rank delta 与 event-context 被送入 Evidence MMDiT `transition_memory`。提取版 bottom 没有对应输入 | 在 W/P 与 bottom 之间恢复 fixed-zero、action-minus-neutral 的低秩 controlled transition；使用 W typed future state、clean proposal、current state/observable history，作为独立只读 evidence lane 进入 bottom |
-| `ACTIVE-PARAMETER-INVENTORY-DRIFT` | 早期 synthetic/default-width V122 账为 227,466,394 / 166,360,123；正式 4096-wide T5 长跑实际为 230,717,082 total / 168,064,059 trainable。最初提取候选仅 117,138,019 / 117,039,715，缺口主要由活动 G hosts、P1 host、proposal、controlled transition 构成，不是冻结 ancestry | 候选参数账按“活动旧模块 → typed 新 owner → 参数量 → 调用边界”逐项闭合；比较基准使用正式长跑 inventory；仅 4/5/7/8 已冻结且跳过的 generic blocks、冻结 legacy heads 与候选重放可计入合法删除 |
+| 0 | V120/V122/current 全 epoch、源码与初步结论对照 | 已完成；初步结论已转成待证假设并逐项确认 |
+| 1 | `BOTTOM-RANK32-CAPACITY-TRUNCATION` | 已实现；exact zero/full identity/non-expansive 单测通过 |
+| 2 | `G-BINDER-COLLAPSE` + `G-HOST-POLICY-DISCONNECTION` | 已实现；真实长跑效果待验 |
+| 3 | `P1-GLOBAL-K-ADDRESS-BOTTLENECK` | 已实现；full local chart、普通 autograd 与单次 packed read 单测通过 |
+| 4 | causal three-frame visual history + dense transition | 已实现；两段 flow 与 512→96 transition 单测通过 |
+| 5 | additive typed P3 + P2/P3 bypass 修复 + V120 horizon weights | 已实现；neutral/identity 与依赖单测通过 |
+| 6 | teacher 高熵 fallback、reliability 双折扣与 neutral-transition 修复 | 已实现；目标/零语义单测通过 |
+| 7 | full active logging + mainline audit parser | 已实现；真实 diagnostic train step 产生 `568` 个有限 archival 指标（V120 parser 为 `287`），包括 19 个 exact weighted contributions、独立闭合残差及 event-balanced/V120-comparable 双口径，并以总量及 G/S/W/P/transition/bottom/owner-gradient 分组下限锁定；无损 JSONL、compact semantic rows、matched-noise proposal/execution ablations 与跨版本 parser 均通过本地验证，仍需真实新日志验收 |
+| 8 | V120 optimizer geometry 恢复 | 已实现；proposal/bottom/capacity 比率、capacity no-decay、base-LR 日志语义均有单测 |
+| 9 | provenance / numerics-autograd / runtime 三轮审查 | provenance、数值/普通 autograd、五步静态缓存与评测干预隔离已完成；零初始化的首步启动边界经过第二个真实 optimizer step 后，全部 trainable tensor 均获得非零普通梯度，避免 aggregate owner norm 隐藏内部死支路；`124` 项回归、Ruff、compileall 通过，Pyright `0 errors`；生产显存仍待服务器 smoke |
+| 10 | BF16 smoke 与服务器 V120 受控八轮比较 | CPU BF16 完整前后向已通过；本机无 CUDA，服务器 batch-1/batch-8 显存与八轮结果待执行，这是性能恢复声明的必要条件 |
+| 11 | V120 execution-value 语义对照 | 已确认其为活动且可学习的 candidate-value 机制，但 V122 证明它不足以阻止执行退化；当前以直接 action-gradient + matched-noise 执行消融作等价边界，是否增加轻量 prefix critic 由正式因果证据决定，不恢复昂贵旧 chart |
 
-重构以当前 schema-4 数学为默认 preserve 基准；只有本表或前述问题表中具有源码证据的问题允许在迁移时改变行为。每个修正必须先有最小失败回归，再实现，再做 provenance、numerics/autograd 和 runtime/performance 三轮审查。
+## 6. 验收口径
 
-## 9. 独立 mainline 候选的已结问题（schema 17）
+静态与单元验收：
 
-这里仅记录会改变候选主干行为或实验可信度的问题；旧日志结论仍留在前文作为 V122 冻结祖先证据，不再把它们伪装成候选当前状态。
+- capacity `0 -> exact zero`、`1 -> bitwise/数值 identity`、中间态 non-expansive；
+- public scene perturbation不能以同一 additive value复制到所有 G candidates；
+- object permutation 与 local-chart permutation 在 G→P1→W/P2 全程等变；
+- P1 query/K 能选择不同空间支持，且视觉 bank 只读取一次；
+- future support 替换只改变 target/loss，部署 action 不变；
+- neutral W 不制造 W interaction，但不删除当前 P1 detail 与合法 S temporal；
+- controlled transition 对 proposal=neutral exact zero，并保留空间差异；
+- 五步部署不重建 observation/G/S/W/P1/Teacher；所有 trainable 参数有且仅有一个 optimizer owner；允许零初始化边界在首步令其上游为零，但第二个真实 optimizer step 后不得仍有 trainable tensor 保持 exact-zero 梯度。
 
-| 问题 | 源码根因 | 候选修正与验收 |
-| --- | --- | --- |
-| `S-POSITION-AS-VALUE` | S 将固定相对历史位置 `[-1,0]` 与 state/action/delta 一起投影成 history value；即使可观测量全零也能制造固定 interval/temporal innovation | 位置只进入 history Q/K carrier，V 只携带可观测数据 innovation；零 goal/state/action 时 S 四区间、对象、temporal 与 coarse intent 精确为零 |
-| `W-SUCCESSOR-GHOST-GRADIENT` | `successor=detach(current)+delta` 却从 attached `current_reference` 相减，前向为零但向 G 注入 `-d(current)` | 两个 current baseline 使用同一 detached provenance；零 successor innovation 对 G 的梯度精确为零 |
-| `FUTURE-ADDRESS-LOW-RELIABILITY` | future address loss 未使用 Teacher-G 匹配可靠度，低置信关联仍训练 W 空间地址 | address Hellinger 与 successor/delta/transport 共用 detached object/interval reliability；可靠度本身只在 physical validity 上校准 |
-| `DEPLOY-BACKWARD-FLOW` | 部署构图仍计算只供 cycle loss 使用的 backward flow | backward flow 只在 geometry-supervision 训练边界构建；五步部署只计算一次 forward learned flow |
-| `VALIDATION-DYNAMIC-COLLISION` | 单随机 flow-time 的 loss-forward 指标与五步部署末端指标同名后被平均 | 部署动态指标统一加 `validation_deploy_` 前缀，保持两种语义独立 |
-| `METRIC-KERNEL-FANOUT` | 每批每指标分别累加 CUDA scalar，虽不立刻同步仍产生大量微小 kernel | 按稳定 key signature 向量化累加，只在日志/epoch 边界一次 materialize |
-| `CHECKPOINT-PARTIAL-MUTATION` | malformed model/optimizer/scheduler/RNG 可能在验证后半段才失败，留下半恢复 live state | exact resume 在任何 mutation 前验证完整 model shape/dtype/finite、optimizer ownership/state、scheduler LR、全局 RNG 与 owned generator；失败回归验证 live model 未改变 |
-| `HISTORICAL-MIGRATION-PARSER` | bottom ABI 可兼容的旧 mainline manifest 因当前 schema 强校验而无法被显式审计 | 仅 bottom migration 使用 relaxed historical-schema parser；exact resume 仍要求当前 schema，bottom state 必须全量匹配 |
-| `DINO-DOUBLE-MMAP-READ` | 当前 DINO 与 12 个 future supports 分两次读取同一 episode mmap | dataset 一次 `load_batch` 读取 13 行再拆 current/future；不复制完整缓存 |
-| `EVAL-QR-RECOMPUTE` | 三个低秩容量算子在每个 ODE step 重做相同 512×32 QR | frozen eval/no-grad 按 parameter version 缓存精确正交基；训练每次保持可微新 QR |
-| `OUTPUT-STREAM-CONTAMINATION` | fresh run 可向已有 metrics/checkpoint 目录追加；且 preflight 前写 context 会留下无法直接重跑的半成品目录 | fresh/migration 要求空目录，resume 对齐已有 identity；fresh context 仅在 preflight 成功后写入 |
-| `FLOW-FRAME-AXIS-AND-UNIT` | recurrent flow 是源网格上的受边界缩放参数；G/Teacher 却把 previous-grid 参数当成 current-grid 的真实 normalized displacement | 部署先求 current→previous 对应，再转换为真实位移并取逆，导出 current-chart 上的 previous→current transport；warp/cycle/G/Teacher 共用同一物理单位；方向、边界转换和重建有可执行回归 |
-| `FLOW-HORIZON-TIME-UNIT` | raw pair 为 `-4→0`，Teacher 却用 `offset/48` 缩放：H4 只有正确先验的 `1/12`，H48 也只有一次四帧位移 | `flow_reference_frames=4` 同时拥有数据 raw-pair 与 Teacher 外推；四个未来区间按真实 `offset/4` 使用流，语义全局匹配仍可纠正错误先验 |
-| `FLOW-FEATURE-COLLAPSE-SHORTCUT` | warp/advantage 只比较共享可学习 encoder 的前后特征；encoder 可通过抹平时间细节降低 loss，而无需学会运动 | 同一外部 flow 权重同时包含 feature warp 与低分辨率 literal-RGB photometric anchor；motion advantage、uncertainty 与 refinement 由不可学习 RGB 变化锚定，不加入非零流配额 |
-| `FLOW-CORRELATION-KERNEL-FANOUT` | 半径 2 的 25 个邻域逐个 `grid_sample`，训练双向、三次 refinement 约 156 次小采样 kernel | 一个迭代用一次向量化邻域采样加一次 matched 采样；逐元素等价回归并锁定为每迭代两次 `grid_sample` |
-| `AUDIT-PROGRESS-LEAK-OR-DEAD-FIELD` | `frame_progress` 每批搬到 GPU 后完全未消费；既增加无效路径，又无法判断 S/W 是否随真实轨迹位置变化 | metadata 固定留在 CPU，只在日志批次 detached 计算 frame-position 与 S interval-energy/state-change、W successor/interval variation 的相关性；forward/loss 类型仍不接收 progress |
-| `GRADIENT-AND-LR-LOG-SEMANTICS` | 全局范数是 clip 前、owner 范数是 clip 后却同名；warmup 日志在 scheduler step 后读取，记录的是下一批 LR | 明确记录 `gradient_global_preclip_l2` 与 `gradient_postclip_<owner>_l2`；learning rate 在 optimizer update 前捕获，与当前 loss 对齐 |
-| `ACTIVE-MODULE-MIGRATION-RESTORED` | schema-12 候选错误删除三个活动 G host、一个活动 P1 host、8-row history proposal 和 controlled transition，导致 trainable 参数从当时 synthetic 口径的 166,360,123 降到 117,039,715；正式 V122 长跑实际 trainable 为 168,064,059 | schema 13 按 typed owner 恢复四类算法：169,378,419 total / 169,276,019 trainable；proposal 参数精确恢复为 10,014,727 total / 10,010,631 trainable；旧 4/5/7/8 frozen+skip block 不迁移；schema 16 对正式长跑的最终差额另按 4096-wide T5 口径闭合 |
-| `TRAIN-CONDITION-DROPOUT-OMISSION` | V122 正式脚本链固定启用 goal `0.05`、executed-action history `0.10` 与 proposal `0.25` 的训练期条件失活；schema-13 候选恢复 proposal 模块后仍把三路条件在每个训练样本上恒置为 keep=1，改变了既定的防捷径训练算法 | schema 14 按样本恢复三路独立 keep；完整 history proposal 仍承担原辅助监督，只有进入 S/P1/controlled-transition/bottom 的条件值 exact-null；validation/deployment 恒为 keep=1 且不消费条件 RNG；keep 比例进入日志，exact-resume 复用已序列化的训练随机流 |
-| `PHYSICAL-ACTION-FIELD-OMISSION` | 正式 V122 最终参数解析固定为 `legacy_independent + legacy_handcrafted + gripper_field_dim=6 + decode_delta_blend=0.25`，即在 18 维 `[arm_abs(6), arm_delta(6), gripper_field(6)]` 中做 flow matching；schema-14 候选却直接在 7 维 normalized action 上加噪、预测和积分 | schema 15 已恢复确定性的 18 维物理动作场；P2/P3/bottom 的 noisy-action query、三块 Evidence MMDiT velocity 与五步 ODE 都位于该场，最终才解码回 7 维动作；proposal/history/controlled-transition 仍保留 7 维 clean-action 语义；逐通道编码、解码和 flow/runtime 同场回归已通过 |
-| `ACTIVE-ACTION-OBJECTIVE-OMISSION` | schema-14 只保留普通 7 维 velocity MSE、decoded MSE、普通 CE 与错误阈值；正式链实际使用 `anchor_bands=(4,12,24)`、tail `0.20`、first `0.05`、raw-unit gripper event threshold `0.10`、focal positive `4.0`、normalized arm-delta motion threshold `0.02`、SmoothL1 decoded/delta consistency。Parseval 包装层最终把 transition/event-delta/magnitude/off-delta 四项覆盖为 0，不能错误恢复祖先默认值 | schema 15 已按最终 argv 恢复 semantic physical-field flow、anchor-band 加权 proposal/event/motion/decoded/delta；外部权重为 proposal `0.05`、event `0.03`、motion `0.03`、decoded `0.08`、smooth-delta `0.02`、physical-delta-consistency `0.03`；最终为 0 的四项没有迁移 |
-| `INFORMATION-BALANCED-SAMPLER-OMISSION` | 正式链固定 `information_balanced_sampling=1`，uniform/event/motion 配额为 `0.50/0.125/0.375`、motion quantile `0.70`；schema-14 使用普通全局 shuffle，改变了每个 epoch 的监督分布 | schema 15 已从 normalized action delta 与 raw-unit gripper transition 预计算无图像 sampling strata；train loader 使用确定性 information-balanced batch sampler，validation/test 顺序遍历，sampler epoch、阈值和 summary 由新 runtime 显式拥有 |
-| `EXECUTION-VALUE-REPLAY-BOUNDARY` | 正式链的 execution value weight 为 `0.05`，但旧实现为每个 block×dwell 候选重复运行完整动作块并保留可微 candidate graph；这是已记录的吞吐/显存结构缺陷，不能作为“重要模块”原样迁入 | schema 15 保留三块 Evidence MMDiT、32-rank/32-group 低秩容量、controller attention、bounded capacity 与 soft continue，只删除重复候选执行图；完整 action backward 已证明 capacity operators、capacity head 与 continue head 均收到非零梯度，execution cost 仍为 audit-only |
-| `FORMAL-T5-WIDTH-OMISSION` | schema 15 的独立配置把 `goal_token_dim` 留在 DINO 风格的 768，但正式 `grasp_pen_embed.pt` 是 `[39,4096]`；V122 从文件动态解析 4096，因此候选会在真实语言加载边界直接失败，也少计了 S 的语言投影参数 | schema 16 将正式 T5-XXL ABI 固定为 4096，配置加载对错误宽度继续 fail-fast；top ABI 升级，新增的 1,703,936 个 trainable 参数全部来自 `4096→512` goal projection，并由真实 `.pt` 加载回归与参数 inventory 锁定 |
-| `GLOBAL-K-MIXTURE-IDENTITY-SHORTCUT` | G 的主原型项计算 `MSE(sum_k owner_k * prototype_k, target)`；多个高度重叠 K 可以在混合后共同解释 DINO，而不要求任何单个、实际送入 W/P 的 prototype 解释自己读到的事实。V122 的 object-content cosine 增至约 `0.71`、chart overlap 增至约 `0.57` 与此代数捷径一致 | 保留原混合重建作为事实图诊断，但 65% 主原型项改成 soft-EM 条件失真：每个 K prototype 对其自身 competitive read posterior 下的 detached DINO target 负责；相同事实仍允许相同 slot，不加入 diversity/entropy/quota。回归锁定 overlapping read 在异质事实上有损失、在相同事实上精确为零 |
-| `S-ACTION-STATE-CONTEXT-SOUP` | S 将 `interval_action_innovation + interval_state_innovation` 在同一个 `tanh` 前相加，再用同一 context 同时制造 object key/value；history 因而被重复，goal/action 可以直接合成“可观测 object value”，四区间更容易公共化 | action/goal innovation 只条件化 semantic object key，observed-state innovation 只条件化 typed object value；两者分别使用相同 RMS 上界。零 state/history 时非零 goal 可产生 key、但 object value 必须精确为零 |
-| `W-INTENT-ACTION-SATURATION-COMPETITION` | W 把 S interval innovation 与 supervised coarse-action innovation 先相加再过一个 `tanh`/writer；V122 中 coarse-action RMS 增至约 `1.60` 而条件交互仅约 `0.21`，较大的 action carrier 能饱和并抹掉 intent 的局部 Jacobian | intent 与 coarse action 各自通过 bias-free object interaction，各自在 pre-tanh 与 write 边界受相同 RMS 合约，再用固定 `1/sqrt(2)` 合并；不使用 gate/quota。回归锁定 intent 的边际写入不随 action 从零增至 `1e6` 而改变，并记录两路 pre/post RMS 与 contract scale |
-| `ACTION-BAND-ROW-COUNT-ALIAS` | 原 action/proposal loss 对 24 行直接求均值，因此 `1-4/5-12/13-24` 的总预算主要由行数 `4/8/12` 决定；高度相关的远端行被当成更多独立任务，日志却只显示轻微的 per-row tail emphasis。这种监督仍让 V122 形成 first 很低、tail 几乎停滞的失衡解 | 在同一 action 外部预算内按三个语义 band 分配质量，再保留既有 `1/1.1/1.2` 远端轻微强调与 first-step `0.05`，最后令 24 行权重均值精确为 1；日志同时给出每 band 未加权误差、实际平衡误差与预算 mass |
-| `GRIPPER-HEAD-WITHOUT-TRAJECTORY-PRESSURE` | information sampler 只保证 event window，窗口内仍以 hold 行为主；event focal loss只训练辅助 head，真正的 18-D flow 与 decoded gripper 仍按所有行平均。另有 `1 + positive_weight(4)` 实际把正类写成 5 倍而非配置声明的 4 倍 | raw-unit event 行在 physical gripper field 和 decoded gripper SmoothL1 中使用 inverse-root-frequency event/hold 权重，并在 horizon 权重下重新归一为精确相同预算；无事件批次 bit-exact 恢复原损失。辅助 head 正类倍率修正为真实 `4.0`；事件/保持的未加权 flow、decoded error 与实际 row weight 分开记录 |
+长跑验收：
 
-三轮静态审查结论：
-
-1. **Provenance**：在线输入类型不含 future；Teacher/recognizer 只属于训练 target plane；P2 只消费被监督 `FutureObjectDynamics`，P3 optional lanes 必须经过 consequence innovation；active import closure 无 legacy runtime/launcher。
-2. **Numerics/autograd**：在线可训练 cosine/selector 使用显式 variance/RMS floor；optional value 与 capacity 保持零值和近零 Jacobian 上界；Teacher FP32/no-grad；flow 的空间轴、normalized-coordinate 单位与四帧时间单位一致；RGB anchor 关闭可学习特征坍缩捷径；每个 trainable parameter 恰有一个 optimizer owner。
-3. **Runtime/performance**：observation/G/S/W/P1 每次 observation 构建一次，Teacher 每训练 batch 一次、部署零次，P2/P3/bottom 每 ODE step 一次；flow 部署一次方向求解、训练两次方向求解，每次 refinement 仅两次采样 kernel；非日志热路径跳过诊断归约，部署 cache 不保留 raw/DINO/flow chart，audit metadata 不常驻 GPU。
-
-schema 16 的本地生产 shape batch-one CUDA BF16 完整训练更新已通过：真实 4096 宽 T5、336 RGB、576 DINO patches 与 12 个 future supports 下 peak allocated/reserved 为 `2.674/2.785 GiB`。schema 17 新增一个 512×512 writer，不能把旧峰值冒充成新实测；当前 86 项 mainline 回归、scoped Ruff 和 production Pyright error=0 已通过。仍未关闭的是 schema 17 本地显存复测与服务器验收：生产 batch 8 `<22 GiB`、fresh smoke、五步部署和真实吞吐。未通过前不切换公开 V122 启动器。
+- 先与 V120 同数据/seed/batch 比较全部 8 epoch，不只看首轮或 best；
+- physical RMSE、normalized RMSE、first/tail、arm/gripper、event/motion、三 horizon bands 均不得差于 V120；
+- G object cosine 不能再精确为 1，且 reconstruction 下降不能以 K 公共化换取；
+- S/W prediction variation 应接近 teacher，而不是只增加 RMS；
+- P3 precision 与 capacity 梯度不能再次在后期消失；
+- flow 的 moving/static warp gain不得因地址修复而丢失；
+- 若边界和所有权均正确而 action 仍无增益，再归类为数据可识别性问题，不继续堆契约或辅助 loss。

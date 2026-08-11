@@ -80,101 +80,112 @@ entropy targets or artificial gradients.  They remain experiment questions.
   reconstruction targets belong to the ephemeral training plane.
 - Pass one protected consequence and typed P3 innovations to the bottom.
 - Give every trainable parameter exactly one optimizer owner.
+- Preserve V120's resolved optimization geometry explicitly: proposal `0.625x`,
+  active bottom decoder `0.7x`, and no-decay capacity basis `1.4x`; keep the
+  G/S/W/P owners at the public base LR.
 - Let modules publish their own diagnostic parameter groups; diagnostics may
   not reach into another module's private attributes.
 - A run label is metadata and never selects source semantics.
 
-## Atomic cutover gates
+## Release gates and current status
 
-The public launcher remains on the frozen V122 path until the new package has:
+`scripts/train_mainline.sh` and `scripts/smoke_mainline.sh` are the direct
+entry points for this package.  They resolve one JSON config and do not inherit
+a V-numbered launcher chain.  A formal result still requires all of:
 
-1. a resolved active config with no inherited launcher chain;
-2. independent online and teacher-forced APIs;
-3. a complete G/S/W/P and bottom forward/backward;
-4. a canonical loss ledger, optimizer and gradient diagnostics;
-5. five-step deployment with verified static cache ownership;
-6. checkpoint manifest and explicit compatibility behavior;
-7. fixed-input provenance, zero-semantics, loss and gradient regressions;
-8. local BF16 memory below 8 GiB and production batch-eight budget below
-   22 GiB;
-9. three completed source reviews: provenance, numerics/autograd, and
-   runtime/performance.
+1. independent online and teacher-forced APIs;
+2. complete G/S/W/P/transition/bottom forward and backward;
+3. canonical loss, optimizer and full active diagnostics;
+4. five-step deployment with static evidence built once;
+5. exact checkpoint/resume identity and explicit migration behavior;
+6. provenance, zero-semantics, numerical and gradient regressions;
+7. local BF16 memory below 8 GiB and production batch-eight below 22 GiB;
+8. a controlled eight-epoch comparison against the V120 recovery baseline.
 
-Only after all gates pass will the default scripts switch once and the old
-versioned launch/runtime surface move out of the active dependency graph.
+The active candidate is manifest schema `19` and contains 171,940,734 total /
+171,838,334 trainable parameters.  Its current component identities and graph
+invariants are recorded in
+`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
 
-## Current candidate status
+Schema 19 retains the independent typed layout and the source-proven numerical
+repairs, while restoring or repairing the active mechanisms that the first
+extraction weakened:
 
-The independent candidate is manifest schema `17` with top ABI
-`object_intent_dynamics_323_conditional_object_writes_v11`.  It contains one
-171,355,774-parameter model (171,253,374 trainable parameters); the 98,304
-Teacher-G association
-parameters are frozen and run only while constructing training targets.
+- three-frame causal DINO/raw history and both adjacent learned flows;
+- G1-G3 hosted public context enters the address key, while object-owned
+  candidate values remain private rather than receiving a copied public value;
+- G reconstruction that cannot reduce its target by copying a public carrier
+  or moving its own responsibility target;
+- query/global-object-specific P1 reads over the complete local chart;
+- additive factual/temporal P3 bases with zero-preserving W interactions;
+- P2 selects intervals from observable intent innovations, and noisy ODE
+  action can modulate P3 temporal content only through a nonzero consequence;
+- ambiguous Teacher-G associations continuously fall back to the current
+  object fact and zero geometry before becoming supervision, so neutral W
+  rows remain learnable without fitting a diffuse future-patch average;
+- 512 dense spatial transition directions pooled to 96 typed action-basis
+  rows instead of one global row per horizon;
+- a full-width, exact-zero/identity/non-expansive capacity operator;
+- V120 per-row horizon mass and raw-unit event semantics;
+- V120 role-specific optimizer pressure, without restoring the legacy launcher
+  or allowing optimizer ownership to overlap;
+- complete semantic logging and parser support for mainline JSONL/console
+  output; JSONL keeps active exact zeros losslessly while the console remains
+  compact;
+- exact weighted `loss_contrib_*` accounting and separate event-balanced versus
+  V120-comparable action/decoded rows, so the gripper-event repair does not
+  corrupt cross-run train-scale comparisons;
+- matched-noise validation ablations for proposal-zero, bottom no-updates and
+  bottom full-updates on the bounded diagnostic subset, with signed utility,
+  action delta and coverage rather than a bare "path active" flag.
 
-The completed formal V122 run serialized 230,717,082 total / 168,064,059
-trainable parameters with its real 4,096-wide T5 condition.  The candidate's
-59,361,308 total-parameter reduction is now entirely accounted for by generic
-role blocks 4/5/7/8 and legacy heads that are both frozen and skipped in the
-old active forward.  The extracted graph no longer removes the trainable
-G1-G3/P1 hosts, history proposal or controlled transition; its trainable count
-is 3,189,315 above the actual V122 run.  The earlier 227,466,394 /
-166,360,123 comparison was a synthetic/default-width inventory, not the
-formal-run baseline.  In addition to typed boundary replacements and the
-restored 18-D physical action field, schema 16 introduced the actual 4,096-wide
-T5-XXL condition boundary used by the formal `.pt` file instead of the
-erroneous 768-wide placeholder in schema 15.  Schema 17 adds one independent
-512x512 W action-object writer and changes the active top/training semantics:
-conditional global-object prototype reconstruction, factorized S object
-keys/values, separately contracted W intent/action writes, semantic-band action
-mass and budget-preserving gripper event-row pressure.
+The lower total parameter count relative to the old monolith is removed frozen
+ancestry, not a deleted active G/P/bottom path.  The three Evidence MMDiT
+blocks, G1-G3/P1 role hosts, history proposal, controlled transition,
+capacity/continuation and event/motion heads are present.
 
-Completed local gates:
+Still pending before an empirical recovery claim:
 
-- the active import/source closure contains 50 Python/data-support files plus
-  the resolved JSON spec (51 hashed artifacts total) and no legacy
-  trainer/runtime/launcher;
-- typed online, ephemeral training and future-supervision planes are disjoint;
-- G/S/W/P object and interval axes, teacher isolation, exact-zero W/P3
-  semantics, five-step static-cache ownership and optimizer ownership have
-  executable regressions;
-- exact resume validates source/data/language identity, model dtype/finite
-  state, optimizer ownership/state, scheduler LR, RNG and owned generators
-  before mutating the live run;
-- fresh and bottom-migration runs cannot append to an earlier output stream,
-  and a fresh run writes its context only after preflight succeeds;
-- provenance, numerics/autograd and runtime/performance static reviews are
-  complete for the extracted graph;
-- learned flow is current-chart aligned, uses true normalized displacement and
-  the four-frame raw-pair time unit; literal RGB anchors the geometry loss and
-  the radius-2 neighbourhood is sampled in two kernels per refinement;
-- frame position stays CPU/audit-only, gradient logs distinguish pre/post clip,
-  and the logged warmup LR belongs to the update that produced the loss;
-- formal goal/history/proposal condition dropout is exact-null on the policy
-  path, leaves the full proposal target supervised, and owns a separately
-  serialized training generator;
-- an earlier schema-16 conservative synthetic batch-one CUDA BF16 train update
-  used 336 RGB and an oversized 24x24 DINO chart, so its 2.674 GiB allocated /
-  2.785 GiB reserved result is not the formal cache measurement; the active
-  `dinov2_cache_336` ABI is 16x16 (256 patches/camera), with 12 future
-  supports and the real 4,096-wide T5 condition, and its memory figure remains
-  pending until the server smoke is rerun;
-- the formal 18-D legacy-independent physical action field, anchor-band
-  action objectives and deterministic information-balanced sampler are owned
-  by the new data/training/runtime path; capacity and soft continuation retain
-  direct non-zero action gradients without candidate replay;
-- 86 independent-mainline, 27 frozen-object-mainline and 11 package-isolation
-  regressions pass locally; the production mainline package also passes scoped
-  Ruff and Pyright with zero error-level diagnostics.
+- CUDA BF16 memory validation (the complete local regression, scoped static
+  checks and CPU BF16 forward/backward already pass);
+- production CUDA batch-eight process memory and throughput;
+- fresh server smoke and five-step deployment smoke;
+- a fresh full eight-epoch comparison, including all V120 action, horizon,
+  gripper/motion, flow, ownership and gradient metrics.
 
-Still pending before cutover:
+Run those two stages from a fresh output directory:
 
-- production CUDA batch-eight total process memory below 22 GiB;
-- server fresh smoke, five-step deployment smoke and measured throughput;
-- a fresh long run with full-epoch validation and frozen causal interventions.
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+OUT_DIR=runs/schema19_recovery_smoke \
+MAINLINE_BATCH_SIZE=1 \
+bash scripts/smoke_mainline.sh
 
-Until those checks pass, `scripts/train_mainline.sh` and
-`scripts/smoke_mainline.sh` are candidate-only entry points and the public
-V122 launcher remains unchanged.
+CUDA_VISIBLE_DEVICES=0 \
+OUT_DIR=runs/schema19_recovery_b8 \
+MAINLINE_BATCH_SIZE=8 \
+bash scripts/train_mainline.sh
+```
+
+After all eight epochs, compare the complete archival streams rather than a
+single best RMSE:
+
+```bash
+uv run python -m clearvla.tools.audit_policy_logs \
+  runs/schema19_recovery_b8 \
+  --recovery-baseline v120_long.log \
+  --tail 120 \
+  --require-recovery \
+  --format text
+```
+
+Passing the run directory loads both `metrics.jsonl` and
+`run_context.json`.  The recovery gate checks the serialized public identity,
+all eight epochs, V120-sized metric coverage, final and eight-epoch mean
+action/horizon/arm/gripper/event behavior, train-tail scales, G/S/W/P owner
+health, owner gradients and matched-noise proposal/execution ablations.  It
+returns exit code `3` for either a demonstrated regression or missing proof;
+one improved RMSE cannot pass the gate by itself.
 
 ## Frozen-mainline early-loss comparison
 

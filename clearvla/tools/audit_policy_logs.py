@@ -23,6 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 TOKEN_RE = re.compile(r"(?P<key>[A-Za-z][A-Za-z0-9_.-]*)=(?P<value>[^\s]+)")
 HEADER_RE = re.compile(r"^\[(?P<name>v\d+(?:-[^\]]+)?)\]\s+(?P<body>.*)$")
+MAINLINE_HEADER_RE = re.compile(r"^\[mainline\]\s+(?P<body>.*)$")
 INIT_COUNT_RE = re.compile(r"^\[v39-init\]\s+(?P<label>.*?)(?:\s+count=(?P<count>\d+))$")
 UNHANDLED_EXCEPTION_RE = re.compile(
     r"^(?P<type>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception)):\s*(?P<message>.*)$"
@@ -1011,6 +1012,69 @@ STRUCTURE_KEYS = (
     "flow_jepa_late_detail_trajectory_ratio",
     "flow_jepa_late_detail_fixed_scale",
     "flow_jepa_late_detail_token_count",
+    # Capability-owned mainline: keep the decisive G/S/W/P and bottom
+    # boundaries visible in the text report.  The lossless metric index has
+    # always retained them; without this projection a healthy schema-19 run
+    # still looked like an RMSE-only run when audited from nohup/JSONL.
+    "object_grounding_reconstruction_mse",
+    "object_grounding_prototype_mse",
+    "object_grounding_spatial_refinement_mse",
+    "object_grounding_object_content_pair_cosine",
+    "object_grounding_object_chart_pair_overlap",
+    "object_grounding_typed_consistency",
+    "object_grounding_camera_coordinate_variation",
+    "object_grounding_g3_parent_l1",
+    "object_intent_goal_attention_entropy",
+    "object_intent_interval_variation",
+    "object_intent_interval_object_key_variation",
+    "object_intent_interval_object_value_variation",
+    "object_intent_temporal_variation",
+    "object_intent_goal_innovation_rms",
+    "object_intent_history_innovation_rms",
+    "object_intent_object_innovation_rms",
+    "object_intent_action_innovation_rms",
+    "object_intent_state_change_evidence_rms",
+    "object_intent_typed_carrier_ratio",
+    "object_w_object_key_innovation_rms",
+    "object_w_object_value_innovation_rms",
+    "object_w_intent_object_interaction_rms",
+    "object_w_action_object_interaction_rms",
+    "object_w_prediction_interval_variation",
+    "object_w1_semantic_delta_rms",
+    "object_w1_transport_rms",
+    "object_w1_interval_adjacent_cosine",
+    "object_w1_object_pair_cosine",
+    "object_w2_semantic_delta_rms",
+    "object_w2_transport_rms",
+    "object_w2_interval_adjacent_cosine",
+    "object_w2_object_pair_cosine",
+    "object_teacher_reliability",
+    "object_teacher_semantic_delta_rms",
+    "object_teacher_transport_rms",
+    "object_teacher_adjacent_cosine",
+    "object_teacher_interval_variation",
+    "p1_query_chart_variation",
+    "p1_query_coordinate_variation",
+    "object_p2_semantic_posterior_entropy",
+    "object_p2_geometry_posterior_entropy",
+    "object_p2_semantic_value_mass",
+    "object_p2_geometry_value_mass",
+    "object_p2_successor_innovation_rms",
+    "object_consequence_effect_rms",
+    "object_consequence_interaction_rms",
+    "object_p3_precision_base_rms",
+    "object_p3_precision_consequence_interaction_rms",
+    "object_p3_temporal_base_rms",
+    "object_p3_temporal_consequence_interaction_rms",
+    "controlled_transition_spatial_value_variation",
+    "controlled_transition_delta_gain",
+    "bottom_capacity_mean",
+    "bottom_capacity_block_std",
+    "bottom_expected_depth",
+    "bottom_controller_common_ratio",
+    "bottom_controller_private_ratio",
+    "bottom_protected_update_rms",
+    "bottom_controlled_transition_value_rms",
 )
 
 GRADIENT_KEYS = (
@@ -1039,6 +1103,30 @@ GRADIENT_KEYS = (
     "grad_action_history_encoder",
     "grad_final_policy_heads",
     "grad",
+    # Schema-19 optimizer owners.  These are post-clip role norms by design;
+    # the global pre-clip norm remains the shared scale/instability sentinel.
+    "gradient_global_preclip_l2",
+    "gradient_postclip_observation_l2",
+    "gradient_postclip_grounding_host_l2",
+    "gradient_postclip_grounder_l2",
+    "gradient_postclip_intent_l2",
+    "gradient_postclip_coarse_action_l2",
+    "gradient_postclip_plan_recognizer_l2",
+    "gradient_postclip_history_proposal_l2",
+    "gradient_postclip_dynamics_l2",
+    "gradient_postclip_controlled_transition_l2",
+    "gradient_postclip_p1_factual_l2",
+    "gradient_postclip_p2_effect_reader_l2",
+    "gradient_postclip_consequence_l2",
+    "gradient_postclip_p3_compiler_l2",
+    "gradient_postclip_bottom_query_l2",
+    "gradient_postclip_bottom_protected_reader_l2",
+    "gradient_postclip_bottom_evidence_compiler_l2",
+    "gradient_postclip_bottom_organizer_l2",
+    "gradient_postclip_bottom_mmdit_l2",
+    "gradient_postclip_bottom_capacity_l2",
+    "gradient_postclip_bottom_execution_l2",
+    "gradient_postclip_bottom_heads_l2",
 )
 
 VALIDATION_KEYS = (
@@ -1055,6 +1143,9 @@ VALIDATION_KEYS = (
     "first8_rmse",
     "tail_rmse",
     "tail_first_ratio",
+    "action_band_1_4_rmse",
+    "action_band_5_12_rmse",
+    "action_band_13_24_rmse",
     "arm_full_rmse",
     "arm_tail_rmse",
     "gripper_full_rmse",
@@ -1079,10 +1170,57 @@ VALIDATION_KEYS = (
     "execution_ablation_neutral_full_rmse",
     "execution_ablation_full_capacity_full_rmse",
     "execution_ablation_three_basis_reduction_full_rmse",
+    "validation_ablation_coverage",
+    "validation_diagnostic_primary_rmse_physical",
+    "validation_proposal_zero_rmse_physical",
+    "validation_proposal_zero_mse_gain_vs_primary_physical",
+    "validation_proposal_zero_action_delta_rmse_physical",
+    "validation_execution_no_updates_rmse_physical",
+    "validation_execution_no_updates_mse_gain_vs_primary_physical",
+    "validation_execution_no_updates_action_delta_rmse_physical",
+    "validation_execution_full_updates_rmse_physical",
+    "validation_execution_full_updates_mse_gain_vs_primary_physical",
+    "validation_execution_full_updates_action_delta_rmse_physical",
     "balanced_score",
     "deploy_eligible",
     "sample_evidence_z_zero_condition_delta",
     "sample_evidence_z_shuffle_condition_delta",
+    # Lossless mainline validation names.  Historical aliases above keep
+    # cross-version tables comparable; these retain units, horizon bands and
+    # causal intervention semantics needed to diagnose a recovery run.
+    "validation_action_rmse_normalized",
+    "validation_action_rmse_physical",
+    "validation_first_rmse_normalized",
+    "validation_first_rmse_physical",
+    "validation_first8_rmse_normalized",
+    "validation_first8_rmse_physical",
+    "validation_tail_rmse_normalized",
+    "validation_tail_rmse_physical",
+    "validation_tail_first_ratio_normalized",
+    "validation_tail_first_ratio_physical",
+    "validation_band_1_4_rmse_normalized",
+    "validation_band_1_4_rmse_physical",
+    "validation_band_5_12_rmse_normalized",
+    "validation_band_5_12_rmse_physical",
+    "validation_band_13_24_rmse_normalized",
+    "validation_band_13_24_rmse_physical",
+    "validation_arm_rmse_normalized",
+    "validation_arm_rmse_physical",
+    "validation_gripper_rmse_normalized",
+    "validation_gripper_rmse_physical",
+    "validation_decoded_gripper_event_precision",
+    "validation_decoded_gripper_event_recall",
+    "validation_decoded_gripper_event_f1",
+    "validation_decoded_gripper_event_ratio",
+    "validation_event_head_precision",
+    "validation_event_head_recall",
+    "validation_event_head_f1",
+    "validation_motion_head_precision",
+    "validation_motion_head_recall",
+    "validation_motion_head_f1",
+    "validation_proposal_zero_rmse_normalized",
+    "validation_execution_no_updates_rmse_normalized",
+    "validation_execution_full_updates_rmse_normalized",
 )
 
 
@@ -1347,8 +1485,149 @@ def _parse_v120_dynamics_error(line: str) -> dict[str, float]:
     return metrics
 
 
+_MAINLINE_ALIASES: dict[str, str] = {
+    "loss_total": "loss",
+    "loss_action_flow": "physical_flow_event_balanced",
+    "loss_action_flow_v120_comparable": "physical_flow",
+    "loss_action_flow_native": "physical_flow_native",
+    "loss_action_arm_flow": "arm_fm_per_dim",
+    "loss_action_gripper_flow": "gripper_fm_field_event_balanced",
+    "loss_action_gripper_flow_unweighted": "gripper_fm_field",
+    "loss_decoded_action": "decoded_action_event_balanced",
+    "loss_decoded_action_v120_comparable": "decoded_action",
+    "loss_future_successor": "flow_jepa_future_prediction",
+    "loss_future_semantic_delta": "flow_jepa_future_change",
+    "loss_flow_warp": "flow_jepa_warp_loss",
+    "loss_flow_identity_advantage": "flow_jepa_identity_advantage_loss",
+    "loss_flow_static_identity": "flow_jepa_static_identity_loss",
+    "loss_flow_cycle": "flow_jepa_cycle_loss",
+    "bottom_capacity_mean": "evidence_mmd_it_capacity_ratio",
+    "bottom_expected_depth": "evidence_mmd_it_effective_depth",
+    "bottom_execution_cost_audit": "evidence_mmd_it_execution_cost",
+}
+
+
+def _canonicalize_mainline_metrics(values: Mapping[str, Any]) -> dict[str, float]:
+    """Keep lossless mainline names while adding cross-version audit aliases."""
+
+    metrics = {
+        str(name): number
+        for name, value in values.items()
+        if (number := _number(value)) is not None
+    }
+    for source, target in _MAINLINE_ALIASES.items():
+        if source in metrics:
+            metrics.setdefault(target, metrics[source])
+
+    # Pre-schema-19-recovery mainline logs did not serialize the separate
+    # V120-comparable event-unweighted rows.  Preserve their historical parser
+    # behavior, while new logs use the unambiguous aliases above.
+    if "physical_flow" not in metrics and "loss_action_flow" in metrics:
+        metrics["physical_flow"] = metrics["loss_action_flow"]
+    if "gripper_fm_field" not in metrics and "loss_action_gripper_flow" in metrics:
+        metrics["gripper_fm_field"] = metrics["loss_action_gripper_flow"]
+    if "decoded_action" not in metrics and "loss_decoded_action" in metrics:
+        metrics["decoded_action"] = metrics["loss_decoded_action"]
+
+    # Historical validation summaries use physical action units.  Preserve
+    # both native mainline names and the old aliases, falling back to
+    # normalized units only for a dataset that has no physical normalizer.
+    validation_aliases = {
+        "action": "full_rmse",
+        "first": "first_rmse",
+        "first8": "first8_rmse",
+        "tail": "tail_rmse",
+        "arm": "arm_full_rmse",
+        "gripper": "gripper_full_rmse",
+    }
+    for stem, target in validation_aliases.items():
+        physical = f"validation_{stem}_rmse_physical"
+        normalized = f"validation_{stem}_rmse_normalized"
+        if physical in metrics:
+            metrics.setdefault(target, metrics[physical])
+        elif normalized in metrics:
+            metrics.setdefault(target, metrics[normalized])
+    if "validation_tail_first_ratio_physical" in metrics:
+        metrics.setdefault(
+            "tail_first_ratio", metrics["validation_tail_first_ratio_physical"]
+        )
+    elif "validation_tail_first_ratio_normalized" in metrics:
+        metrics.setdefault(
+            "tail_first_ratio", metrics["validation_tail_first_ratio_normalized"]
+        )
+    event_aliases = {
+        "validation_decoded_gripper_event_precision": "gripper_event_precision",
+        "validation_decoded_gripper_event_recall": "gripper_event_recall",
+        "validation_decoded_gripper_event_f1": "gripper_event_f1",
+        "validation_decoded_gripper_event_ratio": "gripper_event_ratio",
+        "validation_decoded_gripper_events_predicted": "gripper_pred_events",
+        "validation_decoded_gripper_events_target": "gripper_target_events",
+        "validation_event_head_precision": "event_head_precision",
+        "validation_event_head_recall": "event_head_recall",
+        "validation_event_head_f1": "event_head_f1",
+        "validation_event_head_events_predicted": "event_head_pred_events",
+        "validation_event_head_events_target": "event_head_target_events",
+        "validation_motion_head_precision": "motion_head_precision",
+        "validation_motion_head_recall": "motion_head_recall",
+        "validation_motion_head_f1": "motion_head_f1",
+        "validation_gripper_event_precision_normalized": "gripper_event_precision",
+        "validation_gripper_event_recall_normalized": "gripper_event_recall",
+        "validation_gripper_event_f1_normalized": "gripper_event_f1",
+        "validation_gripper_event_ratio_normalized": "gripper_event_ratio",
+        "validation_gripper_events_predicted_normalized": "gripper_pred_events",
+        "validation_gripper_events_target_normalized": "gripper_target_events",
+        "validation_event_head_precision_normalized": "event_head_precision",
+        "validation_event_head_recall_normalized": "event_head_recall",
+        "validation_event_head_f1_normalized": "event_head_f1",
+        "validation_event_head_events_predicted_normalized": "event_head_pred_events",
+        "validation_event_head_events_target_normalized": "event_head_target_events",
+        "validation_motion_precision_normalized": "motion_head_precision",
+        "validation_motion_recall_normalized": "motion_head_recall",
+        "validation_motion_f1_normalized": "motion_head_f1",
+    }
+    for source, target in event_aliases.items():
+        if source in metrics:
+            metrics.setdefault(target, metrics[source])
+    return metrics
+
+
+def _parse_mainline_tokens(line: str) -> dict[str, float]:
+    values = {
+        match.group("key"): match.group("value").rstrip(",;")
+        for match in TOKEN_RE.finditer(line)
+    }
+    return _canonicalize_mainline_metrics(values)
+
+
 def _ingest_json(run: ParsedRun, payload: Any) -> None:
     if not isinstance(payload, dict):
+        return
+    kind = payload.get("kind")
+    if kind == "train" and isinstance(payload.get("metrics"), Mapping):
+        run.batch_points.append(
+            BatchPoint(
+                int(payload.get("epoch", 0)),
+                int(payload.get("batch", 0)),
+                _canonicalize_mainline_metrics(payload["metrics"]),
+                "mainline",
+            )
+        )
+        return
+    if kind == "epoch":
+        train = payload.get("train")
+        validation = payload.get("validation", payload.get("val"))
+        run.epoch_records.append(
+            {
+                "epoch": int(payload.get("epoch", 0)),
+                "global_step": int(payload.get("step", payload.get("global_step", 0))),
+                "train": _canonicalize_mainline_metrics(train)
+                if isinstance(train, Mapping)
+                else {},
+                "validation": _canonicalize_mainline_metrics(validation)
+                if isinstance(validation, Mapping)
+                else {},
+            }
+        )
         return
     if "epoch" in payload and any(key in payload for key in ("train", "val", "validation")):
         run.epoch_records.append(payload)
@@ -1440,6 +1719,49 @@ def parse_log(path: Path, *, label: str | None = None) -> ParsedRun:
                     )
                 else:
                     _ingest_json(run, payload)
+                continue
+            if line.startswith("[mainline-train]"):
+                flush_v94()
+                metrics = _parse_mainline_tokens(line)
+                epoch = int(metrics.pop("epoch", 0.0))
+                batch = int(metrics.pop("batch", 0.0))
+                metrics.pop("step", None)
+                pending_v94 = BatchPoint(epoch, batch, metrics, "mainline")
+                continue
+            mainline_train_detail = re.match(r"^\[mainline-train-[^\]]+\]", line)
+            if mainline_train_detail is not None and pending_v94 is not None:
+                detail = _parse_mainline_tokens(line)
+                for name in ("epoch", "batch", "step"):
+                    detail.pop(name, None)
+                pending_v94.metrics.update(detail)
+                continue
+            if line.startswith("[mainline-val]"):
+                flush_v94()
+                flush_epoch()
+                metrics = _parse_mainline_tokens(line)
+                epoch = int(metrics.pop("epoch", 0.0))
+                global_step = int(metrics.pop("step", 0.0))
+                metrics.pop("batch", None)
+                pending_epoch = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "train": {},
+                    "validation": metrics,
+                }
+                continue
+            mainline_val_detail = re.match(r"^\[mainline-val-[^\]]+\]", line)
+            if mainline_val_detail is not None and pending_epoch is not None:
+                detail = _parse_mainline_tokens(line)
+                for name in ("epoch", "batch", "step"):
+                    detail.pop(name, None)
+                pending_epoch["validation"].update(detail)
+                continue
+            mainline_header = MAINLINE_HEADER_RE.match(line)
+            if mainline_header is not None:
+                run.headers.append(line)
+                config = _parse_header_body(mainline_header.group("body"))
+                for key, value in config.items():
+                    run.header_config.setdefault(key, value)
                 continue
             if line.startswith("[v39-layer]"):
                 flush_v94()
@@ -1601,6 +1923,42 @@ def _val_section(record: Mapping[str, Any]) -> dict[str, float]:
 
 def _config_value(run: ParsedRun, *keys: str) -> Any:
     normalized = {key.replace("-", "_") for key in keys}
+    mainline_paths: dict[str, tuple[str, ...]] = {
+        "capability": ("identity", "manifest", "capability"),
+        "architecture_schema": ("identity", "manifest", "schema"),
+        "layout": ("identity", "manifest", "layout"),
+        "layout_schema": ("identity", "manifest", "layout_schema"),
+        "seed": ("config", "data", "seed"),
+        "batch_size": ("config", "optimizer", "batch_size"),
+        "data_root": ("config", "data", "raw_hdf5_root"),
+        "train_episode_count": ("config", "data", "train_episodes"),
+        "val_episode_count": ("config", "data", "val_episodes"),
+        "action_normalizer_fingerprint": (
+            "normalizer_fingerprints",
+            "action_v120",
+        ),
+        "action_normalizer_sha256": (
+            "identity",
+            "dataset",
+            "action_normalizer_sha256",
+        ),
+        "rank": ("config", "bottom", "operator_rank"),
+        "groups": ("config", "bottom", "operator_groups"),
+        "depth_logit_init": ("config", "bottom", "operator_depth_logit_init"),
+        "warmup": ("config", "optimizer", "warmup_steps"),
+    }
+    for key in normalized:
+        path = mainline_paths.get(key)
+        if path is None:
+            continue
+        value: Any = run.context
+        for part in path:
+            if not isinstance(value, Mapping) or part not in value:
+                value = None
+                break
+            value = value[part]
+        if value is not None:
+            return value
     for section_name in ("trainer", "args", "policy_model", "performance_contract"):
         section = run.context.get(section_name)
         if isinstance(section, Mapping):
@@ -2092,6 +2450,56 @@ def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[F
             neutral_rmse=neutral_execution_rmse,
             coverage=execution_coverage,
         )
+
+    mainline_primary = latest_val.get("validation_diagnostic_primary_rmse_physical")
+    mainline_coverage = latest_val.get("validation_ablation_coverage")
+    mainline_interventions = (
+        (
+            "proposal_zero",
+            "proposal",
+            "proposal-zero-better",
+            "Removing the clean proposal improves matched-noise action MSE.",
+        ),
+        (
+            "execution_no_updates",
+            "execution",
+            "bottom-no-updates-better",
+            "Removing all Evidence-MMDiT residual updates improves matched-noise action MSE.",
+        ),
+        (
+            "execution_full_updates",
+            "execution",
+            "bottom-full-updates-better",
+            "Full bottom execution improves over the learned capacity/continuation controller.",
+        ),
+    )
+    if mainline_primary is not None:
+        primary_mse = float(mainline_primary) ** 2
+        material_gain = max(1e-8, 0.01 * primary_mse)
+        for stem, category, code, message in mainline_interventions:
+            gain = latest_val.get(
+                f"validation_{stem}_mse_gain_vs_primary_physical"
+            )
+            delta = latest_val.get(
+                f"validation_{stem}_action_delta_rmse_physical"
+            )
+            if (
+                gain is not None
+                and delta is not None
+                and gain > material_gain
+                and delta > 1e-5
+            ):
+                _add_finding(
+                    findings,
+                    "warning",
+                    category,
+                    code,
+                    message,
+                    gain=gain,
+                    action_delta_rmse=delta,
+                    primary_rmse=mainline_primary,
+                    coverage=mainline_coverage,
+                )
     if (
         primary_execution_rmse is not None
         and hard_execution_rmse is not None
@@ -2359,7 +2767,8 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
             "epoch_records": len(run.epoch_records),
             "headers": run.headers,
             "init_counts": run.init_counts,
-            "context_schema": run.context.get("schema"),
+            "context_schema": run.context.get("schema")
+            or _config_value(run, "architecture_schema"),
             "traceback_count": run.traceback_count,
             "fatal_errors": run.fatal_errors[:8],
             "batch_range": (
@@ -2372,6 +2781,10 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
             ),
         },
         "manifest": {
+            "capability": _config_value(run, "capability"),
+            "architecture_schema": _config_value(run, "architecture_schema"),
+            "layout": _config_value(run, "layout"),
+            "layout_schema": _config_value(run, "layout_schema"),
             "decoder": _config_value(run, "decoder", "final_action_decoder"),
             "training_stage": _config_value(run, "training_stage", "experiment_stage"),
             "seed": _config_value(run, "seed"),
@@ -2381,7 +2794,14 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
             "val_episode_count": _config_value(run, "val_episode_count"),
             "condition_mode": _config_value(run, "condition_mode"),
             "stage1_checkpoint": _config_value(run, "stage1_checkpoint"),
+            "stage1_initialization_enabled": _config_value(
+                run,
+                "stage1_initialization_enabled",
+                "require_flow_jepa_stage1_checkpoint",
+            ),
+            "fresh_run": _config_value(run, "fresh", "fresh_run"),
             "action_normalizer_fingerprint": _config_value(run, "action_normalizer_fingerprint"),
+            "action_normalizer_sha256": _config_value(run, "action_normalizer_sha256"),
             "rank": _config_value(run, "rank", "latent_cvae_mmdit_operator_rank"),
             "groups": _config_value(run, "groups", "latent_cvae_mmdit_operator_groups"),
             "depth_logit_init": _config_value(
@@ -2477,8 +2897,18 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
                 "gripper_full_rmse",
                 "tail_first_ratio",
                 "gripper_event_ratio",
+                "gripper_event_f1",
                 "event_head_f1",
+                "motion_head_f1",
                 "proposal_utility_mse_gain",
+                "validation_action_rmse_normalized",
+                "validation_band_1_4_rmse_physical",
+                "validation_band_5_12_rmse_physical",
+                "validation_band_13_24_rmse_physical",
+                "validation_proposal_zero_mse_gain_vs_primary_physical",
+                "validation_execution_no_updates_mse_gain_vs_primary_physical",
+                "validation_execution_full_updates_mse_gain_vs_primary_physical",
+                "validation_ablation_coverage",
             )
             metrics = " ".join(
                 f"{key}={_format_number(val[key])}" for key in selected if key in val
@@ -2487,7 +2917,7 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
                 f"  epoch={record['epoch']} step={record['global_step']} {metrics}".rstrip()
             )
     if summary["structure"]:
-        lines.append("structure/controller tail medians:")
+        lines.append("active structure/controller tail medians:")
         for key, stats in summary["structure"].items():
             lines.append(f"  {key}={_format_number(stats['tail_median'])}")
     if summary["gradients"]:
@@ -2548,6 +2978,366 @@ def _comparison(summaries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _first_metric(
+    values: Mapping[str, Any], names: Sequence[str]
+) -> tuple[str | None, float | None]:
+    for name in names:
+        value = values.get(name)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            return name, float(value)
+    return None, None
+
+
+def _epoch_metric_series(
+    summary: Mapping[str, Any], names: Sequence[str]
+) -> list[float]:
+    result: list[float] = []
+    for record in summary.get("epochs", []):
+        val = record.get("val", {})
+        if not isinstance(val, Mapping):
+            continue
+        _, value = _first_metric(val, names)
+        if value is not None:
+            result.append(value)
+    return result
+
+
+def _is_v120_normalizer_fingerprint(value: Any) -> bool:
+    text = str(value).lower()
+    return len(text) == 12 and all(character in "0123456789abcdef" for character in text)
+
+
+def _recovery_assessment(
+    baseline: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Evaluate one complete candidate against the frozen V120 behavior.
+
+    This is intentionally strict and descriptive.  It does not decide that a
+    new architecture is bad because one stochastic scalar moved; it decides
+    whether the user's stronger claim -- *at least V120* under the same public
+    experiment identity -- has actually been demonstrated.
+    """
+
+    checks: list[dict[str, Any]] = []
+
+    def record(
+        name: str,
+        status: str,
+        *,
+        baseline_value: Any = None,
+        candidate_value: Any = None,
+        detail: str = "",
+    ) -> None:
+        checks.append(
+            {
+                "name": name,
+                "status": status,
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "detail": detail,
+            }
+        )
+
+    baseline_manifest = baseline.get("manifest", {})
+    candidate_manifest = candidate.get("manifest", {})
+    identity_keys = (
+        "seed",
+        "batch_size",
+        "data_root",
+        "train_episode_count",
+        "val_episode_count",
+    )
+    for key in identity_keys:
+        old = baseline_manifest.get(key)
+        new = candidate_manifest.get(key)
+        if old is None or new is None:
+            record(
+                f"identity/{key}",
+                "incomplete",
+                baseline_value=old,
+                candidate_value=new,
+                detail="serialized public experiment identity is missing",
+            )
+        else:
+            record(
+                f"identity/{key}",
+                "pass" if old == new else "fail",
+                baseline_value=old,
+                candidate_value=new,
+            )
+    old_fingerprint = baseline_manifest.get("action_normalizer_fingerprint")
+    new_fingerprint = candidate_manifest.get("action_normalizer_fingerprint")
+    if old_fingerprint is None or new_fingerprint is None:
+        fingerprint_status = "incomplete"
+    elif not (
+        _is_v120_normalizer_fingerprint(old_fingerprint)
+        and _is_v120_normalizer_fingerprint(new_fingerprint)
+    ):
+        fingerprint_status = "incomplete"
+    else:
+        fingerprint_status = (
+            "pass"
+            if str(old_fingerprint).lower() == str(new_fingerprint).lower()
+            else "fail"
+        )
+    record(
+        "identity/action_normalizer",
+        fingerprint_status,
+        baseline_value=old_fingerprint,
+        candidate_value=new_fingerprint,
+        detail=(
+            "requires the exact 12-character V120-compatible MD5; "
+            "the separately serialized SHA-256 is not comparable"
+        ),
+    )
+
+    baseline_coverage = baseline.get("coverage", {})
+    candidate_coverage = candidate.get("coverage", {})
+    baseline_epochs = int(baseline_coverage.get("epoch_records") or 0)
+    candidate_epochs = int(candidate_coverage.get("epoch_records") or 0)
+    record(
+        "coverage/all_epochs",
+        "pass" if baseline_epochs >= 8 and candidate_epochs >= baseline_epochs else "fail",
+        baseline_value=baseline_epochs,
+        candidate_value=candidate_epochs,
+        detail="recovery requires every V120 epoch, not one best checkpoint",
+    )
+    old_rows = int(baseline_coverage.get("batch_rows") or 0)
+    new_rows = int(candidate_coverage.get("batch_rows") or 0)
+    record(
+        "coverage/train_rows",
+        "pass" if old_rows > 0 and new_rows >= old_rows else "fail",
+        baseline_value=old_rows,
+        candidate_value=new_rows,
+    )
+    old_metric_count = int(
+        baseline.get("observability", {}).get("batch_metric_count") or 0
+    )
+    new_metric_count = int(
+        candidate.get("observability", {}).get("batch_metric_count") or 0
+    )
+    record(
+        "coverage/active_metric_count",
+        "pass" if old_metric_count > 0 and new_metric_count >= old_metric_count else "fail",
+        baseline_value=old_metric_count,
+        candidate_value=new_metric_count,
+        detail="count is only a coverage floor; semantic checks below remain mandatory",
+    )
+    fatal_count = len(candidate_coverage.get("fatal_errors") or []) + int(
+        candidate_coverage.get("traceback_count") or 0
+    )
+    record(
+        "health/no_fatal_error",
+        "pass" if fatal_count == 0 else "fail",
+        baseline_value=0,
+        candidate_value=fatal_count,
+    )
+
+    validation_metrics: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
+        ("action_rmse", ("full_rmse",), ("full_rmse",), "lower"),
+        ("first_rmse", ("first_rmse",), ("first_rmse",), "lower"),
+        ("first8_rmse", ("first8_rmse",), ("first8_rmse",), "lower"),
+        ("tail_rmse", ("tail_rmse",), ("tail_rmse",), "lower"),
+        ("arm_rmse", ("arm_full_rmse",), ("arm_full_rmse",), "lower"),
+        ("gripper_rmse", ("gripper_full_rmse",), ("gripper_full_rmse",), "lower"),
+        (
+            "band_1_4_rmse",
+            ("action_band_1_4_rmse",),
+            ("validation_band_1_4_rmse_physical", "action_band_1_4_rmse"),
+            "lower",
+        ),
+        (
+            "band_5_12_rmse",
+            ("action_band_5_12_rmse",),
+            ("validation_band_5_12_rmse_physical", "action_band_5_12_rmse"),
+            "lower",
+        ),
+        (
+            "band_13_24_rmse",
+            ("action_band_13_24_rmse",),
+            ("validation_band_13_24_rmse_physical", "action_band_13_24_rmse"),
+            "lower",
+        ),
+        (
+            "decoded_gripper_f1",
+            ("gripper_f1", "gripper_event_f1"),
+            ("gripper_event_f1", "gripper_f1"),
+            "higher",
+        ),
+        ("event_head_f1", ("event_head_f1",), ("event_head_f1",), "higher"),
+        ("motion_head_f1", ("motion_head_f1",), ("motion_head_f1",), "higher"),
+    )
+    for label, old_names, new_names, direction in validation_metrics:
+        old_values = _epoch_metric_series(baseline, old_names)
+        new_values = _epoch_metric_series(candidate, new_names)
+        if len(old_values) < baseline_epochs or len(new_values) < candidate_epochs:
+            record(
+                f"validation/{label}",
+                "incomplete",
+                baseline_value=len(old_values),
+                candidate_value=len(new_values),
+                detail="metric must exist at every completed epoch",
+            )
+            continue
+        old_final = old_values[-1]
+        new_final = new_values[-1]
+        old_mean = statistics.fmean(old_values)
+        new_mean = statistics.fmean(new_values)
+        if direction == "lower":
+            passed = new_final <= old_final and new_mean <= old_mean
+        else:
+            passed = new_final >= old_final and new_mean >= old_mean
+        record(
+            f"validation/{label}",
+            "pass" if passed else "fail",
+            baseline_value={"final": old_final, "mean": old_mean},
+            candidate_value={"final": new_final, "mean": new_mean},
+            detail=f"{direction} is better; both final and eight-epoch mean must recover",
+        )
+
+    old_event_ratio = _epoch_metric_series(baseline, ("gripper_event_ratio",))
+    new_event_ratio = _epoch_metric_series(candidate, ("gripper_event_ratio",))
+    if len(old_event_ratio) < baseline_epochs or len(new_event_ratio) < candidate_epochs:
+        record(
+            "validation/gripper_event_rate_calibration",
+            "incomplete",
+            baseline_value=len(old_event_ratio),
+            candidate_value=len(new_event_ratio),
+        )
+    else:
+        old_error = statistics.fmean(abs(value - 1.0) for value in old_event_ratio)
+        new_error = statistics.fmean(abs(value - 1.0) for value in new_event_ratio)
+        record(
+            "validation/gripper_event_rate_calibration",
+            "pass" if new_error <= old_error else "fail",
+            baseline_value=old_error,
+            candidate_value=new_error,
+            detail="mean absolute distance from the target event ratio 1.0",
+        )
+
+    train_metrics = (
+        "physical_flow",
+        "physical_flow_native",
+        "arm_fm_per_dim",
+        "gripper_fm_field",
+        "decoded_action",
+    )
+    for name in train_metrics:
+        old = baseline.get("trajectories", {}).get(name, {}).get("tail_median")
+        new = candidate.get("trajectories", {}).get(name, {}).get("tail_median")
+        if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
+            status = "incomplete"
+        else:
+            status = "pass" if float(new) <= float(old) else "fail"
+        record(
+            f"train_tail/{name}",
+            status,
+            baseline_value=old,
+            candidate_value=new,
+            detail="training scale cannot substitute for validation recovery",
+        )
+
+    required_structure = (
+        "object_grounding_object_content_pair_cosine",
+        "object_intent_interval_variation",
+        "object_w_prediction_interval_variation",
+        "object_w1_object_pair_cosine",
+        "object_w2_object_pair_cosine",
+        "object_teacher_reliability",
+        "p1_query_chart_variation",
+        "object_p2_successor_innovation_rms",
+        "object_p3_precision_base_rms",
+        "bottom_capacity_mean",
+    )
+    structure = candidate.get("structure", {})
+    for name in required_structure:
+        value = structure.get(name, {}).get("tail_median")
+        status = (
+            "pass"
+            if isinstance(value, (int, float)) and math.isfinite(float(value))
+            else "incomplete"
+        )
+        if name.endswith("object_content_pair_cosine") or name.endswith(
+            "object_pair_cosine"
+        ):
+            if status == "pass" and float(value) >= 0.999:
+                status = "fail"
+        record(
+            f"structure/{name}",
+            status,
+            candidate_value=value,
+            detail="cosine checks reject exact object-slot publicization",
+        )
+
+    required_gradients = (
+        "gradient_postclip_grounder_l2",
+        "gradient_postclip_intent_l2",
+        "gradient_postclip_dynamics_l2",
+        "gradient_postclip_p1_factual_l2",
+        "gradient_postclip_p2_effect_reader_l2",
+        "gradient_postclip_p3_compiler_l2",
+        "gradient_postclip_bottom_capacity_l2",
+        "gradient_postclip_bottom_execution_l2",
+    )
+    gradients = candidate.get("gradients", {})
+    for name in required_gradients:
+        value = gradients.get(name, {}).get("tail_median")
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            status = "incomplete"
+        else:
+            status = "pass" if float(value) > 1e-12 else "fail"
+        record(f"gradient/{name}", status, candidate_value=value)
+
+    latest_val = (
+        candidate.get("epochs", [])[-1].get("val", {})
+        if candidate.get("epochs")
+        else {}
+    )
+    coverage = latest_val.get("validation_ablation_coverage")
+    record(
+        "causal_ablation/coverage",
+        "pass"
+        if isinstance(coverage, (int, float)) and float(coverage) > 0.0
+        else "incomplete",
+        candidate_value=coverage,
+    )
+    primary = latest_val.get("validation_diagnostic_primary_rmse_physical")
+    allowed_gain = (
+        0.01 * float(primary) ** 2
+        if isinstance(primary, (int, float)) and math.isfinite(float(primary))
+        else None
+    )
+    for stem in (
+        "proposal_zero",
+        "execution_no_updates",
+        "execution_full_updates",
+    ):
+        gain = latest_val.get(f"validation_{stem}_mse_gain_vs_primary_physical")
+        if allowed_gain is None or not isinstance(gain, (int, float)):
+            status = "incomplete"
+        else:
+            status = "pass" if float(gain) <= allowed_gain else "fail"
+        record(
+            f"causal_ablation/{stem}",
+            status,
+            baseline_value=allowed_gain,
+            candidate_value=gain,
+            detail="positive gain means removing/forcing the path improves action",
+        )
+
+    failed = sum(item["status"] == "fail" for item in checks)
+    incomplete = sum(item["status"] == "incomplete" for item in checks)
+    status = "fail" if failed else ("incomplete" if incomplete else "pass")
+    return {
+        "baseline": baseline.get("label"),
+        "candidate": candidate.get("label"),
+        "status": status,
+        "failed": failed,
+        "incomplete": incomplete,
+        "checks": checks,
+    }
+
+
 def _merge_runs(runs: Sequence[ParsedRun], *, path: Path, label: str) -> ParsedRun:
     merged = ParsedRun(path=path, label=label)
     for run in runs:
@@ -2586,17 +3376,32 @@ def parse_run_input(path: Path) -> ParsedRun:
         return parse_log(path)
     if not path.is_dir():
         raise FileNotFoundError(path)
-    candidates = ("nohup.log", "v39_policy_epochs.jsonl", "train.log")
+    candidates = (
+        "nohup.log",
+        "metrics.jsonl",
+        "v39_policy_epochs.jsonl",
+        "train.log",
+    )
     matched = [path / name for name in candidates if (path / name).is_file()]
     if not matched:
         matched = sorted(path.glob("*.log")) + sorted(path.glob("*.txt"))
     if not matched:
         raise FileNotFoundError(f"no supported logs under {path}")
-    return _merge_runs(
+    merged = _merge_runs(
         [parse_log(item, label=path.name) for item in matched],
         path=path,
         label=path.name,
     )
+    context_path = path / "run_context.json"
+    if context_path.is_file():
+        try:
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid mainline run context: {context_path}") from error
+        if not isinstance(context, Mapping):
+            raise ValueError(f"mainline run context must be an object: {context_path}")
+        merged.context = dict(context)
+    return merged
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -2607,6 +3412,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tail", type=int, default=20, help="tail window in logged batches")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--output", type=Path, help="write report instead of stdout")
+    parser.add_argument(
+        "--recovery-baseline",
+        type=Path,
+        help="frozen complete V120 log/run used for strict recovery assessment",
+    )
+    parser.add_argument(
+        "--require-recovery",
+        action="store_true",
+        help="exit nonzero unless every candidate proves complete V120 recovery",
+    )
     return parser.parse_args(argv)
 
 
@@ -2614,16 +3429,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.tail < 1:
         raise SystemExit("--tail must be positive")
+    if args.require_recovery and args.recovery_baseline is None:
+        raise SystemExit("--require-recovery needs --recovery-baseline")
     try:
         runs = [parse_run_input(path) for path in args.logs]
-    except FileNotFoundError as exc:
-        print(f"log path does not exist: {exc}", file=sys.stderr)
+        baseline_run = (
+            parse_run_input(args.recovery_baseline)
+            if args.recovery_baseline is not None
+            else None
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"log/run input is invalid: {exc}", file=sys.stderr)
         return 2
     if not runs:
         print("no supported log files found", file=sys.stderr)
         return 2
     summaries = [build_summary(run, tail=args.tail) for run in runs]
-    payload = {"runs": summaries, "comparison": _comparison(summaries)}
+    baseline_summary = (
+        build_summary(baseline_run, tail=args.tail) if baseline_run is not None else None
+    )
+    recovery = (
+        [
+            _recovery_assessment(baseline_summary, summary)
+            for summary in summaries
+        ]
+        if baseline_summary is not None
+        else []
+    )
+    payload = {
+        "runs": summaries,
+        "comparison": _comparison(summaries),
+        "recovery_baseline": baseline_summary,
+        "recovery": recovery,
+    }
     if args.format == "json":
         rendered = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=True)
     else:
@@ -2639,11 +3477,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"critical={row['critical']} warnings={row['warnings']}\n"
                 )
             rendered = rendered.rstrip()
+        if recovery:
+            rendered += "\n\n=== V120 recovery assessment ===\n"
+            for assessment in recovery:
+                rendered += (
+                    f"{assessment['candidate']} vs {assessment['baseline']}: "
+                    f"status={assessment['status']} failed={assessment['failed']} "
+                    f"incomplete={assessment['incomplete']}\n"
+                )
+                for check in assessment["checks"]:
+                    rendered += (
+                        f"  [{check['status']}] {check['name']}: "
+                        f"baseline={check['baseline']} candidate={check['candidate']}"
+                    )
+                    if check["detail"]:
+                        rendered += f" ({check['detail']})"
+                    rendered += "\n"
+            rendered = rendered.rstrip()
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     else:
         print(rendered)
+    if args.require_recovery and any(item["status"] != "pass" for item in recovery):
+        return 3
     return 0
 
 

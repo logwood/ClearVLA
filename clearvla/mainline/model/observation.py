@@ -395,10 +395,13 @@ class ObservationEvidence:
 
     local_facts: LocalFactSet
     detail_features: Tensor  # [B,C,F,Hd,Wd]
-    previous_detail_features: Tensor  # [B,C,F,Hd,Wd], training geometry only
+    previous_detail_features: Tensor  # t=-4 [B,C,F,Hd,Wd], training geometry only
+    earlier_detail_features: Tensor  # t=-8 [B,C,F,Hd,Wd], training geometry only
     literal_rgb: Tensor  # [B,C,3,R,R]
-    previous_literal_rgb: Tensor  # [B,C,3,R,R], training geometry only
-    flow: PatchFlowField
+    previous_literal_rgb: Tensor  # t=-4 [B,C,3,R,R], training geometry only
+    earlier_literal_rgb: Tensor  # t=-8 [B,C,3,R,R], training geometry only
+    flow: PatchFlowField  # -4 -> 0
+    earlier_flow: PatchFlowField  # -8 -> -4
     context_mask: Tensor  # bool [B,C,8,8]
 
     def validate(self) -> None:
@@ -412,6 +415,8 @@ class ObservationEvidence:
             raise ValueError("detail features must be [B,C,F,H,W]")
         if tuple(self.previous_detail_features.shape) != tuple(self.detail_features.shape):
             raise ValueError("previous/current detail features must align")
+        if tuple(self.earlier_detail_features.shape) != tuple(self.detail_features.shape):
+            raise ValueError("causal detail history must align")
         if self.literal_rgb.ndim != 5 or tuple(self.literal_rgb.shape[:2]) != (
             batch,
             cameras,
@@ -419,9 +424,12 @@ class ObservationEvidence:
             raise ValueError("literal RGB must be [B,C,3,R,R]")
         if tuple(self.previous_literal_rgb.shape) != tuple(self.literal_rgb.shape):
             raise ValueError("previous/current literal RGB charts must align")
+        if tuple(self.earlier_literal_rgb.shape) != tuple(self.literal_rgb.shape):
+            raise ValueError("causal literal RGB history must align")
         if tuple(self.context_mask.shape) != (batch, cameras, 8, 8):
             raise ValueError("context mask must preserve [B,C,8,8]")
         self.flow.validate()
+        self.earlier_flow.validate()
 
 
 class CurrentObservationCompiler(nn.Module):
@@ -468,7 +476,7 @@ class CurrentObservationCompiler(nn.Module):
         self.semantic_key = nn.Linear(self.content_dim, self.route_dim, bias=False)
         self.appearance_key = nn.Linear(obs.feature_dim, self.route_dim, bias=False)
         self.geometry_key = nn.Sequential(
-            nn.Linear(8, 2 * self.route_dim, bias=False),
+            nn.Linear(12, 2 * self.route_dim, bias=False),
             nn.SiLU(),
             nn.Linear(2 * self.route_dim, self.route_dim, bias=False),
         )
@@ -511,11 +519,15 @@ class CurrentObservationCompiler(nn.Module):
         return feature.reshape(batch, history, cameras, *feature.shape[1:])
 
     def _dino_chart(self, tokens: Tensor) -> Tensor:
-        batch, cameras, patches, width = tokens.shape
+        if tokens.ndim != 5:
+            raise ValueError("causal DINO history must be [B,H,C,P,D]")
+        batch, history, cameras, patches, width = tokens.shape
         side = round(math.sqrt(patches))
         if side * side != patches:
             raise ValueError("DINO patch count must form a square chart")
-        return tokens.reshape(batch, cameras, side, side, width).permute(0, 1, 4, 2, 3)
+        return tokens.reshape(batch, history, cameras, side, side, width).permute(
+            0, 1, 2, 5, 3, 4
+        )
 
     @torch.no_grad()
     def teacher_supports(self, tokens: Tensor) -> Tensor:
@@ -622,6 +634,9 @@ class CurrentObservationCompiler(nn.Module):
     ) -> tuple[ObservationEvidence, dict[str, Tensor]]:
         batch = observation.batch
         raw_features = self._raw_features(observation.raw_rgb)
+        if int(raw_features.shape[1]) != 3:
+            raise ValueError("observation compiler requires visual history -8/-4/0")
+        earlier_raw = raw_features[:, -3]
         current_raw = raw_features[:, -1]
         previous_raw = raw_features[:, -2]
         flow = self.flow(
@@ -629,12 +644,56 @@ class CurrentObservationCompiler(nn.Module):
             current_raw,
             compute_backward=geometry_supervision,
         )
-        dino_chart = self._dino_chart(observation.dino_tokens)
-        coarse_dino = self._coarse(dino_chart).permute(0, 1, 3, 4, 2).contiguous()
+        earlier_flow = self.flow(
+            earlier_raw,
+            previous_raw,
+            compute_backward=geometry_supervision,
+        )
+        dino_history = self._dino_chart(observation.dino_history)
+        history = int(dino_history.shape[1])
+        flat_dino = dino_history.reshape(
+            batch * history,
+            self.cameras,
+            self.content_dim,
+            *dino_history.shape[-2:],
+        )
+        coarse_dino_history = self._coarse(flat_dino).reshape(
+            batch,
+            history,
+            self.cameras,
+            self.content_dim,
+            self.grid,
+            self.grid,
+        )
+        coarse_dino_history = coarse_dino_history.permute(0, 1, 2, 4, 5, 3).contiguous()
+        coarse_dino = coarse_dino_history[:, -1]
+        dino_chart = dino_history[:, -1]
         coarse_raw = self._coarse(current_raw).permute(0, 1, 3, 4, 2).contiguous()
         flow_coarse = self._coarse(
             flow.forward.reshape(batch, self.cameras, 2, *flow.forward.shape[-2:])
         )
+        earlier_flow_coarse = self._coarse(
+            earlier_flow.forward.reshape(
+                batch, self.cameras, 2, *earlier_flow.forward.shape[-2:]
+            )
+        )
+        coarse_base = _coordinate_grid(
+            self.grid,
+            self.grid,
+            device=flow_coarse.device,
+            dtype=torch.float32,
+        )[None].expand(batch * self.cameras, -1, -1, -1)
+        current_to_previous = coarse_base - flow_coarse.reshape(
+            batch * self.cameras, 2, self.grid, self.grid
+        ).float().permute(0, 2, 3, 1)
+        earlier_flow_aligned = F.grid_sample(
+            earlier_flow_coarse.reshape(batch * self.cameras, 2, self.grid, self.grid).float(),
+            current_to_previous,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        ).reshape(batch, self.cameras, 2, self.grid, self.grid)
+        flow_acceleration = flow_coarse.float() - earlier_flow_aligned
         if context_mask is None and training_mask:
             context_mask = self._training_mask(flow_coarse.square().sum(dim=2).sqrt())
         if context_mask is None:
@@ -683,7 +742,52 @@ class CurrentObservationCompiler(nn.Module):
         raw_candidates, raw_valid = _sample_feature_chart(current_raw, coordinates)
         validity = dino_valid & raw_valid & visible[..., None, :]
 
-        carrier = self.dino_to_hidden(masked_dino) + self.position + self.camera
+        def align_chart(value: Tensor, grid: Tensor) -> Tensor:
+            channels = int(value.shape[-1])
+            source = value.permute(0, 1, 4, 2, 3).reshape(
+                batch * self.cameras,
+                channels,
+                self.grid,
+                self.grid,
+            )
+            with torch.autocast(device_type=value.device.type, enabled=False):
+                aligned = F.grid_sample(
+                    source.float(),
+                    grid.float(),
+                    mode="bilinear",
+                    padding_mode="border",
+                    align_corners=True,
+                )
+            return aligned.reshape(
+                batch,
+                self.cameras,
+                channels,
+                self.grid,
+                self.grid,
+            ).permute(0, 1, 3, 4, 2)
+
+        previous_to_earlier = coarse_base - earlier_flow_coarse.reshape(
+            batch * self.cameras, 2, self.grid, self.grid
+        ).float().permute(0, 2, 3, 1)
+        aligned_previous = align_chart(coarse_dino_history[:, -2], current_to_previous)
+        aligned_earlier_at_previous = align_chart(
+            coarse_dino_history[:, -3], previous_to_earlier
+        )
+        recent_dino_delta = coarse_dino_history[:, -1] - aligned_previous
+        earlier_delta_at_previous = (
+            coarse_dino_history[:, -2] - aligned_earlier_at_previous
+        )
+        earlier_dino_delta = align_chart(earlier_delta_at_previous, current_to_previous)
+        visual_history_innovation = torch.where(
+            visible,
+            recent_dino_delta + 0.5 * earlier_dino_delta,
+            torch.zeros_like(recent_dino_delta),
+        )
+        carrier = (
+            self.dino_to_hidden(masked_dino)
+            + self.dino_to_hidden(visual_history_innovation)
+        ) / math.sqrt(2.0)
+        carrier = carrier + self.position + self.camera
         flat = carrier.reshape(batch, self.cameras * self.grid * self.grid, self.hidden)
         flat, g1_delta = self.g1(flat, flat)
         carrier = flat.reshape(batch, self.cameras, self.grid, self.grid, self.hidden)
@@ -695,6 +799,12 @@ class CurrentObservationCompiler(nn.Module):
             (
                 coordinates,
                 flow_xy[..., None, :].expand(-1, -1, -1, -1, self.hypotheses, -1),
+                earlier_flow_aligned.permute(0, 1, 3, 4, 2)[..., None, :].expand(
+                    -1, -1, -1, -1, self.hypotheses, -1
+                ),
+                flow_acceleration.permute(0, 1, 3, 4, 2)[..., None, :].expand(
+                    -1, -1, -1, -1, self.hypotheses, -1
+                ),
                 support[..., None, :].expand(-1, -1, -1, -1, self.hypotheses, -1),
                 confidence[..., None, :].expand(-1, -1, -1, -1, self.hypotheses, -1),
                 uncertainty[..., None, :].expand(-1, -1, -1, -1, self.hypotheses, -1),
@@ -773,9 +883,12 @@ class CurrentObservationCompiler(nn.Module):
             local_facts=facts,
             detail_features=current_raw,
             previous_detail_features=previous_raw,
+            earlier_detail_features=earlier_raw,
             literal_rgb=observation.raw_rgb[:, -1],
             previous_literal_rgb=observation.raw_rgb[:, -2],
+            earlier_literal_rgb=observation.raw_rgb[:, -3],
             flow=flow,
+            earlier_flow=earlier_flow,
             context_mask=context_mask,
         )
         evidence.validate()
@@ -786,6 +899,21 @@ class CurrentObservationCompiler(nn.Module):
             "observation_flow_confidence": flow.confidence.detach().float().mean(),
             "observation_flow_uncertainty": flow.uncertainty.detach().float().mean(),
             "observation_flow_occlusion": flow.occlusion.detach().float().mean(),
+            "observation_earlier_flow_rms": earlier_flow.forward.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "observation_flow_acceleration_rms": flow_acceleration.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "observation_visual_history_innovation_rms": visual_history_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "observation_context_mask_fraction": context_mask.detach().float().mean(),
             "grounding_g1_innovation_rms": g1_delta.detach().float().square().mean().sqrt(),
             "grounding_g2_innovation_rms": g2_delta.detach().float().square().mean().sqrt(),

@@ -27,7 +27,7 @@ class ObservedStateDatasetConfig:
     policy_horizon: int = 24
     support_stride: int = 4
     state_history_offsets: tuple[int, ...] = (-8, -4, 0)
-    raw_pair_offsets: tuple[int, ...] = (-4, 0)
+    visual_history_offsets: tuple[int, ...] = (-8, -4, 0)
     executed_action_offsets: tuple[int, ...] = (-24, -16, -12, -8, -6, -4, -2, -1)
     state_offset: int = 0
     image_offset: int = 0
@@ -55,8 +55,8 @@ class ObservedStateDatasetConfig:
             or tuple(sorted(set(self.state_history_offsets))) != self.state_history_offsets
         ):
             raise ValueError("state_history_offsets must be increasing and end at zero")
-        if self.raw_pair_offsets != (-4, 0):
-            raise ValueError("the learned-flow input is exactly the previous/current raw pair")
+        if self.visual_history_offsets != (-8, -4, 0):
+            raise ValueError("the causal visual history is exactly -8/-4/0")
         if not self.executed_action_offsets or max(self.executed_action_offsets) >= 0:
             raise ValueError("executed_action_offsets must contain only past actions")
         if tuple(sorted(set(self.executed_action_offsets))) != self.executed_action_offsets:
@@ -103,7 +103,7 @@ class ObservedStateWindowDataset(Dataset):
         self.refs: list[ObservedWindowRef] = []
 
         min_rel = min(
-            min(config.raw_pair_offsets) + config.image_offset,
+            min(config.visual_history_offsets) + config.image_offset,
             min(config.state_history_offsets) + config.state_offset,
             min(config.executed_action_offsets) + config.action_offset,
         )
@@ -190,7 +190,7 @@ class ObservedStateWindowDataset(Dataset):
             dtype=np.int64,
         )
         history_image_indices = np.asarray(
-            [center + cfg.image_offset + offset for offset in cfg.raw_pair_offsets],
+            [center + cfg.image_offset + offset for offset in cfg.visual_history_offsets],
             dtype=np.int64,
         )
         executed_indices = np.asarray(
@@ -214,9 +214,12 @@ class ObservedStateWindowDataset(Dataset):
 
         history_frames = self.image_store.load_window(episode, history_image_indices)
         history_rgb = _camera_stack(history_frames, self.camera_names).float() / 255.0
-        current_key = np.asarray(
-            (ref.episode_idx, center + cfg.image_offset),
-            dtype=np.int64,
+        history_keys = np.stack(
+            (
+                np.full(len(history_image_indices), ref.episode_idx, dtype=np.int64),
+                history_image_indices,
+            ),
+            axis=1,
         )
         future_keys = np.stack(
             (
@@ -247,7 +250,7 @@ class ObservedStateWindowDataset(Dataset):
             "future_state": torch.from_numpy(self.state_normalizer.encode(future_state_raw)),
             "future_offsets": torch.tensor(cfg.future_offsets, dtype=torch.long),
             "history_obs_image": history_rgb,
-            "current_key": torch.from_numpy(current_key),
+            "history_keys": torch.from_numpy(history_keys),
             "future_keys": torch.from_numpy(future_keys),
         }
 
@@ -282,15 +285,16 @@ class CachedTokenPolicyWindowDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = self.base[int(index)]
-        current_key = sample.pop("current_key")
+        history_keys = sample.pop("history_keys")
         future_keys = sample.pop("future_keys")
         # Current and future keys normally hit the same episode mmap.  One
         # grouped read avoids allocating and dispatching two independent
         # result buffers in every DataLoader sample while preserving the
         # exact current/future ownership split in the returned mapping.
-        token_rows = self.token_store.load_batch(torch.cat((current_key[None], future_keys), dim=0))
-        sample["current_dinov2_tokens"] = token_rows[0]
-        sample["target_future_dinov2_tokens"] = token_rows[1:]
+        token_rows = self.token_store.load_batch(torch.cat((history_keys, future_keys), dim=0))
+        history_rows = int(history_keys.shape[0])
+        sample["history_dinov2_tokens"] = token_rows[:history_rows]
+        sample["target_future_dinov2_tokens"] = token_rows[history_rows:]
         sample["target_future_offsets"] = sample.pop("future_offsets")
         return sample
 

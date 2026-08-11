@@ -151,7 +151,7 @@ def load_mainline_data(
         policy_horizon=dims.action_horizon,
         support_stride=4,
         state_history_offsets=(-8, -4, 0),
-        raw_pair_offsets=(-obs.flow_reference_frames, 0),
+        visual_history_offsets=(-2 * obs.flow_reference_frames, -obs.flow_reference_frames, 0),
         executed_action_offsets=(-24, -16, -12, -8, -6, -4, -2, -1),
         stride=data.stride,
     )
@@ -286,8 +286,8 @@ def to_training_batch(
 ) -> TrainingBatch:
     """Convert a worker batch to the three disjoint model/training planes."""
 
-    current_dino = _device_tensor(batch, "current_dinov2_tokens", device=device)
-    batch_size = int(current_dino.shape[0])
+    dino_history = _device_tensor(batch, "history_dinov2_tokens", device=device)
+    batch_size = int(dino_history.shape[0])
     goal_tokens = goal.tokens.expand(batch_size, -1, -1).to(
         device=device,
         dtype=torch.float32,
@@ -299,7 +299,7 @@ def to_training_batch(
     )
     online = OnlinePolicyInput(
         observation=CurrentObservation(
-            dino_tokens=current_dino,
+            dino_history=dino_history,
             raw_rgb=_device_tensor(batch, "history_obs_image", device=device, dtype=torch.float32),
         ),
         history=ObservableHistory(

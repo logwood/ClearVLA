@@ -16,7 +16,10 @@ Build a source-grounded experiment diagnosis from raw logs. Treat every run as a
    python -m clearvla.tools.audit_policy_logs LOG_OR_RUN_DIR [MORE_LOGS]
    ```
 
-   Pass a run directory when available so the utility merges `nohup.log` with `v39_policy_epochs.jsonl`. Use `--format json` when downstream calculations need the complete normalized summary.
+   Pass a run directory when available.  Legacy runs merge `nohup.log` with
+   `v39_policy_epochs.jsonl`; the independent capability-named mainline merges
+   its console log with `metrics.jsonl`. Use `--format json` when downstream
+   calculations need the complete normalized summary.
 3. Read [metric-catalog.md](references/metric-catalog.md) for metric semantics and comparison constraints. Read [source-map.md](references/source-map.md) whenever the request asks why a behavior occurs, whether a loss is active, or whether code should change.
 4. Inspect the utility findings, then verify every material claim against the relevant raw rows and current source. Rules are triage signals, not proof of causality.
 5. Report the smallest decision-complete set of evidence:
@@ -33,8 +36,15 @@ Build a source-grounded experiment diagnosis from raw logs. Treat every run as a
 - Prefer `loss_contrib_*`, `loss_group_*`, and `loss_ledger_residual` over raw loss magnitudes. Never call a large raw auxiliary loss dominant without multiplying its effective weight.
 - Distinguish an audit-only metric from an objective that enters backward.
 - Treat an active-path zero gradient as evidence. Ignore zero placeholders from inactive branches.
+- For independent-mainline runs, inspect `clearvla/mainline/` and its serialized
+  `ArchitectureManifest` before historical V39 sources. A `v120`/`v122` label
+  is comparison ancestry, not proof that the active graph is the monolith.
 - Do not use event accuracy alone; pair it with precision, recall, F1, predicted/target event counts, and decoded gripper event ratio.
+- Keep decoded gripper events, the auxiliary event head, and the motion head as
+  three distinct semantic objects; never merge their counts or F1 values.
 - Do not infer generalization from training pflow. Compare validation RMSE by horizon and semantic channel.
+- Read all completed epochs.  Do not select only the first few hundred batches
+  or the best validation point when a full run is available.
 - Interpret capacity/depth only after execution progress leaves warmup. Interpret z interventions only when diagnostic coverage is present.
 - Compare `physical_flow_native_uniform` across runs only when the action-normalizer fingerprint matches.
 - Separate implementation facts, log observations, inferences, and experiment proposals in the final answer.

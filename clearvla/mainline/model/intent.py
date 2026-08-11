@@ -749,9 +749,13 @@ class FuturePlanRecognizer(nn.Module):
                 ),
                 dim=-1,
             ).detach()
-            teacher_valid = teacher.validity.detach().float().amax(
-                dim=3
-            ) * teacher.reliability.detach().float().clamp(0.0, 1.0)
+            # Teacher-G already confidence-blends ambiguous associations to
+            # current/zero-effect targets.  Multiplying the recognizer target
+            # by reliability again made the S object lane weakest exactly on
+            # the common neutral rows that it must learn to represent.  Keep
+            # physical object validity here; unreliable geometry has already
+            # been zeroed in the target fields themselves.
+            teacher_valid = teacher.validity.detach().float().amax(dim=3)
         batch, intervals, objects = effect_summary.shape[:3]
         object_identity = interval_identity[:, :, None].expand(batch, -1, objects, -1)
         object_key_input = self.effect_key_input(effect_key_summary)

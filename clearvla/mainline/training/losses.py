@@ -11,7 +11,7 @@ from torch import Tensor
 from ..config import ExperimentConfig
 from ..interfaces import ActionSupervision, ObservableHistory
 from ..model.action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
-from ..model.observation import ObservationEvidence, _coordinate_grid
+from ..model.observation import ObservationEvidence, PatchFlowField, _coordinate_grid
 from ..model.policy import PolicyStepOutput
 from ..model.types import FutureObjectDynamics, ObjectTopTrainingTargets
 
@@ -129,15 +129,18 @@ def _warp(value: Tensor, displacement: Tensor) -> Tensor:
     return sampled.reshape(batch, cameras, channels, height, width)
 
 
-def flow_geometry_terms(evidence: ObservationEvidence) -> dict[str, Tensor]:
-    """Observable geometry objectives with no non-zero-flow quota."""
+def _flow_pair_terms(
+    *,
+    flow: PatchFlowField,
+    previous: Tensor,
+    current: Tensor,
+    previous_literal_rgb: Tensor,
+    current_literal_rgb: Tensor,
+) -> dict[str, Tensor]:
+    """One adjacent causal-flow objective in shared physical units."""
 
-    evidence.validate()
-    flow = evidence.flow
     if flow.backward is None:
         raise ValueError("flow geometry objectives require the training-only backward field")
-    previous = evidence.previous_detail_features
-    current = evidence.detail_features
     height, width = flow.forward.shape[-2:]
 
     def rgb_chart(value: Tensor) -> Tensor:
@@ -152,8 +155,8 @@ def flow_geometry_terms(evidence: ObservationEvidence) -> dict[str, Tensor]:
         )
         return resized.reshape(batch, cameras, channels, height, width)
 
-    previous_rgb = rgb_chart(evidence.previous_literal_rgb)
-    current_rgb = rgb_chart(evidence.literal_rgb)
+    previous_rgb = rgb_chart(previous_literal_rgb)
+    current_rgb = rgb_chart(current_literal_rgb)
     # ``forward`` is previous->current motion indexed on current cells.  A
     # backward sampling warp reconstructs each current cell from
     # ``current_coordinate - forward`` in the previous chart.
@@ -261,16 +264,56 @@ def flow_geometry_terms(evidence: ObservationEvidence) -> dict[str, Tensor]:
     }
 
 
+def flow_geometry_terms(evidence: ObservationEvidence) -> dict[str, Tensor]:
+    """Average both -8->-4 and -4->0 observable geometry objectives."""
+
+    evidence.validate()
+    recent = _flow_pair_terms(
+        flow=evidence.flow,
+        previous=evidence.previous_detail_features,
+        current=evidence.detail_features,
+        previous_literal_rgb=evidence.previous_literal_rgb,
+        current_literal_rgb=evidence.literal_rgb,
+    )
+    earlier = _flow_pair_terms(
+        flow=evidence.earlier_flow,
+        previous=evidence.earlier_detail_features,
+        current=evidence.previous_detail_features,
+        previous_literal_rgb=evidence.earlier_literal_rgb,
+        current_literal_rgb=evidence.previous_literal_rgb,
+    )
+    result = {
+        name: 0.5 * (recent[name] + earlier[name])
+        for name in recent
+    }
+    # Keep the two physical intervals separately visible without changing the
+    # outer geometry budget.
+    result.update(
+        {
+            f"flow_recent_{name.removeprefix('flow_')}": value.detach()
+            for name, value in recent.items()
+        }
+    )
+    result.update(
+        {
+            f"flow_earlier_{name.removeprefix('flow_')}": value.detach()
+            for name, value in earlier.items()
+        }
+    )
+    return result
+
+
 def future_dynamics_terms(
     prediction: FutureObjectDynamics,
     target: FutureObjectDynamics,
+    *,
+    collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     prediction.validate()
     target.validate()
     validity = target.validity.detach().float()
     object_validity = validity.amax(dim=3)
     reliability_weight = target.reliability.detach().float().clamp(0.0, 1.0)
-    reliable_object = object_validity * reliability_weight
 
     def masked(error: Tensor, weight: Tensor) -> Tensor:
         expanded = weight
@@ -279,31 +322,43 @@ def future_dynamics_terms(
         expanded = expanded.expand_as(error)
         return (error * expanded).sum() / expanded.sum().clamp_min(1.0)
 
+    successor_error = F.smooth_l1_loss(
+        prediction.successor_content.float(),
+        target.successor_content.detach().float(),
+        reduction="none",
+    )
     successor = masked(
-        F.smooth_l1_loss(
-            prediction.successor_content.float(),
-            target.successor_content.detach().float(),
-            reduction="none",
-        ),
-        reliable_object,
+        successor_error,
+        # Teacher-G has already blended both confident-null and high-entropy
+        # associations to the current fact.  Multiplying by reliability here
+        # would discount the same uncertainty twice and make W nearly
+        # unsupervised on precisely the neutral rows it must learn.
+        object_validity,
     )
     delta_target = target.semantic_delta.detach().float()
     delta_scale = delta_target.square().mean(dim=-1, keepdim=True).sqrt().clamp_min(0.05)
+    semantic_delta_error = F.smooth_l1_loss(
+        prediction.semantic_delta.float() / delta_scale,
+        delta_target / delta_scale,
+        reduction="none",
+    )
     semantic_delta = masked(
-        F.smooth_l1_loss(
-            prediction.semantic_delta.float() / delta_scale,
-            delta_target / delta_scale,
-            reduction="none",
-        ),
-        reliable_object,
+        semantic_delta_error,
+        # Semantic delta is likewise zero-centred after the confidence
+        # fallback, so it remains a valid target when association is weak.
+        object_validity,
+    )
+    transport_error = F.smooth_l1_loss(
+        prediction.transport_mean.float(),
+        target.transport_mean.detach().float(),
+        reduction="none",
     )
     transport = masked(
-        F.smooth_l1_loss(
-            prediction.transport_mean.float(),
-            target.transport_mean.detach().float(),
-            reduction="none",
-        ),
-        validity * reliability_weight.unsqueeze(3),
+        transport_error,
+        # Teacher-G has already converted ambiguous geometry to identity
+        # transport.  It must remain supervised, otherwise action gradients
+        # can repurpose W transport as a free carrier on low-confidence rows.
+        validity,
     )
     covariance = masked(
         F.smooth_l1_loss(
@@ -359,12 +414,11 @@ def future_dynamics_terms(
     address_error = 0.5 * (
         predicted_address.clamp_min(1e-8).sqrt() - target_address.clamp_min(1e-8).sqrt()
     ).square().sum(dim=-1)
-    # A low-confidence Teacher-G association must not train W toward a noisy
-    # spatial address.  Address is part of the associated future track, just
-    # like successor content/delta/transport, so it uses the same detached
-    # object/interval reliability.  Reliability itself remains calibrated
-    # below against physical validity and is never used as a non-zero value.
-    address = masked(address_error, reliable_object.squeeze(-1))
+    # Teacher-G confidence-blends a null/diffuse association to the current
+    # unit-mass address.  That identity fallback is an actual target: masking
+    # it by reliability would again leave an action-owned free address on the
+    # rows where W is supposed to be neutral.
+    address = masked(address_error, object_validity.squeeze(-1))
     total = (
         0.30 * successor
         + 0.22 * semantic_delta
@@ -376,7 +430,7 @@ def future_dynamics_terms(
         + 0.06 * reliability
         + 0.05 * address
     )
-    return {
+    terms = {
         "future_dynamics": total,
         "future_successor": successor,
         "future_semantic_delta": semantic_delta,
@@ -388,6 +442,23 @@ def future_dynamics_terms(
         "future_reliability": reliability,
         "future_address": address,
     }
+    if collect_diagnostics:
+        for index in range(prediction.intervals):
+            interval_slice = slice(index, index + 1)
+            interval_validity = object_validity[:, interval_slice]
+            terms[f"future_interval_{index}_successor"] = masked(
+                successor_error[:, interval_slice], interval_validity
+            ).detach()
+            terms[f"future_interval_{index}_semantic_delta"] = masked(
+                semantic_delta_error[:, interval_slice], interval_validity
+            ).detach()
+            terms[f"future_interval_{index}_transport"] = masked(
+                transport_error[:, interval_slice], validity[:, interval_slice]
+            ).detach()
+            terms[f"future_interval_{index}_address"] = masked(
+                address_error[:, interval_slice], interval_validity.squeeze(-1)
+            ).detach()
+    return terms
 
 
 def action_terms(
@@ -439,6 +510,11 @@ def action_terms(
     ) / float(codec.arm_dim + 1)
     physical_error = (arm_error.sum(dim=-1) + gripper_error) / float(codec.arm_dim + 1)
     flow = (physical_error * step_weight).mean()
+    # V120 used no event-row boost in its physical flow objective.  Keep the
+    # new event-balanced objective, but also serialize the exact comparable
+    # scale so recovery checks do not mistake a deliberate reweighting for a
+    # worse velocity fit.
+    flow_v120_comparable = (physical_error_unweighted * step_weight).mean()
     arm = (arm_error.mean(dim=-1) * step_weight).mean()
     grip = (gripper_error * step_weight).mean()
     grip_unweighted = (gripper_error_unweighted * step_weight).mean()
@@ -475,6 +551,9 @@ def action_terms(
         + decoded_gripper_error * event_row_weight
     ) / float(codec.arm_dim + 1)
     decoded_action = (decoded_rows * step_weight).mean()
+    decoded_action_v120_comparable = (
+        decoded_element_error.mean(dim=-1) * step_weight
+    ).mean()
     boundary = torch.cat(
         (
             history.action_state[:, None].float(),
@@ -587,6 +666,8 @@ def action_terms(
     return {
         **band_metrics,
         "action_flow": flow,
+        "action_flow_v120_comparable": flow_v120_comparable,
+        "action_flow_event_balance_delta": flow - flow_v120_comparable,
         "action_flow_uniform_field_mse": uniform_flow,
         "action_flow_native": native_flow,
         "action_arm_flow": arm,
@@ -604,6 +685,10 @@ def action_terms(
         "action_gripper_hold_row_weight": hold_row_weight_mean,
         "action_gripper_event_rate": event_mask.mean(),
         "decoded_action": decoded_action,
+        "decoded_action_v120_comparable": decoded_action_v120_comparable,
+        "decoded_action_event_balance_delta": (
+            decoded_action - decoded_action_v120_comparable
+        ),
         "smooth_delta": smooth_delta,
         "physical_delta_consistency": physical_delta_consistency,
         "event": event,
@@ -629,6 +714,7 @@ def action_terms(
 class LossLedger:
     total: Tensor
     groups: dict[str, Tensor]
+    contributions: dict[str, Tensor]
     terms: dict[str, Tensor]
 
     def validate(self) -> None:
@@ -638,6 +724,10 @@ class LossLedger:
             raise ValueError("loss ledger has an inactive or unknown group")
         if any(value.ndim != 0 for value in self.groups.values()):
             raise ValueError("loss groups must be scalar")
+        if not self.contributions or any(
+            value.ndim != 0 for value in self.contributions.values()
+        ):
+            raise ValueError("loss contributions must be non-empty scalars")
 
 
 def compose_losses(
@@ -651,12 +741,17 @@ def compose_losses(
     top_targets: ObjectTopTrainingTargets,
     predicted_dynamics: FutureObjectDynamics,
     action_codec: PhysicalActionFieldCodec,
+    collect_diagnostics: bool = False,
 ) -> LossLedger:
     action = action_terms(config, action_codec, policy_output, action_target, history, flow_state)
     geometry = flow_geometry_terms(observation)
     if top_targets.teacher_dynamics is None:
         raise ValueError("formal training requires future teacher dynamics")
-    future = future_dynamics_terms(predicted_dynamics, top_targets.teacher_dynamics)
+    future = future_dynamics_terms(
+        predicted_dynamics,
+        top_targets.teacher_dynamics,
+        collect_diagnostics=collect_diagnostics,
+    )
     objective = config.objectives
     action_group = (
         action["action_flow"]
@@ -685,6 +780,44 @@ def compose_losses(
         + objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
     )
     groups = {"action": action_group, "representation": representation_group}
+    contributions = {
+        "action_flow": action["action_flow"],
+        "decoded_action": objective.decoded_action * action["decoded_action"],
+        "event": objective.event * action["event"],
+        "motion": objective.motion * action["motion"],
+        "smooth_delta": objective.smooth_delta * action["smooth_delta"],
+        "physical_delta_consistency": (
+            objective.physical_delta_consistency
+            * action["physical_delta_consistency"]
+        ),
+        "proposal": objective.proposal * top_targets.history_proposal_loss,
+        "future_dynamics": objective.future_dynamics * future["future_dynamics"],
+        "object_reconstruction": (
+            objective.intent_structure * 0.25 * top_targets.object_reconstruction_loss
+        ),
+        "intent_online": (
+            objective.intent_structure * 0.35 * top_targets.online_intent_loss
+        ),
+        "intent_recognizer": (
+            objective.intent_structure * 0.20 * top_targets.plan_recognition_loss
+        ),
+        "coarse_action": (
+            objective.intent_structure * 0.20 * top_targets.coarse_action_loss
+        ),
+        "flow_warp": objective.flow_warp * geometry["flow_warp"],
+        "flow_identity_advantage": (
+            objective.flow_identity_advantage * geometry["flow_identity_advantage"]
+        ),
+        "flow_static_identity": (
+            objective.flow_static_identity * geometry["flow_static_identity"]
+        ),
+        "flow_cycle": objective.flow_cycle * geometry["flow_cycle"],
+        "flow_smoothness": objective.flow_smoothness * geometry["flow_smoothness"],
+        "flow_uncertainty": objective.flow_uncertainty * geometry["flow_uncertainty"],
+        "flow_refinement_sequence": (
+            objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
+        ),
+    }
     terms = {
         **action,
         **geometry,
@@ -698,6 +831,7 @@ def compose_losses(
     ledger = LossLedger(
         total=action_group + representation_group,
         groups=groups,
+        contributions=contributions,
         terms=terms,
     )
     ledger.validate()

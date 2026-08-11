@@ -21,15 +21,16 @@ def _batch(batch: int = 2) -> TrainingBatch:
     dims = cfg.dimensions
     online = OnlinePolicyInput(
         observation=CurrentObservation(
-            dino_tokens=torch.zeros(
+            dino_history=torch.zeros(
                 batch,
+                dims.visual_history_length,
                 dims.num_cameras,
                 dims.patches_per_camera,
                 dims.visual_token_dim,
             ),
             raw_rgb=torch.zeros(
                 batch,
-                dims.raw_pair_length,
+                dims.visual_history_length,
                 dims.num_cameras,
                 3,
                 336,

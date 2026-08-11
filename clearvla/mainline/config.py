@@ -96,7 +96,7 @@ class ModelDimensions:
     state_dim: int = 7
     action_horizon: int = 24
     action_basis_tokens: int = 4
-    raw_pair_length: int = 2
+    visual_history_length: int = 3
     state_history_length: int = 3
     executed_history_length: int = 8
     hidden_size: int = 512
@@ -126,8 +126,8 @@ class ModelDimensions:
             raise ValueError("the active bottom and interval contract requires horizon 24")
         if self.num_cameras != 2:
             raise ValueError("the current observation contract owns two cameras")
-        if self.raw_pair_length != 2:
-            raise ValueError("learned flow requires exactly previous/current raw frames")
+        if self.visual_history_length != 3:
+            raise ValueError("the causal visual history requires offsets -8/-4/0")
         if self.state_history_length != 3:
             raise ValueError("the active state history owns three causal rows")
         if self.executed_history_length != 8:
@@ -243,7 +243,6 @@ class BottomConfig:
     initial_exit_probability: float = 0.10
     controlled_delta_rank: int = 8
     controlled_action_tokens: int = 8
-    controlled_neutral_tokens: int = 4
     controlled_delta_dropout: float = 0.0
     gripper_field_dim: int = 6
     physical_decode_delta_blend: float = 0.25
@@ -261,7 +260,6 @@ class BottomConfig:
             self.controller_heads,
             self.controlled_delta_rank,
             self.controlled_action_tokens,
-            self.controlled_neutral_tokens,
             self.gripper_field_dim,
         )
         if any(int(value) <= 0 for value in integer_fields):
@@ -343,6 +341,13 @@ class OptimizerConfig:
     grad_clip: float = 1.0
     warmup_steps: int = 500
     min_lr_ratio: float = 0.1
+    # Preserve the resolved V120 optimization geometry.  The history proposal
+    # was trained at 5e-5 while the public role trunk used 8e-5.  The active
+    # Evidence-MMDiT decoder used 0.7x of the public LR, with its nested
+    # contraction basis at 2x that decoder LR and without weight decay.
+    history_proposal_lr_scale: float = 0.625
+    bottom_decoder_lr_scale: float = 0.70
+    bottom_capacity_relative_lr_scale: float = 2.0
 
     def validate(self) -> None:
         if min(self.epochs, self.batch_size, self.warmup_steps) <= 0:
@@ -355,6 +360,12 @@ class OptimizerConfig:
             raise ValueError("optimizer betas must be in [0,1)")
         if not 0.0 < self.min_lr_ratio <= 1.0:
             raise ValueError("min_lr_ratio must be in (0,1]")
+        if min(
+            self.history_proposal_lr_scale,
+            self.bottom_decoder_lr_scale,
+            self.bottom_capacity_relative_lr_scale,
+        ) <= 0.0:
+            raise ValueError("optimizer role LR scales must be positive")
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,35 @@
 - Logging
 - Static audit watchlist
 
+## Independent mainline (inspect first when the manifest says `clearvla_mainline`)
+
+- `clearvla/mainline/manifest.py`, `config.py`, `interfaces.py`
+  - compact graph identity, resolved capability settings and typed online /
+    teacher boundaries;
+- `clearvla/mainline/model/observation.py`, `grounding.py`, `intent.py`,
+  `dynamics.py`, `factual_reader.py`, `compiler.py`, `transition.py`, `bottom.py`
+  - the active current-only observation -> G/S/W/P -> controlled transition ->
+    three-block Evidence MMDiT graph;
+- `clearvla/mainline/model/policy.py`, `top.py`
+  - static online cache, training-only target plane and ODE-step-dependent
+    P2/P3/bottom composition;
+- `clearvla/mainline/training/losses.py`, `optimizer.py`, `engine.py`
+  - exact action/representation ledger, owner groups, backward and clipping;
+  - `optimizer.py` resolves the V120 role geometry explicitly: public top at
+    `1.0x`, history proposal at `0.625x`, bottom decoder at `0.7x`, and the
+    no-decay capacity basis at `1.4x`; `engine.py` logs the public/base LR
+    independently of optimizer group ordering;
+- `clearvla/mainline/runtime/evaluation.py`, `logging.py`, `sampling.py`
+  - deploy-style normalized/physical validation, separate decoded/event/motion
+    semantics, lossless `metrics.jsonl` and console projections;
+- `clearvla/tools/audit_policy_logs.py`
+  - parser for both mainline and historical logs.
+
+Do not begin an independent-mainline diagnosis in `policy_runtime_v39.py` or
+`trunk.py`.  Those files are ancestry/comparison evidence only.  Conversely,
+when auditing an actual serialized V120/V122 monolith, use the historical map
+below and do not infer its graph from the independent package.
+
 ## Objective construction
 
 - `clearvla/experiments/observed_state_lab/policy_runtime_v36_3.py`

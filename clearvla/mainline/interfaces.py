@@ -67,14 +67,14 @@ class GoalCondition:
 
 @dataclass(frozen=True)
 class CurrentObservation:
-    """Current-only observation evidence; no future support is representable."""
+    """Causal observation history; no future support is representable."""
 
-    dino_tokens: Tensor  # current-only [B,C,P,D_visual]
-    raw_rgb: Tensor  # previous/current [B,2,C,3,R,R], normalized float RGB
+    dino_history: Tensor  # causal [-8,-4,0], [B,3,C,P,D_visual]
+    raw_rgb: Tensor  # causal [-8,-4,0], [B,3,C,3,R,R], normalized float RGB
 
     @property
     def batch(self) -> int:
-        return int(self.dino_tokens.shape[0])
+        return int(self.dino_history.shape[0])
 
     @property
     def raw_side(self) -> int:
@@ -82,36 +82,37 @@ class CurrentObservation:
 
     def validate(self, config: ExperimentConfig) -> None:
         dims = config.dimensions
-        if self.dino_tokens.ndim != 4:
-            raise ValueError("current DINO tokens must be [B,C,P,D]")
+        if self.dino_history.ndim != 5:
+            raise ValueError("causal DINO history must be [B,H,C,P,D]")
         batch = self.batch
         _shape(
-            self.dino_tokens,
+            self.dino_history,
             (
                 batch,
+                dims.visual_history_length,
                 dims.num_cameras,
                 dims.patches_per_camera,
                 dims.visual_token_dim,
             ),
-            "current DINO tokens",
+            "causal DINO history",
         )
         if self.raw_rgb.ndim != 6:
             raise ValueError("current raw RGB must be [B,H,C,3,R,R]")
         if tuple(self.raw_rgb.shape[:4]) != (
             batch,
-            dims.raw_pair_length,
+            dims.visual_history_length,
             dims.num_cameras,
             3,
         ):
-            raise ValueError("raw RGB must retain exactly the previous/current camera pair")
+            raise ValueError("raw RGB must retain the causal -8/-4/0 camera history")
         if int(self.raw_rgb.shape[-2]) != self.raw_side:
             raise ValueError("current raw RGB must be square")
         if self.raw_side < 32 or self.raw_side % 16:
             raise ValueError("current raw RGB side must be >=32 and divisible by 16")
-        _floating(self.dino_tokens, "current DINO tokens")
+        _floating(self.dino_history, "causal DINO history")
         _floating(self.raw_rgb, "current raw RGB")
-        if self.dino_tokens.device != self.raw_rgb.device:
-            raise ValueError("current DINO and raw RGB must share a device")
+        if self.dino_history.device != self.raw_rgb.device:
+            raise ValueError("causal DINO and raw RGB must share a device")
 
 
 @dataclass(frozen=True)
@@ -181,7 +182,7 @@ class OnlinePolicyInput:
 
     @property
     def device(self) -> torch.device:
-        return self.observation.dino_tokens.device
+        return self.observation.dino_history.device
 
     def validate(self, config: ExperimentConfig) -> None:
         self.observation.validate(config)
@@ -190,7 +191,7 @@ class OnlinePolicyInput:
         if self.history.batch != self.batch or self.goal.batch != self.batch:
             raise ValueError("online input components must share a batch size")
         if not (
-            self.observation.dino_tokens.device
+            self.observation.dino_history.device
             == self.history.state.device
             == self.goal.tokens.device
         ):

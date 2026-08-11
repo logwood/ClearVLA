@@ -23,12 +23,21 @@ from .data.loading import MainlineDataBundle, load_mainline_data, to_training_ba
 from .model.policy import ClearVLAMainlinePolicy
 from .runtime.checkpoints import load_checkpoint_exact, migrate_bottom_only, save_checkpoint
 from .runtime.evaluation import ValidationAccumulator
-from .runtime.identity import dataset_identity, language_identity
-from .runtime.logging import DeviceMetricAccumulator, JsonlRunLogger, active_metrics
+from .runtime.identity import (
+    dataset_identity,
+    language_identity,
+    v120_normalizer_fingerprint,
+)
+from .runtime.logging import (
+    DeviceMetricAccumulator,
+    JsonlRunLogger,
+    active_metrics,
+    archival_metrics,
+)
 from .runtime.numerics import resolve_compute_dtype
 from .runtime.sampling import sample_cached_action
 from .training.engine import MainlineTrainingEngine, validate_finite_training_batch
-from .training.optimizer import WarmupCosineSchedule, build_optimizer
+from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -155,6 +164,28 @@ def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
     }
 
 
+def _optimizer_group_context(
+    optimizer: torch.optim.Optimizer,
+    config: ExperimentConfig,
+) -> dict[str, dict[str, float | int]]:
+    """Serialize optimizer geometry without ambiguous LR/count names."""
+
+    base_learning_rate = float(config.optimizer.learning_rate)
+    result: dict[str, dict[str, float | int]] = {}
+    for group in optimizer.param_groups:
+        learning_rate = float(group["lr"])
+        parameters = list(group["params"])
+        result[str(group["name"])] = {
+            "base_learning_rate": base_learning_rate,
+            "initial_learning_rate": learning_rate,
+            "role_learning_rate_scale": learning_rate / base_learning_rate,
+            "weight_decay": float(group["weight_decay"]),
+            "parameter_tensor_count": len(parameters),
+            "parameter_count": sum(int(parameter.numel()) for parameter in parameters),
+        }
+    return result
+
+
 def _prepare_output_directory(
     output_dir: Path,
     *,
@@ -266,14 +297,27 @@ def _validate(
     deployment = ValidationAccumulator.from_action_normalizer(
         bundle.action_normalizer,
         device=device,
+        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
     losses = DeviceMetricAccumulator()
+    ablations = DeviceMetricAccumulator()
     maximum = config.runtime.max_val_batches
+    completed_batches = 0
+    diagnostic_batches = 0
+    action_scale = torch.as_tensor(
+        bundle.action_normalizer.scale,
+        device=device,
+        dtype=torch.float32,
+    ).reshape(1, 1, -1)
+    if bool((action_scale <= 0.0).any()):
+        raise ValueError("validation action normalizer scale must be positive")
     flow_generator = _owned_generator(device, config.data.seed + 10_001)
     sampling_generator = _owned_generator(device, config.data.seed + 10_002)
     for batch_index, raw_batch in enumerate(loader):
         if maximum > 0 and batch_index >= maximum:
             break
+        completed_batches += 1
         batch = to_training_batch(
             raw_batch,
             goal=bundle.goal,
@@ -289,6 +333,21 @@ def _validate(
             encoded=encoded,
         )
         cache = encoded.cache
+        proposal_ablation_cache = None
+        if diagnostics:
+            autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
+                torch.bfloat16,
+                torch.float16,
+            }
+            with torch.autocast(
+                device_type=device.type,
+                dtype=dtype,
+                enabled=autocast_enabled,
+            ):
+                proposal_ablation_cache = engine.model.proposal_ablation_cache(
+                    cache,
+                    encoded.training_state,
+                )
         del encoded
         losses.update(
             {
@@ -305,8 +364,77 @@ def _validate(
             dtype=dtype,
             generator=sampling_generator,
         )
-        deployment.update(prediction.action, batch)
+        target_physical = engine.model.action_codec.encode(
+            batch.action_target.normalized,
+            batch.online.history.action_state,
+        )
+        motion_target = (
+            engine.model.action_codec.split(target_physical).arm_delta.float().norm(dim=-1)
+            >= float(config.objectives.arm_motion_threshold)
+        )
+        deployment.update(
+            prediction.action,
+            batch,
+            event_logits=prediction.event_logits,
+            motion_logits=prediction.motion_logits,
+            motion_target=motion_target,
+        )
         if diagnostics:
+            if proposal_ablation_cache is None:
+                raise RuntimeError("proposal ablation cache was not constructed")
+            diagnostic_batches += 1
+            common_sampling = {
+                "initial_physical_noise": prediction.initial_physical_noise,
+                "collect_diagnostics": False,
+                "dtype": dtype,
+            }
+            proposal_zero = sample_cached_action(
+                engine.model,
+                proposal_ablation_cache,
+                config,
+                **common_sampling,
+            )
+            execution_no_updates = sample_cached_action(
+                engine.model,
+                cache,
+                config,
+                execution_mode="no_updates",
+                **common_sampling,
+            )
+            execution_full_updates = sample_cached_action(
+                engine.model,
+                cache,
+                config,
+                execution_mode="full_updates",
+                **common_sampling,
+            )
+            target = batch.action_target.normalized.float()
+            primary = prediction.action.float()
+            primary_error = primary - target
+            ablation_rows: dict[str, torch.Tensor] = {
+                "diagnostic_primary_mse_normalized": primary_error.square().mean(),
+                "diagnostic_primary_mse_physical": (
+                    primary_error / action_scale
+                ).square().mean(),
+            }
+            for name, value in (
+                ("proposal_zero", proposal_zero.action),
+                ("execution_no_updates", execution_no_updates.action),
+                ("execution_full_updates", execution_full_updates.action),
+            ):
+                error = value.float() - target
+                delta = value.float() - primary
+                ablation_rows[f"{name}_mse_normalized"] = error.square().mean()
+                ablation_rows[f"{name}_mse_physical"] = (
+                    error / action_scale
+                ).square().mean()
+                ablation_rows[f"{name}_action_delta_mse_normalized"] = (
+                    delta.square().mean()
+                )
+                ablation_rows[f"{name}_action_delta_mse_physical"] = (
+                    delta / action_scale
+                ).square().mean()
+            ablations.update(ablation_rows, weight=batch.online.batch)
             # The loss forward samples one random flow time, while this row is
             # the final step of a five-step deployment solve.  Their dynamic
             # P2/P3/bottom keys overlap but do not have the same semantics;
@@ -315,7 +443,45 @@ def _validate(
                 {f"validation_deploy_{name}": value for name, value in prediction.metrics.items()},
                 weight=batch.online.batch,
             )
-    return {**losses.materialize(), **deployment.means()}
+            del proposal_ablation_cache
+            del proposal_zero, execution_no_updates, execution_full_updates
+    result = {**losses.materialize(), **deployment.means()}
+    result["validation_ablation_batches"] = float(diagnostic_batches)
+    result["validation_ablation_coverage"] = float(
+        diagnostic_batches / max(completed_batches, 1)
+    )
+    if diagnostic_batches:
+        rows = ablations.materialize()
+        primary_normalized = rows["diagnostic_primary_mse_normalized"]
+        primary_physical = rows["diagnostic_primary_mse_physical"]
+        result["validation_diagnostic_primary_rmse_normalized"] = float(
+            primary_normalized**0.5
+        )
+        result["validation_diagnostic_primary_rmse_physical"] = float(
+            primary_physical**0.5
+        )
+        for name in (
+            "proposal_zero",
+            "execution_no_updates",
+            "execution_full_updates",
+        ):
+            normalized = rows[f"{name}_mse_normalized"]
+            physical = rows[f"{name}_mse_physical"]
+            result[f"validation_{name}_rmse_normalized"] = float(normalized**0.5)
+            result[f"validation_{name}_rmse_physical"] = float(physical**0.5)
+            result[f"validation_{name}_mse_gain_vs_primary_normalized"] = float(
+                primary_normalized - normalized
+            )
+            result[f"validation_{name}_mse_gain_vs_primary_physical"] = float(
+                primary_physical - physical
+            )
+            result[f"validation_{name}_action_delta_rmse_normalized"] = float(
+                rows[f"{name}_action_delta_mse_normalized"] ** 0.5
+            )
+            result[f"validation_{name}_action_delta_rmse_physical"] = float(
+                rows[f"{name}_action_delta_mse_physical"] ** 0.5
+            )
+    return result
 
 
 def main() -> None:
@@ -402,12 +568,19 @@ def main() -> None:
         "config": config.as_dict(),
         "identity": identity.as_dict(),
         "optimizer_roles": ownership.role_counts,
+        "optimizer_groups": _optimizer_group_context(optimizer, config),
         "dataset_sizes": {name: len(value) for name, value in bundle.datasets.items()},
         "splits": {name: list(value) for name, value in bundle.splits.items()},
         "skipped": list(bundle.skipped),
         "information_sampling": getattr(
             getattr(train_loader, "batch_sampler", None), "summary", None
         ),
+        "normalizer_fingerprints": {
+            "action_v120": v120_normalizer_fingerprint(bundle.action_normalizer),
+            "state_v120": v120_normalizer_fingerprint(bundle.state_normalizer),
+            "action_sha256": identity.dataset.action_normalizer_sha256,
+            "state_sha256": identity.dataset.state_normalizer_sha256,
+        },
     }
     # Preflight uses the deterministic validation sampler and separate RNGs;
     # it must not consume formal training shuffle, condition-dropout or flow
@@ -482,13 +655,22 @@ def main() -> None:
             epoch_metrics.update(row, weight=batch.online.batch)
             window_metrics.update(row, weight=batch.online.batch)
             if emit:
-                values = active_metrics(window_metrics.materialize())
+                values = archival_metrics(window_metrics.materialize())
                 window_seconds = time.perf_counter() - window_started
                 values["runtime_window_seconds_per_batch"] = window_seconds / max(window_batches, 1)
                 values["runtime_window_samples_per_second"] = window_samples / max(
                     window_seconds, 1e-8
                 )
                 values["learning_rate"] = result.learning_rate
+                values["learning_rate_history_proposal"] = (
+                    result.learning_rate * role_lr_scale("history_proposal", config)
+                )
+                values["learning_rate_bottom_decoder"] = (
+                    result.learning_rate * role_lr_scale("bottom_mmdit", config)
+                )
+                values["learning_rate_bottom_capacity"] = (
+                    result.learning_rate * role_lr_scale("bottom_capacity", config)
+                )
                 logger.write(
                     "train",
                     epoch=epoch,
@@ -496,27 +678,36 @@ def main() -> None:
                     step=engine.global_step,
                     metrics=values,
                 )
+                display_values = active_metrics(values)
                 print(
                     logger.compact_line(
                         "train",
                         epoch=epoch,
                         batch=batch_index,
                         step=engine.global_step,
-                        metrics=values,
+                        metrics=display_values,
                     ),
                     flush=True,
                 )
+                for detail_line in logger.diagnostic_lines(
+                    "train",
+                    epoch=epoch,
+                    batch=batch_index,
+                    step=engine.global_step,
+                    metrics=display_values,
+                ):
+                    print(detail_line, flush=True)
                 window_metrics = DeviceMetricAccumulator()
                 window_started = time.perf_counter()
                 window_samples = 0
                 window_batches = 0
-        train_values = active_metrics(epoch_metrics.materialize())
+        train_values = archival_metrics(epoch_metrics.materialize())
         epoch_seconds = time.perf_counter() - epoch_started
         train_values["runtime_epoch_seconds"] = epoch_seconds
         train_values["runtime_seconds_per_batch"] = epoch_seconds / max(epoch_batches, 1)
         train_values["runtime_samples_per_second"] = epoch_samples / max(epoch_seconds, 1e-8)
         train_values.update(_cuda_memory_metrics(device))
-        validation = active_metrics(
+        validation = archival_metrics(
             _validate(
                 engine=engine,
                 loader=val_loader,
@@ -539,10 +730,18 @@ def main() -> None:
                 epoch=epoch,
                 batch=None,
                 step=engine.global_step,
-                metrics=validation,
+                metrics=active_metrics(validation),
             ),
             flush=True,
         )
+        for detail_line in logger.diagnostic_lines(
+            "val",
+            epoch=epoch,
+            batch=None,
+            step=engine.global_step,
+            metrics=active_metrics(validation),
+        ):
+            print(detail_line, flush=True)
         metric = validation["validation_action_rmse_normalized"]
         improved = best_metric is None or metric < best_metric
         if improved:

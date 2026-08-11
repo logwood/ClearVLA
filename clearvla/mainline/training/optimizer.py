@@ -12,28 +12,63 @@ from ..config import ExperimentConfig
 
 ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("observation", ("observation.",)),
-    ("grounding", ("top.grounding_host.", "top.grounder.")),
-    (
-        "intent",
-        (
-            "top.intent.",
-            "top.coarse_action.",
-            "top.recognizer.",
-            "history_proposal.",
-        ),
-    ),
-    ("dynamics", ("top.dynamics.", "transition.")),
+    ("grounding_host", ("top.grounding_host.",)),
+    ("grounder", ("top.grounder.",)),
+    ("intent", ("top.intent.",)),
+    ("coarse_action", ("top.coarse_action.",)),
+    ("plan_recognizer", ("top.recognizer.",)),
+    ("history_proposal", ("history_proposal.",)),
+    ("dynamics", ("top.dynamics.",)),
+    ("controlled_transition", ("transition.",)),
     ("p1_factual", ("factual_reader.",)),
+    ("p2_effect_reader", ("top.effect_reader.",)),
+    ("consequence", ("top.consequence.",)),
+    ("p3_compiler", ("top.plan_compiler.",)),
+    ("bottom_query", ("bottom.query_encoder.",)),
+    ("bottom_protected_reader", ("bottom.protected_reader.",)),
+    ("bottom_evidence_compiler", ("bottom.evidence_compiler.",)),
+    ("bottom_organizer", ("bottom.organizer.",)),
+    ("bottom_mmdit", ("bottom.blocks.",)),
+    ("bottom_capacity", ("bottom.capacity.",)),
+    ("bottom_execution", ("bottom.execution.",)),
     (
-        "p2_p3",
+        "bottom_heads",
         (
-            "top.effect_reader.",
-            "top.consequence.",
-            "top.plan_compiler.",
+            "bottom.final_norm.",
+            "bottom.velocity_head.",
+            "bottom.event_head.",
+            "bottom.motion_head.",
         ),
     ),
-    ("bottom", ("bottom.",)),
 )
+
+BOTTOM_DECODER_ROLES = frozenset(
+    {
+        "bottom_query",
+        "bottom_protected_reader",
+        "bottom_evidence_compiler",
+        "bottom_organizer",
+        "bottom_mmdit",
+        "bottom_execution",
+        "bottom_heads",
+    }
+)
+
+
+def role_lr_scale(role: str, config: ExperimentConfig) -> float:
+    """Return the source-resolved V120 LR scale for one active owner."""
+
+    optimizer = config.optimizer
+    if role == "history_proposal":
+        return float(optimizer.history_proposal_lr_scale)
+    if role == "bottom_capacity":
+        return float(
+            optimizer.bottom_decoder_lr_scale
+            * optimizer.bottom_capacity_relative_lr_scale
+        )
+    if role in BOTTOM_DECODER_ROLES:
+        return float(optimizer.bottom_decoder_lr_scale)
+    return 1.0
 
 
 def parameter_role(name: str) -> str:
@@ -73,7 +108,14 @@ def build_optimizer(
         if id(parameter) in seen:
             raise ValueError(f"optimizer parameter is aliased more than once: {name}")
         seen.add(id(parameter))
-        decay = parameter.ndim >= 2 and not name.endswith(".bias")
+        # V120's contraction factor/basis was explicitly no-decay.  QR makes
+        # its forward map scale-invariant, but AdamW decay still changes its
+        # optimizer moments and therefore its directional learning dynamics.
+        decay = (
+            parameter.ndim >= 2
+            and not name.endswith(".bias")
+            and role != "bottom_capacity"
+        )
         grouped.setdefault((role, decay), []).append(parameter)
         grouped_names.setdefault((role, decay), []).append(name)
         trainable.append(name)
@@ -88,7 +130,7 @@ def build_optimizer(
         optimizer_groups.append(
             {
                 "params": grouped[(role, decay)],
-                "lr": config.optimizer.learning_rate,
+                "lr": config.optimizer.learning_rate * role_lr_scale(role, config),
                 "weight_decay": config.optimizer.weight_decay if decay else 0.0,
                 "name": group_name,
                 "parameter_names": tuple(grouped_names[(role, decay)]),
@@ -211,4 +253,5 @@ __all__ = [
     "build_optimizer",
     "gradient_diagnostics",
     "parameter_role",
+    "role_lr_scale",
 ]

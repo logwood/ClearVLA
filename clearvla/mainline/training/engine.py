@@ -32,7 +32,7 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
     """Expensive value audit for preflight only, never the hot path."""
 
     values = {
-        "online.dino": batch.online.observation.dino_tokens,
+        "online.dino_history": batch.online.observation.dino_history,
         "online.raw": batch.online.observation.raw_rgb,
         "online.state": batch.online.history.state,
         "online.state_history": batch.online.history.state_history,
@@ -122,6 +122,10 @@ class MainlineTrainingEngine:
         tensors = {
             "loss_total": ledger.total,
             **{f"loss_group_{name}": value for name, value in ledger.groups.items()},
+            **{
+                f"loss_contrib_{name}": value
+                for name, value in ledger.contributions.items()
+            },
             **{f"loss_{name}": value for name, value in ledger.terms.items()},
             **values,
         }
@@ -132,6 +136,9 @@ class MainlineTrainingEngine:
             result[name] = value.detach().float()
         result["loss_ledger_gap"] = ledger.total.detach().float() - sum(
             value.detach().float() for value in ledger.groups.values()
+        )
+        result["loss_contribution_gap"] = ledger.total.detach().float() - sum(
+            value.detach().float() for value in ledger.contributions.values()
         )
         return result
 
@@ -285,6 +292,7 @@ class MainlineTrainingEngine:
             top_targets=top_targets,
             predicted_dynamics=encoded.cache.top.predicted_dynamics,
             action_codec=self.model.action_codec,
+            collect_diagnostics=collect_diagnostics,
         )
         metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
         if collect_diagnostics:
@@ -339,7 +347,13 @@ class MainlineTrainingEngine:
         # and then logging the optimizer group reported the *next* batch's LR
         # beside the current batch loss, an off-by-one semantic error during
         # the entire warmup.
-        learning_rate = float(self.optimizer.param_groups[0]["lr"])
+        # Optimizer groups intentionally have different V120-resolved scales.
+        # The public ``learning_rate`` metric therefore owns the base schedule,
+        # not whichever alphabetically sorted role happens to be group zero.
+        learning_rate = float(
+            self.config.optimizer.learning_rate
+            * self.schedule.ratio(self.schedule.step_index)
+        )
         self.optimizer.step()
         self.schedule.step()
         self.global_step += 1

@@ -64,6 +64,15 @@ Known compatibility aliases require care: historical `future_latent` and `action
 - Report `event_head_minus_decoded_gripper_f1`; the decoded gripper trajectory
   remains the deployment behavior, while the event head is auxiliary evidence.
 - `proposal_utility_mse_gain > 0` indicates improvement over the no-proposal ablation. Always report ablation coverage.
+- The independent mainline uses the explicit names
+  `validation_proposal_zero_mse_gain_vs_primary_physical`,
+  `validation_execution_no_updates_mse_gain_vs_primary_physical`, and
+  `validation_execution_full_updates_mse_gain_vs_primary_physical`. Positive
+  gain means the intervention improved over the matched primary sample and is
+  therefore evidence that the removed/overridden path is currently harmful.
+  Read each gain with its action-delta RMSE and
+  `validation_ablation_coverage`; a near-zero gain with a near-zero delta means
+  the intervention did not reach action, not that the path was beneficial.
 - Training pflow and sampled validation RMSE use different procedures; a large training decrease with flat validation is a real mismatch signal, not a numerical contradiction.
 
 ## Structure and control
@@ -816,6 +825,113 @@ Known compatibility aliases require care: historical `future_latent` and `action
 - Production acceptance needs complete train/validation curves plus a frozen
   effect zero/shuffle chain. Local BF16 gradients, nonzero W loss improvement
   or a changed P2 boundary do not by themselves prove deployed-action utility.
+
+## Independent mainline schema 19
+
+The current capability-named package is selected by the serialized
+`ArchitectureManifest` and lives under `clearvla/mainline/`.  Its archival
+record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-epoch-*]` and
+`[mainline-validation-*]` are console projections of that record.
+
+- The audit utility's text report must project active schema-19 G/S/W/P,
+  teacher, transition, bottom and per-owner gradient tails, plus normalized,
+  physical and three-band validation values.  `metric_index` remains the
+  lossless machine-readable inventory; a sparse text projection must not be
+  interpreted as a sparse training log.
+
+- Treat an absent active metric differently from an exact zero.  Schema 19's
+  JSONL retains every active zero so a collapsed W/P2/flow/owner path remains
+  auditable; the compact console may omit ordinary zeros.  Prefer JSONL for
+  observability and always-zero conclusions.
+
+- Compare normalized and physical action RMSE together.  Always include
+  first, first-8, tail, arm, gripper and physical/normalized `1-4 / 5-12 /
+  13-24` bands.  `tail/first` remains diagnostic, not a loss.
+- Training exposes `loss_action_flow`, `loss_action_flow_native`, decoded
+  action, arm/gripper, event/hold rows and the exact horizon mass.  The
+  V120-compatible per-row weighting gives the unequal-length bands different
+  total mass; do not reinterpret this as equal-band weighting.
+- Schema 19 deliberately balances gripper event/hold rows in the active action
+  and decoded objectives.  `loss_action_flow_v120_comparable`,
+  `loss_action_gripper_flow_unweighted`, and
+  `loss_decoded_action_v120_comparable` remove only that new row weighting and
+  are the valid train-scale comparison with V120.  The audit parser maps these
+  to historical `physical_flow`, `gripper_fm_field`, and `decoded_action`, while
+  retaining the real backward quantities under explicit `*_event_balanced`
+  aliases.  Never compare the balanced objective directly to V120 pflow.
+- `loss_contrib_*` rows are the exact weighted components sent to backward;
+  `loss_contribution_gap` must close independently of the group-level
+  `loss_ledger_gap`.
+- Decoded gripper open/close/timing measures deployment behavior.  The
+  three-class event head and binary motion head are auxiliary outputs with
+  separate P/R/F1, positive counts and accuracy.
+- G health requires content pair cosine, chart overlap, K+null mass closure,
+  prototype/spatial/typed reconstruction and candidate key/value RMS.  A
+  falling reconstruction loss with content cosine exactly `1` is a collapse,
+  not successful binding.
+- S health requires interval and temporal variation plus goal/history/object
+  innovation RMS.  Learned interval query identity is an address, not an
+  observable intent value and must not be credited as S usage.
+- W prediction/teacher variation and per-interval errors must be read together.
+  Association confidence first turns diffuse successor content into current
+  identity, transport/covariance into zero, and address into the unit-mass
+  current address.  Physical validity then supervises those neutral targets;
+  reliability is a calibration/diagnostic value and must not erase a neutral
+  W row a second time.
+- P1 query chart/coordinate variation verifies that full local facts survive
+  the global-K boundary.  P2 reports bounded semantic/geometry/intent/
+  coordinate scores, temperatures, posterior mass and null mass.  P3 reports
+  factual/temporal bases separately from consequence interactions.
+- `controlled_transition_dense_rows=512` and `pooled_rows=96` describe the
+  active spatial-to-action-basis transition.  A zero proposal must give exact
+  zero centered coefficients/value.
+- Capacity is a full-width non-expansive contraction.  Read capacity,
+  effective basis mass, contraction ratio and non-expansive violation with
+  post-clip capacity/bottom gradients; effective basis mass is not hardware
+  rank or measured compute reduction.
+- V120's `execution_value_*` family was an active supervised ranking of an
+  expensive differentiable candidate chart, not execution cost.  The schema-19
+  one-graph controller deliberately has no direct same-name value reader; its
+  required equivalence evidence is matched-noise learned/no-update/full-update
+  action error plus controller/capacity/basis gradients and per-block update
+  RMS.  Do not report the old metric as "missing by accident", but treat a
+  forced mode beating learned or persistent capacity-gradient zero as evidence
+  that a lightweight prefix-value calibration may be needed.
+- Flow diagnostics include both observable pairs (`-8->-4`, `-4->0`), literal
+  RGB zero-warp baselines, moving/static gains and flow acceleration.  Never
+  infer useful spatial addressing from flow magnitude alone.
+- On diagnostic rows, read every W interval as one coupled record:
+  prediction/teacher successor RMS, semantic-delta RMS, transport RMS and
+  address error.  An aggregate W loss can improve while one late interval or
+  one field remains free.
+- Owner gradients are intentionally split into observation, grounding host,
+  grounder, intent, coarse action, plan recognizer, history proposal,
+  dynamics, controlled transition, P1 factual, P2 effect reader,
+  consequence, P3 compiler, and the typed bottom owners.  Do not replace
+  these with one `top` or `bottom` norm: that recreates the V122 blind spot in
+  which P3 precision or capacity can die inside a healthy aggregate norm.
+- `learning_rate` is the public/base warmup-cosine LR, not optimizer group
+  zero.  The active V120-resolved private rates are
+  `learning_rate_history_proposal=0.625x`,
+  `learning_rate_bottom_decoder=0.7x`, and
+  `learning_rate_bottom_capacity=1.4x`; capacity basis is no-decay.  Compare
+  gradients together with these actual rates before calling an owner weak or
+  explosive.
+- A performance recovery claim requires every completed epoch and the same
+  data/seed/batch/action-normalizer contract as V120.  Shape tests, early loss,
+  nonzero gradients and one best checkpoint are insufficient.
+- For the formal recovery decision, pass the run directory (not only a copied
+  nohup file) to `audit_policy_logs --recovery-baseline v120_long.log
+  --require-recovery`.  Directory mode reads `metrics.jsonl` together with
+  `run_context.json`; exit code `3` means either a failed V120 threshold or
+  missing evidence.  The gate requires both the final value and the complete
+  eight-epoch mean for core validation metrics, plus active structure,
+  gradient and matched-noise causal-ablation evidence.
+- V120 emitted a 12-character MD5 after rounding normalizer statistics to six
+  decimals.  Schema 19 therefore serializes both the exact V120-compatible
+  fingerprint used for cross-run comparison and the full SHA-256 used for
+  checkpoint identity.  Do not compare V120's short MD5 directly with the
+  SHA-256 and call the data contract different.
 
 ## Gradients and interventions
 

@@ -102,12 +102,21 @@ class DenseObjectGrounder(nn.Module):
             nn.LayerNorm(content_dim, elementwise_affine=False),
             nn.Linear(content_dim, hidden, bias=False),
         )
-        self.public_key = nn.Linear(hidden, hidden, bias=False)
         self.semantic_key = nn.Linear(route_dim, hidden, bias=False)
         self.appearance_key = nn.Linear(route_dim, hidden, bias=False)
         self.geometry_key = nn.Linear(route_dim, hidden, bias=False)
         self.coordinate_key = nn.Linear(16, hidden, bias=False)
         self.candidate_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        # The three active G role-host blocks organize the cell-level public
+        # chart.  That context is legal as an address/key, but not as a value
+        # copied into every local-M hypothesis.  Keeping a separate key-only
+        # projection lets the host influence object competition while the GRU
+        # update and exported object content remain candidate-owned.
+        self.public_address_key = nn.Sequential(
+            nn.LayerNorm(hidden, elementwise_affine=False),
+            nn.Linear(hidden, hidden, bias=False),
+        )
+        self.candidate_key_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.slot_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         # Slot identities only break symmetry.  All transition/read modules
         # are shared across K and therefore cannot assign role-specific heads.
@@ -163,7 +172,15 @@ class DenseObjectGrounder(nn.Module):
         self.reconstruction_null = nn.Parameter(torch.zeros(1, hidden))
         self.maximum_update_rms = float(maximum_update_rms)
 
-    def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
+    def _candidate_tokens(self, chart: DenseFactChart) -> tuple[Tensor, Tensor]:
+        """Return competition keys and candidate-owned update values.
+
+        The first tensor may depend on hosted public context because it only
+        answers *where/which object owns this fact*.  The second tensor is the
+        value aggregated into K and deliberately excludes that public context,
+        so one cell-level carrier cannot be copied into every object value.
+        """
+
         content = self.content_key(chart.candidate_content)
         typed = (
             self.semantic_key(chart.candidate_semantic)
@@ -171,12 +188,13 @@ class DenseObjectGrounder(nn.Module):
             + self.geometry_key(chart.candidate_geometry)
         ) / math.sqrt(3.0)
         coordinate = self.coordinate_key(_coordinate_basis(chart.candidate_coordinates, 16))
-        # G1/G2/G3's observation-only carrier is a bounded cell-level context,
-        # not an alternative owner.  The M-specific content/type/coordinate
-        # terms remain dominant and the public term is never expanded back
-        # from a global mean.
-        public = self.public_key(chart.public_scene_base)[..., None, :]
-        return self.candidate_norm(content + typed + coordinate + 0.5 * public)
+        candidate_value = self.candidate_norm(content + typed + coordinate)
+        public_key = self.public_address_key(chart.public_scene_base)[..., None, :]
+        public_key = public_key.expand_as(candidate_value)
+        candidate_key = self.candidate_key_norm(
+            (candidate_value + public_key) / math.sqrt(2.0)
+        )
+        return candidate_key, candidate_value
 
     def _competition(
         self,
@@ -249,7 +267,12 @@ class DenseObjectGrounder(nn.Module):
         distortion = (
             decoded_slot.float()[:, :, None] - target_candidate.float()[:, None]
         ).square().mean(dim=-1)
-        weight = read.float()
+        # Responsibilities define the current soft-EM E step.  The prototype
+        # distortion may update the prototype/binder representation, but it
+        # must not lower its own target by moving those responsibilities in
+        # the same backward pass.  Spatial mixture reconstruction below still
+        # supplies an ordinary gradient to the assignment path.
+        weight = read.detach().float()
         mass = weight.sum(dim=-1)
         per_object = (distortion * weight).sum(dim=-1) / mass.clamp_min(1e-6)
         live = (mass > 1e-6).to(dtype=per_object.dtype)
@@ -262,14 +285,18 @@ class DenseObjectGrounder(nn.Module):
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectFactSet, dict[str, Tensor]]:
         chart = dense_chart_from_local_facts(local_facts)
-        candidates_structured = self._candidate_tokens(chart)
-        batch = int(candidates_structured.shape[0])
-        candidate_shape = candidates_structured.shape[1:-1]
+        candidate_keys_structured, candidate_values_structured = self._candidate_tokens(chart)
+        batch = int(candidate_keys_structured.shape[0])
+        candidate_shape = candidate_keys_structured.shape[1:-1]
         count = math.prod(int(value) for value in candidate_shape)
-        candidates = candidates_structured.reshape(batch, count, self.hidden)
+        candidate_keys = candidate_keys_structured.reshape(batch, count, self.hidden)
+        candidate_values = candidate_values_structured.reshape(batch, count, self.hidden)
         validity = chart.candidate_validity.reshape(batch, count, 1)
         candidate_prior = chart.candidate_owner_prior.reshape(batch, count, 1)
-        slots = self.slot_seed.to(device=candidates.device, dtype=candidates.dtype).expand(
+        slots = self.slot_seed.to(
+            device=candidate_keys.device,
+            dtype=candidate_keys.dtype,
+        ).expand(
             batch, -1, -1
         )
         parent_owner: Tensor | None = None
@@ -277,9 +304,13 @@ class DenseObjectGrounder(nn.Module):
         read: Tensor | None = None
         for _ in range(self.iterations):
             parent_owner, _, parent_null, read = self._competition(
-                slots, candidates, validity, candidate_prior
+                slots, candidate_keys, validity, candidate_prior
             )
-            update = torch.einsum("bkn,bnh->bkh", read.to(dtype=candidates.dtype), candidates)
+            update = torch.einsum(
+                "bkn,bnh->bkh",
+                read.to(dtype=candidate_values.dtype),
+                candidate_values,
+            )
             update, _ = smooth_rms_contract(update, self.maximum_update_rms)
             next_slots = (
                 self.gru(
@@ -296,7 +327,7 @@ class DenseObjectGrounder(nn.Module):
         # a new G3 slot state.  Recompute the parent posterior once so the
         # bounded G3 correction is genuinely relative to the final binder.
         parent_owner, _, parent_null, read = self._competition(
-            slots, candidates, validity, candidate_prior
+            slots, candidate_keys, validity, candidate_prior
         )
         if parent_owner is None or parent_null is None or read is None:
             raise RuntimeError("object binding did not execute")
@@ -305,7 +336,7 @@ class DenseObjectGrounder(nn.Module):
         pair = torch.cat(
             (
                 slots[:, None].expand(-1, count, -1, -1),
-                candidates[:, :, None].expand(-1, -1, self.objects, -1),
+                candidate_keys[:, :, None].expand(-1, -1, self.objects, -1),
             ),
             dim=-1,
         )
@@ -511,11 +542,11 @@ class DenseObjectGrounder(nn.Module):
             cell_error * masked_weight
         ).sum() / masked_weight.sum().clamp_min(1.0)
 
-        # A shared coordinate decoder can cheaply explain spatially smooth
-        # DINO structure while every K slot remains identical.  Keep that
-        # within-object refinement, but make the conditional object-prototype
-        # distortion own most of the unchanged reconstruction budget so neither
-        # coordinate features nor an algebraic mixture can satisfy G alone.
+        # The real V120 run kept distinct K slots with a dense spatial
+        # reconstruction pressure.  Make that candidate-owned mixture the
+        # primary term again, while retaining a detached-responsibility
+        # conditional prototype term and typed proximal consistency.  No term
+        # asks slots to differ when the underlying facts are identical.
         def typed_consistency(
             value: Tensor,
             typed_joint: Tensor,
@@ -559,7 +590,7 @@ class DenseObjectGrounder(nn.Module):
         dino_unit = target_content.detach().square().mean().clamp_min(1e-3)
         typed_consistency_scaled = typed_consistency_error * dino_unit
         reconstruction_error = (
-            0.65 * prototype_error + 0.20 * spatial_error + 0.15 * typed_consistency_scaled
+            0.30 * prototype_error + 0.55 * spatial_error + 0.15 * typed_consistency_scaled
         )
         facts = ObjectFactSet(
             dense_chart=chart,
@@ -667,6 +698,16 @@ class DenseObjectGrounder(nn.Module):
             .float()
             .std(dim=2, unbiased=False)
             .mean(),
+            "object_grounding_candidate_key_rms": candidate_keys.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_candidate_value_rms": candidate_values.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
         }
         return facts, metrics
 

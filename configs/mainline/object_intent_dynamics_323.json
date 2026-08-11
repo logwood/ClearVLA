@@ -30,7 +30,7 @@
     "state_dim": 7,
     "action_horizon": 24,
     "action_basis_tokens": 4,
-    "raw_pair_length": 2,
+    "visual_history_length": 3,
     "state_history_length": 3,
     "executed_history_length": 8,
     "hidden_size": 512,
@@ -89,7 +89,6 @@
     "initial_exit_probability": 0.1,
     "controlled_delta_rank": 8,
     "controlled_action_tokens": 8,
-    "controlled_neutral_tokens": 4,
     "controlled_delta_dropout": 0.0,
     "gripper_field_dim": 6,
     "physical_decode_delta_blend": 0.25
@@ -127,7 +126,10 @@
     "epsilon": 1e-8,
     "grad_clip": 1.0,
     "warmup_steps": 500,
-    "min_lr_ratio": 0.1
+    "min_lr_ratio": 0.1,
+    "history_proposal_lr_scale": 0.625,
+    "bottom_decoder_lr_scale": 0.7,
+    "bottom_capacity_relative_lr_scale": 2.0
   },
   "runtime": {
     "compute_dtype": "bf16",

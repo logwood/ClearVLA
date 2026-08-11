@@ -543,10 +543,10 @@ class ControlledTransitionState:
     learned action-independent base cannot become a second world residual.
     """
 
-    selector: Tensor  # [B,I*K,H]
-    value: Tensor  # [B,I*K,H]
-    action_coefficients: Tensor  # [B,I*K,R]
-    neutral_coefficients: Tensor  # [B,I*K,R]
+    selector: Tensor  # [B,T*A,H], pooled from I*C*8*8 dense transition rows
+    value: Tensor  # [B,T*A,H]
+    action_coefficients: Tensor  # [B,T*A,R]
+    neutral_coefficients: Tensor  # [B,T*A,R]
 
     def validate(self, *, hidden: int) -> None:
         if self.selector.ndim != 3 or tuple(self.selector.shape) != tuple(

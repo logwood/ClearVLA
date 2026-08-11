@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Mapping, cast
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 17
+CAPABILITY_SCHEMA = 19
 LAYOUT_NAME = "clearvla_mainline"
 LAYOUT_SCHEMA = 1
 TOPOLOGY = (3, 2, 3)
@@ -24,11 +24,13 @@ INTERVALS = ((4, 8), (8, 16), (16, 32), (32, 48))
 class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
-    observation: str = "current_dino_raw_pair_current_aligned_flow_pre_g_v4"
-    top: str = "object_intent_dynamics_323_conditional_object_writes_v11"
-    bottom: str = "typed_read_only_physical_evidence_mmdit_controlled_transition_v6"
-    training: str = "single_stage_physical_action_band_event_balanced_exact_null_v9"
-    runtime: str = "minimal_cached_physical_transition_five_step_ode_v8"
+    observation: str = "causal_three_frame_dino_raw_two_flow_pre_g_v5"
+    top: str = "object_intent_dynamics_323_keyed_g_local_p1_additive_p3_v14"
+    bottom: str = (
+        "typed_evidence_mmdit_dense_transition4basis_zero_proposal_fullwidth_capacity_v9"
+    )
+    training: str = "single_stage_physical_action_v120_role_lr_horizon_event_v12"
+    runtime: str = "cached_five_step_ode_lossless_semantic_logging_v11"
 
     def validate(self) -> None:
         for name, value in self.as_dict().items():

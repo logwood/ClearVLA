@@ -67,25 +67,24 @@ def test_flow_matching_and_deployment_share_the_same_physical_field() -> None:
     )
 
 
-def test_semantic_anchor_bands_have_balanced_mass_and_unit_mean() -> None:
+def test_anchor_bands_restore_v120_per_row_pressure_and_unit_mean() -> None:
     weight = anchor_horizon_weights(
         horizon=24,
         tail_emphasis=0.20,
         first_step_protection=0.05,
         device=torch.device("cpu"),
     )
-    expected = torch.tensor(
-        [0.30, 0.25, 0.25, 0.25]
-        + [1.10 / 8.0] * 8
-        + [1.20 / 12.0] * 12
-    )
+    expected = torch.tensor([1.05, 1.0, 1.0, 1.0] + [1.10] * 8 + [1.20] * 12)
     expected = expected / expected.mean()
     torch.testing.assert_close(weight, expected)
     torch.testing.assert_close(weight.mean(), torch.tensor(1.0))
     mass = torch.stack((weight[:4].sum(), weight[4:12].sum(), weight[12:].sum()))
     mass = mass / mass.sum()
     assert bool((mass[1:] > mass[:-1]).all())
-    assert float(mass.max() - mass.min()) < 0.05
+    torch.testing.assert_close(
+        mass,
+        torch.tensor([4.05, 8.80, 14.40]) / 27.25,
+    )
 
 
 def test_event_row_balance_reaches_real_gripper_rows_without_changing_budget() -> None:

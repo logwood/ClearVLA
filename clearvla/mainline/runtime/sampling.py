@@ -17,6 +17,8 @@ from .numerics import resolve_compute_dtype
 class SamplingResult:
     action: Tensor
     physical_field: Tensor
+    event_logits: Tensor
+    motion_logits: Tensor
     initial_physical_noise: Tensor
     step_times: Tensor
     metrics: dict[str, Tensor]
@@ -32,6 +34,7 @@ def _integrate_cache(
     collect_diagnostics: bool,
     dtype: torch.dtype,
     static_metrics: dict[str, Tensor] | None = None,
+    execution_mode: str = "learned",
 ) -> SamplingResult:
     """Integrate one already materialized static cache."""
 
@@ -71,6 +74,7 @@ def _integrate_cache(
                 cache,
                 noisy_action_field=value,
                 time=time,
+                execution_mode=execution_mode,
                 collect_diagnostics=collect_diagnostics and index == steps - 1,
             )
         value = value + dt * output.bottom.physical_velocity.to(dtype=value.dtype)
@@ -79,6 +83,8 @@ def _integrate_cache(
     return SamplingResult(
         action=model.action_codec.decode(value, cache.history.action_state).float(),
         physical_field=value,
+        event_logits=output.bottom.event_logits.float(),
+        motion_logits=output.bottom.motion_logits.float(),
         initial_physical_noise=noise,
         step_times=times,
         metrics={**(static_metrics or {}), **dynamic_metrics},
@@ -128,6 +134,7 @@ def sample_action(
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
         static_metrics=static_metrics,
+        execution_mode="learned",
     )
 
 
@@ -141,6 +148,7 @@ def sample_cached_action(
     initial_physical_noise: Tensor | None = None,
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
+    execution_mode: str = "learned",
 ) -> SamplingResult:
     """Deploy from a cache already built for another read-only consumer."""
 
@@ -155,6 +163,7 @@ def sample_cached_action(
         initial_physical_noise=initial_physical_noise,
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
+        execution_mode=execution_mode,
     )
 
 

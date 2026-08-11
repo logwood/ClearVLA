@@ -14,7 +14,7 @@ from clearvla.mainline.model.bottom import (
     TypedEvidenceBank,
 )
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
-from clearvla.mainline.model.grounding import DenseObjectGrounder
+from clearvla.mainline.model.grounding import DenseObjectGrounder, dense_chart_from_local_facts
 from clearvla.mainline.model.intent import FuturePlanRecognizer
 from clearvla.mainline.model.observation import (
     CurrentObservationCompiler,
@@ -159,6 +159,44 @@ def test_future_recognizer_keeps_interval_and_object_axes_distinct() -> None:
     )
     assert tuple(result.object_key_targets.shape) == (batch, intervals, objects, 16)
     assert tuple(result.object_value_targets.shape) == (batch, intervals, objects, 16)
+
+
+def test_future_recognizer_supervises_neutral_objects_without_reliability_discount() -> None:
+    batch, intervals, objects, content, cameras = 1, 4, 2, 8, 1
+    current = torch.randn(batch, objects, content)
+    scalar = torch.zeros(batch, intervals, objects, 1)
+    teacher = FutureObjectDynamics(
+        current_reference=current,
+        successor_content=current[:, None].expand(-1, intervals, -1, -1),
+        semantic_delta=torch.zeros(batch, intervals, objects, content),
+        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
+        visibility=scalar,
+        persistence=scalar,
+        uncertainty=torch.ones_like(scalar),
+        reliability=scalar,
+        validity=torch.ones(batch, intervals, objects, cameras, 1),
+        future_address=torch.zeros(batch, intervals, objects, cameras, 2, 2),
+        object_coordinates=torch.zeros(batch, objects, cameras, 2),
+    )
+    recognizer = FuturePlanRecognizer(
+        hidden=16,
+        action_dim=2,
+        state_dim=2,
+        content_dim=content,
+        heads=4,
+    )
+    result = recognizer(
+        future_action=torch.randn(batch, 48, 2),
+        future_state=torch.randn(batch, 48, 2),
+        teacher=teacher,
+    )
+    torch.testing.assert_close(
+        result.object_validity,
+        torch.ones_like(result.object_validity),
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_final_object_posterior_is_recomputed_after_last_slot_update() -> None:
@@ -382,15 +420,16 @@ def test_current_fact_coordinates_do_not_double_apply_previous_to_current_flow()
     config = ExperimentConfig()
     compiler = CurrentObservationCompiler(config).eval()
     observation = CurrentObservation(
-        dino_tokens=torch.randn(
+        dino_history=torch.randn(
             1,
+            config.dimensions.visual_history_length,
             config.dimensions.num_cameras,
             config.dimensions.patches_per_camera,
             config.dimensions.visual_token_dim,
         ),
         raw_rgb=torch.rand(
             1,
-            config.dimensions.raw_pair_length,
+            config.dimensions.visual_history_length,
             config.dimensions.num_cameras,
             3,
             32,
@@ -411,20 +450,79 @@ def test_current_fact_coordinates_do_not_double_apply_previous_to_current_flow()
     )
 
 
+def test_causal_dino_history_changes_owner_evidence_without_changing_current_target() -> None:
+    torch.manual_seed(222)
+    base = ExperimentConfig()
+    config = replace(
+        base,
+        dimensions=replace(
+            base.dimensions,
+            hidden_size=32,
+            num_heads=4,
+            visual_token_dim=16,
+            goal_token_dim=16,
+            patches_per_camera=64,
+        ),
+        observation=replace(
+            base.observation,
+            feature_dim=16,
+            address_route_dim=8,
+            flow_iterations=1,
+            correlation_radius=1,
+            raw_base_channels=8,
+        ),
+        bottom=replace(base.bottom, controller_heads=4),
+    )
+    compiler = CurrentObservationCompiler(config).eval()
+    compiler.flow = _FixedFlow(0.0)
+    dino = torch.randn(
+        1,
+        config.dimensions.visual_history_length,
+        config.dimensions.num_cameras,
+        config.dimensions.patches_per_camera,
+        config.dimensions.visual_token_dim,
+    )
+    raw = torch.rand(
+        1,
+        config.dimensions.visual_history_length,
+        config.dimensions.num_cameras,
+        3,
+        32,
+        32,
+    )
+    baseline, _ = compiler(CurrentObservation(dino_history=dino, raw_rgb=raw))
+    changed_history = dino.clone()
+    changed_history[:, 0, :, :8] += 2.0
+    changed, _ = compiler(
+        CurrentObservation(dino_history=changed_history, raw_rgb=raw)
+    )
+    # The supervised current DINO target is still the same final frame, while
+    # causal history changes G's owner evidence through an aligned innovation.
+    torch.testing.assert_close(
+        baseline.local_facts.target_dino_content,
+        changed.local_facts.target_dino_content,
+    )
+    assert not torch.equal(
+        baseline.local_facts.semantic_owner_probs,
+        changed.local_facts.semantic_owner_probs,
+    )
+
+
 def test_flow_geometry_keeps_literal_rgb_anchor_when_learned_features_collapse() -> None:
     torch.manual_seed(33)
     config = ExperimentConfig()
     compiler = CurrentObservationCompiler(config).eval()
     observation = CurrentObservation(
-        dino_tokens=torch.randn(
+        dino_history=torch.randn(
             1,
+            config.dimensions.visual_history_length,
             config.dimensions.num_cameras,
             config.dimensions.patches_per_camera,
             config.dimensions.visual_token_dim,
         ),
         raw_rgb=torch.zeros(
             1,
-            config.dimensions.raw_pair_length,
+            config.dimensions.visual_history_length,
             config.dimensions.num_cameras,
             3,
             32,
@@ -446,8 +544,10 @@ def test_flow_geometry_keeps_literal_rgb_anchor_when_learned_features_collapse()
         evidence,
         detail_features=torch.zeros_like(evidence.detail_features),
         previous_detail_features=torch.zeros_like(evidence.previous_detail_features),
+        earlier_detail_features=torch.zeros_like(evidence.earlier_detail_features),
         literal_rgb=current_rgb,
         previous_literal_rgb=previous_rgb,
+        earlier_literal_rgb=previous_rgb,
         flow=PatchFlowField(
             forward=forward,
             backward=backward,
@@ -455,6 +555,14 @@ def test_flow_geometry_keeps_literal_rgb_anchor_when_learned_features_collapse()
             uncertainty=scalar,
             occlusion=torch.zeros_like(scalar),
             refinement_sequence=(forward,),
+        ),
+        earlier_flow=PatchFlowField(
+            forward=torch.zeros_like(forward),
+            backward=torch.zeros_like(backward),
+            confidence=scalar,
+            uncertainty=scalar,
+            occlusion=torch.zeros_like(scalar),
+            refinement_sequence=(torch.zeros_like(forward),),
         ),
     )
     terms = flow_geometry_terms(anchored)
@@ -530,6 +638,33 @@ def test_g_prototype_loss_penalizes_overlapping_reads_without_forcing_diversity(
         overlapping,
     )
     assert torch.count_nonzero(identical_loss) == 0
+
+
+def test_g_host_context_changes_only_binder_keys_not_candidate_values() -> None:
+    torch.manual_seed(221)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )
+    first = dense_chart_from_local_facts(
+        _local_facts(cameras=2, content=8, route=4, hidden=16)
+    )
+    second = replace(
+        first,
+        public_scene_base=first.public_scene_base + 1000.0 * torch.randn_like(
+            first.public_scene_base
+        ),
+    )
+    first_key, first_value = grounder._candidate_tokens(first)
+    second_key, second_value = grounder._candidate_tokens(second)
+    # Hosted G context must reach the online ownership competition.
+    assert not torch.allclose(first_key, second_key)
+    # It remains key-only: exported/aggregated candidate values are not a
+    # public carrier copied into every K slot.
+    torch.testing.assert_close(first_value, second_value)
 
 
 def test_w_zero_initialized_camera_mass_residual_preserves_current_camera_prior() -> None:
@@ -719,7 +854,7 @@ def test_goal_intent_cannot_synthesize_observable_object_state_values() -> None:
     assert torch.count_nonzero(intent.interval_object_values) == 0
 
 
-def test_future_address_loss_ignores_unreliable_teacher_association() -> None:
+def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -> None:
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     current = torch.randn(batch, objects, content)
     scalar = torch.zeros(batch, intervals, objects, 1)
@@ -742,17 +877,32 @@ def test_future_address_loss_ignores_unreliable_teacher_association() -> None:
     )
     changed_address = torch.zeros_like(address)
     changed_address[..., 1, 1] = 1.0
-    prediction = replace(target, future_address=changed_address)
+    prediction = replace(
+        target,
+        future_address=changed_address,
+        transport_mean=torch.ones_like(target.transport_mean),
+    )
     unreliable = future_dynamics_terms(prediction, target)
-    assert torch.count_nonzero(unreliable["future_address"]) == 0
+    assert unreliable["future_address"] > 0
+    assert unreliable["future_transport"] > 0
+
+    # The teacher's null association already turns content into the current
+    # fact/zero-delta fallback.  That fallback remains an actual supervised W
+    # target instead of being discounted a second time by reliability.
+    changed_successor = replace(
+        target,
+        successor_content=target.successor_content + 1.0,
+        semantic_delta=target.semantic_delta + 1.0,
+    )
+    unreliable_content = future_dynamics_terms(changed_successor, target)
+    assert unreliable_content["future_successor"] > 0
+    assert unreliable_content["future_semantic_delta"] > 0
 
     reliable_target = replace(target, reliability=torch.ones_like(scalar))
-    reliable_prediction = replace(
-        prediction,
-        reliability=torch.ones_like(scalar),
-    )
+    reliable_prediction = replace(prediction, reliability=torch.ones_like(scalar))
     reliable = future_dynamics_terms(reliable_prediction, reliable_target)
-    assert reliable["future_address"] > 0
+    torch.testing.assert_close(unreliable["future_address"], reliable["future_address"])
+    torch.testing.assert_close(unreliable["future_transport"], reliable["future_transport"])
 
 
 def test_teacher_reliability_falls_for_semantically_opposed_supports() -> None:
@@ -784,6 +934,40 @@ def test_teacher_reliability_falls_for_semantically_opposed_supports() -> None:
         future_offsets=offsets,
     )
     assert high_target.reliability[:, :, 0].mean() > low_target.reliability[:, :, 0].mean()
+
+
+def test_teacher_diffuse_visible_track_falls_back_continuously_to_current_fact() -> None:
+    torch.manual_seed(31)
+    facts, _ = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )(_local_facts(content=8, route=4, hidden=16))
+    future_value = torch.randn(1, 1, 1, 1, 1, 8)
+    supports = future_value.expand(1, 12, 1, 2, 2, 8).clone()
+    teacher = ObjectFutureTeacher(content_dim=8, key_dim=4)
+    target, _ = teacher(
+        facts=facts,
+        future_supports=supports,
+        future_offsets=torch.arange(4, 49, 4)[None],
+    )
+    full_delta = future_value.reshape(1, 1, 1, 8) - target.current_reference[:, None]
+    observed_delta = target.successor_content - target.current_reference[:, None]
+    confidence = (observed_delta * full_delta).sum(dim=-1, keepdim=True) / full_delta.square().sum(
+        dim=-1, keepdim=True
+    ).clamp_min(1e-8)
+    torch.testing.assert_close(
+        observed_delta,
+        confidence * full_delta,
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    assert bool((confidence >= 0.0).all())
+    assert bool((confidence < 1.0).all())
+    address_mass = target.future_address.sum(dim=(-3, -2, -1))
+    torch.testing.assert_close(address_mass, torch.ones_like(address_mass))
 
 
 def test_teacher_track_is_equivariant_to_global_object_relabeling() -> None:
@@ -960,7 +1144,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
         ), name
 
 
-def test_neutral_w_effect_makes_every_optional_p3_lane_exact_zero() -> None:
+def test_neutral_w_preserves_current_precision_and_temporal_without_w_interaction() -> None:
     torch.manual_seed(4)
     top = ObjectIntentDynamicsTop(
         hidden=32,
@@ -1001,15 +1185,58 @@ def test_neutral_w_effect_makes_every_optional_p3_lane_exact_zero() -> None:
         intent=context.intent,
         predicted_dynamics=FutureObjectDynamics.neutral(context.facts),
     )
+    action_query = torch.randn(1, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
+        deployment,
+        factual_dock=dock,
+        action_query=action_query,
+    )
+    neutral_other_query, _ = top.compile_policy(
         deployment,
         factual_dock=dock,
         action_query=torch.randn(1, horizon, basis, hidden),
     )
     assert torch.count_nonzero(compiled.effect) == 0
-    assert torch.count_nonzero(compiled.plan.precision) == 0
-    assert torch.count_nonzero(compiled.plan.temporal) == 0
-    assert torch.count_nonzero(compiled.plan.state_change) == 0
+    assert torch.count_nonzero(compiled.plan.precision) > 0
+    assert torch.count_nonzero(compiled.plan.temporal) > 0
+    assert torch.count_nonzero(compiled.plan.state_change) > 0
+    # With no W consequence, a noisy ODE query cannot turn S temporal into an
+    # action-adapter bypass.  The legal observable temporal base remains.
+    torch.testing.assert_close(
+        compiled.plan.temporal,
+        neutral_other_query.plan.temporal,
+        atol=0.0,
+        rtol=0.0,
+    )
+    identity_only_intent = replace(
+        context.intent,
+        interval_queries=context.intent.interval_queries + 1000.0 * torch.randn_like(
+            context.intent.interval_queries
+        ),
+    )
+    identity_only_compiled, _ = top.compile_policy(
+        DeploymentTopCache(
+            intent=identity_only_intent,
+            predicted_dynamics=deployment.predicted_dynamics,
+        ),
+        factual_dock=dock,
+        action_query=action_query,
+    )
+    # Cumulative/identity-bearing S queries are addresses internal to S.  P2
+    # consumes only the observed interval innovation, so changing identity
+    # alone cannot recreate a fixed temporal route prior.
+    torch.testing.assert_close(
+        compiled.effect,
+        identity_only_compiled.effect,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        compiled.consequence.protected_consequence,
+        dock.aggregate_fact,
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass() -> None:
@@ -1114,7 +1341,7 @@ def test_bottom_optional_values_preserve_zero_and_do_not_expand_near_zero() -> N
     assert near_update.abs().amax() < 1e-5
 
 
-def test_capacity_is_a_true_low_rank_update_without_full_width_bypass() -> None:
+def test_capacity_is_zero_full_identity_and_nonexpansive_between() -> None:
     torch.manual_seed(23)
     operator = NestedCapacityOperator(hidden=16, rank=4, groups=4)
     update = torch.randn(2, 5, 16)
@@ -1129,15 +1356,19 @@ def test_capacity_is_a_true_low_rank_update_without_full_width_bypass() -> None:
         torch.ones(2),
         collect_diagnostics=True,
     )
-    basis = operator._basis()
-    residual = full.float() - torch.einsum(
-        "btr,hr->bth",
-        torch.einsum("bth,hr->btr", full.float(), basis),
-        basis,
-    )
-    assert residual.abs().amax() < 1e-5
+    torch.testing.assert_close(full, update, atol=2e-6, rtol=2e-6)
     assert metrics["effective_basis_mass"] == 4
     assert metrics["nonexpansive_violation"] < 1e-6
+
+    middle, middle_metrics = operator(
+        update,
+        torch.full((2,), 0.375),
+        collect_diagnostics=True,
+    )
+    input_rms = update.float().square().mean(dim=(1, 2)).sqrt()
+    output_rms = middle.float().square().mean(dim=(1, 2)).sqrt()
+    assert bool((output_rms <= input_rms + 1e-6).all())
+    assert middle_metrics["nonexpansive_violation"] < 1e-6
 
 
 def test_capacity_reuses_exact_qr_basis_only_in_frozen_eval() -> None:

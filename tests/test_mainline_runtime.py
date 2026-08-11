@@ -18,6 +18,7 @@ from clearvla.mainline.runtime.logging import (
     DeviceMetricAccumulator,
     JsonlRunLogger,
     active_metrics,
+    archival_metrics,
 )
 from clearvla.mainline.train import _prepare_output_directory
 
@@ -34,6 +35,7 @@ def test_active_logging_keeps_every_current_top_owner() -> None:
         "condition_goal_keep": 0.95,
         "condition_action_history_keep": 0.90,
         "condition_proposal_keep": 0.75,
+        "learning_rate_bottom_decoder": 5.6e-5,
         "inactive_ancestry_metric": 0.8,
     }
     filtered = active_metrics(values)
@@ -45,12 +47,34 @@ def test_active_logging_suppresses_inactive_exact_zero() -> None:
         {
             "object_w_typed_innovation_rms": 0.0,
             "loss_ledger_gap": 0.0,
+            "gradient_postclip_p1_factual_l2": 0.0,
+            "object_grounding_mass_conservation_error": 0.0,
         }
     )
-    assert filtered == {"loss_ledger_gap": 0.0}
+    assert filtered == {
+        "loss_ledger_gap": 0.0,
+        "gradient_postclip_p1_factual_l2": 0.0,
+        "object_grounding_mass_conservation_error": 0.0,
+    }
 
 
-def test_compact_logging_exposes_the_schema17_failure_boundaries() -> None:
+def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
+    archived = archival_metrics(
+        {
+            "object_w_typed_innovation_rms": 0.0,
+            "object_p2_effect_precontract_rms": 0.0,
+            "observation_flow_rms": 0.0,
+            "inactive_ancestry_metric": 0.0,
+        }
+    )
+    assert archived == {
+        "object_w_typed_innovation_rms": 0.0,
+        "object_p2_effect_precontract_rms": 0.0,
+        "observation_flow_rms": 0.0,
+    }
+
+
+def test_compact_logging_exposes_the_schema19_failure_boundaries() -> None:
     values = {
         "loss_future_successor": 0.12,
         "object_grounding_object_content_pair_cosine": 0.34,
@@ -58,8 +82,7 @@ def test_compact_logging_exposes_the_schema17_failure_boundaries() -> None:
         "object_w_intent_object_interaction_rms": 0.07,
         "object_w_action_object_interaction_rms": 0.08,
         "object_w2_interval_adjacent_cosine": 0.78,
-        "action_flow_balanced_band_13_24": 0.9,
-        "action_gripper_event_flow": 1.1,
+        "loss_action_flow_band_13_24": 0.9,
     }
     line = JsonlRunLogger.compact_line(
         "train",
@@ -70,6 +93,49 @@ def test_compact_logging_exposes_the_schema17_failure_boundaries() -> None:
     )
     for name in values:
         assert f"{name}=" in line
+
+    details = JsonlRunLogger.diagnostic_lines(
+        "train",
+        epoch=1,
+        batch=20,
+        step=20,
+        metrics={
+            **values,
+            "loss_action_gripper_event_flow": 1.1,
+            "loss_flow_recent_warp": 0.2,
+            "loss_flow_earlier_warp": 0.3,
+            "object_grounding_candidate_key_rms": 0.31,
+            "object_w_typed_innovation_rms": 0.32,
+            "object_w2_interval_0_semantic_delta_rms": 0.321,
+            "object_teacher_interval_0_semantic_delta_rms": 0.322,
+            "loss_future_interval_0_semantic_delta": 0.323,
+            "object_p2_intent_score_max_abs": 0.33,
+            "object_p3_precision_base_rms": 0.4,
+            "object_p3_temporal_consequence_interaction_rms": 0.41,
+            "bottom_capacity_mean": 0.5,
+            "bottom_controller_common_ratio": 0.51,
+            "bottom_block_1_executed_update_rms": 0.52,
+            "validation_ablation_coverage": 0.06,
+            "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
+        },
+    )
+    joined = "\n".join(details)
+    assert "loss_action_gripper_event_flow=1.1" in joined
+    assert "loss_flow_recent_warp=0.2" in joined
+    assert "loss_flow_earlier_warp=0.3" in joined
+    assert "object_grounding_candidate_key_rms=0.31" in joined
+    assert "object_w_typed_innovation_rms=0.32" in joined
+    assert "object_w2_interval_0_semantic_delta_rms=0.321" in joined
+    assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
+    assert "loss_future_interval_0_semantic_delta=0.323" in joined
+    assert "object_p2_intent_score_max_abs=0.33" in joined
+    assert "object_p3_precision_base_rms=0.4" in joined
+    assert "object_p3_temporal_consequence_interaction_rms=0.41" in joined
+    assert "bottom_capacity_mean=0.5" in joined
+    assert "bottom_controller_common_ratio=0.51" in joined
+    assert "bottom_block_1_executed_update_rms=0.52" in joined
+    assert "validation_ablation_coverage=0.06" in joined
+    assert "validation_proposal_zero_mse_gain_vs_primary_physical=-0.01" in joined
 
 
 def test_gripper_event_metric_rejects_the_opposite_event_direction() -> None:
@@ -135,15 +201,16 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
     training_batch = TrainingBatch(
         online=OnlinePolicyInput(
             observation=CurrentObservation(
-                dino_tokens=torch.zeros(
+                dino_history=torch.zeros(
                     batch,
+                    dims.visual_history_length,
                     dims.num_cameras,
                     dims.patches_per_camera,
                     dims.visual_token_dim,
                 ),
                 raw_rgb=torch.zeros(
                     batch,
-                    dims.raw_pair_length,
+                    dims.visual_history_length,
                     dims.num_cameras,
                     3,
                     32,
@@ -194,4 +261,107 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
     metrics = accumulator.means()
     assert metrics["validation_action_rmse_normalized"] == 1.0
     assert metrics["validation_action_rmse_physical"] == 0.5
+    assert metrics["validation_band_1_4_rmse_normalized"] == 1.0
+    assert metrics["validation_band_5_12_rmse_normalized"] == 1.0
+    assert metrics["validation_band_13_24_rmse_normalized"] == 1.0
+    assert metrics["validation_band_13_24_rmse_physical"] == 0.5
+    assert "validation_decoded_gripper_event_ratio" in metrics
+    assert "validation_motion_head_f1" in metrics
     assert "validation_action_rmse" not in metrics
+
+
+def test_validation_keeps_decoded_events_and_auxiliary_heads_semantically_separate() -> None:
+    config = ExperimentConfig()
+    dims = config.dimensions
+    normalized = torch.zeros(1, dims.action_horizon, dims.action_dim)
+    raw = torch.zeros_like(normalized)
+    # The demonstration closes the gripper at row zero and moves the arm in
+    # physical-field space.  The decoded action below remains a complete hold.
+    raw[0, 0:, -1] = 0.2
+    history = ObservableHistory(
+        state=torch.zeros(1, dims.state_dim),
+        action_state=torch.zeros(1, dims.action_dim),
+        state_history=torch.zeros(1, dims.state_history_length, dims.state_dim),
+        executed_action_history=torch.zeros(
+            1, dims.executed_history_length, dims.action_dim
+        ),
+    )
+    training_batch = TrainingBatch(
+        online=OnlinePolicyInput(
+            observation=CurrentObservation(
+                dino_history=torch.zeros(
+                    1,
+                    dims.visual_history_length,
+                    dims.num_cameras,
+                    dims.patches_per_camera,
+                    dims.visual_token_dim,
+                ),
+                raw_rgb=torch.zeros(
+                    1,
+                    dims.visual_history_length,
+                    dims.num_cameras,
+                    3,
+                    32,
+                    32,
+                ),
+            ),
+            history=history,
+            goal=GoalCondition(
+                tokens=torch.zeros(1, 1, dims.goal_token_dim),
+                mask=torch.ones(1, 1, dtype=torch.bool),
+            ),
+        ),
+        action_target=ActionSupervision(
+            normalized=normalized,
+            raw_units=raw,
+            current_raw_units=torch.zeros(1, dims.action_dim),
+        ),
+        future=FutureSupervision(
+            dino_supports=torch.zeros(
+                1,
+                dims.future_supports,
+                dims.num_cameras,
+                dims.patches_per_camera,
+                dims.visual_token_dim,
+                dtype=torch.float16,
+            ),
+            action_sequence=torch.zeros(1, 48, dims.action_dim),
+            state_sequence=torch.zeros(1, 48, dims.state_dim),
+            offsets=torch.arange(4, 49, 4)[None],
+        ),
+        audit=AuditMetadata(),
+    )
+    identity = np.ones((1, dims.action_dim), dtype=np.float32)
+    normalizer = ArrayNormalizer(
+        offset=np.zeros_like(identity),
+        scale=identity,
+        mean=np.zeros_like(identity),
+        std=identity,
+        minimum=-identity,
+        maximum=identity,
+        mode="identity",
+    )
+    accumulator = ValidationAccumulator.from_action_normalizer(
+        normalizer,
+        device=torch.device("cpu"),
+    )
+    event_logits = torch.zeros(1, dims.action_horizon, 3)
+    event_logits[..., 0] = 5.0
+    event_logits[:, 0, 2] = 10.0
+    motion_logits = torch.full((1, dims.action_horizon), -10.0)
+    motion_logits[:, 0] = 10.0
+    motion_target = torch.zeros(1, dims.action_horizon, dtype=torch.bool)
+    motion_target[:, 0] = True
+    accumulator.update(
+        torch.zeros_like(normalized),
+        training_batch,
+        event_logits=event_logits,
+        motion_logits=motion_logits,
+        motion_target=motion_target,
+    )
+    metrics = accumulator.means()
+    assert metrics["validation_decoded_gripper_event_f1"] == 0.0
+    assert metrics["validation_event_head_f1"] == 1.0
+    assert metrics["validation_event_head_close_f1"] == 1.0
+    assert metrics["validation_motion_head_f1"] == 1.0
+    assert metrics["validation_decoded_motion_f1"] == 0.0

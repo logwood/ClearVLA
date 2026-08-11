@@ -147,9 +147,10 @@ class ClearVLAMainlinePolicy(nn.Module):
             action_dim=dims.action_dim,
             cameras=dims.num_cameras,
             heads=dims.num_heads,
+            horizon=dims.action_horizon,
+            basis=dims.action_basis_tokens,
             rank=config.bottom.controlled_delta_rank,
             action_tokens=config.bottom.controlled_action_tokens,
-            neutral_tokens=config.bottom.controlled_neutral_tokens,
             dropout=config.bottom.controlled_delta_dropout,
         )
         self.bottom = EvidenceMMDiTBottom(
@@ -263,6 +264,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
         transition, transition_metrics = self.transition(
             dynamics=context.predicted_dynamics,
+            facts=context.facts,
             proposal=conditioned_history_proposal,
             history=conditioned_policy_input.history,
             collect_diagnostics=collect_diagnostics,
@@ -341,6 +343,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         *,
         noisy_action_field: Tensor,
         time: Tensor,
+        execution_mode: str = "learned",
         collect_diagnostics: bool = False,
     ) -> PolicyStepOutput:
         """Run only the ODE-dependent P2/P3 and action bottom."""
@@ -360,6 +363,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             plan=compiled.plan,
             history=cache.history,
             transition=cache.transition,
+            execution_mode=execution_mode,
             collect_diagnostics=collect_diagnostics,
         )
         return PolicyStepOutput(
@@ -367,6 +371,51 @@ class ClearVLAMainlinePolicy(nn.Module):
             compiled=compiled,
             metrics={**top_metrics, **bottom_metrics},
         )
+
+    @torch.no_grad()
+    def proposal_ablation_cache(
+        self,
+        cache: OnlinePolicyCache,
+        training_state: OnlineTrainingState,
+    ) -> OnlinePolicyCache:
+        """Rebuild only the proposal-owned P1/transition boundary with zero value.
+
+        This is a validation intervention, not a deployment alternative.  The
+        direct observable action history remains intact in S and the bottom;
+        only the clean history-proposal tokens consumed by P1 and controlled
+        transition are removed.
+        """
+
+        if self.training:
+            raise ValueError("proposal ablation cache is evaluation-only")
+        cache.validate(self.config)
+        training_state.validate(self.config)
+        proposal = replace(
+            training_state.history_proposal,
+            tokens=torch.zeros_like(training_state.history_proposal.tokens),
+        )
+        factual_dock, _ = self.factual_reader(
+            evidence=training_state.observation,
+            facts=training_state.top.facts,
+            intent=training_state.top.intent,
+            coarse_action=training_state.top.coarse_action,
+            history_proposal=proposal,
+            collect_diagnostics=False,
+        )
+        transition, _ = self.transition(
+            dynamics=training_state.top.predicted_dynamics,
+            facts=training_state.top.facts,
+            proposal=proposal,
+            history=cache.history,
+            collect_diagnostics=False,
+        )
+        ablated = replace(
+            cache,
+            factual_dock=factual_dock,
+            transition=transition,
+        )
+        ablated.validate(self.config)
+        return ablated
 
 
 __all__ = [

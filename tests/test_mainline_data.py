@@ -19,6 +19,7 @@ from clearvla.mainline.data.loading import (
     to_training_batch,
 )
 from clearvla.mainline.data.normalizer import ArrayNormalizer
+from clearvla.mainline.runtime.identity import v120_normalizer_fingerprint
 
 
 def _config() -> ExperimentConfig:
@@ -36,12 +37,19 @@ def _config() -> ExperimentConfig:
     return config
 
 
+def test_v120_compatibility_normalizer_fingerprint_is_exact() -> None:
+    normalizer = ArrayNormalizer.fit_zscore(
+        [np.asarray([[0.0, 1.0], [2.0, 3.0], [4.0, 8.0]], dtype=np.float32)]
+    )
+    assert v120_normalizer_fingerprint(normalizer) == "b9a2b34d6697"
+
+
 def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() -> None:
     config = _config()
     batch = 2
     raw = {
-        "current_dinov2_tokens": torch.randn(batch, 2, 64, 16).half(),
-        "history_obs_image": torch.rand(batch, 2, 2, 3, 32, 32),
+        "history_dinov2_tokens": torch.randn(batch, 3, 2, 64, 16).half(),
+        "history_obs_image": torch.rand(batch, 3, 2, 3, 32, 32),
         "state": torch.randn(batch, 7),
         "state_raw": torch.randn(batch, 7),
         "action_state": torch.randn(batch, 7),
@@ -192,7 +200,7 @@ def test_train_loader_owns_the_resolved_information_balanced_sampler() -> None:
     )
 
 
-def test_cached_dataset_reads_only_current_dino_but_keeps_raw_pair() -> None:
+def test_cached_dataset_groups_three_causal_dino_rows_with_future_supports() -> None:
     class Base:
         config = ObservedStateDatasetConfig()
 
@@ -201,10 +209,10 @@ def test_cached_dataset_reads_only_current_dino_but_keeps_raw_pair() -> None:
 
         def __getitem__(self, _index):
             return {
-                "current_key": torch.tensor([2, 17]),
+                "history_keys": torch.tensor([[2, 9], [2, 13], [2, 17]]),
                 "future_keys": torch.stack((torch.full((12,), 2), torch.arange(21, 69, 4)), dim=-1),
                 "future_offsets": torch.arange(4, 49, 4),
-                "history_obs_image": torch.zeros(2, 2, 3, 32, 32),
+                "history_obs_image": torch.zeros(3, 2, 3, 32, 32),
             }
 
     class Store:
@@ -219,8 +227,8 @@ def test_cached_dataset_reads_only_current_dino_but_keeps_raw_pair() -> None:
     dataset = CachedTokenPolicyWindowDataset(Base(), token_store=store)
     sample = dataset[0]
     assert len(store.calls) == 1
-    assert torch.equal(store.calls[0][0], torch.tensor([2, 17]))
-    assert tuple(store.calls[0].shape) == (13, 2)
-    assert tuple(sample["current_dinov2_tokens"].shape) == (2, 64, 16)
-    assert tuple(sample["history_obs_image"].shape) == (2, 2, 3, 32, 32)
+    assert torch.equal(store.calls[0][0], torch.tensor([2, 9]))
+    assert tuple(store.calls[0].shape) == (15, 2)
+    assert tuple(sample["history_dinov2_tokens"].shape) == (3, 2, 64, 16)
+    assert tuple(sample["history_obs_image"].shape) == (3, 2, 3, 32, 32)
     assert tuple(sample["target_future_dinov2_tokens"].shape) == (12, 2, 64, 16)

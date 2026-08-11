@@ -3,14 +3,112 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
-from clearvla.tools.audit_policy_logs import build_summary, parse_log, parse_run_input
+from clearvla.tools.audit_policy_logs import (
+    _recovery_assessment,
+    build_summary,
+    parse_log,
+    parse_run_input,
+)
 
 
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _complete_recovery_summary(label: str) -> dict[str, Any]:
+    validation = {
+        "full_rmse": 0.08,
+        "first_rmse": 0.02,
+        "first8_rmse": 0.04,
+        "tail_rmse": 0.09,
+        "arm_full_rmse": 0.06,
+        "gripper_full_rmse": 0.14,
+        "action_band_1_4_rmse": 0.03,
+        "action_band_5_12_rmse": 0.06,
+        "action_band_13_24_rmse": 0.1,
+        "validation_band_1_4_rmse_physical": 0.03,
+        "validation_band_5_12_rmse_physical": 0.06,
+        "validation_band_13_24_rmse_physical": 0.1,
+        "gripper_f1": 0.35,
+        "gripper_event_f1": 0.35,
+        "event_head_f1": 0.14,
+        "motion_head_f1": 0.83,
+        "gripper_event_ratio": 0.4,
+        "validation_ablation_coverage": 1.0,
+        "validation_diagnostic_primary_rmse_physical": 0.08,
+        "validation_proposal_zero_mse_gain_vs_primary_physical": 0.0,
+        "validation_execution_no_updates_mse_gain_vs_primary_physical": 0.0,
+        "validation_execution_full_updates_mse_gain_vs_primary_physical": 0.0,
+    }
+    structure_names = (
+        "object_grounding_object_content_pair_cosine",
+        "object_intent_interval_variation",
+        "object_w_prediction_interval_variation",
+        "object_w1_object_pair_cosine",
+        "object_w2_object_pair_cosine",
+        "object_teacher_reliability",
+        "p1_query_chart_variation",
+        "object_p2_successor_innovation_rms",
+        "object_p3_precision_base_rms",
+        "bottom_capacity_mean",
+    )
+    gradient_names = (
+        "gradient_postclip_grounder_l2",
+        "gradient_postclip_intent_l2",
+        "gradient_postclip_dynamics_l2",
+        "gradient_postclip_p1_factual_l2",
+        "gradient_postclip_p2_effect_reader_l2",
+        "gradient_postclip_p3_compiler_l2",
+        "gradient_postclip_bottom_capacity_l2",
+        "gradient_postclip_bottom_execution_l2",
+    )
+    trajectories = {
+        name: {"tail_median": value}
+        for name, value in {
+            "physical_flow": 0.011,
+            "physical_flow_native": 0.016,
+            "arm_fm_per_dim": 0.01,
+            "gripper_fm_field": 0.02,
+            "decoded_action": 0.002,
+        }.items()
+    }
+    return {
+        "label": label,
+        "manifest": {
+            "seed": 0,
+            "batch_size": 8,
+            "data_root": "/dataset",
+            "train_episode_count": 63,
+            "val_episode_count": 5,
+            "action_normalizer_fingerprint": "a" * 12,
+        },
+        "coverage": {
+            "epoch_records": 8,
+            "batch_rows": 100,
+            "fatal_errors": [],
+            "traceback_count": 0,
+        },
+        "observability": {"batch_metric_count": 100},
+        "epochs": [
+            {"epoch": epoch, "global_step": epoch * 100, "val": dict(validation)}
+            for epoch in range(1, 9)
+        ],
+        "trajectories": trajectories,
+        "structure": {
+            name: {
+                "tail_median": (
+                    0.5 if name.endswith("object_pair_cosine") else 0.1
+                )
+            }
+            for name in structure_names
+        },
+        "gradients": {name: {"tail_median": 0.01} for name in gradient_names},
+    }
 
 
 class AuditPolicyLogsTest(unittest.TestCase):
@@ -139,6 +237,8 @@ class AuditPolicyLogsTest(unittest.TestCase):
             self.tmp_path / "v120.log",
             "\n".join(
                 (
+                    "[v120] stage1_checkpoint=/tmp/old.pt "
+                    "stage1_initialization_enabled=0 fresh=1",
                     "[v120-train] epoch=001 batch=0020 loss_total=0.500000 "
                     "flow_loss=0.400000",
                     "[v120-ground] reconstruction=0.03000 existence=0.700 "
@@ -191,6 +291,10 @@ class AuditPolicyLogsTest(unittest.TestCase):
         self.assertEqual(row["object_p3_state_change_rms"], 0.004)
         self.assertEqual(len(run.epoch_records), 1)
         self.assertEqual(run.epoch_records[0]["val"]["full_rmse"], 0.1)
+        manifest = build_summary(run)["manifest"]
+        self.assertEqual(manifest["stage1_checkpoint"], "/tmp/old.pt")
+        self.assertEqual(manifest["stage1_initialization_enabled"], 0)
+        self.assertEqual(manifest["fresh_run"], 1)
 
     def test_v121_rows_parse_typed_grounding_and_policy_routes(self) -> None:
         path = _write(
@@ -906,6 +1010,257 @@ class AuditPolicyLogsTest(unittest.TestCase):
         val = run.epoch_records[0]["val"]
         self.assertEqual(val["sample_flow_jepa_late_detail_attention_entropy"], 0.6)
         self.assertEqual(val["sample_flow_jepa_world_anchor_camera_residual_norm"], 0.41)
+
+    def test_mainline_compact_rows_preserve_batch_and_validation_semantics(self) -> None:
+        path = _write(
+            self.tmp_path / "mainline.log",
+            "\n".join(
+                (
+                    "[mainline] capability=object_intent_dynamics_323 schema=19",
+                    "[mainline-train] epoch=001 batch=0020 step=20 "
+                    "loss_total=1.2 loss_action_flow=0.8 loss_action_flow_native=0.7",
+                    "[mainline-train-top] epoch=001 batch=0020 step=20 "
+                    "object_grounding_object_content_pair_cosine=0.4",
+                    "[mainline-train-bottom] epoch=001 batch=0020 step=20 "
+                    "bottom_capacity_mean=0.9 bottom_expected_depth=2.5",
+                    "[mainline-val] epoch=001 step=100 "
+                    "validation_action_rmse_normalized=0.2 "
+                    "validation_action_rmse_physical=0.08 "
+                    "validation_first_rmse_physical=0.03 "
+                    "validation_tail_rmse_physical=0.1",
+                    "[mainline-val-detail] epoch=001 step=100 "
+                    "validation_gripper_event_f1_normalized=0.35 "
+                    "validation_motion_f1_normalized=0.82",
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(run.header_config["capability"], "object_intent_dynamics_323")
+        self.assertEqual(len(run.batch_points), 1)
+        point = run.batch_points[0]
+        self.assertEqual(point.source, "mainline")
+        self.assertEqual(point.metrics["physical_flow"], 0.8)
+        self.assertEqual(point.metrics["physical_flow_native"], 0.7)
+        self.assertEqual(point.metrics["evidence_mmd_it_capacity_ratio"], 0.9)
+        self.assertEqual(
+            point.metrics["object_grounding_object_content_pair_cosine"], 0.4
+        )
+        self.assertEqual(len(run.epoch_records), 1)
+        validation = run.epoch_records[0]["validation"]
+        self.assertEqual(validation["full_rmse"], 0.08)
+        self.assertEqual(validation["first_rmse"], 0.03)
+        self.assertEqual(validation["tail_rmse"], 0.1)
+        self.assertEqual(validation["gripper_event_f1"], 0.35)
+        self.assertEqual(validation["motion_head_f1"], 0.82)
+
+    def test_mainline_metrics_jsonl_is_a_first_class_run_input(self) -> None:
+        path = _write(
+            self.tmp_path / "metrics.jsonl",
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "kind": "train",
+                            "epoch": 1,
+                            "batch": 20,
+                            "step": 20,
+                            "metrics": {
+                                "loss_total": 1.0,
+                                "loss_action_flow": 0.75,
+                                "loss_action_flow_v120_comparable": 0.50,
+                                "loss_action_gripper_flow": 0.42,
+                                "loss_action_gripper_flow_unweighted": 0.31,
+                                "loss_decoded_action": 0.20,
+                                "loss_decoded_action_v120_comparable": 0.15,
+                                "object_grounding_reconstruction_mse": 0.12,
+                                "object_intent_interval_variation": 0.08,
+                                "object_w2_object_pair_cosine": 0.6,
+                                "object_p3_precision_base_rms": 0.2,
+                                "gradient_postclip_grounder_l2": 0.03,
+                                "gradient_postclip_p3_compiler_l2": 0.04,
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "kind": "epoch",
+                            "epoch": 1,
+                            "step": 100,
+                            "train": {"loss_total": 0.9},
+                            "validation": {
+                                "validation_action_rmse_physical": 0.081,
+                                "validation_action_rmse_normalized": 0.19,
+                                "validation_band_13_24_rmse_physical": 0.1,
+                                "validation_gripper_event_f1_normalized": 0.31,
+                                "validation_ablation_coverage": 0.06,
+                                "validation_diagnostic_primary_rmse_physical": 0.08,
+                                "validation_proposal_zero_mse_gain_vs_primary_physical": 0.0001,
+                                "validation_proposal_zero_action_delta_rmse_physical": 0.01,
+                            },
+                        }
+                    ),
+                )
+            ),
+        )
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        self.assertEqual(run.batch_points[0].metrics["physical_flow"], 0.50)
+        self.assertEqual(
+            run.batch_points[0].metrics["physical_flow_event_balanced"], 0.75
+        )
+        self.assertEqual(run.batch_points[0].metrics["gripper_fm_field"], 0.31)
+        self.assertEqual(
+            run.batch_points[0].metrics["gripper_fm_field_event_balanced"], 0.42
+        )
+        self.assertEqual(run.batch_points[0].metrics["decoded_action"], 0.15)
+        self.assertEqual(
+            run.batch_points[0].metrics["decoded_action_event_balanced"], 0.20
+        )
+        self.assertEqual(len(run.epoch_records), 1)
+        self.assertEqual(run.epoch_records[0]["validation"]["full_rmse"], 0.081)
+        summary = build_summary(run)
+        self.assertEqual(
+            summary["structure"]["object_grounding_reconstruction_mse"][
+                "tail_median"
+            ],
+            0.12,
+        )
+        self.assertEqual(
+            summary["structure"]["object_intent_interval_variation"][
+                "tail_median"
+            ],
+            0.08,
+        )
+        self.assertEqual(
+            summary["structure"]["object_p3_precision_base_rms"]["tail_median"],
+            0.2,
+        )
+        self.assertEqual(
+            summary["gradients"]["gradient_postclip_grounder_l2"]["tail_median"],
+            0.03,
+        )
+        self.assertEqual(
+            summary["gradients"]["gradient_postclip_p3_compiler_l2"][
+                "tail_median"
+            ],
+            0.04,
+        )
+        self.assertIn(
+            "proposal-zero-better",
+            {finding["code"] for finding in summary["findings"]},
+        )
+        self.assertEqual(
+            summary["epochs"][0]["val"]["validation_ablation_coverage"],
+            0.06,
+        )
+        self.assertEqual(
+            summary["epochs"][0]["val"][
+                "validation_band_13_24_rmse_physical"
+            ],
+            0.1,
+        )
+
+    def test_mainline_run_directory_loads_metrics_and_serialized_identity(self) -> None:
+        run_dir = self.tmp_path / "schema19_run"
+        run_dir.mkdir()
+        _write(
+            run_dir / "metrics.jsonl",
+            json.dumps(
+                {
+                    "kind": "epoch",
+                    "epoch": 1,
+                    "step": 100,
+                    "train": {"loss_total": 0.9},
+                    "validation": {"validation_action_rmse_physical": 0.08},
+                }
+            ),
+        )
+        _write(
+            run_dir / "run_context.json",
+            json.dumps(
+                {
+                    "config": {
+                        "data": {
+                            "seed": 0,
+                            "raw_hdf5_root": "/dataset",
+                            "train_episodes": 63,
+                            "val_episodes": 5,
+                        },
+                        "optimizer": {"batch_size": 8, "warmup_steps": 500},
+                        "bottom": {
+                            "operator_rank": 32,
+                            "operator_groups": 32,
+                            "operator_depth_logit_init": 2.25,
+                        },
+                    },
+                    "identity": {
+                        "manifest": {
+                            "capability": "object_intent_dynamics_323",
+                            "schema": 19,
+                            "layout": "clearvla_mainline",
+                            "layout_schema": 1,
+                        },
+                        "dataset": {"action_normalizer_sha256": "a" * 64},
+                    },
+                    "normalizer_fingerprints": {"action_v120": "b" * 12},
+                }
+            ),
+        )
+        summary = build_summary(parse_run_input(run_dir))
+        self.assertEqual(summary["coverage"]["epoch_records"], 1)
+        self.assertEqual(summary["coverage"]["context_schema"], 19)
+        manifest = summary["manifest"]
+        self.assertEqual(manifest["capability"], "object_intent_dynamics_323")
+        self.assertEqual(manifest["architecture_schema"], 19)
+        self.assertEqual(manifest["layout"], "clearvla_mainline")
+        self.assertEqual(manifest["seed"], 0)
+        self.assertEqual(manifest["batch_size"], 8)
+        self.assertEqual(manifest["data_root"], "/dataset")
+        self.assertEqual(manifest["train_episode_count"], 63)
+        self.assertEqual(manifest["val_episode_count"], 5)
+        self.assertEqual(manifest["action_normalizer_fingerprint"], "b" * 12)
+        self.assertEqual(manifest["action_normalizer_sha256"], "a" * 64)
+        self.assertEqual(manifest["rank"], 32)
+        self.assertEqual(manifest["groups"], 32)
+        self.assertEqual(manifest["warmup"], 500)
+
+    def test_v120_recovery_assessment_requires_complete_behavior_not_one_rmse(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "candidate"
+        assessment = _recovery_assessment(baseline, candidate)
+        self.assertEqual(assessment["status"], "pass")
+        self.assertEqual(assessment["failed"], 0)
+        self.assertEqual(assessment["incomplete"], 0)
+
+        candidate["manifest"]["action_normalizer_fingerprint"] = "a" * 64
+        assessment = _recovery_assessment(baseline, candidate)
+        identity_check = next(
+            item
+            for item in assessment["checks"]
+            if item["name"] == "identity/action_normalizer"
+        )
+        self.assertEqual(identity_check["status"], "incomplete")
+
+        candidate["manifest"]["action_normalizer_fingerprint"] = "a" * 12
+        candidate["epochs"][-1]["val"]["full_rmse"] = 0.12
+        candidate["structure"]["object_w2_object_pair_cosine"][
+            "tail_median"
+        ] = 1.0
+        candidate["gradients"]["gradient_postclip_bottom_capacity_l2"][
+            "tail_median"
+        ] = 0.0
+        assessment = _recovery_assessment(baseline, candidate)
+        self.assertEqual(assessment["status"], "fail")
+        failed = {
+            item["name"] for item in assessment["checks"] if item["status"] == "fail"
+        }
+        self.assertIn("validation/action_rmse", failed)
+        self.assertIn("structure/object_w2_object_pair_cosine", failed)
+        self.assertIn(
+            "gradient/gradient_postclip_bottom_capacity_l2",
+            failed,
+        )
 
 
 if __name__ == "__main__":

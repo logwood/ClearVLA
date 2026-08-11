@@ -236,7 +236,6 @@ class ObjectFutureTeacher(nn.Module):
         )
         candidate_flat_probability = candidate_posterior.flatten(3)
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
-        successor_per_support = matched + null_probability * facts.content.detach().float()[:, None]
         candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
         camera_probability = candidate_posterior.sum(dim=(-2, -1), keepdim=False)
         destination_coordinate = torch.einsum(
@@ -277,7 +276,42 @@ class ObjectFutureTeacher(nn.Module):
         # future object state.  Plain posterior entropy would incorrectly call
         # it certain, so null mass supplies the fallback uncertainty floor.
         uncertainty_per_support = null_probability + visibility_per_support * entropy
-        reliability_per_support = visibility_per_support * (1.0 - entropy).clamp(0.0, 1.0)
+        association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
+        reliability_per_support = visibility_per_support * association_confidence
+        current_reference = facts.content.detach().float()[:, None]
+        # Null probability already makes ``matched + null * current`` a
+        # convex fallback.  Entropy is an independent failure mode: a diffuse
+        # visible posterior has low reliability but would otherwise export a
+        # spatial average of unrelated future patches.  Blend that raw track
+        # continuously back to the current fact before it becomes a target.
+        # Content/delta may then be supervised with physical validity without
+        # either fitting a noisy average or discounting the neutral target a
+        # second time.
+        raw_successor = matched + null_probability * current_reference
+        successor_per_support = current_reference + association_confidence * (
+            raw_successor - current_reference
+        )
+        current_address = facts.object_to_chart.detach().float()
+        current_address = current_address / current_address.flatten(2).sum(
+            dim=-1, keepdim=True
+        )[:, :, None, None].clamp_min(1e-6)
+        # Address owns the same identity fallback as content.  A null match or
+        # a high-entropy visible match means "retain the current object
+        # address", not "leave W's address unsupervised".  Keeping unit mass
+        # also prevents missing association confidence from becoming a cheap
+        # scalar feature in P2.
+        raw_address_per_support = (
+            candidate_posterior
+            + null_probability[..., None, None] * current_address[:, None]
+        )
+        address_per_support = current_address[:, None] + association_confidence[
+            ..., None, None
+        ] * (raw_address_per_support - current_address[:, None])
+        # Geometry has no meaningful identity fallback other than zero
+        # displacement.  Unlike content, its raw moment is not already mixed
+        # with the null candidate, so use the complete reliability here.
+        transport_per_support = transport_per_support * reliability_per_support[..., None]
+        covariance_per_support = covariance_per_support * reliability_per_support[..., None]
 
         successor_rows: list[Tensor] = []
         transport_rows: list[Tensor] = []
@@ -374,7 +408,7 @@ class ObjectFutureTeacher(nn.Module):
                 torch.einsum(
                     "bfk,bfkcyx->bkcyx",
                     content_weight,
-                    candidate_posterior,
+                    address_per_support,
                 )
             )
             # The end-biased successor is kept locally so semantic change is
@@ -421,6 +455,10 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_persistence_change": persistence_change.mean(),
             "object_teacher_uncertainty": uncertainty.mean(),
             "object_teacher_reliability": reliability.mean(),
+            "object_teacher_association_confidence": association_confidence.mean(),
+            "object_teacher_interval_variation": target.semantic_delta.float()
+            .std(dim=1, unbiased=False)
+            .mean(),
             "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
             "object_teacher_transport_rms": transport.square().mean().sqrt(),
             "object_teacher_null_probability": null_probability.mean(),

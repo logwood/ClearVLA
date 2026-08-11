@@ -207,15 +207,14 @@ def anchor_horizon_weights(
     first_step_protection: float,
     device: torch.device,
 ) -> Tensor:
-    """Give each semantic horizon band one normalized share of action pressure.
+    """Restore V120's per-row horizon pressure with exact unit mean.
 
-    A flat per-row mean silently gives the 12-row ``13-24`` band three times
-    the objective mass of the four-row ``1-4`` band.  Those rows are strongly
-    correlated samples from one action chunk rather than twelve independent
-    tasks.  We therefore allocate mass per semantic band, retain the existing
-    mild near-to-far emphasis, add the historical first-step protection inside
-    the first band, and finally normalize the complete 24-row chart to exact
-    unit mean.  This changes allocation, not the outer action-loss budget.
+    ``tail_emphasis`` is a mild per-row band multiplier, not a request to give
+    the three unequal-length bands equal total mass.  Equal-band allocation
+    reduced the 12-row far horizon from roughly 53% of the action objective to
+    36% and changed the experiment while claiming only to improve accounting.
+    Gripper event/hold balancing is applied separately inside its own channel
+    and must not redefine this temporal objective.
     """
 
     horizon = int(horizon)
@@ -227,9 +226,8 @@ def anchor_horizon_weights(
     start = 0
     denominator = max(len(ACTION_BAND_ENDS) - 1, 1)
     for index, end in enumerate(ACTION_BAND_ENDS):
-        band_length = int(end - start)
-        band_mass = 1.0 + float(tail_emphasis) * float(index) / float(denominator)
-        weight[start:end] = band_mass / float(band_length)
+        row_weight = 1.0 + float(tail_emphasis) * float(index) / float(denominator)
+        weight[start:end] = row_weight
         start = end
     weight[0] = weight[0] + float(first_step_protection)
     return weight / weight.mean()

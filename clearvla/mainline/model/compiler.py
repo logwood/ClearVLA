@@ -183,7 +183,15 @@ class ObjectFutureEffectReader(nn.Module):
         geometry_score = torch.einsum("btqkch,bikch->btqikc", geometry_query, geometry_key)
 
         intent_query = self._bounded_unit(self.intent_query(action_query))
-        intent_key = self._bounded_unit(self.intent_key(intent.interval_queries))
+        # Learned interval identities are legal addresses inside S, but they
+        # are not an observed intent value.  Routing on the cumulative query
+        # recreated a fixed temporal prior even when goal/history/object
+        # innovations were absent.  P2 therefore scores only the online,
+        # data-dependent interval innovation; W's own interval axis still
+        # preserves the four physical horizon identities.
+        intent_key = self._bounded_unit(
+            self.intent_key(intent.interval_action_innovations)
+        )
         intent_score = torch.einsum("btqh,bih->btqi", intent_query, intent_key)
 
         # Full future-address distributions contribute through their spatial
@@ -500,17 +508,26 @@ class ObjectPolicyPlanCompiler(nn.Module):
             precision_posterior[..., :-1].to(dtype=centered_detail.dtype),
             self.precision_object_value(centered_detail),
         )
-        precision_consequence_gate = torch.tanh(
+        precision_interaction = selected_detail * torch.tanh(
             self.precision_consequence_value(consequence_innovation)
         )
-        precision = self.precision_lane(selected_detail * precision_consequence_gate)
+        # Current high-resolution detail is a legal factual innovation even
+        # when W is neutral.  W conditions an additional bias-free
+        # interaction; it is not allowed to annihilate the factual lane.
+        precision = self.precision_lane(selected_detail + precision_interaction)
         temporal_source = intent.temporal_innovations[:, :, None].expand(-1, -1, self.basis, -1)
         temporal_consequence_gate = torch.tanh(self.temporal_consequence(consequence_innovation))
-        temporal = self.temporal_lane(
-            temporal_source
-            * temporal_consequence_gate
-            * torch.tanh(self.temporal_action(action_query))
+        # A legal S temporal innovation remains available when W is neutral,
+        # but the noisy ODE action query may not modulate that base directly:
+        # doing so turned this lane into a time-conditioned action adapter that
+        # could bypass both P1 and W.  Action dependence is confined to the
+        # bias-free S x consequence interaction below.
+        temporal_action_gate = torch.tanh(self.temporal_action(action_query))
+        temporal_base = temporal_source
+        temporal_interaction = (
+            temporal_source * temporal_consequence_gate * temporal_action_gate
         )
+        temporal = self.temporal_lane(temporal_base + temporal_interaction)
         state_change_source = intent.state_change_evidence[:, None, None].expand(
             -1, self.horizon, self.basis, -1
         )
@@ -524,8 +541,9 @@ class ObjectPolicyPlanCompiler(nn.Module):
         state_change_consequence_gate = torch.tanh(
             self.state_change_consequence(consequence_innovation)
         )
+        state_change_base = state_change_source * state_change_modulation
         state_change = 0.05 * self.state_change_lane(
-            state_change_source * state_change_modulation * state_change_consequence_gate
+            state_change_base + state_change_base * state_change_consequence_gate
         )
         lanes = [precision, temporal, state_change]
         lanes = [smooth_rms_contract(value, 0.35)[0] for value in lanes]
@@ -553,12 +571,27 @@ class ObjectPolicyPlanCompiler(nn.Module):
             .mean()
             .sqrt(),
             "object_p3_precision_null_mass": precision_posterior.detach()[..., -1].mean(),
-            "object_p3_precision_consequence_gate_rms": precision_consequence_gate.detach()
+            "object_p3_precision_consequence_interaction_rms": precision_interaction.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_precision_base_rms": selected_detail.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_base_rms": temporal_base.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
             "object_p3_temporal_consequence_gate_rms": temporal_consequence_gate.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_consequence_interaction_rms": temporal_interaction.detach()
             .float()
             .square()
             .mean()
