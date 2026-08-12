@@ -590,6 +590,60 @@ def test_p1_protected_fact_cannot_be_attenuated_by_grounding_existence() -> None
         torch.testing.assert_close(getattr(low, name), getattr(high, name), rtol=0, atol=0)
 
 
+def test_p1_public_object_value_cannot_synthesize_or_cancel_protected_detail() -> None:
+    torch.manual_seed(471)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    _, training_state, _ = model.encode_online(batch.online)
+    with torch.no_grad():
+        model.factual_reader.detail_value.weight.zero_()
+        model.factual_reader.rgb_value.weight.zero_()
+        model.factual_reader.object_value.weight.normal_()
+    dock, metrics = model.factual_reader(
+        evidence=training_state.observation,
+        facts=training_state.top.facts,
+        intent=training_state.top.intent,
+        clean_action_basis=model.bottom.clean_action_basis_tokens(
+            1,
+            device=training_state.top.facts.content.device,
+            dtype=training_state.top.facts.content.dtype,
+        ),
+        collect_diagnostics=True,
+    )
+    assert metrics["p1_local_content_rms"] > 0
+    assert torch.count_nonzero(dock.fact_by_object) == 0
+    assert torch.count_nonzero(dock.aggregate_fact) == 0
+
+
+def test_dynamic_p1_completes_cached_detail_at_each_ode_time() -> None:
+    torch.manual_seed(472)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    cache, _, _ = model.encode_online(batch.online)
+    physical = model.action_codec.encode(
+        batch.action_target.normalized,
+        batch.online.history.action_state,
+    )
+    query = model.bottom.action_query(physical, torch.full((1,), 0.25))
+    first, first_metrics = model.bottom.complete_p1_fact(
+        action_query=query,
+        protected_detail=cache.factual_dock.aggregate_fact,
+        time=torch.full((1,), 0.25),
+        collect_diagnostics=True,
+    )
+    second, _ = model.bottom.complete_p1_fact(
+        action_query=query,
+        protected_detail=cache.factual_dock.aggregate_fact,
+        time=torch.full((1,), 0.75),
+    )
+    assert not torch.equal(first, second)
+    assert first_metrics["p1_protected_detail_rms"] > 0
+    assert first_metrics["p1_dynamic_delta_rms"] > 0
+    assert first_metrics["p1_completed_fact_rms"] > 0
+
+
 def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() -> None:
     torch.manual_seed(42)
     config = _config()
@@ -611,7 +665,11 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     compiled, _ = model.top.compile_policy(
         cache.top,
-        factual_dock=cache.factual_dock,
+        p1_fact=model.bottom.complete_p1_fact(
+            action_query=query,
+            protected_detail=cache.factual_dock.aggregate_fact,
+            time=time,
+        )[0],
         action_query=query,
     )
     captured_transition: dict[str, torch.Tensor] = {}
@@ -793,7 +851,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert len(model.history_proposal.blocks) == 2
     assert model.history_proposal.recent_tokens == 4
     assert model.history_proposal.summary_tokens == 3
-    assert model.factual_reader.role_host is not None
+    assert model.bottom.p1_policy_block is not None
     assert model.transition.rank == 8
     assert model.transition.action_queries.shape[1] == 8
     assert len(model.bottom.blocks) == 3
@@ -849,7 +907,7 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     handles.append(model.top.teacher.register_forward_hook(count_teacher))
     handles.append(model.top.grounding_host.register_forward_hook(count_grounding_host))
     handles.append(model.history_proposal.register_forward_hook(count_history_proposal))
-    handles.append(model.factual_reader.role_host.register_forward_hook(count_p1_host))
+    handles.append(model.bottom.p1_policy_block.register_forward_hook(count_p1_host))
     handles.append(model.transition.register_forward_hook(count_transition))
     for index, block in enumerate(model.bottom.blocks):
 
@@ -877,7 +935,7 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert teacher_calls == 0
     assert grounding_host_calls == 1
     assert history_proposal_calls == 1
-    assert p1_host_calls == 1
+    assert p1_host_calls == config.runtime.inference_steps
     assert transition_calls == config.runtime.inference_steps
     # Both V120 correspondence scales batch all adjacent pairs/directions in
     # one invocation and are built once outside the five ODE steps.
@@ -888,8 +946,9 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert torch.isfinite(result.action).all()
     # The restored learned V120 execution chart may evaluate several
     # block/dwell candidates inside one ODE step.  Those are dynamic bottom
-    # operations; the expensive observation/G/S/W/P1 sources above must still
-    # be built exactly once.
+    # operations; the expensive observation/G/S/W/P1-detail sources above
+    # must still be built exactly once.  The compact P1 policy write is a live
+    # noisy-action block and therefore executes once per ODE step.
     assert all(value >= config.runtime.inference_steps for value in calls)
     for handle in handles:
         handle.remove()

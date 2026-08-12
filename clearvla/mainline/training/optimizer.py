@@ -20,7 +20,16 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("history_proposal", ("history_proposal.",)),
     ("dynamics", ("top.dynamics.",)),
     ("controlled_transition", ("transition.",)),
-    ("p1_factual", ("factual_reader.",)),
+    (
+        "p1_factual",
+        (
+            "factual_reader.",
+            "bottom.p1_time.",
+            "bottom.p1_content_mod.",
+            "bottom.p1_content_mod_scale",
+            "bottom.p1_policy_block.",
+        ),
+    ),
     ("p2_effect_reader", ("top.effect_reader.",)),
     ("consequence", ("top.consequence.",)),
     ("p3_compiler", ("top.plan_compiler.",)),

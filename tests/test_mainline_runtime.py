@@ -111,8 +111,8 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "object_teacher_interval_0_semantic_delta_rms": 0.322,
             "loss_future_interval_0_semantic_delta": 0.323,
             "object_p2_intent_score_max_abs": 0.33,
-            "object_p3_precision_base_rms": 0.4,
-            "object_p3_temporal_consequence_interaction_rms": 0.41,
+            "p1_completed_fact_rms": 0.4,
+            "object_p3_effect_rms": 0.41,
             "bottom_capacity_mean": 0.5,
             "bottom_controller_common_ratio": 0.51,
             "bottom_block_1_executed_update_rms": 0.52,
@@ -130,8 +130,8 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
     assert "loss_future_interval_0_semantic_delta=0.323" in joined
     assert "object_p2_intent_score_max_abs=0.33" in joined
-    assert "object_p3_precision_base_rms=0.4" in joined
-    assert "object_p3_temporal_consequence_interaction_rms=0.41" in joined
+    assert "p1_completed_fact_rms=0.4" in joined
+    assert "object_p3_effect_rms=0.41" in joined
     assert "bottom_capacity_mean=0.5" in joined
     assert "bottom_controller_common_ratio=0.51" in joined
     assert "bottom_block_1_executed_update_rms=0.52" in joined

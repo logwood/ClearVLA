@@ -16,7 +16,8 @@ config / manifest / typed online and training inputs
   -> G1-G3 global K+null grounding
   -> V120 cumulative stateless intent S
   -> W1/W2 four-interval future object dynamics
-  -> P1 one query-specific read over all progressive candidates
+  -> P1 one cached protected-detail read over all progressive candidates
+  -> per-ODE V120 P1 policy block
   -> P2 bounded consequence read
   -> P3 five V120 typed lanes
   -> shared V120 action/context canvas seed
@@ -70,22 +71,23 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        21
+schema:        22
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
-parameters:    177,732,213 total / 161,152,873 trainable
+parameters:    182,724,214 total / 164,041,578 trainable
 ```
 
-Schema 20 is not an exact-resume source for schema 21. Formal runs start fresh
+Schema 21 is not an exact-resume source for schema 22. Formal runs start fresh
 unless the complete manifest, model, optimizer, scheduler and RNG identity
 matches. Bottom-only migration is explicit and emits a report.
 
 ## Runtime contract
 
-- Observation/G/S/W/P1 and the 512-row transition source build once per
-  observation.
-- The shared action/context seed, P2/P3, two terminal layer contracts, the
-  action-conditioned transition and bottom run on every ODE step.
+- Observation/G/S/W, P1's N=49 detail read and the 512-row transition source
+  build once per observation.
+- The shared action/context seed, compact P1 policy block, P2/P3, two terminal
+  layer contracts, the action-conditioned transition and bottom run on every
+  ODE step.
 - Execution candidate/value charts are mandatory for every train/eval loss
   forward, even after the optional diagnostic-batch budget is exhausted; they
   stay disabled during ordinary five-step deployment sampling.
@@ -109,16 +111,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema21_v120_recovery_smoke \
-nohup bash scripts/smoke_mainline.sh > schema21_smoke.log 2>&1 &
+OUT_DIR=runs/schema22_dynamic_p1_recovery_smoke \
+nohup bash scripts/smoke_mainline.sh > schema22_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema21_v120_recovery_b8 \
-nohup bash scripts/train_mainline.sh > schema21_long.log 2>&1 &
+OUT_DIR=runs/schema22_dynamic_p1_recovery_b8 \
+nohup bash scripts/train_mainline.sh > schema22_long.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -130,7 +132,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema21_v120_recovery_b8 \
+  runs/schema22_dynamic_p1_recovery_b8 \
   --recovery-baseline v120_long.log \
   --tail 120 --require-recovery --format text
 ```

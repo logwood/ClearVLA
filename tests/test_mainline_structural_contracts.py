@@ -1123,7 +1123,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     action_query = torch.randn(batch, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
         DeploymentTopCache(intent=intent, predicted_dynamics=dynamics),
-        factual_dock=dock,
+        p1_fact=dock.aggregate_fact,
         action_query=action_query,
     )
     relabeled_compiled, _ = top.compile_policy(
@@ -1131,7 +1131,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             intent=relabeled_intent,
             predicted_dynamics=relabeled_dynamics,
         ),
-        factual_dock=dock.permute(permutation),
+        p1_fact=dock.permute(permutation).aggregate_fact,
         action_query=action_query,
     )
     for name in ("effect",):
@@ -1201,12 +1201,12 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     action_query = torch.randn(1, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
         deployment,
-        factual_dock=dock,
+        p1_fact=dock.aggregate_fact,
         action_query=action_query,
     )
     neutral_other_query, _ = top.compile_policy(
         deployment,
-        factual_dock=dock,
+        p1_fact=dock.aggregate_fact,
         action_query=torch.randn(1, horizon, basis, hidden),
     )
     assert torch.count_nonzero(compiled.effect) == 0
@@ -1227,7 +1227,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
             intent=identity_only_intent,
             predicted_dynamics=deployment.predicted_dynamics,
         ),
-        factual_dock=dock,
+        p1_fact=dock.aggregate_fact,
         action_query=action_query,
     )
     # Cumulative/identity-bearing S queries are addresses internal to S.  P2

@@ -133,7 +133,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     try:
         compiled, _ = top.compile_policy(
             context.deployment_cache(),
-            factual_dock=dock,
+            p1_fact=dock.aggregate_fact,
             action_query=action_query,
         )
     finally:

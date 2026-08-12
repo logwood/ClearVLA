@@ -1,9 +1,9 @@
-"""Typed homes for the four active role blocks from the formal V122 graph.
+"""Typed home for the three active grounding role blocks.
 
-The historical blocks mixed many canvas regions in one class.  Only three
-grounding hosts and the first policy host were trainable and executed for the
-active capability.  This module preserves their transformer mathematics while
-making the legal operands explicit.
+The historical blocks mixed many canvas regions in one class.  This module
+keeps G1-G3's legal operands explicit.  The dynamic V120 P1 policy block lives
+beside the restored canvas seed in :mod:`restored_bottom`, because it owns the
+per-ODE noisy-action/time boundary rather than a static grounding carrier.
 """
 
 from __future__ import annotations
@@ -239,78 +239,4 @@ class TypedGroundingRoleHost(nn.Module):
         return hosted, metric_rows
 
 
-class StaticP1RoleHost(nn.Module):
-    """The active first policy block, restricted to clean P1 query tokens."""
-
-    def __init__(
-        self,
-        *,
-        hidden: int,
-        heads: int,
-        expansion: float = 4.0,
-        dropout: float = 0.05,
-        maximum_update_rms: float = 0.50,
-    ) -> None:
-        super().__init__()
-        self.hidden = int(hidden)
-        self.maximum_update_rms = float(maximum_update_rms)
-        self.self_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.self_attention = nn.MultiheadAttention(
-            hidden,
-            heads,
-            batch_first=True,
-            dropout=dropout,
-        )
-        self.ffn_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden, int(hidden * expansion), bias=False),
-            nn.GELU(),
-            nn.Linear(int(hidden * expansion), hidden, bias=False),
-        )
-        # Keep the active block's full AdaLN parameterization.  The disabled
-        # visual/transition branches are not reconstructed as frozen baggage.
-        self.modulation = nn.Linear(hidden, 12 * hidden)
-        self.role_identity = nn.Parameter(torch.randn(1, hidden) * 0.02)
-        self.dropout = nn.Dropout(dropout)
-        nn.init.normal_(self.modulation.weight, mean=0.0, std=3e-3)
-        nn.init.zeros_(self.modulation.bias)
-        with torch.no_grad():
-            for index in (2, 5, 8, 11):
-                self.modulation.bias[index * hidden : (index + 1) * hidden].fill_(-2.0)
-
-    def _write(self, value: Tensor, update: Tensor, gate: Tensor) -> tuple[Tensor, Tensor]:
-        bounded, _ = smooth_rms_contract(
-            self.dropout(update) * torch.sigmoid(gate)[:, None],
-            self.maximum_update_rms,
-        )
-        return value + bounded, bounded
-
-    def forward(self, query: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
-        if query.ndim != 4 or int(query.shape[-1]) != self.hidden:
-            raise ValueError("P1 role host query must be [B,T,Q,H]")
-        shape = tuple(query.shape)
-        value = query.reshape(int(query.shape[0]), -1, self.hidden)
-        condition = value.mean(dim=1) + self.role_identity.to(
-            device=value.device,
-            dtype=value.dtype,
-        )
-        chunks = self.modulation(condition).chunk(12, dim=-1)
-        normalized = _modulate(self.self_norm(value), chunks[0], chunks[1])
-        update, _ = self.self_attention(
-            normalized,
-            normalized,
-            self.self_norm(value),
-            need_weights=False,
-        )
-        value, self_delta = self._write(value, update, chunks[2])
-        update = self.ffn(
-            _modulate(self.ffn_norm(value), chunks[9], chunks[10])
-        )
-        value, ffn_delta = self._write(value, update, chunks[11])
-        return value.reshape(shape), {
-            "p1_host_self_rms": self_delta.detach().float().square().mean().sqrt(),
-            "p1_host_ffn_rms": ffn_delta.detach().float().square().mean().sqrt(),
-        }
-
-
-__all__ = ["StaticP1RoleHost", "TypedGroundingRoleHost"]
+__all__ = ["TypedGroundingRoleHost"]

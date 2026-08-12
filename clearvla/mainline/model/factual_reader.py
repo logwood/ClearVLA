@@ -10,7 +10,6 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from .observation_contract import ObservationEvidence
-from .role_hosts import StaticP1RoleHost
 from .routing import smooth_rms_contract, variance_floored_centered_norm
 from .types import ObjectFactSet, ObjectFactualDock, ObjectIntentState, normalized_entropy
 
@@ -36,9 +35,6 @@ class ObjectFactualReader(nn.Module):
         horizon: int,
         basis: int,
         cameras: int,
-        heads: int,
-        host_expansion: float = 4.0,
-        host_dropout: float = 0.05,
         microgrid_side: int = 3,
     ) -> None:
         super().__init__()
@@ -64,13 +60,6 @@ class ObjectFactualReader(nn.Module):
         self.rgb_value = nn.Linear(3, hidden, bias=False)
         self.object_value = nn.Linear(content_dim, hidden, bias=False)
         self.fact_key = nn.Linear(hidden, hidden, bias=False)
-        self.null_key = nn.Parameter(torch.zeros(1, 1, 1, hidden))
-        self.role_host = StaticP1RoleHost(
-            hidden=hidden,
-            heads=heads,
-            expansion=host_expansion,
-            dropout=host_dropout,
-        )
 
     def _queries(
         self,
@@ -87,7 +76,11 @@ class ObjectFactualReader(nn.Module):
         query = (
             clean_action_basis + temporal + goal + history
         ) / math.sqrt(4.0)
-        return self.role_host(query)
+        # This is the ODE-invariant factual selection query.  V120's active
+        # P1 policy block is an ODE-dependent trajectory write and therefore
+        # does not belong here.  It is executed after this protected detail
+        # has been cached, immediately before P2.
+        return query, {}
 
     def _candidate_chunk(
         self,
@@ -282,11 +275,19 @@ class ObjectFactualReader(nn.Module):
             selected_rgb_raw
         )
         object_base = self.object_value(selected_content)
-        fact_by_object, _ = smooth_rms_contract(object_base + selected_detail, 1.0)
+        # The protected value is literal/learned current detail.  Object
+        # content is legal selector context, but adding a second signed value
+        # branch here lets ``object_base == -selected_detail`` erase P1 while
+        # every routing tensor remains non-empty.  The historical V120 reader
+        # likewise used semantic/appearance/geometry to select/refine detail;
+        # it did not add an independently cancellable public-object value to
+        # the protected write.
+        fact_by_object, _ = smooth_rms_contract(selected_detail, 1.0)
 
         object_query, _ = variance_floored_centered_norm(queries, 0.25)
         object_key, _ = variance_floored_centered_norm(
-            self.fact_key(fact_by_object), 0.25
+            self.fact_key((fact_by_object + object_base) / math.sqrt(2.0)),
+            0.25,
         )
         object_score = torch.einsum(
             "btqh,btqkh->btqk", object_query, object_key
@@ -302,15 +303,15 @@ class ObjectFactualReader(nn.Module):
             object_prior[:, None, None].clamp_min(1e-30).log(),
             torch.full_like(object_score.float(), -1.0e4),
         )
-        null_logit = (
-            object_query.float()
-            * self.null_key.to(device=queries.device, dtype=queries.dtype).float()
-        ).sum(dim=-1, keepdim=True)
-        posterior = torch.softmax(
-            torch.cat((object_logit, null_logit), dim=-1), dim=-1
-        )
-        object_posterior = posterior[..., :objects]
-        null_posterior = posterior[..., objects:]
+        # P1 is the protected current-fact path, not an optional effect lane.
+        # It must select among physically available K objects without a
+        # learned null shortcut.  Null is reserved for the real no-evidence
+        # case; P2 retains its own legal optional/null future-effect route.
+        available = object_prior[:, None, None] > 0
+        object_weight = torch.softmax(object_logit, dim=-1) * available.float()
+        available_mass = object_weight.sum(dim=-1, keepdim=True)
+        object_posterior = object_weight / available_mass.clamp_min(1.0e-6)
+        null_posterior = (available_mass <= 0).to(dtype=object_posterior.dtype)
         aggregate = torch.einsum(
             "btqk,btqkh->btqh",
             object_posterior.to(dtype=fact_by_object.dtype),
@@ -327,6 +328,7 @@ class ObjectFactualReader(nn.Module):
         dock.validate()
         if not collect_diagnostics:
             return dock, {}
+        posterior = torch.cat((object_posterior, null_posterior), dim=-1)
         candidate_entropy = torch.cat(entropy_rows, dim=1)
         candidate_max = torch.cat(maximum_rows, dim=1)
         return dock, {
@@ -354,6 +356,11 @@ class ObjectFactualReader(nn.Module):
             .mean(),
             "p1_local_content_rms": object_base.detach().float().square().mean().sqrt(),
             "p1_detail_rms": selected_detail.detach().float().square().mean().sqrt(),
+            "p1_fact_by_object_rms": fact_by_object.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "p1_fact_rms": aggregate.detach().float().square().mean().sqrt(),
             "p1_existence_is_diagnostic_only": aggregate.new_ones(
                 (), dtype=torch.float32

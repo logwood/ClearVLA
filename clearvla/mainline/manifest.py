@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Mapping, cast
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 21
+CAPABILITY_SCHEMA = 22
 LAYOUT_NAME = "clearvla_mainline"
 LAYOUT_SCHEMA = 1
 TOPOLOGY = (3, 2, 3)
@@ -25,10 +25,10 @@ class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
     observation: str = "restored_v120_three_frame_flow_dino_raw_local_chart"
-    top: str = "v120_cumulative_intent_four_interval_dynamics_full_candidate_p1_five_lane_p3"
-    bottom: str = "restored_v120_shared_seed_p1_p2_contracts_evidence_mmdit_dense512_execution"
+    top: str = "v120_cumulative_intent_four_interval_dynamics_protected_candidate_p1_five_lane_p3"
+    bottom: str = "restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_evidence_mmdit_dense512_execution"
     training: str = "v120_physical_flow_attainable_direction_interval_transition_execution_value_exact_role_lr"
-    runtime: str = "cached_observation_gsw_p1_per_ode_shared_seed_transition_contracts_teacher_isolated"
+    runtime: str = "cached_observation_gsw_p1_detail_dynamic_p1_per_ode_transition_teacher_isolated"
 
     def validate(self) -> None:
         for name, value in self.as_dict().items():

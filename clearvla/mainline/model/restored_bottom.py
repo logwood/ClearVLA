@@ -27,11 +27,16 @@ from torch import Tensor, nn
 from ..config import ExperimentConfig
 from ..interfaces import ObservableHistory
 from ..v120_core.profile import build_v120_policy_config
-from ..v120_core.role_delta_attnres import PolicyRoleDeltaBank
+from ..v120_core.primitives import TimeEmbedding
+from ..v120_core.role_delta_attnres import (
+    AffineVarianceFlooredCenteredNorm,
+    PolicyRoleDeltaBank,
+)
 from ..v120_core.layer_contracts import LayerContractAdapterHeads
 from ..v120_core.time_domain_mmdit import (
     EvidenceLatentMMDiTActionDecoder,
 )
+from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 from .action_contract import ActionQueryEncoder, BottomOutput, V120SeedContext
 from .compiler import ObjectPolicyPlanDeltaBank
 from .types import ControlledTransitionState, ObjectIntentState
@@ -98,6 +103,37 @@ class RestoredV120EvidenceBottom(nn.Module):
         # the two layer contracts.  The restored decoder still owns its own
         # native physical-action lift, exactly as V120 did.
         self.query_encoder = ActionQueryEncoder(self.core_config)
+        # V120 P1 was not only the static high-resolution reader.  The reader
+        # first wrote protected current detail, then the first policy DiT
+        # block updated the live noisy-action trajectory at every ODE step.
+        # Keep the expensive detail read cached, but retain that dynamic block
+        # and its exact time/content modulation here beside the shared seed.
+        self.p1_time = TimeEmbedding(self.hidden)
+        self.p1_content_mod = nn.Sequential(
+            AffineVarianceFlooredCenteredNorm(
+                2 * self.hidden,
+                float(self.core_config.flow_jepa_routing_norm_floor),
+                affine_maximum=4.0,
+            ),
+            nn.Linear(2 * self.hidden, self.hidden),
+            nn.SiLU(),
+            nn.Linear(self.hidden, self.hidden),
+        )
+        nn.init.normal_(self.p1_content_mod[-1].weight, mean=0.0, std=2e-2)
+        nn.init.zeros_(self.p1_content_mod[-1].bias)
+        self.p1_content_mod_scale = nn.Parameter(torch.tensor(0.10))
+        self.p1_policy_block = TemporalDynamicsBoundDiTBlock(
+            self.core_config,
+            role="policy",
+        )
+        if (
+            self.p1_policy_block.visual_cross_enabled
+            or not self.p1_policy_block.policy_explicit_handoff_only
+            or not self.p1_policy_block.grounded_policy_explicit_only
+        ):
+            raise ValueError(
+                "the recovered P1 block must use the strict explicit object handoff"
+            )
         policy_start = int(self.core_config.depth) - int(
             self.core_config.flow_jepa_policy_blocks
         )
@@ -189,6 +225,101 @@ class RestoredV120EvidenceBottom(nn.Module):
             device=device,
             dtype=dtype,
         )
+
+    def complete_p1_fact(
+        self,
+        *,
+        action_query: Tensor,
+        protected_detail: Tensor,
+        time: Tensor,
+        collect_diagnostics: bool = False,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Apply V120's dynamic P1 policy write to one cached detail read.
+
+        In the strict object path the policy block's trajectory queries may
+        attend only trajectory keys; visual/context/future rows are masked and
+        policy writes are trajectory-only.  Evaluating that active subgraph on
+        the compact ``[T,Q]`` canvas is therefore mathematically identical to
+        retaining the inactive rows, without reopening RGB/DINO or duplicating
+        their memory at every ODE step.
+        """
+
+        expected = (
+            int(action_query.shape[0]),
+            self.horizon,
+            self.basis,
+            self.hidden,
+        )
+        if tuple(action_query.shape) != expected or tuple(protected_detail.shape) != expected:
+            raise ValueError("dynamic P1 inputs must align as [B,T,Q,H]")
+        if tuple(time.shape) != (expected[0],):
+            raise ValueError("dynamic P1 time must be [B]")
+        trajectory = action_query + protected_detail
+        canvas = trajectory.flatten(1, 2)
+        rows = int(canvas.shape[1])
+        empty_before = slice(0, 0)
+        empty_after = slice(rows, rows)
+        slices = {
+            "task": empty_before,
+            "state": empty_before,
+            "state_history": empty_before,
+            "executed": empty_before,
+            "proposal": empty_before,
+            "trajectory": slice(0, rows),
+            "stage": empty_after,
+            "rollout": empty_after,
+            "registers": empty_after,
+        }
+        trajectory_summary = canvas.mean(dim=1)
+        content_delta = self.p1_content_mod(
+            torch.cat((trajectory_summary, trajectory_summary), dim=-1)
+        ) * self.p1_content_mod_scale.to(
+            device=canvas.device,
+            dtype=canvas.dtype,
+        )
+        time_input = time.to(device=canvas.device, dtype=canvas.dtype)
+        mod_embed = self.p1_time(time_input) + content_delta
+        updated, block_metrics = self.p1_policy_block(
+            canvas,
+            canvas[:, :0],
+            mod_embed,
+            slices,
+            collect_diagnostics=collect_diagnostics,
+        )
+        dynamic_delta = (updated - canvas).reshape(expected)
+        completed = protected_detail + dynamic_delta
+        if not collect_diagnostics:
+            return completed, {}
+        metrics = {
+            "p1_protected_detail_rms": protected_detail.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "p1_dynamic_delta_rms": dynamic_delta.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "p1_completed_fact_rms": completed.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "p1_policy_content_mod_rms": content_delta.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+        }
+        for source, target in (
+            ("residual_self_written_rms", "p1_policy_self_written_rms"),
+            ("residual_ffn_written_rms", "p1_policy_ffn_written_rms"),
+        ):
+            value = block_metrics.get(source)
+            if value is not None:
+                metrics[target] = value
+        return completed, metrics
 
     def set_training_step(self, global_step: int) -> float:
         return self.decoder.set_execution_training_step(global_step)

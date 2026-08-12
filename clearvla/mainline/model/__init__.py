@@ -25,7 +25,7 @@ from .policy import ClearVLAMainlinePolicy, OnlinePolicyCache, PolicyStepOutput
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
-from .role_hosts import StaticP1RoleHost, TypedGroundingRoleHost
+from .role_hosts import TypedGroundingRoleHost
 from .teacher import ObjectFutureTeacher
 from .top import CompiledPolicyState, ObjectIntentDynamicsTop, OnlineTopContext
 from .transition import ControlledTransitionDynamics
@@ -80,7 +80,6 @@ __all__ = [
     "PolicyStepOutput",
     "ObjectFutureTeacher",
     "StatelessObjectIntentOrganizer",
-    "StaticP1RoleHost",
     "TypedGroundingRoleHost",
     "ZeroPreservingObjectConsequence",
 ]

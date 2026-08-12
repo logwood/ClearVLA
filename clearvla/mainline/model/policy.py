@@ -148,9 +148,6 @@ class ClearVLAMainlinePolicy(nn.Module):
             horizon=dims.action_horizon,
             basis=dims.action_basis_tokens,
             cameras=dims.num_cameras,
-            heads=dims.num_heads,
-            host_expansion=top.role_host_ffn_expansion,
-            host_dropout=top.role_host_dropout,
             microgrid_side=obs.microgrid_side,
         )
         self.transition = ControlledTransitionDynamics(
@@ -362,9 +359,15 @@ class ClearVLAMainlinePolicy(nn.Module):
             executed_memory=cache.executed_memory,
             action_history_keep=cache.action_history_keep,
         )
+        p1_fact, p1_metrics = self.bottom.complete_p1_fact(
+            action_query=action_query,
+            protected_detail=cache.factual_dock.aggregate_fact,
+            time=time,
+            collect_diagnostics=collect_diagnostics,
+        )
         compiled, top_metrics = self.top.compile_policy(
             cache.top,
-            factual_dock=cache.factual_dock,
+            p1_fact=p1_fact,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,
         )
@@ -391,7 +394,12 @@ class ClearVLAMainlinePolicy(nn.Module):
         return PolicyStepOutput(
             bottom=bottom,
             compiled=compiled,
-            metrics={**top_metrics, **transition_metrics, **bottom_metrics},
+            metrics={
+                **p1_metrics,
+                **top_metrics,
+                **transition_metrics,
+                **bottom_metrics,
+            },
         )
 
     @torch.no_grad()

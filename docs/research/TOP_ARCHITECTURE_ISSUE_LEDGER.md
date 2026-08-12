@@ -6,9 +6,10 @@
 
 行为基线：V120 commit `0b92d359a2889a0a1b1eba256007c00ccbc54f3c`
 
-本文件保留 schema 20 退化的历史证据、根因和修改权限。P0-1 至 P1-7
-已经映射为 schema 21 的源码恢复，不再是当前 active 问题；它们是否在
-实验行为上恢复，仍需 fresh smoke 和长跑证明。当前未解决项只看
+本文件保留 schema 20/21 退化的历史证据、根因和修改权限。Schema 21
+虽然恢复了若干 producer/consumer，却把 V120 动态 P1 policy block 放进
+了静态 factual query，并给 protected detail 增加了可相消 value 与 learned
+null；batch-600 的 factual collapse 已在 schema 22 修正。当前未解决项只看
 [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md)，不要从本历史
 账本重新拼装当前图。
 

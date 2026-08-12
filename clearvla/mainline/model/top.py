@@ -9,10 +9,11 @@ active capability.  It has three calls with non-overlapping authority:
     Training-only no-grad Teacher-G plus recognizer/loss targets.  It cannot
     mutate or replace the online context.
 ``compile_policy``
-    ODE-step-dependent P2/P3 read from one already materialized P1 dock.
+    ODE-step-dependent P2/P3 read from the completed dynamic P1 fact.
 
-P1 is built exactly once by the independent factual reader and enters this
-composer only through its typed dock; P2/P3 cannot reopen a visual bank.
+P1's expensive current-detail read is built exactly once by the independent
+factual reader.  The live policy write is completed at each ODE step before it
+enters this composer; P2/P3 cannot reopen a visual bank.
 """
 
 from __future__ import annotations
@@ -45,7 +46,6 @@ from .types import (
     FutureObjectDynamics,
     LocalFactSet,
     ObjectFactSet,
-    ObjectFactualDock,
     ObjectIntentState,
     ObjectTopTrainingTargets,
 )
@@ -328,7 +328,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self,
         context: DeploymentTopCache,
         *,
-        factual_dock: ObjectFactualDock,
+        p1_fact: Tensor,
         action_query: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[CompiledPolicyState, dict[str, Tensor]]:
@@ -339,7 +339,9 @@ class ObjectIntentDynamicsTop(nn.Module):
         # write, not the untouched noisy-action seed.  Keeping that residual
         # order is important: it lets the future-effect reader ask questions
         # in the factual chart that P1 actually selected.
-        p1_action_query = action_query + factual_dock.aggregate_fact
+        if tuple(p1_fact.shape) != tuple(action_query.shape):
+            raise ValueError("completed P1 fact and action query must align")
+        p1_action_query = action_query + p1_fact
         raw_effect, effect_metrics = self.effect_reader(
             p1_action_query,
             context.predicted_dynamics,
@@ -352,7 +354,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         # seen by P3 and the controlled-transition coefficient geometry.
         effect, effect_contract = smooth_rms_contract(raw_effect, 0.35)
         consequence, consequence_metrics = self.consequence(
-            factual_base=factual_dock.aggregate_fact,
+            factual_base=p1_fact,
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
@@ -362,7 +364,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         # generic canvas.
         p3_action_query = action_query + consequence.protected_consequence
         plan, plan_metrics = self.plan_compiler(
-            p1_fact=factual_dock.aggregate_fact,
+            p1_fact=p1_fact,
             consequence=consequence,
             intent=context.intent,
             action_query=p3_action_query,

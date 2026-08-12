@@ -318,9 +318,10 @@ class ObjectFactualDock:
 
     ``fact_by_object`` is read from the high-resolution current observation
     under the corresponding global-object support.  It is not reconstructed
-    by expanding an already pooled P1 value.  ``aggregate_fact`` is the actual
-    P1 update delivered to the policy trajectory.  P2 reuses the same K/null
-    posterior and chart coordinates instead of inventing another object basis.
+    by expanding an already pooled P1 value.  ``aggregate_fact`` is the cached
+    protected-detail write; the dynamic V120 P1 policy block completes the
+    live P1 fact from it at each ODE step.  The P1 posterior has no learned-null
+    shortcut: null is one only when no physical K object is available.
     """
 
     fact_by_object: Tensor  # [B,T,Q,K,H], conditional values

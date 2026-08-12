@@ -13,7 +13,7 @@ evidence that motivated recovery are kept in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        21
+manifest schema:        22
 recovery reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
@@ -32,12 +32,12 @@ trainer/runtime/trunk or a V-numbered launcher. The compact manifest owns graph
 identity; typed interfaces and executable checks own shapes, dtypes and zero
 semantics. Do not add a version-wide `_validate_vXXX_*` contract.
 
-Schema 21 is a source-level V120 behavior recovery, not a claim of recovered
-server performance. It restores the active V120 dynamic frequency, action-token
-geometry, P1 candidate choice, S/W/P interfaces, shared canvas seed, two active
-P1/P2 layer contracts and bottom source bank. Only the source defects listed
-below were changed. A fresh smoke and controlled long run are still required
-before claiming behavior parity.
+Schema 22 corrects the P1 boundary exposed by the schema-21 batch-600 run.  The
+expensive current-detail posterior remains cached once, while the actual V120
+P1 policy block again updates the noisy-action trajectory at every ODE step.
+Protected detail is no longer an additive public-content value and cannot take
+a learned null shortcut.  A fresh smoke and controlled long run are still
+required before claiming behavior parity.
 
 ## Active graph in execution order
 
@@ -69,10 +69,14 @@ ObjectFactSet + S + causal CoarseActionIntent
 
 ObjectFactSet + S + clean V120 typed action-basis tokens
     -> P1 query-specific read over all 49 progressive candidates
-    -> one packed RGB/detail factual read
-    -> ObjectFactualDock
+    -> one packed, no-null protected RGB/detail factual read
+    -> cached ObjectFactualDock
 
-ObjectFactualDock + FutureObjectDynamics + S + current noisy-action query
+current noisy action + flow time + cached protected detail
+    -> compact exact V120 P1 policy block, once per ODE step
+    -> completed P1 fact
+
+completed P1 fact + FutureObjectDynamics + S + current noisy-action query
     -> P2 bounded content/intent/coordinate effect read
     -> zero-preserving protected consequence
     -> P3 five lanes: factual / precision / effect / temporal / state-change
@@ -148,9 +152,12 @@ supports can change targets/losses only, never a deployment action.
 6. W1 owns the two near intervals and W2 the two far intervals. W2 may read W1
    without replacing either with a mean. The only W value below W is the
    directly supervised `FutureObjectDynamics`; no public W residual crosses.
-7. P1 executes once per observation. Every action-basis/global-K query chooses
-   among the complete N=49 progressive bank before value contraction. It uses
-   clean V120 typed action-basis tokens, not coarse/history-proposal aliases.
+7. P1 has two distinct frequencies. Every action-basis/global-K query chooses
+   among the complete N=49 progressive bank once per observation before value
+   contraction, using clean V120 typed action-basis tokens.  That protected
+   detail cannot be deleted by a learned null or an additive public-content
+   value.  The V120 P1 policy block then completes the live P1 fact once per
+   ODE step from noisy action, time and the cached detail.
 8. P2 content, intent and coordinate scores are bounded in `[-1,1]`; learned
    temperatures stay in `[0.25,4]`. It cannot reopen RGB/DINO or consume a
    second W carrier.
@@ -192,7 +199,7 @@ supports can change targets/losses only, never a deployment action.
     explicit null-goal smoke may omit it.
 16. Fresh runs require an empty output directory. Exact resume verifies
     manifest, source/data/language identity, model/optimizer/scheduler and RNG.
-    Schema 20 cannot exact-resume schema 21; compatible bottom migration must be
+    Schema 21 cannot exact-resume schema 22; compatible bottom migration must be
     explicit and reported.
 
 ## Typed boundaries
@@ -278,9 +285,10 @@ ControlledTransitionState
 
 ## Runtime, identity and inventory
 
-- Observation/G/S/W/P1 and the transition source build once per observation.
-- The shared action/context seed, P2/P3, two terminal contracts, dynamic
-  transition and bottom run at every ODE step.
+- Observation/G/S/W, P1's N=49 detail read and the transition source build once
+  per observation.
+- The shared action/context seed, compact P1 policy block, P2/P3, two terminal
+  contracts, dynamic transition and bottom run at every ODE step.
 - Candidate-value tensors required by the execution objective are built on
   every train/eval loss forward, independently of the optional diagnostic
   batch budget. Deployment sampling leaves this loss-only boundary disabled.
@@ -290,13 +298,13 @@ ControlledTransitionState
 - Active manifest identity:
 
   ```text
-  schema:       21
+  schema:       22
   observation:  restored_v120_three_frame_flow_dino_raw_local_chart
-  top:          v120_cumulative_intent_four_interval_dynamics_full_candidate_p1_five_lane_p3
-  bottom:       restored_v120_shared_seed_p1_p2_contracts_evidence_mmdit_dense512_execution
+  top:          v120_cumulative_intent_four_interval_dynamics_protected_candidate_p1_five_lane_p3
+  bottom:       restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_evidence_mmdit_dense512_execution
   training:     v120_physical_flow_attainable_direction_interval_transition_execution_value_exact_role_lr
-  runtime:      cached_observation_gsw_p1_per_ode_shared_seed_transition_contracts_teacher_isolated
-  parameters:   177,732,213 total / 161,152,873 trainable
+  runtime:      cached_observation_gsw_p1_detail_dynamic_p1_per_ode_transition_teacher_isolated
+  parameters:   182,724,214 total / 164,041,578 trainable
   ```
 
 The lower count than the old monolith reflects removed inactive ancestry and
@@ -332,15 +340,15 @@ Use a new empty output directory:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema21_v120_recovery_smoke \
-nohup bash scripts/smoke_mainline.sh > schema21_smoke.log 2>&1 &
+OUT_DIR=runs/schema22_dynamic_p1_recovery_smoke \
+nohup bash scripts/smoke_mainline.sh > schema22_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema21_v120_recovery_b8 \
-nohup bash scripts/train_mainline.sh > schema21_long.log 2>&1 &
+OUT_DIR=runs/schema22_dynamic_p1_recovery_b8 \
+nohup bash scripts/train_mainline.sh > schema22_long.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema21_v120_recovery_b8 \
+  runs/schema22_dynamic_p1_recovery_b8 \
   --recovery-baseline v120_long.log \
   --tail 120 --require-recovery --format text
 ```
