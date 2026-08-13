@@ -194,7 +194,6 @@ class ObjectFactSet:
     null_assignment: Tensor  # joint local-prior null mass [B,C,Y,X,M]
     reconstructed_dino: Tensor  # [B,C,Y,X,D]
     reconstruction_error: Tensor  # scalar, not weighted here
-    typed_consistency_error: Tensor  # scalar, inside the existing G budget
 
     @property
     def batch(self) -> int:
@@ -278,8 +277,6 @@ class ObjectFactSet:
         _shape(self.reconstructed_dino, tuple(chart.shape), "reconstructed DINO")
         if self.reconstruction_error.ndim != 0:
             raise ValueError("object reconstruction error must be scalar")
-        if self.typed_consistency_error.ndim != 0:
-            raise ValueError("typed consistency error must be scalar")
 
     def permute(self, permutation: Tensor) -> "ObjectFactSet":
         """Permutation-equivariant view used by downstream causal audits."""
@@ -308,82 +305,29 @@ class ObjectFactSet:
             null_assignment=self.null_assignment,
             reconstructed_dino=self.reconstructed_dino,
             reconstruction_error=self.reconstruction_error,
-            typed_consistency_error=self.typed_consistency_error,
         )
 
 
 @dataclass(frozen=True)
-class ObjectFactualDock:
-    """The single current-fact bridge from global K objects into P1/P2.
+class FactualPrecisionDock:
+    """The exact V120 P1 current-fact boundary.
 
-    ``fact_by_object`` is read from the high-resolution current observation
-    under the corresponding global-object support.  It is not reconstructed
-    by expanding an already pooled P1 value.  ``aggregate_fact`` is the cached
-    protected-detail write; the dynamic V120 P1 policy block completes the
-    live P1 fact from it at each ODE step.  The P1 posterior has no learned-null
-    shortcut: null is one only when no physical K object is available.
+    P1 owns 24 horizon rows and four factual lanes. Object identity is not a
+    P1 axis: global K belongs to W/P2 and must not be recreated by expanding a
+    pooled factual value.
     """
 
-    fact_by_object: Tensor  # [B,T,Q,K,H], conditional values
-    object_posterior: Tensor  # [B,T,Q,K]
-    null_posterior: Tensor  # [B,T,Q,1]
-    chart_posterior: Tensor  # [B,T,Q,K,C,Y,X]
-    camera_coordinates: Tensor  # [B,T,Q,K,C,2]
-    aggregate_fact: Tensor  # [B,T,Q,H]
+    protected_detail: Tensor  # [B,24,4,H]
 
-    @property
-    def objects(self) -> int:
-        return int(self.fact_by_object.shape[3])
-
-    def validate(self) -> None:
-        if self.fact_by_object.ndim != 5:
-            raise ValueError("object factual values must be [B,T,Q,K,H]")
-        batch, horizon, basis, objects, hidden = self.fact_by_object.shape
-        _shape(
-            self.object_posterior,
-            (batch, horizon, basis, objects),
-            "object factual posterior",
-        )
-        _shape(
-            self.null_posterior,
-            (batch, horizon, basis, 1),
-            "object factual null posterior",
-        )
-        if self.chart_posterior.ndim != 7 or tuple(self.chart_posterior.shape[:4]) != (
-            batch,
-            horizon,
-            basis,
-            objects,
-        ):
-            raise ValueError("object factual chart posterior must be [B,T,Q,K,C,Y,X]")
-        cameras = int(self.chart_posterior.shape[4])
-        _shape(
-            self.camera_coordinates,
-            (batch, horizon, basis, objects, cameras, 2),
-            "object factual camera coordinates",
-        )
-        _shape(
-            self.aggregate_fact,
-            (batch, horizon, basis, hidden),
-            "object factual aggregate",
-        )
-        # Numerical invariants are checked at construction/preflight.  P2
-        # calls this shape validator at every ODE step, so value reductions or
-        # Python ``bool`` conversions here would introduce a GPU sync into the
-        # deployment hot path.
-
-    def permute(self, permutation: Tensor) -> "ObjectFactualDock":
-        if permutation.ndim != 1 or int(permutation.numel()) != self.objects:
-            raise ValueError("object factual permutation must cover every K slot")
-        index = permutation.to(device=self.fact_by_object.device, dtype=torch.long)
-        return ObjectFactualDock(
-            fact_by_object=self.fact_by_object[:, :, :, index],
-            object_posterior=self.object_posterior[:, :, :, index],
-            null_posterior=self.null_posterior,
-            chart_posterior=self.chart_posterior[:, :, :, index],
-            camera_coordinates=self.camera_coordinates[:, :, :, index],
-            aggregate_fact=self.aggregate_fact,
-        )
+    def validate(self, *, horizon: int = 24, basis: int | None = None) -> None:
+        if self.protected_detail.ndim != 4:
+            raise ValueError("factual precision detail must be [B,24,4,H]")
+        if int(self.protected_detail.shape[1]) != int(horizon):
+            raise ValueError("V120 P1 lost its horizon-query axis")
+        if int(self.protected_detail.shape[2]) < 1:
+            raise ValueError("V120 P1 requires at least one action-basis lane")
+        if basis is not None and int(self.protected_detail.shape[2]) != int(basis):
+            raise ValueError("V120 P1 action-basis axis does not match the model")
 
 
 @dataclass(frozen=True)
@@ -585,15 +529,15 @@ class FutureObjectDynamics:
     current_reference: Tensor  # [B,K,D]
     successor_content: Tensor  # [B,I,K,D]
     semantic_delta: Tensor  # [B,I,K,D]
-    transport_mean: Tensor  # [B,I,K,C,2]
-    transport_covariance: Tensor  # [B,I,K,C,3]
+    transport_mean: Tensor  # [B,I,K,2]
+    transport_covariance: Tensor  # [B,I,K,3]
     visibility: Tensor  # zero-centred visibility change [B,I,K,1]
     persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
     uncertainty: Tensor  # [B,I,K,1]
     reliability: Tensor  # calibration only [B,I,K,1]
-    future_selector_validity: Tensor  # online P2 selector [B,I,K,C,1]
+    future_selector_validity: Tensor  # online P2 selector [B,I,K,1]
     future_address: Tensor  # [B,I,K,C,Y,X]
-    object_coordinates: Tensor  # [B,K,C,2]
+    object_coordinates: Tensor  # [B,K,2]
 
     @property
     def intervals(self) -> int:
@@ -615,28 +559,27 @@ class FutureObjectDynamics:
             objects,
         ):
             raise ValueError("future address must be [B,I,K,C,Y,X]")
-        cameras = int(self.future_address.shape[3])
         _shape(
             self.transport_mean,
-            (batch, intervals, objects, cameras, 2),
+            (batch, intervals, objects, 2),
             "transport mean",
         )
         _shape(
             self.transport_covariance,
-            (batch, intervals, objects, cameras, 3),
+            (batch, intervals, objects, 3),
             "transport covariance",
         )
         for name in ("visibility", "persistence", "uncertainty", "reliability"):
             _shape(getattr(self, name), (batch, intervals, objects, 1), name)
         _shape(
             self.future_selector_validity,
-            (batch, intervals, objects, cameras, 1),
+            (batch, intervals, objects, 1),
             "future selector validity",
         )
         _shape(
             self.object_coordinates,
-            (batch, objects, cameras, 2),
-            "future object camera coordinates",
+            (batch, objects, 2),
+            "future object coordinates",
         )
 
     def permute(self, permutation: Tensor) -> "FutureObjectDynamics":
@@ -671,23 +614,22 @@ class FutureObjectDynamics:
         batch, objects, width = current.shape
         zeros = current.new_zeros(batch, intervals, objects, width)
         scalar = current.new_zeros(batch, intervals, objects, 1)
-        cameras = int(facts.object_to_chart.shape[2])
         address = facts.object_to_chart[:, None].expand(-1, intervals, -1, -1, -1, -1)
         return cls(
             current_reference=current,
             successor_content=current[:, None].expand(-1, intervals, -1, -1),
             semantic_delta=zeros,
-            transport_mean=current.new_zeros(batch, intervals, objects, cameras, 2),
-            transport_covariance=current.new_zeros(batch, intervals, objects, cameras, 3),
+            transport_mean=current.new_zeros(batch, intervals, objects, 2),
+            transport_covariance=current.new_zeros(batch, intervals, objects, 3),
             visibility=scalar,
             persistence=scalar,
             uncertainty=scalar,
             reliability=scalar,
-            future_selector_validity=facts.camera_validity[:, None].expand(
-                -1, intervals, -1, -1, -1
+            future_selector_validity=facts.validity[:, None].expand(
+                -1, intervals, -1, -1
             ),
             future_address=address,
-            object_coordinates=facts.camera_coordinates,
+            object_coordinates=facts.coordinates.to(dtype=current.dtype),
         )
 
 

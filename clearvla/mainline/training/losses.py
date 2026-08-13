@@ -362,7 +362,9 @@ def future_dynamics_terms(
     prediction.validate()
     target.validate()
     batch, intervals, objects = prediction.semantic_delta.shape[:3]
-    cameras = int(prediction.transport_mean.shape[3])
+    if current_loss_support.ndim != 4:
+        raise ValueError("current loss support must retain [B,K,C,1]")
+    cameras = int(current_loss_support.shape[2])
     if tuple(current_loss_support.shape) != (batch, objects, cameras, 1):
         raise ValueError(
             "current loss support must be [B,K,C,1] and align with future dynamics"
@@ -439,13 +441,13 @@ def future_dynamics_terms(
         target.transport_mean,
         scale_floored=False,
     )
-    transport = masked(transport_error, camera_validity)
+    transport = masked(transport_error, object_validity)
     covariance_error = row_loss(
         prediction.transport_covariance,
         target.transport_covariance,
         scale_floored=False,
     )
-    covariance = masked(covariance_error, camera_validity)
+    covariance = masked(covariance_error, object_validity)
     visibility_error = row_loss(
         prediction.visibility,
         target.visibility,
@@ -521,7 +523,7 @@ def future_dynamics_terms(
             ).detach()
             terms[f"future_interval_{index}_transport"] = masked(
                 transport_error[:, interval_slice],
-                camera_validity[:, interval_slice],
+                interval_validity,
             ).detach()
     return terms
 

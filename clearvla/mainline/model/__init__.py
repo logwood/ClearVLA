@@ -13,7 +13,6 @@ from .compiler import (
     ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler, ObjectW1WorkingState
-from .factual_reader import ObjectFactualReader
 from .grounding import DenseObjectGrounder
 from .intent import (
     CoarseActionIntent,
@@ -25,7 +24,6 @@ from .policy import ClearVLAMainlinePolicy, OnlinePolicyCache, PolicyStepOutput
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
-from .role_hosts import TypedGroundingRoleHost
 from .teacher import ObjectFutureTeacher
 from .top import CompiledPolicyState, ObjectIntentDynamicsTop, OnlineTopContext
 from .transition import ControlledTransitionDynamics
@@ -38,7 +36,7 @@ from .types import (
     HistoryActionProposalState,
     LocalFactSet,
     ObjectFactSet,
-    ObjectFactualDock,
+    FactualPrecisionDock,
     ObjectIntentState,
     ObjectTopTrainingTargets,
 )
@@ -62,8 +60,7 @@ __all__ = [
     "HistoryActionProposalState",
     "LocalFactSet",
     "ObjectConsequenceState",
-    "ObjectFactualDock",
-    "ObjectFactualReader",
+    "FactualPrecisionDock",
     "ObjectFactSet",
     "ObjectFutureDynamicsCompiler",
     "ObjectFutureEffectReader",
@@ -80,6 +77,5 @@ __all__ = [
     "PolicyStepOutput",
     "ObjectFutureTeacher",
     "StatelessObjectIntentOrganizer",
-    "TypedGroundingRoleHost",
     "ZeroPreservingObjectConsequence",
 ]

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from clearvla.tools.audit_policy_logs import (
+    BatchPoint,
+    ParsedRun,
     _recovery_assessment,
     build_summary,
     parse_log,
@@ -81,6 +83,18 @@ def _complete_recovery_summary(label: str) -> dict[str, Any]:
             "decoded_action": 0.002,
         }.items()
     }
+    aligned_batch_2200 = {
+        name: {"tail_median": value}
+        for name, value in {
+            "object_grounding_g3_parent_l1": 0.02,
+            "object_grounding_object_content_pair_cosine": 0.5,
+            "object_p1_spatial_variation": 0.01,
+            "p1_query_chart_variation": 0.01,
+            "object_p2_null_mass": 0.2,
+            "object_p2_effect_precontract_rms": 0.03,
+            "object_consequence_effect_rms": 0.03,
+        }.items()
+    }
     return {
         "label": label,
         "manifest": {
@@ -103,6 +117,7 @@ def _complete_recovery_summary(label: str) -> dict[str, Any]:
             for epoch in range(1, 9)
         ],
         "trajectories": trajectories,
+        "aligned_batch_2200": aligned_batch_2200,
         "structure": {
             name: {
                 "tail_median": (
@@ -1363,6 +1378,70 @@ class AuditPolicyLogsTest(unittest.TestCase):
             if item["status"] == "incomplete"
         }
         self.assertIn("performance/cuda_peak_process_gib", incomplete)
+
+    def test_v120_recovery_assessment_reports_missing_epochs_without_index_error(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "unfinished"
+        candidate["coverage"]["epoch_records"] = 0
+        candidate["epochs"] = []
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        self.assertEqual(checks["coverage/all_epochs"], "fail")
+        self.assertEqual(checks["validation/action_rmse"], "incomplete")
+        self.assertEqual(
+            checks["validation/gripper_event_rate_calibration"],
+            "incomplete",
+        )
+
+    def test_aligned_batch_2200_does_not_use_later_epoch_tail(self) -> None:
+        run = ParsedRun(path=self.tmp_path / "aligned.log", label="aligned")
+        run.batch_points = [
+            BatchPoint(1, 20, {"physical_flow": 1.0}, "mainline"),
+            BatchPoint(1, 2200, {"physical_flow": 0.4}, "mainline"),
+            BatchPoint(2, 20, {"physical_flow": 0.01}, "mainline"),
+        ]
+        summary = build_summary(run, tail=2)
+        self.assertEqual(
+            summary["aligned_batch_2200"]["physical_flow"]["tail_median"],
+            0.7,
+        )
+        self.assertAlmostEqual(
+            summary["trajectories"]["physical_flow"]["tail_median"],
+            0.205,
+        )
+
+    def test_three_way_early_gate_requires_half_schema23_to_v120_gap_closure(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        parent = deepcopy(baseline)
+        parent["label"] = "schema23"
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema24"
+        parent["aligned_batch_2200"]["object_grounding_g3_parent_l1"][
+            "tail_median"
+        ] = 0.10
+        candidate["aligned_batch_2200"]["object_grounding_g3_parent_l1"][
+            "tail_median"
+        ] = 0.055
+        assessment = _recovery_assessment(baseline, candidate, parent)
+        check = next(
+            item
+            for item in assessment["checks"]
+            if item["name"] == "early_batch_2200/g3_parent_l1"
+        )
+        self.assertEqual(check["status"], "pass")
+        self.assertAlmostEqual(check["candidate"]["gap_closure"], 0.5625)
+
+        candidate["aligned_batch_2200"]["object_grounding_g3_parent_l1"][
+            "tail_median"
+        ] = 0.07
+        assessment = _recovery_assessment(baseline, candidate, parent)
+        check = next(
+            item
+            for item in assessment["checks"]
+            if item["name"] == "early_batch_2200/g3_parent_l1"
+        )
+        self.assertEqual(check["status"], "fail")
 
 
 if __name__ == "__main__":

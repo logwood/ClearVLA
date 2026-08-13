@@ -212,7 +212,11 @@ class MainlineTrainingEngine:
             )
         raise RuntimeError("global gradient norm was non-finite without a named owner")
 
-    def _clip_gradients_with_first_offender(self) -> Tensor:
+    def _gradient_lifecycle(
+        self, *, collect_diagnostics: bool
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """V120 finite-check -> decoder-local -> global clip lifecycle."""
+
         parameters = [
             parameter
             for parameter in self.model.parameters()
@@ -238,12 +242,86 @@ class MainlineTrainingEngine:
             raise NonFiniteGradientError(
                 self._first_nonfinite_gradient_report(global_norm=nonfinite_norm)
             ) from error
+        metrics = (
+            gradient_diagnostics(self.model, stage="raw")
+            if collect_diagnostics
+            else {}
+        )
+        decoder_parameters = [
+            parameter
+            for name, parameter in self.model.named_parameters()
+            if name.startswith("bottom.decoder.") and parameter.grad is not None
+        ]
+        decoder_norm: Tensor | None = None
+        if decoder_parameters:
+            decoder_norm = torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in decoder_parameters],
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
+            torch.nn.utils.clip_grads_with_norm_(
+                decoder_parameters,
+                1.0,
+                decoder_norm,
+                foreach=True,
+            )
+        if collect_diagnostics:
+            metrics.update(gradient_diagnostics(self.model, stage="postlocal"))
+            metrics["gradient_raw_bottom_decoder_l2"] = (
+                decoder_norm.detach().float()
+                if decoder_norm is not None
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+            metrics["gradient_postlocal_bottom_decoder_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    [parameter.grad for parameter in decoder_parameters],
+                    norm_type=2.0,
+                    error_if_nonfinite=True,
+                    foreach=True,
+                ).detach().float()
+                if decoder_parameters
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+        postlocal_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=True,
+            foreach=True,
+        )
         torch.nn.utils.clip_grads_with_norm_(
             parameters,
             self.config.optimizer.grad_clip,
-            total_norm,
+            postlocal_norm,
             foreach=True,
         )
+        postglobal_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=True,
+            foreach=True,
+        )
+        if collect_diagnostics:
+            metrics.update(gradient_diagnostics(self.model, stage="postglobal"))
+            metrics["gradient_raw_global_l2"] = total_norm.detach().float()
+            metrics["gradient_postlocal_global_l2"] = postlocal_norm.detach().float()
+            metrics["gradient_postglobal_global_l2"] = postglobal_norm.detach().float()
+            metrics["gradient_postglobal_bottom_decoder_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    [parameter.grad for parameter in decoder_parameters],
+                    norm_type=2.0,
+                    error_if_nonfinite=True,
+                    foreach=True,
+                ).detach().float()
+                if decoder_parameters
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+        return total_norm, metrics
+
+    def _clip_gradients_with_first_offender(self) -> Tensor:
+        """Compatibility wrapper used by the non-finite regression test."""
+
+        total_norm, _ = self._gradient_lifecycle(collect_diagnostics=False)
         return total_norm
 
     @staticmethod
@@ -480,9 +558,10 @@ class MainlineTrainingEngine:
                 condition_generator=self.train_condition_generator,
             )
         ledger.total.backward()
-        gradient_norm = self._clip_gradients_with_first_offender()
-        if collect_diagnostics:
-            metrics.update(gradient_diagnostics(self.model))
+        gradient_norm, gradient_metrics = self._gradient_lifecycle(
+            collect_diagnostics=collect_diagnostics
+        )
+        metrics.update(gradient_metrics)
         # Record the LR that owns this update.  Advancing the scheduler first
         # and then logging the optimizer group reported the *next* batch's LR
         # beside the current batch loss, an off-by-one semantic error during

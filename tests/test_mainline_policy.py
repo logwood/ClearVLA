@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
@@ -20,7 +21,6 @@ from clearvla.mainline.interfaces import (
 )
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.model.restored_observation import (
-    _align_chart_to_later_frame,
     _v120_flow_field,
 )
 from clearvla.mainline.runtime.logging import archival_metrics
@@ -107,19 +107,6 @@ def test_v120_exported_flow_is_reindexed_and_scaled_by_chart_side() -> None:
     assert not torch.allclose(field.forward, torch.full_like(field.forward, 4.0 / 23.0))
 
 
-def test_destination_indexed_forward_flow_aligns_source_chart() -> None:
-    x = torch.arange(8, dtype=torch.float32)[None, None, None, :, None]
-    value = x.expand(1, 1, 8, 8, 1).clone()
-    flow = torch.zeros(1, 1, 2, 8, 8)
-    flow[:, :, 0] = 2.0 / 7.0  # one 8x8 chart cell to the right
-
-    aligned = _align_chart_to_later_frame(value, flow)
-
-    # Destination x=1 samples source x=0; border padding defines x=0.
-    assert torch.allclose(aligned[0, 0, :, 1:, 0], value[0, 0, :, :-1, 0])
-    assert torch.allclose(aligned[0, 0, :, :1, 0], value[0, 0, :, :1, 0])
-
-
 def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
     dims = config.dimensions
     device = torch.device("cpu")
@@ -192,7 +179,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     optimizer, ownership = build_optimizer(model, config)
     assert set(ownership.role_counts) == {
         "observation",
-        "grounding_host",
+        "grounding",
         "grounder",
         "intent",
         "coarse_action",
@@ -240,7 +227,11 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert group_lrs["history_proposal/decay"] == config.optimizer.learning_rate * 0.625
     assert group_lrs["bottom_mmdit/decay"] == config.optimizer.learning_rate * 0.7
     assert group_lrs["bottom_capacity/nodecay"] == config.optimizer.learning_rate * 1.4
-    assert "gradient_postclip_observation_l2" in result.metrics
+    assert "gradient_raw_observation_l2" in result.metrics
+    assert "gradient_postlocal_observation_l2" in result.metrics
+    assert "gradient_postglobal_observation_l2" in result.metrics
+    assert result.metrics["gradient_postlocal_bottom_decoder_l2"] <= 1.0001
+    assert result.metrics["gradient_postglobal_global_l2"] <= 1.0001
     assert "gradient_observation_l2" not in result.metrics
     assert "gradient_global_preclip_l2" in result.materialize()
     archived = archival_metrics(result.materialize())
@@ -297,7 +288,9 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "controlled_transition_": 5,
         "bottom_": 4,
         "evidence_": 40,
-        "gradient_postclip_": 20,
+        "gradient_raw_": 20,
+        "gradient_postlocal_": 20,
+        "gradient_postglobal_": 20,
     }
     for prefix, minimum in minimum_prefix_counts.items():
         assert sum(name.startswith(prefix) for name in archived) >= minimum
@@ -644,7 +637,7 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
     assert torch.count_nonzero(captured["intent"]["executed_history"]) == 0
     assert "history_proposal" not in captured["factual"]
     assert "proposal" not in captured["factual"]
-    assert torch.count_nonzero(captured["factual"]["clean_action_basis"]) > 0
+    assert torch.count_nonzero(captured["factual"]["clean_basis_tokens"]) > 0
     assert torch.count_nonzero(cache.history.executed_action_history) == 0
     assert torch.equal(
         training_state.history_proposal.action_prediction,
@@ -665,63 +658,158 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
     assert torch.equal(generator_state, deployment_generator.get_state())
 
 
-def test_p1_protected_fact_cannot_be_attenuated_by_grounding_existence() -> None:
+def test_p1_dock_is_exact_v120_precision_without_global_k_axis() -> None:
     torch.manual_seed(47)
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
-    _, training_state, _ = model.encode_online(batch.online)
-    facts = training_state.top.facts
+    cache, training_state, metrics = model.encode_online(
+        batch.online,
+        collect_diagnostics=True,
+    )
+    assert tuple(cache.factual_dock.protected_detail.shape) == (
+        1,
+        24,
+        config.dimensions.action_basis_tokens,
+        config.dimensions.hidden_size,
+    )
+    assert set(cache.factual_dock.__dataclass_fields__) == {"protected_detail"}
+    assert metrics["flow_jepa_p1_query_rows"] == 24
+    assert metrics["flow_jepa_typed_p1_micro_grid"] == 3
+    assert metrics["flow_jepa_typed_p1_micro_token_count"] == 9
+    fine = training_state.observation.progressive_state.dynamic_fine_values
+    assert fine is not None and int(fine.shape[-2]) == 49
 
-    def read(existence: torch.Tensor):
-        return model.factual_reader(
-            evidence=training_state.observation,
-            facts=replace(facts, existence=existence),
-            intent=training_state.top.intent,
-            clean_action_basis=model.bottom.clean_action_basis_tokens(
-                1,
-                device=facts.content.device,
-                dtype=facts.content.dtype,
-            ),
-        )[0]
 
-    low = read(torch.full_like(facts.existence, 1.0e-4))
-    high = read(torch.ones_like(facts.existence))
-    for name in (
-        "fact_by_object",
-        "object_posterior",
-        "null_posterior",
-        "chart_posterior",
-        "camera_coordinates",
-        "aggregate_fact",
+def test_progressive_grounding_executes_g1_g2_g3_and_rematerializes_n49_once() -> None:
+    torch.manual_seed(470)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    compiler = model.observation.encoder.soft_address_compiler
+    with mock.patch.object(
+        compiler,
+        "progressive_fine_candidates",
+        wraps=compiler.progressive_fine_candidates,
+    ) as rematerialize, mock.patch.object(
+        model.observation,
+        "advance_progressive_grounding",
+        wraps=model.observation.advance_progressive_grounding,
+    ) as advance:
+        _, training_state, metrics = model.encode_online(
+            batch.online,
+            collect_diagnostics=True,
+        )
+    assert [call.kwargs["stage"] for call in advance.call_args_list] == [1, 2, 3]
+    assert rematerialize.call_count == 1
+    progressive = training_state.observation.progressive_state
+    assert progressive.stage == 3
+    assert progressive.grounded_fact_set is not None
+    assert progressive.dynamic_fine_values is not None
+    assert int(progressive.dynamic_fine_values.shape[-2]) == 49
+    assert metrics["observation_g1_g2_g3_completed"] == 1
+    # The G3 correction is zero-initialized, so the fresh model must inherit
+    # its G2 parent posterior exactly instead of silently replacing it.
+    assert metrics["observation_g3_parent_semantic_l1"] <= 1e-7
+
+
+def test_grounding_canvas_structurally_excludes_forbidden_conditions() -> None:
+    torch.manual_seed(4701)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    prepared = model.observation.prepare(batch.online.observation)
+    role = model.bottom.sample_role_table(prepared.pack.value_tokens)
+    canvas, slices = model.bottom.grounding_canvas(
+        state=batch.online.history.state,
+        rollout_init=prepared.pack.future_queries,
+        role=role,
+    )
+    for name in ("task", "state_history", "executed", "proposal", "trajectory", "stage"):
+        assert slices[name].start == slices[name].stop
+    assert slices["state"].stop - slices["state"].start == 1
+    assert slices["rollout"].stop > slices["rollout"].start
+    assert slices["registers"].stop > slices["registers"].start
+    assert canvas.shape[1] == sum(
+        current.stop - current.start for current in slices.values()
+    )
+
+
+def test_v120_p1_query_chunking_preserves_output_and_parameter_gradients() -> None:
+    torch.manual_seed(4702)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    captured: dict[str, object] = {}
+
+    def capture(_module, args, kwargs):
+        captured["args"] = args
+        captured["kwargs"] = {**kwargs, "collect_diagnostics": False}
+
+    hook = model.factual_reader.register_forward_pre_hook(capture, with_kwargs=True)
+    try:
+        with torch.no_grad():
+            model.encode_online(batch.online)
+    finally:
+        hook.remove()
+    assert "args" in captured and "kwargs" in captured
+    chunked = copy.deepcopy(model.factual_reader).eval()
+    unchunked = copy.deepcopy(model.factual_reader).eval()
+    chunked.address_query_batch_budget = 1
+    unchunked.address_query_batch_budget = 1_000_000
+    # Checkpointing is an independent production memory contract. Disable it
+    # here so this test isolates the query-factorization equivalence itself.
+    chunked.raw_activation_checkpoint = False
+    unchunked.raw_activation_checkpoint = False
+    args = captured["args"]
+    kwargs = captured["kwargs"]
+    assert isinstance(args, tuple) and isinstance(kwargs, dict)
+    output_chunked, _ = chunked(*args, **kwargs)
+    output_full, _ = unchunked(*args, **kwargs)
+    torch.testing.assert_close(output_chunked, output_full, atol=3e-6, rtol=3e-6)
+
+    named_chunked = tuple(
+        (name, parameter)
+        for name, parameter in chunked.named_parameters()
+        if parameter.requires_grad
+    )
+    named_full = tuple(
+        (name, parameter)
+        for name, parameter in unchunked.named_parameters()
+        if parameter.requires_grad
+    )
+    assert tuple(name for name, _ in named_chunked) == tuple(name for name, _ in named_full)
+    gradients_chunked = torch.autograd.grad(
+        output_chunked.float().square().mean(),
+        tuple(parameter for _, parameter in named_chunked),
+        allow_unused=True,
+    )
+    gradients_full = torch.autograd.grad(
+        output_full.float().square().mean(),
+        tuple(parameter for _, parameter in named_full),
+        allow_unused=True,
+    )
+    for (name, _), left, right in zip(
+        named_chunked,
+        gradients_chunked,
+        gradients_full,
+        strict=True,
     ):
-        torch.testing.assert_close(getattr(low, name), getattr(high, name), rtol=0, atol=0)
+        assert (left is None) == (right is None), name
+        if left is not None and right is not None:
+            torch.testing.assert_close(left, right, atol=1e-5, rtol=1e-5, msg=name)
 
 
-def test_p1_public_object_value_cannot_synthesize_or_cancel_protected_detail() -> None:
+def test_p1_has_no_global_object_value_or_learned_null_shortcut() -> None:
     torch.manual_seed(471)
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
-    _, training_state, _ = model.encode_online(batch.online)
-    with torch.no_grad():
-        model.factual_reader.detail_value.weight.zero_()
-        model.factual_reader.rgb_value.weight.zero_()
-        model.factual_reader.object_value.weight.normal_()
-    dock, metrics = model.factual_reader(
-        evidence=training_state.observation,
-        facts=training_state.top.facts,
-        intent=training_state.top.intent,
-        clean_action_basis=model.bottom.clean_action_basis_tokens(
-            1,
-            device=training_state.top.facts.content.device,
-            dtype=training_state.top.facts.content.dtype,
-        ),
-        collect_diagnostics=True,
-    )
-    assert metrics["p1_local_content_rms"] > 0
-    assert torch.count_nonzero(dock.fact_by_object) == 0
-    assert torch.count_nonzero(dock.aggregate_fact) == 0
+    cache, _, _ = model.encode_online(batch.online)
+    parameter_names = {name for name, _ in model.factual_reader.named_parameters()}
+    assert not any("object_value" in name for name in parameter_names)
+    assert not any("learned_null" in name for name in parameter_names)
+    assert torch.count_nonzero(cache.factual_dock.protected_detail) > 0
 
 
 def test_dynamic_p1_completes_cached_detail_at_each_ode_time() -> None:
@@ -737,13 +825,13 @@ def test_dynamic_p1_completes_cached_detail_at_each_ode_time() -> None:
     query = model.bottom.action_query(physical, torch.full((1,), 0.25))
     first, first_metrics = model.bottom.complete_p1_fact(
         action_query=query,
-        protected_detail=cache.factual_dock.aggregate_fact,
+        protected_detail=cache.factual_dock.protected_detail,
         time=torch.full((1,), 0.25),
         collect_diagnostics=True,
     )
     second, _ = model.bottom.complete_p1_fact(
         action_query=query,
-        protected_detail=cache.factual_dock.aggregate_fact,
+        protected_detail=cache.factual_dock.protected_detail,
         time=torch.full((1,), 0.75),
     )
     assert not torch.equal(first, second)
@@ -775,7 +863,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         cache.top,
         p1_fact=model.bottom.complete_p1_fact(
             action_query=query,
-            protected_detail=cache.factual_dock.aggregate_fact,
+            protected_detail=cache.factual_dock.protected_detail,
             time=time,
         )[0],
         action_query=query,
@@ -953,7 +1041,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         )
         lower = int(upper)
     assert lower == config.dimensions.action_horizon
-    assert len(model.top.grounding_host.blocks) == 3
+    assert len(model.top.grounding_blocks) == 3
     assert model.top.dynamics.w1 is not model.top.dynamics.w2
     assert model.history_proposal.OFFSETS == (-24, -16, -12, -8, -6, -4, -2, -1)
     assert len(model.history_proposal.blocks) == 2
@@ -973,18 +1061,13 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     model = ClearVLAMainlinePolicy(config)
     batch = _batch(config)
     calls = [0 for _ in model.bottom.blocks]
-    observation_calls = 0
     factual_calls = 0
     teacher_calls = 0
-    grounding_host_calls = 0
+    grounding_block_calls = [0, 0, 0]
     history_proposal_calls = 0
     p1_host_calls = 0
     transition_calls = 0
     handles = []
-
-    def count_observation(_module, _args, _output):
-        nonlocal observation_calls
-        observation_calls += 1
 
     def count_factual(_module, _args, _output):
         nonlocal factual_calls
@@ -993,10 +1076,6 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     def count_teacher(_module, _args, _output):
         nonlocal teacher_calls
         teacher_calls += 1
-
-    def count_grounding_host(_module, _args, _output):
-        nonlocal grounding_host_calls
-        grounding_host_calls += 1
 
     def count_history_proposal(_module, _args, _output):
         nonlocal history_proposal_calls
@@ -1010,10 +1089,14 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
         nonlocal transition_calls
         transition_calls += 1
 
-    handles.append(model.observation.register_forward_hook(count_observation))
     handles.append(model.factual_reader.register_forward_hook(count_factual))
     handles.append(model.top.teacher.register_forward_hook(count_teacher))
-    handles.append(model.top.grounding_host.register_forward_hook(count_grounding_host))
+    for index, block in enumerate(model.top.grounding_blocks):
+
+        def count_grounding_block(_module, _args, _output, *, index=index):
+            grounding_block_calls[index] += 1
+
+        handles.append(block.register_forward_hook(count_grounding_block))
     handles.append(model.history_proposal.register_forward_hook(count_history_proposal))
     handles.append(model.bottom.p1_policy_block.register_forward_hook(count_p1_host))
     handles.append(model.transition.register_forward_hook(count_transition))
@@ -1024,6 +1107,10 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
 
         handles.append(block.register_forward_hook(count_call))
     with mock.patch.object(
+        model.observation,
+        "prepare",
+        wraps=model.observation.prepare,
+    ) as observation_prepare, mock.patch.object(
         model.observation.encoder.flow,
         "forward",
         wraps=model.observation.encoder.flow.forward,
@@ -1038,10 +1125,10 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
             config,
             dtype=torch.float32,
         )
-    assert observation_calls == 1
+    assert observation_prepare.call_count == 1
     assert factual_calls == 1
     assert teacher_calls == 0
-    assert grounding_host_calls == 1
+    assert grounding_block_calls == [1, 1, 1]
     assert history_proposal_calls == 1
     # Five action updates are followed by one complete endpoint forward for
     # event/motion heads.  The endpoint pass must not rebuild static evidence.
@@ -1132,19 +1219,25 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
         geometry_supervision=False,
         collect_diagnostics=True,
     )
-    dock = cache.factual_dock
-    inherited = training_state.top.facts.object_to_chart[:, None, None].expand_as(
-        dock.chart_posterior
+    assert tuple(cache.factual_dock.protected_detail.shape[1:3]) == (
+        24,
+        config.dimensions.action_basis_tokens,
     )
-    assert not torch.equal(dock.chart_posterior, inherited)
-    assert metrics["p1_query_chart_variation"] > 0
-    assert metrics["p1_query_coordinate_variation"] > 0
-    assignment_gradient = torch.autograd.grad(
-        dock.chart_posterior.square().sum(),
-        training_state.top.facts.candidate_assignment,
+    assert metrics["flow_jepa_p1_query_rows"] == 24
+    assert metrics["flow_jepa_p1_shared_factual"] == 1
+    assert metrics["flow_jepa_typed_p1_spatial_variation"] > 0
+    progressive = training_state.observation.progressive_state
+    assert progressive.dynamic_fine_values is not None
+    assert progressive.dynamic_fine_coordinates is not None
+    assert int(progressive.dynamic_fine_values.shape[-2]) == 49
+    assert int(progressive.dynamic_fine_coordinates.shape[-2]) == 49
+    g_gradient = torch.autograd.grad(
+        cache.factual_dock.protected_detail.square().sum(),
+        progressive.dynamic_fine_values,
         retain_graph=True,
+        allow_unused=True,
     )[0]
-    assert torch.count_nonzero(assignment_gradient) > 0
+    assert g_gradient is not None and torch.count_nonzero(g_gradient) > 0
     assert tuple(cache.transition_source.selector.shape[1:]) == (
         4 * config.dimensions.num_cameras * 8 * 8,
         config.dimensions.hidden_size,
@@ -1272,7 +1365,10 @@ def test_proposal_ablation_does_not_alias_p1_or_controlled_transition() -> None:
         ablated.top.predicted_dynamics.semantic_delta,
         cache.top.predicted_dynamics.semantic_delta,
     )
-    assert torch.equal(ablated.factual_dock.aggregate_fact, cache.factual_dock.aggregate_fact)
+    assert torch.equal(
+        ablated.factual_dock.protected_detail,
+        cache.factual_dock.protected_detail,
+    )
     assert torch.equal(
         ablated.transition_source.selector,
         cache.transition_source.selector,

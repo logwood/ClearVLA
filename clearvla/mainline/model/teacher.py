@@ -237,37 +237,32 @@ class ObjectFutureTeacher(nn.Module):
         candidate_flat_probability = candidate_posterior.flatten(3)
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
         candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
-        camera_probability = candidate_posterior.sum(dim=(-2, -1), keepdim=False)
         destination_moment = torch.einsum(
-            "bfkcyx,cyxd->bfkcd",
+            "bfkcyx,cyxd->bfkd",
             candidate_posterior,
             candidate_coordinate,
         )
-        # Preserve the exact V120 raw posterior moment while retaining the
-        # schema-22 per-camera axis.  Dividing by camera probability here
-        # turns a tiny candidate mass into a full conditional displacement and
-        # creates large geometry targets precisely when association is weak.
         transport_per_support = (
             destination_moment
-            - camera_probability[..., None]
-            * facts.camera_coordinates.detach().float()[:, None]
+            - (1.0 - null_probability)
+            * facts.coordinates.detach().float()[:, None]
         )
         centered = coordinate - (
-            facts.camera_coordinates.detach().float()[:, None, :, :, None, None]
-            + transport_per_support[:, :, :, :, None, None]
+            facts.coordinates.detach().float()[:, None, :, None, None, None]
+            + transport_per_support[:, :, :, None, None, None]
         )
         covariance_xx = torch.einsum(
-            "bfkcyx,bfkcyx->bfkc",
+            "bfkcyx,bfkcyx->bfk",
             candidate_posterior,
             centered[..., 0].square(),
         )
         covariance_xy = torch.einsum(
-            "bfkcyx,bfkcyx->bfkc",
+            "bfkcyx,bfkcyx->bfk",
             candidate_posterior,
             centered[..., 0] * centered[..., 1],
         )
         covariance_yy = torch.einsum(
-            "bfkcyx,bfkcyx->bfkc",
+            "bfkcyx,bfkcyx->bfk",
             candidate_posterior,
             centered[..., 1].square(),
         )
@@ -328,12 +323,12 @@ class ObjectFutureTeacher(nn.Module):
             )
             successor_rows.append(interval_successor)
             interval_transport = torch.einsum(
-                "bf,bfkcd->bkcd", weight, transport_per_support
+                "bf,bfkd->bkd", weight, transport_per_support
             )
             transport_rows.append(interval_transport)
             covariance_rows.append(
                 torch.einsum(
-                    "bf,bfkcd->bkcd",
+                    "bf,bfkd->bkd",
                     weight,
                     covariance_per_support,
                 )
@@ -382,15 +377,13 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty = torch.stack(uncertainty_rows, dim=1)
         reliability = torch.stack(reliability_rows, dim=1)
         future_address = torch.stack(address_rows, dim=1)
-        current_validity = facts.camera_validity.detach().float()[:, None]
+        current_validity = facts.validity.detach().float()[:, None]
         # Current object facts are visible and persistent by construction.
         # Export changes around that current state so a neutral/static future
         # is exactly zero and cannot become a constant P2 value shortcut.
         visibility_change = visibility - 1.0
         persistence_change = persistence_probability - 1.0
-        future_selector_validity = (
-            current_validity * visibility[:, :, :, None, :]
-        )
+        future_selector_validity = current_validity * visibility
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
@@ -403,7 +396,7 @@ class ObjectFutureTeacher(nn.Module):
             reliability=reliability,
             future_selector_validity=future_selector_validity,
             future_address=future_address,
-            object_coordinates=facts.camera_coordinates.detach().float(),
+            object_coordinates=facts.coordinates.detach().float(),
         )
         target.validate()
         if not collect_diagnostics:

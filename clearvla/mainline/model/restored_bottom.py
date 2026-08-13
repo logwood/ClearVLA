@@ -202,6 +202,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         *,
         executed_memory: Tensor,
         action_history_keep: Tensor,
+        role: Tensor | None = None,
     ) -> tuple[Tensor, V120SeedContext]:
         """Build the one shared V120 seed consumed by top and bottom."""
 
@@ -211,6 +212,23 @@ class RestoredV120EvidenceBottom(nn.Module):
             history,
             executed_memory=executed_memory,
             action_history_keep=action_history_keep,
+            role=role,
+        )
+
+    def sample_role_table(self, reference: Tensor) -> Tensor:
+        return self.query_encoder.sample_role_table(reference)
+
+    def grounding_canvas(
+        self,
+        *,
+        state: Tensor,
+        rollout_init: Tensor,
+        role: Tensor,
+    ) -> tuple[Tensor, dict[str, slice]]:
+        return self.query_encoder.grounding_canvas(
+            state=state,
+            rollout_init=rollout_init,
+            role=role,
         )
 
     def clean_action_basis_tokens(

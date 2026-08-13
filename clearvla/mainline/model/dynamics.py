@@ -211,11 +211,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         object_covariance = F.softplus(
             self.covariance_head(hidden).float()
         ).to(dtype=hidden.dtype)
-        cameras = int(facts.camera_coordinates.shape[2])
-        transport = object_transport[:, :, :, None].expand(-1, -1, -1, cameras, -1)
-        covariance = object_covariance[:, :, :, None].expand(
-            -1, -1, -1, cameras, -1
-        )
         visibility = (
             1.0 - 2.0 * torch.sigmoid(self.visibility_head(hidden).float())
         ).to(dtype=hidden.dtype)
@@ -227,25 +222,22 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         ).to(dtype=hidden.dtype)
         reliability = torch.zeros_like(uncertainty)
         visibility_probability = (1.0 + visibility.float()).clamp(0.0, 1.0)
-        future_selector_validity = (
-            facts.camera_validity[:, None].float()
-            * visibility_probability[:, :, :, None, :]
-        )
-        address = self._transport_address(facts.object_to_chart, transport)
+        future_selector_validity = facts.validity[:, None].float() * visibility_probability
+        address = self._transport_address(facts.object_to_chart, object_transport)
         current_reference = facts.content.detach()
         return FutureObjectDynamics(
             current_reference=current_reference,
             successor_content=current_reference[:, None] + semantic_delta,
             semantic_delta=semantic_delta,
-            transport_mean=transport,
-            transport_covariance=covariance,
+            transport_mean=object_transport,
+            transport_covariance=object_covariance,
             visibility=visibility,
             persistence=persistence,
             uncertainty=uncertainty,
             reliability=reliability,
             future_selector_validity=future_selector_validity,
             future_address=address,
-            object_coordinates=facts.camera_coordinates,
+            object_coordinates=facts.coordinates.to(dtype=hidden.dtype),
         )
 
     @staticmethod
@@ -262,9 +254,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
         base_grid = torch.stack((coordinate_x, coordinate_y), dim=-1)
-        sampling_grid = (
+        # This diagnostic applies the one physical object displacement to
+        # each *existing* camera chart.  Let the camera axis come from the
+        # current object address itself; do not manufacture a camera-valued W
+        # prediction by expanding transport.
+        camera_grid = (
             base_grid.reshape(1, 1, 1, 1, rows, columns, 2)
-            - transport.float()[..., None, None, :]
+            + torch.zeros_like(current.float()[:, None, :, :, :, :, None])
+        )
+        sampling_grid = (
+            camera_grid
+            - transport.float()[:, :, :, None, None, None, :]
         )
         source = current.float()[:, None].expand(
             -1, intervals, -1, -1, -1, -1

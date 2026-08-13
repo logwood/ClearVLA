@@ -1155,6 +1155,44 @@ GRADIENT_KEYS = (
     "gradient_postclip_bottom_capacity_l2",
     "gradient_postclip_bottom_execution_l2",
     "gradient_postclip_bottom_heads_l2",
+    # Schema24 exposes the actual three-stage V120 lifecycle.  Keep the old
+    # postclip rows above so historical runs remain comparable, but never
+    # relabel a post-global value as a raw owner gradient.
+    *(
+        f"gradient_{stage}_{role}_l2"
+        for stage in ("raw", "postlocal", "postglobal")
+        for role in (
+            "observation",
+            "grounding",
+            "grounder",
+            "intent",
+            "coarse_action",
+            "plan_recognizer",
+            "history_proposal",
+            "dynamics",
+            "controlled_transition",
+            "p1_factual",
+            "p2_effect_reader",
+            "consequence",
+            "p3_compiler",
+            "v120_canvas_seed",
+            "v120_layer_contracts",
+            "bottom_query",
+            "bottom_evidence_adapter",
+            "bottom_policy_bridge",
+            "bottom_organizer",
+            "bottom_mmdit",
+            "bottom_capacity",
+            "bottom_execution",
+            "bottom_heads",
+        )
+    ),
+    "gradient_raw_global_l2",
+    "gradient_postlocal_global_l2",
+    "gradient_postglobal_global_l2",
+    "gradient_raw_bottom_decoder_l2",
+    "gradient_postlocal_bottom_decoder_l2",
+    "gradient_postglobal_bottom_decoder_l2",
 )
 
 VALIDATION_KEYS = (
@@ -2139,6 +2177,49 @@ def _window_stats(run: ParsedRun, key: str, tail: int) -> dict[str, Any]:
     }
 
 
+def _window_stats_through_batch(
+    run: ParsedRun,
+    key: str,
+    *,
+    epoch: int,
+    batch: int,
+    tail: int,
+) -> dict[str, Any]:
+    """Summarize one metric at a fixed aligned training boundary.
+
+    Recovery audits must compare the same optimization age.  Reusing the
+    complete-run tail for V120 while the candidate has only reached epoch 1
+    silently compares batch ~2200 with epoch 8 and makes every early gate
+    meaningless.
+    """
+
+    values = [
+        point.metrics[key]
+        for point in run.batch_points
+        if (point.epoch, point.batch) <= (int(epoch), int(batch))
+        and key in point.metrics
+        and math.isfinite(point.metrics[key])
+    ]
+    if not values:
+        return {
+            "count": 0,
+            "first": None,
+            "last": None,
+            "tail_median": None,
+            "change": None,
+        }
+    window = max(1, min(int(tail), max(len(values) // 4, 1)))
+    first = _median(values[:window])
+    last = _median(values[-window:])
+    return {
+        "count": len(values),
+        "first": first,
+        "last": last,
+        "tail_median": _median(values[-int(tail) :]),
+        "change": _relative_change(first, last),
+    }
+
+
 LOSS_COMPONENTS: tuple[tuple[str, str, str | None, str], ...] = (
     ("flow", "physical_flow", None, "action"),
     ("proposal", "proposal", "proposal_loss_weight", "action"),
@@ -2943,6 +3024,19 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
     }
     all_batch_keys = sorted({key for point in run.batch_points for key in point.metrics})
     metric_index = {key: _window_stats(run, key, tail) for key in all_batch_keys}
+    aligned_batch_2200 = {
+        key: stats
+        for key in all_batch_keys
+        if (
+            stats := _window_stats_through_batch(
+                run,
+                key,
+                epoch=1,
+                batch=2200,
+                tail=tail,
+            )
+        )["count"]
+    }
     epochs: list[dict[str, Any]] = []
     for record in run.epoch_records:
         train = _train_section(record)
@@ -3035,12 +3129,18 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
             ),
             "z_probe": _config_value(run, "z_probe", "latent_cvae_z_probe"),
         },
+        "module_parameters": (
+            dict(run.context.get("module_parameters", {}))
+            if isinstance(run.context.get("module_parameters"), Mapping)
+            else {}
+        ),
         "loss_budget": _loss_budget(run),
         "trajectories": trajectories,
         "structure": structure,
         "gradients": gradients,
         "performance": _performance_summary(run),
         "metric_index": metric_index,
+        "aligned_batch_2200": aligned_batch_2200,
         "epochs": epochs,
         "latest_epoch_metrics": (
             {
@@ -3243,7 +3343,9 @@ def _is_v120_normalizer_fingerprint(value: Any) -> bool:
 
 
 def _recovery_assessment(
-    baseline: Mapping[str, Any], candidate: Mapping[str, Any]
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    parent: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate one complete candidate against the frozen V120 behavior.
 
@@ -3433,6 +3535,78 @@ def _recovery_assessment(
         ),
     )
 
+    # Schema24's source-level recovery gate is intentionally evaluated at the
+    # same optimization age (epoch 1, batch <=2200), before a complete long
+    # run exists.  Report the values without inventing pass/fail thresholds
+    # when the frozen Schema23 audit series was not supplied.  The complete
+    # eight-epoch gate below remains authoritative for release.
+    early_metrics = (
+        ("g3_parent_l1", ("object_grounding_g3_parent_l1",)),
+        (
+            "object_pair_cosine",
+            ("object_grounding_object_content_pair_cosine",),
+        ),
+        (
+            "p1_spatial_variation",
+            (
+                "object_p1_spatial_variation",
+                "p1_query_chart_variation",
+                "p1_spatial_var",
+            ),
+        ),
+        ("p2_null_mass", ("object_p2_null_mass",)),
+        (
+            "p2_effect_rms",
+            (
+                "object_p2_effect_precontract_rms",
+                "object_p2_effect_rms",
+                "object_consequence_effect_rms",
+            ),
+        ),
+    )
+    baseline_early = baseline.get("aligned_batch_2200", {})
+    candidate_early = candidate.get("aligned_batch_2200", {})
+    parent_early = parent.get("aligned_batch_2200", {}) if parent is not None else {}
+
+    def first_early_value(source: Mapping[str, Any], names: tuple[str, ...]) -> Any:
+        for name in names:
+            value = source.get(name, {}).get("tail_median")
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        return None
+
+    for label, names in early_metrics:
+        old = first_early_value(baseline_early, names)
+        new = first_early_value(candidate_early, names)
+        parent_value = first_early_value(parent_early, names)
+        if old is None or new is None or (parent is not None and parent_value is None):
+            status = "incomplete"
+            closure = None
+        elif parent is None:
+            status = "pass"
+            closure = None
+        else:
+            assert parent_value is not None
+            parent_distance = abs(parent_value - old)
+            candidate_distance = abs(new - old)
+            tolerance = max(1e-8, abs(old) * 1e-6)
+            if parent_distance <= tolerance:
+                closure = 1.0 if candidate_distance <= tolerance else -candidate_distance
+                status = "pass" if candidate_distance <= tolerance else "fail"
+            else:
+                closure = 1.0 - candidate_distance / parent_distance
+                status = "pass" if closure >= 0.50 else "fail"
+        record(
+            f"early_batch_2200/{label}",
+            status,
+            baseline_value={"v120": old, "schema23": parent_value},
+            candidate_value={"schema24": new, "gap_closure": closure},
+            detail=(
+                "same-age metric; when Schema23 is supplied, Schema24 must "
+                "close at least 50% of its absolute distance to V120"
+            ),
+        )
+
     validation_metrics: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
         ("action_rmse", ("full_rmse",), ("full_rmse",), "lower"),
         ("first_rmse", ("first_rmse",), ("first_rmse",), "lower"),
@@ -3470,7 +3644,12 @@ def _recovery_assessment(
     for label, old_names, new_names, direction in validation_metrics:
         old_values = _epoch_metric_series(baseline, old_names)
         new_values = _epoch_metric_series(candidate, new_names)
-        if len(old_values) < baseline_epochs or len(new_values) < candidate_epochs:
+        if (
+            baseline_epochs < 1
+            or candidate_epochs < 1
+            or len(old_values) < baseline_epochs
+            or len(new_values) < candidate_epochs
+        ):
             record(
                 f"validation/{label}",
                 "incomplete",
@@ -3497,7 +3676,12 @@ def _recovery_assessment(
 
     old_event_ratio = _epoch_metric_series(baseline, ("gripper_event_ratio",))
     new_event_ratio = _epoch_metric_series(candidate, ("gripper_event_ratio",))
-    if len(old_event_ratio) < baseline_epochs or len(new_event_ratio) < candidate_epochs:
+    if (
+        baseline_epochs < 1
+        or candidate_epochs < 1
+        or len(old_event_ratio) < baseline_epochs
+        or len(new_event_ratio) < candidate_epochs
+    ):
         record(
             "validation/gripper_event_rate_calibration",
             "incomplete",
@@ -3569,21 +3753,35 @@ def _recovery_assessment(
             detail="cosine checks reject exact object-slot publicization",
         )
 
-    required_gradients = (
-        "gradient_postclip_grounder_l2",
-        "gradient_postclip_intent_l2",
-        "gradient_postclip_dynamics_l2",
-        "gradient_postclip_p1_factual_l2",
-        "gradient_postclip_p2_effect_reader_l2",
-        "gradient_postclip_p3_compiler_l2",
-        "gradient_postclip_v120_canvas_seed_l2",
-        "gradient_postclip_v120_layer_contracts_l2",
-        "gradient_postclip_bottom_evidence_adapter_l2",
-        "gradient_postclip_bottom_policy_bridge_l2",
-        "gradient_postclip_bottom_capacity_l2",
-        "gradient_postclip_bottom_execution_l2",
-    )
     gradients = candidate.get("gradients", {})
+    candidate_schema = candidate_manifest.get("architecture_schema")
+    schema24 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 24
+    ) or any(name.startswith("gradient_raw_") for name in gradients)
+    owner_rows = (
+        "grounder",
+        "intent",
+        "dynamics",
+        "p1_factual",
+        "p2_effect_reader",
+        "p3_compiler",
+        "v120_canvas_seed",
+        "v120_layer_contracts",
+        "bottom_evidence_adapter",
+        "bottom_policy_bridge",
+        "bottom_capacity",
+        "bottom_execution",
+    )
+    required_gradients = (
+        tuple(
+            f"gradient_{stage}_{owner}_l2"
+            for stage in ("raw", "postlocal", "postglobal")
+            for owner in owner_rows
+        )
+        if schema24
+        else tuple(f"gradient_postclip_{owner}_l2" for owner in owner_rows)
+    )
     for name in required_gradients:
         value = gradients.get(name, {}).get("tail_median")
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -3591,6 +3789,26 @@ def _recovery_assessment(
         else:
             status = "pass" if float(value) > 1e-12 else "fail"
         record(f"gradient/{name}", status, candidate_value=value)
+
+    if schema24:
+        for name in (
+            "gradient_postlocal_bottom_decoder_l2",
+            "gradient_postglobal_global_l2",
+        ):
+            value = gradients.get(name, {}).get("tail_median")
+            status = (
+                "pass"
+                if isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                and float(value) <= 1.0001
+                else ("incomplete" if value is None else "fail")
+            )
+            record(
+                f"gradient_bound/{name}",
+                status,
+                baseline_value=1.0,
+                candidate_value=value,
+            )
 
     latest_val = (
         candidate.get("epochs", [])[-1].get("val", {})
@@ -3634,6 +3852,7 @@ def _recovery_assessment(
     status = "fail" if failed else ("incomplete" if incomplete else "pass")
     return {
         "baseline": baseline.get("label"),
+        "parent": parent.get("label") if parent is not None else None,
         "candidate": candidate.get("label"),
         "status": status,
         "failed": failed,
@@ -3729,6 +3948,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="frozen complete V120 log/run used for strict recovery assessment",
     )
     parser.add_argument(
+        "--recovery-parent",
+        type=Path,
+        help=(
+            "rejected Schema23 log/run used only for the aligned batch-2200 "
+            "absolute-gap closure gate"
+        ),
+    )
+    parser.add_argument(
         "--require-recovery",
         action="store_true",
         help="exit nonzero unless every candidate proves complete V120 recovery",
@@ -3742,11 +3969,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--tail must be positive")
     if args.require_recovery and args.recovery_baseline is None:
         raise SystemExit("--require-recovery needs --recovery-baseline")
+    if args.recovery_parent is not None and args.recovery_baseline is None:
+        raise SystemExit("--recovery-parent needs --recovery-baseline")
     try:
         runs = [parse_run_input(path) for path in args.logs]
         baseline_run = (
             parse_run_input(args.recovery_baseline)
             if args.recovery_baseline is not None
+            else None
+        )
+        parent_run = (
+            parse_run_input(args.recovery_parent)
+            if args.recovery_parent is not None
             else None
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -3759,9 +3993,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     baseline_summary = (
         build_summary(baseline_run, tail=args.tail) if baseline_run is not None else None
     )
+    parent_summary = (
+        build_summary(parent_run, tail=args.tail) if parent_run is not None else None
+    )
     recovery = (
         [
-            _recovery_assessment(baseline_summary, summary)
+            _recovery_assessment(baseline_summary, summary, parent_summary)
             for summary in summaries
         ]
         if baseline_summary is not None
@@ -3771,6 +4008,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runs": summaries,
         "comparison": _comparison(summaries),
         "recovery_baseline": baseline_summary,
+        "recovery_parent": parent_summary,
         "recovery": recovery,
     }
     if args.format == "json":

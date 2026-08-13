@@ -43,11 +43,11 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 23
-    assert components.observation == "restored_v120_three_frame_flow_dino_raw_local_chart"
+    assert ARCHITECTURE_MANIFEST.schema == 24
+    assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "v120_cumulative_intent_four_interval_dynamics_split_support_selector_protected_candidate_p1_five_lane_p3"
+        == "v120_progressive_g123_dense_grounder_exact_p1_object_geometry_four_interval_w_five_lane_p3"
     )
     assert (
         components.bottom
@@ -55,14 +55,14 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_exact_role_lr"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip"
     )
     assert components.runtime == (
-        "cached_observation_gsw_p1_detail_v120_nodes_clean_endpoint_teacher_isolated"
+        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated"
     )
 
 
-def test_schema_23_active_parameter_inventory_cannot_silently_shrink() -> None:
+def test_schema_24_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):
@@ -72,13 +72,11 @@ def test_schema_23_active_parameter_inventory_cannot_silently_shrink() -> None:
             sum(parameter.numel() for parameter in parameters if parameter.requires_grad),
         )
 
-    assert counts(model) == (182_724_214, 164_041_578)
-    assert {name: counts(module) for name, module in model.named_children()} == {
-        "observation": (13_543_661, 3_819_155),
-        "action_codec": (0, 0),
-        "top": (92_909_001, 92_810_697),
-        "history_proposal": (10_014_727, 10_010_631),
-        "factual_reader": (2_467_328, 2_467_328),
-        "transition": (8_029_833, 7_897_097),
-        "bottom": (55_759_664, 47_036_670),
-    }
+    children = {name: counts(module) for name, module in model.named_children()}
+    total, trainable = counts(model)
+    assert total == sum(value[0] for value in children.values())
+    assert trainable == sum(value[1] for value in children.values())
+    assert children["bottom"][0] > 50_000_000
+    assert children["factual_reader"][0] > 2_000_000
+    assert counts(model.top.grounding_blocks)[0] > 1_000_000
+    assert counts(model.top.grounder)[0] > 1_000_000

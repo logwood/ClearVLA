@@ -1,9 +1,11 @@
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import torch
 
-from clearvla.mainline.model import LocalFactSet, ObjectFactualDock
+from clearvla.mainline.config import ExperimentConfig
+from clearvla.mainline.model import FactualPrecisionDock, LocalFactSet
 from clearvla.mainline.model.top import ObjectIntentDynamicsTop, OnlineTopContext
+from clearvla.mainline.v120_core.profile import build_v120_visual_config
 
 
 def _local_facts(batch: int = 2) -> LocalFactSet:
@@ -29,6 +31,20 @@ def _local_facts(batch: int = 2) -> LocalFactSet:
 
 
 def _top() -> ObjectIntentDynamicsTop:
+    base = ExperimentConfig()
+    config = replace(
+        base,
+        dimensions=replace(
+            base.dimensions,
+            hidden_size=32,
+            num_heads=4,
+            visual_token_dim=16,
+            goal_token_dim=12,
+            action_basis_tokens=2,
+        ),
+        bottom=replace(base.bottom, controller_heads=4),
+    )
+    config.validate()
     return ObjectIntentDynamicsTop(
         hidden=32,
         content_dim=16,
@@ -40,6 +56,7 @@ def _top() -> ObjectIntentDynamicsTop:
         basis=2,
         heads=4,
         teacher_key_dim=8,
+        core_config=build_v120_visual_config(config),
     )
 
 
@@ -98,20 +115,9 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     torch.manual_seed(11)
     top = _top()
     context = _context(top)
-    batch, horizon, basis, objects, hidden = 2, 24, 2, 4, 32
-    fact_by_object = torch.randn(batch, horizon, basis, objects, hidden)
-    object_posterior = torch.softmax(torch.randn(batch, horizon, basis, objects + 1), dim=-1)
-    chart = context.facts.object_to_chart[:, None, None].expand(-1, horizon, basis, -1, -1, -1, -1)
-    coordinates = context.facts.camera_coordinates[:, None, None].expand(
-        -1, horizon, basis, -1, -1, -1
-    )
-    dock = ObjectFactualDock(
-        fact_by_object=fact_by_object,
-        object_posterior=object_posterior[..., :-1],
-        null_posterior=object_posterior[..., -1:],
-        chart_posterior=chart,
-        camera_coordinates=coordinates,
-        aggregate_fact=torch.einsum("btqk,btqkh->btqh", object_posterior[..., :-1], fact_by_object),
+    batch, horizon, basis, hidden = 2, 24, 2, 32
+    dock = FactualPrecisionDock(
+        protected_detail=torch.randn(batch, horizon, basis, hidden),
     )
     action_query = torch.randn(batch, horizon, basis, hidden)
     captured: dict[str, torch.Tensor] = {}
@@ -133,7 +139,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     try:
         compiled, _ = top.compile_policy(
             context.deployment_cache(),
-            p1_fact=dock.aggregate_fact,
+            p1_fact=dock.protected_detail,
             action_query=action_query,
         )
     finally:
@@ -143,7 +149,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     assert tuple(compiled.plan.protected_base.shape) == (batch, horizon, basis, hidden)
     torch.testing.assert_close(
         captured["p2_query"],
-        action_query + dock.aggregate_fact,
+        action_query + dock.protected_detail,
         atol=0.0,
         rtol=0.0,
     )

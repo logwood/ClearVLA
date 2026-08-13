@@ -77,7 +77,9 @@ def active_metrics(values: Mapping[str, float], *, zero_tolerance: float = 0.0) 
         visible_zero = (
             name == "loss_ledger_gap"
             or name == "loss_contribution_gap"
-            or name.startswith("gradient_postclip_")
+            or name.startswith("gradient_raw_")
+            or name.startswith("gradient_postlocal_")
+            or name.startswith("gradient_postglobal_")
             or name.endswith("_nonexpansive_violation")
             or name.endswith("_mass_conservation_error")
             or name
@@ -500,17 +502,22 @@ class JsonlRunLogger:
                 rows.append(
                     " ".join((f"[mainline-{kind}-{label}]", lead_suffix, *fields))
                 )
-        gradient_fields = [
-            f"{name}={value:.3e}"
-            for name, value in sorted(metrics.items())
-            if name.startswith("gradient_postclip_")
-        ]
-        if gradient_fields:
-            rows.append(
-                " ".join(
-                    (f"[mainline-{kind}-grad]", lead_suffix, *gradient_fields)
+        for stage in ("raw", "postlocal", "postglobal"):
+            gradient_fields = [
+                f"{name}={value:.3e}"
+                for name, value in sorted(metrics.items())
+                if name.startswith(f"gradient_{stage}_")
+            ]
+            if gradient_fields:
+                rows.append(
+                    " ".join(
+                        (
+                            f"[mainline-{kind}-grad-{stage}]",
+                            lead_suffix,
+                            *gradient_fields,
+                        )
+                    )
                 )
-            )
         block_fields = [
             f"{name}={value:.6g}"
             for name, value in sorted(metrics.items())

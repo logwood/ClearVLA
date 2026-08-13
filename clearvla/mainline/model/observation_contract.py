@@ -14,7 +14,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from ..v120_core.flow_dino_evidence import ProgressiveFineCandidates
+from ..v120_core.flow_dino_evidence import (
+    LateRawDetailEvidence,
+    ProgressiveGroundingAddressState,
+    SoftAddressLatticeBank,
+)
 from .types import LocalFactSet
 
 
@@ -81,11 +85,13 @@ class PatchFlowField:
 
 
 @dataclass(frozen=True)
-class ObservationEvidence:
-    """Current facts plus the sole high-resolution bank available to P1."""
+class GroundingObservationBank:
+    """Complete pre-G observation bank; no local fact is materialized yet."""
 
-    local_facts: LocalFactSet
-    progressive_candidates: ProgressiveFineCandidates
+    address_bank: SoftAddressLatticeBank
+    late_detail: LateRawDetailEvidence
+    visual_memory: Tensor
+    visual_value_memory: Tensor
     detail_features: Tensor
     previous_detail_features: Tensor
     earlier_detail_features: Tensor | None
@@ -98,9 +104,17 @@ class ObservationEvidence:
     native_flow_losses: dict[str, Tensor] | None = None
 
     def validate(self) -> None:
-        self.local_facts.validate()
-        batch = self.local_facts.batch
-        cameras = int(self.local_facts.public_scene_base.shape[1])
+        if self.address_bank.dense_current_dino_content is None:
+            raise ValueError("grounding bank lost the full current DINO chart")
+        if self.late_detail.address_bank is not self.address_bank:
+            raise ValueError("late detail and grounding address bank must be identical")
+        batch, cameras = self.address_bank.dense_current_dino_content.shape[:2]
+        if self.visual_memory.ndim != 3 or tuple(self.visual_memory.shape) != tuple(
+            self.visual_value_memory.shape
+        ):
+            raise ValueError("grounding selector/value memory must align as [B,N,H]")
+        if int(self.visual_memory.shape[0]) != batch:
+            raise ValueError("grounding memory batch does not align with the address bank")
         if self.detail_features.ndim != 5 or tuple(self.detail_features.shape[:2]) != (
             batch,
             cameras,
@@ -125,34 +139,6 @@ class ObservationEvidence:
             raise ValueError("context mask must preserve [B,C,8,8]")
         self.flow.validate()
         self.earlier_flow.validate()
-        candidates = self.progressive_candidates
-        candidate_prefix = (
-            batch,
-            cameras,
-            8,
-            8,
-            self.local_facts.local_hypotheses,
-        )
-        if candidates.learned_detail.ndim != 7 or tuple(
-            candidates.learned_detail.shape[:5]
-        ) != candidate_prefix:
-            raise ValueError(
-                "progressive fine candidates must preserve [B,C,8,8,M,N,*]"
-            )
-        fine_prefix = tuple(candidates.learned_detail.shape[:-1])
-        if tuple(candidates.valid.shape) != fine_prefix:
-            raise ValueError("progressive fine validity lost the N candidate axis")
-        if tuple(candidates.current_coordinates.shape) != (*fine_prefix, 2):
-            raise ValueError("progressive fine coordinates are misaligned")
-        for name in (
-            "semantic_keys",
-            "appearance_keys",
-            "geometry_keys",
-            "literal_rgb",
-        ):
-            value = getattr(candidates, name)
-            if value is None or tuple(value.shape[:-1]) != fine_prefix:
-                raise ValueError(f"progressive candidate {name} is missing or misaligned")
         if self.native_flow_losses is not None:
             required = {
                 "flow_jepa_warp_loss",
@@ -176,7 +162,78 @@ class ObservationEvidence:
             )
 
 
+@dataclass(frozen=True)
+class ObservationEvidence:
+    """Completed G3 facts plus the one lossless V120 precision bank."""
+
+    grounding: GroundingObservationBank
+    progressive_state: ProgressiveGroundingAddressState
+    local_facts: LocalFactSet
+
+    def validate(self) -> None:
+        self.grounding.validate()
+        self.local_facts.validate()
+        state = self.progressive_state
+        if state.stage != 3 or state.grounded_fact_set is None:
+            raise ValueError("observation evidence requires completed G1/G2/G3 facts")
+        required = (
+            state.dynamic_fine_values,
+            state.dynamic_fine_valid,
+            state.dynamic_fine_coordinates,
+            state.dynamic_semantic_keys,
+            state.dynamic_appearance_keys,
+            state.dynamic_geometry_keys,
+            state.dynamic_literal_rgb,
+        )
+        if not all(torch.is_tensor(value) for value in required):
+            raise ValueError("completed G3 state lost its N=49 precision candidates")
+        assert state.dynamic_fine_values is not None
+        if int(state.dynamic_fine_values.shape[-2]) != 49:
+            raise ValueError("V120 P1 requires the complete N=49 candidate axis")
+
+    @property
+    def detail_features(self) -> Tensor:
+        return self.grounding.detail_features
+
+    @property
+    def previous_detail_features(self) -> Tensor:
+        return self.grounding.previous_detail_features
+
+    @property
+    def earlier_detail_features(self) -> Tensor | None:
+        return self.grounding.earlier_detail_features
+
+    @property
+    def literal_rgb(self) -> Tensor:
+        return self.grounding.literal_rgb
+
+    @property
+    def previous_literal_rgb(self) -> Tensor:
+        return self.grounding.previous_literal_rgb
+
+    @property
+    def earlier_literal_rgb(self) -> Tensor:
+        return self.grounding.earlier_literal_rgb
+
+    @property
+    def flow(self) -> PatchFlowField:
+        return self.grounding.flow
+
+    @property
+    def earlier_flow(self) -> PatchFlowField:
+        return self.grounding.earlier_flow
+
+    @property
+    def context_mask(self) -> Tensor:
+        return self.grounding.context_mask
+
+    @property
+    def native_flow_losses(self) -> dict[str, Tensor] | None:
+        return self.grounding.native_flow_losses
+
+
 __all__ = [
+    "GroundingObservationBank",
     "ObservationEvidence",
     "PatchFlowField",
     "_coordinate_grid",

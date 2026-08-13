@@ -12,7 +12,6 @@ from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
-from .factual_reader import ObjectFactualReader
 from .observation_contract import ObservationEvidence
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
@@ -24,10 +23,11 @@ from .top import (
     OnlineTopContext,
 )
 from .transition import ControlledTransitionDynamics
+from .v120_p1 import LateRawDetailPolicyReader
 from .types import (
     ControlledTransitionSource,
+    FactualPrecisionDock,
     HistoryActionProposalState,
-    ObjectFactualDock,
     ObjectTopTrainingTargets,
 )
 
@@ -37,11 +37,12 @@ class OnlinePolicyCache:
     """Current-only state reused by every deployment ODE step."""
 
     top: DeploymentTopCache
-    factual_dock: ObjectFactualDock
+    factual_dock: FactualPrecisionDock
     transition_source: ControlledTransitionSource
     history: ObservableHistory
     executed_memory: Tensor
     action_history_keep: Tensor
+    role_table: Tensor
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
@@ -49,7 +50,10 @@ class OnlinePolicyCache:
             hidden=config.dimensions.hidden_size,
             horizon=config.dimensions.action_horizon,
         )
-        self.factual_dock.validate()
+        self.factual_dock.validate(
+            horizon=config.dimensions.action_horizon,
+            basis=config.dimensions.action_basis_tokens,
+        )
         self.transition_source.validate(hidden=config.dimensions.hidden_size)
         expected_memory = (
             int(self.history.state.shape[0]),
@@ -60,6 +64,8 @@ class OnlinePolicyCache:
             raise ValueError("online cache lost compressed executed-action memory")
         if tuple(self.action_history_keep.shape) != (expected_memory[0],):
             raise ValueError("online cache action-history keep mask must be [B]")
+        if tuple(self.role_table.shape) != (8, config.dimensions.hidden_size):
+            raise ValueError("online cache lost the shared V120 role table")
 
 
 @dataclass(frozen=True)
@@ -128,6 +134,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             role_host_depth=top.role_host_depth,
             role_host_expansion=top.role_host_ffn_expansion,
             role_host_dropout=top.role_host_dropout,
+            core_config=self.observation.v120_config,
         )
         self.history_proposal = HistoryActionProposal(
             action_dim=dims.action_dim,
@@ -140,15 +147,8 @@ class ClearVLAMainlinePolicy(nn.Module):
             depth=top.proposal_depth,
             expansion=top.role_host_ffn_expansion,
         )
-        self.factual_reader = ObjectFactualReader(
-            hidden=dims.hidden_size,
-            content_dim=dims.visual_token_dim,
-            raw_dim=self.observation.detail_dim,
-            route_dim=obs.address_route_dim,
-            horizon=dims.action_horizon,
-            basis=dims.action_basis_tokens,
-            cameras=dims.num_cameras,
-            microgrid_side=obs.microgrid_side,
+        self.factual_reader = LateRawDetailPolicyReader(
+            self.observation.v120_config
         )
         self.transition = ControlledTransitionDynamics(
             hidden=dims.hidden_size,
@@ -238,11 +238,41 @@ class ClearVLAMainlinePolicy(nn.Module):
             history=conditioned_history,
             goal=conditioned_goal,
         )
-        evidence, observation_metrics = self.observation(
+        prepared = self.observation.prepare(
             conditioned_policy_input.observation,
             context_mask=context_mask,
             training_mask=training_mask,
             geometry_supervision=geometry_supervision,
+        )
+        role_table = self.bottom.sample_role_table(prepared.pack.value_tokens)
+        grounding_canvas, grounding_slices = self.bottom.grounding_canvas(
+            state=conditioned_policy_input.history.state,
+            rollout_init=prepared.pack.future_queries,
+            role=role_table,
+        )
+        grounding_bank, observation_metrics = self.observation.build_grounding_bank(
+            prepared,
+            grounding_canvas,
+            grounding_slices,
+            collect_diagnostics=collect_diagnostics,
+        )
+        progressive_state = self.observation.begin_progressive_grounding(
+            grounding_bank
+        )
+        progressive_state, grounding_canvas, grounding_metrics = (
+            self.top.run_progressive_grounding(
+                canvas=grounding_canvas,
+                slices=grounding_slices,
+                visual_memory=grounding_bank.visual_memory,
+                visual_value_memory=grounding_bank.visual_value_memory,
+                state=progressive_state,
+                advance=self.observation.advance_progressive_grounding,
+                collect_diagnostics=collect_diagnostics,
+            )
+        )
+        evidence, grounding_fact_metrics = self.observation.finalize_grounding(
+            grounding_bank,
+            progressive_state,
             collect_diagnostics=collect_diagnostics,
         )
         context, top_metrics = self.top.build_online_context(
@@ -254,17 +284,61 @@ class ClearVLAMainlinePolicy(nn.Module):
             executed_history=conditioned_policy_input.history.executed_action_history,
             collect_diagnostics=collect_diagnostics,
         )
-        factual_dock, p1_metrics = self.factual_reader(
-            evidence=evidence,
-            facts=context.facts,
-            intent=context.intent,
-            clean_action_basis=self.bottom.clean_action_basis_tokens(
-                batch,
-                device=context.intent.interval_queries.device,
-                dtype=context.intent.interval_queries.dtype,
+        clean_action_basis = self.bottom.clean_action_basis_tokens(
+            batch,
+            device=context.intent.interval_queries.device,
+            dtype=context.intent.interval_queries.dtype,
+        )
+        clean_trajectory = clean_action_basis.reshape(
+            batch,
+            self.config.dimensions.action_horizon
+            * self.config.dimensions.action_basis_tokens,
+            self.config.dimensions.hidden_size,
+        )
+        p1_detail = replace(
+            evidence.grounding.late_detail,
+            progressive_address=evidence.progressive_state,
+        )
+        updated_trajectory, p1_metrics = self.factual_reader(
+            clean_trajectory,
+            grounding_canvas[:, grounding_slices["rollout"]],
+            p1_detail,
+            phase_context=context.intent.interval_queries,
+            condition_query_context=(
+                context.intent.protected_goal_set.mean(dim=1)[:, None].expand(-1, 4, -1)
             ),
+            history_query_context=(
+                context.intent.history_tokens[:, -1:, :].expand(-1, 4, -1)
+            ),
+            clean_basis_tokens=clean_action_basis,
             collect_diagnostics=collect_diagnostics,
         )
+        factual_dock = FactualPrecisionDock(
+            protected_detail=(updated_trajectory - clean_trajectory).reshape(
+                batch,
+                self.config.dimensions.action_horizon,
+                self.config.dimensions.action_basis_tokens,
+                self.config.dimensions.hidden_size,
+            )
+        )
+        factual_dock.validate(
+            horizon=self.config.dimensions.action_horizon,
+            basis=self.config.dimensions.action_basis_tokens,
+        )
+        p1_aliases = {
+            "flow_jepa_p1_query_rows": "p1_query_rows",
+            "flow_jepa_p1_query_chunk": "p1_query_chunk",
+            "flow_jepa_p1_shared_factual": "p1_shared_factual",
+            "flow_jepa_p1_g3_only_factual_address": "p1_g3_only_address",
+            "flow_jepa_p1_clean_basis_entropy": "p1_clean_basis_entropy",
+            "flow_jepa_typed_p1_micro_grid": "p1_microgrid_side",
+            "flow_jepa_typed_p1_micro_token_count": "p1_microgrid_tokens",
+            "flow_jepa_typed_p1_micro_value_rms": "p1_microgrid_value_rms",
+            "flow_jepa_typed_p1_spatial_variation": "p1_spatial_variation",
+            "flow_jepa_typed_p1_activation_checkpoint_active": (
+                "p1_activation_checkpoint_active"
+            ),
+        }
         transition_source, transition_metrics = self.transition.build_source(
             facts=context.facts,
             collect_diagnostics=collect_diagnostics,
@@ -276,6 +350,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             history=conditioned_policy_input.history,
             executed_memory=history_proposal.history_tokens,
             action_history_keep=history_keep,
+            role_table=role_table,
         )
         training_state = OnlineTrainingState(
             observation=evidence,
@@ -288,8 +363,15 @@ class ClearVLAMainlinePolicy(nn.Module):
             return cache, training_state, {}
         return cache, training_state, {
             **observation_metrics,
+            **grounding_metrics,
+            **grounding_fact_metrics,
             **top_metrics,
             **p1_metrics,
+            **{
+                target: p1_metrics[source]
+                for source, target in p1_aliases.items()
+                if source in p1_metrics
+            },
             **transition_metrics,
             "condition_goal_keep": goal_keep.detach().float().mean(),
             "condition_action_history_keep": history_keep.detach().float().mean(),
@@ -358,10 +440,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             cache.history,
             executed_memory=cache.executed_memory,
             action_history_keep=cache.action_history_keep,
+            role=cache.role_table,
         )
         p1_fact, p1_metrics = self.bottom.complete_p1_fact(
             action_query=action_query,
-            protected_detail=cache.factual_dock.aggregate_fact,
+            protected_detail=cache.factual_dock.protected_detail,
             time=time,
             collect_diagnostics=collect_diagnostics,
         )

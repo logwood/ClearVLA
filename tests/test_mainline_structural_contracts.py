@@ -28,9 +28,9 @@ from clearvla.mainline.model.top import DeploymentTopCache, ObjectIntentDynamics
 from clearvla.mainline.model.types import (
     FutureObjectDynamics,
     LocalFactSet,
-    ObjectFactualDock,
 )
 from clearvla.mainline.training.losses import flow_geometry_terms, future_dynamics_terms
+from clearvla.mainline.v120_core.profile import build_v120_visual_config
 from clearvla.mainline.v120_core.refinement import NestedLowRankContractionBank
 
 
@@ -88,14 +88,44 @@ def _local_facts(
     )
 
 
-def test_masked_reconstruction_keeps_target_without_reopening_candidates() -> None:
+def _object_top() -> ObjectIntentDynamicsTop:
+    base = ExperimentConfig()
+    config = replace(
+        base,
+        dimensions=replace(
+            base.dimensions,
+            hidden_size=32,
+            num_heads=4,
+            visual_token_dim=16,
+            goal_token_dim=12,
+            action_basis_tokens=2,
+        ),
+        bottom=replace(base.bottom, controller_heads=4),
+    )
+    config.validate()
+    return ObjectIntentDynamicsTop(
+        hidden=32,
+        content_dim=16,
+        route_dim=8,
+        goal_dim=12,
+        state_dim=7,
+        action_dim=7,
+        horizon=24,
+        basis=2,
+        heads=4,
+        teacher_key_dim=8,
+        core_config=build_v120_visual_config(config),
+    )
+
+
+def test_grounder_owns_only_one_dense_reconstruction_objective() -> None:
     torch.manual_seed(1)
     local = _local_facts(
         content=8,
         route=4,
         hidden=16,
-        valid=False,
-        observed=False,
+        valid=True,
+        observed=True,
     )
     public = local.public_scene_base.detach().clone().requires_grad_(True)
     candidates = local.content_slots.detach().clone().requires_grad_(True)
@@ -115,16 +145,14 @@ def test_masked_reconstruction_keeps_target_without_reopening_candidates() -> No
     )
     facts, metrics = grounder(local)
     assert torch.count_nonzero(facts.dense_chart.dino_content) > 0
-    assert metrics["object_grounding_masked_reconstruction_mse"] > 0
+    assert metrics["object_grounding_reconstruction_mse"] > 0
+    assert not any(
+        name in " ".join(metrics)
+        for name in ("prototype", "masked_reconstruction", "typed_consistency")
+    )
     facts.reconstruction_error.backward()
     assert public.grad is not None and public.grad.abs().sum() > 0
-    assert candidates.grad is None or torch.count_nonzero(candidates.grad) == 0
-    reconstruction_grad = sum(
-        parameter.grad.abs().sum()
-        for parameter in grounder.reconstruction_query.parameters()
-        if parameter.grad is not None
-    )
-    assert reconstruction_grad > 0
+    assert candidates.grad is not None and candidates.grad.abs().sum() > 0
 
 
 def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:
@@ -135,15 +163,15 @@ def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:
         current_reference=torch.randn(batch, objects, content),
         successor_content=torch.randn(batch, intervals, objects, content),
         semantic_delta=torch.randn(batch, intervals, objects, content),
-        transport_mean=torch.randn(batch, intervals, objects, cameras, 2),
-        transport_covariance=torch.rand(batch, intervals, objects, cameras, 3),
+        transport_mean=torch.randn(batch, intervals, objects, 2),
+        transport_covariance=torch.rand(batch, intervals, objects, 3),
         visibility=torch.zeros_like(scalar),
         persistence=torch.zeros_like(scalar),
         uncertainty=torch.zeros_like(scalar),
         reliability=scalar,
-        future_selector_validity=scalar[:, :, :, None],
+        future_selector_validity=scalar,
         future_address=torch.full((batch, intervals, objects, cameras, 2, 2), 0.25),
-        object_coordinates=torch.zeros(batch, objects, cameras, 2),
+        object_coordinates=torch.zeros(batch, objects, 2),
     )
     recognizer = FuturePlanRecognizer(
         hidden=16,
@@ -156,6 +184,7 @@ def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:
         future_action=torch.randn(batch, 48, 2),
         future_state=torch.randn(batch, 48, 2),
         teacher=teacher,
+        current_loss_support=torch.ones(batch, objects, cameras, 1),
     )
     assert tuple(result.interval_targets.shape) == (batch, intervals, 16)
     assert tuple(result.action_summary.shape) == (batch, intervals, 2)
@@ -171,15 +200,15 @@ def test_future_recognizer_supervises_neutral_objects_without_reliability_discou
         current_reference=current,
         successor_content=current[:, None].expand(-1, intervals, -1, -1),
         semantic_delta=torch.ones(batch, intervals, objects, content),
-        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
-        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
+        transport_mean=torch.zeros(batch, intervals, objects, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, 3),
         visibility=scalar,
         persistence=scalar,
         uncertainty=torch.ones_like(scalar),
         reliability=scalar,
-        future_selector_validity=torch.zeros(batch, intervals, objects, cameras, 1),
+        future_selector_validity=torch.zeros(batch, intervals, objects, 1),
         future_address=torch.zeros(batch, intervals, objects, cameras, 2, 2),
-        object_coordinates=torch.zeros(batch, objects, cameras, 2),
+        object_coordinates=torch.zeros(batch, objects, 2),
     )
     recognizer = FuturePlanRecognizer(
         hidden=16,
@@ -192,6 +221,7 @@ def test_future_recognizer_supervises_neutral_objects_without_reliability_discou
         future_action=torch.randn(batch, 48, 2),
         future_state=torch.randn(batch, 48, 2),
         teacher=teacher,
+        current_loss_support=torch.ones(batch, objects, cameras, 1),
     )
     torch.testing.assert_close(result.effect_summary, torch.ones_like(result.effect_summary))
 
@@ -602,7 +632,7 @@ def test_w_transport_moves_probability_instead_of_reweighting_source() -> None:
     side = 7
     current = torch.zeros(1, 1, 1, side, side)
     current[..., side // 2, side // 2] = 1.0
-    transport = torch.tensor([[[[[0.5, 0.0]]]]])
+    transport = torch.tensor([[[[0.5, 0.0]]]])
     moved = ObjectFutureDynamicsCompiler._transport_address(current, transport)
     axis = torch.linspace(-1.0, 1.0, side)
     source_x = (current * axis[None, None, None, None]).sum()
@@ -611,30 +641,18 @@ def test_w_transport_moves_probability_instead_of_reweighting_source() -> None:
     assert torch.allclose(moved.sum(), current.sum(), atol=1e-5)
 
 
-def test_g_prototype_loss_penalizes_overlapping_reads_without_forcing_diversity() -> None:
-    decoded = torch.tensor([[[-1.0], [1.0]]])
-    target = torch.tensor([[[[[-1.0], [1.0]]]]])
-    owned = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
-    overlapping = torch.full_like(owned, 0.5)
-    owned_loss = DenseObjectGrounder._conditional_prototype_error(decoded, target, owned)
-    overlap_loss = DenseObjectGrounder._conditional_prototype_error(
-        decoded,
-        target,
-        overlapping,
+def test_grounder_has_no_learned_typed_or_prototype_shortcut_heads() -> None:
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
     )
-    assert torch.count_nonzero(owned_loss) == 0
-    assert overlap_loss > 1.0
-
-    # This is conditional reconstruction, not an artificial slot-diversity
-    # quota: identical facts and identical prototypes remain a legal optimum.
-    identical = torch.zeros_like(decoded)
-    identical_target = torch.zeros_like(target)
-    identical_loss = DenseObjectGrounder._conditional_prototype_error(
-        identical,
-        identical_target,
-        overlapping,
-    )
-    assert torch.count_nonzero(identical_loss) == 0
+    names = {name for name, _ in grounder.named_parameters()}
+    assert not any("prototype" in name for name in names)
+    assert not any("typed_verifier" in name for name in names)
+    assert not any("masked" in name for name in names)
 
 
 def test_g_host_context_changes_only_binder_keys_not_candidate_values() -> None:
@@ -657,7 +675,8 @@ def test_g_host_context_changes_only_binder_keys_not_candidate_values() -> None:
     )
     first_key, first_value = grounder._candidate_tokens(first)
     second_key, second_value = grounder._candidate_tokens(second)
-    # Hosted G context must reach the online ownership competition.
+    # The final G3 public chart must reach ownership competition as key-only
+    # context.
     assert not torch.allclose(first_key, second_key)
     # It remains key-only: exported/aggregated candidate values are not a
     # public carrier copied into every K slot.
@@ -687,7 +706,7 @@ def test_w_zero_initialized_camera_mass_residual_preserves_current_camera_prior(
     assert torch.allclose(field.future_address, expected, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(
         field.future_selector_validity,
-        facts.camera_validity[:, None].expand(-1, 2, -1, -1, -1),
+        facts.validity[:, None].expand(-1, 2, -1, -1),
     )
 
     # Online visibility controls only the P2 selector support.  A strong
@@ -727,18 +746,7 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
 def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> None:
 
     torch.manual_seed(31)
-    top = ObjectIntentDynamicsTop(
-        hidden=32,
-        content_dim=16,
-        route_dim=8,
-        goal_dim=12,
-        state_dim=7,
-        action_dim=7,
-        horizon=24,
-        basis=2,
-        heads=4,
-        teacher_key_dim=8,
-    )
+    top = _object_top()
     facts, _ = top.grounder(_local_facts(cameras=2))
     intent, _ = top.intent(
         goal_tokens=torch.randn(1, 6, 12),
@@ -786,18 +794,7 @@ def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> N
 def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
 
     torch.manual_seed(30)
-    top = ObjectIntentDynamicsTop(
-        hidden=32,
-        content_dim=16,
-        route_dim=8,
-        goal_dim=12,
-        state_dim=7,
-        action_dim=7,
-        horizon=24,
-        basis=2,
-        heads=4,
-        teacher_key_dim=8,
-    )
+    top = _object_top()
     facts, _ = top.grounder(_local_facts(cameras=2))
     kwargs = dict(
         goal_tokens=torch.zeros(1, 6, 12),
@@ -817,18 +814,7 @@ def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
 def test_goal_changes_interval_intent_without_rewriting_object_facts() -> None:
 
     torch.manual_seed(32)
-    top = ObjectIntentDynamicsTop(
-        hidden=32,
-        content_dim=16,
-        route_dim=8,
-        goal_dim=12,
-        state_dim=7,
-        action_dim=7,
-        horizon=24,
-        basis=2,
-        heads=4,
-        teacher_key_dim=8,
-    )
+    top = _object_top()
     facts, _ = top.grounder(_local_facts(cameras=2))
     common = dict(
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
@@ -854,22 +840,22 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     current = torch.randn(batch, objects, content)
     scalar = torch.zeros(batch, intervals, objects, 1)
-    validity = torch.ones(batch, intervals, objects, cameras, 1)
+    validity = torch.ones(batch, intervals, objects, 1)
     address = torch.zeros(batch, intervals, objects, cameras, 2, 2)
     address[..., 0, 0] = 1.0
     target = FutureObjectDynamics(
         current_reference=current,
         successor_content=current[:, None].expand(-1, intervals, -1, -1),
         semantic_delta=torch.zeros(batch, intervals, objects, content),
-        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
-        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
+        transport_mean=torch.zeros(batch, intervals, objects, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, 3),
         visibility=scalar,
         persistence=scalar,
         uncertainty=scalar,
         reliability=scalar,
         future_selector_validity=validity,
         future_address=address,
-        object_coordinates=torch.zeros(batch, objects, cameras, 2),
+        object_coordinates=torch.zeros(batch, objects, 2),
     )
     changed_address = torch.zeros_like(address)
     changed_address[..., 1, 1] = 1.0
@@ -949,15 +935,15 @@ def test_future_interval_transition_penalizes_temporal_collapse_not_common_offse
         current_reference=current,
         successor_content=current[:, None].expand(-1, intervals, -1, -1),
         semantic_delta=semantic,
-        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
-        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
+        transport_mean=torch.zeros(batch, intervals, objects, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, 3),
         visibility=scalar,
         persistence=scalar,
         uncertainty=scalar,
         reliability=scalar,
-        future_selector_validity=torch.ones(batch, intervals, objects, cameras, 1),
+        future_selector_validity=torch.ones(batch, intervals, objects, 1),
         future_address=address,
-        object_coordinates=torch.zeros(batch, objects, cameras, 2),
+        object_coordinates=torch.zeros(batch, objects, 2),
     )
     shifted = replace(target, semantic_delta=semantic + 7.0)
     collapsed = replace(target, semantic_delta=torch.zeros_like(semantic))
@@ -1072,25 +1058,25 @@ def test_diffuse_teacher_keeps_raw_successor_and_spatial_moments() -> None:
     axis_x = torch.linspace(-1.0, 1.0, columns)
     coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
     coordinate = torch.stack((coordinate_x, coordinate_y), dim=-1)
-    per_camera_mass = candidate.sum(dim=(-2, -1))
+    candidate_mass = candidate.sum(dim=(-3, -2, -1))
     destination_moment = torch.einsum(
-        "bikcyx,yxd->bikcd", candidate, coordinate
+        "bikcyx,yxd->bikd", candidate, coordinate
     )
     expected_transport = destination_moment - (
-        per_camera_mass[..., None] * target.object_coordinates[:, None].float()
+        candidate_mass[..., None] * target.object_coordinates[:, None].float()
     )
     torch.testing.assert_close(target.transport_mean.float(), expected_transport)
 
     centered = coordinate[None, None, None, None] - (
         target.object_coordinates[:, None].float() + expected_transport
-    )[..., None, None, :]
+    )[..., None, None, None, :]
     expected_covariance = torch.stack(
         (
-            (candidate * centered[..., 0].square()).sum(dim=(-2, -1)),
+            (candidate * centered[..., 0].square()).sum(dim=(-3, -2, -1)),
             (candidate * centered[..., 0] * centered[..., 1]).sum(
-                dim=(-2, -1)
+                dim=(-3, -2, -1)
             ),
-            (candidate * centered[..., 1].square()).sum(dim=(-2, -1)),
+            (candidate * centered[..., 1].square()).sum(dim=(-3, -2, -1)),
         ),
         dim=-1,
     )
@@ -1167,20 +1153,74 @@ def test_teacher_track_is_equivariant_to_global_object_relabeling() -> None:
         ), field.name
 
 
+def test_teacher_camera_relabeling_preserves_object_geometry_and_permutes_only_diagnostic_address() -> None:
+    torch.manual_seed(261)
+    facts, _ = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=2,
+    )(_local_facts(cameras=2, content=8, route=4, hidden=16))
+    supports = torch.randn(1, 12, 2, 2, 2, 8)
+    offsets = torch.arange(4, 49, 4)[None]
+    teacher = ObjectFutureTeacher(content_dim=8, key_dim=4)
+    target, _ = teacher(
+        facts=facts,
+        future_supports=supports,
+        future_offsets=offsets,
+    )
+    camera_permutation = torch.tensor([1, 0])
+    chart = facts.dense_chart
+    permuted_chart = type(chart)(
+        **{
+            field.name: getattr(chart, field.name)[:, camera_permutation]
+            for field in fields(type(chart))
+        }
+    )
+    permuted_facts = replace(
+        facts,
+        dense_chart=permuted_chart,
+        camera_coordinates=facts.camera_coordinates[:, :, camera_permutation],
+        camera_transport_prior=facts.camera_transport_prior[:, :, camera_permutation],
+        camera_support=facts.camera_support[:, :, camera_permutation],
+        camera_validity=facts.camera_validity[:, :, camera_permutation],
+        object_to_chart=facts.object_to_chart[:, :, camera_permutation],
+        candidate_assignment=facts.candidate_assignment[:, :, camera_permutation],
+        semantic_candidate_assignment=(
+            facts.semantic_candidate_assignment[:, :, camera_permutation]
+        ),
+        appearance_candidate_assignment=(
+            facts.appearance_candidate_assignment[:, :, camera_permutation]
+        ),
+        geometry_candidate_assignment=(
+            facts.geometry_candidate_assignment[:, :, camera_permutation]
+        ),
+        null_assignment=facts.null_assignment[:, camera_permutation],
+        reconstructed_dino=facts.reconstructed_dino[:, camera_permutation],
+    )
+    permuted_facts.validate()
+    relabeled, _ = teacher(
+        facts=permuted_facts,
+        future_supports=supports[:, :, camera_permutation],
+        future_offsets=offsets,
+    )
+    for field in fields(FutureObjectDynamics):
+        expected = getattr(target, field.name)
+        if field.name == "future_address":
+            expected = expected[:, :, :, camera_permutation]
+        torch.testing.assert_close(
+            getattr(relabeled, field.name),
+            expected,
+            atol=2e-6,
+            rtol=2e-6,
+            msg=field.name,
+        )
+
+
 def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> None:
     torch.manual_seed(27)
-    top = ObjectIntentDynamicsTop(
-        hidden=32,
-        content_dim=16,
-        route_dim=8,
-        goal_dim=12,
-        state_dim=7,
-        action_dim=7,
-        horizon=24,
-        basis=2,
-        heads=4,
-        teacher_key_dim=8,
-    ).eval()
+    top = _object_top().eval()
     facts, _ = top.grounder(_local_facts(cameras=2))
     goal_tokens = torch.randn(1, 6, 12)
     goal_mask = torch.ones(1, 6, dtype=torch.bool)
@@ -1256,25 +1296,12 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             rtol=2e-5,
         ), field.name
 
-    batch, horizon, basis, objects, hidden = 1, 24, 2, 4, 32
-    fact_by_object = torch.randn(batch, horizon, basis, objects, hidden)
-    posterior = torch.softmax(torch.randn(batch, horizon, basis, objects + 1), dim=-1)
-    dock = ObjectFactualDock(
-        fact_by_object=fact_by_object,
-        object_posterior=posterior[..., :-1],
-        null_posterior=posterior[..., -1:],
-        chart_posterior=facts.object_to_chart[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1, -1
-        ),
-        camera_coordinates=facts.camera_coordinates[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1
-        ),
-        aggregate_fact=torch.einsum("btqk,btqkh->btqh", posterior[..., :-1], fact_by_object),
-    )
+    batch, horizon, basis, hidden = 1, 24, 2, 32
+    p1_fact = torch.randn(batch, horizon, basis, hidden)
     action_query = torch.randn(batch, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
         DeploymentTopCache(intent=intent, predicted_dynamics=dynamics),
-        p1_fact=dock.aggregate_fact,
+        p1_fact=p1_fact,
         action_query=action_query,
     )
     relabeled_compiled, _ = top.compile_policy(
@@ -1282,7 +1309,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             intent=relabeled_intent,
             predicted_dynamics=relabeled_dynamics,
         ),
-        p1_fact=dock.permute(permutation).aggregate_fact,
+        p1_fact=p1_fact,
         action_query=action_query,
     )
     for name in ("effect",):
@@ -1310,18 +1337,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
 
 def test_neutral_w_preserves_current_precision_and_temporal_without_w_interaction() -> None:
     torch.manual_seed(4)
-    top = ObjectIntentDynamicsTop(
-        hidden=32,
-        content_dim=16,
-        route_dim=8,
-        goal_dim=12,
-        state_dim=7,
-        action_dim=7,
-        horizon=24,
-        basis=2,
-        heads=4,
-        teacher_key_dim=8,
-    )
+    top = _object_top()
     context, _ = top.build_online_context(
         local_facts=_local_facts(),
         goal_tokens=torch.randn(1, 6, 12),
@@ -1330,21 +1346,8 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
         state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
-    horizon, basis, objects, hidden = 24, 2, 4, 32
-    posterior = torch.softmax(torch.randn(1, horizon, basis, objects + 1), dim=-1)
-    fact_by_object = torch.randn(1, horizon, basis, objects, hidden)
-    dock = ObjectFactualDock(
-        fact_by_object=fact_by_object,
-        object_posterior=posterior[..., :-1],
-        null_posterior=posterior[..., -1:],
-        chart_posterior=context.facts.object_to_chart[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1, -1
-        ),
-        camera_coordinates=context.facts.camera_coordinates[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1
-        ),
-        aggregate_fact=torch.einsum("btqk,btqkh->btqh", posterior[..., :-1], fact_by_object),
-    )
+    horizon, basis, hidden = 24, 2, 32
+    p1_fact = torch.randn(1, horizon, basis, hidden)
     deployment = DeploymentTopCache(
         intent=context.intent,
         predicted_dynamics=FutureObjectDynamics.neutral(context.facts),
@@ -1352,12 +1355,12 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     action_query = torch.randn(1, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
         deployment,
-        p1_fact=dock.aggregate_fact,
+        p1_fact=p1_fact,
         action_query=action_query,
     )
     neutral_other_query, _ = top.compile_policy(
         deployment,
-        p1_fact=dock.aggregate_fact,
+        p1_fact=p1_fact,
         action_query=torch.randn(1, horizon, basis, hidden),
     )
     assert torch.count_nonzero(compiled.effect) == 0
@@ -1378,7 +1381,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
             intent=identity_only_intent,
             predicted_dynamics=deployment.predicted_dynamics,
         ),
-        p1_fact=dock.aggregate_fact,
+        p1_fact=p1_fact,
         action_query=action_query,
     )
     # Cumulative/identity-bearing S queries are addresses internal to S.  P2
@@ -1392,7 +1395,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     )
     torch.testing.assert_close(
         compiled.consequence.protected_consequence,
-        dock.aggregate_fact,
+        p1_fact,
         atol=0.0,
         rtol=0.0,
     )
@@ -1400,18 +1403,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
 
 def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass() -> None:
     torch.manual_seed(28)
-    top = ObjectIntentDynamicsTop(
-        hidden=32,
-        content_dim=16,
-        route_dim=8,
-        goal_dim=12,
-        state_dim=7,
-        action_dim=7,
-        horizon=24,
-        basis=2,
-        heads=4,
-        teacher_key_dim=8,
-    )
+    top = _object_top()
     context, _ = top.build_online_context(
         local_facts=_local_facts(),
         goal_tokens=torch.randn(1, 6, 12),
@@ -1420,21 +1412,7 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
         state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
-    horizon, basis, objects, hidden = 24, 2, 4, 32
-    posterior = torch.softmax(torch.randn(1, horizon, basis, objects + 1), dim=-1)
-    fact_by_object = torch.randn(1, horizon, basis, objects, hidden)
-    dock = ObjectFactualDock(
-        fact_by_object=fact_by_object,
-        object_posterior=posterior[..., :-1],
-        null_posterior=posterior[..., -1:],
-        chart_posterior=context.facts.object_to_chart[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1, -1
-        ),
-        camera_coordinates=context.facts.camera_coordinates[:, None, None].expand(
-            -1, horizon, basis, -1, -1, -1
-        ),
-        aggregate_fact=torch.einsum("btqk,btqkh->btqh", posterior[..., :-1], fact_by_object),
-    )
+    horizon, basis, hidden = 24, 2, 32
     neutral = FutureObjectDynamics.neutral(context.facts)
     changed = replace(
         neutral,
@@ -1604,6 +1582,7 @@ def test_deployment_cache_has_no_source_or_training_charts() -> None:
         "history",
         "executed_memory",
         "action_history_keep",
+        "role_table",
     }
     assert {field.name for field in fields(DeploymentTopCache)} == {
         "intent",

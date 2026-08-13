@@ -113,10 +113,14 @@ class ActionQueryEncoder(nn.Module):
     transform, while dead task/proposal/register canvas rows stay absent.
     """
 
+    ROLE_TASK = 0
     ROLE_STATE = 1
     ROLE_STATE_HISTORY = 2
     ROLE_EXECUTED = 3
+    ROLE_PROPOSAL = 4
     ROLE_NOISY_ACTION = 5
+    ROLE_ROLLOUT = 6
+    ROLE_REGISTER = 7
 
     def __init__(self, core_config) -> None:
         super().__init__()
@@ -127,6 +131,10 @@ class ActionQueryEncoder(nn.Module):
         self.state_dim = int(core_config.state_dim)
         self.state_history_rows = int(core_config.visual_history_length)
         self.executed_rows = int(core_config.action_history_token_count)
+        self.future_anchors = int(core_config.future_anchors)
+        self.cameras = int(core_config.num_cameras)
+        self.future_grid = int(core_config.future_grid_size)
+        self.canvas_registers = int(core_config.canvas_registers)
         self.state_projection = nn.Linear(self.state_dim, self.hidden)
         self.state_history_projection = nn.Linear(self.state_dim, self.hidden)
         self.physical_lift = PhysicalActionTokenLift(core_config)
@@ -136,6 +144,22 @@ class ActionQueryEncoder(nn.Module):
         )
         self.role_embed = nn.Parameter(torch.randn(8, self.hidden) * 0.02)
         self.role_drop = nn.Dropout(float(core_config.role_dropout))
+        self.canvas_drop = nn.Dropout(float(core_config.canvas_dropout))
+        self.rollout_anchor_type = nn.Parameter(
+            torch.randn(1, self.future_anchors, 1, self.hidden) * 0.02
+        )
+        self.rollout_grid_type = nn.Parameter(
+            torch.randn(
+                1,
+                1,
+                self.cameras * self.future_grid * self.future_grid,
+                self.hidden,
+            )
+            * 0.02
+        )
+        self.registers = nn.Parameter(
+            torch.randn(1, self.canvas_registers, self.hidden) * 0.02
+        )
         self.action_private_condition = nn.Sequential(
             nn.LayerNorm(self.hidden),
             nn.Linear(self.hidden, self.hidden),
@@ -185,6 +209,82 @@ class ActionQueryEncoder(nn.Module):
         return horizon[:, :, None] + self.basis_identity.to(
             device=device, dtype=dtype
         )
+
+    def sample_role_table(self, reference: Tensor) -> Tensor:
+        """Sample the one V120 role table shared by static G and live action.
+
+        Role dropout is a canvas-level condition. Sampling it independently
+        inside G and at every ODE node changes the input distribution and
+        defeats the original shared-seed gradient geometry.
+        """
+
+        return self.role_drop(
+            self.role_embed.to(device=reference.device, dtype=reference.dtype)
+        )
+
+    def grounding_canvas(
+        self,
+        *,
+        state: Tensor,
+        rollout_init: Tensor,
+        role: Tensor,
+    ) -> tuple[Tensor, dict[str, slice]]:
+        """Build the observation-only V120 G canvas from the shared seed.
+
+        G sees current state, registers and visual rollout only. Empty slices
+        make task/history/proposal/noisy-action absence structural instead of
+        relying on a learned zero or a later attention mask.
+        """
+
+        if state.ndim != 2 or int(state.shape[-1]) != self.state_dim:
+            raise ValueError("grounding state must be [B,state_dim]")
+        batch = int(state.shape[0])
+        future_tokens = self.future_anchors * self.cameras * self.future_grid**2
+        if tuple(rollout_init.shape) != (batch, future_tokens, self.hidden):
+            raise ValueError(
+                "grounding rollout must preserve anchor/camera/spatial identity"
+            )
+        if tuple(role.shape) != (8, self.hidden):
+            raise ValueError("shared V120 role table must be [8,H]")
+        device, dtype = rollout_init.device, rollout_init.dtype
+        state_token = (
+            self.state_projection(state.to(device=device, dtype=dtype))[:, None]
+            + role[self.ROLE_STATE]
+        )
+        spatial = self.cameras * self.future_grid * self.future_grid
+        rollout = rollout_init.reshape(
+            batch, self.future_anchors, spatial, self.hidden
+        )
+        rollout = (
+            rollout
+            + self.rollout_anchor_type.to(device=device, dtype=dtype)
+            + self.rollout_grid_type.to(device=device, dtype=dtype)
+        ).reshape(batch, future_tokens, self.hidden)
+        rollout = rollout + role[self.ROLE_ROLLOUT]
+        registers = (
+            self.registers.expand(batch, -1, -1).to(device=device, dtype=dtype)
+            + role[self.ROLE_REGISTER]
+        )
+        empty = rollout.new_empty(batch, 0, self.hidden)
+        named = (
+            ("state", state_token),
+            ("state_history", empty),
+            ("task", empty),
+            ("executed", empty),
+            ("proposal", empty),
+            ("trajectory", empty),
+            ("stage", empty),
+            ("rollout", rollout),
+            ("registers", registers),
+        )
+        offset = 0
+        slices: dict[str, slice] = {}
+        rows: list[Tensor] = []
+        for name, value in named:
+            rows.append(value)
+            slices[name] = slice(offset, offset + int(value.shape[1]))
+            offset += int(value.shape[1])
+        return self.canvas_drop(torch.cat(rows, dim=1)), slices
 
     def _action_from_role(self, noisy_action_field: Tensor, role: Tensor) -> Tensor:
         batch = int(noisy_action_field.shape[0])
@@ -265,6 +365,7 @@ class ActionQueryEncoder(nn.Module):
         *,
         executed_memory: Tensor,
         action_history_keep: Tensor,
+        role: Tensor | None = None,
     ) -> tuple[Tensor, V120SeedContext]:
         """Build action and context with one shared V120 role-drop sample."""
 
@@ -276,11 +377,9 @@ class ActionQueryEncoder(nn.Module):
         if int(history.state.shape[0]) != batch:
             raise ValueError("V120 action and context batches do not align")
         del time
-        role = self.role_drop(
-            self.role_embed.to(
-                device=noisy_action_field.device, dtype=noisy_action_field.dtype
-            )
-        )
+        role = self.sample_role_table(noisy_action_field) if role is None else role
+        if tuple(role.shape) != (8, self.hidden):
+            raise ValueError("shared V120 role table must be [8,H]")
         return (
             self._action_from_role(noisy_action_field, role),
             self._context_from_role(

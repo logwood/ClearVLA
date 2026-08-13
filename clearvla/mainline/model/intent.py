@@ -403,6 +403,7 @@ class FuturePlanRecognizer(nn.Module):
         future_action: Tensor,
         future_state: Tensor,
         teacher: FutureObjectDynamics | None,
+        current_loss_support: Tensor,
     ) -> FuturePlanRecognition:
         if future_action.ndim != 3 or future_state.ndim != 3:
             raise ValueError("plan recognizer requires full future action/state sequences")
@@ -414,6 +415,16 @@ class FuturePlanRecognizer(nn.Module):
         state_summary = torch.stack(
             [future_state[:, row].mean(dim=1) for row in slices], dim=1
         )
+        if current_loss_support.ndim != 4 or int(current_loss_support.shape[-1]) != 1:
+            raise ValueError("recognizer current loss support must be [B,K,C,1]")
+        if int(current_loss_support.shape[0]) != int(future_action.shape[0]):
+            raise ValueError("recognizer current loss support batch does not align")
+        # This is the same detached current-fact support used by the object
+        # losses.  Future reliability and selector validity are deliberately
+        # absent: neither may shrink a supervised target or create a routing
+        # shortcut.  A camera reduction is performed exactly once because W
+        # exports object-level future geometry/content.
+        object_support = current_loss_support.detach().float().amax(dim=2)
         if teacher is None:
             effect_summary = future_action.new_zeros(
                 future_action.shape[0], 4, self.content_dim
@@ -421,16 +432,22 @@ class FuturePlanRecognizer(nn.Module):
             teacher_valid = future_action.new_zeros(future_action.shape[0], 4, 1)
         else:
             teacher.validate()
-            # Teacher null fallback has already made an unmatched object a
-            # zero semantic delta.  Use a fixed object mean so this auxiliary
-            # recognizer consumes neither loss support nor P2 selector
-            # validity; changing reliability/selector can never change loss.
-            effect_summary = teacher.semantic_delta.mean(dim=2)
-            teacher_valid = teacher.semantic_delta.new_ones(
+            expected_support = (
                 teacher.semantic_delta.shape[0],
-                teacher.semantic_delta.shape[1],
+                teacher.semantic_delta.shape[2],
                 1,
             )
+            if tuple(object_support.shape) != expected_support:
+                raise ValueError("recognizer object support does not align with teacher")
+            support = object_support[:, None]
+            denominator = support.sum(dim=2).clamp_min(1.0)
+            effect_summary = (
+                teacher.semantic_delta.detach().float() * support
+            ).sum(dim=2) / denominator
+            effect_summary = effect_summary.to(dtype=teacher.semantic_delta.dtype)
+            teacher_valid = (support.sum(dim=2) > 0).to(
+                dtype=teacher.semantic_delta.dtype
+            ).expand(-1, teacher.semantic_delta.shape[1], -1)
         token = (
             self.action_input(action_summary)
             + self.state_input(state_summary)

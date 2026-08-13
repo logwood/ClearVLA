@@ -30,6 +30,15 @@ def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
     """Preserve every local hypothesis while exposing a dense DINO target."""
 
     local.validate()
+    # V120's sole G target is the dense mixture already represented by the
+    # completed G3 local facts.  Do not silently replace it with the raw DINO
+    # cache: that would introduce a stronger, behavior-changing objective
+    # under the same external 0.25 weight.
+    validity = local.slot_validity.to(dtype=local.content_slots.dtype)
+    semantic_mass = local.semantic_owner_probs[..., None] * validity
+    dense_content = (
+        local.content_slots * semantic_mass
+    ).sum(dim=-2) / semantic_mass.sum(dim=-2).clamp_min(1e-6)
     # This is a conditional mixture over the local M hypotheses.  Candidate
     # validity is a separate Bernoulli support variable and must not be folded
     # into this distribution: doing so turns the complement of a perfectly
@@ -47,7 +56,7 @@ def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
     )
     chart = DenseFactChart(
         public_scene_base=local.public_scene_base,
-        dino_content=local.target_dino_content,
+        dino_content=dense_content,
         cell_observed=local.cell_observed,
         candidate_content=local.content_slots,
         candidate_semantic=local.semantic_slots,
@@ -107,11 +116,10 @@ class DenseObjectGrounder(nn.Module):
         self.geometry_key = nn.Linear(route_dim, hidden, bias=False)
         self.coordinate_key = nn.Linear(16, hidden, bias=False)
         self.candidate_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        # The three active G role-host blocks organize the cell-level public
-        # chart.  That context is legal as an address/key, but not as a value
-        # copied into every local-M hypothesis.  Keeping a separate key-only
-        # projection lets the host influence object competition while the GRU
-        # update and exported object content remain candidate-owned.
+        # G3's public chart is legal address context, but never a second
+        # object value.  Keep a separate key-only projection so public scene
+        # organization can influence ownership without being copied through
+        # the GRU update or exported K content.
         self.public_address_key = nn.Sequential(
             nn.LayerNorm(hidden, elementwise_affine=False),
             nn.Linear(hidden, hidden, bias=False),
@@ -139,47 +147,13 @@ class DenseObjectGrounder(nn.Module):
         if not isinstance(g3_output, nn.Linear):
             raise TypeError("G3 residual output must remain a linear layer")
         nn.init.zeros_(g3_output.weight)
-        # Semantic, appearance and geometry verify evidence *inside* the one
-        # physical K+null assignment.  Zero initialization makes all three
-        # reads exactly inherit the physical posterior at startup; ordinary
-        # gradients may then refine them without creating three drifting
-        # object identities.
-        self.typed_verifier = nn.ModuleDict(
-            {
-                name: nn.Linear(2 * route_dim, 1, bias=False)
-                for name in ("semantic", "appearance", "geometry")
-            }
-        )
-        for verifier in self.typed_verifier.values():
-            if not isinstance(verifier, nn.Linear):
-                raise TypeError("typed verifier must remain a linear layer")
-            nn.init.zeros_(verifier.weight)
         self.decode_content_residual = nn.Linear(hidden, content_dim, bias=False)
         nn.init.zeros_(self.decode_content_residual.weight)
         self.decode_position = nn.Linear(16, content_dim, bias=False)
-        # Reconstruction ownership is a loss-only read from the contextual G
-        # carrier.  It is needed only where the online candidate chart was
-        # masked; it never replaces the physical K+null assignment exported
-        # to Teacher, W or P.
-        self.reconstruction_query = nn.Sequential(
-            nn.LayerNorm(hidden, elementwise_affine=False),
-            nn.Linear(hidden, hidden, bias=False),
-        )
-        self.reconstruction_slot = nn.Sequential(
-            nn.LayerNorm(hidden, elementwise_affine=False),
-            nn.Linear(hidden, hidden, bias=False),
-        )
-        self.reconstruction_null = nn.Parameter(torch.zeros(1, hidden))
         self.maximum_update_rms = float(maximum_update_rms)
 
     def _candidate_tokens(self, chart: DenseFactChart) -> tuple[Tensor, Tensor]:
-        """Return competition keys and candidate-owned update values.
-
-        The first tensor may depend on hosted public context because it only
-        answers *where/which object owns this fact*.  The second tensor is the
-        value aggregated into K and deliberately excludes that public context,
-        so one cell-level carrier cannot be copied into every object value.
-        """
+        """Return the one V120 candidate representation used by G binding."""
 
         content = self.content_key(chart.candidate_content)
         typed = (
@@ -228,55 +202,6 @@ class DenseObjectGrounder(nn.Module):
         read = object_mass.transpose(1, 2)
         read = read / read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         return owner, object_mass, null_mass, read
-
-    @staticmethod
-    def _conditional_prototype_error(
-        decoded_slot: Tensor,
-        target_content: Tensor,
-        read: Tensor,
-    ) -> Tensor:
-        """Measure whether each K prototype explains the facts it actually owns.
-
-        ``MSE(sum_k p_k prototype_k, target)`` permits several K slots to act
-        as interchangeable mixture components.  That is useful for image
-        reconstruction but too weak to establish object identity: overlapping
-        slots can cooperate algebraically while no individual prototype is a
-        usable W/P fact.  The conditional distortion below is the soft-EM
-        counterpart: every slot must explain the detached DINO cells selected
-        by its own competitive read posterior.  It adds no diversity target;
-        identical slots remain optimal when their observed facts are actually
-        identical.
-        """
-
-        if decoded_slot.ndim != 3 or target_content.ndim != 5 or read.ndim != 3:
-            raise ValueError("conditional prototype loss has an invalid tensor rank")
-        batch, objects, width = decoded_slot.shape
-        if tuple(target_content.shape[:1]) != (batch,) or int(target_content.shape[-1]) != width:
-            raise ValueError("prototype and DINO target widths do not align")
-        cells = math.prod(int(value) for value in target_content.shape[1:-1])
-        candidates = int(read.shape[-1])
-        if tuple(read.shape[:2]) != (batch, objects) or candidates % cells:
-            raise ValueError("object read posterior does not align with the dense DINO chart")
-        hypotheses = candidates // cells
-        target_candidate = target_content.detach().unsqueeze(-2).expand(
-            *target_content.shape[:-1],
-            hypotheses,
-            width,
-        )
-        target_candidate = target_candidate.reshape(batch, candidates, width)
-        distortion = (
-            decoded_slot.float()[:, :, None] - target_candidate.float()[:, None]
-        ).square().mean(dim=-1)
-        # Responsibilities define the current soft-EM E step.  The prototype
-        # distortion may update the prototype/binder representation, but it
-        # must not lower its own target by moving those responsibilities in
-        # the same backward pass.  Spatial mixture reconstruction below still
-        # supplies an ordinary gradient to the assignment path.
-        weight = read.detach().float()
-        mass = weight.sum(dim=-1)
-        per_object = (distortion * weight).sum(dim=-1) / mass.clamp_min(1e-6)
-        live = (mass > 1e-6).to(dtype=per_object.dtype)
-        return (per_object * live).sum() / live.sum().clamp_min(1.0)
 
     def forward(
         self,
@@ -363,27 +288,17 @@ class DenseObjectGrounder(nn.Module):
             flat = value.reshape(batch, count, int(value.shape[-1]))
             return torch.einsum("bkn,bnd->bkd", weight.to(dtype=flat.dtype), flat)
 
-        def typed_verify(
+        def typed_reweight(
             name: str,
             value: Tensor,
         ) -> tuple[Tensor, Tensor, Tensor]:
             flat = value.reshape(batch, count, int(value.shape[-1]))
-            parent_value = aggregate(value)
-            pair = torch.cat(
-                (
-                    parent_value[:, :, None].expand(-1, -1, count, -1),
-                    flat[:, None].expand(-1, self.objects, -1, -1),
-                ),
-                dim=-1,
-            )
-            residual = 0.50 * torch.tanh(self.typed_verifier[name](pair).squeeze(-1).float())
-            # Multiplication by ``read`` makes the typed posterior absolutely
-            # continuous with respect to the physical object support: a typed
-            # verifier cannot resurrect an invalid/null candidate.
+            # Parameter-free conditional reweighting inside physical support.
+            # A typed prior cannot resurrect a candidate with zero K mass.
             typed_prior = getattr(chart, f"candidate_{name}_prior").reshape(batch, count).float()
             physical_prior = candidate_prior.reshape(batch, count).float()
             prior_ratio = typed_prior / physical_prior.clamp_min(1e-6)
-            typed_read = read.float() * prior_ratio[:, None] * residual.exp()
+            typed_read = read.float() * prior_ratio[:, None]
             typed_read = typed_read / typed_read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
             # ``assignment.sum(dim=1)`` is [B,K]; keep exactly the physical
             # allocation owned by each K object while redistributing evidence
@@ -394,13 +309,13 @@ class DenseObjectGrounder(nn.Module):
             return typed_value, typed_read, typed_joint
 
         content = aggregate(chart.candidate_content)
-        semantic, semantic_read, semantic_assignment = typed_verify(
+        semantic, semantic_read, semantic_assignment = typed_reweight(
             "semantic", chart.candidate_semantic
         )
-        appearance, appearance_read, appearance_assignment = typed_verify(
+        appearance, appearance_read, appearance_assignment = typed_reweight(
             "appearance", chart.candidate_appearance
         )
-        geometry, geometry_read, geometry_assignment = typed_verify(
+        geometry, geometry_read, geometry_assignment = typed_reweight(
             "geometry", chart.candidate_geometry
         )
         support = aggregate(chart.candidate_support[..., None])
@@ -491,107 +406,15 @@ class DenseObjectGrounder(nn.Module):
         # satisfying the loss while the W-visible object content remains weak.
         decoded_slot = content + self.decode_content_residual(slots)
         decoded_position = self.decode_position(position)
-        reconstruction_query = self.reconstruction_query(chart.public_scene_base)
-        reconstruction_key = self.reconstruction_slot(slots)
-        reconstruction_logit = torch.einsum(
-            "bcyxh,bkh->bcyxk",
-            reconstruction_query.float(),
-            reconstruction_key.float(),
-        ) / math.sqrt(float(self.hidden))
-        reconstruction_null = torch.einsum(
-            "bcyxh,qh->bcyxq",
-            reconstruction_query.float(),
-            self.reconstruction_null.float(),
-        ) / math.sqrt(float(self.hidden))
-        reconstruction_probability = torch.softmax(
-            torch.cat((reconstruction_logit, reconstruction_null), dim=-1),
-            dim=-1,
-        )
-        predicted_owner = reconstruction_probability[..., : self.objects].permute(0, 4, 1, 2, 3)
-        observed = chart.cell_observed.permute(0, 4, 1, 2, 3)
-        reconstruction_owner = torch.where(observed, chart_owner, predicted_owner)
         prototype_value = decoded_slot[:, :, None, None, None, :]
-        prototype_reconstruction = torch.einsum(
-            "bkcyx,bkcyxd->bcyxd",
-            reconstruction_owner.to(dtype=prototype_value.dtype),
-            prototype_value.expand(-1, -1, *reconstruction_owner.shape[2:], -1),
-        )
         reconstruction_value = prototype_value + decoded_position[:, None]
         reconstructed = torch.einsum(
             "bkcyx,bkcyxd->bcyxd",
-            reconstruction_owner.to(dtype=reconstruction_value.dtype),
+            chart_owner.to(dtype=reconstruction_value.dtype),
             reconstruction_value,
         )
         target_content = chart.dino_content.detach().float()
-        prototype_mixture_error = (
-            prototype_reconstruction.float() - target_content
-        ).square().mean()
-        prototype_error = self._conditional_prototype_error(
-            decoded_slot,
-            target_content,
-            read,
-        )
-        spatial_error = (reconstructed.float() - target_content).square().mean()
-        cell_error = (reconstructed.float() - target_content).square().mean(dim=-1)
-        observed_weight = chart.cell_observed[..., 0].float()
-        masked_weight = 1.0 - observed_weight
-        visible_reconstruction_error = (
-            cell_error * observed_weight
-        ).sum() / observed_weight.sum().clamp_min(1.0)
-        masked_reconstruction_error = (
-            cell_error * masked_weight
-        ).sum() / masked_weight.sum().clamp_min(1.0)
-
-        # The real V120 run kept distinct K slots with a dense spatial
-        # reconstruction pressure.  Make that candidate-owned mixture the
-        # primary term again, while retaining a detached-responsibility
-        # conditional prototype term and typed proximal consistency.  No term
-        # asks slots to differ when the underlying facts are identical.
-        def typed_consistency(
-            value: Tensor,
-            typed_joint: Tensor,
-            prototype: Tensor,
-        ) -> Tensor:
-            """Reconstruct each live candidate from the typed G read.
-
-            This is a proximal field-specific objective on one physical K
-            assignment.  It does not ask the three evidence reads to differ;
-            when the same support explains two fields, equal posteriors remain
-            legal.  Multiplying the dimensionless error by the detached DINO
-            power keeps it inside the existing reconstruction unit/budget.
-            """
-
-            flat_value = value.reshape(batch, count, int(value.shape[-1])).float()
-            joint = typed_joint.float()
-            conditional_owner = joint / joint.sum(dim=1, keepdim=True).clamp_min(1e-6)
-            reconstruction = torch.einsum("bkn,bkd->bnd", conditional_owner, prototype.float())
-            target_power = flat_value.detach().square().mean(dim=-1, keepdim=True)
-            population_floor = (0.10 * target_power.mean().detach()).clamp_min(1e-4)
-            normalized = (reconstruction - flat_value.detach()).square().mean(
-                dim=-1, keepdim=True
-            ) / (target_power + population_floor)
-            live = validity.float().reshape(batch, count, 1) * candidate_prior.float().reshape(
-                batch, count, 1
-            )
-            return (normalized * live).sum() / live.sum().clamp_min(1.0)
-
-        semantic_consistency = typed_consistency(
-            chart.candidate_semantic, semantic_assignment, semantic
-        )
-        appearance_consistency = typed_consistency(
-            chart.candidate_appearance, appearance_assignment, appearance
-        )
-        geometry_consistency = typed_consistency(
-            chart.candidate_geometry, geometry_assignment, geometry
-        )
-        typed_consistency_error = (
-            semantic_consistency + appearance_consistency + geometry_consistency
-        ) / 3.0
-        dino_unit = target_content.detach().square().mean().clamp_min(1e-3)
-        typed_consistency_scaled = typed_consistency_error * dino_unit
-        reconstruction_error = (
-            0.30 * prototype_error + 0.55 * spatial_error + 0.15 * typed_consistency_scaled
-        )
+        reconstruction_error = (reconstructed.float() - target_content).square().mean()
         facts = ObjectFactSet(
             dense_chart=chart,
             content=content,
@@ -613,28 +436,17 @@ class DenseObjectGrounder(nn.Module):
             null_assignment=structured_null,
             reconstructed_dino=reconstructed,
             reconstruction_error=reconstruction_error,
-            typed_consistency_error=typed_consistency_error,
         )
         facts.validate()
-        # Reconstruction and typed-consistency scalars above are owned by the
-        # objective and therefore remain in the ordinary graph.  Everything
-        # below is a read-only audit reduction.  Skipping those pairwise and
-        # entropy reductions on non-log batches keeps G's mathematics exactly
-        # unchanged while removing avoidable hot-path kernels.
+        # The single dense reconstruction scalar above is the only G-side
+        # objective. Everything below is a detached audit reduction.
         if not collect_diagnostics:
             return facts, {}
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
-            "object_grounding_prototype_mse": prototype_error.detach(),
-            "object_grounding_prototype_mixture_mse": prototype_mixture_error.detach(),
-            "object_grounding_spatial_refinement_mse": spatial_error.detach(),
-            "object_grounding_visible_reconstruction_mse": visible_reconstruction_error.detach(),
-            "object_grounding_masked_reconstruction_mse": masked_reconstruction_error.detach(),
-            "object_grounding_typed_consistency": typed_consistency_error.detach(),
-            "object_grounding_typed_consistency_scaled": typed_consistency_scaled.detach(),
-            "object_grounding_semantic_consistency": semantic_consistency.detach(),
-            "object_grounding_appearance_consistency": appearance_consistency.detach(),
-            "object_grounding_geometry_consistency": geometry_consistency.detach(),
+            "object_grounding_dense_objective_count": reconstruction_error.new_ones(
+                (), dtype=torch.float32
+            ),
             "object_grounding_existence_mean": existence.detach().float().mean(),
             "object_grounding_validity_mean": object_validity.detach().float().mean(),
             "object_grounding_allocation_share_mean": allocation_share.detach().float().mean(),

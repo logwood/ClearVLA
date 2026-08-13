@@ -205,6 +205,40 @@ def _optimizer_group_context(
     return result
 
 
+def _module_parameter_context(
+    model: ClearVLAMainlinePolicy,
+) -> dict[str, dict[str, int]]:
+    """Serialize visible module counts so graph changes cannot be silent."""
+
+    modules = {
+        "complete_model": model,
+        "observation": model.observation,
+        "grounding_g1_g2_g3": model.top.grounding_blocks,
+        "global_object_grounder": model.top.grounder,
+        "stateless_intent": model.top.intent,
+        "future_dynamics_w1_w2": model.top.dynamics,
+        "factual_precision_p1": model.factual_reader,
+        "future_effect_p2": model.top.effect_reader,
+        "policy_compiler_p3": model.top.plan_compiler,
+        "controlled_transition": model.transition,
+        "retained_bottom": model.bottom,
+        "retained_bottom_decoder": model.bottom.decoder,
+    }
+    result: dict[str, dict[str, int]] = {}
+    for name, module in modules.items():
+        parameters = tuple(module.parameters())
+        result[name] = {
+            "parameter_count": sum(int(parameter.numel()) for parameter in parameters),
+            "trainable_parameter_count": sum(
+                int(parameter.numel())
+                for parameter in parameters
+                if parameter.requires_grad
+            ),
+            "parameter_tensor_count": len(parameters),
+        }
+    return result
+
+
 def _prepare_output_directory(
     output_dir: Path,
     *,
@@ -593,6 +627,7 @@ def main() -> None:
         "identity": identity.as_dict(),
         "optimizer_roles": ownership.role_counts,
         "optimizer_groups": _optimizer_group_context(optimizer, config),
+        "module_parameters": _module_parameter_context(model),
         "dataset_sizes": {name: len(value) for name, value in bundle.datasets.items()},
         "splits": {name: list(value) for name, value in bundle.splits.items()},
         "skipped": list(bundle.skipped),

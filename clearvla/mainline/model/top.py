@@ -19,7 +19,9 @@ enters this composer; P2/P3 cannot reopen a visual bank.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
@@ -37,7 +39,6 @@ from .intent import (
     FuturePlanRecognizer,
     StatelessObjectIntentOrganizer,
 )
-from .role_hosts import TypedGroundingRoleHost
 from .routing import smooth_rms_contract
 from .teacher import ObjectFutureTeacher
 from .types import (
@@ -48,6 +49,9 @@ from .types import (
     ObjectIntentState,
     ObjectTopTrainingTargets,
 )
+from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
+from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
+from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         role_host_depth: int = 3,
         role_host_expansion: float = 4.0,
         role_host_dropout: float = 0.05,
+        core_config=None,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -138,16 +143,30 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.basis = int(basis)
         if int(objects) != 4:
             raise ValueError("the active object top requires K=4")
-        self.grounding_host = TypedGroundingRoleHost(
-            hidden=hidden,
-            content_dim=content_dim,
-            route_dim=route_dim,
-            state_dim=state_dim,
-            heads=heads,
-            depth=role_host_depth,
-            expansion=role_host_expansion,
-            dropout=role_host_dropout,
+        del role_host_expansion, role_host_dropout
+        if core_config is None:
+            raise ValueError("the V120 G stack requires its resolved core configuration")
+        if int(role_host_depth) != 3:
+            raise ValueError("the active progressive grounding path requires G1/G2/G3")
+        self.grounding_blocks = nn.ModuleList(
+            [
+                TemporalDynamicsBoundDiTBlock(core_config, role="grounding")
+                for _ in range(3)
+            ]
         )
+        self.grounding_content_mod = nn.Sequential(
+            AffineVarianceFlooredCenteredNorm(
+                2 * hidden,
+                float(core_config.flow_jepa_routing_norm_floor),
+                affine_maximum=4.0,
+            ),
+            nn.Linear(2 * hidden, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+        )
+        nn.init.normal_(self.grounding_content_mod[-1].weight, mean=0.0, std=2e-2)
+        nn.init.zeros_(self.grounding_content_mod[-1].bias)
+        self.grounding_content_mod_scale = nn.Parameter(torch.tensor(0.10))
         self.grounder = DenseObjectGrounder(
             hidden=hidden,
             content_dim=content_dim,
@@ -199,6 +218,65 @@ class ObjectIntentDynamicsTop(nn.Module):
             basis=basis,
         )
 
+    def run_progressive_grounding(
+        self,
+        *,
+        canvas: Tensor,
+        slices: dict[str, slice],
+        visual_memory: Tensor,
+        visual_value_memory: Tensor,
+        state: ProgressiveGroundingAddressState,
+        advance: Callable[..., ProgressiveGroundingAddressState],
+        collect_diagnostics: bool = False,
+    ) -> tuple[ProgressiveGroundingAddressState, Tensor, dict[str, Tensor]]:
+        """Execute the literal V120 G1/G2/G3 block/update alternation."""
+
+        clean = torch.cat(
+            (canvas[:, slices["state"]], canvas[:, slices["registers"]]), dim=1
+        )
+        if int(clean.shape[1]) < 1:
+            raise ValueError("grounding modulation requires state/register rows")
+        summary = torch.cat((clean.mean(dim=1), visual_memory.mean(dim=1)), dim=-1)
+        content_delta = self.grounding_content_mod(summary)
+        content_delta = content_delta * self.grounding_content_mod_scale.to(
+            device=canvas.device, dtype=canvas.dtype
+        )
+        # G is a cached current fact. Its exact endpoint is t_v120=0, hence
+        # the V120 time embedding is algebraically zero at this static boundary.
+        modulation = content_delta
+        metrics: dict[str, Tensor] = {}
+        for stage, block in enumerate(self.grounding_blocks, start=1):
+            before = canvas[:, slices["rollout"]]
+            canvas, block_metrics = block(
+                canvas,
+                visual_memory,
+                modulation,
+                slices,
+                visual_value_memory=visual_value_memory,
+                collect_diagnostics=collect_diagnostics,
+            )
+            rollout = canvas[:, slices["rollout"]]
+            state = advance(
+                state,
+                rollout,
+                stage=stage,
+                collect_diagnostics=collect_diagnostics,
+            )
+            if collect_diagnostics:
+                metrics[f"grounding_g{stage}_update_rms"] = (
+                    rollout.detach().float() - before.detach().float()
+                ).square().mean().sqrt()
+                metrics.update(
+                    {f"grounding_g{stage}_{name}": value for name, value in block_metrics.items()}
+                )
+        if state.stage != 3 or state.grounded_fact_set is None:
+            raise RuntimeError("progressive grounding did not complete G3")
+        if collect_diagnostics:
+            metrics["grounding_clean_endpoint_t_v120"] = canvas.new_zeros(
+                (), dtype=torch.float32
+            )
+        return state, canvas, metrics
+
     def build_online_context(
         self,
         *,
@@ -212,13 +290,8 @@ class ObjectIntentDynamicsTop(nn.Module):
     ) -> tuple[OnlineTopContext, dict[str, Tensor]]:
         """Build current G/S/W without a future-capable argument."""
 
-        hosted_local_facts, host_metrics = self.grounding_host(
-            local_facts,
-            state=state,
-            collect_diagnostics=collect_diagnostics,
-        )
         facts, ground_metrics = self.grounder(
-            hosted_local_facts,
+            local_facts,
             collect_diagnostics=collect_diagnostics,
         )
         intent, intent_metrics = self.intent(
@@ -254,7 +327,6 @@ class ObjectIntentDynamicsTop(nn.Module):
         if not collect_diagnostics:
             return context, {}
         metrics = {
-            **host_metrics,
             **ground_metrics,
             **intent_metrics,
             **w1_metrics,
@@ -294,6 +366,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             future_action=future_action,
             future_state=future_state,
             teacher=teacher,
+            current_loss_support=context.facts.camera_validity,
         )
         online_intent_loss = F.smooth_l1_loss(
             context.intent.interval_queries.float(),

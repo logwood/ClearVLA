@@ -48,13 +48,13 @@ def test_active_logging_suppresses_inactive_exact_zero() -> None:
         {
             "object_w_typed_innovation_rms": 0.0,
             "loss_ledger_gap": 0.0,
-            "gradient_postclip_p1_factual_l2": 0.0,
+            "gradient_postglobal_p1_factual_l2": 0.0,
             "object_grounding_mass_conservation_error": 0.0,
         }
     )
     assert filtered == {
         "loss_ledger_gap": 0.0,
-        "gradient_postclip_p1_factual_l2": 0.0,
+        "gradient_postglobal_p1_factual_l2": 0.0,
         "object_grounding_mass_conservation_error": 0.0,
     }
 

@@ -121,42 +121,30 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.object_coordinates[:, None].float()
             + dynamics.transport_mean.float()
         ).clamp(-1.0, 1.0)
-        camera_coordinate_score = -0.25 * (
-            coordinate_query[:, :, :, None, None, None]
+        coordinate_score = -0.25 * (
+            coordinate_query[:, :, :, None, None]
             - future_coordinate[:, None, None]
         ).square().sum(dim=-1)
-        camera_coordinate_score = camera_coordinate_score.clamp(-1.0, 0.0)
-        camera_validity = (
+        coordinate_score = coordinate_score.clamp(-1.0, 0.0)
+        validity = (
             dynamics.future_selector_validity.float().squeeze(-1).clamp(0.0, 1.0)
         )
-        coordinate_score = (
-            camera_coordinate_score * camera_validity[:, None, None]
-        ).sum(dim=-1) / camera_validity[:, None, None].sum(dim=-1).clamp_min(1e-6)
         temperature = self._temperatures().to(device=action_query.device)
         bounded_logit = (
             temperature[0] * content_score
             + temperature[1] * intent_score[..., None]
             + temperature[2] * coordinate_score
         )
-        validity = camera_validity.amax(dim=-1)
         logit = bounded_logit + validity.clamp_min(1e-6).log()[:, None, None]
         flat_logit = logit.flatten(-2)
         posterior = torch.softmax(
             torch.cat((flat_logit, torch.zeros_like(flat_logit[..., :1])), dim=-1),
             dim=-1,
         )
-        camera_weight = camera_validity / camera_validity.sum(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-6)
-        object_transport = (
-            dynamics.transport_mean * camera_weight[..., None].to(
-                dtype=dynamics.transport_mean.dtype
-            )
-        ).sum(dim=3)
         typed_source_value = torch.stack(
             (
                 self.semantic_value(dynamics.semantic_delta),
-                self.transport_value(object_transport),
+                self.transport_value(dynamics.transport_mean),
                 self.status_value(
                     torch.cat((dynamics.visibility, dynamics.persistence), dim=-1)
                 ),

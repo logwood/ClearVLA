@@ -12,7 +12,14 @@ from ..config import ExperimentConfig
 
 ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("observation", ("observation.",)),
-    ("grounding_host", ("top.grounding_host.",)),
+    (
+        "grounding",
+        (
+            "top.grounding_blocks.",
+            "top.grounding_content_mod.",
+            "top.grounding_content_mod_scale",
+        ),
+    ),
     ("grounder", ("top.grounder.",)),
     ("intent", ("top.intent.",)),
     ("coarse_action", ("top.coarse_action.",)),
@@ -119,6 +126,20 @@ def parameter_role(name: str) -> str:
     raise ValueError(f"trainable parameter has no mainline owner: {name}")
 
 
+def parameter_uses_v120_no_decay(name: str) -> bool:
+    """Return the small explicit V120 scale-invariant parameter set.
+
+    Biases and normalization affine parameters are deliberately *not*
+    inferred as no-decay from rank or suffix. V120 regular optimizer groups
+    inherited AdamW decay; only ordered-contraction bases/depth controls were
+    separated because their forward parameterization is scale invariant.
+    """
+
+    if not name.startswith("bottom.decoder.operator_contractions."):
+        return False
+    return name.endswith((".basis_raw", ".depth_weight", ".depth_bias"))
+
+
 @dataclass(frozen=True)
 class OptimizerOwnership:
     trainable_names: tuple[str, ...]
@@ -147,14 +168,10 @@ def build_optimizer(
         if id(parameter) in seen:
             raise ValueError(f"optimizer parameter is aliased more than once: {name}")
         seen.add(id(parameter))
-        # V120's contraction factor/basis was explicitly no-decay.  QR makes
-        # its forward map scale-invariant, but AdamW decay still changes its
-        # optimizer moments and therefore its directional learning dynamics.
-        decay = (
-            parameter.ndim >= 2
-            and not name.endswith(".bias")
-            and role != "bottom_capacity"
-        )
+        # V120 regular groups use AdamW decay for bias, LayerNorm and all top
+        # modules. Only the explicitly named scale-invariant contraction
+        # coordinates are no-decay; tensor rank is not an ownership rule.
+        decay = not parameter_uses_v120_no_decay(name)
         grouped.setdefault((role, decay), []).append(parameter)
         grouped_names.setdefault((role, decay), []).append(name)
         trainable.append(name)
@@ -260,8 +277,13 @@ class WarmupCosineSchedule:
 
 def gradient_diagnostics(
     model: nn.Module,
+    *,
+    stage: str,
 ) -> dict[str, Tensor]:
-    """Report post-clip gradients by stable role."""
+    """Report one named gradient lifecycle stage by stable role."""
+
+    if stage not in {"raw", "postlocal", "postglobal"}:
+        raise ValueError("gradient stage must be raw/postlocal/postglobal")
 
     rows: dict[str, list[Tensor]] = {role: [] for role, _ in ROLE_PREFIXES}
     for name, parameter in model.named_parameters():
@@ -271,7 +293,7 @@ def gradient_diagnostics(
     reference = next(model.parameters())
     result: dict[str, Tensor] = {}
     for role, values in rows.items():
-        result[f"gradient_postclip_{role}_l2"] = (
+        result[f"gradient_{stage}_{role}_l2"] = (
             torch.nn.utils.get_total_norm(
                 values,
                 norm_type=2.0,
@@ -291,6 +313,7 @@ __all__ = [
     "WarmupCosineSchedule",
     "build_optimizer",
     "gradient_diagnostics",
+    "parameter_uses_v120_no_decay",
     "parameter_role",
     "role_lr_scale",
 ]
