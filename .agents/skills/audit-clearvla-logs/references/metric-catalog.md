@@ -64,15 +64,17 @@ Known compatibility aliases require care: historical `future_latent` and `action
 - Report `event_head_minus_decoded_gripper_f1`; the decoded gripper trajectory
   remains the deployment behavior, while the event head is auxiliary evidence.
 - `proposal_utility_mse_gain > 0` indicates improvement over the no-proposal ablation. Always report ablation coverage.
-- The independent mainline uses the explicit names
-  `validation_proposal_zero_mse_gain_vs_primary_physical`,
-  `validation_execution_no_updates_mse_gain_vs_primary_physical`, and
-  `validation_execution_full_updates_mse_gain_vs_primary_physical`. Positive
-  gain means the intervention improved over the matched primary sample and is
-  therefore evidence that the removed/overridden path is currently harmful.
-  Read each gain with its action-delta RMSE and
-  `validation_ablation_coverage`; a near-zero gain with a near-zero delta means
-  the intervention did not reach action, not that the path was beneficial.
+- The current independent mainline reports proposal and execution subsets
+  separately. Read `validation_proposal_zero_*` with
+  `validation_proposal_ablation_coverage`; read matched-noise `hard`,
+  `neutral`, `full_capacity`, and `three_basis_reduction` execution rows with
+  `validation_execution_ablation_coverage`. Sampling-only G/S/W/P gauges use
+  `validation_sampling_diagnostic_coverage`. Positive MSE gain means the
+  intervention improved over its subset's matched primary sample and is
+  evidence that the removed/overridden path is harmful. A near-zero gain with
+  a near-zero action delta means the intervention did not reach action, not
+  that the path was beneficial. The older `no_updates/full_updates` names are
+  pre-fidelity diagnostics and are not aliases for V120 `neutral/full_capacity`.
 - Training pflow and sampled validation RMSE use different procedures; a large training decrease with flat validation is a real mismatch signal, not a numerical contradiction.
 
 ## Structure and control
@@ -826,7 +828,7 @@ Known compatibility aliases require care: historical `future_latent` and `action
   effect zero/shuffle chain. Local BF16 gradients, nonzero W loss improvement
   or a changed P2 boundary do not by themselves prove deployed-action utility.
 
-## Independent mainline schema 20
+## Independent mainline schema 20+
 
 The current capability-named package is selected by the serialized
 `ArchitectureManifest` and lives under `clearvla/mainline/`.  Its archival
@@ -889,7 +891,7 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   effective basis mass, contraction ratio and non-expansive violation with
   post-clip capacity/bottom gradients; effective basis mass is not hardware
   rank or measured compute reduction.
-- V120's `execution_value_*` family is restored in schema 20 as active
+- V120's `execution_value_*` family is active
   supervised ranking of the differentiable candidate chart; it is not
   execution cost.  Read target/predicted spread, terminal margins,
   correlation, pairwise/top-1 accuracy and candidate coverage together with

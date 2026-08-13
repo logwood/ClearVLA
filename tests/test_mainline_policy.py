@@ -84,6 +84,40 @@ def _config() -> ExperimentConfig:
     return config
 
 
+def test_restored_observation_keeps_consumed_v120_address_modules_trainable() -> None:
+    model = ClearVLAMainlinePolicy(_config())
+    parameters = dict(model.observation.encoder.named_parameters())
+    for name in (
+        "history_type",
+        "camera_type",
+        "spatial_type",
+        "evidence_type",
+        "future_query",
+        "future_anchor_type",
+    ):
+        assert parameters[name].requires_grad, name
+    for prefix in (
+        "motion_key.",
+        "organized_key.",
+        "early_masked_raw_context.",
+        "future_motion.",
+        "future_history_score.",
+        "future_transition.",
+    ):
+        rows = [
+            parameter
+            for name, parameter in parameters.items()
+            if name.startswith(prefix)
+        ]
+        assert rows, prefix
+        assert all(parameter.requires_grad for parameter in rows), prefix
+    # The G3 block remains active, while the parallel generic route query is
+    # absent from the exported object-intent GroundedFactSet.
+    assert not parameters[
+        "progressive_grounding_address.query_projections.2.weight"
+    ].requires_grad
+
+
 def test_v120_exported_flow_is_reindexed_and_scaled_by_chart_side() -> None:
     source_forward = torch.full((1, 2, 1, 2, 8, 8), 2.0)
     source_backward = torch.full((1, 2, 1, 2, 8, 8), -2.0)
@@ -318,7 +352,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         or name == "bottom.decoder.execution_controller.block_queries"
         or name.startswith("bottom.decoder.execution_controller.capacity_head.")
         for name in missing
-    )
+    ), missing
     dormant = [
         name
         for name, parameter in model.named_parameters()
@@ -1301,7 +1335,7 @@ def test_cached_deployment_forces_eval_mode_and_is_repeatable() -> None:
     assert torch.equal(first.action, second.action)
 
 
-def test_validation_execution_interventions_reach_the_native_v120_controller() -> None:
+def test_validation_execution_interventions_match_the_native_v120_modes() -> None:
     torch.manual_seed(231)
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
@@ -1315,30 +1349,50 @@ def test_validation_execution_interventions_reach_the_native_v120_controller() -
             dtype=torch.float32,
         )
         time = torch.full((batch.online.batch,), 0.5)
-        no_updates = model.velocity(
-            cache,
-            noisy_action_field=physical,
-            time=time,
-            execution_mode="no_updates",
-            collect_diagnostics=True,
-        )
-        full_updates = model.velocity(
-            cache,
-            noisy_action_field=physical,
-            time=time,
-            execution_mode="full_updates",
-            collect_diagnostics=True,
-        )
+        outputs = {
+            mode: model.velocity(
+                cache,
+                noisy_action_field=physical,
+                time=time,
+                execution_mode=mode,
+                collect_diagnostics=True,
+            )
+            for mode in (
+                "no_updates",
+                "hard",
+                "neutral",
+                "full_capacity",
+                "three_basis_reduction",
+            )
+        }
+    no_updates = outputs["no_updates"]
     # V120 capacity is rank retention, not block amplitude.  The no-update
     # intervention therefore selects prefix row zero instead of pretending
     # that capacity=0 disables the host operation.
     assert no_updates.metrics["evidence_mmd_it_capacity_ratio"] == 1
-    assert full_updates.metrics["evidence_mmd_it_capacity_ratio"] == 1
     assert no_updates.metrics["evidence_mmd_it_execution_eval_policy_code"] == 2
-    assert full_updates.metrics["evidence_mmd_it_execution_eval_policy_code"] == 1
+    assert outputs["hard"].metrics["evidence_mmd_it_execution_eval_policy_code"] == 1
+    assert outputs["neutral"].metrics["evidence_mmd_it_execution_eval_policy_code"] == 2
+    assert outputs["full_capacity"].metrics[
+        "evidence_mmd_it_execution_eval_policy_code"
+    ] == 0
+    assert outputs["three_basis_reduction"].metrics[
+        "evidence_mmd_it_execution_eval_policy_code"
+    ] == 0
+    assert outputs["neutral"].metrics["evidence_mmd_it_capacity_ratio"] == 1
+    assert outputs["full_capacity"].metrics["evidence_mmd_it_capacity_ratio"] == 1
+    expected_reduction = max(config.bottom.operator_rank - 3, 1) / float(
+        config.bottom.operator_rank
+    )
+    torch.testing.assert_close(
+        outputs["three_basis_reduction"].metrics[
+            "evidence_mmd_it_capacity_ratio"
+        ],
+        torch.tensor(expected_reduction),
+    )
     assert not torch.equal(
-        no_updates.bottom.physical_velocity,
-        full_updates.bottom.physical_velocity,
+        outputs["hard"].bottom.physical_velocity,
+        outputs["full_capacity"].bottom.physical_velocity,
     )
     torch.testing.assert_close(
         no_updates.bottom.physical_velocity,
@@ -1347,7 +1401,8 @@ def test_validation_execution_interventions_reach_the_native_v120_controller() -
         ][:, 0],
     )
     assert no_updates.metrics["bottom_execution_output_block_count"] == 0
-    assert full_updates.metrics["bottom_execution_output_block_count"] == 3
+    for mode in ("hard", "neutral", "full_capacity", "three_basis_reduction"):
+        assert outputs[mode].metrics["bottom_execution_output_block_count"] == 3
 
 
 def test_proposal_ablation_does_not_alias_p1_or_controlled_transition() -> None:

@@ -236,37 +236,14 @@ class ObjectFutureTeacher(nn.Module):
         )
         candidate_flat_probability = candidate_posterior.flatten(3)
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
-        candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
-        destination_moment = torch.einsum(
-            "bfkcyx,cyxd->bfkd",
-            candidate_posterior,
-            candidate_coordinate,
+        candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(
+            cameras, -1, -1, -1
         )
-        transport_per_support = (
-            destination_moment
-            - (1.0 - null_probability)
-            * facts.coordinates.detach().float()[:, None]
+        transport_per_support, covariance_per_support = self._relative_geometry_moments(
+            candidate_posterior=candidate_posterior,
+            candidate_coordinate=candidate_coordinate,
+            current_camera_coordinate=facts.camera_coordinates.detach().float(),
         )
-        centered = coordinate - (
-            facts.coordinates.detach().float()[:, None, :, None, None, None]
-            + transport_per_support[:, :, :, None, None, None]
-        )
-        covariance_xx = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
-            candidate_posterior,
-            centered[..., 0].square(),
-        )
-        covariance_xy = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
-            candidate_posterior,
-            centered[..., 0] * centered[..., 1],
-        )
-        covariance_yy = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
-            candidate_posterior,
-            centered[..., 1].square(),
-        )
-        covariance_per_support = torch.stack((covariance_xx, covariance_xy, covariance_yy), dim=-1)
         entropy = -(posterior.clamp_min(1e-8) * posterior.clamp_min(1e-8).log()).sum(
             dim=-1, keepdim=True
         ) / math.log(float(cameras * rows * columns + 1))
@@ -464,3 +441,59 @@ class ObjectFutureTeacher(nn.Module):
             metrics[f"{row}_reliability"] = reliability[:, index].mean()
             metrics[f"{row}_address_mass"] = future_address[:, index].sum(dim=(-3, -2, -1)).mean()
         return target, metrics
+
+    @staticmethod
+    def _relative_geometry_moments(
+        *,
+        candidate_posterior: Tensor,
+        candidate_coordinate: Tensor,
+        current_camera_coordinate: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Form V120 moments from within-camera displacements.
+
+        Each camera has its own normalized image chart.  Subtracting one
+        separately reduced global current coordinate from a posterior whose
+        camera mass can change creates motion for a static object.  Compute
+        ``future-current`` inside every camera first, then use the exact same
+        candidate posterior for the object-level mean and centered second
+        moment.  Null mass remains the V120 identity fallback because it owns
+        no candidate displacement.
+        """
+
+        if candidate_posterior.ndim != 6:
+            raise ValueError("candidate posterior must be [B,F,K,C,Y,X]")
+        batch, _, objects, cameras, rows, columns = candidate_posterior.shape
+        if tuple(candidate_coordinate.shape) != (cameras, rows, columns, 2):
+            raise ValueError("candidate coordinate chart does not align with cameras")
+        if tuple(current_camera_coordinate.shape) != (batch, objects, cameras, 2):
+            raise ValueError("current camera coordinates must be [B,K,C,2]")
+        displacement = (
+            candidate_coordinate[None, None, None].float()
+            - current_camera_coordinate[:, None, :, :, None, None].float()
+        )
+        transport = torch.einsum(
+            "bfkcyx,bfkcyxd->bfkd",
+            candidate_posterior.float(),
+            displacement,
+        )
+        centered = displacement - transport[:, :, :, None, None, None]
+        covariance_xx = torch.einsum(
+            "bfkcyx,bfkcyx->bfk",
+            candidate_posterior.float(),
+            centered[..., 0].square(),
+        )
+        covariance_xy = torch.einsum(
+            "bfkcyx,bfkcyx->bfk",
+            candidate_posterior.float(),
+            centered[..., 0] * centered[..., 1],
+        )
+        covariance_yy = torch.einsum(
+            "bfkcyx,bfkcyx->bfk",
+            candidate_posterior.float(),
+            centered[..., 1].square(),
+        )
+        covariance = torch.stack(
+            (covariance_xx, covariance_xy, covariance_yy),
+            dim=-1,
+        )
+        return transport, covariance

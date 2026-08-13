@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-13
+Updated: 2026-08-14
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -46,6 +46,26 @@ non-finite sentinel, then restores the four source-audited boundaries:
 It also restores V120 AdamW decay and decoder-local then global clipping. No
 new block, loss weight, gain, quota, hard gate, entropy target, capacity or P1
 learned null was added. Schema23 checkpoints cannot exact-resume Schema24.
+
+The post-epoch-1 source/log closure audit then corrected four remaining
+fidelity defects without changing the G/S/W/P or bottom topology:
+
+- active V120 pre-G/address/future-query parameters are trainable again; only
+  the unconsumed object-intent G3 generic route query remains frozen;
+- Teacher transport/covariance now form displacement moments inside each
+  camera before object-level reduction, so a camera-mass change cannot invent
+  motion for a static object;
+- the global-K binder no longer adds the public chart equally to every private
+  candidate key;
+- validation diagnostics are spread across the full loader and proposal,
+  sampling and exact V120 execution ablations have separate coverage.
+  Primary deployment noise is restored to V120's deterministic per-batch
+  stream (`37237 + one-based batch index`), and every ablation reuses that
+  exact physical noise.
+
+These corrections change the source fingerprint. A checkpoint produced by an
+earlier Schema24 source cannot exact-resume the corrected graph; use a fresh
+output directory.
 
 ## Active graph in execution order
 
@@ -145,9 +165,9 @@ supports may change targets and losses, never deployment action.
    action call for that observation. G uses clean endpoint `t_v120=0`; ODE
    time cannot leak into cached facts.
 5. Local M hypotheses are not persistent objects. The dense grounder owns one
-   physical K=4 plus null competition. Public chart is address key only, never
-   a second object value. Typed reads can reweight only inside physical K
-   support.
+   physical K=4 plus null competition. The public chart remains outside that
+   private candidate competition and is never a second object value. Typed
+   reads can reweight only inside physical K support.
 6. Learned flow is a continuous source-relative prior, never a nonzero quota.
    Flow warp/cycle/smoothness/uncertainty/refinement keep explicit units.
 7. S reads full T5, observable state/action history and typed G facts. It does
@@ -266,7 +286,9 @@ ControlledTransitionSource / State
 - Teacher successor is the uniform interval mean of
   `matched + null_probability * current_reference`; semantic delta is exactly
   successor minus current reference. Transport/covariance are uniform means of
-  raw posterior moments. Reliability/entropy do not shrink targets or masks.
+  raw posterior moments formed from same-camera
+  `future_coordinate-current_camera_coordinate` displacements.
+  Reliability/entropy do not shrink targets or masks.
 - `current_loss_support [B,K,C,1]` owns future losses and the recognizer after
   detached camera reduction. `future_selector_validity [B,4,K,1]` belongs
   only to online P2 routing.
@@ -301,6 +323,12 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
+- The corrected formal configuration measures `182,713,028` total and
+  `166,318,707` trainable parameters. Relative to the rejected pre-fix
+  Schema24 graph, removal of the non-V120 public candidate projection subtracts
+  `262,144` total parameters, while restoring active observation ownership adds
+  `3,037,931` trainable parameters; retaining the dead G3 generic query frozen
+  gives the resulting net trainable delta.
 - Active manifest identity:
 
   ```text
@@ -327,7 +355,8 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 Local tests cover full forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
-permutations, object geometry, neutral effect, P2 bounds, endpoint lifecycle,
+permutations, same-camera Teacher geometry, object geometry, neutral effect,
+P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 

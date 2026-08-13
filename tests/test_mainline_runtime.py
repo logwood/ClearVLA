@@ -21,7 +21,7 @@ from clearvla.mainline.runtime.logging import (
     archival_metrics,
     validate_resume_metric_boundary,
 )
-from clearvla.mainline.train import _prepare_output_directory
+from clearvla.mainline.train import _diagnostic_batch_indices, _prepare_output_directory
 
 
 def test_active_logging_keeps_every_current_top_owner() -> None:
@@ -116,8 +116,11 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "bottom_capacity_mean": 0.5,
             "bottom_controller_common_ratio": 0.51,
             "bottom_block_1_executed_update_rms": 0.52,
-            "validation_ablation_coverage": 0.06,
+            "validation_sampling_diagnostic_coverage": 0.09,
+            "validation_proposal_ablation_coverage": 0.09,
+            "validation_execution_ablation_coverage": 0.04,
             "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
+            "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
         },
     )
     joined = "\n".join(details)
@@ -135,8 +138,11 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "bottom_capacity_mean=0.5" in joined
     assert "bottom_controller_common_ratio=0.51" in joined
     assert "bottom_block_1_executed_update_rms=0.52" in joined
-    assert "validation_ablation_coverage=0.06" in joined
+    assert "validation_sampling_diagnostic_coverage=0.09" in joined
+    assert "validation_proposal_ablation_coverage=0.09" in joined
+    assert "validation_execution_ablation_coverage=0.04" in joined
     assert "validation_proposal_zero_mse_gain_vs_primary_physical=-0.01" in joined
+    assert "validation_execution_full_capacity_mse_gain_vs_primary_physical=-0.02" in joined
 
 
 def test_gripper_event_metric_rejects_the_opposite_event_direction() -> None:
@@ -160,6 +166,19 @@ def test_device_metric_accumulator_preserves_dynamic_key_weighting() -> None:
     result = accumulator.materialize()
     assert abs(result["always"] - 8.0 / 3.0) < 1e-6
     assert result["diagnostic"] == 7.0
+
+
+def test_validation_diagnostic_budget_is_spread_over_the_full_loader() -> None:
+    assert _diagnostic_batch_indices(planned_batches=181, budget=4) == {
+        1,
+        61,
+        121,
+        181,
+    }
+    assert _diagnostic_batch_indices(planned_batches=5, budget=0) == set(
+        range(1, 6)
+    )
+    assert _diagnostic_batch_indices(planned_batches=0, budget=4) == set()
 
 
 def test_fresh_output_directory_cannot_reuse_an_existing_run(tmp_path) -> None:

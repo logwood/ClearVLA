@@ -14,12 +14,12 @@
   - compact graph identity, resolved capability settings and typed online /
     teacher boundaries;
 - `clearvla/mainline/model/restored_observation.py`, `grounding.py`, `intent.py`,
-  `dynamics.py`, `factual_reader.py`, `compiler.py`, `transition.py`,
+  `dynamics.py`, `teacher.py`, `v120_p1.py`, `compiler.py`, `transition.py`,
   `restored_bottom.py`, plus `clearvla/mainline/v120_core/`
   - the active current-only observation -> G/S/W/P -> controlled transition ->
     extracted V120 three-block Evidence MMDiT graph;
   - `model/observation.py` and `model/bottom.py` are retained inactive
-    prototypes and are not part of the schema-20 source closure;
+    prototypes and are not part of the active manifest source closure;
 - `clearvla/mainline/model/policy.py`, `top.py`
   - static online cache, training-only target plane and ODE-step-dependent
     P2/P3/bottom composition;

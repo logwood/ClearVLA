@@ -151,7 +151,9 @@ def test_grounder_owns_only_one_dense_reconstruction_objective() -> None:
         for name in ("prototype", "masked_reconstruction", "typed_consistency")
     )
     facts.reconstruction_error.backward()
-    assert public.grad is not None and public.grad.abs().sum() > 0
+    # V120's binder does not inject the already-consumed public G chart into
+    # every K candidate a second time.
+    assert public.grad is None
     assert candidates.grad is not None and candidates.grad.abs().sum() > 0
 
 
@@ -308,6 +310,37 @@ def test_teacher_scales_four_frame_flow_in_physical_horizon_units() -> None:
         teacher._flow_horizon_scale(offsets),
         torch.arange(1, 13, dtype=torch.float32)[None],
     )
+
+
+def test_teacher_camera_relative_moments_do_not_invent_static_transport() -> None:
+    axis = torch.tensor((-1.0, 0.0, 1.0))
+    y, x = torch.meshgrid(axis, axis, indexing="ij")
+    coordinate = torch.stack((x, y), dim=-1)[None].expand(2, -1, -1, -1)
+    posterior = torch.zeros(1, 1, 1, 2, 3, 3)
+    # One static object occupies different image coordinates in the two
+    # cameras, while the future association changes camera mass. Subtracting
+    # a separately reduced global current coordinate would invent +0.5 flow.
+    posterior[0, 0, 0, 0, 1, 0] = 0.2
+    posterior[0, 0, 0, 1, 1, 2] = 0.7
+    current = torch.tensor([[[[-1.0, 0.0], [1.0, 0.0]]]])
+    transport, covariance = ObjectFutureTeacher._relative_geometry_moments(
+        candidate_posterior=posterior,
+        candidate_coordinate=coordinate,
+        current_camera_coordinate=current,
+    )
+    torch.testing.assert_close(transport, torch.zeros_like(transport))
+    torch.testing.assert_close(covariance, torch.zeros_like(covariance))
+
+    permutation = torch.tensor((1, 0))
+    permuted_transport, permuted_covariance = (
+        ObjectFutureTeacher._relative_geometry_moments(
+            candidate_posterior=posterior[:, :, :, permutation],
+            candidate_coordinate=coordinate[permutation],
+            current_camera_coordinate=current[:, :, permutation],
+        )
+    )
+    torch.testing.assert_close(permuted_transport, transport)
+    torch.testing.assert_close(permuted_covariance, covariance)
 
 
 class _FixedFlow(torch.nn.Module):
@@ -655,7 +688,7 @@ def test_grounder_has_no_learned_typed_or_prototype_shortcut_heads() -> None:
     assert not any("masked" in name for name in names)
 
 
-def test_g_host_context_changes_only_binder_keys_not_candidate_values() -> None:
+def test_grounder_does_not_reinject_public_chart_into_object_candidates() -> None:
     torch.manual_seed(221)
     grounder = DenseObjectGrounder(
         hidden=16,
@@ -673,14 +706,11 @@ def test_g_host_context_changes_only_binder_keys_not_candidate_values() -> None:
             first.public_scene_base
         ),
     )
-    first_key, first_value = grounder._candidate_tokens(first)
-    second_key, second_value = grounder._candidate_tokens(second)
-    # The final G3 public chart must reach ownership competition as key-only
-    # context.
-    assert not torch.allclose(first_key, second_key)
-    # It remains key-only: exported/aggregated candidate values are not a
-    # public carrier copied into every K slot.
-    torch.testing.assert_close(first_value, second_value)
+    first_candidate = grounder._candidate_tokens(first)
+    second_candidate = grounder._candidate_tokens(second)
+    torch.testing.assert_close(first_candidate, second_candidate)
+    names = {name for name, _ in grounder.named_parameters()}
+    assert not any("public_address_key" in name for name in names)
 
 
 def test_w_zero_initialized_camera_mass_residual_preserves_current_camera_prior() -> None:

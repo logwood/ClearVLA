@@ -116,15 +116,6 @@ class DenseObjectGrounder(nn.Module):
         self.geometry_key = nn.Linear(route_dim, hidden, bias=False)
         self.coordinate_key = nn.Linear(16, hidden, bias=False)
         self.candidate_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        # G3's public chart is legal address context, but never a second
-        # object value.  Keep a separate key-only projection so public scene
-        # organization can influence ownership without being copied through
-        # the GRU update or exported K content.
-        self.public_address_key = nn.Sequential(
-            nn.LayerNorm(hidden, elementwise_affine=False),
-            nn.Linear(hidden, hidden, bias=False),
-        )
-        self.candidate_key_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.slot_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         # Slot identities only break symmetry.  All transition/read modules
         # are shared across K and therefore cannot assign role-specific heads.
@@ -152,8 +143,8 @@ class DenseObjectGrounder(nn.Module):
         self.decode_position = nn.Linear(16, content_dim, bias=False)
         self.maximum_update_rms = float(maximum_update_rms)
 
-    def _candidate_tokens(self, chart: DenseFactChart) -> tuple[Tensor, Tensor]:
-        """Return the one V120 candidate representation used by G binding."""
+    def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
+        """Return the exact shared V120 key/value candidate representation."""
 
         content = self.content_key(chart.candidate_content)
         typed = (
@@ -162,13 +153,7 @@ class DenseObjectGrounder(nn.Module):
             + self.geometry_key(chart.candidate_geometry)
         ) / math.sqrt(3.0)
         coordinate = self.coordinate_key(_coordinate_basis(chart.candidate_coordinates, 16))
-        candidate_value = self.candidate_norm(content + typed + coordinate)
-        public_key = self.public_address_key(chart.public_scene_base)[..., None, :]
-        public_key = public_key.expand_as(candidate_value)
-        candidate_key = self.candidate_key_norm(
-            (candidate_value + public_key) / math.sqrt(2.0)
-        )
-        return candidate_key, candidate_value
+        return self.candidate_norm(content + typed + coordinate)
 
     def _competition(
         self,
@@ -210,17 +195,16 @@ class DenseObjectGrounder(nn.Module):
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectFactSet, dict[str, Tensor]]:
         chart = dense_chart_from_local_facts(local_facts)
-        candidate_keys_structured, candidate_values_structured = self._candidate_tokens(chart)
-        batch = int(candidate_keys_structured.shape[0])
-        candidate_shape = candidate_keys_structured.shape[1:-1]
+        candidates_structured = self._candidate_tokens(chart)
+        batch = int(candidates_structured.shape[0])
+        candidate_shape = candidates_structured.shape[1:-1]
         count = math.prod(int(value) for value in candidate_shape)
-        candidate_keys = candidate_keys_structured.reshape(batch, count, self.hidden)
-        candidate_values = candidate_values_structured.reshape(batch, count, self.hidden)
+        candidates = candidates_structured.reshape(batch, count, self.hidden)
         validity = chart.candidate_validity.reshape(batch, count, 1)
         candidate_prior = chart.candidate_owner_prior.reshape(batch, count, 1)
         slots = self.slot_seed.to(
-            device=candidate_keys.device,
-            dtype=candidate_keys.dtype,
+            device=candidates.device,
+            dtype=candidates.dtype,
         ).expand(
             batch, -1, -1
         )
@@ -229,12 +213,12 @@ class DenseObjectGrounder(nn.Module):
         read: Tensor | None = None
         for _ in range(self.iterations):
             parent_owner, _, parent_null, read = self._competition(
-                slots, candidate_keys, validity, candidate_prior
+                slots, candidates, validity, candidate_prior
             )
             update = torch.einsum(
                 "bkn,bnh->bkh",
-                read.to(dtype=candidate_values.dtype),
-                candidate_values,
+                read.to(dtype=candidates.dtype),
+                candidates,
             )
             update, _ = smooth_rms_contract(update, self.maximum_update_rms)
             next_slots = (
@@ -252,7 +236,7 @@ class DenseObjectGrounder(nn.Module):
         # a new G3 slot state.  Recompute the parent posterior once so the
         # bounded G3 correction is genuinely relative to the final binder.
         parent_owner, _, parent_null, read = self._competition(
-            slots, candidate_keys, validity, candidate_prior
+            slots, candidates, validity, candidate_prior
         )
         if parent_owner is None or parent_null is None or read is None:
             raise RuntimeError("object binding did not execute")
@@ -261,7 +245,7 @@ class DenseObjectGrounder(nn.Module):
         pair = torch.cat(
             (
                 slots[:, None].expand(-1, count, -1, -1),
-                candidate_keys[:, :, None].expand(-1, -1, self.objects, -1),
+                candidates[:, :, None].expand(-1, -1, self.objects, -1),
             ),
             dim=-1,
         )
@@ -510,12 +494,12 @@ class DenseObjectGrounder(nn.Module):
             .float()
             .std(dim=2, unbiased=False)
             .mean(),
-            "object_grounding_candidate_key_rms": candidate_keys.detach()
+            "object_grounding_candidate_key_rms": candidates.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_grounding_candidate_value_rms": candidate_values.detach()
+            "object_grounding_candidate_value_rms": candidates.detach()
             .float()
             .square()
             .mean()

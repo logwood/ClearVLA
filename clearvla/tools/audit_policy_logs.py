@@ -1247,6 +1247,23 @@ VALIDATION_KEYS = (
     "validation_execution_full_updates_rmse_physical",
     "validation_execution_full_updates_mse_gain_vs_primary_physical",
     "validation_execution_full_updates_action_delta_rmse_physical",
+    "validation_sampling_diagnostic_coverage",
+    "validation_proposal_ablation_coverage",
+    "validation_execution_ablation_coverage",
+    "validation_proposal_primary_rmse_physical",
+    "validation_execution_primary_rmse_physical",
+    "validation_execution_hard_rmse_physical",
+    "validation_execution_hard_mse_gain_vs_primary_physical",
+    "validation_execution_hard_action_delta_rmse_physical",
+    "validation_execution_neutral_rmse_physical",
+    "validation_execution_neutral_mse_gain_vs_primary_physical",
+    "validation_execution_neutral_action_delta_rmse_physical",
+    "validation_execution_full_capacity_rmse_physical",
+    "validation_execution_full_capacity_mse_gain_vs_primary_physical",
+    "validation_execution_full_capacity_action_delta_rmse_physical",
+    "validation_execution_three_basis_reduction_rmse_physical",
+    "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical",
+    "validation_execution_three_basis_reduction_action_delta_rmse_physical",
     "balanced_score",
     "deploy_eligible",
     "sample_evidence_z_zero_condition_delta",
@@ -1287,6 +1304,11 @@ VALIDATION_KEYS = (
     "validation_proposal_zero_rmse_normalized",
     "validation_execution_no_updates_rmse_normalized",
     "validation_execution_full_updates_rmse_normalized",
+    "validation_execution_primary_rmse_normalized",
+    "validation_execution_hard_rmse_normalized",
+    "validation_execution_neutral_rmse_normalized",
+    "validation_execution_full_capacity_rmse_normalized",
+    "validation_execution_three_basis_reduction_rmse_normalized",
 )
 
 
@@ -1634,6 +1656,24 @@ _MAINLINE_ALIASES: dict[str, str] = {
     ),
     "loss_execution_terminal_target_preferred_fraction": (
         "evidence_mmd_it_terminal_target_preferred_fraction"
+    ),
+    "validation_sampling_diagnostic_coverage": "eval_sampling_diagnostic_coverage",
+    "validation_proposal_ablation_coverage": "eval_proposal_ablation_coverage",
+    "validation_execution_ablation_coverage": "eval_execution_ablation_coverage",
+    "validation_execution_primary_rmse_physical": (
+        "execution_ablation_primary_full_rmse"
+    ),
+    "validation_execution_hard_rmse_physical": (
+        "execution_ablation_hard_full_rmse"
+    ),
+    "validation_execution_neutral_rmse_physical": (
+        "execution_ablation_neutral_full_rmse"
+    ),
+    "validation_execution_full_capacity_rmse_physical": (
+        "execution_ablation_full_capacity_full_rmse"
+    ),
+    "validation_execution_three_basis_reduction_rmse_physical": (
+        "execution_ablation_three_basis_reduction_full_rmse"
     ),
 }
 
@@ -2649,6 +2689,34 @@ def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[F
             "proposal ablation 覆盖率较低，收益结论置信度有限。",
             coverage=proposal_coverage,
         )
+    mainline_proposal_primary = latest_val.get(
+        "validation_proposal_primary_rmse_physical"
+    )
+    mainline_proposal_gain = latest_val.get(
+        "validation_proposal_zero_mse_gain_vs_primary_physical"
+    )
+    mainline_proposal_delta = latest_val.get(
+        "validation_proposal_zero_action_delta_rmse_physical"
+    )
+    if (
+        mainline_proposal_primary is not None
+        and mainline_proposal_gain is not None
+        and mainline_proposal_delta is not None
+        and mainline_proposal_gain
+        > max(1e-8, 0.01 * float(mainline_proposal_primary) ** 2)
+        and mainline_proposal_delta > 1e-5
+    ):
+        _add_finding(
+            findings,
+            "warning",
+            "proposal",
+            "proposal-zero-better",
+            "Removing the clean proposal improves matched-noise action MSE.",
+            gain=mainline_proposal_gain,
+            action_delta_rmse=mainline_proposal_delta,
+            primary_rmse=mainline_proposal_primary,
+            coverage=proposal_coverage,
+        )
 
     execution_coverage = latest_val.get("eval_execution_ablation_coverage")
     primary_execution_rmse = latest_val.get("execution_ablation_primary_full_rmse")
@@ -2671,6 +2739,9 @@ def _health_findings(run: ParsedRun, observability: Mapping[str, Any]) -> list[F
             coverage=execution_coverage,
         )
 
+    # Preserve diagnosis of pre-fidelity mainline logs whose two ambiguous
+    # execution names shared the proposal subset. New logs use the exact V120
+    # modes above through canonical aliases and never enter this branch.
     mainline_primary = latest_val.get("validation_diagnostic_primary_rmse_physical")
     mainline_coverage = latest_val.get("validation_ablation_coverage")
     mainline_interventions = (
@@ -3235,9 +3306,13 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
                 "validation_band_5_12_rmse_physical",
                 "validation_band_13_24_rmse_physical",
                 "validation_proposal_zero_mse_gain_vs_primary_physical",
-                "validation_execution_no_updates_mse_gain_vs_primary_physical",
-                "validation_execution_full_updates_mse_gain_vs_primary_physical",
-                "validation_ablation_coverage",
+                "validation_execution_hard_mse_gain_vs_primary_physical",
+                "validation_execution_neutral_mse_gain_vs_primary_physical",
+                "validation_execution_full_capacity_mse_gain_vs_primary_physical",
+                "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical",
+                "validation_sampling_diagnostic_coverage",
+                "validation_proposal_ablation_coverage",
+                "validation_execution_ablation_coverage",
             )
             metrics = " ".join(
                 f"{key}={_format_number(val[key])}" for key in selected if key in val
@@ -3815,37 +3890,99 @@ def _recovery_assessment(
         if candidate.get("epochs")
         else {}
     )
-    coverage = latest_val.get("validation_ablation_coverage")
-    record(
-        "causal_ablation/coverage",
-        "pass"
-        if isinstance(coverage, (int, float)) and float(coverage) > 0.0
-        else "incomplete",
-        candidate_value=coverage,
-    )
-    primary = latest_val.get("validation_diagnostic_primary_rmse_physical")
-    allowed_gain = (
-        0.01 * float(primary) ** 2
-        if isinstance(primary, (int, float)) and math.isfinite(float(primary))
-        else None
-    )
-    for stem in (
-        "proposal_zero",
-        "execution_no_updates",
-        "execution_full_updates",
-    ):
-        gain = latest_val.get(f"validation_{stem}_mse_gain_vs_primary_physical")
-        if allowed_gain is None or not isinstance(gain, (int, float)):
-            status = "incomplete"
-        else:
-            status = "pass" if float(gain) <= allowed_gain else "fail"
-        record(
-            f"causal_ablation/{stem}",
-            status,
-            baseline_value=allowed_gain,
-            candidate_value=gain,
-            detail="positive gain means removing/forcing the path improves action",
+    exact_v120_ablations = "validation_execution_ablation_coverage" in latest_val
+    if exact_v120_ablations:
+        for stem in ("sampling_diagnostic", "proposal_ablation", "execution_ablation"):
+            coverage = latest_val.get(f"validation_{stem}_coverage")
+            record(
+                f"causal_ablation/{stem}_coverage",
+                "pass"
+                if isinstance(coverage, (int, float)) and float(coverage) > 0.0
+                else "incomplete",
+                candidate_value=coverage,
+            )
+        proposal_primary = latest_val.get("validation_proposal_primary_rmse_physical")
+        proposal_allowed = (
+            0.01 * float(proposal_primary) ** 2
+            if isinstance(proposal_primary, (int, float))
+            and math.isfinite(float(proposal_primary))
+            else None
         )
+        proposal_gain = latest_val.get(
+            "validation_proposal_zero_mse_gain_vs_primary_physical"
+        )
+        record(
+            "causal_ablation/proposal_zero",
+            (
+                "incomplete"
+                if proposal_allowed is None or not isinstance(proposal_gain, (int, float))
+                else ("pass" if float(proposal_gain) <= proposal_allowed else "fail")
+            ),
+            baseline_value=proposal_allowed,
+            candidate_value=proposal_gain,
+            detail="positive gain means removing the path improves action",
+        )
+        execution_primary = latest_val.get(
+            "validation_execution_primary_rmse_physical"
+        )
+        execution_allowed = (
+            0.01 * float(execution_primary) ** 2
+            if isinstance(execution_primary, (int, float))
+            and math.isfinite(float(execution_primary))
+            else None
+        )
+        for mode in (
+            "hard",
+            "neutral",
+            "full_capacity",
+            "three_basis_reduction",
+        ):
+            gain = latest_val.get(
+                f"validation_execution_{mode}_mse_gain_vs_primary_physical"
+            )
+            record(
+                f"causal_ablation/execution_{mode}",
+                (
+                    "incomplete"
+                    if execution_allowed is None or not isinstance(gain, (int, float))
+                    else ("pass" if float(gain) <= execution_allowed else "fail")
+                ),
+                baseline_value=execution_allowed,
+                candidate_value=gain,
+                detail="positive gain means forcing the ablation improves action",
+            )
+    else:
+        coverage = latest_val.get("validation_ablation_coverage")
+        record(
+            "causal_ablation/coverage",
+            "pass"
+            if isinstance(coverage, (int, float)) and float(coverage) > 0.0
+            else "incomplete",
+            candidate_value=coverage,
+        )
+        primary = latest_val.get("validation_diagnostic_primary_rmse_physical")
+        allowed_gain = (
+            0.01 * float(primary) ** 2
+            if isinstance(primary, (int, float)) and math.isfinite(float(primary))
+            else None
+        )
+        for stem in (
+            "proposal_zero",
+            "execution_no_updates",
+            "execution_full_updates",
+        ):
+            gain = latest_val.get(f"validation_{stem}_mse_gain_vs_primary_physical")
+            if allowed_gain is None or not isinstance(gain, (int, float)):
+                status = "incomplete"
+            else:
+                status = "pass" if float(gain) <= allowed_gain else "fail"
+            record(
+                f"causal_ablation/{stem}",
+                status,
+                baseline_value=allowed_gain,
+                candidate_value=gain,
+                detail="positive gain means removing/forcing the path improves action",
+            )
 
     failed = sum(item["status"] == "fail" for item in checks)
     incomplete = sum(item["status"] == "incomplete" for item in checks)

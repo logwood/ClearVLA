@@ -1,97 +1,89 @@
 # ClearVLA 当前纯问题账本
 
-更新：2026-08-13
+更新：2026-08-14
 
-本文件只记录 Schema24 源码完成后仍未关闭的问题。已经修复的
-G1→G2→G3、V120 P1、grounder 目标、对象级 W/P2 几何、optimizer decay、
-局部/全局裁剪和梯度日志问题已删除；它们的历史依据保留在审计账本与 Git
-差异中，不在这里反复占用注意力。
+本文件只保留尚未解决的问题。已经由源码确认并修复的活跃 observation 参数误冻结、
+Teacher 跨相机坐标代数、global-K public-key 二次注入以及 validation 采样/消融口径
+已从问题账本删除；其实现边界记录在
+`00_CURRENT_ARCHITECTURE_CONTRACT.md`。本轮闭环审查没有发现第五个与这四项同级、
+可由现有源码和日志独立证明的主路故障。这个结论不等于剩余行为问题已经消失。
 
-## P0：尚未完成生产环境行为验收
+## P0：修正后的 Schema24 尚未通过 fresh 行为恢复验收
 
-### 当前事实
+旧 Schema24 epoch-1 checkpoint 产生于错误图，不能 exact-resume 到当前源码。当前版本
+必须使用新的空输出目录完成：
 
-本地 CPU/FP32/BF16 边界测试只能证明接口、autograd 和数值契约闭合，不能证明
-24 GiB GPU 上的真实显存、吞吐和八轮泛化已经恢复。Schema24 因此仍是
-“源码完成、实验待验收”，不是已经接受的实验基线。
+- BF16 smoke、五步部署与 endpoint heads；
+- batch 8 总进程显存不超过 22 GiB；
+- 对齐 batch 2200 的 V120/旧 Schema24/当前 fresh-run 比较；
+- 八个 epoch 的最终点和完整均值比较，不能只取 best checkpoint。
 
-### 关闭条件
+早期恢复至少同时检查：G3 parent L1、object pair cosine、typed posterior L1、P1
+protected detail/spatial variation、Teacher transport/covariance、P2 null/effect、
+consequence 与 P3 effect。动作端必须比较 physical/native、first/tail、三个 horizon、
+arm/gripper、decoded event、event head 和 motion head。
 
-- fresh BF16 smoke 和五步部署通过；
-- batch 8 总进程峰值不超过 22 GiB；
-- 对齐 batch 2200，与 V120 比较 G3 parent L1、object pair cosine、
-  P1 spatial variation、P2 null mass 和 P2 effect RMS；每项至少关闭
-  Schema23→V120 差距的 50%，且没有指标继续远离 V120；审计命令必须同时
-  提供 `--recovery-baseline` 与 `--recovery-parent`，不能拿 V120 第八轮 tail
-  和 Schema24 第一轮比较；
-- 跑满八个 epoch，比较全部 train/validation、first/tail、四 horizon、
-  arm/gripper、event/motion、G/S/W/P、raw/postlocal/postglobal 梯度；
-- 最终点和八轮均值均通过 recovery gate，不能用 best checkpoint 掩盖后期反弹。
+## P1：W→action 在旧 Schema24 中是严重衰减，fresh run 后复核
 
-## P1：参数、显存和吞吐差异仍需由真实启动清单解释
+旧日志并非 autograd 断线：P2 与 consequence action-only 梯度非零；但错误 Teacher
+几何使 P2 合法地偏向 null，validation 中 effect/consequence/P3-effect 接近消失，策略
+退回 P1+temporal。当前修复去除了已确认的上游原因，但尚无新实验能证明动作端已恢复。
 
-源码已经在 run context 中写入逐模块参数量，不再硬编码总参数。尚需生产 smoke
-记录并解释：
+关闭条件：在相同数据、seed、batch 和对齐 iter 上，Teacher transport 回到合理量级，
+P2 null 下降、effect/consequence/P3-effect 恢复且 action 指标同步改善。仅有 future loss
+下降、W 梯度非零或 representation 改变不算关闭。若修正后 W zero 仍改善 action，才把
+它升级为新的 W/P2 结构任务；此前禁止重写 P2/P3/bottom、取消合法 null、增加 gain、
+quota、硬门控或人工梯度。
 
-- progressive G1-G3、exact V120 P1 与删除旧 host/K-object P1/额外 grounder
-  heads 各自带来的参数差异；
-- batch 1 与 batch 8 的模型、activation、reserved 与 context 峰值；
-- Teacher 每训练 batch 一次、部署零次；
-- 静态 observation/G/S/W/P1 一次，动态 P1/P2/P3/transition/bottom 六次
-  （五个更新节点加一个 endpoint head）。
+## P1：S typed innovation 的部署条件依赖仍未判定
 
-若时间或显存不满足边界，先用调用次数和模块清单定位；不得先缩弱 P1、删除
-bottom、减少 N=49 或降低高分辨率读取来制造“优化”。
+旧 Schema24 训练末段 typed innovation 约 `0.08–0.16`，但首四个 validation 诊断 batch
+约 `1.29e-4`；goal/history/object innovation 同时仍非零。这是旧子集上的真实边界输出，
+但旧采样只覆盖验证集开头约 2.23%，不能外推到全验证集。
 
-## P1：结构恢复后 S/W/P3 的可识别性尚未由长跑判定
+当前验证已改为在全 loader 上均匀抽取 16 个 sampling diagnostic batches。fresh run 后需
+按完整 goal/history、各自 dropout 和 train-mask/eval-mask 对同一固定 batch 做无梯度
+对照，并记录 typed null/source mass。若完整条件下仍稳定归零，才确认
+condition-dependent routing shortcut。不得通过 typed gain、熵目标、非零配额或删除
+null 制造使用率。
 
-旧日志中的 S 公共化、W 比 Teacher 更公共、effect 使用弱、P3 temporal/history
-偏置可能来自此前错误的 G/P1/geometry/训练生命周期，也可能在正确接线后仍然
-存在数据可识别性问题。源码审查目前没有依据继续改 S/W/P3。
+## P1：P1 protected detail 的 train/eval 衰减仍未判定
 
-只有在以下边界全部正确且 Schema24 长跑仍复现问题时，才建立下一轮结构任务：
+旧 Schema24 训练末段 `p1_protected_detail_rms≈0.03–0.04`，首四个 validation 诊断
+batch 约 `0.0104`，而 dynamic delta 仍约 `0.385`。静态源码复核已经确认当前 P1 仍
+完整执行 24 factual queries、四种 glimpse、N=49 posterior 和真实 3×3
+RGB/detail/coordinate microgrid；`FactualPrecisionDock` 只是参数自由的已计算结果边界，
+不是粗暴替代 reader。
 
-- G1/G2/G3、P1 N=49/microgrid、对象几何和 support/selector 探针均通过；
-- W zero/shuffle 先显著改变 P2/effect/consequence 边界；
-- action 端置信区间仍跨零，或 W zero 仍改善动作；
-- S/W 的区间变化在完整轨迹与完整 epoch 上仍公共化。
+先在恢复 observation trainability、移除 public-key 注入并采用均匀 validation 采样的
+fresh run 上复核。如果同一输入的 train-mask/eval-mask 仍产生异常 detail 衰减，再定位
+mask/selector 输入分布；此前禁止改 P1、缩小 microgrid、增加 detail gain 或再造 reader。
 
-届时应归类为“监督/可识别性”而不是继续补接线，不允许用 gain、quota、硬门控、
-entropy loss 或人工梯度制造使用率。
+## P1：G/S/W/P3 的可识别性只能由修正后的完整实验判定
 
-## P2：future_address 是无消费者的诊断债务
+旧日志中的 K 槽公共化、三类 typed posterior 相似、W 比 Teacher 更公共、P3
+temporal/history 偏置，可能由本轮已修的冻结/key/Teacher 问题造成，也可能包含独立的
+数据可识别性问题。静态 closure audit 已再次核对当前 P2、P3、RoleDeltaAttnRes、
+transition 与 Evidence bottom 的代数，没有发现新的断线或替代实现，因此本轮不修改
+这些成熟模块。
 
-`FutureObjectDynamics.future_address [B,4,K,C,8,8]` 只用于诊断与 Teacher
-可视化；在线 P2 使用对象级 coordinate/transport/validity，不消费该张量。
-它当前不改变 action，也不是本轮回归原因。
+只有在 G1/G2/G3、P1、Teacher 和对象几何边界全部恢复，且八轮仍复现公共化时，才把
+它归类为监督/可识别性任务。届时必须基于完整轨迹和 causal intervention，而不是靠
+额外 loss 或接口命名判断所有权。
 
-后续若删除，必须先确认日志、探针和 checkpoint schema 不再依赖；不得把它重新
-接入 P2 以制造相机轴或空间使用。
+## P2：保留但不进入当前修复的债务
 
-## P2：P1 learned null 明确延期
+- `FutureObjectDynamics.future_address [B,4,K,C,8,8]` 当前只有诊断消费者；不把它
+  接回 P2 来制造相机轴或空间使用率。
+- P1 learned null 明确延期。若未来实现，protected base 必须在竞争外、null value
+  必须代数零、且只能抑制 optional detail innovation。
+- HistoryActionProposal 仍是监督辅助项；future proposal token 不进入主路，真实 executed
+  history 仍通过共享 V120 seed 条件化策略。只有完整消融证明该辅助项无益且昂贵时再处理。
 
-当前 exact V120 P1 没有 learned null，protected factual base 不参与可选竞争。
-若未来引入，只允许：
+## 失败归类
 
-- protected base 位于竞争外；
-- null value 代数精确为零；
-- null 只抑制 optional detail innovation；
-- 先验只来自当前可观测证据；
-- 不读取 noisy action、future Teacher 或直接 policy carrier。
-
-在出现明确的 detail 误读证据前，不实施该机制。
-
-## P2：future proposal 的主路 no-op 保持为显式设计
-
-HistoryActionProposal 仍有监督，但其未来预测 token 不进入 G/S/W/P/transition/
-bottom；真实可观测 executed-action history 通过共享 V120 seed 进入主路。当前
-不删除该辅助项，也不把 proposal 接回主路。只有完整消融证明辅助 loss 无益且
-产生显著开销时，才单独处理。
-
-## 失败时的归类规则
-
-- 若 smoke 在 forward/shape/dtype 失败：源码契约问题，停止长跑并修复；
-- 若出现 non-finite：以 `gradient_failure` 首个参数记录归因，不先加 clip；
-- 若显存/速度失败：按静态/动态调用次数与模块清单归因；
-- 若结构边界通过但八轮性能失败：数据/监督/可识别性问题；
-- 不把“梯度存在”“tensor 非空”或“辅助 loss 下降”当作主路有效证据。
+- forward/shape/dtype 失败：源码边界问题，停止长跑；
+- non-finite：使用 `gradient_failure` 首个参数记录归因，不先增加 clip；
+- 显存/速度失败：按静态/动态调用次数和模块清单归因；
+- 边界测试正确但八轮性能失败：数据、监督或可识别性问题；
+- 不把“梯度存在”“张量非空”或“辅助 loss 下降”当作主路有效证据。

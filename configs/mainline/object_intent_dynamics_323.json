@@ -143,6 +143,8 @@
     "log_every": 20,
     "max_train_batches": 0,
     "max_val_batches": 0,
-    "eval_diagnostic_batches": 4
+    "eval_sampling_diagnostic_batches": 16,
+    "eval_proposal_ablation_batches": 16,
+    "eval_execution_ablation_batches": 8
   }
 }

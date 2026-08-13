@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -24,7 +25,6 @@ from ..v120_core.flow_dino_evidence import (
     FlowDINOEvidenceEncoder,
     FlowDINOEvidencePack,
     ProgressiveGroundingAddressState,
-    SoftAddressLatticeBank,
 )
 from ..v120_core.profile import build_v120_visual_config
 from .observation_contract import (
@@ -34,30 +34,14 @@ from .observation_contract import (
 )
 from .types import LocalFactSet
 
-_UNUSED_V120_VISUAL_PARAMETERS = {
-    "history_type",
-    "camera_type",
-    "spatial_type",
-    "evidence_type",
-    "future_query",
-    "future_anchor_type",
-    # The exported G3 fact contract inherits/refines G2 ownership through
-    # ``g3_owner_residual`` and builds the public base from the protected
-    # clean canvas.  Consequently the third generic route query is not a G3
-    # owner in the grounded V120 graph (the exact grounded V120 path freezes
-    # the same parameter).  Keep it out of the optimizer instead of leaving a
-    # trainable parameter with no consumer.
+_NON_OWNER_V120_VISUAL_PARAMETERS = {
+    # The object-intent export uses the G3 block output to drive the bounded
+    # owner residual, but its completed GroundedFactSet deliberately does not
+    # consume the parallel generic route query.  Keeping this one matrix out
+    # of the optimizer is exact no-op behavior and avoids a dead trainable
+    # parameter.  Do not broaden this list to active pre-G/Teacher modules.
     "progressive_grounding_address.query_projections.2.weight",
 }
-
-_UNUSED_V120_VISUAL_PREFIXES = (
-    "motion_key.",
-    "organized_key.",
-    "early_masked_raw_context.",
-    "future_motion.",
-    "future_history_score.",
-    "future_transition.",
-)
 
 
 @dataclass(frozen=True)
@@ -135,22 +119,15 @@ class RestoredV120ObservationCompiler(nn.Module):
         if self.encoder.raw_flow is None:
             raise RuntimeError("the restored V120 compiler has no raw-flow pyramid")
         self.detail_dim = int(self.encoder.raw_flow.pyramid.high_channels)
-        self._freeze_non_mainline_branches()
+        for name, parameter in self.encoder.named_parameters():
+            if name in _NON_OWNER_V120_VISUAL_PARAMETERS:
+                parameter.requires_grad_(False)
 
     @property
     def flow(self) -> nn.Module:
         """Expose the actual V120 SEA-RAFT core for profiling/tests."""
 
         return self.encoder.flow
-
-    def _freeze_non_mainline_branches(self) -> None:
-        """Freeze extracted heads whose consumer belonged to the old monolith."""
-
-        for name, parameter in self.encoder.named_parameters():
-            if name in _UNUSED_V120_VISUAL_PARAMETERS or name.startswith(
-                _UNUSED_V120_VISUAL_PREFIXES
-            ):
-                parameter.requires_grad_(False)
 
     @torch.no_grad()
     def teacher_supports(self, tokens: Tensor) -> Tensor:

@@ -26,13 +26,13 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import ObservableHistory
-from ..v120_core.profile import build_v120_policy_config
+from ..v120_core.layer_contracts import LayerContractAdapterHeads
 from ..v120_core.primitives import TimeEmbedding
+from ..v120_core.profile import build_v120_policy_config
 from ..v120_core.role_delta_attnres import (
     AffineVarianceFlooredCenteredNorm,
     PolicyRoleDeltaBank,
 )
-from ..v120_core.layer_contracts import LayerContractAdapterHeads
 from ..v120_core.time_domain_mmdit import (
     EvidenceLatentMMDiTActionDecoder,
 )
@@ -515,14 +515,37 @@ class RestoredV120EvidenceBottom(nn.Module):
                 capacity_gate=1.0,
             )
             return
-        if mode == "full_updates":
+        if mode == "hard":
             self.decoder.set_execution_eval_ablation(
                 policy="hard",
+                capacity_gate=None,
+            )
+            return
+        if mode == "neutral":
+            self.decoder.set_execution_eval_ablation(
+                policy="neutral",
                 capacity_gate=1.0,
             )
             return
+        if mode == "full_capacity":
+            self.decoder.set_execution_eval_ablation(
+                policy="soft",
+                capacity_gate=1.0,
+            )
+            return
+        if mode == "three_basis_reduction":
+            rank = max(
+                int(self.core_config.latent_cvae_mmdit_operator_rank),
+                1,
+            )
+            self.decoder.set_execution_eval_ablation(
+                policy="soft",
+                capacity_gate=max(float(rank - 3), 1.0) / float(rank),
+            )
+            return
         raise ValueError(
-            "bottom execution_mode must be learned/no_updates/full_updates"
+            "bottom execution_mode must be learned/no_updates/hard/neutral/"
+            "full_capacity/three_basis_reduction"
         )
 
     def compile_evidence_view(

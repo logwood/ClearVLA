@@ -399,7 +399,9 @@ class RuntimeConfig:
     log_every: int = 20
     max_train_batches: int = 0
     max_val_batches: int = 0
-    eval_diagnostic_batches: int = 4
+    eval_sampling_diagnostic_batches: int = 16
+    eval_proposal_ablation_batches: int = 16
+    eval_execution_ablation_batches: int = 8
 
     def validate(self) -> None:
         if self.compute_dtype not in {"bf16", "fp32"}:
@@ -411,7 +413,9 @@ class RuntimeConfig:
         limits = (
             self.max_train_batches,
             self.max_val_batches,
-            self.eval_diagnostic_batches,
+            self.eval_sampling_diagnostic_batches,
+            self.eval_proposal_ablation_batches,
+            self.eval_execution_ablation_batches,
         )
         if any(int(value) < 0 for value in limits):
             raise ValueError("runtime batch limits and diagnostics must be non-negative")

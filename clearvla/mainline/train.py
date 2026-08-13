@@ -337,6 +337,23 @@ def _preflight(
     )
 
 
+def _diagnostic_batch_indices(*, planned_batches: int, budget: int) -> set[int]:
+    """Spread a bounded diagnostic budget over the complete validation run."""
+
+    if planned_batches < 0 or budget < 0:
+        raise ValueError("validation batch counts and diagnostic budgets must be non-negative")
+    if planned_batches == 0:
+        return set()
+    if budget == 0 or budget >= planned_batches:
+        return set(range(1, planned_batches + 1))
+    if budget == 1:
+        return {1 + (planned_batches - 1) // 2}
+    return {
+        1 + round(index * (planned_batches - 1) / float(budget - 1))
+        for index in range(budget)
+    }
+
+
 @torch.no_grad()
 def _validate(
     *,
@@ -354,10 +371,13 @@ def _validate(
         arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
     losses = DeviceMetricAccumulator()
-    ablations = DeviceMetricAccumulator()
+    proposal_ablations = DeviceMetricAccumulator()
+    execution_ablations = DeviceMetricAccumulator()
     maximum = config.runtime.max_val_batches
     completed_batches = 0
-    diagnostic_batches = 0
+    sampling_diagnostic_batches = 0
+    proposal_ablation_batches = 0
+    execution_ablation_batches = 0
     action_scale = torch.as_tensor(
         bundle.action_normalizer.scale,
         device=device,
@@ -366,9 +386,23 @@ def _validate(
     if bool((action_scale <= 0.0).any()):
         raise ValueError("validation action normalizer scale must be positive")
     flow_generator = _owned_generator(device, config.data.seed + 10_001)
-    sampling_generator = _owned_generator(device, config.data.seed + 10_002)
-    for batch_index, raw_batch in enumerate(loader):
-        if maximum > 0 and batch_index >= maximum:
+    planned_batches = len(loader)
+    if maximum > 0:
+        planned_batches = min(planned_batches, int(maximum))
+    sampling_diagnostic_indices = _diagnostic_batch_indices(
+        planned_batches=planned_batches,
+        budget=config.runtime.eval_sampling_diagnostic_batches,
+    )
+    proposal_ablation_indices = _diagnostic_batch_indices(
+        planned_batches=planned_batches,
+        budget=config.runtime.eval_proposal_ablation_batches,
+    )
+    execution_ablation_indices = _diagnostic_batch_indices(
+        planned_batches=planned_batches,
+        budget=config.runtime.eval_execution_ablation_batches,
+    )
+    for batch_index, raw_batch in enumerate(loader, start=1):
+        if maximum > 0 and batch_index > maximum:
             break
         completed_batches += 1
         batch = to_training_batch(
@@ -377,7 +411,9 @@ def _validate(
             config=config,
             device=device,
         )
-        diagnostics = batch_index < config.runtime.eval_diagnostic_batches
+        diagnostics = batch_index in sampling_diagnostic_indices
+        run_proposal_ablation = batch_index in proposal_ablation_indices
+        run_execution_ablation = batch_index in execution_ablation_indices
         encoded = engine.encode_eval(batch, collect_diagnostics=diagnostics)
         loss_result = engine.eval_step(
             batch,
@@ -387,7 +423,7 @@ def _validate(
         )
         cache = encoded.cache
         proposal_ablation_cache = None
-        if diagnostics:
+        if run_proposal_ablation:
             autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
                 torch.bfloat16,
                 torch.float16,
@@ -415,7 +451,10 @@ def _validate(
             config,
             collect_diagnostics=diagnostics,
             dtype=dtype,
-            generator=sampling_generator,
+            # V120 owns one validation-noise stream per batch.  This makes a
+            # batch's deployment sample independent of diagnostic budgets and
+            # preserves matched cross-version/action-ablation comparisons.
+            generator=_owned_generator(device, 37_237 + batch_index),
         )
         target_physical = engine.model.action_codec.encode(
             batch.action_target.normalized,
@@ -433,91 +472,156 @@ def _validate(
             motion_target=motion_target,
         )
         if diagnostics:
-            if proposal_ablation_cache is None:
-                raise RuntimeError("proposal ablation cache was not constructed")
-            diagnostic_batches += 1
+            sampling_diagnostic_batches += 1
+            losses.update(
+                {
+                    f"validation_deploy_{name}": value
+                    for name, value in prediction.metrics.items()
+                },
+                weight=batch.online.batch,
+            )
+        if run_proposal_ablation or run_execution_ablation:
             common_sampling = {
                 "initial_physical_noise": prediction.initial_physical_noise,
                 "collect_diagnostics": False,
                 "dtype": dtype,
             }
+            target = batch.action_target.normalized.float()
+            primary = prediction.action.float()
+            primary_error = primary - target
+        if run_proposal_ablation:
+            if proposal_ablation_cache is None:
+                raise RuntimeError("proposal ablation cache was not constructed")
+            proposal_ablation_batches += 1
             proposal_zero = sample_cached_action(
                 engine.model,
                 proposal_ablation_cache,
                 config,
                 **common_sampling,
             )
-            execution_no_updates = sample_cached_action(
-                engine.model,
-                cache,
-                config,
-                execution_mode="no_updates",
-                **common_sampling,
+            proposal_error = proposal_zero.action.float() - target
+            proposal_delta = proposal_zero.action.float() - primary
+            proposal_ablations.update(
+                {
+                    "proposal_primary_mse_normalized": primary_error.square().mean(),
+                    "proposal_primary_mse_physical": (
+                        primary_error / action_scale
+                    ).square().mean(),
+                    "proposal_zero_mse_normalized": proposal_error.square().mean(),
+                    "proposal_zero_mse_physical": (
+                        proposal_error / action_scale
+                    ).square().mean(),
+                    "proposal_zero_action_delta_mse_normalized": (
+                        proposal_delta.square().mean()
+                    ),
+                    "proposal_zero_action_delta_mse_physical": (
+                        proposal_delta / action_scale
+                    ).square().mean(),
+                },
+                weight=batch.online.batch,
             )
-            execution_full_updates = sample_cached_action(
-                engine.model,
-                cache,
-                config,
-                execution_mode="full_updates",
-                **common_sampling,
-            )
-            target = batch.action_target.normalized.float()
-            primary = prediction.action.float()
-            primary_error = primary - target
-            ablation_rows: dict[str, torch.Tensor] = {
-                "diagnostic_primary_mse_normalized": primary_error.square().mean(),
-                "diagnostic_primary_mse_physical": (
+            del proposal_ablation_cache, proposal_zero
+        if run_execution_ablation:
+            execution_ablation_batches += 1
+            execution_rows: dict[str, torch.Tensor] = {
+                "execution_primary_mse_normalized": primary_error.square().mean(),
+                "execution_primary_mse_physical": (
                     primary_error / action_scale
                 ).square().mean(),
             }
-            for name, value in (
-                ("proposal_zero", proposal_zero.action),
-                ("execution_no_updates", execution_no_updates.action),
-                ("execution_full_updates", execution_full_updates.action),
+            for mode in (
+                "hard",
+                "neutral",
+                "full_capacity",
+                "three_basis_reduction",
             ):
-                error = value.float() - target
-                delta = value.float() - primary
-                ablation_rows[f"{name}_mse_normalized"] = error.square().mean()
-                ablation_rows[f"{name}_mse_physical"] = (
+                execution = sample_cached_action(
+                    engine.model,
+                    cache,
+                    config,
+                    execution_mode=mode,
+                    **common_sampling,
+                )
+                error = execution.action.float() - target
+                delta = execution.action.float() - primary
+                stem = f"execution_{mode}"
+                execution_rows[f"{stem}_mse_normalized"] = error.square().mean()
+                execution_rows[f"{stem}_mse_physical"] = (
                     error / action_scale
                 ).square().mean()
-                ablation_rows[f"{name}_action_delta_mse_normalized"] = (
+                execution_rows[f"{stem}_action_delta_mse_normalized"] = (
                     delta.square().mean()
                 )
-                ablation_rows[f"{name}_action_delta_mse_physical"] = (
+                execution_rows[f"{stem}_action_delta_mse_physical"] = (
                     delta / action_scale
                 ).square().mean()
-            ablations.update(ablation_rows, weight=batch.online.batch)
-            # The loss forward samples one random flow time, while this row is
-            # the final step of a five-step deployment solve.  Their dynamic
-            # P2/P3/bottom keys overlap but do not have the same semantics;
-            # merging them under one name silently averaged unlike states.
-            losses.update(
-                {f"validation_deploy_{name}": value for name, value in prediction.metrics.items()},
+                del execution
+            execution_ablations.update(
+                execution_rows,
                 weight=batch.online.batch,
             )
-            del proposal_ablation_cache
-            del proposal_zero, execution_no_updates, execution_full_updates
     result = {**losses.materialize(), **deployment.means()}
-    result["validation_ablation_batches"] = float(diagnostic_batches)
-    result["validation_ablation_coverage"] = float(
-        diagnostic_batches / max(completed_batches, 1)
+    result["validation_sampling_diagnostic_batches"] = float(
+        sampling_diagnostic_batches
     )
-    if diagnostic_batches:
-        rows = ablations.materialize()
-        primary_normalized = rows["diagnostic_primary_mse_normalized"]
-        primary_physical = rows["diagnostic_primary_mse_physical"]
-        result["validation_diagnostic_primary_rmse_normalized"] = float(
+    result["validation_sampling_diagnostic_coverage"] = float(
+        sampling_diagnostic_batches / max(completed_batches, 1)
+    )
+    result["validation_proposal_ablation_batches"] = float(
+        proposal_ablation_batches
+    )
+    result["validation_proposal_ablation_coverage"] = float(
+        proposal_ablation_batches / max(completed_batches, 1)
+    )
+    result["validation_execution_ablation_batches"] = float(
+        execution_ablation_batches
+    )
+    result["validation_execution_ablation_coverage"] = float(
+        execution_ablation_batches / max(completed_batches, 1)
+    )
+    if proposal_ablation_batches:
+        rows = proposal_ablations.materialize()
+        primary_normalized = rows["proposal_primary_mse_normalized"]
+        primary_physical = rows["proposal_primary_mse_physical"]
+        result["validation_proposal_primary_rmse_normalized"] = float(
             primary_normalized**0.5
         )
-        result["validation_diagnostic_primary_rmse_physical"] = float(
+        result["validation_proposal_primary_rmse_physical"] = float(
             primary_physical**0.5
         )
-        for name in (
-            "proposal_zero",
-            "execution_no_updates",
-            "execution_full_updates",
+        normalized = rows["proposal_zero_mse_normalized"]
+        physical = rows["proposal_zero_mse_physical"]
+        result["validation_proposal_zero_rmse_normalized"] = float(normalized**0.5)
+        result["validation_proposal_zero_rmse_physical"] = float(physical**0.5)
+        result["validation_proposal_zero_mse_gain_vs_primary_normalized"] = float(
+            primary_normalized - normalized
+        )
+        result["validation_proposal_zero_mse_gain_vs_primary_physical"] = float(
+            primary_physical - physical
+        )
+        result["validation_proposal_zero_action_delta_rmse_normalized"] = float(
+            rows["proposal_zero_action_delta_mse_normalized"] ** 0.5
+        )
+        result["validation_proposal_zero_action_delta_rmse_physical"] = float(
+            rows["proposal_zero_action_delta_mse_physical"] ** 0.5
+        )
+    if execution_ablation_batches:
+        rows = execution_ablations.materialize()
+        primary_normalized = rows["execution_primary_mse_normalized"]
+        primary_physical = rows["execution_primary_mse_physical"]
+        result["validation_execution_primary_rmse_normalized"] = float(
+            primary_normalized**0.5
+        )
+        result["validation_execution_primary_rmse_physical"] = float(
+            primary_physical**0.5
+        )
+        for mode in (
+            "hard",
+            "neutral",
+            "full_capacity",
+            "three_basis_reduction",
         ):
+            name = f"execution_{mode}"
             normalized = rows[f"{name}_mse_normalized"]
             physical = rows[f"{name}_mse_physical"]
             result[f"validation_{name}_rmse_normalized"] = float(normalized**0.5)
