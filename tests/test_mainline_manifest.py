@@ -43,11 +43,11 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 22
+    assert ARCHITECTURE_MANIFEST.schema == 23
     assert components.observation == "restored_v120_three_frame_flow_dino_raw_local_chart"
     assert (
         components.top
-        == "v120_cumulative_intent_four_interval_dynamics_protected_candidate_p1_five_lane_p3"
+        == "v120_cumulative_intent_four_interval_dynamics_split_support_selector_protected_candidate_p1_five_lane_p3"
     )
     assert (
         components.bottom
@@ -55,14 +55,14 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.training
-        == "v120_physical_flow_attainable_direction_interval_transition_execution_value_exact_role_lr"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_exact_role_lr"
     )
     assert components.runtime == (
-        "cached_observation_gsw_p1_detail_dynamic_p1_per_ode_transition_teacher_isolated"
+        "cached_observation_gsw_p1_detail_v120_nodes_clean_endpoint_teacher_isolated"
     )
 
 
-def test_schema_22_active_parameter_inventory_cannot_silently_shrink() -> None:
+def test_schema_23_active_parameter_inventory_cannot_silently_shrink() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

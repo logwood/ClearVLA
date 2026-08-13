@@ -8,6 +8,7 @@ from clearvla.mainline.model.action_codec import (
 )
 from clearvla.mainline.training.losses import (
     balanced_event_row_weights,
+    event_positive_class_weights,
     sample_flow_matching,
 )
 
@@ -55,7 +56,7 @@ def test_flow_matching_and_deployment_share_the_same_physical_field() -> None:
         target,
         action_state=state,
         codec=codec,
-        distribution="beta_1_5_1",
+        distribution="v120_mirrored_beta_1_5_1",
         generator=generator,
     )
     assert tuple(flow.source_physical_noise.shape) == (2, 24, 18)
@@ -65,6 +66,33 @@ def test_flow_matching_and_deployment_share_the_same_physical_field() -> None:
         flow.target_physical_velocity,
         flow.target_physical - flow.source_physical_noise,
     )
+
+
+def test_flow_time_is_the_exact_mirrored_v120_beta_with_owned_rng_order() -> None:
+    batch = 8
+    seed = 1234
+    expected_generator = torch.Generator().manual_seed(seed)
+    numerator = torch._standard_gamma(
+        torch.full((batch,), 1.5, dtype=torch.float32),
+        generator=expected_generator,
+    )
+    denominator = numerator + torch._standard_gamma(
+        torch.ones(batch, dtype=torch.float32),
+        generator=expected_generator,
+    )
+    expected_v120 = numerator / denominator.clamp_min(1e-8)
+    expected_mainline = 1.0 - (expected_v120 * 0.999 + 0.001)
+
+    flow = sample_flow_matching(
+        torch.randn(batch, 24, 7),
+        action_state=torch.randn(batch, 7),
+        codec=_codec(),
+        distribution="v120_mirrored_beta_1_5_1",
+        generator=torch.Generator().manual_seed(seed),
+    )
+    torch.testing.assert_close(flow.time, expected_mainline)
+    assert bool((flow.time >= 0.0).all())
+    assert bool((flow.time <= 0.999).all())
 
 
 def test_anchor_bands_restore_v120_per_row_pressure_and_unit_mean() -> None:
@@ -105,3 +133,11 @@ def test_event_row_balance_reaches_real_gripper_rows_without_changing_budget() -
 
     no_event = balanced_event_row_weights(torch.zeros_like(event), horizon)
     assert torch.equal(no_event, torch.ones_like(no_event))
+
+
+def test_v120_event_positive_boost_is_five_to_one_over_hold() -> None:
+    weight = event_positive_class_weights(
+        torch.tensor((0, 1, 2)),
+        positive_boost=4.0,
+    )
+    torch.testing.assert_close(weight, torch.tensor((1.0, 5.0, 5.0)))

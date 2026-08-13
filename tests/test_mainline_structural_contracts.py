@@ -141,7 +141,7 @@ def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:
         persistence=torch.zeros_like(scalar),
         uncertainty=torch.zeros_like(scalar),
         reliability=scalar,
-        validity=scalar[:, :, :, None],
+        future_selector_validity=scalar[:, :, :, None],
         future_address=torch.full((batch, intervals, objects, cameras, 2, 2), 0.25),
         object_coordinates=torch.zeros(batch, objects, cameras, 2),
     )
@@ -177,7 +177,7 @@ def test_future_recognizer_supervises_neutral_objects_without_reliability_discou
         persistence=scalar,
         uncertainty=torch.ones_like(scalar),
         reliability=scalar,
-        validity=torch.ones(batch, intervals, objects, cameras, 1),
+        future_selector_validity=torch.zeros(batch, intervals, objects, cameras, 1),
         future_address=torch.zeros(batch, intervals, objects, cameras, 2, 2),
         object_coordinates=torch.zeros(batch, objects, cameras, 2),
     )
@@ -685,6 +685,20 @@ def test_w_zero_initialized_camera_mass_residual_preserves_current_camera_prior(
     )
     expected = facts.object_to_chart[:, None].expand(-1, 2, -1, -1, -1, -1)
     assert torch.allclose(field.future_address, expected, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        field.future_selector_validity,
+        facts.camera_validity[:, None].expand(-1, 2, -1, -1, -1),
+    )
+
+    # Online visibility controls only the P2 selector support.  A strong
+    # predicted disappearance must continuously suppress that route.
+    with torch.no_grad():
+        dynamics.visibility_head.bias.fill_(20.0)
+    suppressed = dynamics._field(
+        facts=facts,
+        hidden=torch.zeros(1, 2, 4, 16),
+    )
+    assert suppressed.future_selector_validity.max() < 1e-6
 
 
 def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> None:
@@ -853,7 +867,7 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
         persistence=scalar,
         uncertainty=scalar,
         reliability=scalar,
-        validity=validity,
+        future_selector_validity=validity,
         future_address=address,
         object_coordinates=torch.zeros(batch, objects, cameras, 2),
     )
@@ -864,7 +878,12 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
         future_address=changed_address,
         transport_mean=torch.ones_like(target.transport_mean),
     )
-    unreliable = future_dynamics_terms(prediction, target)
+    current_support = torch.ones(batch, objects, cameras, 1)
+    unreliable = future_dynamics_terms(
+        prediction,
+        target,
+        current_loss_support=current_support,
+    )
     assert unreliable["future_transport"] > 0
     assert "future_address" not in unreliable
 
@@ -876,14 +895,46 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
         successor_content=target.successor_content + 1.0,
         semantic_delta=target.semantic_delta + 1.0,
     )
-    unreliable_content = future_dynamics_terms(changed_successor, target)
+    unreliable_content = future_dynamics_terms(
+        changed_successor,
+        target,
+        current_loss_support=current_support,
+    )
     assert unreliable_content["future_successor"] > 0
     assert unreliable_content["future_semantic_delta"] > 0
 
     reliable_target = replace(target, reliability=torch.ones_like(scalar))
     reliable_prediction = replace(prediction, reliability=torch.ones_like(scalar))
-    reliable = future_dynamics_terms(reliable_prediction, reliable_target)
+    reliable = future_dynamics_terms(
+        reliable_prediction,
+        reliable_target,
+        current_loss_support=current_support,
+    )
     torch.testing.assert_close(unreliable["future_transport"], reliable["future_transport"])
+
+    # Selector validity is a P2 routing field, never a training-loss mask.
+    selector_changed_target = replace(
+        target,
+        future_selector_validity=torch.zeros_like(target.future_selector_validity),
+    )
+    selector_changed_prediction = replace(
+        prediction,
+        future_selector_validity=torch.zeros_like(prediction.future_selector_validity),
+    )
+    selector_changed = future_dynamics_terms(
+        selector_changed_prediction,
+        selector_changed_target,
+        current_loss_support=current_support,
+    )
+    for name in unreliable:
+        torch.testing.assert_close(selector_changed[name], unreliable[name])
+
+    unsupported = future_dynamics_terms(
+        prediction,
+        target,
+        current_loss_support=torch.zeros_like(current_support),
+    )
+    torch.testing.assert_close(unsupported["future_dynamics"], torch.zeros(()))
 
 
 def test_future_interval_transition_penalizes_temporal_collapse_not_common_offset() -> None:
@@ -904,7 +955,7 @@ def test_future_interval_transition_penalizes_temporal_collapse_not_common_offse
         persistence=scalar,
         uncertainty=scalar,
         reliability=scalar,
-        validity=torch.ones(batch, intervals, objects, cameras, 1),
+        future_selector_validity=torch.ones(batch, intervals, objects, cameras, 1),
         future_address=address,
         object_coordinates=torch.zeros(batch, objects, cameras, 2),
     )
@@ -912,10 +963,21 @@ def test_future_interval_transition_penalizes_temporal_collapse_not_common_offse
     collapsed = replace(target, semantic_delta=torch.zeros_like(semantic))
 
     torch.testing.assert_close(
-        future_dynamics_terms(shifted, target)["future_transition"],
+        future_dynamics_terms(
+            shifted,
+            target,
+            current_loss_support=torch.ones(batch, objects, cameras, 1),
+        )["future_transition"],
         torch.zeros(()),
     )
-    assert future_dynamics_terms(collapsed, target)["future_transition"] > 0
+    assert (
+        future_dynamics_terms(
+            collapsed,
+            target,
+            current_loss_support=torch.ones(batch, objects, cameras, 1),
+        )["future_transition"]
+        > 0
+    )
 
 
 def test_teacher_reliability_falls_for_semantically_opposed_supports() -> None:
@@ -947,6 +1009,95 @@ def test_teacher_reliability_falls_for_semantically_opposed_supports() -> None:
         future_offsets=offsets,
     )
     assert high_target.reliability[:, :, 0].mean() > low_target.reliability[:, :, 0].mean()
+    torch.testing.assert_close(
+        high_target.semantic_delta,
+        high_target.successor_content - high_target.current_reference[:, None],
+    )
+    torch.testing.assert_close(
+        low_target.semantic_delta,
+        low_target.successor_content - low_target.current_reference[:, None],
+    )
+
+
+def test_diffuse_teacher_keeps_raw_successor_and_spatial_moments() -> None:
+    """Entropy may lower reliability but must not contract physical targets."""
+
+    torch.manual_seed(33)
+    local = _local_facts(content=8, route=4, hidden=16)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )
+    facts, _ = grounder(local)
+    teacher = ObjectFutureTeacher(content_dim=8, key_dim=4)
+    with torch.no_grad():
+        teacher.semantic_content_key.weight.zero_()
+        teacher.appearance_content_key.weight.zero_()
+
+    rows, columns = facts.object_to_chart.shape[-2:]
+    support_value = torch.linspace(-0.75, 0.75, 8)
+    supports = support_value.reshape(1, 1, 1, 1, 1, 8).expand(
+        1, 4, 1, rows, columns, 8
+    )
+    target, _ = teacher(
+        facts=facts,
+        future_supports=supports,
+        future_offsets=torch.tensor((6, 12, 24, 40)),
+    )
+
+    visibility = 1.0 + target.visibility.float()
+    null_probability = 1.0 - visibility
+    current_address = facts.object_to_chart.detach().float()
+    current_address = current_address / current_address.flatten(2).sum(
+        dim=-1, keepdim=True
+    )[:, :, None, None].clamp_min(1e-6)
+    candidate = target.future_address.float() - (
+        null_probability[..., None, None] * current_address[:, None]
+    )
+    candidate_mass = candidate.sum(dim=(-3, -2, -1))
+    expected_successor = (
+        candidate_mass[..., None] * support_value
+        + null_probability * target.current_reference[:, None].float()
+    )
+    torch.testing.assert_close(target.successor_content.float(), expected_successor)
+    torch.testing.assert_close(
+        target.semantic_delta.float(),
+        expected_successor - target.current_reference[:, None].float(),
+    )
+
+    axis_y = torch.linspace(-1.0, 1.0, rows)
+    axis_x = torch.linspace(-1.0, 1.0, columns)
+    coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
+    coordinate = torch.stack((coordinate_x, coordinate_y), dim=-1)
+    per_camera_mass = candidate.sum(dim=(-2, -1))
+    destination_moment = torch.einsum(
+        "bikcyx,yxd->bikcd", candidate, coordinate
+    )
+    expected_transport = destination_moment - (
+        per_camera_mass[..., None] * target.object_coordinates[:, None].float()
+    )
+    torch.testing.assert_close(target.transport_mean.float(), expected_transport)
+
+    centered = coordinate[None, None, None, None] - (
+        target.object_coordinates[:, None].float() + expected_transport
+    )[..., None, None, :]
+    expected_covariance = torch.stack(
+        (
+            (candidate * centered[..., 0].square()).sum(dim=(-2, -1)),
+            (candidate * centered[..., 0] * centered[..., 1]).sum(
+                dim=(-2, -1)
+            ),
+            (candidate * centered[..., 1].square()).sum(dim=(-2, -1)),
+        ),
+        dim=-1,
+    )
+    torch.testing.assert_close(
+        target.transport_covariance.float(), expected_covariance, atol=1e-5, rtol=1e-5
+    )
+    assert target.reliability.mean() < visibility.mean()
 
 
 def test_teacher_diffuse_visible_track_falls_back_continuously_to_current_fact() -> None:

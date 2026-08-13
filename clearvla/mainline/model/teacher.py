@@ -238,15 +238,19 @@ class ObjectFutureTeacher(nn.Module):
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
         candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
         camera_probability = candidate_posterior.sum(dim=(-2, -1), keepdim=False)
-        destination_coordinate = torch.einsum(
+        destination_moment = torch.einsum(
             "bfkcyx,cyxd->bfkcd",
             candidate_posterior,
             candidate_coordinate,
-        ) / camera_probability[..., None].clamp_min(1e-6)
-        transport_per_support = torch.where(
-            camera_probability[..., None] > 1e-6,
-            destination_coordinate - facts.camera_coordinates.detach().float()[:, None],
-            torch.zeros_like(destination_coordinate),
+        )
+        # Preserve the exact V120 raw posterior moment while retaining the
+        # schema-22 per-camera axis.  Dividing by camera probability here
+        # turns a tiny candidate mass into a full conditional displacement and
+        # creates large geometry targets precisely when association is weak.
+        transport_per_support = (
+            destination_moment
+            - camera_probability[..., None]
+            * facts.camera_coordinates.detach().float()[:, None]
         )
         centered = coordinate - (
             facts.camera_coordinates.detach().float()[:, None, :, :, None, None]
@@ -256,17 +260,17 @@ class ObjectFutureTeacher(nn.Module):
             "bfkcyx,bfkcyx->bfkc",
             candidate_posterior,
             centered[..., 0].square(),
-        ) / camera_probability.clamp_min(1e-6)
+        )
         covariance_xy = torch.einsum(
             "bfkcyx,bfkcyx->bfkc",
             candidate_posterior,
             centered[..., 0] * centered[..., 1],
-        ) / camera_probability.clamp_min(1e-6)
+        )
         covariance_yy = torch.einsum(
             "bfkcyx,bfkcyx->bfkc",
             candidate_posterior,
             centered[..., 1].square(),
-        ) / camera_probability.clamp_min(1e-6)
+        )
         covariance_per_support = torch.stack((covariance_xx, covariance_xy, covariance_yy), dim=-1)
         entropy = -(posterior.clamp_min(1e-8) * posterior.clamp_min(1e-8).log()).sum(
             dim=-1, keepdim=True
@@ -279,39 +283,22 @@ class ObjectFutureTeacher(nn.Module):
         association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
         reliability_per_support = visibility_per_support * association_confidence
         current_reference = facts.content.detach().float()[:, None]
-        # Null probability already makes ``matched + null * current`` a
-        # convex fallback.  Entropy is an independent failure mode: a diffuse
-        # visible posterior has low reliability but would otherwise export a
-        # spatial average of unrelated future patches.  Blend that raw track
-        # continuously back to the current fact before it becomes a target.
-        # Content/delta may then be supervised with physical validity without
-        # either fitting a noisy average or discounting the neutral target a
-        # second time.
-        raw_successor = matched + null_probability * current_reference
-        successor_per_support = current_reference + association_confidence * (
-            raw_successor - current_reference
-        )
+        # This is the exact V120 physical target algebra.  Null mass already
+        # supplies the only identity fallback.  Association confidence remains
+        # a calibration diagnostic and must not contract a diffuse-but-visible
+        # target toward the current fact a second time.
+        successor_per_support = matched + null_probability * current_reference
         current_address = facts.object_to_chart.detach().float()
         current_address = current_address / current_address.flatten(2).sum(
             dim=-1, keepdim=True
         )[:, :, None, None].clamp_min(1e-6)
-        # Address owns the same identity fallback as content.  A null match or
-        # a high-entropy visible match means "retain the current object
-        # address", not "leave W's address unsupervised".  Keeping unit mass
-        # also prevents missing association confidence from becoming a cheap
-        # scalar feature in P2.
-        raw_address_per_support = (
+        # ``future_address`` remains diagnostic-only in the active mainline,
+        # but preserve the same single null fallback and unit-mass identity
+        # semantics as content.  Entropy must not rewrite it either.
+        address_per_support = (
             candidate_posterior
             + null_probability[..., None, None] * current_address[:, None]
         )
-        address_per_support = current_address[:, None] + association_confidence[
-            ..., None, None
-        ] * (raw_address_per_support - current_address[:, None])
-        # Geometry has no meaningful identity fallback other than zero
-        # displacement.  Unlike content, its raw moment is not already mixed
-        # with the null candidate, so use the complete reliability here.
-        transport_per_support = transport_per_support * reliability_per_support[..., None]
-        covariance_per_support = covariance_per_support * reliability_per_support[..., None]
 
         successor_rows: list[Tensor] = []
         transport_rows: list[Tensor] = []
@@ -321,7 +308,6 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty_rows: list[Tensor] = []
         reliability_rows: list[Tensor] = []
         address_rows: list[Tensor] = []
-        semantic_end_rows: list[Tensor] = []
         support_counts: list[Tensor] = []
         for lower, upper in INTERVAL_BOUNDS:
             selected = ((offsets >= lower) & (offsets <= upper)).float()
@@ -337,43 +323,19 @@ class ObjectFutureTeacher(nn.Module):
                 fallback,
             )
             weight = selected / selected.sum(dim=1, keepdim=True).clamp_min(1.0)
-            # Reliability is object-owned.  Averaging it across K before the
-            # temporal aggregation made every object choose the same support
-            # frames and was a direct common-mode pressure on W targets.
-            reliability = reliability_per_support[..., 0].clamp_min(0.05)
-            content_weight = selected[:, :, None] * reliability
-            content_weight = content_weight / content_weight.sum(dim=1, keepdim=True).clamp_min(
-                1e-6
-            )
-            interval_offset = offsets.float().clamp(float(lower), float(upper))
-            interval_position = (interval_offset - float(lower)) / float(max(upper - lower, 1))
-            end_weight = (
-                selected[:, :, None] * reliability * torch.exp(2.0 * interval_position)[:, :, None]
-            )
-            end_weight = end_weight / end_weight.sum(dim=1, keepdim=True).clamp_min(1e-6)
             interval_successor = torch.einsum(
-                "bfk,bfkd->bkd", content_weight, successor_per_support
+                "bf,bfkd->bkd", weight, successor_per_support
             )
-            interval_end = torch.einsum("bfk,bfkd->bkd", end_weight, successor_per_support)
             successor_rows.append(interval_successor)
             interval_transport = torch.einsum(
-                "bfk,bfkcd->bkcd", content_weight, transport_per_support
+                "bf,bfkcd->bkcd", weight, transport_per_support
             )
             transport_rows.append(interval_transport)
-            transport_delta = transport_per_support - interval_transport[:, None]
-            between_support_covariance = torch.stack(
-                (
-                    transport_delta[..., 0].square(),
-                    transport_delta[..., 0] * transport_delta[..., 1],
-                    transport_delta[..., 1].square(),
-                ),
-                dim=-1,
-            )
             covariance_rows.append(
                 torch.einsum(
-                    "bfk,bfkcd->bkcd",
-                    content_weight,
-                    covariance_per_support + between_support_covariance,
+                    "bf,bfkcd->bkcd",
+                    weight,
+                    covariance_per_support,
                 )
             )
             interval_visibility = torch.einsum("bf,bfkd->bkd", weight, visibility_per_support)
@@ -395,8 +357,8 @@ class ObjectFutureTeacher(nn.Module):
                 torch.einsum("bf,bfkd->bkd", weight, uncertainty_per_support)
                 + (
                     torch.einsum(
-                        "bfk,bfkd->bkd",
-                        content_weight,
+                        "bf,bfkd->bkd",
+                        weight,
                         (successor_per_support - interval_successor[:, None])
                         .square()
                         .mean(dim=-1, keepdim=True),
@@ -406,15 +368,11 @@ class ObjectFutureTeacher(nn.Module):
             reliability_rows.append(torch.einsum("bf,bfkd->bkd", weight, reliability_per_support))
             address_rows.append(
                 torch.einsum(
-                    "bfk,bfkcyx->bkcyx",
-                    content_weight,
+                    "bf,bfkcyx->bkcyx",
+                    weight,
                     address_per_support,
                 )
             )
-            # The end-biased successor is kept locally so semantic change is
-            # ordered rather than algebraically identical to the interval
-            # stable-content target.
-            semantic_end_rows.append(interval_end)
             support_counts.append(selected.sum(dim=1).float().mean())
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
@@ -424,25 +382,26 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty = torch.stack(uncertainty_rows, dim=1)
         reliability = torch.stack(reliability_rows, dim=1)
         future_address = torch.stack(address_rows, dim=1)
-        semantic_end = torch.stack(semantic_end_rows, dim=1)
         current_validity = facts.camera_validity.detach().float()[:, None]
         # Current object facts are visible and persistent by construction.
         # Export changes around that current state so a neutral/static future
         # is exactly zero and cannot become a constant P2 value shortcut.
         visibility_change = visibility - 1.0
         persistence_change = persistence_probability - 1.0
-        validity = current_validity.expand(-1, len(INTERVAL_BOUNDS), -1, -1, -1)
+        future_selector_validity = (
+            current_validity * visibility[:, :, :, None, :]
+        )
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
-            semantic_delta=(semantic_end - facts.content.detach().float()[:, None]),
+            semantic_delta=(successor - facts.content.detach().float()[:, None]),
             transport_mean=transport,
             transport_covariance=covariance,
             visibility=visibility_change,
             persistence=persistence_change,
             uncertainty=uncertainty,
             reliability=reliability,
-            validity=validity,
+            future_selector_validity=future_selector_validity,
             future_address=future_address,
             object_coordinates=facts.camera_coordinates.detach().float(),
         )
@@ -461,6 +420,17 @@ class ObjectFutureTeacher(nn.Module):
             .mean(),
             "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
             "object_teacher_transport_rms": transport.square().mean().sqrt(),
+            "object_teacher_covariance_rms": covariance.square().mean().sqrt(),
+            "object_teacher_current_loss_support": facts.camera_validity.detach()
+            .float()
+            .mean(),
+            "object_teacher_future_selector_validity": future_selector_validity.mean(),
+            "object_teacher_successor_delta_identity_max_abs": (
+                target.semantic_delta
+                - (target.successor_content - target.current_reference[:, None])
+            )
+            .abs()
+            .amax(),
             "object_teacher_null_probability": null_probability.mean(),
             "object_teacher_semantic_max": semantic.detach().float().amax(dim=(-3, -2, -1)).mean(),
             "object_teacher_semantic_margin": (

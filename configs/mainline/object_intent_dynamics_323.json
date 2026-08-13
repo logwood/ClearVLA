@@ -72,7 +72,7 @@
     "proposal_condition_dropout": 0.25
   },
   "bottom": {
-    "flow_time_distribution": "beta_1_5_1",
+    "flow_time_distribution": "v120_mirrored_beta_1_5_1",
     "evidence_depth": 3,
     "latent_dim": 64,
     "ffn_expansion": 2.0,
@@ -115,7 +115,7 @@
     "physical_delta_consistency": 0.03,
     "execution_value": 0.05,
     "execution_value_huber_delta": 0.10,
-    "event_positive_weight": 4.0,
+    "event_positive_boost": 4.0,
     "event_focal_gamma": 1.0,
     "gripper_event_threshold": 0.1,
     "arm_motion_threshold": 0.02,

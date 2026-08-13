@@ -226,7 +226,7 @@ class TopConfig:
 
 @dataclass(frozen=True)
 class BottomConfig:
-    flow_time_distribution: str = "beta_1_5_1"
+    flow_time_distribution: str = "v120_mirrored_beta_1_5_1"
     evidence_depth: int = 3
     latent_dim: int = 64
     ffn_expansion: float = 2.0
@@ -252,8 +252,10 @@ class BottomConfig:
     physical_decode_delta_blend: float = 0.25
 
     def validate(self) -> None:
-        if self.flow_time_distribution != "beta_1_5_1":
-            raise ValueError("formal training uses beta_1_5_1 flow time")
+        if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
+            raise ValueError(
+                "formal training uses the mirrored V120 beta_1_5_1 flow time"
+            )
         integer_fields = (
             self.evidence_depth,
             self.latent_dim,
@@ -324,7 +326,9 @@ class ObjectiveConfig:
     # only and therefore has no weight here.
     execution_value: float = 0.05
     execution_value_huber_delta: float = 0.10
-    event_positive_weight: float = 4.0
+    # This is the additive V120 boost.  Positive rows therefore receive
+    # ``1 + event_positive_boost == 5`` times the base event-head weight.
+    event_positive_boost: float = 4.0
     event_focal_gamma: float = 1.0
     gripper_event_threshold: float = 0.10
     arm_motion_threshold: float = 0.02
@@ -337,8 +341,10 @@ class ObjectiveConfig:
                 raise ValueError(f"objective.{name} must be non-negative")
         if self.future_dynamics <= 0.0 or self.intent_structure <= 0.0:
             raise ValueError("W and G/S require active future/structure budgets")
-        if self.event_positive_weight != 4.0 or self.event_focal_gamma != 1.0:
-            raise ValueError("the resolved focal event contract is positive=4 and gamma=1")
+        if self.event_positive_boost != 4.0 or self.event_focal_gamma != 1.0:
+            raise ValueError(
+                "the resolved focal event contract is positive boost=4 and gamma=1"
+            )
         if self.gripper_event_threshold != 0.10 or self.arm_motion_threshold != 0.02:
             raise ValueError("the resolved event/motion thresholds are 0.10 raw and 0.02 normalized")
         if self.horizon_tail_emphasis != 0.20 or self.horizon_first_step_protection != 0.05:

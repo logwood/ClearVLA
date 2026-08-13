@@ -421,11 +421,16 @@ class FuturePlanRecognizer(nn.Module):
             teacher_valid = future_action.new_zeros(future_action.shape[0], 4, 1)
         else:
             teacher.validate()
-            object_validity = teacher.validity.float().amax(dim=3)
-            effect_summary = (
-                teacher.semantic_delta * object_validity.to(dtype=teacher.semantic_delta.dtype)
-            ).sum(dim=2) / object_validity.sum(dim=2).clamp_min(1e-6)
-            teacher_valid = object_validity.mean(dim=2)
+            # Teacher null fallback has already made an unmatched object a
+            # zero semantic delta.  Use a fixed object mean so this auxiliary
+            # recognizer consumes neither loss support nor P2 selector
+            # validity; changing reliability/selector can never change loss.
+            effect_summary = teacher.semantic_delta.mean(dim=2)
+            teacher_valid = teacher.semantic_delta.new_ones(
+                teacher.semantic_delta.shape[0],
+                teacher.semantic_delta.shape[1],
+                1,
+            )
         token = (
             self.action_input(action_summary)
             + self.state_input(state_summary)

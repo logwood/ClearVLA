@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -17,7 +18,7 @@ from ..model.policy import (
 from ..runtime.logging import tensor_scalars
 from ..runtime.numerics import resolve_compute_dtype
 from .losses import LossLedger, compose_losses, sample_flow_matching
-from .optimizer import WarmupCosineSchedule, gradient_diagnostics
+from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
 
 
 def _autocast(device: torch.device, dtype: torch.dtype):
@@ -80,6 +81,41 @@ class TrainStepResult:
 
 
 @dataclass(frozen=True)
+class NonFiniteGradientReport:
+    """JSON-safe identity of the first non-finite parameter gradient."""
+
+    parameter_name: str
+    parameter_role: str
+    optimizer_group: str
+    shape: tuple[int, ...]
+    dtype: str
+    finite_fraction: float
+    finite_max_abs: float
+    nan_count: int
+    positive_inf_count: int
+    negative_inf_count: int
+    global_norm: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class NonFiniteGradientError(FloatingPointError):
+    """Fail before clipping/optimizer mutation with a named owner report."""
+
+    def __init__(self, report: NonFiniteGradientReport) -> None:
+        self.report = report
+        super().__init__(
+            "non-finite gradient before clipping: "
+            f"parameter={report.parameter_name} role={report.parameter_role} "
+            f"optimizer_group={report.optimizer_group} "
+            f"finite_fraction={report.finite_fraction:.6f} "
+            f"finite_max_abs={report.finite_max_abs:.6g} "
+            f"global_norm={report.global_norm}"
+        )
+
+
+@dataclass(frozen=True)
 class EncodedTrainingBatch:
     """One current-only static graph shared by validation loss and sampling."""
 
@@ -113,6 +149,102 @@ class MainlineTrainingEngine:
         self.train_flow_generator = train_flow_generator
         self.train_condition_generator = train_condition_generator
         self.global_step = 0
+
+    def _optimizer_group_name(self, parameter_name: str) -> str:
+        for group in self.optimizer.param_groups:
+            raw_names = group.get("parameter_names", ())
+            if parameter_name in raw_names:
+                return str(group.get("name", "unnamed"))
+        return "unowned"
+
+    @staticmethod
+    def _nonfinite_scalar_label(value: Tensor) -> str:
+        scalar = value.detach().float().reshape(())
+        if bool(torch.isnan(scalar)):
+            return "nan"
+        if bool(torch.isposinf(scalar)):
+            return "+inf"
+        if bool(torch.isneginf(scalar)):
+            return "-inf"
+        return f"{float(scalar):.9g}"
+
+    def _first_nonfinite_gradient_report(
+        self,
+        *,
+        global_norm: Tensor,
+    ) -> NonFiniteGradientReport:
+        for name, parameter in self.model.named_parameters():
+            gradient = parameter.grad
+            if gradient is None:
+                continue
+            detached = gradient.detach()
+            finite = torch.isfinite(detached)
+            parameter_norm = torch.nn.utils.get_total_norm(
+                [detached],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+            # A parameter can contain only finite FP32 elements and still make
+            # its L2 reduction overflow.  That tensor is the first actionable
+            # owner and must not fall through to an unstructured RuntimeError.
+            if bool(finite.all()) and bool(torch.isfinite(parameter_norm)):
+                continue
+            finite_count = int(finite.sum().item())
+            finite_values = detached[finite]
+            finite_max_abs = (
+                float(finite_values.float().abs().amax().item())
+                if finite_count
+                else 0.0
+            )
+            return NonFiniteGradientReport(
+                parameter_name=name,
+                parameter_role=parameter_role(name),
+                optimizer_group=self._optimizer_group_name(name),
+                shape=tuple(int(value) for value in detached.shape),
+                dtype=str(detached.dtype).removeprefix("torch."),
+                finite_fraction=float(finite_count) / float(max(detached.numel(), 1)),
+                finite_max_abs=finite_max_abs,
+                nan_count=int(torch.isnan(detached).sum().item()),
+                positive_inf_count=int(torch.isposinf(detached).sum().item()),
+                negative_inf_count=int(torch.isneginf(detached).sum().item()),
+                global_norm=self._nonfinite_scalar_label(global_norm),
+            )
+        raise RuntimeError("global gradient norm was non-finite without a named owner")
+
+    def _clip_gradients_with_first_offender(self) -> Tensor:
+        parameters = [
+            parameter
+            for parameter in self.model.parameters()
+            if parameter.grad is not None
+        ]
+        gradients = [parameter.grad for parameter in parameters]
+        try:
+            total_norm = torch.nn.utils.get_total_norm(
+                gradients,
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
+        except RuntimeError as error:
+            # Recompute only on the failure path so the report owns the
+            # observed global value while normal batches pay for one norm.
+            nonfinite_norm = torch.nn.utils.get_total_norm(
+                gradients,
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+            raise NonFiniteGradientError(
+                self._first_nonfinite_gradient_report(global_norm=nonfinite_norm)
+            ) from error
+        torch.nn.utils.clip_grads_with_norm_(
+            parameters,
+            self.config.optimizer.grad_clip,
+            total_norm,
+            foreach=True,
+        )
+        return total_norm
 
     @staticmethod
     def _tensor_metrics(
@@ -348,12 +480,7 @@ class MainlineTrainingEngine:
                 condition_generator=self.train_condition_generator,
             )
         ledger.total.backward()
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(),
-            self.config.optimizer.grad_clip,
-            error_if_nonfinite=True,
-            foreach=True,
-        )
+        gradient_norm = self._clip_gradients_with_first_offender()
         if collect_diagnostics:
             metrics.update(gradient_diagnostics(self.model))
         # Record the LR that owns this update.  Advancing the scheduler first
@@ -420,6 +547,8 @@ class MainlineTrainingEngine:
 __all__ = [
     "EncodedTrainingBatch",
     "MainlineTrainingEngine",
+    "NonFiniteGradientError",
+    "NonFiniteGradientReport",
     "TrainStepResult",
     "validate_finite_training_batch",
 ]

@@ -37,7 +37,11 @@ from .runtime.logging import (
 )
 from .runtime.numerics import resolve_compute_dtype
 from .runtime.sampling import sample_cached_action
-from .training.engine import MainlineTrainingEngine, validate_finite_training_batch
+from .training.engine import (
+    MainlineTrainingEngine,
+    NonFiniteGradientError,
+    validate_finite_training_batch,
+)
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
 
 
@@ -662,7 +666,30 @@ def main() -> None:
                 device=device,
             )
             emit = batch_index % config.runtime.log_every == 0
-            result = engine.train_step(batch, collect_diagnostics=emit)
+            try:
+                result = engine.train_step(batch, collect_diagnostics=emit)
+            except NonFiniteGradientError as error:
+                report = error.report.as_dict()
+                logger.write(
+                    "gradient_failure",
+                    epoch=epoch,
+                    batch=batch_index,
+                    step=engine.global_step,
+                    **report,
+                )
+                print(
+                    "[mainline-gradient-failure] "
+                    f"epoch={epoch:03d} batch={batch_index:04d} "
+                    f"step={engine.global_step} "
+                    f"parameter={report['parameter_name']} "
+                    f"role={report['parameter_role']} "
+                    f"optimizer_group={report['optimizer_group']} "
+                    f"finite_fraction={report['finite_fraction']:.6f} "
+                    f"finite_max_abs={report['finite_max_abs']:.6g} "
+                    f"global_norm={report['global_norm']}",
+                    flush=True,
+                )
+                raise
             epoch_samples += batch.online.batch
             epoch_batches += 1
             window_samples += batch.online.batch

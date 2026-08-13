@@ -99,7 +99,10 @@ def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: P
     assert "top" in report.rejected_components
 
     historical_manifest = copy.deepcopy(identity.manifest)
-    historical_manifest["schema"] = int(historical_manifest["schema"]) - 1
+    # Schema 22 was experimentally rejected.  It remains parseable only for
+    # the explicit unchanged-bottom migration path and can never exact-resume
+    # into the schema-23 behavioral repair.
+    historical_manifest["schema"] = 22
     components = dict(historical_manifest["components"])
     components["top"] = "object_intent_dynamics_323_schema6"
     historical_manifest["components"] = components
@@ -119,6 +122,7 @@ def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: P
     historical_report = compare_checkpoint_identity(restored_historical, identity)
     assert not historical_report.exact_resume
     assert historical_report.reusable_components == ("bottom",)
+    assert "top" in historical_report.rejected_components
 
 
 def test_artifact_relocation_does_not_change_semantic_identity(tmp_path: Path) -> None:

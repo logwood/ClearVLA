@@ -126,7 +126,9 @@ class ObjectFutureEffectReader(nn.Module):
             - future_coordinate[:, None, None]
         ).square().sum(dim=-1)
         camera_coordinate_score = camera_coordinate_score.clamp(-1.0, 0.0)
-        camera_validity = dynamics.validity.float().squeeze(-1).clamp(0.0, 1.0)
+        camera_validity = (
+            dynamics.future_selector_validity.float().squeeze(-1).clamp(0.0, 1.0)
+        )
         coordinate_score = (
             camera_coordinate_score * camera_validity[:, None, None]
         ).sum(dim=-1) / camera_validity[:, None, None].sum(dim=-1).clamp_min(1e-6)

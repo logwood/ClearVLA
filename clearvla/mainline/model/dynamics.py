@@ -204,7 +204,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         facts: ObjectFactSet,
         hidden: Tensor,
     ) -> FutureObjectDynamics:
-        intervals = int(hidden.shape[1])
         semantic_delta = self.delta_head(hidden)
         object_transport = 0.50 * torch.tanh(
             self.transport_head(hidden).float()
@@ -227,8 +226,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self.uncertainty_head(hidden).float()
         ).to(dtype=hidden.dtype)
         reliability = torch.zeros_like(uncertainty)
-        validity = facts.camera_validity[:, None].float().expand(
-            -1, intervals, -1, -1, -1
+        visibility_probability = (1.0 + visibility.float()).clamp(0.0, 1.0)
+        future_selector_validity = (
+            facts.camera_validity[:, None].float()
+            * visibility_probability[:, :, :, None, :]
         )
         address = self._transport_address(facts.object_to_chart, transport)
         current_reference = facts.content.detach()
@@ -242,7 +243,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             persistence=persistence,
             uncertainty=uncertainty,
             reliability=reliability,
-            validity=validity,
+            future_selector_validity=future_selector_validity,
             future_address=address,
             object_coordinates=facts.camera_coordinates,
         )
@@ -359,7 +360,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             persistence=torch.cat((near_field.persistence, far_field.persistence), dim=1),
             uncertainty=torch.cat((near_field.uncertainty, far_field.uncertainty), dim=1),
             reliability=torch.cat((near_field.reliability, far_field.reliability), dim=1),
-            validity=torch.cat((near_field.validity, far_field.validity), dim=1),
+            future_selector_validity=torch.cat(
+                (
+                    near_field.future_selector_validity,
+                    far_field.future_selector_validity,
+                ),
+                dim=1,
+            ),
             future_address=torch.cat(
                 (near_field.future_address, far_field.future_address), dim=1
             ),
@@ -398,7 +405,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             f"{prefix}_interval_adjacent_cosine": adjacent,
             f"{prefix}_object_pair_cosine": pair,
             f"{prefix}_transport_rms": field.transport_mean.detach().float().square().mean().sqrt(),
-            f"{prefix}_validity": field.validity.detach().float().mean(),
+            f"{prefix}_future_selector_validity": field.future_selector_validity
+            .detach()
+            .float()
+            .mean(),
         }
 
 

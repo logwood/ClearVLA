@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
@@ -38,8 +37,8 @@ from .intent import (
     FuturePlanRecognizer,
     StatelessObjectIntentOrganizer,
 )
-from .routing import smooth_rms_contract
 from .role_hosts import TypedGroundingRoleHost
+from .routing import smooth_rms_contract
 from .teacher import ObjectFutureTeacher
 from .types import (
     CoarseActionIntentState,
@@ -307,6 +306,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
+            current_loss_support=context.facts.camera_validity.detach().float(),
             plan_recognition=recognition,
             online_intent_loss=online_intent_loss,
             plan_recognition_loss=recognition.reconstruction_loss,

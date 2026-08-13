@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-12
+Updated: 2026-08-13
 
 This is the compact source of truth for the active independent mainline. Run
 labels are experiment metadata and never select model semantics. Current open
@@ -13,7 +13,7 @@ evidence that motivated recovery are kept in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        22
+manifest schema:        23
 recovery reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
@@ -32,12 +32,24 @@ trainer/runtime/trunk or a V-numbered launcher. The compact manifest owns graph
 identity; typed interfaces and executable checks own shapes, dtypes and zero
 semantics. Do not add a version-wide `_validate_vXXX_*` contract.
 
-Schema 22 corrects the P1 boundary exposed by the schema-21 batch-600 run.  The
-expensive current-detail posterior remains cached once, while the actual V120
-P1 policy block again updates the noisy-action trajectory at every ODE step.
-Protected detail is no longer an additive public-content value and cannot take
-a learned null shortcut.  A fresh smoke and controlled long run are still
-required before claiming behavior parity.
+Schema 23 is the controlled V120 behavior-contract repair. It keeps the
+Schema-22 G/S/W/P graph and restores only four proven boundaries: mirrored
+flow time, V120 deployment nodes plus clean endpoint heads, exact unsqueezed
+Teacher targets, and separate training support versus online selector
+validity. It also records the first non-finite named parameter before clipping.
+No block, loss weight, gate, capacity or P1 learned null was added.
+
+**Schema 22 is experimentally rejected and must not be released or continued
+as a long run.** It completed two epochs, then produced a non-finite parameter
+gradient in epoch 3 after global step 7812. More importantly, its first/tail
+rollout, gripper calibration, G/W separation and P2 future-effect path remained
+far outside the V120 envelope before the crash. The active source is therefore
+a repair base, not a behaviorally accepted mainline.
+
+The exact V120 object package is available at commit
+`0b92d359a2889a0a1b1eba256007c00ccbc54f3c`; all seven package blobs match the
+V120 logged SHA256 values. Current repairs must use source-to-source comparison,
+not infer the historical object graph from a descendant filename.
 
 ## Active graph in execution order
 
@@ -156,7 +168,12 @@ supports can change targets/losses only, never a deployment action.
    among the complete N=49 progressive bank once per observation before value
    contraction, using clean V120 typed action-basis tokens.  That protected
    detail cannot be deleted by a learned null or an additive public-content
-   value.  The V120 P1 policy block then completes the live P1 fact once per
+   value. A legal learned null is an identity/zero-valued selector hypothesis
+   grounded in current observable support/conflict; it may suppress only an
+   optional detail innovation. A bounded compatibility residual may read the
+   clean goal/action-basis query, but null availability cannot read noisy
+   action, future teacher or a direct policy carrier. The V120 P1 policy block then
+   completes the live P1 fact once per
    ODE step from noisy action, time and the cached detail.
 8. P2 content, intent and coordinate scores are bounded in `[-1,1]`; learned
    temperatures stay in `[0.25,4]`. It cannot reopen RGB/DINO or consume a
@@ -199,8 +216,8 @@ supports can change targets/losses only, never a deployment action.
     explicit null-goal smoke may omit it.
 16. Fresh runs require an empty output directory. Exact resume verifies
     manifest, source/data/language identity, model/optimizer/scheduler and RNG.
-    Schema 21 cannot exact-resume schema 22; compatible bottom migration must be
-    explicit and reported.
+    Schema 21/22 cannot exact-resume schema 23; compatible bottom migration must
+    be explicit and reported.
 
 ## Typed boundaries
 
@@ -223,9 +240,12 @@ ObjectIntentState
 FutureObjectDynamics
   current_reference                                        [B,K,D]
   successor / semantic_delta                               [B,4,K,D]
-  transport / covariance / validity                        [B,4,K,C,*]
+  transport / covariance / future_selector_validity        [B,4,K,C,*]
   visibility / persistence / uncertainty                   [B,4,K,*]
   future_address                                           [B,4,K,C,8,8]
+
+ObjectTopTrainingTargets
+  current_loss_support                                     [B,K,C,1]
 
 ObjectFactualDock
   fact_by_object                                           [B,24,4,K,H]
@@ -268,6 +288,13 @@ ControlledTransitionState
 - Future dynamics owns successor, semantic delta, transport, covariance,
   visibility, persistence and detached-dispersion uncertainty. Address and
   reliability are target/diagnostic fields, not extra active losses.
+- Teacher successor is the fixed uniform interval mean of
+  `matched + null_probability * current_reference`; semantic delta is exactly
+  successor minus current reference. Transport/covariance are uniform means of
+  raw posterior moments. Entropy/reliability never contract these targets.
+- Current loss support and online future selector validity are separate owners:
+  every future loss and the training recognizer use current G camera validity;
+  P2 alone consumes current validity times W-predicted future visibility.
 - The V120 future row loss is retained except for one proven mathematical bug:
   its floored direction term now compares the two smoothed directions directly,
   so prediction equal to target has attainable zero loss.
@@ -289,6 +316,9 @@ ControlledTransitionState
   per observation.
 - The shared action/context seed, compact P1 policy block, P2/P3, two terminal
   contracts, dynamic transition and bottom run at every ODE step.
+- Deployment performs action updates at mainline times `[0,.2,.4,.6,.8]`, then
+  runs one complete dynamic forward at `t=1.0` for event/motion heads without
+  updating the integrated physical field.
 - Candidate-value tensors required by the execution objective are built on
   every train/eval loss forward, independently of the optional diagnostic
   batch budget. Deployment sampling leaves this loss-only boundary disabled.
@@ -298,12 +328,12 @@ ControlledTransitionState
 - Active manifest identity:
 
   ```text
-  schema:       22
+  schema:       23
   observation:  restored_v120_three_frame_flow_dino_raw_local_chart
-  top:          v120_cumulative_intent_four_interval_dynamics_protected_candidate_p1_five_lane_p3
+  top:          v120_cumulative_intent_four_interval_dynamics_split_support_selector_protected_candidate_p1_five_lane_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_evidence_mmdit_dense512_execution
-  training:     v120_physical_flow_attainable_direction_interval_transition_execution_value_exact_role_lr
-  runtime:      cached_observation_gsw_p1_detail_dynamic_p1_per_ode_transition_teacher_isolated
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_exact_role_lr
+  runtime:      cached_observation_gsw_p1_detail_v120_nodes_clean_endpoint_teacher_isolated
   parameters:   182,724,214 total / 164,041,578 trainable
   ```
 
@@ -336,19 +366,27 @@ CUDA memory result. Production acceptance still requires:
   first/tail, horizon bands, arm/gripper, event/motion, G/S/W/P and gradients;
 - no early divergence or later rebound hidden by a best-RMSE checkpoint.
 
+The Schema-23 source repair is locally executable and covered by regression
+tests. Production behavior is not accepted until a fresh smoke and complete
+batch-eight run pass the recovery gate. If non-finite backward recurs, the
+`gradient_failure` JSONL row owns the first named parameter, role, optimizer
+group and finite/NaN/Inf statistics; no optimizer, scheduler or step update is
+allowed for that batch. Dead `future_address` remains diagnostic debt and P1
+learned null remains explicitly deferred.
+
 Use a new empty output directory:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema22_dynamic_p1_recovery_smoke \
-nohup bash scripts/smoke_mainline.sh > schema22_smoke.log 2>&1 &
+OUT_DIR=runs/mainline_v120_contract_repair_smoke \
+nohup bash scripts/smoke_mainline.sh > mainline_v120_contract_repair_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema22_dynamic_p1_recovery_b8 \
-nohup bash scripts/train_mainline.sh > schema22_long.log 2>&1 &
+OUT_DIR=runs/mainline_v120_contract_repair_b8 \
+nohup bash scripts/train_mainline.sh > mainline_v120_contract_repair_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema22_dynamic_p1_recovery_b8 \
+  runs/mainline_v120_contract_repair_b8 \
   --recovery-baseline v120_long.log \
   --tail 120 --require-recovery --format text
 ```

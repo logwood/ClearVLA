@@ -61,7 +61,10 @@ def _integrate_cache(
     noise = value.clone()
     steps = config.runtime.inference_steps
     dt = 1.0 / float(steps)
-    times = (torch.arange(steps, device=device, dtype=torch.float32) + 0.5) * dt
+    # V120 evaluates the vector field at [1,.8,.6,.4,.2] on its
+    # noise-to-clean chart.  The mainline chart is reversed, so the exact
+    # corresponding update nodes are [0,.2,.4,.6,.8], not midpoints.
+    times = torch.arange(steps, device=device, dtype=torch.float32) * dt
     dynamic_metrics: dict[str, Tensor] = {}
     for index in range(steps):
         time = times[index].expand(batch)
@@ -80,14 +83,38 @@ def _integrate_cache(
         value = value + dt * output.bottom.physical_velocity.to(dtype=value.dtype)
         if collect_diagnostics and index == steps - 1:
             dynamic_metrics = output.metrics
+    # V120 evaluates event/motion heads once more at the final clean endpoint.
+    # This is a head-producing dynamic forward, not a sixth integration step:
+    # the resulting physical field is deliberately left unchanged.
+    endpoint_time = torch.ones(batch, device=device, dtype=torch.float32)
+    with torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=autocast_enabled,
+    ):
+        endpoint_output = model.velocity(
+            cache,
+            noisy_action_field=value,
+            time=endpoint_time,
+            execution_mode=execution_mode,
+            collect_diagnostics=False,
+        )
     return SamplingResult(
         action=model.action_codec.decode(value, cache.history.action_state).float(),
         physical_field=value,
-        event_logits=output.bottom.event_logits.float(),
-        motion_logits=output.bottom.motion_logits.float(),
+        event_logits=endpoint_output.bottom.event_logits.float(),
+        motion_logits=endpoint_output.bottom.motion_logits.float(),
         initial_physical_noise=noise,
         step_times=times,
-        metrics={**(static_metrics or {}), **dynamic_metrics},
+        metrics={
+            **(static_metrics or {}),
+            **dynamic_metrics,
+            "sampling_update_time_first": times[0].detach().float(),
+            "sampling_update_time_last": times[-1].detach().float(),
+            "sampling_endpoint_head_time": endpoint_time[0].detach().float(),
+            "sampling_velocity_update_calls": times.new_tensor(float(steps)),
+            "sampling_endpoint_head_calls": times.new_ones(()),
+        },
     )
 
 
@@ -102,7 +129,7 @@ def sample_action(
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
 ) -> SamplingResult:
-    """Integrate the 18-D physical action flow with exactly five velocity calls."""
+    """Integrate five updates, then evaluate heads at the clean endpoint."""
 
     config.validate()
     dtype = resolve_compute_dtype(config, dtype)

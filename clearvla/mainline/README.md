@@ -71,15 +71,15 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        22
+schema:        23
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    182,724,214 total / 164,041,578 trainable
 ```
 
-Schema 21 is not an exact-resume source for schema 22. Formal runs start fresh
-unless the complete manifest, model, optimizer, scheduler and RNG identity
-matches. Bottom-only migration is explicit and emits a report.
+Schema 21/22 is not an exact-resume source for schema 23. Formal runs start
+fresh unless the complete manifest, model, optimizer, scheduler and RNG
+identity matches. Bottom-only migration is explicit and emits a report.
 
 ## Runtime contract
 
@@ -88,6 +88,8 @@ matches. Bottom-only migration is explicit and emits a report.
 - The shared action/context seed, compact P1 policy block, P2/P3, two terminal
   layer contracts, the action-conditioned transition and bottom run on every
   ODE step.
+- Five action updates use times `[0,.2,.4,.6,.8]`. One additional full dynamic
+  forward at `t=1` supplies event/motion heads and cannot update the action.
 - Execution candidate/value charts are mandatory for every train/eval loss
   forward, even after the optional diagnostic-batch budget is exhausted; they
   stay disabled during ordinary five-step deployment sampling.
@@ -111,16 +113,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema22_dynamic_p1_recovery_smoke \
-nohup bash scripts/smoke_mainline.sh > schema22_smoke.log 2>&1 &
+OUT_DIR=runs/mainline_v120_contract_repair_smoke \
+nohup bash scripts/smoke_mainline.sh > mainline_v120_contract_repair_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema22_dynamic_p1_recovery_b8 \
-nohup bash scripts/train_mainline.sh > schema22_long.log 2>&1 &
+OUT_DIR=runs/mainline_v120_contract_repair_b8 \
+nohup bash scripts/train_mainline.sh > mainline_v120_contract_repair_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -132,7 +134,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema22_dynamic_p1_recovery_b8 \
+  runs/mainline_v120_contract_repair_b8 \
   --recovery-baseline v120_long.log \
   --tail 120 --require-recovery --format text
 ```

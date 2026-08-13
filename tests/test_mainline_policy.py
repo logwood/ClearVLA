@@ -29,8 +29,10 @@ from clearvla.mainline.train import _optimizer_group_context
 from clearvla.mainline.training.engine import (
     EncodedTrainingBatch,
     MainlineTrainingEngine,
+    NonFiniteGradientError,
     validate_finite_training_batch,
 )
+from clearvla.mainline.training.losses import LossLedger
 from clearvla.mainline.training.optimizer import (
     WarmupCosineSchedule,
     build_optimizer,
@@ -258,6 +260,8 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert "loss_contrib_future_transition" in archived
     assert "loss_contrib_object_reconstruction" in archived
     assert "loss_contrib_execution_value" in archived
+
+
     for name in (
         "loss_execution_value_target_spread",
         "loss_execution_value_predicted_spread",
@@ -358,6 +362,110 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert len(ownership.trainable_names) == len(
         [parameter for parameter in model.parameters() if parameter.requires_grad]
     )
+
+
+def test_nonfinite_gradient_reports_first_owner_before_any_update() -> None:
+    class TinyOwnerModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.observation = torch.nn.Linear(2, 2, bias=False)
+            self.seen_step: int | None = None
+
+        def set_training_step(self, step: int) -> None:
+            self.seen_step = int(step)
+
+    config = _config()
+    model = TinyOwnerModel()
+    parameter = model.observation.weight
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": (parameter,),
+                "lr": config.optimizer.learning_rate,
+                "name": "observation/decay",
+                "parameter_names": ("observation.weight",),
+            }
+        ],
+        lr=config.optimizer.learning_rate,
+    )
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=8,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,  # type: ignore[arg-type]
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    engine.global_step = 7
+    loss = parameter.square().sum()
+    ledger = LossLedger(
+        total=loss,
+        groups={
+            "action": loss,
+            "representation": loss.new_zeros(()),
+            "execution": loss.new_zeros(()),
+        },
+        contributions={"action_flow": loss},
+        terms={"action_flow": loss},
+    )
+
+    def corrupt(gradient: torch.Tensor) -> torch.Tensor:
+        result = gradient.clone()
+        result.flatten()[0] = torch.nan
+        result.flatten()[1] = torch.inf
+        result.flatten()[2] = -torch.inf
+        return result
+
+    handle = parameter.register_hook(corrupt)
+    parameter_before = parameter.detach().clone()
+    learning_rate_before = float(optimizer.param_groups[0]["lr"])
+    schedule_before = schedule.step_index
+    try:
+        with mock.patch.object(engine, "_forward", return_value=(ledger, {})):
+            engine.train_step(object())  # type: ignore[arg-type]
+    except NonFiniteGradientError as error:
+        report = error.report
+    else:
+        raise AssertionError("non-finite gradients must fail before clipping")
+    finally:
+        handle.remove()
+
+    assert report.parameter_name == "observation.weight"
+    assert report.parameter_role == "observation"
+    assert report.optimizer_group == "observation/decay"
+    assert report.shape == (2, 2)
+    assert report.dtype == "float32"
+    assert report.nan_count == 1
+    assert report.positive_inf_count == 1
+    assert report.negative_inf_count == 1
+    assert report.finite_fraction == 0.25
+    assert report.finite_max_abs > 0.0
+    assert report.global_norm == "nan"
+    torch.testing.assert_close(parameter, parameter_before)
+    assert not optimizer.state
+    assert float(optimizer.param_groups[0]["lr"]) == learning_rate_before
+    assert schedule.step_index == schedule_before
+    assert engine.global_step == 7
+
+    parameter.grad = torch.full_like(parameter, torch.finfo(parameter.dtype).max)
+    try:
+        engine._clip_gradients_with_first_offender()
+    except NonFiniteGradientError as error:
+        overflow_report = error.report
+    else:
+        raise AssertionError("a finite-element norm overflow must name its owner")
+    assert overflow_report.parameter_name == "observation.weight"
+    assert overflow_report.finite_fraction == 1.0
+    assert overflow_report.nan_count == 0
+    assert overflow_report.positive_inf_count == 0
+    assert overflow_report.negative_inf_count == 0
+    assert overflow_report.global_norm == "+inf"
 
 
 def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
@@ -935,13 +1043,26 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert teacher_calls == 0
     assert grounding_host_calls == 1
     assert history_proposal_calls == 1
-    assert p1_host_calls == config.runtime.inference_steps
-    assert transition_calls == config.runtime.inference_steps
+    # Five action updates are followed by one complete endpoint forward for
+    # event/motion heads.  The endpoint pass must not rebuild static evidence.
+    assert p1_host_calls == config.runtime.inference_steps + 1
+    assert transition_calls == config.runtime.inference_steps + 1
     # Both V120 correspondence scales batch all adjacent pairs/directions in
     # one invocation and are built once outside the five ODE steps.
     assert semantic_flow.call_count == 1
     assert raw_flow.call_count == 1
     assert tuple(result.step_times.shape) == (5,)
+    torch.testing.assert_close(
+        result.step_times,
+        torch.tensor((0.0, 0.2, 0.4, 0.6, 0.8)),
+    )
+    torch.testing.assert_close(result.metrics["sampling_endpoint_head_time"], torch.tensor(1.0))
+    torch.testing.assert_close(
+        result.metrics["sampling_velocity_update_calls"], torch.tensor(5.0)
+    )
+    torch.testing.assert_close(
+        result.metrics["sampling_endpoint_head_calls"], torch.tensor(1.0)
+    )
     assert tuple(result.action.shape) == tuple(batch.action_target.normalized.shape)
     assert torch.isfinite(result.action).all()
     # The restored learned V120 execution chart may evaluate several
@@ -949,9 +1070,56 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     # operations; the expensive observation/G/S/W/P1-detail sources above
     # must still be built exactly once.  The compact P1 policy write is a live
     # noisy-action block and therefore executes once per ODE step.
-    assert all(value >= config.runtime.inference_steps for value in calls)
+    assert all(value >= config.runtime.inference_steps + 1 for value in calls)
     for handle in handles:
         handle.remove()
+
+
+def test_clean_endpoint_head_forward_cannot_change_integrated_action() -> None:
+    torch.manual_seed(52)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    initial_noise = model.action_codec.sample_noise(
+        batch.online.batch,
+        device=batch.online.device,
+        dtype=torch.float32,
+        generator=torch.Generator().manual_seed(71),
+    )
+    baseline = sample_action(
+        model,
+        batch.online,
+        config,
+        initial_physical_noise=initial_noise,
+        dtype=torch.float32,
+    )
+    original_velocity = model.velocity
+
+    def poisoned_endpoint(*args, **kwargs):
+        output = original_velocity(*args, **kwargs)
+        time = kwargs["time"]
+        if bool((time == 1.0).all()):
+            output = replace(
+                output,
+                bottom=replace(
+                    output.bottom,
+                    physical_velocity=torch.full_like(
+                        output.bottom.physical_velocity, 1.0e6
+                    ),
+                ),
+            )
+        return output
+
+    with mock.patch.object(model, "velocity", side_effect=poisoned_endpoint):
+        endpoint_poisoned = sample_action(
+            model,
+            batch.online,
+            config,
+            initial_physical_noise=initial_noise,
+            dtype=torch.float32,
+        )
+    torch.testing.assert_close(endpoint_poisoned.physical_field, baseline.physical_field)
+    torch.testing.assert_close(endpoint_poisoned.action, baseline.action)
 
 
 def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g() -> None:

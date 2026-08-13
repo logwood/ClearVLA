@@ -67,6 +67,14 @@ def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Te
     return torch.where(both_classes, balanced, torch.ones_like(balanced))
 
 
+def event_positive_class_weights(event_target: Tensor, *, positive_boost: float) -> Tensor:
+    """Return the V120 additive event boost (hold=1, positive=1+boost)."""
+
+    if float(positive_boost) < 0.0:
+        raise ValueError("event positive boost must be non-negative")
+    return 1.0 + (event_target != 0).to(dtype=torch.float32) * float(positive_boost)
+
+
 def sample_flow_matching(
     target: Tensor,
     *,
@@ -77,8 +85,10 @@ def sample_flow_matching(
 ) -> FlowMatchingState:
     if target.ndim != 3:
         raise ValueError("flow-matching native action target must be [B,T,A]")
-    if distribution != "beta_1_5_1":
-        raise ValueError("the mainline supports only beta_1_5_1 flow time")
+    if distribution != "v120_mirrored_beta_1_5_1":
+        raise ValueError(
+            "the mainline supports only the mirrored V120 beta_1_5_1 flow time"
+        )
     # ``_standard_gamma`` accepts a generator, unlike Distribution.sample,
     # and keeps training/resume RNG ownership explicit.
     concentration = target.new_full((target.shape[0],), 1.5, dtype=torch.float32)
@@ -87,7 +97,14 @@ def sample_flow_matching(
         target.new_ones(target.shape[0], dtype=torch.float32),
         generator=generator,
     )
-    time = numerator / denominator.clamp_min(1e-8)
+    # V120 uses ``t_v120=1`` at noise and samples Beta(1.5, 1.0), with a
+    # public endpoint contraction to [0.001, 1).  The independent mainline
+    # uses the opposite chart (0=noise, 1=clean), so the density must be
+    # mirrored as well as the bridge algebra.  Keep the two owned Gamma draws
+    # in their existing order so resume RNG ownership does not change.
+    v120_time = numerator / denominator.clamp_min(1e-8)
+    v120_time = v120_time * 0.999 + 0.001
+    time = 1.0 - v120_time
     target_physical = codec.encode(target, action_state)
     noise = codec.sample_noise(
         int(target.shape[0]),
@@ -339,11 +356,20 @@ def future_dynamics_terms(
     prediction: FutureObjectDynamics,
     target: FutureObjectDynamics,
     *,
+    current_loss_support: Tensor,
     collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     prediction.validate()
     target.validate()
-    camera_validity = target.validity.detach().float().clamp(0.0, 1.0)
+    batch, intervals, objects = prediction.semantic_delta.shape[:3]
+    cameras = int(prediction.transport_mean.shape[3])
+    if tuple(current_loss_support.shape) != (batch, objects, cameras, 1):
+        raise ValueError(
+            "current loss support must be [B,K,C,1] and align with future dynamics"
+        )
+    camera_validity = current_loss_support.detach().float()[:, None].expand(
+        -1, intervals, -1, -1, -1
+    ).clamp(0.0, 1.0)
     object_validity = camera_validity.amax(dim=3)
 
     def masked(error: Tensor, weight: Tensor) -> Tensor:
@@ -477,6 +503,13 @@ def future_dynamics_terms(
         "future_transition": transition,
     }
     if collect_diagnostics:
+        terms["future_current_loss_support"] = camera_validity.mean().detach()
+        terms["future_prediction_selector_validity"] = (
+            prediction.future_selector_validity.detach().float().mean()
+        )
+        terms["future_target_selector_validity"] = (
+            target.future_selector_validity.detach().float().mean()
+        )
         for index in range(prediction.intervals):
             interval_slice = slice(index, index + 1)
             interval_validity = object_validity[:, interval_slice]
@@ -866,11 +899,10 @@ def action_terms(
     event_ce = F.cross_entropy(event_logits, flat_event, reduction="none")
     event_pt = torch.exp(-event_ce.detach()).clamp(min=1e-6, max=1.0)
     event_ce = (1.0 - event_pt).pow(float(objective.event_focal_gamma)) * event_ce
-    event_positive = torch.where(
-        flat_event != 0,
-        event_ce.new_full((), float(objective.event_positive_weight)),
-        event_ce.new_ones(()),
-    )
+    event_positive = event_positive_class_weights(
+        flat_event,
+        positive_boost=objective.event_positive_boost,
+    ).to(dtype=event_ce.dtype)
     event = (
         event_ce
         * event_positive
@@ -1047,6 +1079,7 @@ def compose_losses(
     future = future_dynamics_terms(
         predicted_dynamics,
         top_targets.teacher_dynamics,
+        current_loss_support=top_targets.current_loss_support,
         collect_diagnostics=collect_diagnostics,
     )
     objective = config.objectives
@@ -1170,6 +1203,7 @@ __all__ = [
     "balanced_event_row_weights",
     "compose_losses",
     "execution_value_terms",
+    "event_positive_class_weights",
     "flow_geometry_terms",
     "future_dynamics_terms",
     "sample_flow_matching",

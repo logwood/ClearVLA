@@ -591,7 +591,7 @@ class FutureObjectDynamics:
     persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
     uncertainty: Tensor  # [B,I,K,1]
     reliability: Tensor  # calibration only [B,I,K,1]
-    validity: Tensor  # physical per-camera support [B,I,K,C,1]
+    future_selector_validity: Tensor  # online P2 selector [B,I,K,C,1]
     future_address: Tensor  # [B,I,K,C,Y,X]
     object_coordinates: Tensor  # [B,K,C,2]
 
@@ -629,9 +629,9 @@ class FutureObjectDynamics:
         for name in ("visibility", "persistence", "uncertainty", "reliability"):
             _shape(getattr(self, name), (batch, intervals, objects, 1), name)
         _shape(
-            self.validity,
+            self.future_selector_validity,
             (batch, intervals, objects, cameras, 1),
-            "future camera validity",
+            "future selector validity",
         )
         _shape(
             self.object_coordinates,
@@ -659,7 +659,7 @@ class FutureObjectDynamics:
             persistence=self.persistence[:, :, index],
             uncertainty=self.uncertainty[:, :, index],
             reliability=self.reliability[:, :, index],
-            validity=self.validity[:, :, index],
+            future_selector_validity=self.future_selector_validity[:, :, index],
             future_address=self.future_address[:, :, index],
             object_coordinates=self.object_coordinates[:, index],
         )
@@ -683,7 +683,9 @@ class FutureObjectDynamics:
             persistence=scalar,
             uncertainty=scalar,
             reliability=scalar,
-            validity=facts.camera_validity[:, None].expand(-1, intervals, -1, -1, -1),
+            future_selector_validity=facts.camera_validity[:, None].expand(
+                -1, intervals, -1, -1, -1
+            ),
             future_address=address,
             object_coordinates=facts.camera_coordinates,
         )
@@ -692,6 +694,7 @@ class FutureObjectDynamics:
 @dataclass(frozen=True)
 class ObjectTopTrainingTargets:
     teacher_dynamics: FutureObjectDynamics | None
+    current_loss_support: Tensor  # training-only current facts [B,K,C,1]
     plan_recognition: FuturePlanRecognition | None
     online_intent_loss: Tensor
     plan_recognition_loss: Tensor
