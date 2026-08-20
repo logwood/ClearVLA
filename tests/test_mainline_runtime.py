@@ -26,11 +26,11 @@ from clearvla.mainline.train import _diagnostic_batch_indices, _prepare_output_d
 
 def test_active_logging_keeps_every_current_top_owner() -> None:
     values = {
-        "object_intent_interval_variation": 0.1,
+        "object_intent_public_interval_variation": 0.1,
         "object_plan_recognition_loss": 0.2,
         "object_coarse_action_rms": 0.3,
         "object_teacher_reliability": 0.4,
-        "object_w_typed_innovation_rms": 0.5,
+        "object_w_typed_contribution_rms": 0.5,
         "object_w1_semantic_delta_rms": 0.6,
         "object_w2_semantic_delta_rms": 0.7,
         "condition_goal_keep": 0.95,
@@ -46,7 +46,7 @@ def test_active_logging_keeps_every_current_top_owner() -> None:
 def test_active_logging_suppresses_inactive_exact_zero() -> None:
     filtered = active_metrics(
         {
-            "object_w_typed_innovation_rms": 0.0,
+            "object_w_typed_contribution_rms": 0.0,
             "loss_ledger_gap": 0.0,
             "gradient_postglobal_p1_factual_l2": 0.0,
             "object_grounding_mass_conservation_error": 0.0,
@@ -62,14 +62,14 @@ def test_active_logging_suppresses_inactive_exact_zero() -> None:
 def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
     archived = archival_metrics(
         {
-            "object_w_typed_innovation_rms": 0.0,
+            "object_w_typed_contribution_rms": 0.0,
             "object_p2_effect_precontract_rms": 0.0,
             "observation_flow_rms": 0.0,
             "inactive_ancestry_metric": 0.0,
         }
     )
     assert archived == {
-        "object_w_typed_innovation_rms": 0.0,
+        "object_w_typed_contribution_rms": 0.0,
         "object_p2_effect_precontract_rms": 0.0,
         "observation_flow_rms": 0.0,
     }
@@ -79,7 +79,7 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     values = {
         "loss_future_successor": 0.12,
         "object_grounding_object_content_pair_cosine": 0.34,
-        "object_intent_interval_variation": 0.56,
+        "object_intent_public_interval_variation": 0.56,
         "object_w_intent_object_interaction_rms": 0.07,
         "object_w_action_object_interaction_rms": 0.08,
         "object_w2_interval_adjacent_cosine": 0.78,
@@ -106,7 +106,10 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "loss_flow_recent_warp": 0.2,
             "loss_flow_earlier_warp": 0.3,
             "object_grounding_candidate_key_rms": 0.31,
-            "object_w_typed_innovation_rms": 0.32,
+            "object_w_typed_contribution_rms": 0.32,
+            "object_intent_semantic_route_raw_rms": 0.33,
+            "object_intent_semantic_relevance_mass": 0.34,
+            "object_w_semantic_input_object_variation": 0.35,
             "object_w2_interval_0_semantic_delta_rms": 0.321,
             "object_teacher_interval_0_semantic_delta_rms": 0.322,
             "loss_future_interval_0_semantic_delta": 0.323,
@@ -128,7 +131,10 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "loss_flow_recent_warp=0.2" in joined
     assert "loss_flow_earlier_warp=0.3" in joined
     assert "object_grounding_candidate_key_rms=0.31" in joined
-    assert "object_w_typed_innovation_rms=0.32" in joined
+    assert "object_w_typed_contribution_rms=0.32" in joined
+    assert "object_intent_semantic_route_raw_rms=0.33" in joined
+    assert "object_intent_semantic_relevance_mass=0.34" in joined
+    assert "object_w_semantic_input_object_variation=0.35" in joined
     assert "object_w2_interval_0_semantic_delta_rms=0.321" in joined
     assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
     assert "loss_future_interval_0_semantic_delta=0.323" in joined

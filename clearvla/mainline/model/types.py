@@ -331,51 +331,232 @@ class FactualPrecisionDock:
 
 
 @dataclass(frozen=True)
+class ActionIntentDock:
+    """S-owned inputs that the clean coarse-action compiler may consume."""
+
+    public_interval_carrier: Tensor  # [B,I,H]
+    history_memory: Tensor  # [B,L,H]
+    public_object_memory: Tensor  # [B,K,H]
+    typed_action_components: Tensor  # [B,I,type,H]
+
+    @property
+    def typed_action_context(self) -> Tensor:
+        # Type identity is formed before this consumer-specific reduction.
+        # The fixed denominator preserves exact zero when every optional type
+        # is absent; normalizing by selected mass would destroy that contract.
+        return self.typed_action_components.sum(dim=2) / (3.0**0.5)
+
+    def validate(self, *, hidden: int) -> None:
+        batch = int(self.public_interval_carrier.shape[0])
+        _shape(
+            self.public_interval_carrier,
+            (batch, 4, hidden),
+            "action-intent public interval carrier",
+        )
+        if self.history_memory.ndim != 3 or int(self.history_memory.shape[0]) != batch:
+            raise ValueError("action-intent history memory must be [B,L,H]")
+        if self.public_object_memory.ndim != 3 or int(
+            self.public_object_memory.shape[0]
+        ) != batch:
+            raise ValueError("action-intent object memory must be [B,K,H]")
+        _shape(
+            self.typed_action_components,
+            (batch, 4, 3, hidden),
+            "action-intent typed components",
+        )
+
+
+@dataclass(frozen=True)
+class WorldIntentDock:
+    """S-owned relevance boundary consumed by W1/W2 exactly once."""
+
+    protected_goal_memory: Tensor  # [B,G,H]
+    public_interval_carrier: Tensor  # [B,I,H]
+    typed_relevance_mass: Tensor  # [B,I,K,type,1]
+    typed_relevance_value: Tensor  # [B,I,K,type,R]
+
+    def validate(self, *, hidden: int) -> None:
+        batch = int(self.public_interval_carrier.shape[0])
+        _shape(
+            self.public_interval_carrier,
+            (batch, 4, hidden),
+            "world-intent public interval carrier",
+        )
+        _shape(
+            self.protected_goal_memory,
+            (batch, 4, hidden),
+            "world-intent protected goal memory",
+        )
+        if self.typed_relevance_mass.ndim != 5:
+            raise ValueError("typed relevance mass must be [B,I,K,type,1]")
+        if tuple(self.typed_relevance_mass.shape[:2]) != (batch, 4):
+            raise ValueError("typed relevance mass lost its interval axis")
+        if int(self.typed_relevance_mass.shape[3]) != 3 or int(
+            self.typed_relevance_mass.shape[-1]
+        ) != 1:
+            raise ValueError("typed relevance mass lost semantic/appearance/geometry")
+        if self.typed_relevance_value.ndim != 5 or tuple(
+            self.typed_relevance_value.shape[:4]
+        ) != tuple(self.typed_relevance_mass.shape[:4]):
+            raise ValueError("typed relevance value does not align with its mass")
+
+
+@dataclass(frozen=True)
+class FactualIntentDock:
+    """Read-only S context for the unchanged V120 P1 factual reader."""
+
+    phase_context: Tensor  # [B,I,H]
+    condition_query_context: Tensor  # [B,I,H]
+    history_query_context: Tensor  # [B,I,H]
+
+    def validate(self, *, hidden: int) -> None:
+        batch = int(self.phase_context.shape[0])
+        expected = (batch, 4, hidden)
+        _shape(self.phase_context, expected, "factual-intent phase context")
+        _shape(
+            self.condition_query_context,
+            expected,
+            "factual-intent condition context",
+        )
+        _shape(self.history_query_context, expected, "factual-intent history context")
+
+
+@dataclass(frozen=True)
+class PolicyIntentDock:
+    """Read-only S context for the unchanged P2/P3 compilers."""
+
+    interval_key: Tensor  # [B,I,H]
+    temporal_control: Tensor  # [B,T,H]
+    state_change_evidence: Tensor  # [B,H]
+
+    def validate(self, *, horizon: int, hidden: int) -> None:
+        batch = int(self.interval_key.shape[0])
+        _shape(self.interval_key, (batch, 4, hidden), "policy-intent interval key")
+        _shape(
+            self.temporal_control,
+            (batch, horizon, hidden),
+            "policy-intent temporal control",
+        )
+        _shape(
+            self.state_change_evidence,
+            (batch, hidden),
+            "policy-intent state-change evidence",
+        )
+
+
+@dataclass(frozen=True)
 class ObjectIntentState:
-    """Recovered V120 stateless intent with cumulative typed queries."""
+    """Stateless intent bundle with public and object/type-owned outputs."""
 
     protected_goal_set: Tensor  # [B,4,H]
     history_tokens: Tensor  # [B,L,H]
     object_tokens: Tensor  # [B,K,H]
-    semantic_object_tokens: Tensor  # [B,K,H]
-    appearance_object_tokens: Tensor  # [B,K,H]
-    geometry_object_tokens: Tensor  # [B,K,H]
-    interval_queries: Tensor  # [B,4,H]
+    public_interval_carrier: Tensor  # [B,4,H]
+    policy_interval_context: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
+    typed_relevance_mass: Tensor  # [B,4,K,3,1]
+    typed_relevance_value: Tensor  # [B,4,K,3,R]
+    typed_action_components: Tensor  # [B,4,3,H]
     goal_attention: Tensor  # [B,4,Lg]
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
     interval_object_attention: Tensor  # [B,4,K]
-    interval_semantic_attention: Tensor  # [B,4,K]
-    interval_appearance_attention: Tensor  # [B,4,K]
-    interval_geometry_attention: Tensor  # [B,4,K]
+
+    @property
+    def interval_queries(self) -> Tensor:
+        """Compatibility name for the S-owned consumer-specific context."""
+
+        return self.policy_interval_context
+
+    @property
+    def interval_semantic_attention(self) -> Tensor:
+        return self.typed_relevance_mass[..., 0, 0]
+
+    @property
+    def interval_appearance_attention(self) -> Tensor:
+        return self.typed_relevance_mass[..., 1, 0]
+
+    @property
+    def interval_geometry_attention(self) -> Tensor:
+        return self.typed_relevance_mass[..., 2, 0]
+
+    def action_dock(self) -> ActionIntentDock:
+        return ActionIntentDock(
+            public_interval_carrier=self.public_interval_carrier,
+            history_memory=self.history_tokens,
+            public_object_memory=self.object_tokens,
+            typed_action_components=self.typed_action_components,
+        )
+
+    def world_dock(self) -> WorldIntentDock:
+        return WorldIntentDock(
+            protected_goal_memory=self.protected_goal_set,
+            public_interval_carrier=self.public_interval_carrier,
+            typed_relevance_mass=self.typed_relevance_mass,
+            typed_relevance_value=self.typed_relevance_value,
+        )
+
+    def factual_dock(self) -> FactualIntentDock:
+        batch = int(self.policy_interval_context.shape[0])
+        return FactualIntentDock(
+            phase_context=self.policy_interval_context,
+            condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
+                -1, 4, -1
+            ),
+            history_query_context=self.history_tokens[:, -1:, :].expand(
+                batch, 4, -1
+            ),
+        )
+
+    def policy_dock(self) -> PolicyIntentDock:
+        return PolicyIntentDock(
+            interval_key=self.policy_interval_context,
+            temporal_control=self.temporal_queries,
+            state_change_evidence=self.state_change_evidence,
+        )
 
     def validate(self, *, horizon: int, hidden: int) -> None:
-        batch = int(self.interval_queries.shape[0])
+        batch = int(self.public_interval_carrier.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
-        _shape(self.interval_queries, (batch, 4, hidden), "interval queries")
+        _shape(
+            self.public_interval_carrier,
+            (batch, 4, hidden),
+            "public interval carrier",
+        )
+        _shape(
+            self.policy_interval_context,
+            (batch, 4, hidden),
+            "policy interval context",
+        )
         _shape(self.temporal_queries, (batch, horizon, hidden), "temporal queries")
         _shape(self.state_change_evidence, (batch, hidden), "state-change evidence")
-        if self.object_tokens.ndim != 3:
+        if self.history_tokens.ndim != 3 or int(self.history_tokens.shape[0]) != batch:
+            raise ValueError("intent history tokens must be [B,L,H]")
+        if self.object_tokens.ndim != 3 or int(self.object_tokens.shape[0]) != batch:
             raise ValueError("object intent public tokens must be [B,K,H]")
-        object_shape = tuple(self.object_tokens.shape)
-        for name in (
-            "semantic_object_tokens",
-            "appearance_object_tokens",
-            "geometry_object_tokens",
-        ):
-            if tuple(getattr(self, name).shape) != object_shape:
-                raise ValueError(f"{name} lost the global-object axis")
+        objects = int(self.object_tokens.shape[1])
+        _shape(
+            self.typed_relevance_mass,
+            (batch, 4, objects, 3, 1),
+            "typed relevance mass",
+        )
+        if self.typed_relevance_value.ndim != 5 or tuple(
+            self.typed_relevance_value.shape[:4]
+        ) != (batch, 4, objects, 3):
+            raise ValueError("typed relevance value lost interval/object/type identity")
+        _shape(
+            self.typed_action_components,
+            (batch, 4, 3, hidden),
+            "typed action components",
+        )
+        self.action_dock().validate(hidden=hidden)
+        self.world_dock().validate(hidden=hidden)
+        self.factual_dock().validate(hidden=hidden)
+        self.policy_dock().validate(horizon=horizon, hidden=hidden)
 
     def permute(self, permutation: Tensor) -> "ObjectIntentState":
-        """Return the same intent state under a relabeling of global K slots.
-
-        Interval, temporal and state-change values have no object axis and
-        therefore remain unchanged.  Keeping this operation explicit makes
-        causal audits exercise the real G→S→W owner boundary instead of
-        rebuilding a synthetic object axis after pooling.
-        """
+        """Return the same intent bundle under a relabeling of global K slots."""
 
         objects = int(self.object_tokens.shape[1])
         if permutation.ndim != 1 or int(permutation.numel()) != objects:
@@ -388,20 +569,23 @@ class ObjectIntentState:
             protected_goal_set=self.protected_goal_set,
             history_tokens=self.history_tokens,
             object_tokens=self.object_tokens[:, index],
-            semantic_object_tokens=self.semantic_object_tokens[:, index],
-            appearance_object_tokens=self.appearance_object_tokens[:, index],
-            geometry_object_tokens=self.geometry_object_tokens[:, index],
-            interval_queries=self.interval_queries,
+            public_interval_carrier=self.public_interval_carrier,
+            policy_interval_context=self.policy_interval_context,
             temporal_queries=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            typed_relevance_mass=self.typed_relevance_mass[:, :, index],
+            typed_relevance_value=self.typed_relevance_value[:, :, index],
+            typed_action_components=self.typed_action_components,
             goal_attention=self.goal_attention,
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
             interval_object_attention=self.interval_object_attention[:, :, index],
-            interval_semantic_attention=self.interval_semantic_attention[:, :, index],
-            interval_appearance_attention=self.interval_appearance_attention[:, :, index],
-            interval_geometry_attention=self.interval_geometry_attention[:, :, index],
         )
+
+
+# The descriptive name is exported without breaking existing import sites that
+# still use ObjectIntentState for the same typed runtime container.
+StatelessIntentBundle = ObjectIntentState
 
 
 @dataclass(frozen=True)

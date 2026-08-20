@@ -23,13 +23,13 @@ from .top import (
     OnlineTopContext,
 )
 from .transition import ControlledTransitionDynamics
-from .v120_p1 import LateRawDetailPolicyReader
 from .types import (
     ControlledTransitionSource,
     FactualPrecisionDock,
     HistoryActionProposalState,
     ObjectTopTrainingTargets,
 )
+from .v120_p1 import LateRawDetailPolicyReader
 
 
 @dataclass(frozen=True)
@@ -284,10 +284,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             executed_history=conditioned_policy_input.history.executed_action_history,
             collect_diagnostics=collect_diagnostics,
         )
+        factual_intent = context.intent.factual_dock()
         clean_action_basis = self.bottom.clean_action_basis_tokens(
             batch,
-            device=context.intent.interval_queries.device,
-            dtype=context.intent.interval_queries.dtype,
+            device=factual_intent.phase_context.device,
+            dtype=factual_intent.phase_context.dtype,
         )
         clean_trajectory = clean_action_basis.reshape(
             batch,
@@ -303,13 +304,9 @@ class ClearVLAMainlinePolicy(nn.Module):
             clean_trajectory,
             grounding_canvas[:, grounding_slices["rollout"]],
             p1_detail,
-            phase_context=context.intent.interval_queries,
-            condition_query_context=(
-                context.intent.protected_goal_set.mean(dim=1)[:, None].expand(-1, 4, -1)
-            ),
-            history_query_context=(
-                context.intent.history_tokens[:, -1:, :].expand(-1, 4, -1)
-            ),
+            phase_context=factual_intent.phase_context,
+            condition_query_context=factual_intent.condition_query_context,
+            history_query_context=factual_intent.history_query_context,
             clean_basis_tokens=clean_action_basis,
             collect_diagnostics=collect_diagnostics,
         )

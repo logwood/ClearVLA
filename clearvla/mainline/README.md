@@ -15,7 +15,7 @@ config / manifest / typed online and training inputs
   -> Pre-G local chart
   -> G1/G2/G3 progressive local grounding with an N=49 rematerialization
   -> one dense global K+null grounding objective
-  -> V120 cumulative stateless intent S
+  -> S public interval carrier + per-type [interval,K,type] relevance
   -> W1/W2 four-interval future object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy block
@@ -72,14 +72,14 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        24
+schema:        25
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 21/22/23 is not an exact-resume source for schema 24. Formal runs start
-fresh unless the complete manifest, model, optimizer, scheduler and RNG
+Schema 24 and older are not exact-resume sources for schema 25. Formal runs
+start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
 ## Runtime contract
@@ -114,16 +114,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema24_v120_fidelity_smoke \
-nohup bash scripts/smoke_mainline.sh > schema24_v120_fidelity_smoke.log 2>&1 &
+OUT_DIR=runs/schema25_s_owned_typed_smoke \
+nohup bash scripts/smoke_mainline.sh > schema25_s_owned_typed_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema24_v120_fidelity_b8 \
-nohup bash scripts/train_mainline.sh > schema24_v120_fidelity_b8.log 2>&1 &
+OUT_DIR=runs/schema25_s_owned_typed_b8 \
+nohup bash scripts/train_mainline.sh > schema25_s_owned_typed_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -135,7 +135,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema24_v120_fidelity_b8 \
+  runs/schema25_s_owned_typed_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

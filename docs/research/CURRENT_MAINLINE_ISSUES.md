@@ -1,89 +1,58 @@
 # ClearVLA 当前纯问题账本
 
-更新：2026-08-14
+更新：2026-08-20
 
-本文件只保留尚未解决的问题。已经由源码确认并修复的活跃 observation 参数误冻结、
-Teacher 跨相机坐标代数、global-K public-key 二次注入以及 validation 采样/消融口径
-已从问题账本删除；其实现边界记录在
-`00_CURRENT_ARCHITECTURE_CONTRACT.md`。本轮闭环审查没有发现第五个与这四项同级、
-可由现有源码和日志独立证明的主路故障。这个结论不等于剩余行为问题已经消失。
+本文件只保留当前仍未解决的问题。已在 Schema25 源码中关闭的 S 公共化、跨类型 learned-null 竞争以及 CoarseAction/W raw-typed 旁路已经移除；实现决定见
+[`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)，实验验收边界见
+[`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md)。
 
-## P0：修正后的 Schema24 尚未通过 fresh 行为恢复验收
+## 证据边界
 
-旧 Schema24 epoch-1 checkpoint 产生于错误图，不能 exact-resume 到当前源码。当前版本
-必须使用新的空输出目录完成：
+- 行为参考：V120 `long`，提交 `0b92d359a2889a0a1b1eba256007c00ccbc54f3c`，完整快照 `.audit/v120_exact_source_0b92d359/`。
+- 上一完整实验：Schema24 `schema24_fidelity_fix_b8.log`，八个 epoch 全部结束。
+- 当前源码：Schema25，能力名 `object_intent_dynamics_323`；122 个本地 mainline 测试通过（连同日志审计共 153 项），但 CUDA smoke 与 fresh 八轮尚未运行。
+- 因而本文可以确认源码依赖是否修正，不能预先声称动作性能已经改善。
 
-- BF16 smoke、五步部署与 endpoint heads；
-- batch 8 总进程显存不超过 22 GiB；
-- 对齐 batch 2200 的 V120/旧 Schema24/当前 fresh-run 比较；
-- 八个 epoch 的最终点和完整均值比较，不能只取 best checkpoint。
+## P0（独立暂缓）：最终 G3 anchor 事实轴在 transition source 前被抹掉
 
-早期恢复至少同时检查：G3 parent L1、object pair cosine、typed posterior L1、P1
-protected detail/spatial variation、Teacher transport/covariance、P2 null/effect、
-consequence 与 P3 effect。动作端必须比较 physical/native、first/tail、三个 horizon、
-arm/gripper、decoded event、event head 和 motion head。
+### 已确认源码事实
 
-## P1：W→action 在旧 Schema24 中是严重衰减，fresh run 后复核
+- G1→G2→G3 已形成 `[B,4,C,8,8,H]` anchor-aware grounding rollout。
+- 当前 transition source 没有直接消费该四 anchor chart；它从 public chart 构造一份公共 128-row 内容，再加四组 identity label 得到 512 rows。
+- 因此 512-row shape 正确，但四组内容不是四个真实 G3 anchor facts。旧 V120 则把最终 grounding rollout 直接交给 controlled dynamics。
 
-旧日志并非 autograd 断线：P2 与 consequence action-only 梯度非零；但错误 Teacher
-几何使 P2 合法地偏向 null，validation 中 effect/consequence/P3-effect 接近消失，策略
-退回 P1+temporal。当前修复去除了已确认的上游原因，但尚无新实验能证明动作端已恢复。
+### 为什么暂缓
 
-关闭条件：在相同数据、seed、batch 和对齐 iter 上，Teacher transport 回到合理量级，
-P2 null 下降、effect/consequence/P3-effect 恢复且 action 指标同步改善。仅有 future loss
-下降、W 梯度非零或 representation 改变不算关闭。若修正后 W zero 仍改善 action，才把
-它升级为新的 W/P2 结构任务；此前禁止重写 P2/P3/bottom、取消合法 null、增加 gain、
-quota、硬门控或人工梯度。
+该缺陷与本轮 S 所有权修复相互独立。同时修改会使 fresh 动作变化无法归因。Schema25 的第一轮受控实验只验证 S；不得因为它邻接 S 就顺手重写 transition 或 bottom。
 
-## P1：S typed innovation 的部署条件依赖仍未判定
+### 关闭条件
 
-旧 Schema24 训练末段 typed innovation 约 `0.08–0.16`，但首四个 validation 诊断 batch
-约 `1.29e-4`；goal/history/object innovation 同时仍非零。这是旧子集上的真实边界输出，
-但旧采样只覆盖验证集开头约 2.23%，不能外推到全验证集。
+- transition flatten 前张量与最终 G3 rollout bit-exact；不能由公共 chart 加 identity label 近似。
+- G3 anchor permutation 必须在 transition source 中等变。
+- 不改变 transition 的 512-row ABI、动态更新频率、CVAE/workspace/Evidence MMDiT 或 execution。
+- 单独 fresh smoke 与完整对照通过后，才从本账本删除。
 
-当前验证已改为在全 loader 上均匀抽取 16 个 sampling diagnostic batches。fresh run 后需
-按完整 goal/history、各自 dropout 和 train-mask/eval-mask 对同一固定 batch 做无梯度
-对照，并记录 typed null/source mass。若完整条件下仍稳定归零，才确认
-condition-dependent routing shortcut。不得通过 typed gain、熵目标、非零配额或删除
-null 制造使用率。
+## P1（行为未归因）：epoch 7/8 的 gripper 与中远程回退
 
-## P1：P1 protected detail 的 train/eval 衰减仍未判定
+Schema24 的 physical RMSE 在 epoch 6–8 为 `0.08008 / 0.08193 / 0.08218`；回退主要来自 gripper 与 5–24 步，arm 基本稳定。V120 自身也从 epoch 7 的约 `0.0793` 回升到 epoch 8 的约 `0.0814`，所以晚期反弹不是已被证明的单一 S 故障。
 
-旧 Schema24 训练末段 `p1_protected_detail_rms≈0.03–0.04`，首四个 validation 诊断
-batch 约 `0.0104`，而 dynamic delta 仍约 `0.385`。静态源码复核已经确认当前 P1 仍
-完整执行 24 factual queries、四种 glimpse、N=49 posterior 和真实 3×3
-RGB/detail/coordinate microgrid；`FactualPrecisionDock` 只是参数自由的已计算结果边界，
-不是粗暴替代 reader。
+同期 Schema24 的 S typed innovation 从 epoch 6 的 `0.00350` 回到 `0.01004 / 0.00860`，W interval 指标没有突变；P2 null mass 从 `0.1270` 降至约 `0.0946`，consequence/effect RMS 增长约 `10%`，但没有冻结干预证明该同步漂移是因果根源。
 
-先在恢复 observation trainability、移除 public-key 注入并采用均匀 validation 采样的
-fresh run 上复核。如果同一输入的 train-mask/eval-mask 仍产生异常 detail 衰减，再定位
-mask/selector 输入分布；此前禁止改 P1、缩小 microgrid、增加 detail gain 或再造 reader。
+### 当前处理
 
-## P1：G/S/W/P3 的可识别性只能由修正后的完整实验判定
+- 不在 Schema25 源码中调 P2/P3 gain、null、route mass、loss 或 hard gate。
+- fresh 八轮必须同时比较最佳点与最终点、first/tail、1–4/5–12/13–24、arm/gripper、event/motion。
+- 若 S 边界健康但晚期回退仍在，继续归类为独立泛化/数据可识别性问题，不再用接线补丁解释。
+- 若 P2/consequence effect 继续增大而 W target-normalized error 与动作验证不改善，视为拒绝信号，不视为“使用率提高”。
 
-旧日志中的 K 槽公共化、三类 typed posterior 相似、W 比 Teacher 更公共、P3
-temporal/history 偏置，可能由本轮已修的冻结/key/Teacher 问题造成，也可能包含独立的
-数据可识别性问题。静态 closure audit 已再次核对当前 P2、P3、RoleDeltaAttnRes、
-transition 与 Evidence bottom 的代数，没有发现新的断线或替代实现，因此本轮不修改
-这些成熟模块。
+## 当前放行阻塞
 
-只有在 G1/G2/G3、P1、Teacher 和对象几何边界全部恢复，且八轮仍复现公共化时，才把
-它归类为监督/可识别性任务。届时必须基于完整轨迹和 causal intervention，而不是靠
-额外 loss 或接口命名判断所有权。
+Schema25 只有完成以下外部实验后才能视为主线候选：
 
-## P2：保留但不进入当前修复的债务
+1. fresh CUDA BF16 smoke；
+2. batch 8 进程显存不超过 22 GiB，并记录吞吐；
+3. 完整八个 epoch，与 Schema24 和 V120 全指标对照；
+4. per-type S/W 边界在真实日志中均存在且有限，不能只剩一个合并 RMS；
+5. 不能同时恶化最佳 physical RMSE 与最终 physical/gripper/中远程指标。
 
-- `FutureObjectDynamics.future_address [B,4,K,C,8,8]` 当前只有诊断消费者；不把它
-  接回 P2 来制造相机轴或空间使用率。
-- P1 learned null 明确延期。若未来实现，protected base 必须在竞争外、null value
-  必须代数零、且只能抑制 optional detail innovation。
-- HistoryActionProposal 仍是监督辅助项；future proposal token 不进入主路，真实 executed
-  history 仍通过共享 V120 seed 条件化策略。只有完整消融证明该辅助项无益且昂贵时再处理。
-
-## 失败归类
-
-- forward/shape/dtype 失败：源码边界问题，停止长跑；
-- non-finite：使用 `gradient_failure` 首个参数记录归因，不先增加 clip；
-- 显存/速度失败：按静态/动态调用次数和模块清单归因；
-- 边界测试正确但八轮性能失败：数据、监督或可识别性问题；
-- 不把“梯度存在”“张量非空”或“辅助 loss 下降”当作主路有效证据。
+在上述结果返回前，不新增 S/W block、阶段标签、scalar progress、使用率配额、entropy/diversity loss 或人工梯度。

@@ -9,12 +9,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import RoleDeltaAttnRes, smooth_rms_contract
+from .routing import smooth_rms_contract
 from .types import (
     CoarseActionIntentState,
     FutureObjectDynamics,
     ObjectFactSet,
-    ObjectIntentState,
+    WorldIntentDock,
 )
 
 
@@ -102,14 +102,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
         self.object_transport_prior = nn.Linear(2, hidden, bias=False)
-        self.typed_router = RoleDeltaAttnRes(
-            hidden,
-            max(hidden // 8, 32),
-            max_sources=3,
-            include_null=True,
-            max_value_rms=0.35,
-            normalization_floor=0.25,
-        )
         self.goal_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.goal_memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.goal_read = nn.MultiheadAttention(
@@ -143,25 +135,24 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _base(
         self,
         facts: ObjectFactSet,
-        intent: ObjectIntentState,
+        intent: WorldIntentDock,
         action: CoarseActionIntentState,
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, dict[str, Tensor]]:
+        intent.validate(hidden=self.hidden)
         objects = self.object_content(facts.content)
-        semantic = self.object_semantic(facts.semantic)
-        appearance = self.object_appearance(facts.appearance)
-        geometry = self.object_geometry(facts.geometry) + self.object_transport_prior(
-            facts.transport_prior.to(dtype=facts.geometry.dtype)
+        transport_prior = self.object_transport_prior(
+            facts.transport_prior.to(dtype=facts.content.dtype)
         )
         interval = (
-            intent.interval_queries
+            intent.public_interval_carrier
             + action.tokens
             + self.interval_identity.to(
                 device=objects.device, dtype=objects.dtype
             )[:, :, 0]
         )
-        normalized_goal = self.goal_memory_norm(intent.protected_goal_set)
+        normalized_goal = self.goal_memory_norm(intent.protected_goal_memory)
         goal_update, goal_attention = self.goal_read(
             self.goal_query_norm(interval),
             normalized_goal,
@@ -169,19 +160,33 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             need_weights=collect_diagnostics,
             average_attn_weights=True,
         )
-        base = objects[:, None] + interval[:, :, None] + goal_update[:, :, None]
-        typed_values = torch.stack((semantic, appearance, geometry), dim=-2)
-        typed_values = typed_values[:, None].expand(-1, 4, -1, -1, -1)
-        typed_update, typed_metrics = self.typed_router(
-            base,
-            typed_values,
-            collect_diagnostics=collect_diagnostics,
+        base = (
+            objects[:, None]
+            + transport_prior[:, None]
+            + interval[:, :, None]
+            + goal_update[:, :, None]
+        )
+        typed_components = []
+        for type_index, projection in enumerate(
+            (self.object_semantic, self.object_appearance, self.object_geometry)
+        ):
+            component, _ = smooth_rms_contract(
+                projection(intent.typed_relevance_value[..., type_index, :]),
+                0.35,
+            )
+            typed_components.append(component)
+        typed_components_value = torch.stack(typed_components, dim=3)
+        typed_update, _ = smooth_rms_contract(
+            typed_components_value.sum(dim=3) / math.sqrt(3.0),
+            0.35,
         )
         if not collect_diagnostics:
             return base + typed_update, {}
         if goal_attention is None:
             goal_attention = interval.new_zeros(
-                interval.shape[0], interval.shape[1], intent.protected_goal_set.shape[1]
+                interval.shape[0],
+                interval.shape[1],
+                intent.protected_goal_memory.shape[1],
             )
         metrics = {
             "object_w_goal_attention_entropy": (
@@ -192,10 +197,35 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 / math.log(float(max(int(goal_attention.shape[-1]), 2)))
             ).mean(),
             "object_w_goal_innovation_rms": goal_update.detach().float().square().mean().sqrt(),
-            "object_w_typed_innovation_rms": typed_update.detach().float().square().mean().sqrt(),
+            "object_w_typed_contribution_rms": typed_update.detach().float().square().mean().sqrt(),
         }
-        for key, value in typed_metrics.items():
-            metrics[f"object_w_typed_{key}"] = value
+        for type_index, name in enumerate(("semantic", "appearance", "geometry")):
+            component = typed_components_value[..., type_index, :].detach().float()
+            input_mass = intent.typed_relevance_mass[
+                ..., type_index, 0
+            ].detach().float()
+            input_value = intent.typed_relevance_value[
+                ..., type_index, :
+            ].detach().float()
+            metrics[f"object_w_{name}_contribution_rms"] = (
+                component.square().mean().sqrt()
+            )
+            metrics[f"object_w_{name}_contribution_interval_variation"] = (
+                component.std(dim=1, unbiased=False).mean()
+            )
+            metrics[f"object_w_{name}_contribution_object_variation"] = (
+                component.std(dim=2, unbiased=False).mean()
+            )
+            metrics[f"object_w_{name}_input_relevance_mass"] = input_mass.mean()
+            metrics[f"object_w_{name}_input_value_rms"] = (
+                input_value.square().mean().sqrt()
+            )
+            metrics[f"object_w_{name}_input_interval_variation"] = (
+                input_value.std(dim=1, unbiased=False).mean()
+            )
+            metrics[f"object_w_{name}_input_object_variation"] = (
+                input_value.std(dim=2, unbiased=False).mean()
+            )
         return base + typed_update, metrics
 
     def _field(
@@ -288,7 +318,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self,
         *,
         facts: ObjectFactSet,
-        intent: ObjectIntentState,
+        intent: WorldIntentDock,
         action: CoarseActionIntentState,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics, ObjectW1WorkingState, dict[str, Tensor]]:
@@ -310,7 +340,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self,
         *,
         facts: ObjectFactSet,
-        intent: ObjectIntentState,
+        intent: WorldIntentDock,
         action: CoarseActionIntentState,
         w1_state: ObjectW1WorkingState,
         collect_diagnostics: bool = False,

@@ -101,7 +101,7 @@ def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: P
     historical_manifest = copy.deepcopy(identity.manifest)
     # Schema 22 was experimentally rejected.  It remains parseable only for
     # the explicit unchanged-bottom migration path and can never exact-resume
-    # into the schema-24 V120-fidelity recovery.
+    # into the current S-owned typed-relevance recovery.
     historical_manifest["schema"] = 22
     components = dict(historical_manifest["components"])
     components["top"] = "object_intent_dynamics_323_schema6"

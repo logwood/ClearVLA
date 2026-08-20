@@ -387,28 +387,27 @@ class MainlineTrainingEngine:
         intent = encoded.training_state.top.intent
         dynamics = encoded.training_state.top.predicted_dynamics
         progress = batch.audit.frame_progress.to(
-            device=intent.interval_queries.device,
+            device=intent.public_interval_carrier.device,
             dtype=torch.float32,
         )
 
         def sample_rms(value: Tensor) -> Tensor:
             return value.detach().float().flatten(1).square().mean(dim=1).sqrt()
 
-        # V120 exports the completed cumulative interval state rather than
-        # three factorized value heads.  Audit the tensor W actually consumes;
-        # reconstructing synthetic action/state/object energies here would
-        # recreate the retired schema-20 contract in logging only.
-        interval_energy = intent.interval_queries.detach().float().square().mean(
-            dim=-1
-        ).sqrt()
+        # Audit the supervised public carrier.  Optional typed values keep
+        # their own interval/K/type metrics and must not silently redefine the
+        # public progress diagnostic.
+        interval_energy = (
+            intent.public_interval_carrier.detach().float().square().mean(dim=-1).sqrt()
+        )
         centers = interval_energy.new_tensor((6.0, 12.0, 24.0, 40.0)) / 48.0
         energy_total = interval_energy.sum(dim=1)
         centroid = (interval_energy * centers[None]).sum(dim=1) / energy_total.clamp_min(1e-8)
         centroid = torch.where(energy_total > 1e-8, centroid, centroid.new_zeros(centroid.shape))
 
         interval_variation = sample_rms(
-            intent.interval_queries.detach().float()
-            - intent.interval_queries.detach().float().mean(dim=1, keepdim=True)
+            intent.public_interval_carrier.detach().float()
+            - intent.public_interval_carrier.detach().float().mean(dim=1, keepdim=True)
         )
         state_change = sample_rms(intent.state_change_evidence)
         successor_innovation = sample_rms(

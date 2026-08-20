@@ -5,9 +5,10 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from .routing import RoleDeltaAttnRes, smooth_rms_contract
+from .routing import smooth_rms_contract
 from .types import (
     INTERVAL_BOUNDS,
+    ActionIntentDock,
     CoarseActionIntentState,
     FutureObjectDynamics,
     FuturePlanRecognition,
@@ -15,6 +16,8 @@ from .types import (
     ObjectIntentState,
     normalized_entropy,
 )
+
+TYPED_INTENT_NAMES = ("semantic", "appearance", "geometry")
 
 
 def _causal_mask(length: int, device: torch.device) -> Tensor:
@@ -141,16 +144,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
         self.interval_object = _CrossRead(hidden, heads)
-        self.interval_semantic = _CrossRead(hidden, heads)
-        self.interval_appearance = _CrossRead(hidden, heads)
-        self.interval_geometry = _CrossRead(hidden, heads)
-        self.interval_typed_router = RoleDeltaAttnRes(
-            hidden,
-            max(hidden // 8, 32),
-            max_sources=3,
-            include_null=True,
-            max_value_rms=0.35,
-            normalization_floor=0.25,
+        self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.typed_relevance_queries = nn.ModuleList(
+            nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
+        )
+        # Initial temperature is exactly one.  It remains bounded in [0.25, 4]
+        # and therefore cannot turn the fixed-zero null comparison into an
+        # unbounded selector gain.
+        self.typed_temperature_logit = nn.Parameter(
+            torch.full((len(TYPED_INTENT_NAMES),), -1.3862943611198906)
         )
         self.interval_self = _SelfBlock(hidden, heads)
         self.temporal_identity = nn.Parameter(torch.randn(1, horizon, hidden) * 0.02)
@@ -191,15 +193,72 @@ class StatelessObjectIntentOrganizer(nn.Module):
         )[None, :, None].expand(states.shape[0], -1, -1)
         return torch.cat((states, actions, delta, offset), dim=-1), delta
 
-    def _object_tokens(
-        self, facts: ObjectFactSet
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def _object_tokens(self, facts: ObjectFactSet) -> Tensor:
         facts.validate()
+        return self.object_content(facts.content)
+
+    @staticmethod
+    def _bounded_unit(value: Tensor, *, floor: float = 0.25) -> Tensor:
+        value_f = value.float()
+        return value_f / (
+            value_f.square().sum(dim=-1, keepdim=True) + float(floor) ** 2
+        ).sqrt()
+
+    def _typed_relevance(
+        self,
+        *,
+        public_interval_carrier: Tensor,
+        facts: ObjectFactSet,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Build fixed-zero, per-type relevance without collapsing K."""
+
+        query_source = self.typed_query_norm(public_interval_carrier)
+        typed_query = torch.stack(
+            tuple(projection(query_source) for projection in self.typed_relevance_queries),
+            dim=2,
+        )  # [B,I,type,R]
+        typed_route = torch.stack(
+            (facts.semantic, facts.appearance, facts.geometry), dim=2
+        )  # [B,K,type,R]
+        score = torch.einsum(
+            "bitr,bktr->bikt",
+            self._bounded_unit(typed_query),
+            self._bounded_unit(typed_route),
+        ).clamp(-1.0, 1.0)
+        temperature = 0.25 + 3.75 * torch.sigmoid(
+            self.typed_temperature_logit.float()
+        )
+        signal_probability = torch.sigmoid(
+            score * temperature.to(device=score.device)[None, None, None]
+        )
+        validity = facts.validity.float()[:, None, :, None, :].clamp(0.0, 1.0)
+        relevance_mass = signal_probability[..., None] * validity
+        relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
+        relevance_value = (
+            relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
+        )
+
+        components: list[Tensor] = []
+        for type_index, projection in enumerate(
+            (self.object_semantic, self.object_appearance, self.object_geometry)
+        ):
+            # K is a fixed identity axis.  A fixed mean preserves zero and
+            # cannot cancel the optionality by renormalizing selected mass.
+            selected_route = relevance_value[..., type_index, :].mean(dim=2)
+            component, _ = smooth_rms_contract(projection(selected_route), 0.35)
+            components.append(component)
+        typed_components = torch.stack(components, dim=2)
+        raw_context = typed_components.sum(dim=2) / (3.0**0.5)
+        _, context_scale = smooth_rms_contract(raw_context, 0.35)
+        typed_components = typed_components * context_scale[:, :, None].to(
+            dtype=typed_components.dtype
+        )
         return (
-            self.object_content(facts.content),
-            self.object_semantic(facts.semantic),
-            self.object_appearance(facts.appearance),
-            self.object_geometry(facts.geometry),
+            relevance_mass,
+            relevance_value,
+            typed_components,
+            score,
+            temperature,
         )
 
     def forward(
@@ -233,9 +292,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         history = self.history_input(paired_history)
         for block in self.history_blocks:
             history = block(history, causal=True)
-        objects, semantic_objects, appearance_objects, geometry_objects = (
-            self._object_tokens(facts)
-        )
+        objects = self._object_tokens(facts)
         interval_base = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
@@ -248,35 +305,29 @@ class StatelessObjectIntentOrganizer(nn.Module):
         _, object_innovation, interval_object_attention = self.interval_object(
             interval_base, objects, diagnostics=collect_diagnostics
         )
-        _, semantic_innovation, interval_semantic_attention = self.interval_semantic(
-            interval_base, semantic_objects, diagnostics=collect_diagnostics
-        )
-        _, appearance_innovation, interval_appearance_attention = self.interval_appearance(
-            interval_base, appearance_objects, diagnostics=collect_diagnostics
-        )
-        _, geometry_innovation, interval_geometry_attention = self.interval_geometry(
-            interval_base, geometry_objects, diagnostics=collect_diagnostics
-        )
-        typed_innovation, typed_route_metrics = self.interval_typed_router(
-            interval_base + goal_innovation + history_innovation,
-            torch.stack(
-                (semantic_innovation, appearance_innovation, geometry_innovation),
-                dim=-2,
-            ),
-            collect_diagnostics=collect_diagnostics,
-        )
-        intervals = self.interval_self(
+        public_intervals = self.interval_self(
             interval_base
             + goal_innovation
             + history_innovation
             + object_innovation
-            + typed_innovation
         )
+        (
+            typed_relevance_mass,
+            typed_relevance_value,
+            typed_action_components,
+            typed_relevance_score,
+            typed_temperature,
+        ) = self._typed_relevance(
+            public_interval_carrier=public_intervals,
+            facts=facts,
+        )
+        typed_action_context = typed_action_components.sum(dim=2) / (3.0**0.5)
+        policy_intervals = public_intervals + typed_action_context
         temporal_base = self.temporal_identity.to(
-            device=intervals.device, dtype=intervals.dtype
+            device=public_intervals.device, dtype=public_intervals.dtype
         ).expand(batch, -1, -1)
         temporal, _, _ = self.temporal_read(
-            temporal_base, intervals, diagnostics=False
+            temporal_base, public_intervals, diagnostics=False
         )
         state_change_values = self.state_change_input(observed_state_delta)
         state_change_history, state_change_attention = self.state_change_read(
@@ -310,19 +361,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
             protected_goal_set=protected_goal,
             history_tokens=history,
             object_tokens=objects,
-            semantic_object_tokens=semantic_objects,
-            appearance_object_tokens=appearance_objects,
-            geometry_object_tokens=geometry_objects,
-            interval_queries=intervals,
+            public_interval_carrier=public_intervals,
+            policy_interval_context=policy_intervals,
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
+            typed_relevance_mass=typed_relevance_mass,
+            typed_relevance_value=typed_relevance_value,
+            typed_action_components=typed_action_components,
             goal_attention=goal_attention,
             interval_goal_attention=interval_goal_attention,
             interval_history_attention=interval_history_attention,
             interval_object_attention=interval_object_attention,
-            interval_semantic_attention=interval_semantic_attention,
-            interval_appearance_attention=interval_appearance_attention,
-            interval_geometry_attention=interval_geometry_attention,
         )
         state_out.validate(horizon=self.horizon, hidden=self.hidden)
         if not collect_diagnostics:
@@ -340,16 +389,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_interval_object_entropy": normalized_entropy(
                 interval_object_attention, dim=-1
             ).detach().mean(),
-            "object_intent_interval_semantic_entropy": normalized_entropy(
-                interval_semantic_attention, dim=-1
-            ).detach().mean(),
-            "object_intent_interval_appearance_entropy": normalized_entropy(
-                interval_appearance_attention, dim=-1
-            ).detach().mean(),
-            "object_intent_interval_geometry_entropy": normalized_entropy(
-                interval_geometry_attention, dim=-1
-            ).detach().mean(),
-            "object_intent_interval_variation": intervals.detach().float().std(
+            "object_intent_public_interval_variation": public_intervals.detach().float().std(
+                dim=1, unbiased=False
+            ).mean(),
+            "object_intent_policy_interval_variation": policy_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
             "object_intent_temporal_variation": temporal.detach().float().std(
@@ -358,7 +401,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_typed_innovation_rms": typed_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_typed_action_context_rms": typed_action_context.detach().float().square().mean().sqrt(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": facts.transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
@@ -368,8 +411,44 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 state_change_attention, dim=-1
             ).detach().mean(),
         }
-        for key, value in typed_route_metrics.items():
-            metrics[f"object_intent_typed_{key}"] = value
+        raw_routes = (facts.semantic, facts.appearance, facts.geometry)
+        for type_index, name in enumerate(TYPED_INTENT_NAMES):
+            mass = typed_relevance_mass[..., type_index, 0].detach().float()
+            selected = typed_relevance_value[..., type_index, :].detach().float()
+            component = typed_action_components[..., type_index, :].detach().float()
+            metrics.update(
+                {
+                    f"object_intent_{name}_route_raw_rms": raw_routes[type_index]
+                    .detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_relevance_mass": mass.mean(),
+                    f"object_intent_{name}_null_mass": (1.0 - mass).mean(),
+                    f"object_intent_{name}_selected_value_rms": selected.square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_object_variation": selected.std(
+                        dim=2, unbiased=False
+                    ).mean(),
+                    f"object_intent_{name}_interval_variation": selected.std(
+                        dim=1, unbiased=False
+                    ).mean(),
+                    f"object_intent_{name}_action_context_rms": component.square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_score_abs": typed_relevance_score[
+                        ..., type_index
+                    ]
+                    .detach()
+                    .abs()
+                    .mean(),
+                    f"object_intent_{name}_temperature": typed_temperature[
+                        type_index
+                    ].detach(),
+                }
+            )
         return state_out, metrics
 
 
@@ -490,47 +569,33 @@ class CoarseActionIntent(nn.Module):
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = _CrossRead(hidden, heads)
-        self.semantic_read = _CrossRead(hidden, heads)
-        self.appearance_read = _CrossRead(hidden, heads)
-        self.geometry_read = _CrossRead(hidden, heads)
-        self.typed_router = RoleDeltaAttnRes(
-            hidden,
-            max(hidden // 8, 32),
-            max_sources=3,
-            include_null=True,
-            max_value_rms=0.35,
-            normalization_floor=0.25,
-        )
         self.history_read = _CrossRead(hidden, heads)
         self.block = _SelfBlock(hidden, heads)
         self.action_head = nn.Linear(hidden, action_dim, bias=False)
 
     def forward(
         self,
-        intent: ObjectIntentState,
+        intent: ActionIntentDock,
         *,
         future_action: Tensor | None = None,
     ) -> CoarseActionIntentState:
-        batch = int(intent.interval_queries.shape[0])
+        intent.validate(hidden=int(self.query.shape[-1]))
+        batch = int(intent.public_interval_carrier.shape[0])
         query = self.query.to(
-            device=intent.interval_queries.device,
-            dtype=intent.interval_queries.dtype,
+            device=intent.public_interval_carrier.device,
+            dtype=intent.public_interval_carrier.dtype,
         ).expand(batch, -1, -1)
-        _, intent_delta, _ = self.intent_read(query, intent.interval_queries)
-        _, object_delta, _ = self.object_read(query, intent.object_tokens)
-        _, semantic_delta, _ = self.semantic_read(query, intent.semantic_object_tokens)
-        _, appearance_delta, _ = self.appearance_read(
-            query, intent.appearance_object_tokens
+        _, intent_delta, _ = self.intent_read(
+            query, intent.public_interval_carrier
         )
-        _, geometry_delta, _ = self.geometry_read(query, intent.geometry_object_tokens)
-        typed_delta, _ = self.typed_router(
-            query + intent_delta + object_delta,
-            torch.stack((semantic_delta, appearance_delta, geometry_delta), dim=-2),
-            collect_diagnostics=False,
-        )
-        _, history_delta, _ = self.history_read(query, intent.history_tokens)
+        _, object_delta, _ = self.object_read(query, intent.public_object_memory)
+        _, history_delta, _ = self.history_read(query, intent.history_memory)
         token = self.block(
-            query + intent_delta + object_delta + typed_delta + history_delta
+            query
+            + intent_delta
+            + object_delta
+            + intent.typed_action_context
+            + history_delta
         )
         action_prediction = self.action_head(token)
         if future_action is None:

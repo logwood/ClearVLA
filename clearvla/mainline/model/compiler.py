@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from .routing import PolicyRoleDeltaBank, smooth_rms_contract
-from .types import FutureObjectDynamics, ObjectIntentState, normalized_entropy
+from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ class ObjectFutureEffectReader(nn.Module):
         self,
         action_query: Tensor,
         dynamics: FutureObjectDynamics,
-        intent: ObjectIntentState,
+        intent: PolicyIntentDock,
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, dict[str, Tensor]]:
@@ -109,12 +109,13 @@ class ObjectFutureEffectReader(nn.Module):
         batch, horizon, basis, hidden = action_query.shape
         if hidden != self.hidden:
             raise ValueError("P2 action query hidden width is invalid")
+        intent.validate(horizon=horizon, hidden=self.hidden)
         intervals, objects = dynamics.semantic_delta.shape[1:3]
         query = self._bounded_unit(self.query_key(action_query))
         effect_key = self._bounded_unit(self.effect_key(dynamics.semantic_delta))
         content_score = torch.einsum("btqh,bikh->btqik", query, effect_key)
         intent_query = self._bounded_unit(self.intent_query(action_query))
-        intent_key = self._bounded_unit(self.intent_key(intent.interval_queries))
+        intent_key = self._bounded_unit(self.intent_key(intent.interval_key))
         intent_score = torch.einsum("btqh,bih->btqi", intent_query, intent_key)
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
         future_coordinate = (
@@ -258,13 +259,14 @@ class ObjectPolicyPlanCompiler(nn.Module):
         *,
         p1_fact: Tensor,
         consequence: ObjectConsequenceState,
-        intent: ObjectIntentState,
+        intent: PolicyIntentDock,
         action_query: Tensor,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
         if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
+        intent.validate(horizon=self.horizon, hidden=self.hidden)
         factual = self.factual_lane(consequence.factual_base)
         precision_condition = (
             self.precision_fact(p1_fact)
@@ -274,7 +276,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
             torch.tanh(self.precision_action(action_query)) * precision_condition
         )
         effect = self.effect_lane(consequence.effect + consequence.interaction)
-        temporal_source = intent.temporal_queries[:, :, None].expand(
+        temporal_source = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
         temporal_condition = (

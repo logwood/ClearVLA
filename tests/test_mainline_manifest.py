@@ -43,11 +43,11 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 24
+    assert ARCHITECTURE_MANIFEST.schema == 25
     assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_exact_p1_object_geometry_four_interval_w_five_lane_p3"
+        == "v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_five_lane_p3"
     )
     assert (
         components.bottom
@@ -62,7 +62,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
 
 
-def test_schema_24_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_25_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

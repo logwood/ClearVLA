@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import inspect
 from dataclasses import fields, is_dataclass, replace
 from unittest import mock
 
@@ -788,14 +790,14 @@ def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> N
         collect_diagnostics=False,
     )
     blank_intent = replace(
-        intent,
-        interval_queries=torch.zeros_like(intent.interval_queries),
+        intent.world_dock(),
+        public_interval_carrier=torch.zeros_like(intent.public_interval_carrier),
     )
     signal_intent = replace(
         blank_intent,
-        interval_queries=torch.randn_like(intent.interval_queries),
+        public_interval_carrier=torch.randn_like(intent.public_interval_carrier),
     )
-    coarse = top.coarse_action(blank_intent)
+    coarse = top.coarse_action(intent.action_dock())
     zero_action = replace(coarse, tokens=torch.zeros_like(coarse.tokens))
     signal_action = replace(coarse, tokens=torch.randn_like(coarse.tokens))
 
@@ -1282,8 +1284,8 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             rtol=2e-5,
         ), field.name
 
-    coarse = top.coarse_action(intent)
-    relabeled_coarse = top.coarse_action(relabeled_intent)
+    coarse = top.coarse_action(intent.action_dock())
+    relabeled_coarse = top.coarse_action(relabeled_intent.action_dock())
     assert torch.allclose(
         relabeled_coarse.tokens,
         coarse.tokens,
@@ -1293,26 +1295,26 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
 
     _, w1, _ = top.dynamics.forward_w1(
         facts=facts,
-        intent=intent,
+        intent=intent.world_dock(),
         action=coarse,
         collect_diagnostics=False,
     )
     dynamics, _ = top.dynamics.forward_w2(
         facts=facts,
-        intent=intent,
+        intent=intent.world_dock(),
         action=coarse,
         w1_state=w1,
         collect_diagnostics=False,
     )
     _, relabeled_w1, _ = top.dynamics.forward_w1(
         facts=relabeled_facts,
-        intent=relabeled_intent,
+        intent=relabeled_intent.world_dock(),
         action=relabeled_coarse,
         collect_diagnostics=False,
     )
     relabeled_dynamics, _ = top.dynamics.forward_w2(
         facts=relabeled_facts,
-        intent=relabeled_intent,
+        intent=relabeled_intent.world_dock(),
         action=relabeled_coarse,
         w1_state=relabeled_w1,
         collect_diagnostics=False,
@@ -1365,6 +1367,202 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
         ), name
 
 
+def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
+    torch.manual_seed(37)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    inputs = {
+        "goal_tokens": torch.randn(1, 6, 12),
+        "goal_mask": torch.ones(1, 6, dtype=torch.bool),
+        "state_history": torch.randn(1, 3, 7),
+        "state": torch.randn(1, 7),
+        "executed_history": torch.randn(1, 3, 7),
+        "collect_diagnostics": False,
+    }
+
+    def organize(current_facts):
+        return top.intent(facts=current_facts, **inputs)[0]
+
+    intent = organize(facts)
+    assert tuple(intent.typed_relevance_mass.shape[:4]) == (1, 4, 4, 3)
+    assert tuple(intent.typed_relevance_value.shape[:4]) == (1, 4, 4, 3)
+
+    semantic_facts = replace(
+        facts,
+        semantic=facts.semantic.roll(1, dims=-1) + 0.13,
+    )
+    semantic_intent = organize(semantic_facts)
+    torch.testing.assert_close(
+        semantic_intent.public_interval_carrier,
+        intent.public_interval_carrier,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert not torch.equal(
+        semantic_intent.typed_relevance_value[..., 0, :],
+        intent.typed_relevance_value[..., 0, :],
+    )
+    torch.testing.assert_close(
+        semantic_intent.typed_relevance_mass[..., 1:, :],
+        intent.typed_relevance_mass[..., 1:, :],
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        semantic_intent.typed_relevance_value[..., 1:, :],
+        intent.typed_relevance_value[..., 1:, :],
+        atol=0.0,
+        rtol=0.0,
+    )
+
+    zero_semantic = organize(replace(facts, semantic=torch.zeros_like(facts.semantic)))
+    assert torch.count_nonzero(zero_semantic.typed_relevance_value[..., 0, :]) == 0
+    assert torch.count_nonzero(zero_semantic.typed_action_components[..., 0, :]) == 0
+
+    invalid_facts = replace(facts, validity=torch.zeros_like(facts.validity))
+    invalid_intent = organize(invalid_facts)
+    assert torch.count_nonzero(invalid_intent.typed_relevance_value) == 0
+    assert torch.count_nonzero(invalid_intent.typed_action_components) == 0
+    torch.testing.assert_close(
+        invalid_intent.policy_interval_context,
+        invalid_intent.public_interval_carrier,
+        atol=0.0,
+        rtol=0.0,
+    )
+    coarse = top.coarse_action(invalid_intent.action_dock())
+    _, w_metrics = top.dynamics._base(
+        invalid_facts,
+        invalid_intent.world_dock(),
+        coarse,
+        collect_diagnostics=True,
+    )
+    assert float(w_metrics["object_w_typed_contribution_rms"]) == 0.0
+
+
+def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> None:
+    torch.manual_seed(39)
+    top = _object_top().eval()
+    relabeled_top = copy.deepcopy(top)
+    semantic_query = relabeled_top.intent.typed_relevance_queries[0]
+    appearance_query = relabeled_top.intent.typed_relevance_queries[1]
+    relabeled_top.intent.typed_relevance_queries[0] = appearance_query
+    relabeled_top.intent.typed_relevance_queries[1] = semantic_query
+    semantic_projection = relabeled_top.intent.object_semantic
+    appearance_projection = relabeled_top.intent.object_appearance
+    relabeled_top.intent.object_semantic = appearance_projection
+    relabeled_top.intent.object_appearance = semantic_projection
+    semantic_projection = relabeled_top.dynamics.object_semantic
+    appearance_projection = relabeled_top.dynamics.object_appearance
+    relabeled_top.dynamics.object_semantic = appearance_projection
+    relabeled_top.dynamics.object_appearance = semantic_projection
+
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    relabeled_facts = replace(
+        facts,
+        semantic=facts.appearance,
+        appearance=facts.semantic,
+    )
+    inputs = {
+        "goal_tokens": torch.randn(1, 6, 12),
+        "goal_mask": torch.ones(1, 6, dtype=torch.bool),
+        "state_history": torch.randn(1, 3, 7),
+        "state": torch.randn(1, 7),
+        "executed_history": torch.randn(1, 3, 7),
+        "collect_diagnostics": False,
+    }
+    intent = top.intent(facts=facts, **inputs)[0]
+    relabeled_intent = relabeled_top.intent(facts=relabeled_facts, **inputs)[0]
+
+    torch.testing.assert_close(
+        relabeled_intent.public_interval_carrier,
+        intent.public_interval_carrier,
+    )
+    torch.testing.assert_close(
+        relabeled_intent.typed_relevance_mass[..., (0, 1), :],
+        intent.typed_relevance_mass[..., (1, 0), :],
+    )
+    torch.testing.assert_close(
+        relabeled_intent.typed_relevance_value[..., (0, 1), :],
+        intent.typed_relevance_value[..., (1, 0), :],
+    )
+    torch.testing.assert_close(
+        relabeled_intent.policy_interval_context,
+        intent.policy_interval_context,
+    )
+
+    coarse = top.coarse_action(intent.action_dock())
+    relabeled_coarse = relabeled_top.coarse_action(relabeled_intent.action_dock())
+    torch.testing.assert_close(relabeled_coarse.tokens, coarse.tokens)
+
+    _, w1, _ = top.dynamics.forward_w1(
+        facts=facts,
+        intent=intent.world_dock(),
+        action=coarse,
+        collect_diagnostics=False,
+    )
+    dynamics, _ = top.dynamics.forward_w2(
+        facts=facts,
+        intent=intent.world_dock(),
+        action=coarse,
+        w1_state=w1,
+        collect_diagnostics=False,
+    )
+    _, relabeled_w1, _ = relabeled_top.dynamics.forward_w1(
+        facts=relabeled_facts,
+        intent=relabeled_intent.world_dock(),
+        action=relabeled_coarse,
+        collect_diagnostics=False,
+    )
+    relabeled_dynamics, _ = relabeled_top.dynamics.forward_w2(
+        facts=relabeled_facts,
+        intent=relabeled_intent.world_dock(),
+        action=relabeled_coarse,
+        w1_state=relabeled_w1,
+        collect_diagnostics=False,
+    )
+    for field in fields(FutureObjectDynamics):
+        torch.testing.assert_close(
+            getattr(relabeled_dynamics, field.name),
+            getattr(dynamics, field.name),
+            msg=field.name,
+        )
+
+
+def test_public_intent_match_cannot_train_optional_typed_relevance() -> None:
+    torch.manual_seed(38)
+    top = _object_top()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    intent.public_interval_carrier.float().square().mean().backward()
+    for parameter in top.intent.typed_relevance_queries.parameters():
+        assert parameter.grad is None or torch.count_nonzero(parameter.grad) == 0
+    assert top.intent.typed_temperature_logit.grad is None
+
+
+def test_coarse_action_and_w_have_no_raw_typed_fact_reread() -> None:
+    top = _object_top()
+    for name in (
+        "semantic_read",
+        "appearance_read",
+        "geometry_read",
+        "typed_router",
+    ):
+        assert not hasattr(top.coarse_action, name)
+    assert not hasattr(top.dynamics, "typed_router")
+    source = inspect.getsource(type(top.dynamics)._base)
+    for forbidden in ("facts.semantic", "facts.appearance", "facts.geometry"):
+        assert forbidden not in source
+    assert "intent.typed_relevance_value" in source
+
+
 def test_neutral_w_preserves_current_precision_and_temporal_without_w_interaction() -> None:
     torch.manual_seed(4)
     top = _object_top()
@@ -1402,7 +1600,9 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     assert not torch.equal(compiled.plan.temporal, neutral_other_query.plan.temporal)
     identity_only_intent = replace(
         context.intent,
-        interval_queries=context.intent.interval_queries + 1000.0 * torch.randn_like(
+        policy_interval_context=context.intent.interval_queries
+        + 1000.0
+        * torch.randn_like(
             context.intent.interval_queries
         ),
     )
@@ -1453,13 +1653,13 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
     neutral_effect, _ = top.effect_reader(
         action_query,
         neutral,
-        context.intent,
+        context.intent.policy_dock(),
         collect_diagnostics=False,
     )
     changed_effect, _ = top.effect_reader(
         action_query,
         changed,
-        context.intent,
+        context.intent.policy_dock(),
         collect_diagnostics=False,
     )
     assert torch.count_nonzero(neutral_effect) == 0

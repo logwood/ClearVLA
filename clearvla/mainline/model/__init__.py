@@ -28,20 +28,26 @@ from .teacher import ObjectFutureTeacher
 from .top import CompiledPolicyState, ObjectIntentDynamicsTop, OnlineTopContext
 from .transition import ControlledTransitionDynamics
 from .types import (
+    ActionIntentDock,
     CoarseActionIntentState,
     ControlledTransitionState,
     DenseFactChart,
+    FactualIntentDock,
+    FactualPrecisionDock,
     FutureObjectDynamics,
     FuturePlanRecognition,
     HistoryActionProposalState,
     LocalFactSet,
     ObjectFactSet,
-    FactualPrecisionDock,
     ObjectIntentState,
     ObjectTopTrainingTargets,
+    PolicyIntentDock,
+    StatelessIntentBundle,
+    WorldIntentDock,
 )
 
 __all__ = [
+    "ActionIntentDock",
     "BottomOutput",
     "ClearVLAMainlinePolicy",
     "CoarseActionIntent",
@@ -56,6 +62,7 @@ __all__ = [
     "FutureObjectDynamics",
     "FuturePlanRecognition",
     "FuturePlanRecognizer",
+    "FactualIntentDock",
     "HistoryActionProposal",
     "HistoryActionProposalState",
     "LocalFactSet",
@@ -75,6 +82,9 @@ __all__ = [
     "OnlineTopContext",
     "PatchFlowField",
     "PolicyStepOutput",
+    "PolicyIntentDock",
+    "StatelessIntentBundle",
+    "WorldIntentDock",
     "ObjectFutureTeacher",
     "StatelessObjectIntentOrganizer",
     "ZeroPreservingObjectConsequence",

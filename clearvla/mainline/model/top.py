@@ -25,6 +25,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
+from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
+from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 from .compiler import (
     ObjectConsequenceState,
     ObjectFutureEffectReader,
@@ -49,9 +52,6 @@ from .types import (
     ObjectIntentState,
     ObjectTopTrainingTargets,
 )
-from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
-from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
-from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 
 
 @dataclass(frozen=True)
@@ -303,16 +303,18 @@ class ObjectIntentDynamicsTop(nn.Module):
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
-        coarse = self.coarse_action(intent)
+        action_intent = intent.action_dock()
+        world_intent = intent.world_dock()
+        coarse = self.coarse_action(action_intent)
         _, w1_state, w1_metrics = self.dynamics.forward_w1(
             facts=facts,
-            intent=intent,
+            intent=world_intent,
             action=coarse,
             collect_diagnostics=collect_diagnostics,
         )
         predicted, w2_metrics = self.dynamics.forward_w2(
             facts=facts,
-            intent=intent,
+            intent=world_intent,
             action=coarse,
             w1_state=w1_state,
             collect_diagnostics=collect_diagnostics,
@@ -369,11 +371,11 @@ class ObjectIntentDynamicsTop(nn.Module):
             current_loss_support=context.facts.camera_validity,
         )
         online_intent_loss = F.smooth_l1_loss(
-            context.intent.interval_queries.float(),
+            context.intent.public_interval_carrier.float(),
             recognition.interval_targets.detach().float(),
         )
         supervised_coarse = self.coarse_action(
-            context.intent,
+            context.intent.action_dock(),
             future_action=future_action,
         )
         coarse_loss = supervised_coarse.loss
@@ -418,7 +420,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         raw_effect, effect_metrics = self.effect_reader(
             p1_action_query,
             context.predicted_dynamics,
-            context.intent,
+            context.intent.policy_dock(),
             collect_diagnostics=collect_diagnostics,
         )
         # The original object path contracts the P2 write at the caller
@@ -439,7 +441,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         plan, plan_metrics = self.plan_compiler(
             p1_fact=p1_fact,
             consequence=consequence,
-            intent=context.intent,
+            intent=context.intent.policy_dock(),
             action_query=p3_action_query,
             collect_diagnostics=collect_diagnostics,
         )
