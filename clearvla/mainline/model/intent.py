@@ -1,8 +1,9 @@
-"""Recovered V120 stateless intent, plan recognition and coarse action."""
+"""Stateless intent, direct future supervision and coarse action."""
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .routing import smooth_rms_contract, variance_floored_centered_norm
@@ -11,7 +12,7 @@ from .types import (
     ActionIntentDock,
     CoarseActionIntentState,
     FutureObjectDynamics,
-    FuturePlanRecognition,
+    IntentFutureSupervision,
     ObjectFactSet,
     ObjectIntentState,
     normalized_entropy,
@@ -427,6 +428,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
         state_out.validate(horizon=self.horizon, hidden=self.hidden)
         if not collect_diagnostics:
             return state_out, {}
+        public_condition_centered = public_intervals.detach().float()
+        public_condition_centered = (
+            public_condition_centered
+            - public_condition_centered.mean(dim=0, keepdim=True)
+        )
         metrics: dict[str, Tensor] = {
             "object_intent_goal_attention_entropy": normalized_entropy(
                 goal_attention, dim=-1
@@ -443,6 +449,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_public_interval_variation": public_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
+            "object_intent_public_condition_centered_interval_variation": (
+                public_condition_centered.std(dim=1, unbiased=False).mean()
+            ),
             "object_intent_policy_interval_variation": policy_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
@@ -470,6 +479,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         for type_index, name in enumerate(TYPED_INTENT_NAMES):
             mass = typed_relevance_mass[..., type_index, 0].detach().float()
             selected = typed_relevance_value[..., type_index, :].detach().float()
+            condition_centered = selected - selected.mean(dim=0, keepdim=True)
             component = typed_policy_components[..., type_index, :].detach().float()
             selector_null = (
                 1.0
@@ -494,6 +504,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     f"object_intent_{name}_interval_variation": selected.std(
                         dim=1, unbiased=False
                     ).mean(),
+                    f"object_intent_{name}_condition_centered_interval_variation": (
+                        condition_centered.std(dim=1, unbiased=False).mean()
+                    ),
                     f"object_intent_{name}_policy_context_rms": component.square()
                     .mean()
                     .sqrt(),
@@ -523,112 +536,123 @@ class StatelessObjectIntentOrganizer(nn.Module):
         return state_out, metrics
 
 
-class FuturePlanRecognizer(nn.Module):
-    """Training-only V120 whole-segment posterior."""
+class DirectIntentFutureSupervisor(nn.Module):
+    """Decode stable physical future quantities from the online S boundary.
+
+    No hidden recognizer coordinate is learned.  The public S carrier owns a
+    direct future-state prediction, while the exact typed values consumed by
+    W own matching semantic, status and transport predictions.
+    """
 
     def __init__(
         self,
         *,
         hidden: int,
-        action_dim: int,
         state_dim: int,
         content_dim: int,
-        heads: int,
+        route_dim: int,
     ) -> None:
         super().__init__()
-        self.hidden = int(hidden)
-        self.content_dim = int(content_dim)
-        self.action_input = nn.Linear(action_dim, hidden, bias=False)
-        self.state_input = nn.Linear(state_dim, hidden, bias=False)
-        self.effect_input = nn.Linear(content_dim, hidden, bias=False)
-        self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
-        self.block = _SelfBlock(hidden, heads)
-        self.action_reconstruction = nn.Linear(hidden, action_dim, bias=False)
-        self.state_reconstruction = nn.Linear(hidden, state_dim, bias=False)
-        self.effect_reconstruction = nn.Linear(hidden, content_dim, bias=False)
+        self.state_head = nn.Linear(hidden, state_dim, bias=False)
+        self.semantic_head = nn.Linear(route_dim, content_dim, bias=False)
+        self.status_head = nn.Linear(route_dim, 2, bias=False)
+        self.transport_head = nn.Linear(route_dim, 2, bias=False)
+
+    @staticmethod
+    def _supported_field_loss(
+        prediction: Tensor,
+        target: Tensor,
+        object_support: Tensor,
+    ) -> Tensor:
+        if tuple(prediction.shape) != tuple(target.shape):
+            raise ValueError("typed intent prediction and target must align")
+        if object_support.ndim != 3 or int(object_support.shape[-1]) != 1:
+            raise ValueError("typed intent support must be [B,K,1]")
+        mask = object_support[:, None].expand(
+            prediction.shape[0], prediction.shape[1], prediction.shape[2], 1
+        )
+        error = F.smooth_l1_loss(
+            prediction.float(), target.detach().float(), reduction="none"
+        ).mean(dim=-1, keepdim=True)
+        return (error * mask).sum() / mask.sum().clamp_min(1.0)
 
     def forward(
         self,
         *,
-        future_action: Tensor,
+        intent: ObjectIntentState,
         future_state: Tensor,
-        teacher: FutureObjectDynamics | None,
+        teacher: FutureObjectDynamics,
         current_loss_support: Tensor,
-    ) -> FuturePlanRecognition:
-        if future_action.ndim != 3 or future_state.ndim != 3:
-            raise ValueError("plan recognizer requires full future action/state sequences")
-        length = min(int(future_action.shape[1]), int(future_state.shape[1]))
-        slices = _interval_slices(length)
-        action_summary = torch.stack(
-            [future_action[:, row].mean(dim=1) for row in slices], dim=1
+    ) -> IntentFutureSupervision:
+        if future_state.ndim != 3:
+            raise ValueError("intent supervision requires a future state sequence")
+        teacher.validate()
+        intent.validate(
+            horizon=int(intent.temporal_queries.shape[1]),
+            hidden=int(intent.public_interval_carrier.shape[-1]),
         )
+        length = int(future_state.shape[1])
+        slices = _interval_slices(length)
         state_summary = torch.stack(
             [future_state[:, row].mean(dim=1) for row in slices], dim=1
         )
         if current_loss_support.ndim != 4 or int(current_loss_support.shape[-1]) != 1:
-            raise ValueError("recognizer current loss support must be [B,K,C,1]")
-        if int(current_loss_support.shape[0]) != int(future_action.shape[0]):
-            raise ValueError("recognizer current loss support batch does not align")
-        # This is the same detached current-fact support used by the object
-        # losses.  Future reliability and selector validity are deliberately
-        # absent: neither may shrink a supervised target or create a routing
-        # shortcut.  A camera reduction is performed exactly once because W
-        # exports object-level future geometry/content.
+            raise ValueError("intent current loss support must be [B,K,C,1]")
+        if int(current_loss_support.shape[0]) != int(future_state.shape[0]):
+            raise ValueError("intent current loss support batch does not align")
         object_support = current_loss_support.detach().float().amax(dim=2)
-        if teacher is None:
-            effect_summary = future_action.new_zeros(
-                future_action.shape[0], 4, self.content_dim
-            )
-            teacher_valid = future_action.new_zeros(future_action.shape[0], 4, 1)
-        else:
-            teacher.validate()
-            expected_support = (
-                teacher.semantic_delta.shape[0],
-                teacher.semantic_delta.shape[2],
-                1,
-            )
-            if tuple(object_support.shape) != expected_support:
-                raise ValueError("recognizer object support does not align with teacher")
-            support = object_support[:, None]
-            denominator = support.sum(dim=2).clamp_min(1.0)
-            effect_summary = (
-                teacher.semantic_delta.detach().float() * support
-            ).sum(dim=2) / denominator
-            effect_summary = effect_summary.to(dtype=teacher.semantic_delta.dtype)
-            teacher_valid = (support.sum(dim=2) > 0).to(
-                dtype=teacher.semantic_delta.dtype
-            ).expand(-1, teacher.semantic_delta.shape[1], -1)
-        token = (
-            self.action_input(action_summary)
-            + self.state_input(state_summary)
-            + self.effect_input(effect_summary)
-            + self.interval_identity.to(
-                device=future_action.device, dtype=future_action.dtype
-            )
+        expected_support = (
+            teacher.semantic_delta.shape[0],
+            teacher.semantic_delta.shape[2],
+            1,
         )
-        token = self.block(token)
-        action_pred = self.action_reconstruction(token)
-        state_pred = self.state_reconstruction(token)
-        effect_pred = self.effect_reconstruction(token)
-        effect_error = (
-            (effect_pred.float() - effect_summary.detach().float()).square()
-            * teacher_valid.detach().float()
-        ).sum() / teacher_valid.detach().float().sum().clamp_min(1.0) / float(
-            self.content_dim
+        if tuple(object_support.shape) != expected_support:
+            raise ValueError("intent object support does not align with teacher")
+
+        state_prediction = self.state_head(intent.public_interval_carrier)
+        semantic_prediction = self.semantic_head(
+            intent.typed_relevance_value[..., 0, :]
         )
-        reconstruction = (
-            (action_pred.float() - action_summary.detach().float()).square().mean()
-            + (state_pred.float() - state_summary.detach().float()).square().mean()
-            + 0.25 * effect_error
+        status_prediction = self.status_head(
+            intent.typed_relevance_value[..., 1, :]
         )
-        result = FuturePlanRecognition(
-            interval_targets=token.detach(),
-            action_summary=action_summary.detach(),
-            state_summary=state_summary.detach(),
-            effect_summary=effect_summary.detach(),
-            reconstruction_loss=reconstruction,
+        transport_prediction = self.transport_head(
+            intent.typed_relevance_value[..., 2, :]
         )
-        result.validate(hidden=self.hidden)
+        semantic_target = teacher.semantic_delta.detach()
+        status_target = torch.cat(
+            (teacher.visibility.detach(), teacher.persistence.detach()), dim=-1
+        )
+        transport_target = teacher.transport_mean.detach()
+        public_loss = F.smooth_l1_loss(
+            state_prediction.float(), state_summary.detach().float()
+        )
+        semantic_loss = self._supported_field_loss(
+            semantic_prediction, semantic_target, object_support
+        )
+        status_loss = self._supported_field_loss(
+            status_prediction, status_target, object_support
+        )
+        transport_loss = self._supported_field_loss(
+            transport_prediction, transport_target, object_support
+        )
+        typed_loss = (semantic_loss + status_loss + transport_loss) / 3.0
+        result = IntentFutureSupervision(
+            state_prediction=state_prediction,
+            state_target=state_summary.detach(),
+            semantic_prediction=semantic_prediction,
+            semantic_target=semantic_target,
+            status_prediction=status_prediction,
+            status_target=status_target,
+            transport_prediction=transport_prediction,
+            transport_target=transport_target,
+            public_loss=public_loss,
+            semantic_loss=semantic_loss,
+            status_loss=status_loss,
+            transport_loss=transport_loss,
+            typed_loss=typed_loss,
+        )
+        result.validate()
         return result
 
 
@@ -687,6 +711,6 @@ class CoarseActionIntent(nn.Module):
 
 __all__ = [
     "CoarseActionIntent",
-    "FuturePlanRecognizer",
+    "DirectIntentFutureSupervisor",
     "StatelessObjectIntentOrganizer",
 ]

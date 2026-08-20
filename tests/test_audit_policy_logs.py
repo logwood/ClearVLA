@@ -1496,7 +1496,81 @@ class AuditPolicyLogsTest(unittest.TestCase):
             0.205,
         )
 
-    def test_three_way_early_gate_requires_half_schema23_to_v120_gap_closure(self) -> None:
+    def test_schema27_recovery_uses_active_structure_and_split_clip_bounds(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema27"
+        candidate["manifest"]["architecture_schema"] = 27
+        active_structure = (
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_future_field_loss",
+            "object_w_typed_sidecar_rms",
+            "object_w2_condition_centered_interval_variation",
+            "object_teacher_reliability",
+            "p1_query_chart_variation",
+            "object_p2_effect_precontract_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+        )
+        candidate["structure"] = {
+            name: {"tail_median": 0.5 if name.endswith("pair_cosine") else 0.1}
+            for name in active_structure
+        }
+        owners = (
+            "grounder",
+            "intent",
+            "intent_supervisor",
+            "dynamics",
+            "p1_factual",
+            "p2_effect_reader",
+            "p3_compiler",
+            "v120_canvas_seed",
+            "v120_layer_contracts",
+            "bottom_evidence_adapter",
+            "bottom_policy_bridge",
+            "bottom_capacity",
+            "bottom_execution",
+        )
+        candidate["gradients"] = {
+            f"gradient_{stage}_{owner}_l2": {"tail_median": 0.01}
+            for stage in ("raw", "postlocal", "postglobal")
+            for owner in owners
+        }
+        candidate["gradients"].update(
+            {
+                "gradient_postlocal_bottom_decoder_l2": {"tail_median": 0.8},
+                "gradient_postglobal_main_l2": {"tail_median": 0.9},
+                "gradient_postglobal_execution_controller_l2": {
+                    "tail_median": 0.8
+                },
+                # The union can exceed one because main/controller are
+                # separately clipped owner sets.
+                "gradient_postglobal_global_l2": {"tail_median": 1.2},
+            }
+        )
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        for name in active_structure:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+        self.assertEqual(
+            checks["gradient/gradient_raw_intent_supervisor_l2"], "pass"
+        )
+        self.assertEqual(
+            checks["gradient_bound/gradient_postglobal_main_l2"], "pass"
+        )
+        self.assertEqual(
+            checks[
+                "gradient_bound/gradient_postglobal_execution_controller_l2"
+            ],
+            "pass",
+        )
+        self.assertEqual(
+            checks["gradient_bound/gradient_postglobal_global_l2"], "pass"
+        )
+
+    def test_global_k_binder_is_presence_only_across_changed_semantics(self) -> None:
         baseline = _complete_recovery_summary("v120")
         parent = deepcopy(baseline)
         parent["label"] = "schema23"
@@ -1512,21 +1586,21 @@ class AuditPolicyLogsTest(unittest.TestCase):
         check = next(
             item
             for item in assessment["checks"]
-            if item["name"] == "early_batch_2200/g3_parent_l1"
+            if item["name"]
+            == "early_batch_2200/global_k_binder_diagnostic"
         )
         self.assertEqual(check["status"], "pass")
-        self.assertAlmostEqual(check["candidate"]["gap_closure"], 0.5625)
-
-        candidate["aligned_batch_2200"]["object_grounding_g3_parent_l1"][
-            "tail_median"
-        ] = 0.07
-        assessment = _recovery_assessment(baseline, candidate, parent)
-        check = next(
-            item
-            for item in assessment["checks"]
-            if item["name"] == "early_batch_2200/g3_parent_l1"
+        self.assertEqual(
+            check["baseline"],
+            "non-comparable across binder posterior semantics",
         )
-        self.assertEqual(check["status"], "fail")
+        self.assertEqual(check["candidate"], 0.055)
+        self.assertFalse(
+            any(
+                item["name"] == "early_batch_2200/g3_parent_l1"
+                for item in assessment["checks"]
+            )
+        )
 
 
 if __name__ == "__main__":

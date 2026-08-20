@@ -155,7 +155,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     )
     torch.testing.assert_close(
         captured["p3_query"],
-        action_query + compiled.consequence.protected_consequence,
+        action_query,
         atol=0.0,
         rtol=0.0,
     )

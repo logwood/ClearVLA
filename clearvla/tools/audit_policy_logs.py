@@ -780,7 +780,18 @@ V94_ALIASES.update(
             "owner_H": "object_grounding_candidate_owner_entropy",
             "local_prior_H": "object_grounding_local_prior_entropy",
             "chart_H": "object_grounding_chart_entropy",
+            "global_k_correction_l1": (
+                "object_grounding_global_k_binder_correction_l1"
+            ),
+            "global_k_residual": "object_grounding_global_k_binder_residual_rms",
             "g3_parent_l1": "object_grounding_g3_parent_l1",
+            "prebind_consensus_l1": "object_grounding_prebind_typed_consensus_l1",
+            "prebind_sem_app_l1": (
+                "object_grounding_prebind_semantic_appearance_l1"
+            ),
+            "prebind_sem_geo_l1": (
+                "object_grounding_prebind_semantic_geometry_l1"
+            ),
             "object_pair_cos": "object_grounding_object_content_pair_cosine",
             "chart_pair_overlap": "object_grounding_object_chart_pair_overlap",
             "sem_app_post_l1": (
@@ -809,6 +820,9 @@ V94_ALIASES.update(
             "geometry_sim_H": "object_intent_interval_geometry_audit_similarity_entropy",
             "interval_var": "object_intent_interval_variation",
             "public_interval_var": "object_intent_public_interval_variation",
+            "public_condition_interval_var": (
+                "object_intent_public_condition_centered_interval_variation"
+            ),
             "policy_interval_var": "object_intent_policy_interval_variation",
             "state_interval_var": "object_intent_interval_state_variation",
             "object_key_var": "object_intent_interval_object_key_variation",
@@ -846,6 +860,31 @@ V94_ALIASES.update(
             "geo_value": "object_intent_geometry_selected_value_rms",
             "geo_k_var": "object_intent_geometry_object_variation",
             "geo_i_var": "object_intent_geometry_interval_variation",
+            "public_future_loss": "object_intent_public_future_state_loss",
+            "typed_future_loss": "object_intent_typed_future_field_loss",
+            "typed_semantic_loss": "object_intent_typed_semantic_loss",
+            "typed_status_loss": "object_intent_typed_status_loss",
+            "typed_transport_loss": "object_intent_typed_transport_loss",
+            "future_state_prediction": (
+                "object_intent_future_state_prediction_rms"
+            ),
+            "future_state_target": "object_intent_future_state_target_rms",
+            "typed_semantic_prediction": (
+                "object_intent_typed_semantic_prediction_rms"
+            ),
+            "typed_semantic_target": (
+                "object_intent_typed_semantic_target_rms"
+            ),
+            "typed_status_prediction": (
+                "object_intent_typed_status_prediction_rms"
+            ),
+            "typed_status_target": "object_intent_typed_status_target_rms",
+            "typed_transport_prediction": (
+                "object_intent_typed_transport_prediction_rms"
+            ),
+            "typed_transport_target": (
+                "object_intent_typed_transport_target_rms"
+            ),
             "action_innov": "object_intent_action_innovation_rms",
             "state_innov": "object_intent_state_innovation_rms",
             "temporal_innov": "object_intent_temporal_innovation_rms",
@@ -877,6 +916,7 @@ V94_ALIASES.update(
             "object_key_innov": "object_w_object_key_innovation_rms",
             "object_value_innov": "object_w_object_value_innovation_rms",
             "typed_innov": "object_w_typed_innovation_rms",
+            "typed_sidecar": "object_w_typed_sidecar_rms",
             "typed_contribution": "object_w_typed_contribution_rms",
             "semantic_contribution": "object_w_semantic_contribution_rms",
             "appearance_contribution": "object_w_appearance_contribution_rms",
@@ -889,6 +929,9 @@ V94_ALIASES.update(
             "w2_transport": "object_w2_transport_rms",
             "w2_interval_cos": "object_w2_interval_adjacent_cosine",
             "w2_object_cos": "object_w2_object_pair_cosine",
+            "w2_condition_interval_var": (
+                "object_w2_condition_centered_interval_variation"
+            ),
             "teacher_visibility": "object_teacher_visibility",
             "teacher_visibility_change": "object_teacher_visibility_change",
             "teacher_persistence_change": "object_teacher_persistence_change",
@@ -947,6 +990,9 @@ V94_ALIASES.update(
             "coordinate_score": "object_p2_coordinate_score_abs",
             "coordinate_score_max": "object_p2_coordinate_score_max_abs",
             "combined_logit_max": "object_p2_combined_logit_max_abs",
+            "candidate_partition_correction": (
+                "object_p2_candidate_partition_correction"
+            ),
             "tau_content": "object_p2_temperature_content",
             "tau_intent": "object_p2_temperature_intent",
             "tau_coordinate": "object_p2_temperature_coordinate",
@@ -969,7 +1015,7 @@ V94_ALIASES.update(
             "h16_32_mass": "object_p2_interval_2_mass",
             "h32_48_mass": "object_p2_interval_3_mass",
             "effect_precontract": "object_p2_effect_precontract_rms",
-            "effect": "object_p2_effect_rms",
+            "effect": "object_p2_effect_postcontract_rms",
             "contract_min": "object_p2_contract_min",
             "consequence_effect": "object_consequence_effect_rms",
             "interaction": "object_consequence_interaction_rms",
@@ -1069,9 +1115,17 @@ STRUCTURE_KEYS = (
     "object_grounding_typed_consistency",
     "object_grounding_camera_coordinate_variation",
     "object_grounding_g3_parent_l1",
+    "object_grounding_global_k_binder_correction_l1",
+    "object_grounding_global_k_binder_residual_rms",
+    "object_grounding_prebind_typed_consensus_l1",
+    "object_grounding_prebind_semantic_appearance_l1",
+    "object_grounding_prebind_semantic_geometry_l1",
+    "object_grounding_candidate_key_rms",
+    "object_grounding_full_dino_value_rms",
     "object_intent_goal_attention_entropy",
     "object_intent_interval_variation",
     "object_intent_public_interval_variation",
+    "object_intent_public_condition_centered_interval_variation",
     "object_intent_policy_interval_variation",
     "object_intent_interval_object_key_variation",
     "object_intent_interval_object_value_variation",
@@ -1117,6 +1171,22 @@ STRUCTURE_KEYS = (
     "object_intent_geometry_selected_value_rms",
     "object_intent_geometry_object_variation",
     "object_intent_geometry_interval_variation",
+    "object_intent_semantic_condition_centered_interval_variation",
+    "object_intent_appearance_condition_centered_interval_variation",
+    "object_intent_geometry_condition_centered_interval_variation",
+    "object_intent_public_future_state_loss",
+    "object_intent_typed_future_field_loss",
+    "object_intent_typed_semantic_loss",
+    "object_intent_typed_status_loss",
+    "object_intent_typed_transport_loss",
+    "object_intent_future_state_prediction_rms",
+    "object_intent_future_state_target_rms",
+    "object_intent_typed_semantic_prediction_rms",
+    "object_intent_typed_semantic_target_rms",
+    "object_intent_typed_status_prediction_rms",
+    "object_intent_typed_status_target_rms",
+    "object_intent_typed_transport_prediction_rms",
+    "object_intent_typed_transport_target_rms",
     "object_intent_geometry_action_context_rms",
     "object_intent_geometry_score_abs",
     "object_intent_geometry_common_score_abs",
@@ -1127,6 +1197,7 @@ STRUCTURE_KEYS = (
     "object_w_intent_object_interaction_rms",
     "object_w_action_object_interaction_rms",
     "object_w_typed_contribution_rms",
+    "object_w_typed_sidecar_rms",
     "object_w_semantic_contribution_rms",
     "object_w_semantic_contribution_interval_variation",
     "object_w_semantic_contribution_object_variation",
@@ -1157,6 +1228,7 @@ STRUCTURE_KEYS = (
     "object_w2_transport_rms",
     "object_w2_interval_adjacent_cosine",
     "object_w2_object_pair_cosine",
+    "object_w2_condition_centered_interval_variation",
     "object_teacher_reliability",
     "object_teacher_semantic_delta_rms",
     "object_teacher_transport_rms",
@@ -1180,6 +1252,7 @@ STRUCTURE_KEYS = (
     "object_p2_geometry_posterior_entropy",
     "object_p2_semantic_value_mass",
     "object_p2_geometry_value_mass",
+    "object_p2_candidate_partition_correction",
     "object_p2_successor_innovation_rms",
     "object_consequence_effect_rms",
     "object_consequence_interaction_rms",
@@ -1233,6 +1306,7 @@ GRADIENT_KEYS = (
     "gradient_postclip_intent_l2",
     "gradient_postclip_coarse_action_l2",
     "gradient_postclip_plan_recognizer_l2",
+    "gradient_postclip_intent_supervisor_l2",
     "gradient_postclip_history_proposal_l2",
     "gradient_postclip_dynamics_l2",
     "gradient_postclip_controlled_transition_l2",
@@ -1266,6 +1340,7 @@ GRADIENT_KEYS = (
             "intent",
             "coarse_action",
             "plan_recognizer",
+            "intent_supervisor",
             "history_proposal",
             "dynamics",
             "controlled_transition",
@@ -1291,6 +1366,10 @@ GRADIENT_KEYS = (
     "gradient_raw_bottom_decoder_l2",
     "gradient_postlocal_bottom_decoder_l2",
     "gradient_postglobal_bottom_decoder_l2",
+    "gradient_postlocal_main_l2",
+    "gradient_raw_execution_controller_l2",
+    "gradient_postglobal_main_l2",
+    "gradient_postglobal_execution_controller_l2",
 )
 
 VALIDATION_KEYS = (
@@ -3714,7 +3793,6 @@ def _recovery_assessment(
     # when the frozen Schema23 audit series was not supplied.  The complete
     # eight-epoch gate below remains authoritative for release.
     early_metrics = (
-        ("g3_parent_l1", ("object_grounding_g3_parent_l1",)),
         (
             "object_pair_cosine",
             ("object_grounding_object_content_pair_cosine",),
@@ -3747,6 +3825,24 @@ def _recovery_assessment(
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 return float(value)
         return None
+
+    # The old ``object_grounding_g3_parent_l1`` used a stale, differently
+    # located posterior and is not numerically comparable with the active
+    # global-K correction.  Require an explicit binder diagnostic, but never
+    # fabricate gap closure by subtracting the two incompatible quantities.
+    binder_metric = first_early_value(
+        candidate_early,
+        (
+            "object_grounding_global_k_binder_correction_l1",
+            "object_grounding_g3_parent_l1",
+        ),
+    )
+    record(
+        "early_batch_2200/global_k_binder_diagnostic",
+        "pass" if binder_metric is not None else "incomplete",
+        baseline_value="non-comparable across binder posterior semantics",
+        candidate_value=binder_metric,
+    )
 
     for label, names in early_metrics:
         old = first_early_value(baseline_early, names)
@@ -3895,22 +3991,43 @@ def _recovery_assessment(
         )
 
     structure = candidate.get("structure", {})
+    candidate_schema = candidate_manifest.get("architecture_schema")
+    schema27 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 27
+    )
     intent_interval_key = (
         "object_intent_public_interval_variation"
         if "object_intent_public_interval_variation" in structure
         else "object_intent_interval_variation"
     )
     required_structure = (
-        "object_grounding_object_content_pair_cosine",
-        intent_interval_key,
-        "object_w_prediction_interval_variation",
-        "object_w1_object_pair_cosine",
-        "object_w2_object_pair_cosine",
-        "object_teacher_reliability",
-        "p1_query_chart_variation",
-        "object_p2_successor_innovation_rms",
-        "object_p3_precision_base_rms",
-        "bottom_capacity_mean",
+        (
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_future_field_loss",
+            "object_w_typed_sidecar_rms",
+            "object_w2_condition_centered_interval_variation",
+            "object_teacher_reliability",
+            "p1_query_chart_variation",
+            "object_p2_effect_precontract_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+        )
+        if schema27
+        else (
+            "object_grounding_object_content_pair_cosine",
+            intent_interval_key,
+            "object_w_prediction_interval_variation",
+            "object_w1_object_pair_cosine",
+            "object_w2_object_pair_cosine",
+            "object_teacher_reliability",
+            "p1_query_chart_variation",
+            "object_p2_successor_innovation_rms",
+            "object_p3_precision_base_rms",
+            "bottom_capacity_mean",
+        )
     )
     for name in required_structure:
         value = structure.get(name, {}).get("tail_median")
@@ -3932,7 +4049,6 @@ def _recovery_assessment(
         )
 
     gradients = candidate.get("gradients", {})
-    candidate_schema = candidate_manifest.get("architecture_schema")
     schema26 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 26
@@ -3944,6 +4060,7 @@ def _recovery_assessment(
     owner_rows = (
         "grounder",
         "intent",
+        *(("intent_supervisor",) if schema27 else ()),
         "dynamics",
         "p1_factual",
         "p2_effect_reader",
@@ -3973,10 +4090,19 @@ def _recovery_assessment(
         record(f"gradient/{name}", status, candidate_value=value)
 
     if schema24:
-        for name in (
-            "gradient_postlocal_bottom_decoder_l2",
-            "gradient_postglobal_global_l2",
-        ):
+        bounded_gradients = (
+            (
+                "gradient_postlocal_bottom_decoder_l2",
+                "gradient_postglobal_main_l2",
+                "gradient_postglobal_execution_controller_l2",
+            )
+            if schema27
+            else (
+                "gradient_postlocal_bottom_decoder_l2",
+                "gradient_postglobal_global_l2",
+            )
+        )
+        for name in bounded_gradients:
             value = gradients.get(name, {}).get("tail_median")
             status = (
                 "pass"
@@ -3990,6 +4116,28 @@ def _recovery_assessment(
                 status,
                 baseline_value=1.0,
                 candidate_value=value,
+            )
+        if schema27:
+            combined = gradients.get("gradient_postglobal_global_l2", {}).get(
+                "tail_median"
+            )
+            combined_limit = math.sqrt(2.0)
+            combined_status = (
+                "pass"
+                if isinstance(combined, (int, float))
+                and math.isfinite(float(combined))
+                and float(combined) <= combined_limit + 1e-4
+                else ("incomplete" if combined is None else "fail")
+            )
+            record(
+                "gradient_bound/gradient_postglobal_global_l2",
+                combined_status,
+                baseline_value=combined_limit,
+                candidate_value=combined,
+                detail=(
+                    "Schema27 reports the Euclidean union of independently "
+                    "clipped main and execution-controller owners"
+                ),
             )
 
     latest_val = (

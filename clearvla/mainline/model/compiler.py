@@ -138,8 +138,18 @@ class ObjectFutureEffectReader(nn.Module):
         )
         logit = bounded_logit + validity.clamp_min(1e-6).log()[:, None, None]
         flat_logit = logit.flatten(-2)
+        # One null hypothesis competes with the *set* of interval/object
+        # effects.  Comparing it with an uncorrected sum of N exponentials
+        # gives non-null an automatic N:1 prior even when every score is zero.
+        # Subtract log(N) so equal evidence yields 1:1 set-vs-null odds without
+        # imposing a learned mass quota or changing relative candidate scores.
+        candidate_partition_correction = math.log(float(max(intervals * objects, 1)))
+        corrected_flat_logit = flat_logit - candidate_partition_correction
         posterior = torch.softmax(
-            torch.cat((flat_logit, torch.zeros_like(flat_logit[..., :1])), dim=-1),
+            torch.cat(
+                (corrected_flat_logit, torch.zeros_like(flat_logit[..., :1])),
+                dim=-1,
+            ),
             dim=-1,
         )
         typed_source_value = torch.stack(
@@ -173,6 +183,9 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
             "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
             "object_p2_combined_logit_max_abs": bounded_logit.detach().abs().amax(),
+            "object_p2_candidate_partition_correction": bounded_logit.new_tensor(
+                candidate_partition_correction, dtype=torch.float32
+            ),
             "object_p2_temperature_content": temperature[0].detach(),
             "object_p2_temperature_intent": temperature[1].detach(),
             "object_p2_temperature_coordinate": temperature[2].detach(),
@@ -241,14 +254,11 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self.hidden = int(hidden)
         self.horizon = int(horizon)
         self.basis = int(basis)
-        self.factual_lane = nn.Linear(hidden, hidden, bias=False)
         self.precision_action = nn.Linear(hidden, hidden, bias=False)
-        self.precision_fact = nn.Linear(hidden, hidden, bias=False)
-        self.precision_consequence = nn.Linear(hidden, hidden, bias=False)
+        self.precision_innovation = nn.Linear(hidden, hidden, bias=False)
         self.precision_lane = nn.Linear(hidden, hidden, bias=False)
         self.effect_lane = nn.Linear(hidden, hidden, bias=False)
         self.temporal_action = nn.Linear(hidden, hidden, bias=False)
-        self.temporal_consequence = nn.Linear(hidden, hidden, bias=False)
         self.temporal_lane = nn.Linear(hidden, hidden, bias=False)
         self.state_change_action = nn.Linear(hidden, hidden, bias=False)
         self.state_change_temporal = nn.Linear(hidden, hidden, bias=False)
@@ -267,11 +277,17 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
-        factual = self.factual_lane(consequence.factual_base)
-        precision_condition = (
-            self.precision_fact(p1_fact)
-            + self.precision_consequence(consequence.protected_consequence)
-        ) / math.sqrt(2.0)
+        # The complete factual consequence is already the protected base.
+        # Optional lanes may only encode source-exclusive zero-centred
+        # innovations; duplicating that base gives the bottom selector several
+        # interchangeable ways to reconstruct the same fact.
+        factual = torch.zeros_like(consequence.protected_consequence)
+        # The complete P1 fact already lives in ``protected_base``.  Only the
+        # action-basis-specific precision innovation is optional evidence;
+        # copying the common P1 component into this lane recreates the
+        # deterministic protected-fact bypass under a second name.
+        precision_innovation = p1_fact - p1_fact.mean(dim=2, keepdim=True)
+        precision_condition = self.precision_innovation(precision_innovation)
         precision = self.precision_lane(
             torch.tanh(self.precision_action(action_query)) * precision_condition
         )
@@ -279,12 +295,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
         temporal_source = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
-        temporal_condition = (
-            temporal_source
-            + self.temporal_consequence(consequence.protected_consequence)
-        ) / math.sqrt(2.0)
         temporal = self.temporal_lane(
-            temporal_condition * torch.tanh(self.temporal_action(action_query))
+            temporal_source * torch.tanh(self.temporal_action(action_query))
         )
         state_change_source = intent.state_change_evidence[:, None, None].expand(
             -1, self.horizon, self.basis, -1

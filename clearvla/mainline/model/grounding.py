@@ -30,15 +30,12 @@ def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
     """Preserve every local hypothesis while exposing a dense DINO target."""
 
     local.validate()
-    # V120's sole G target is the dense mixture already represented by the
-    # completed G3 local facts.  Do not silently replace it with the raw DINO
-    # cache: that would introduce a stronger, behavior-changing objective
-    # under the same external 0.25 weight.
-    validity = local.slot_validity.to(dtype=local.content_slots.dtype)
-    semantic_mass = local.semantic_owner_probs[..., None] * validity
-    dense_content = (
-        local.content_slots * semantic_mass
-    ).sum(dim=-2) / semantic_mass.sum(dim=-2).clamp_min(1e-6)
+    # The reconstruction target must be independent of the online hypotheses
+    # that are being evaluated.  Rebuilding it from ``content_slots`` makes a
+    # self-consistent collapsed chart a valid target.  The current DINO chart
+    # is observable online, detached by the observation compiler and carries
+    # no future information.
+    dense_content = local.target_dino_content
     # This is a conditional mixture over the local M hypotheses.  Candidate
     # validity is a separate Bernoulli support variable and must not be folded
     # into this distribution: doing so turns the complement of a perfectly
@@ -117,6 +114,11 @@ class DenseObjectGrounder(nn.Module):
         self.coordinate_key = nn.Linear(16, hidden, bias=False)
         self.candidate_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.slot_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.slot_typed_keys = nn.ModuleList(
+            nn.Linear(hidden, hidden, bias=False) for _ in range(3)
+        )
+        for projection in self.slot_typed_keys:
+            nn.init.eye_(projection.weight)
         # Slot identities only break symmetry.  All transition/read modules
         # are shared across K and therefore cannot assign role-specific heads.
         self.slot_seed = nn.Parameter(torch.randn(1, objects, hidden) * 0.02)
@@ -144,7 +146,7 @@ class DenseObjectGrounder(nn.Module):
         self.maximum_update_rms = float(maximum_update_rms)
 
     def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
-        """Return the exact shared V120 key/value candidate representation."""
+        """Return the public audit key without re-injecting the scene chart."""
 
         content = self.content_key(chart.candidate_content)
         typed = (
@@ -155,29 +157,65 @@ class DenseObjectGrounder(nn.Module):
         coordinate = self.coordinate_key(_coordinate_basis(chart.candidate_coordinates, 16))
         return self.candidate_norm(content + typed + coordinate)
 
+    def _candidate_key_views(self, chart: DenseFactChart) -> Tensor:
+        """Return separate semantic/appearance/geometry pre-binding keys.
+
+        The three posteriors vote on one physical K+null assignment.  They are
+        not three object identities and cannot resurrect mass outside the
+        resulting physical support.
+        """
+
+        content = self.content_key(chart.candidate_content)
+        coordinate = self.coordinate_key(_coordinate_basis(chart.candidate_coordinates, 16))
+        semantic = self.candidate_norm(content + self.semantic_key(chart.candidate_semantic))
+        appearance = self.candidate_norm(
+            content + self.appearance_key(chart.candidate_appearance)
+        )
+        geometry = self.candidate_norm(
+            coordinate + self.geometry_key(chart.candidate_geometry)
+        )
+        return torch.stack((semantic, appearance, geometry), dim=-2)
+
     def _competition(
         self,
         slots: Tensor,
-        candidates: Tensor,
+        candidate_views: Tensor,
         validity: Tensor,
         candidate_prior: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        batch, count, _ = candidates.shape
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        if candidate_views.ndim != 4 or int(candidate_views.shape[-2]) != 3:
+            raise ValueError("typed candidate views must be [B,N,3,H]")
+        batch, count, _, _ = candidate_views.shape
         slot_key = self.slot_norm(slots)
-        logits = torch.einsum("bkh,bnh->bnk", slot_key.float(), candidates.float())
-        logits = logits / math.sqrt(float(self.hidden))
+        typed_slot_key = torch.stack(
+            tuple(projection(slot_key) for projection in self.slot_typed_keys),
+            dim=2,
+        )
+        logits = torch.einsum(
+            "bkvh,bnvh->bnkv", typed_slot_key.float(), candidate_views.float()
+        ) / math.sqrt(float(self.hidden))
         null = torch.einsum(
-            "bnh,bqh->bnq",
-            candidates.float(),
-            self.null_key.to(device=candidates.device, dtype=candidates.dtype)
+            "bnvh,bqh->bnvq",
+            candidate_views.float(),
+            self.null_key.to(
+                device=candidate_views.device, dtype=candidate_views.dtype
+            )
             .expand(batch, -1, -1)
             .float(),
-        )
+        ).permute(0, 1, 3, 2)
         # ``owner`` is conditional on one local candidate.  The local prior
         # is applied afterwards as joint mixture mass.  Only true invalidity
         # may move probability to null; ``1 - candidate_prior`` denotes other
         # hypotheses at the same cell, not absence.
-        owner = torch.softmax(torch.cat((logits, null), dim=-1), dim=-1)
+        typed_logits = torch.cat((logits, null), dim=2)
+        typed_owner = torch.softmax(typed_logits, dim=2)
+        # One physical object identity is selected from the consensus of the
+        # three typed compatibility views.  Averaging three already-normalized
+        # posteriors would retain three competing object identities and merely
+        # blur them after the fact; averaging bounded logits before the single
+        # softmax makes semantic/appearance/geometry genuine pre-binding
+        # evidence for the same K+null assignment.
+        owner = torch.softmax(typed_logits.mean(dim=-1), dim=2)
         valid = validity.float().reshape(batch, count, 1).clamp(0.0, 1.0)
         prior = candidate_prior.float().reshape(batch, count, 1).clamp_min(0.0)
         object_mass = owner[..., : self.objects] * valid * prior
@@ -186,7 +224,7 @@ class DenseObjectGrounder(nn.Module):
         ]
         read = object_mass.transpose(1, 2)
         read = read / read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        return owner, object_mass, null_mass, read
+        return owner, typed_owner.permute(0, 1, 3, 2), object_mass, null_mass, read
 
     def forward(
         self,
@@ -196,10 +234,14 @@ class DenseObjectGrounder(nn.Module):
     ) -> tuple[ObjectFactSet, dict[str, Tensor]]:
         chart = dense_chart_from_local_facts(local_facts)
         candidates_structured = self._candidate_tokens(chart)
+        candidate_views_structured = self._candidate_key_views(chart)
         batch = int(candidates_structured.shape[0])
         candidate_shape = candidates_structured.shape[1:-1]
         count = math.prod(int(value) for value in candidate_shape)
         candidates = candidates_structured.reshape(batch, count, self.hidden)
+        candidate_views = candidate_views_structured.reshape(
+            batch, count, 3, self.hidden
+        )
         validity = chart.candidate_validity.reshape(batch, count, 1)
         candidate_prior = chart.candidate_owner_prior.reshape(batch, count, 1)
         slots = self.slot_seed.to(
@@ -210,10 +252,11 @@ class DenseObjectGrounder(nn.Module):
         )
         parent_owner: Tensor | None = None
         parent_null: Tensor | None = None
+        typed_parent: Tensor | None = None
         read: Tensor | None = None
         for _ in range(self.iterations):
-            parent_owner, _, parent_null, read = self._competition(
-                slots, candidates, validity, candidate_prior
+            parent_owner, typed_parent, _, parent_null, read = self._competition(
+                slots, candidate_views, validity, candidate_prior
             )
             update = torch.einsum(
                 "bkn,bnh->bkh",
@@ -235,10 +278,15 @@ class DenseObjectGrounder(nn.Module):
         # pre-update posterior here would combine a stale G2 assignment with
         # a new G3 slot state.  Recompute the parent posterior once so the
         # bounded G3 correction is genuinely relative to the final binder.
-        parent_owner, _, parent_null, read = self._competition(
-            slots, candidates, validity, candidate_prior
+        parent_owner, typed_parent, _, parent_null, read = self._competition(
+            slots, candidate_views, validity, candidate_prior
         )
-        if parent_owner is None or parent_null is None or read is None:
+        if (
+            parent_owner is None
+            or typed_parent is None
+            or parent_null is None
+            or read is None
+        ):
             raise RuntimeError("object binding did not execute")
         # G3 is a bounded correction over the actual G2/binder posterior.  Its
         # zero initialization makes the initial graph an exact identity.
@@ -278,11 +326,23 @@ class DenseObjectGrounder(nn.Module):
         ) -> tuple[Tensor, Tensor, Tensor]:
             flat = value.reshape(batch, count, int(value.shape[-1]))
             # Parameter-free conditional reweighting inside physical support.
-            # A typed prior cannot resurrect a candidate with zero K mass.
+            # Typed compatibility already participated before K binding.  Its
+            # posterior and the local-M prior may refine a read, but neither
+            # can resurrect a candidate with zero corrected physical mass.
+            type_index = {"semantic": 0, "appearance": 1, "geometry": 2}[name]
             typed_prior = getattr(chart, f"candidate_{name}_prior").reshape(batch, count).float()
             physical_prior = candidate_prior.reshape(batch, count).float()
             prior_ratio = typed_prior / physical_prior.clamp_min(1e-6)
-            typed_read = read.float() * prior_ratio[:, None]
+            typed_object_probability = typed_parent[..., type_index, : self.objects]
+            physical_object_probability = parent_owner[..., : self.objects]
+            compatibility_ratio = typed_object_probability / physical_object_probability.clamp_min(
+                1e-6
+            )
+            typed_read = (
+                read.float()
+                * compatibility_ratio.transpose(1, 2)
+                * prior_ratio[:, None]
+            )
             typed_read = typed_read / typed_read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
             # ``assignment.sum(dim=1)`` is [B,K]; keep exactly the physical
             # allocation owned by each K object while redistributing evidence
@@ -292,7 +352,10 @@ class DenseObjectGrounder(nn.Module):
             typed_value = torch.einsum("bkn,bnd->bkd", typed_read.to(dtype=flat.dtype), flat)
             return typed_value, typed_read, typed_joint
 
-        content = aggregate(chart.candidate_content)
+        target_candidates = chart.dino_content[..., None, :].expand(
+            *chart.candidate_content.shape[:-1], chart.dino_content.shape[-1]
+        )
+        content = aggregate(target_candidates)
         semantic, semantic_read, semantic_assignment = typed_reweight(
             "semantic", chart.candidate_semantic
         )
@@ -398,7 +461,13 @@ class DenseObjectGrounder(nn.Module):
             reconstruction_value,
         )
         target_content = chart.dino_content.detach().float()
-        reconstruction_error = (reconstructed.float() - target_content).square().mean()
+        observed = chart.cell_observed.detach().float()
+        reconstruction_per_cell = (
+            reconstructed.float() - target_content
+        ).square().mean(dim=-1, keepdim=True)
+        reconstruction_error = (
+            reconstruction_per_cell * observed
+        ).sum() / observed.sum().clamp_min(1.0)
         facts = ObjectFactSet(
             dense_chart=chart,
             content=content,
@@ -457,11 +526,46 @@ class DenseObjectGrounder(nn.Module):
             "object_grounding_chart_entropy": normalized_entropy(chart_read.flatten(2), dim=-1)
             .detach()
             .mean(),
-            "object_grounding_g3_parent_l1": (
+            "object_grounding_global_k_binder_correction_l1": (
                 corrected.detach().float() - parent_owner.detach().float()
             )
             .abs()
             .mean(),
+            "object_grounding_global_k_binder_residual_rms": residual.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_prebind_typed_consensus_l1": (
+                0.5
+                * (
+                    typed_parent.detach().float()
+                    - parent_owner.detach().float()[:, :, None]
+                )
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_prebind_semantic_appearance_l1": (
+                0.5
+                * (
+                    typed_parent.detach().float()[:, :, 0]
+                    - typed_parent.detach().float()[:, :, 1]
+                )
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_prebind_semantic_geometry_l1": (
+                0.5
+                * (
+                    typed_parent.detach().float()[:, :, 0]
+                    - typed_parent.detach().float()[:, :, 2]
+                )
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
             "object_grounding_object_content_pair_cosine": self._pair_cosine(content),
             "object_grounding_object_chart_pair_overlap": self._pair_overlap(chart_read.flatten(2)),
             "object_grounding_semantic_appearance_posterior_l1": (
@@ -494,12 +598,12 @@ class DenseObjectGrounder(nn.Module):
             .float()
             .std(dim=2, unbiased=False)
             .mean(),
-            "object_grounding_candidate_key_rms": candidates.detach()
+            "object_grounding_candidate_key_rms": candidate_views.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_grounding_candidate_value_rms": candidates.detach()
+            "object_grounding_full_dino_value_rms": content.detach()
             .float()
             .square()
             .mean()

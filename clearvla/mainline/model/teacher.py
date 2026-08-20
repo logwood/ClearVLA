@@ -241,6 +241,7 @@ class ObjectFutureTeacher(nn.Module):
         )
         transport_per_support, covariance_per_support = self._relative_geometry_moments(
             candidate_posterior=candidate_posterior,
+            null_probability=null_probability,
             candidate_coordinate=candidate_coordinate,
             current_camera_coordinate=facts.camera_coordinates.detach().float(),
         )
@@ -340,7 +341,11 @@ class ObjectFutureTeacher(nn.Module):
         # is exactly zero and cannot become a constant P2 value shortcut.
         visibility_change = visibility - 1.0
         persistence_change = persistence_probability - 1.0
-        future_selector_validity = current_validity * visibility
+        future_selector_validity = (
+            current_validity
+            * facts.existence.detach().float()[:, None].clamp(0.0, 1.0)
+            * visibility
+        )
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
@@ -405,12 +410,8 @@ class ObjectFutureTeacher(nn.Module):
                 successor[:, 1:].flatten(2), successor[:, :-1].flatten(2), dim=-1
             ).mean(),
         }
-        successor_innovation = successor - target.current_reference[:, None]
         for index in range(len(INTERVAL_BOUNDS)):
             row = f"object_teacher_interval_{index}"
-            metrics[f"{row}_successor_innovation_rms"] = (
-                successor_innovation[:, index].square().mean().sqrt()
-            )
             metrics[f"{row}_semantic_delta_rms"] = (
                 target.semantic_delta[:, index].square().mean().sqrt()
             )
@@ -424,6 +425,7 @@ class ObjectFutureTeacher(nn.Module):
     def _relative_geometry_moments(
         *,
         candidate_posterior: Tensor,
+        null_probability: Tensor,
         candidate_coordinate: Tensor,
         current_camera_coordinate: Tensor,
     ) -> tuple[Tensor, Tensor]:
@@ -441,6 +443,8 @@ class ObjectFutureTeacher(nn.Module):
         if candidate_posterior.ndim != 6:
             raise ValueError("candidate posterior must be [B,F,K,C,Y,X]")
         batch, _, objects, cameras, rows, columns = candidate_posterior.shape
+        if tuple(null_probability.shape) != (*candidate_posterior.shape[:3], 1):
+            raise ValueError("null probability must be [B,F,K,1]")
         if tuple(candidate_coordinate.shape) != (cameras, rows, columns, 2):
             raise ValueError("candidate coordinate chart does not align with cameras")
         if tuple(current_camera_coordinate.shape) != (batch, objects, cameras, 2):
@@ -470,6 +474,13 @@ class ObjectFutureTeacher(nn.Module):
             candidate_posterior.float(),
             centered[..., 1].square(),
         )
+        # Null is the identity-transport component at displacement zero.  The
+        # mean above is the unconditional mixture mean, so the complete second
+        # central moment must include p_null * (0 - mean)(0 - mean)^T.
+        null = null_probability[..., 0].float()
+        covariance_xx = covariance_xx + null * transport[..., 0].square()
+        covariance_xy = covariance_xy + null * transport[..., 0] * transport[..., 1]
+        covariance_yy = covariance_yy + null * transport[..., 1].square()
         covariance = torch.stack(
             (covariance_xx, covariance_xy, covariance_yy),
             dim=-1,

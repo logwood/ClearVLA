@@ -6,7 +6,7 @@ active capability.  It has three calls with non-overlapping authority:
 ``build_online_context``
     Current observation/history/language only.  Produces G, S and W once.
 ``build_training_targets``
-    Training-only no-grad Teacher-G plus recognizer/loss targets.  It cannot
+    Training-only no-grad Teacher-G plus direct S/loss targets.  It cannot
     mutate or replace the online context.
 ``compile_policy``
     ODE-step-dependent P2/P3 read from the completed dynamic P1 fact.
@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
@@ -39,7 +38,7 @@ from .dynamics import ObjectFutureDynamicsCompiler
 from .grounding import DenseObjectGrounder
 from .intent import (
     CoarseActionIntent,
-    FuturePlanRecognizer,
+    DirectIntentFutureSupervisor,
     StatelessObjectIntentOrganizer,
 )
 from .routing import smooth_rms_contract
@@ -200,12 +199,11 @@ class ObjectIntentDynamicsTop(nn.Module):
             key_dim=teacher_key_dim,
             flow_reference_frames=flow_reference_frames,
         )
-        self.recognizer = FuturePlanRecognizer(
+        self.intent_supervisor = DirectIntentFutureSupervisor(
             hidden=hidden,
-            action_dim=action_dim,
             state_dim=state_dim,
             content_dim=content_dim,
-            heads=heads,
+            route_dim=route_dim,
         )
         self.effect_reader = ObjectFutureEffectReader(
             hidden=hidden,
@@ -364,15 +362,11 @@ class ObjectIntentDynamicsTop(nn.Module):
             future_offsets=future_offsets,
             collect_diagnostics=collect_diagnostics,
         )
-        recognition = self.recognizer(
-            future_action=future_action,
+        supervision = self.intent_supervisor(
+            intent=context.intent,
             future_state=future_state,
             teacher=teacher,
             current_loss_support=context.facts.camera_validity,
-        )
-        online_intent_loss = F.smooth_l1_loss(
-            context.intent.public_interval_carrier.float(),
-            recognition.interval_targets.detach().float(),
         )
         supervised_coarse = self.coarse_action(
             context.intent.action_dock(),
@@ -382,9 +376,9 @@ class ObjectIntentDynamicsTop(nn.Module):
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
             current_loss_support=context.facts.camera_validity.detach().float(),
-            plan_recognition=recognition,
-            online_intent_loss=online_intent_loss,
-            plan_recognition_loss=recognition.reconstruction_loss,
+            intent_supervision=supervision,
+            public_intent_loss=supervision.public_loss,
+            typed_intent_loss=supervision.typed_loss,
             coarse_action_loss=coarse_loss,
             history_proposal_loss=coarse_loss.new_zeros(()),
             object_reconstruction_loss=context.facts.reconstruction_error,
@@ -393,8 +387,59 @@ class ObjectIntentDynamicsTop(nn.Module):
             return targets, {}
         metrics = {
             **teacher_metrics,
-            "object_intent_online_match_loss": online_intent_loss.detach(),
-            "object_plan_recognition_loss": recognition.reconstruction_loss.detach(),
+            "object_intent_public_future_state_loss": supervision.public_loss.detach(),
+            "object_intent_typed_future_field_loss": supervision.typed_loss.detach(),
+            "object_intent_typed_semantic_loss": supervision.semantic_loss.detach(),
+            "object_intent_typed_status_loss": supervision.status_loss.detach(),
+            "object_intent_typed_transport_loss": supervision.transport_loss.detach(),
+            "object_intent_future_state_prediction_rms": supervision.state_prediction
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_future_state_target_rms": supervision.state_target
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_semantic_prediction_rms": supervision.semantic_prediction
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_semantic_target_rms": supervision.semantic_target
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_status_prediction_rms": supervision.status_prediction
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_status_target_rms": supervision.status_target
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_transport_prediction_rms": supervision.transport_prediction
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_transport_target_rms": supervision.transport_target
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_coarse_action_loss": coarse_loss.detach(),
         }
         return targets, metrics
@@ -433,11 +478,11 @@ class ObjectIntentDynamicsTop(nn.Module):
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
-        # P3 likewise read the trajectory after the P2 write.  The protected
-        # consequence is the complete P1+P2 residual, so adding it to the
-        # original seed reconstructs that exact boundary without rebuilding a
-        # generic canvas.
-        p3_action_query = action_query + consequence.protected_consequence
+        # The protected consequence already carries the complete P1+P2 base.
+        # Optional P3 lanes are modulated by the original dynamic action query
+        # so consequence cannot leak back into precision/temporal under a
+        # second name.
+        p3_action_query = action_query
         plan, plan_metrics = self.plan_compiler(
             p1_fact=p1_fact,
             consequence=consequence,

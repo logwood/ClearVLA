@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-20
+Updated: 2026-08-21
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        26
+manifest schema:        27
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         source-complete; local tests pass; awaiting CUDA smoke and behavior gates
+release status:         local implementation verified; fresh CUDA smoke required before release
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -27,19 +27,13 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema26 source is implemented, not yet behavior-released.** It closes the
-> source-proven G3-anchor transmission defect and the S typed double-ingress,
-> but a fresh CUDA smoke and complete eight-epoch comparison are still required
-> before claiming action improvement. W interval under-resolution, early action
-> lag and late gripper rebound remain behavior gates in
-> [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md).
-
-> **Near-term scope lock:** do not make another source change before the fresh
-> Schema26 smoke and behavior gates. If those gates fail after the exact G3
-> boundary is confirmed, attribution starts at the S→W interval boundary; G,
-> P1/P2/P3, transition core and bottom remain locked unless a new independent
-> source defect is first recorded. Adjacency is not authorization to expand
-> the repair scope.
+> **Schema27 is one integrated ownership repair, not another additive
+> mechanism.** The complete Schema26 logs and the source audit closed the old
+> scope lock: global-K identity is weakly identifiable, S follows a drifting
+> recognizer coordinate, W immediately re-publicizes typed values, and P2/P3
+> contain deterministic algebraic priors/bypasses. Schema27 repairs only those
+> recorded boundaries plus the mechanical lifecycle/logging defects. P1,
+> transition and the complete V120 bottom remain locked.
 
 The active graph lives in `clearvla/mainline/`. It does not dispatch through
 the V39 trainer/runtime/trunk or a V-numbered capability branch. The manifest
@@ -47,7 +41,7 @@ owns serialized graph identity; typed interfaces and executable checks own
 shape, dtype, provenance and zero semantics. Do not add a version-wide
 `_validate_vXXX_*` contract.
 
-Schema26 retains the controlled Schema24/V120 fidelity recovery, including its
+Schema27 retains the controlled Schema24/V120 fidelity recovery, including its
 flow-time, endpoint-head, Teacher algebra, support/selector split, non-finite
 sentinel and the following four source-audited boundaries:
 
@@ -57,9 +51,41 @@ sentinel and the following four source-audited boundaries:
 - object-level online future geometry, with camera identity retained only
   where it is physically observed.
 
-It also retains V120 AdamW decay and decoder-local then global clipping.
-Schema26 keeps Schema25's S ownership boundary and makes four source-proven
-repairs:
+It also retains V120 AdamW decay and restores the exact three-owner clipping
+lifecycle. Schema27 keeps Schema26's useful S ownership boundary and applies
+the following frozen changes as one serialized graph identity:
+
+- the global grounder reconstructs the independent, observed current-DINO
+  chart rather than a detached mixture of its own G3 candidates; semantic,
+  appearance and geometry form separate pre-binding compatibility posteriors
+  whose bounded consensus owns one physical K+null assignment;
+- object existence is a detached prior only for optional online future
+  candidacy. It never masks the protected current fact, Teacher/future losses,
+  or a value tensor, so learned null cannot become a global erasure shortcut;
+- the free-gauge whole-segment recognizer is removed. S's public interval
+  carrier predicts the canonical future-state summaries directly, while its
+  exact `[interval,K,type]` value boundary predicts matching Teacher semantic,
+  appearance/status and geometry fields under the existing intent budget;
+- S owns the sole learned interval coordinate. W no longer adds another
+  interval identity, and semantic/appearance/geometry sidecars remain separate
+  until their matching W output fields are decoded. W1/W2 public state may
+  only boundedly multiply a nonzero matching sidecar; it cannot add a typed
+  value by itself, and visibility/persistence have no free bias;
+- P2 compares its one null with the mean evidence of the legal candidate set,
+  rather than giving 16 candidates an automatic partition advantage;
+- the protected P1+effect consequence remains outside optional P3 routes.
+  Factual is no longer duplicated as a lane; precision is action×P1 only,
+  effect is W-effect only, temporal is action×S only, and state-change keeps
+  its existing exact-zero source semantics;
+- Teacher covariance is the full candidate-plus-identity-null mixture moment;
+  active G boundaries and physically distinct candidate key/value magnitudes
+  replace the stale/aliased console metrics.
+
+No external loss weight, block count, gain, quota, hard gate, entropy target,
+capacity or P1 learned null is added. Schema26 and older checkpoints cannot
+exact-resume Schema27.
+
+The retained Schema26 S repairs are:
 
 - S scores the public common carrier and zero-mean interval innovation
   separately, then combines them inside the selector's remaining bounded score
@@ -113,20 +139,22 @@ current state + V120 visual rollout + one shared sampled role table
     -> G2 DiT -> progressive update stage 2: rematerialize N=49 fine candidates
     -> G3 DiT -> progressive update stage 3: bounded owner correction
     -> completed camera x 8x8 x local-M GroundedFactSet
-    -> competitive global K+null DenseObjectGrounder
+    -> typed pre-binding consensus over semantic/appearance/geometry
+    -> one competitive global K+null DenseObjectGrounder
     -> ObjectFactSet with reversible K <-> chart correspondence
 
 T5 + observable state/executed-action history + ObjectFactSet
     -> StatelessObjectIntentOrganizer S
        protected goal/history/public-object values
-       supervised public interval carrier [B,4,H]
+       public interval carrier with direct future-state supervision [B,4,H]
        common/differential per-type fixed-zero relevance [B,4,K,3,*]
+       typed values supervised against matching object-level Teacher fields
        consumer-specific policy interval context
        24 temporal queries and state-change evidence
 
 ObjectFactSet public content/transport + S-owned WorldIntentDock (typed once)
     + causal clean CoarseActionIntent from public ActionIntentDock
-    -> W1: 4-8 and 8-16
+    -> W1: 4-8 and 8-16, field-matched typed sidecars retained
     -> W2: 16-32 and 32-48, causally reading W1
     -> one supervised object-level FutureObjectDynamics field
 
@@ -144,9 +172,9 @@ current noisy action + flow time + cached protected detail
     -> completed live P1 fact
 
 completed P1 fact + FutureObjectDynamics + S + noisy-action query
-    -> P2 bounded content/intent/object-coordinate effect read
+    -> P2 cardinality-neutral bounded content/intent/object-coordinate effect read
     -> zero-preserving protected consequence
-    -> P3 factual/precision/effect/temporal/state-change lanes
+    -> P3 zero-factual/precision/effect/temporal/state-change innovations
 
 one shared V120 action/context seed
     -> noisy-action query shared by P2/P3/transition/bottom
@@ -178,8 +206,10 @@ Training-only graph:
 future DINO supports
     -> FP32/no-grad Teacher association, once per training batch
     -> four object-level FutureObjectDynamics targets
-future action/state + current_loss_support + teacher targets
-    -> whole-segment recognizer and auxiliary losses only
+future state + current_loss_support + Teacher fields
+    -> direct public-state and typed-boundary S supervision only
+future action
+    -> clean CoarseAction supervision only
 ```
 
 Future evidence is absent from every online/deployment API. Replacing future
@@ -203,19 +233,24 @@ supports may change targets and losses, never deployment action.
 5. Local M hypotheses are not persistent objects. The dense grounder owns one
    physical K=4 plus null competition. The public chart remains outside that
    private candidate competition and is never a second object value. Typed
-   reads can reweight only inside physical K support.
+   compatibility is evaluated before binding, but its consensus creates only
+   one physical assignment; typed reads can refine only inside that support.
+   The reconstruction target is the independent observed current-DINO chart.
 6. Learned flow is a continuous source-relative prior, never a nonzero quota.
    Flow warp/cycle/smoothness/uncertainty/refinement keep explicit units.
 7. S reads full T5, observable state/action history and typed G facts. It does
    not read frame progress, phase labels, noisy action or future Teacher. Its
-   public carrier is supervised separately from optional typed relevance.
+   public carrier predicts canonical future-state summaries; the exact typed
+   S→W values predict matching detached Teacher fields during training.
    Semantic, appearance and geometry retain real K/type axes, each owns a
    fixed-zero null comparison. Full K/type values enter W only through
    `WorldIntentDock`; CoarseAction is public-only. A named reduced policy
    context may enter the existing factual/policy consumers.
-8. W1 owns the two near intervals and W2 the two far intervals. The only W
-   value below W is directly supervised `FutureObjectDynamics`; no public or
-   private free W carrier crosses into P.
+8. W1 owns the two near intervals and W2 the two far intervals. S owns the one
+   learned interval coordinate. W's semantic, appearance and geometry
+   sidecars cannot substitute for one another before their matching output
+   fields. The only W value below W is directly supervised
+   `FutureObjectDynamics`; no public or private free W carrier crosses into P.
 9. P1 owns 24 factual queries before action-basis organization, four factual
    glimpse types, the complete N=49 posterior and a real 3x3 microgrid.
    Global-K is not a P1 axis. `FactualPrecisionDock` is a parameter-free
@@ -240,8 +275,11 @@ supports may change targets and losses, never deployment action.
     protected_consequence = completed P1 fact
     ```
 
-12. P3 owns five V120 lanes: factual, precision, effect, temporal and
-    state-change. It cannot reopen vision or consume a free W carrier.
+12. P3 preserves the five-row bottom ABI, but the factual optional row is
+    algebraic zero because the factual consequence is already protected.
+    Precision owns action×P1, effect owns W effect, temporal owns action×S,
+    and state-change owns its observed zero-centred source. It cannot reopen
+    vision, duplicate the protected base or consume a free W carrier.
 13. Transition static/dynamic frequency is model semantics: its current static
     source is the exact completed G3 rollout shared with P1 and builds once;
     real-versus-neutral coefficients read current noisy action at every dynamic
@@ -294,6 +332,8 @@ FutureObjectDynamics
 
 ObjectTopTrainingTargets
   current loss support                                   [B,K,C,1]
+  public future-state target                             [B,4,S]
+  typed semantic/status/transport targets                [B,4,K,*]
 
 FactualPrecisionDock
   protected detail                                       [B,24,4,H]
@@ -326,24 +366,28 @@ ControlledTransitionSource / State
 ## Loss and optimizer ownership
 
 - Physical V120 action flow matching remains dominant.
-- The global grounder owns exactly one dense-mixture reconstruction MSE; the
-  existing intent-structure ledger applies its fixed 0.25 internal coefficient.
-  No prototype, masked-completion or typed-consistency head remains.
+- The global grounder owns exactly one observed-current dense reconstruction
+  MSE; the existing intent-structure ledger applies its fixed 0.25 internal
+  coefficient. Separate typed compatibility changes the physical assignment,
+  not the number of G objectives. No diversity, entropy, prototype or
+  typed-consistency loss is introduced.
 - Teacher successor is the uniform interval mean of
   `matched + null_probability * current_reference`; semantic delta is exactly
   successor minus current reference. Transport/covariance are uniform means of
   raw posterior moments formed from same-camera
   `future_coordinate-current_camera_coordinate` displacements.
   Reliability/entropy do not shrink targets or masks.
-- `current_loss_support [B,K,C,1]` owns future losses and the recognizer after
-  detached camera reduction. `future_selector_validity [B,4,K,1]` belongs
+- `current_loss_support [B,K,C,1]` owns future and typed-S supervision after
+  detached camera reduction. `object_existence` is detached and belongs only
+  to optional online candidacy. `future_selector_validity [B,4,K,1]` belongs
   only to online P2 routing.
 - Action, future, flow geometry, intent scaffold, history proposal and
   execution-value external weights are unchanged from the recovery reference.
-- The whole-segment recognizer supervises only S's public interval carrier.
-  Typed relevance is trained through the existing coarse-action, future W and
-  final action paths; no public future target, entropy or usage loss directly
-  trains its selector.
+- S has no training-only recognizer hidden. Its public future-state head and
+  typed semantic/status/transport heads are decoded directly from the same
+  online boundaries consumed downstream. Their losses reuse the former
+  online/recognizer fractions of the existing intent scaffold; no external
+  weight is added. CoarseAction alone owns future-action regression.
 - Every trainable parameter has exactly one optimizer owner. Ordinary bias,
   LayerNorm, top/controller/decoder parameters use AdamW decay 0.01. Only
   explicitly named scale-invariant contraction basis/depth coordinates are
@@ -352,8 +396,9 @@ ControlledTransitionSource / State
 
   ```text
   finite check -> gradient_raw
-  -> bottom.decoder local clip 1.0 -> gradient_postlocal
-  -> global clip 1.0 -> gradient_postglobal
+  -> non-controller bottom.decoder local clip 1.0 -> gradient_postlocal
+  -> non-controller global clip 1.0
+  -> execution controller independent clip 1.0 -> gradient_postglobal
   ```
 
   A non-finite batch records the first named parameter, role, optimizer group,
@@ -373,25 +418,26 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- The Schema26 formal configuration measures `169,979,847` total and
-  `153,585,526` trainable parameters. Relative to Schema25, the exact `-2,048`
-  delta is the removed transition-only four-row pseudo-anchor identity; no
-  bottom, P1, G, S or W parameter was removed. Relative to the completed
-  Schema24 graph, the exact `-12,733,181` trainable delta is fully accounted
-  for: S removes
-  three duplicate `_CrossRead`s plus one shared learned-null router and adds
-  three route-width relevance projections plus three temperatures
-  (`-6,308,093`); CoarseAction removes three duplicate `_CrossRead`s and one
-  learned-null router (`-6,357,248`); W removes one learned-null router
-  (`-65,792`). Bottom and the exact P1 reader are unchanged.
+- Schema27 parameter counts are measured after implementation and must be
+  reported by the launcher. The verified default graph has `167,106,117`
+  parameters, of which `150,711,796` are trainable. Its direct-child inventory
+  is observation `13,543,661 / 6,895,950`, top
+  `76,074,123 / 75,975,819`, history proposal
+  `10,014,727 / 10,010,631`, factual P1 `3,612,429 / 2,823,949`, transition
+  `8,027,785 / 7,895,049`, and bottom `55,833,392 / 47,110,398`
+  (total/trainable). The only Schema27 parameter deltas are typed pre-binding
+  projections, replacement of the free-gauge recognizer by direct S field
+  heads, removal of W's duplicate interval identity/status biases, and removal
+  of duplicate P3 projections. Bottom and the exact P1 reader remain
+  unchanged.
 - Active manifest identity:
 
   ```text
-  schema:       26
+  schema:       27
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-  top:          v120_progressive_g123_dense_grounder_exact_p1_s_common_differential_k_typed_single_w_ingress_four_interval_w_five_lane_p3
+  top:          typed_prebinding_global_k_direct_s_targets_field_owned_w_cardinality_neutral_p2_exclusive_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip
+  training:     v120_mirrored_physical_flow_observed_current_grounding_direct_s_fields_exact_teacher_event_boost_v120_decay_three_owner_clip
   runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only
   ```
 
@@ -407,12 +453,14 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-Local tests cover full forward/backward, G1/G2/G3 ordering and N=49
+The 148-test local mainline/audit suite covers full forward/backward,
+G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
 permutations, per-type S perturbation locality, fixed-zero typed values,
 typed-owner relabeling equivariance, public-target gradient isolation,
-absence of CoarseAction/W raw-typed rereads,
+absence of CoarseAction/W raw-typed rereads, public-W inability to synthesize
+a zero typed field,
 same-camera Teacher geometry, object geometry, neutral effect, P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
@@ -430,15 +478,15 @@ Use new empty output directories:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema26_g3_s_boundary_smoke \
-nohup bash scripts/smoke_mainline.sh > schema26_g3_s_boundary_smoke.log 2>&1 &
+OUT_DIR=runs/schema27_typed_ownership_smoke \
+nohup bash scripts/smoke_mainline.sh > schema27_typed_ownership_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema26_g3_s_boundary_b8 \
-nohup bash scripts/train_mainline.sh > schema26_g3_s_boundary_b8.log 2>&1 &
+OUT_DIR=runs/schema27_typed_ownership_b8 \
+nohup bash scripts/train_mainline.sh > schema27_typed_ownership_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema26_g3_s_boundary_b8 \
+  runs/schema27_typed_ownership_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

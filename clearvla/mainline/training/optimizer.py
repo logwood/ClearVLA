@@ -23,7 +23,7 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("grounder", ("top.grounder.",)),
     ("intent", ("top.intent.",)),
     ("coarse_action", ("top.coarse_action.",)),
-    ("plan_recognizer", ("top.recognizer.",)),
+    ("intent_supervisor", ("top.intent_supervisor.",)),
     ("history_proposal", ("history_proposal.",)),
     ("dynamics", ("top.dynamics.",)),
     ("controlled_transition", ("transition.",)),

@@ -790,16 +790,28 @@ Known compatibility aliases require care: historical `future_latent` and `action
 - `object_grounding_existence_mean` is the object-vs-null confidence evaluated
   on each object's own read support. `object_grounding_allocation_share_mean`
   is the different audit quantity measuring its fraction of valid chart mass.
-  `object_grounding_validity_mean` is physical support of that read and is the
-  only one of these three values that may mask W/Teacher/loss/P2. Never use
-  allocation or existence as that mask. Null mass is summed over the mutually
+  `object_grounding_validity_mean` is observable physical support and is the
+  only one of these three values that may mask Teacher/future/S losses.
+  Schema27 also uses detached existence as an *online optional-candidate
+  prior* in W/P2; it never multiplies the protected current fact or a training
+  loss. Allocation remains audit-only. Null mass is summed over the mutually
   exclusive local-M hypotheses per cell;
   `object_grounding_mass_conservation_error` must stay at numerical zero.
 - S has four interval queries but no phase/progress variable.
   `object_intent_*_attention_entropy` reports normalized read dispersion;
-  `goal/history/object/typed_innovation_rms` reports actual writes.
-  `online_match`, `plan_recognition` and `coarse_action` are structure terms
-  inside the existing interval budget, not new outer objectives.
+  `goal/history/object` innovation RMS reports actual writes. In Schema27 the
+  free-gauge `online_match/plan_recognition` target is absent: public S predicts
+  future state directly and the exact typed S->W values predict matching
+  semantic/status/transport Teacher fields. Read prediction and target RMS
+  together with each field loss. `coarse_action` alone owns future-action
+  regression. These terms reuse the existing interval budget, not new outer
+  objectives.
+- `*_condition_centered_interval_variation` first subtracts each interval's
+  batch mean, so it deliberately removes fixed interval identity. It is
+  identically zero for a batch-one smoke; interpret it only for batch size
+  greater than one (the formal batch-eight run) or under explicit condition
+  interventions. Raw interval variation remains valid at batch one, but also
+  includes fixed interval-query identity.
 - `observed_state_delta_rms` and `observed_transport_rms` are the two legal
   raw sources of object-S state change. Read them with
   `state_change_history_rms`, `state_change_transport_rms` and
@@ -808,16 +820,22 @@ Known compatibility aliases require care: historical `future_latent` and `action
 - W1 owns `4-8/8-16`; W2 owns `16-32/32-48`. Read W1/W2 interval and object
   cosine together with the four per-interval target-normalized errors. A high
   prediction cosine is a failure only when the corresponding teacher targets
-  have materially lower cosine/greater variation.
+  have materially lower cosine/greater variation. Schema27 keeps
+  semantic/appearance/geometry as separate field-owned sidecars. W public
+  state can only boundedly modulate a nonzero matching sidecar; it cannot add
+  a typed value by itself. A nonzero `object_w_typed_sidecar_rms` therefore
+  establishes a boundary, not downstream action utility.
 - Teacher `visibility_change` and `persistence_change` are zero-centred around
   the current visible object. `uncertainty` is calibration; it does not scale
   the online P2 value. `null_probability` and supports-per-interval describe
   association difficulty, not action-path gates.
 - P2 content/intent/coordinate score maxima are construction-bounded to 1;
   temperatures are bounded to `[0.25,4]`. The combined bounded score excludes
-  the negative validity log-mask and cannot exceed 12. Semantic/geometry/status
-  mass and four interval masses are descriptive posterior ownership, never
-  optimization targets.
+  the negative validity log-mask and cannot exceed 12. Schema27 subtracts
+  `log(intervals*objects)` from the non-null candidate set before the single
+  null competes; with equal scores and full validity, set/null mass is exactly
+  `0.5/0.5`. Semantic/geometry/status mass and four interval masses are
+  descriptive posterior ownership, never optimization targets.
 - `object_p2_effect_rms`, consequence effect/interaction and the five P3 lane
   RMS values locate the W-to-action handoff. The fifth object lane is
   `p3_state_change`, weakly scaled at `0.05`; `p3_terminal` and an external
@@ -904,12 +922,16 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   prediction/teacher successor RMS, semantic-delta RMS, transport RMS and
   address error.  An aggregate W loss can improve while one late interval or
   one field remains free.
-- Owner gradients are intentionally split into observation, grounding host,
-  grounder, intent, coarse action, plan recognizer, history proposal,
+- Owner gradients are intentionally split into observation, grounding,
+  grounder, intent, direct intent supervisor, coarse action, history proposal,
   dynamics, controlled transition, P1 factual, P2 effect reader,
   consequence, P3 compiler, and the typed bottom owners.  Do not replace
   these with one `top` or `bottom` norm: that recreates the V122 blind spot in
   which P3 precision or capacity can die inside a healthy aggregate norm.
+- Schema27 gradient bounds are owner-specific: the non-controller decoder is
+  clipped locally, the non-controller main set globally, and the execution
+  controller independently. Each owner bound is `<=1`; their Euclidean union
+  may legally reach `sqrt(2)` and must not be rejected by the recovery audit.
 - `learning_rate` is the public/base warmup-cosine LR, not optimizer group
   zero.  The active V120-resolved private rates are
   `learning_rate_history_proposal=0.625x`,

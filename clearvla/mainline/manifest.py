@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Mapping, cast
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 26
+CAPABILITY_SCHEMA = 27
 LAYOUT_NAME = "clearvla_mainline"
 LAYOUT_SCHEMA = 1
 TOPOLOGY = (3, 2, 3)
@@ -25,9 +25,9 @@ class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
     observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_bank"
-    top: str = "v120_progressive_g123_dense_grounder_exact_p1_s_common_differential_k_typed_single_w_ingress_four_interval_w_five_lane_p3"
+    top: str = "typed_prebinding_global_k_direct_s_targets_field_owned_w_cardinality_neutral_p2_exclusive_p3"
     bottom: str = "restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
-    training: str = "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip"
+    training: str = "v120_mirrored_physical_flow_observed_current_grounding_direct_s_fields_exact_teacher_event_boost_v120_decay_three_owner_clip"
     runtime: str = "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only"
 
     def validate(self) -> None:

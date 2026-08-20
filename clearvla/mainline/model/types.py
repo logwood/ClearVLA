@@ -575,26 +575,47 @@ StatelessIntentBundle = ObjectIntentState
 
 
 @dataclass(frozen=True)
-class FuturePlanRecognition:
-    """Recovered V120 whole-segment target for online interval intent."""
+class IntentFutureSupervision:
+    """Stable physical targets decoded from the online S boundaries."""
 
-    interval_targets: Tensor  # [B,4,H]
-    action_summary: Tensor  # [B,4,A]
-    state_summary: Tensor  # [B,4,S]
-    effect_summary: Tensor  # [B,4,D]
-    reconstruction_loss: Tensor
+    state_prediction: Tensor  # [B,4,S]
+    state_target: Tensor  # [B,4,S]
+    semantic_prediction: Tensor  # [B,4,K,D]
+    semantic_target: Tensor
+    status_prediction: Tensor  # [B,4,K,2]
+    status_target: Tensor
+    transport_prediction: Tensor  # [B,4,K,2]
+    transport_target: Tensor
+    public_loss: Tensor
+    semantic_loss: Tensor
+    status_loss: Tensor
+    transport_loss: Tensor
+    typed_loss: Tensor
 
-    def validate(self, *, hidden: int) -> None:
-        if self.interval_targets.ndim != 3:
-            raise ValueError("recognizer interval target must be [B,4,H]")
-        batch = int(self.interval_targets.shape[0])
-        _shape(self.interval_targets, (batch, 4, hidden), "interval targets")
-        if self.action_summary.ndim != 3 or self.state_summary.ndim != 3:
-            raise ValueError("recognizer action/state summaries lost interval axis")
-        if self.effect_summary.ndim != 3:
-            raise ValueError("recognizer effect summary lost interval axis")
-        if self.reconstruction_loss.ndim != 0:
-            raise ValueError("recognizer reconstruction loss must be scalar")
+    def validate(self) -> None:
+        if self.state_prediction.ndim != 3 or tuple(
+            self.state_prediction.shape
+        ) != tuple(self.state_target.shape):
+            raise ValueError("intent state prediction/target must align as [B,4,S]")
+        batch = int(self.state_prediction.shape[0])
+        if int(self.state_prediction.shape[1]) != 4:
+            raise ValueError("intent state target lost the four interval axis")
+        for name in ("semantic", "status", "transport"):
+            prediction = getattr(self, f"{name}_prediction")
+            target = getattr(self, f"{name}_target")
+            if prediction.ndim != 4 or tuple(prediction.shape) != tuple(target.shape):
+                raise ValueError(f"intent {name} prediction/target must be [B,4,K,*]")
+            if tuple(prediction.shape[:2]) != (batch, 4):
+                raise ValueError(f"intent {name} target lost batch/interval identity")
+        scalar_losses = (
+            self.public_loss,
+            self.semantic_loss,
+            self.status_loss,
+            self.transport_loss,
+            self.typed_loss,
+        )
+        if any(value.ndim != 0 for value in scalar_losses):
+            raise ValueError("intent future supervision losses must be scalars")
 
 
 @dataclass(frozen=True)
@@ -786,9 +807,9 @@ class FutureObjectDynamics:
             persistence=scalar,
             uncertainty=scalar,
             reliability=scalar,
-            future_selector_validity=facts.validity[:, None].expand(
-                -1, intervals, -1, -1
-            ),
+            future_selector_validity=(
+                facts.validity * facts.existence.detach().clamp(0.0, 1.0)
+            )[:, None].expand(-1, intervals, -1, -1),
             object_coordinates=facts.coordinates.to(dtype=current.dtype),
         )
 
@@ -797,9 +818,9 @@ class FutureObjectDynamics:
 class ObjectTopTrainingTargets:
     teacher_dynamics: FutureObjectDynamics | None
     current_loss_support: Tensor  # training-only current facts [B,K,C,1]
-    plan_recognition: FuturePlanRecognition | None
-    online_intent_loss: Tensor
-    plan_recognition_loss: Tensor
+    intent_supervision: IntentFutureSupervision | None
+    public_intent_loss: Tensor
+    typed_intent_loss: Tensor
     coarse_action_loss: Tensor
     history_proposal_loss: Tensor
     object_reconstruction_loss: Tensor
@@ -807,8 +828,8 @@ class ObjectTopTrainingTargets:
     @property
     def total_unweighted(self) -> Tensor:
         return (
-            self.online_intent_loss
-            + self.plan_recognition_loss
+            self.public_intent_loss
+            + self.typed_intent_loss
             + self.coarse_action_loss
             + self.history_proposal_loss
             + self.object_reconstruction_loss

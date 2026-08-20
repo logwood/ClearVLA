@@ -16,7 +16,7 @@ from .dynamics import ObjectFutureDynamicsCompiler, ObjectW1WorkingState
 from .grounding import DenseObjectGrounder
 from .intent import (
     CoarseActionIntent,
-    FuturePlanRecognizer,
+    DirectIntentFutureSupervisor,
     StatelessObjectIntentOrganizer,
 )
 from .observation_contract import ObservationEvidence, PatchFlowField
@@ -35,7 +35,7 @@ from .types import (
     FactualIntentDock,
     FactualPrecisionDock,
     FutureObjectDynamics,
-    FuturePlanRecognition,
+    IntentFutureSupervision,
     HistoryActionProposalState,
     LocalFactSet,
     ObjectFactSet,
@@ -60,8 +60,8 @@ __all__ = [
     "RestoredV120EvidenceBottom",
     "RestoredV120ObservationCompiler",
     "FutureObjectDynamics",
-    "FuturePlanRecognition",
-    "FuturePlanRecognizer",
+    "IntentFutureSupervision",
+    "DirectIntentFutureSupervisor",
     "FactualIntentDock",
     "HistoryActionProposal",
     "HistoryActionProposalState",

@@ -1096,13 +1096,13 @@ def compose_losses(
     )
     intent_structure_core = (
         0.25 * top_targets.object_reconstruction_loss
-        + 0.35 * top_targets.online_intent_loss
-        + 0.20 * top_targets.plan_recognition_loss
+        + 0.35 * top_targets.public_intent_loss
+        + 0.20 * top_targets.typed_intent_loss
         + 0.20 * top_targets.coarse_action_loss
     )
     # Restore V120's interval ledger exactly: half of the existing 0.02
     # budget supervises chronological changes between adjacent W intervals;
-    # the other half owns the small G/S/recognizer/coarse scaffold.  Giving
+    # the other half owns the small G/S-direct-field/coarse scaffold.  Giving
     # the whole budget to the easy scalar scaffold both over-trained it and
     # removed W1/W2's only explicit differentiation pressure.
     interval_structure = 0.50 * future["future_transition"] + 0.50 * intent_structure_core
@@ -1145,17 +1145,17 @@ def compose_losses(
             * 0.25
             * top_targets.object_reconstruction_loss
         ),
-        "intent_online": (
+        "intent_public_future_state": (
             objective.intent_structure
             * 0.50
             * 0.35
-            * top_targets.online_intent_loss
+            * top_targets.public_intent_loss
         ),
-        "intent_recognizer": (
+        "intent_typed_future_field": (
             objective.intent_structure
             * 0.50
             * 0.20
-            * top_targets.plan_recognition_loss
+            * top_targets.typed_intent_loss
         ),
         "coarse_action": (
             objective.intent_structure
@@ -1182,8 +1182,8 @@ def compose_losses(
         **geometry,
         **future,
         **execution,
-        "intent_online": top_targets.online_intent_loss,
-        "intent_recognizer": top_targets.plan_recognition_loss,
+        "intent_public_future_state": top_targets.public_intent_loss,
+        "intent_typed_future_field": top_targets.typed_intent_loss,
         "object_reconstruction": top_targets.object_reconstruction_loss,
         "coarse_action": top_targets.coarse_action_loss,
         "history_action_proposal": top_targets.history_proposal_loss,

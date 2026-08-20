@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
@@ -217,7 +218,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "grounder",
         "intent",
         "coarse_action",
-        "plan_recognizer",
+        "intent_supervisor",
         "history_proposal",
         "dynamics",
         "controlled_transition",
@@ -265,7 +266,25 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert "gradient_postlocal_observation_l2" in result.metrics
     assert "gradient_postglobal_observation_l2" in result.metrics
     assert result.metrics["gradient_postlocal_bottom_decoder_l2"] <= 1.0001
-    assert result.metrics["gradient_postglobal_global_l2"] <= 1.0001
+    torch.testing.assert_close(
+        result.metrics["gradient_raw_bottom_execution_l2"],
+        result.metrics["gradient_postlocal_bottom_execution_l2"],
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    expected_controller = torch.minimum(
+        result.metrics["gradient_raw_bottom_execution_l2"],
+        torch.ones_like(result.metrics["gradient_raw_bottom_execution_l2"]),
+    )
+    torch.testing.assert_close(
+        result.metrics["gradient_postglobal_bottom_execution_l2"],
+        expected_controller,
+        rtol=1e-5,
+        atol=1e-7,
+    )
+    assert result.metrics["gradient_postglobal_main_l2"] <= 1.0001
+    assert result.metrics["gradient_postglobal_execution_controller_l2"] <= 1.0001
+    assert result.metrics["gradient_postglobal_global_l2"] <= math.sqrt(2.0) + 1e-4
     assert "gradient_observation_l2" not in result.metrics
     assert "gradient_global_preclip_l2" in result.materialize()
     archived = archival_metrics(result.materialize())
@@ -545,7 +564,18 @@ def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
         device=torch.device("cpu"),
         dtype=torch.bfloat16,
     )
-    result = engine.train_step(_batch(config), collect_diagnostics=True)
+    teacher_calls = 0
+
+    def _count_teacher_call(_module, _inputs, _output) -> None:
+        nonlocal teacher_calls
+        teacher_calls += 1
+
+    hook = model.top.teacher.register_forward_hook(_count_teacher_call)
+    try:
+        result = engine.train_step(_batch(config), collect_diagnostics=True)
+    finally:
+        hook.remove()
+    assert teacher_calls == 1
     assert torch.isfinite(result.loss)
     assert torch.isfinite(result.gradient_norm)
     assert result.gradient_norm > 0

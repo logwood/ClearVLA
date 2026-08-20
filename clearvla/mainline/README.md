@@ -14,9 +14,9 @@ config / manifest / typed online and training inputs
   -> three-frame current observation + two learned flows
   -> Pre-G local chart
   -> G1/G2/G3 progressive local grounding with an N=49 rematerialization
-  -> one dense global K+null grounding objective
-  -> S common/differential interval carrier + per-type [interval,K,type] relevance
-  -> W1/W2 four-interval future object dynamics
+  -> one typed-prebinding physical K+null grounder against current DINO
+  -> S interval carrier + per-type [interval,K,type] relevance and direct targets
+  -> W1/W2 field-owned four-interval future object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy block
   -> P2 bounded consequence read
@@ -75,13 +75,17 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        26
+schema:        27
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 25 and older are not exact-resume sources for schema 26. Formal runs
+The verified Schema27 default graph currently measures
+`167,106,117 total / 150,711,796 trainable`; the launcher remains the
+authoritative source and prints the per-module inventory for every run.
+
+Schema 26 and older are not exact-resume sources for schema 27. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
@@ -117,16 +121,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema26_g3_s_boundary_smoke \
-nohup bash scripts/smoke_mainline.sh > schema26_g3_s_boundary_smoke.log 2>&1 &
+OUT_DIR=runs/schema27_typed_ownership_smoke \
+nohup bash scripts/smoke_mainline.sh > schema27_typed_ownership_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema26_g3_s_boundary_b8 \
-nohup bash scripts/train_mainline.sh > schema26_g3_s_boundary_b8.log 2>&1 &
+OUT_DIR=runs/schema27_typed_ownership_b8 \
+nohup bash scripts/train_mainline.sh > schema27_typed_ownership_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -138,7 +142,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema26_g3_s_boundary_b8 \
+  runs/schema27_typed_ownership_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

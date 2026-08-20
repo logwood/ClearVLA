@@ -24,6 +24,8 @@ class ObjectW1WorkingState:
 
     near: Tensor
     far_base: Tensor
+    near_typed: Tensor
+    far_typed: Tensor
     near_field: FutureObjectDynamics
 
 
@@ -107,7 +109,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.goal_read = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
-        self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
         self.w1 = _ObjectIntervalBlock(hidden, heads)
         self.w2 = _ObjectIntervalBlock(hidden, heads)
         self.w2_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
@@ -118,17 +119,18 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.delta_head = nn.Linear(hidden, content_dim, bias=False)
         self.transport_head = nn.Linear(hidden, 2, bias=False)
         self.covariance_head = nn.Linear(hidden, 3)
-        self.visibility_head = nn.Linear(hidden, 1)
-        self.persistence_head = nn.Linear(hidden, 1)
+        # Status changes are optional typed values.  A free bias can learn the
+        # dataset-wide mean disappearance/persistence and bypass the
+        # appearance sidecar entirely, so both heads are bias-free.
+        self.visibility_head = nn.Linear(hidden, 1, bias=False)
+        self.persistence_head = nn.Linear(hidden, 1, bias=False)
         self.uncertainty_head = nn.Linear(hidden, 1)
         nn.init.zeros_(self.delta_head.weight)
         nn.init.zeros_(self.transport_head.weight)
         nn.init.zeros_(self.covariance_head.weight)
         nn.init.constant_(self.covariance_head.bias, -3.0)
         nn.init.zeros_(self.visibility_head.weight)
-        nn.init.zeros_(self.visibility_head.bias)
         nn.init.zeros_(self.persistence_head.weight)
-        nn.init.zeros_(self.persistence_head.bias)
         nn.init.zeros_(self.uncertainty_head.weight)
         nn.init.constant_(self.uncertainty_head.bias, -2.0)
 
@@ -139,7 +141,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action: CoarseActionIntentState,
         *,
         collect_diagnostics: bool,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         intent.validate(hidden=self.hidden)
         objects = self.object_content(facts.content)
         transport_prior = self.object_transport_prior(
@@ -148,9 +150,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         interval = (
             intent.public_interval_carrier
             + action.tokens
-            + self.interval_identity.to(
-                device=objects.device, dtype=objects.dtype
-            )[:, :, 0]
         )
         normalized_goal = self.goal_memory_norm(intent.protected_goal_memory)
         goal_update, goal_attention = self.goal_read(
@@ -176,12 +175,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
             typed_components.append(component)
         typed_components_value = torch.stack(typed_components, dim=3)
-        typed_update, _ = smooth_rms_contract(
-            typed_components_value.sum(dim=3) / math.sqrt(3.0),
-            0.35,
-        )
         if not collect_diagnostics:
-            return base + typed_update, {}
+            return base, typed_components_value, {}
         if goal_attention is None:
             goal_attention = interval.new_zeros(
                 interval.shape[0],
@@ -197,7 +192,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 / math.log(float(max(int(goal_attention.shape[-1]), 2)))
             ).mean(),
             "object_w_goal_innovation_rms": goal_update.detach().float().square().mean().sqrt(),
-            "object_w_typed_contribution_rms": typed_update.detach().float().square().mean().sqrt(),
+            "object_w_typed_sidecar_rms": typed_components_value.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
         }
         for type_index, name in enumerate(("semantic", "appearance", "geometry")):
             component = typed_components_value[..., type_index, :].detach().float()
@@ -226,33 +225,52 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             metrics[f"object_w_{name}_input_object_variation"] = (
                 input_value.std(dim=2, unbiased=False).mean()
             )
-        return base + typed_update, metrics
+        return base, typed_components_value, metrics
 
     def _field(
         self,
         *,
         facts: ObjectFactSet,
         hidden: Tensor,
+        typed_sidecars: Tensor,
     ) -> FutureObjectDynamics:
-        semantic_delta = self.delta_head(hidden)
+        if tuple(typed_sidecars.shape) != (*hidden.shape[:-1], 3, hidden.shape[-1]):
+            raise ValueError("W typed sidecars must align as [B,I,K,3,H]")
+        # W1/W2 public state contains object content, goal and clean-action
+        # context.  It may condition a typed field, but it must not be an
+        # additive value that can predict every field while ignoring S's
+        # semantic/appearance/geometry boundary.  The residual modulation is
+        # bounded in (0, 2); a zero sidecar therefore remains algebraic zero,
+        # while a real sidecar still receives the complete W1/W2 context.
+        public_modulation = (
+            1.0 + torch.tanh(hidden.float())
+        ).to(dtype=typed_sidecars.dtype)
+        semantic_hidden = typed_sidecars[..., 0, :] * public_modulation
+        appearance_hidden = typed_sidecars[..., 1, :] * public_modulation
+        geometry_hidden = typed_sidecars[..., 2, :] * public_modulation
+        semantic_delta = self.delta_head(semantic_hidden)
         object_transport = 0.50 * torch.tanh(
-            self.transport_head(hidden).float()
+            self.transport_head(geometry_hidden).float()
         ).to(dtype=hidden.dtype)
         object_covariance = F.softplus(
-            self.covariance_head(hidden).float()
+            self.covariance_head(geometry_hidden).float()
         ).to(dtype=hidden.dtype)
         visibility = (
-            1.0 - 2.0 * torch.sigmoid(self.visibility_head(hidden).float())
+            1.0 - 2.0 * torch.sigmoid(self.visibility_head(appearance_hidden).float())
         ).to(dtype=hidden.dtype)
         persistence = (
-            1.0 - 2.0 * torch.sigmoid(self.persistence_head(hidden).float())
+            1.0 - 2.0 * torch.sigmoid(self.persistence_head(appearance_hidden).float())
         ).to(dtype=hidden.dtype)
         uncertainty = F.softplus(
             self.uncertainty_head(hidden).float()
         ).to(dtype=hidden.dtype)
         reliability = torch.zeros_like(uncertainty)
         visibility_probability = (1.0 + visibility.float()).clamp(0.0, 1.0)
-        future_selector_validity = facts.validity[:, None].float() * visibility_probability
+        future_selector_validity = (
+            facts.validity[:, None].float()
+            * facts.existence.detach()[:, None].float().clamp(0.0, 1.0)
+            * visibility_probability
+        )
         current_reference = facts.content.detach()
         return FutureObjectDynamics(
             current_reference=current_reference,
@@ -276,17 +294,23 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action: CoarseActionIntentState,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics, ObjectW1WorkingState, dict[str, Tensor]]:
-        hidden, base_metrics = self._base(
+        hidden, typed_sidecars, base_metrics = self._base(
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
         near = self.w1(hidden[:, :2], causal_interval=True)
-        field = self._field(facts=facts, hidden=near)
+        field = self._field(
+            facts=facts,
+            hidden=near,
+            typed_sidecars=typed_sidecars[:, :2],
+        )
         field.validate(expected_intervals=2)
         metrics = self._metrics(field, prefix="object_w1") if collect_diagnostics else {}
         metrics.update(base_metrics)
         return field, ObjectW1WorkingState(
             near=near,
             far_base=hidden[:, 2:],
+            near_typed=typed_sidecars[:, :2],
+            far_typed=typed_sidecars[:, 2:],
             near_field=field,
         ), metrics
 
@@ -304,6 +328,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             w1_state.far_base.shape[1:3]
         ) != (2, facts.objects):
             raise ValueError("W2 requires both completed W1 intervals")
+        if tuple(w1_state.near_typed.shape[1:4]) != (2, facts.objects, 3) or tuple(
+            w1_state.far_typed.shape[1:4]
+        ) != (2, facts.objects, 3):
+            raise ValueError("W2 typed sidecars lost interval/object/type identity")
         batch, _, objects, hidden = w1_state.near.shape
         far_query = w1_state.far_base.transpose(1, 2).reshape(
             batch * objects, 2, hidden
@@ -323,7 +351,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             batch, objects, 2, hidden
         ).transpose(1, 2)
         far = self.w2(far, causal_interval=True)
-        far_field = self._field(facts=facts, hidden=far)
+        far_field = self._field(
+            facts=facts,
+            hidden=far,
+            typed_sidecars=w1_state.far_typed,
+        )
         near_field = w1_state.near_field
         near_field.validate(expected_intervals=2)
         field = FutureObjectDynamics(
@@ -360,6 +392,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     @staticmethod
     def _metrics(field: FutureObjectDynamics, *, prefix: str) -> dict[str, Tensor]:
         delta = field.semantic_delta.detach().float()
+        condition_centered = delta - delta.mean(dim=0, keepdim=True)
         adjacent = (
             F.cosine_similarity(
                 delta[:, 1:].flatten(2),
@@ -383,6 +416,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         return {
             f"{prefix}_semantic_delta_rms": delta.square().mean().sqrt(),
+            f"{prefix}_condition_centered_interval_variation": (
+                condition_centered.std(dim=1, unbiased=False).mean()
+            ),
             f"{prefix}_interval_adjacent_cosine": adjacent,
             f"{prefix}_object_pair_cosine": pair,
             f"{prefix}_transport_rms": field.transport_mean.detach().float().square().mean().sqrt(),

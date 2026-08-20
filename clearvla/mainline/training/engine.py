@@ -247,10 +247,25 @@ class MainlineTrainingEngine:
             if collect_diagnostics
             else {}
         )
+        named_parameters = [
+            (name, parameter)
+            for name, parameter in self.model.named_parameters()
+            if parameter.grad is not None
+        ]
+        controller_parameters = [
+            parameter
+            for name, parameter in named_parameters
+            if name.startswith("bottom.decoder.execution_controller.")
+        ]
+        controller_ids = {id(parameter) for parameter in controller_parameters}
         decoder_parameters = [
             parameter
-            for name, parameter in self.model.named_parameters()
-            if name.startswith("bottom.decoder.") and parameter.grad is not None
+            for name, parameter in named_parameters
+            if name.startswith("bottom.decoder.")
+            and id(parameter) not in controller_ids
+        ]
+        main_parameters = [
+            parameter for parameter in parameters if id(parameter) not in controller_ids
         ]
         decoder_norm: Tensor | None = None
         if decoder_parameters:
@@ -289,12 +304,40 @@ class MainlineTrainingEngine:
             error_if_nonfinite=True,
             foreach=True,
         )
-        torch.nn.utils.clip_grads_with_norm_(
-            parameters,
-            self.config.optimizer.grad_clip,
-            postlocal_norm,
-            foreach=True,
+        main_postlocal_norm = (
+            torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in main_parameters],
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
+            if main_parameters
+            else total_norm.new_zeros(())
         )
+        if main_parameters:
+            torch.nn.utils.clip_grads_with_norm_(
+                main_parameters,
+                self.config.optimizer.grad_clip,
+                main_postlocal_norm,
+                foreach=True,
+            )
+        controller_norm = (
+            torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in controller_parameters],
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
+            if controller_parameters
+            else total_norm.new_zeros(())
+        )
+        if controller_parameters:
+            torch.nn.utils.clip_grads_with_norm_(
+                controller_parameters,
+                self.config.optimizer.grad_clip,
+                controller_norm,
+                foreach=True,
+            )
         postglobal_norm = torch.nn.utils.get_total_norm(
             [parameter.grad for parameter in parameters],
             norm_type=2.0,
@@ -306,6 +349,28 @@ class MainlineTrainingEngine:
             metrics["gradient_raw_global_l2"] = total_norm.detach().float()
             metrics["gradient_postlocal_global_l2"] = postlocal_norm.detach().float()
             metrics["gradient_postglobal_global_l2"] = postglobal_norm.detach().float()
+            metrics["gradient_postlocal_main_l2"] = main_postlocal_norm.detach().float()
+            metrics["gradient_raw_execution_controller_l2"] = controller_norm.detach().float()
+            metrics["gradient_postglobal_main_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    [parameter.grad for parameter in main_parameters],
+                    norm_type=2.0,
+                    error_if_nonfinite=True,
+                    foreach=True,
+                ).detach().float()
+                if main_parameters
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+            metrics["gradient_postglobal_execution_controller_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    [parameter.grad for parameter in controller_parameters],
+                    norm_type=2.0,
+                    error_if_nonfinite=True,
+                    foreach=True,
+                ).detach().float()
+                if controller_parameters
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
             metrics["gradient_postglobal_bottom_decoder_l2"] = (
                 torch.nn.utils.get_total_norm(
                     [parameter.grad for parameter in decoder_parameters],
