@@ -13,13 +13,12 @@ from ..v120_core.trunk_primitives import (
     ControlledResidualLatentDynamics,
     TrunkPrimitiveConfig,
 )
-from .compiler import ObjectPolicyPlanDeltaBank
 from .action_contract import V120SeedContext
+from .compiler import ObjectPolicyPlanDeltaBank
 from .routing import AffineVarianceFlooredCenteredNorm
 from .types import (
     ControlledTransitionSource,
     ControlledTransitionState,
-    ObjectFactSet,
 )
 
 
@@ -50,7 +49,6 @@ class ControlledTransitionDynamics(nn.Module):
         del content_dim, state_dim, action_dim
         self.hidden = int(hidden)
         self.rank = int(rank)
-        self.intervals = 4
         self.cameras = int(cameras)
         self.horizon = int(horizon)
         self.basis = int(basis)
@@ -58,9 +56,6 @@ class ControlledTransitionDynamics(nn.Module):
         self.executed_rows = 7
         if self.cameras != 2:
             raise ValueError("the recovered V120 transition requires two cameras")
-        self.interval_identity = nn.Parameter(
-            torch.randn(1, self.intervals, 1, self.hidden) * 0.02
-        )
         # This is the extracted V120 terminal trajectory normalization.  It
         # belongs immediately after the P2 residual write and before the
         # controlled action reader.  Moving it earlier or dropping it changes
@@ -96,27 +91,27 @@ class ControlledTransitionDynamics(nn.Module):
     def build_source(
         self,
         *,
-        facts: ObjectFactSet,
+        g3_rollout: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[ControlledTransitionSource, dict[str, Tensor]]:
-        """Build the ODE-invariant protected G3 chart exactly once."""
+        """Protect the exact completed G3 anchor rollout for every ODE step.
 
-        facts.validate()
-        chart = facts.dense_chart.public_scene_base
-        if chart.ndim != 5 or tuple(chart.shape[1:4]) != (self.cameras, 8, 8):
-            raise ValueError("controlled transition requires the full [C,8,8] G3 chart")
-        if int(chart.shape[-1]) != self.hidden:
-            raise ValueError("G3 transition chart has an invalid hidden width")
-        batch = int(chart.shape[0])
-        spatial = chart.reshape(batch, 1, self.cameras * 8 * 8, self.hidden)
-        source = spatial + self.interval_identity.to(
-            device=chart.device, dtype=chart.dtype
-        )
-        result = ControlledTransitionSource(
-            selector=source.reshape(
-                batch, self.intervals * self.cameras * 8 * 8, self.hidden
+        V120 passed the final G3 rollout directly to the controlled transition.
+        Reconstructing this source from the public chart loses the four anchor
+        identities and then invents unrelated interval labels.  P1 and the
+        transition must therefore share this exact tensor boundary.
+        """
+
+        expected_rows = 4 * self.cameras * 8 * 8
+        if g3_rollout.ndim != 3 or tuple(g3_rollout.shape[1:]) != (
+            expected_rows,
+            self.hidden,
+        ):
+            raise ValueError(
+                "controlled transition requires the exact [B,4*C*8*8,H] G3 rollout"
             )
-        )
+        batch = int(g3_rollout.shape[0])
+        result = ControlledTransitionSource(selector=g3_rollout)
         result.validate(hidden=self.hidden)
         if not collect_diagnostics:
             return result, {}
@@ -128,8 +123,13 @@ class ControlledTransitionDynamics(nn.Module):
             .sqrt(),
             "controlled_transition_source_spatial_variation": result.selector.detach()
             .float()
-            .reshape(batch, self.intervals, self.cameras * 8 * 8, self.hidden)
+            .reshape(batch, 4, self.cameras * 8 * 8, self.hidden)
             .std(dim=2, unbiased=False)
+            .mean(),
+            "controlled_transition_source_anchor_variation": result.selector.detach()
+            .float()
+            .reshape(batch, 4, self.cameras * 8 * 8, self.hidden)
+            .std(dim=1, unbiased=False)
             .mean(),
         }
 

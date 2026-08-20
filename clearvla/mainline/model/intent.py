@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from .routing import smooth_rms_contract
+from .routing import smooth_rms_contract, variance_floored_centered_norm
 from .types import (
     INTERVAL_BOUNDS,
     ActionIntentDock,
@@ -209,21 +209,64 @@ class StatelessObjectIntentOrganizer(nn.Module):
         *,
         public_interval_carrier: Tensor,
         facts: ObjectFactSet,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Build fixed-zero, per-type relevance without collapsing K."""
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ]:
+        """Build fixed-zero typed relevance while preserving interval identity.
 
-        query_source = self.typed_query_norm(public_interval_carrier)
-        typed_query = torch.stack(
-            tuple(projection(query_source) for projection in self.typed_relevance_queries),
+        The common S carrier and its zero-mean interval innovation are scored
+        separately.  A bounded residual composition lets a real interval
+        innovation use only the score range left by the common evidence.  It
+        therefore cannot manufacture interval differences when the carrier is
+        identical, nor amplify the selector beyond its original [-1, 1]
+        contract.
+        """
+
+        common_carrier = public_interval_carrier.mean(dim=1, keepdim=True)
+        differential_carrier = public_interval_carrier - common_carrier
+        common_source = self.typed_query_norm(common_carrier)
+        # Ordinary LayerNorm would expand a tiny interval innovation toward
+        # unit variance before the bounded cosine.  Preserve exact zero and
+        # cap the new branch's Jacobian with the established normalized-chart
+        # floor instead.  The common branch remains numerically unchanged.
+        differential_source, differential_denominator = (
+            variance_floored_centered_norm(differential_carrier, 0.25)
+        )
+        common_query = torch.stack(
+            tuple(projection(common_source) for projection in self.typed_relevance_queries),
+            dim=2,
+        )  # [B,1,type,R]
+        differential_query = torch.stack(
+            tuple(
+                projection(differential_source)
+                for projection in self.typed_relevance_queries
+            ),
             dim=2,
         )  # [B,I,type,R]
         typed_route = torch.stack(
             (facts.semantic, facts.appearance, facts.geometry), dim=2
         )  # [B,K,type,R]
-        score = torch.einsum(
+        common_score = torch.einsum(
             "bitr,bktr->bikt",
-            self._bounded_unit(typed_query),
+            self._bounded_unit(common_query),
             self._bounded_unit(typed_route),
+        ).clamp(-1.0, 1.0)
+        differential_score = torch.einsum(
+            "bitr,bktr->bikt",
+            self._bounded_unit(differential_query),
+            self._bounded_unit(typed_route),
+        ).clamp(-1.0, 1.0)
+        score = (
+            common_score
+            + (1.0 - common_score.abs()) * differential_score
         ).clamp(-1.0, 1.0)
         temperature = 0.25 + 3.75 * torch.sigmoid(
             self.typed_temperature_logit.float()
@@ -258,7 +301,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             relevance_value,
             typed_components,
             score,
+            common_score.expand(-1, public_interval_carrier.shape[1], -1, -1),
+            differential_score,
+            signal_probability,
             temperature,
+            differential_denominator,
         )
 
     def forward(
@@ -314,15 +361,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
         (
             typed_relevance_mass,
             typed_relevance_value,
-            typed_action_components,
+            typed_policy_components,
             typed_relevance_score,
+            typed_common_score,
+            typed_differential_score,
+            typed_signal_probability,
             typed_temperature,
+            typed_differential_denominator,
         ) = self._typed_relevance(
             public_interval_carrier=public_intervals,
             facts=facts,
         )
-        typed_action_context = typed_action_components.sum(dim=2) / (3.0**0.5)
-        policy_intervals = public_intervals + typed_action_context
+        typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
+        policy_intervals = public_intervals + typed_policy_context
         temporal_base = self.temporal_identity.to(
             device=public_intervals.device, dtype=public_intervals.dtype
         ).expand(batch, -1, -1)
@@ -367,7 +418,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             state_change_evidence=state_change_evidence,
             typed_relevance_mass=typed_relevance_mass,
             typed_relevance_value=typed_relevance_value,
-            typed_action_components=typed_action_components,
+            typed_policy_components=typed_policy_components,
             goal_attention=goal_attention,
             interval_goal_attention=interval_goal_attention,
             interval_history_attention=interval_history_attention,
@@ -401,7 +452,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_typed_action_context_rms": typed_action_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_policy_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_differential_norm_denominator_min": typed_differential_denominator.detach().float().amin(),
+            "object_intent_typed_fact_unsupported_fraction": (
+                1.0 - facts.validity.detach().float().clamp(0.0, 1.0)
+            ).mean(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": facts.transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
@@ -415,7 +470,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
         for type_index, name in enumerate(TYPED_INTENT_NAMES):
             mass = typed_relevance_mass[..., type_index, 0].detach().float()
             selected = typed_relevance_value[..., type_index, :].detach().float()
-            component = typed_action_components[..., type_index, :].detach().float()
+            component = typed_policy_components[..., type_index, :].detach().float()
+            selector_null = (
+                1.0
+                - typed_signal_probability[..., type_index].detach().float()
+            )
             metrics.update(
                 {
                     f"object_intent_{name}_route_raw_rms": raw_routes[type_index]
@@ -425,7 +484,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     .mean()
                     .sqrt(),
                     f"object_intent_{name}_relevance_mass": mass.mean(),
-                    f"object_intent_{name}_null_mass": (1.0 - mass).mean(),
+                    f"object_intent_{name}_selector_null_probability": selector_null.mean(),
                     f"object_intent_{name}_selected_value_rms": selected.square()
                     .mean()
                     .sqrt(),
@@ -435,10 +494,22 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     f"object_intent_{name}_interval_variation": selected.std(
                         dim=1, unbiased=False
                     ).mean(),
-                    f"object_intent_{name}_action_context_rms": component.square()
+                    f"object_intent_{name}_policy_context_rms": component.square()
                     .mean()
                     .sqrt(),
                     f"object_intent_{name}_score_abs": typed_relevance_score[
+                        ..., type_index
+                    ]
+                    .detach()
+                    .abs()
+                    .mean(),
+                    f"object_intent_{name}_common_score_abs": typed_common_score[
+                        ..., type_index
+                    ]
+                    .detach()
+                    .abs()
+                    .mean(),
+                    f"object_intent_{name}_differential_score_abs": typed_differential_score[
                         ..., type_index
                     ]
                     .detach()
@@ -594,7 +665,6 @@ class CoarseActionIntent(nn.Module):
             query
             + intent_delta
             + object_delta
-            + intent.typed_action_context
             + history_delta
         )
         action_prediction = self.action_head(token)

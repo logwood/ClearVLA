@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        25
+manifest schema:        26
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         source-complete; 122 mainline tests pass; awaiting CUDA smoke and behavior gates
+release status:         source-complete; local tests pass; awaiting CUDA smoke and behavior gates
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -27,21 +27,19 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema25 source is implemented, not yet behavior-released.** The S-only
-> object/type ownership repair in
-> [`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md) is now the
-> active source. Local structure, CPU BF16, optimizer, deployment and checkpoint
-> tests pass. A fresh CUDA smoke and complete eight-epoch comparison are still
-> required before claiming action improvement. The independent G3-anchor
-> transmission defect remains deferred in
+> **Schema26 source is implemented, not yet behavior-released.** It closes the
+> source-proven G3-anchor transmission defect and the S typed double-ingress,
+> but a fresh CUDA smoke and complete eight-epoch comparison are still required
+> before claiming action improvement. W interval under-resolution, early action
+> lag and late gripper rebound remain behavior gates in
 > [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md).
 
-> **Near-term scope lock:** the next several repair iterations are S-focused.
-> They may change S internals and the minimum G/ObjectFactSet -> S and
-> S -> CoarseAction/W/P consumer wiring required to preserve object/type
-> ownership. They must not redesign G, W, P1/P2/P3, transition or bottom
-> internals. Any non-S edit needs a recorded, independently confirmed defect;
-> adjacency to S is not sufficient authorization to expand the repair scope.
+> **Near-term scope lock:** do not make another source change before the fresh
+> Schema26 smoke and behavior gates. If those gates fail after the exact G3
+> boundary is confirmed, attribution starts at the S→W interval boundary; G,
+> P1/P2/P3, transition core and bottom remain locked unless a new independent
+> source defect is first recorded. Adjacency is not authorization to expand
+> the repair scope.
 
 The active graph lives in `clearvla/mainline/`. It does not dispatch through
 the V39 trainer/runtime/trunk or a V-numbered capability branch. The manifest
@@ -49,7 +47,7 @@ owns serialized graph identity; typed interfaces and executable checks own
 shape, dtype, provenance and zero semantics. Do not add a version-wide
 `_validate_vXXX_*` contract.
 
-Schema25 retains the controlled Schema24 V120 fidelity recovery, including its
+Schema26 retains the controlled Schema24/V120 fidelity recovery, including its
 flow-time, endpoint-head, Teacher algebra, support/selector split, non-finite
 sentinel and the following four source-audited boundaries:
 
@@ -60,18 +58,26 @@ sentinel and the following four source-audited boundaries:
   where it is physically observed.
 
 It also retains V120 AdamW decay and decoder-local then global clipping.
-Schema25 makes one bounded S ownership change:
+Schema26 keeps Schema25's S ownership boundary and makes four source-proven
+repairs:
 
-- S separates its supervised public interval carrier from optional typed
-  relevance and preserves `[interval,K,type]` until named consumers;
+- S scores the public common carrier and zero-mean interval innovation
+  separately, then combines them inside the selector's remaining bounded score
+  range; the differential branch uses the zero-preserving 0.25 variance floor,
+  so identical intervals remain zero and tiny residuals cannot be normalized
+  into confident differences;
 - semantic, appearance and geometry each compare only with a fixed zero null;
-- CoarseAction and W consume S-owned docks and no longer reread/reselect raw
-  typed facts through their own learned-null routers;
-- P1, P2, P3, transition and bottom internals are unchanged.
+- full `[interval,K,type]` typed values enter W exactly once through
+  `WorldIntentDock`; `ActionIntentDock` and CoarseAction cannot duplicate them;
+- P1 and transition share the exact completed G3 rollout; transition no longer
+  reconstructs four pseudo anchors from the public chart plus new identities;
+- the unconsumed `future_address` export/online grid-sampling path and the
+  bit-exact no-op proposal ablation are removed. The proposal dropout RNG draw
+  remains solely for V120 generator-cadence compatibility.
 
 No block, external loss weight, gain, quota, hard gate, entropy target,
-capacity or P1 learned null was added. Schema24 and older checkpoints cannot
-exact-resume Schema25.
+capacity or P1 learned null was added. Schema25 and older checkpoints cannot
+exact-resume Schema26.
 
 The post-epoch-1 source/log closure audit then corrected four remaining
 fidelity defects without changing the G/S/W/P or bottom topology:
@@ -83,13 +89,14 @@ fidelity defects without changing the G/S/W/P or bottom topology:
   motion for a static object;
 - the global-K binder no longer adds the public chart equally to every private
   candidate key;
-- validation diagnostics are spread across the full loader and proposal,
-  sampling and exact V120 execution ablations have separate coverage.
+- validation diagnostics are spread across the full loader; sampling and exact
+  V120 execution ablations have separate coverage. The proposal path is absent
+  from the V120 object policy and is no longer presented as a causal ablation.
   Primary deployment noise is restored to V120's deterministic per-batch
   stream (`37237 + one-based batch index`), and every ablation reuses that
   exact physical noise.
 
-These corrections and the Schema25 S parameter change alter the source and
+These corrections and the Schema26 transition/S boundary change alter the source and
 state-dict fingerprints. Use a fresh output directory.
 
 ## Active graph in execution order
@@ -113,12 +120,12 @@ T5 + observable state/executed-action history + ObjectFactSet
     -> StatelessObjectIntentOrganizer S
        protected goal/history/public-object values
        supervised public interval carrier [B,4,H]
-       per-type fixed-zero relevance [B,4,K,3,*]
+       common/differential per-type fixed-zero relevance [B,4,K,3,*]
        consumer-specific policy interval context
        24 temporal queries and state-change evidence
 
-ObjectFactSet public content/transport + S-owned WorldIntentDock
-    + causal clean CoarseActionIntent from ActionIntentDock
+ObjectFactSet public content/transport + S-owned WorldIntentDock (typed once)
+    + causal clean CoarseActionIntent from public ActionIntentDock
     -> W1: 4-8 and 8-16
     -> W2: 16-32 and 32-48, causally reading W1
     -> one supervised object-level FutureObjectDynamics field
@@ -145,7 +152,7 @@ one shared V120 action/context seed
     -> noisy-action query shared by P2/P3/transition/bottom
     -> current state, causal state history, compressed executed history
 
-G3 public chart plus four identity labels (known anchor-axis debt)
+exact completed G3 rollout shared with P1
     -> static 512-row ControlledTransitionSource, once per observation
 noisy action + V120 learned neutral + plan/history
     -> dynamic 512-row ControlledTransitionState, every dynamic forward
@@ -203,8 +210,9 @@ supports may change targets and losses, never deployment action.
    not read frame progress, phase labels, noisy action or future Teacher. Its
    public carrier is supervised separately from optional typed relevance.
    Semantic, appearance and geometry retain real K/type axes, each owns a
-   fixed-zero null comparison, and only S-owned docks may deliver these typed
-   values to CoarseAction or W.
+   fixed-zero null comparison. Full K/type values enter W only through
+   `WorldIntentDock`; CoarseAction is public-only. A named reduced policy
+   context may enter the existing factual/policy consumers.
 8. W1 owns the two near intervals and W2 the two far intervals. The only W
    value below W is directly supervised `FutureObjectDynamics`; no public or
    private free W carrier crosses into P.
@@ -235,9 +243,9 @@ supports may change targets and losses, never deployment action.
 12. P3 owns five V120 lanes: factual, precision, effect, temporal and
     state-change. It cannot reopen vision or consume a free W carrier.
 13. Transition static/dynamic frequency is model semantics: its current static
-    source builds once; real-versus-neutral coefficients read current noisy
-    action at every dynamic forward. Exact G3 anchor ownership is a separately
-    recorded open repair and is not silently assumed here.
+    source is the exact completed G3 rollout shared with P1 and builds once;
+    real-versus-neutral coefficients read current noisy action at every dynamic
+    forward. No public-chart reconstruction or second anchor identity is legal.
 14. Bottom source count/order/value semantics follow V120. Do not remove CVAE,
     workspace, P1/P2 contracts, Evidence MMDiT, capacity or execution to reduce
     memory or simplify the mainline.
@@ -271,7 +279,7 @@ StatelessIntentBundle (serialized compatibility name: ObjectIntentState)
   protected goal/history/public-object tokens
   public / policy interval carriers                      [B,4,H]
   typed relevance mass / value                           [B,4,K,3,1|R]
-  typed action components                                [B,4,3,H]
+    typed policy components                                [B,4,3,H]
   temporal queries / state-change evidence               [B,24,H] / [B,H]
 
 Consumer views
@@ -283,7 +291,6 @@ FutureObjectDynamics
   transport / covariance                                 [B,4,K,2|3]
   visibility / persistence / uncertainty                 [B,4,K,1]
   future selector validity                               [B,4,K,1]
-  future address (diagnostic only)                       [B,4,K,C,8,8]
 
 ObjectTopTrainingTargets
   current loss support                                   [B,K,C,1]
@@ -312,7 +319,7 @@ ControlledTransitionSource / State
 | P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, second visual read |
 | P2 | completed P1 fact, supervised W field, S, noisy-action query | RGB/DINO reopen, camera-expanded W, free W hidden |
 | P3 | P1 fact, consequence, S, noisy-action query | Teacher, RGB/DINO, proposal, free W carrier |
-| transition source | G3 public chart | W target, proposal, noisy action, Teacher |
+| transition source | exact completed G3 rollout | W target, proposal, noisy action, Teacher |
 | transition dynamic | source, shared V120 seed, plan | target action, Teacher, future proposal |
 | bottom | consequence, five P3 lanes, transition, seed, layer contracts | RGB/DINO, Teacher, duplicate W/P base |
 
@@ -366,9 +373,12 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- The Schema25 formal configuration measures `169,981,895` total and
-  `153,587,574` trainable parameters. Relative to the completed Schema24 graph,
-  the exact `-12,731,133` trainable delta is fully accounted for: S removes
+- The Schema26 formal configuration measures `169,979,847` total and
+  `153,585,526` trainable parameters. Relative to Schema25, the exact `-2,048`
+  delta is the removed transition-only four-row pseudo-anchor identity; no
+  bottom, P1, G, S or W parameter was removed. Relative to the completed
+  Schema24 graph, the exact `-12,733,181` trainable delta is fully accounted
+  for: S removes
   three duplicate `_CrossRead`s plus one shared learned-null router and adds
   three route-width relevance projections plus three temperatures
   (`-6,308,093`); CoarseAction removes three duplicate `_CrossRead`s and one
@@ -377,12 +387,12 @@ ControlledTransitionSource / State
 - Active manifest identity:
 
   ```text
-  schema:       25
+  schema:       26
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-  top:          v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_five_lane_p3
-  bottom:       restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_evidence_mmdit_dense512_execution
+  top:          v120_progressive_g123_dense_grounder_exact_p1_s_common_differential_k_typed_single_w_ingress_four_interval_w_five_lane_p3
+  bottom:       restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
   training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip
-  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated
+  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only
   ```
 
 Storage defaults:
@@ -420,15 +430,15 @@ Use new empty output directories:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema25_s_owned_typed_smoke \
-nohup bash scripts/smoke_mainline.sh > schema25_s_owned_typed_smoke.log 2>&1 &
+OUT_DIR=runs/schema26_g3_s_boundary_smoke \
+nohup bash scripts/smoke_mainline.sh > schema26_g3_s_boundary_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema25_s_owned_typed_b8 \
-nohup bash scripts/train_mainline.sh > schema25_s_owned_typed_b8.log 2>&1 &
+OUT_DIR=runs/schema26_g3_s_boundary_b8 \
+nohup bash scripts/train_mainline.sh > schema26_g3_s_boundary_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema25_s_owned_typed_b8 \
+  runs/schema26_g3_s_boundary_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

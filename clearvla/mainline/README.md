@@ -15,7 +15,7 @@ config / manifest / typed online and training inputs
   -> Pre-G local chart
   -> G1/G2/G3 progressive local grounding with an N=49 rematerialization
   -> one dense global K+null grounding objective
-  -> S public interval carrier + per-type [interval,K,type] relevance
+  -> S common/differential interval carrier + per-type [interval,K,type] relevance
   -> W1/W2 four-interval future object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy block
@@ -23,7 +23,7 @@ config / manifest / typed online and training inputs
   -> P3 five V120 typed lanes
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
-  -> per-ODE noisy-action controlled transition
+  -> exact completed-G3 anchor source + per-ODE noisy-action controlled transition
   -> V120 Evidence MMDiT / execution value / capacity bottom
 ```
 
@@ -34,6 +34,9 @@ The 24-row executed-history future proposal is an auxiliary supervised
 prediction in the recovered V120 object path. Its separate 4-recent +
 3-summary history encoding remains the observable executed-history condition
 used by the shared V120 canvas seed; it is not a P1 or controlled-action alias.
+The object policy masks proposal from G/P/bottom, so the V120-compatible
+proposal dropout RNG draw is retained but no deployment proposal ablation is
+reported.
 
 ## Package boundaries
 
@@ -72,13 +75,13 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        25
+schema:        26
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 24 and older are not exact-resume sources for schema 25. Formal runs
+Schema 25 and older are not exact-resume sources for schema 26. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
@@ -114,16 +117,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema25_s_owned_typed_smoke \
-nohup bash scripts/smoke_mainline.sh > schema25_s_owned_typed_smoke.log 2>&1 &
+OUT_DIR=runs/schema26_g3_s_boundary_smoke \
+nohup bash scripts/smoke_mainline.sh > schema26_g3_s_boundary_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema25_s_owned_typed_b8 \
-nohup bash scripts/train_mainline.sh > schema25_s_owned_typed_b8.log 2>&1 &
+OUT_DIR=runs/schema26_g3_s_boundary_b8 \
+nohup bash scripts/train_mainline.sh > schema26_g3_s_boundary_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -135,7 +138,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema25_s_owned_typed_b8 \
+  runs/schema26_g3_s_boundary_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

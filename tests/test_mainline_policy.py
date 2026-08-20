@@ -679,7 +679,7 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
     )
     assert metrics["condition_goal_keep"] == 0
     assert metrics["condition_action_history_keep"] == 0
-    assert metrics["condition_proposal_keep"] == 0
+    assert "condition_proposal_keep" not in metrics
 
     deployment_generator = torch.Generator().manual_seed(91)
     generator_state = deployment_generator.get_state().clone()
@@ -1248,11 +1248,18 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_g3(_module, args):
+        captured["g3_rollout"] = args[1]
+
+    handle = model.factual_reader.register_forward_pre_hook(capture_g3)
     cache, training_state, metrics = model.encode_online(
         batch.online,
         geometry_supervision=False,
         collect_diagnostics=True,
     )
+    handle.remove()
     assert tuple(cache.factual_dock.protected_detail.shape[1:3]) == (
         24,
         config.dimensions.action_basis_tokens,
@@ -1277,6 +1284,12 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
         config.dimensions.hidden_size,
     )
     assert metrics["controlled_transition_source_spatial_variation"] >= 0
+    assert metrics["controlled_transition_source_anchor_variation"] >= 0
+    assert torch.equal(
+        cache.transition_source.selector,
+        captured["g3_rollout"],
+    )
+    assert not hasattr(model.transition, "interval_identity")
     assert cache.transition_source.selector.shape[1] == (
         4 * config.dimensions.num_cameras * 8 * 8
     )
@@ -1405,29 +1418,9 @@ def test_validation_execution_interventions_match_the_native_v120_modes() -> Non
         assert outputs[mode].metrics["bottom_execution_output_block_count"] == 3
 
 
-def test_proposal_ablation_does_not_alias_p1_or_controlled_transition() -> None:
-    torch.manual_seed(232)
-    config = _config()
-    model = ClearVLAMainlinePolicy(config).eval()
-    batch = _batch(config)
-    with torch.no_grad():
-        cache, training_state, _ = model.encode_online(batch.online)
-        original_tokens = training_state.history_proposal.tokens.clone()
-        ablated = model.proposal_ablation_cache(cache, training_state)
-    assert torch.equal(training_state.history_proposal.tokens, original_tokens)
-    assert torch.equal(ablated.top.intent.interval_queries, cache.top.intent.interval_queries)
-    assert torch.equal(
-        ablated.top.predicted_dynamics.semantic_delta,
-        cache.top.predicted_dynamics.semantic_delta,
-    )
-    assert torch.equal(
-        ablated.factual_dock.protected_detail,
-        cache.factual_dock.protected_detail,
-    )
-    assert torch.equal(
-        ablated.transition_source.selector,
-        cache.transition_source.selector,
-    )
+def test_inactive_proposal_path_has_no_deployment_ablation_api() -> None:
+    model = ClearVLAMainlinePolicy(_config()).eval()
+    assert not hasattr(model, "proposal_ablation_cache")
 
 
 def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlations() -> None:

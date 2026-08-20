@@ -253,7 +253,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         reliability = torch.zeros_like(uncertainty)
         visibility_probability = (1.0 + visibility.float()).clamp(0.0, 1.0)
         future_selector_validity = facts.validity[:, None].float() * visibility_probability
-        address = self._transport_address(facts.object_to_chart, object_transport)
         current_reference = facts.content.detach()
         return FutureObjectDynamics(
             current_reference=current_reference,
@@ -266,53 +265,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             uncertainty=uncertainty,
             reliability=reliability,
             future_selector_validity=future_selector_validity,
-            future_address=address,
             object_coordinates=facts.coordinates.to(dtype=hidden.dtype),
         )
-
-    @staticmethod
-    def _transport_address(current: Tensor, transport: Tensor) -> Tensor:
-        """Differentiably translate the complete current object chart."""
-
-        batch, objects, cameras, rows, columns = current.shape
-        intervals = int(transport.shape[1])
-        axis_y = torch.linspace(
-            -1.0, 1.0, rows, device=current.device, dtype=torch.float32
-        )
-        axis_x = torch.linspace(
-            -1.0, 1.0, columns, device=current.device, dtype=torch.float32
-        )
-        coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
-        base_grid = torch.stack((coordinate_x, coordinate_y), dim=-1)
-        # This diagnostic applies the one physical object displacement to
-        # each *existing* camera chart.  Let the camera axis come from the
-        # current object address itself; do not manufacture a camera-valued W
-        # prediction by expanding transport.
-        camera_grid = (
-            base_grid.reshape(1, 1, 1, 1, rows, columns, 2)
-            + torch.zeros_like(current.float()[:, None, :, :, :, :, None])
-        )
-        sampling_grid = (
-            camera_grid
-            - transport.float()[:, :, :, None, None, None, :]
-        )
-        source = current.float()[:, None].expand(
-            -1, intervals, -1, -1, -1, -1
-        )
-        sampled = F.grid_sample(
-            source.reshape(batch * intervals * objects * cameras, 1, rows, columns),
-            sampling_grid.reshape(
-                batch * intervals * objects * cameras, rows, columns, 2
-            ),
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=True,
-        ).reshape(batch, intervals, objects, cameras, rows, columns)
-        source_mass = source.sum(dim=(-2, -1), keepdim=True)
-        sampled_mass = sampled.sum(dim=(-2, -1), keepdim=True)
-        sampled = sampled * source_mass / sampled_mass.clamp_min(1e-8)
-        sampled = torch.where(sampled_mass > 1e-8, sampled, source)
-        return sampled.to(dtype=current.dtype)
 
     def forward_w1(
         self,
@@ -396,9 +350,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     far_field.future_selector_validity,
                 ),
                 dim=1,
-            ),
-            future_address=torch.cat(
-                (near_field.future_address, far_field.future_address), dim=1
             ),
             object_coordinates=near_field.object_coordinates,
         )

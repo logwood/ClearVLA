@@ -1394,6 +1394,91 @@ class AuditPolicyLogsTest(unittest.TestCase):
             "incomplete",
         )
 
+    def test_schema26_recovery_does_not_require_removed_proposal_ablation(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema26"
+        candidate["manifest"]["architecture_schema"] = 26
+
+        owner_rows = (
+            "grounder",
+            "intent",
+            "dynamics",
+            "p1_factual",
+            "p2_effect_reader",
+            "p3_compiler",
+            "v120_canvas_seed",
+            "v120_layer_contracts",
+            "bottom_evidence_adapter",
+            "bottom_policy_bridge",
+            "bottom_capacity",
+            "bottom_execution",
+        )
+        candidate["gradients"] = {
+            f"gradient_{stage}_{owner}_l2": {"tail_median": 0.01}
+            for stage in ("raw", "postlocal", "postglobal")
+            for owner in owner_rows
+        }
+        candidate["gradients"].update(
+            {
+                "gradient_postlocal_bottom_decoder_l2": {"tail_median": 0.5},
+                "gradient_postglobal_global_l2": {"tail_median": 0.5},
+            }
+        )
+        for record in candidate["epochs"]:
+            validation = record["val"]
+            validation.pop("validation_ablation_coverage", None)
+            validation.pop("validation_diagnostic_primary_rmse_physical", None)
+            validation.pop(
+                "validation_proposal_zero_mse_gain_vs_primary_physical", None
+            )
+            validation.pop(
+                "validation_execution_no_updates_mse_gain_vs_primary_physical", None
+            )
+            validation.pop(
+                "validation_execution_full_updates_mse_gain_vs_primary_physical", None
+            )
+            validation.update(
+                {
+                    "validation_sampling_diagnostic_coverage": 1.0,
+                    "validation_execution_ablation_coverage": 1.0,
+                    "validation_execution_primary_rmse_physical": 0.08,
+                    "validation_execution_hard_mse_gain_vs_primary_physical": 0.0,
+                    "validation_execution_neutral_mse_gain_vs_primary_physical": 0.0,
+                    "validation_execution_full_capacity_mse_gain_vs_primary_physical": 0.0,
+                    "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical": 0.0,
+                }
+            )
+
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        self.assertNotIn("causal_ablation/proposal_ablation_coverage", checks)
+        self.assertNotIn("causal_ablation/proposal_zero", checks)
+        self.assertEqual(checks["causal_ablation/sampling_diagnostic_coverage"], "pass")
+        self.assertEqual(checks["causal_ablation/execution_ablation_coverage"], "pass")
+        self.assertEqual(checks["causal_ablation/execution_hard"], "pass")
+
+        for record in candidate["epochs"]:
+            validation = record["val"]
+            for name in tuple(validation):
+                if name.startswith("validation_sampling_diagnostic_") or name.startswith(
+                    "validation_execution_"
+                ):
+                    validation.pop(name)
+        early_assessment = _recovery_assessment(baseline, candidate)
+        early_checks = {
+            item["name"]: item["status"] for item in early_assessment["checks"]
+        }
+        self.assertNotIn("causal_ablation/proposal_zero", early_checks)
+        self.assertEqual(
+            early_checks["causal_ablation/sampling_diagnostic_coverage"],
+            "incomplete",
+        )
+        self.assertEqual(
+            early_checks["causal_ablation/execution_ablation_coverage"],
+            "incomplete",
+        )
+
     def test_aligned_batch_2200_does_not_use_later_epoch_tail(self) -> None:
         run = ParsedRun(path=self.tmp_path / "aligned.log", label="aligned")
         run.batch_points = [

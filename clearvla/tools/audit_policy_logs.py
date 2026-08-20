@@ -818,19 +818,31 @@ V94_ALIASES.update(
             "history_innov": "object_intent_history_innovation_rms",
             "object_innov": "object_intent_object_innovation_rms",
             "typed_innov": "object_intent_typed_innovation_rms",
-            "typed_action": "object_intent_typed_action_context_rms",
+            "typed_policy": "object_intent_typed_policy_context_rms",
+            "typed_action_legacy": "object_intent_typed_action_context_rms",
+            "typed_diff_denom": "object_intent_typed_differential_norm_denominator_min",
+            "typed_unsupported": "object_intent_typed_fact_unsupported_fraction",
             "sem_rel": "object_intent_semantic_relevance_mass",
             "sem_null": "object_intent_semantic_null_mass",
+            "sem_selector_null": "object_intent_semantic_selector_null_probability",
+            "sem_common_score": "object_intent_semantic_common_score_abs",
+            "sem_diff_score": "object_intent_semantic_differential_score_abs",
             "sem_value": "object_intent_semantic_selected_value_rms",
             "sem_k_var": "object_intent_semantic_object_variation",
             "sem_i_var": "object_intent_semantic_interval_variation",
             "app_rel": "object_intent_appearance_relevance_mass",
             "app_null": "object_intent_appearance_null_mass",
+            "app_selector_null": "object_intent_appearance_selector_null_probability",
+            "app_common_score": "object_intent_appearance_common_score_abs",
+            "app_diff_score": "object_intent_appearance_differential_score_abs",
             "app_value": "object_intent_appearance_selected_value_rms",
             "app_k_var": "object_intent_appearance_object_variation",
             "app_i_var": "object_intent_appearance_interval_variation",
             "geo_rel": "object_intent_geometry_relevance_mass",
             "geo_null": "object_intent_geometry_null_mass",
+            "geo_selector_null": "object_intent_geometry_selector_null_probability",
+            "geo_common_score": "object_intent_geometry_common_score_abs",
+            "geo_diff_score": "object_intent_geometry_differential_score_abs",
             "geo_value": "object_intent_geometry_selected_value_rms",
             "geo_k_var": "object_intent_geometry_object_variation",
             "geo_i_var": "object_intent_geometry_interval_variation",
@@ -1070,33 +1082,45 @@ STRUCTURE_KEYS = (
     "object_intent_action_innovation_rms",
     "object_intent_state_change_evidence_rms",
     "object_intent_typed_carrier_ratio",
+    "object_intent_typed_policy_context_rms",
     "object_intent_typed_action_context_rms",
+    "object_intent_typed_differential_norm_denominator_min",
+    "object_intent_typed_fact_unsupported_fraction",
     "object_intent_semantic_route_raw_rms",
     "object_intent_semantic_relevance_mass",
     "object_intent_semantic_null_mass",
+    "object_intent_semantic_selector_null_probability",
     "object_intent_semantic_selected_value_rms",
     "object_intent_semantic_object_variation",
     "object_intent_semantic_interval_variation",
     "object_intent_semantic_action_context_rms",
     "object_intent_semantic_score_abs",
+    "object_intent_semantic_common_score_abs",
+    "object_intent_semantic_differential_score_abs",
     "object_intent_semantic_temperature",
     "object_intent_appearance_route_raw_rms",
     "object_intent_appearance_relevance_mass",
     "object_intent_appearance_null_mass",
+    "object_intent_appearance_selector_null_probability",
     "object_intent_appearance_selected_value_rms",
     "object_intent_appearance_object_variation",
     "object_intent_appearance_interval_variation",
     "object_intent_appearance_action_context_rms",
     "object_intent_appearance_score_abs",
+    "object_intent_appearance_common_score_abs",
+    "object_intent_appearance_differential_score_abs",
     "object_intent_appearance_temperature",
     "object_intent_geometry_route_raw_rms",
     "object_intent_geometry_relevance_mass",
     "object_intent_geometry_null_mass",
+    "object_intent_geometry_selector_null_probability",
     "object_intent_geometry_selected_value_rms",
     "object_intent_geometry_object_variation",
     "object_intent_geometry_interval_variation",
     "object_intent_geometry_action_context_rms",
     "object_intent_geometry_score_abs",
+    "object_intent_geometry_common_score_abs",
+    "object_intent_geometry_differential_score_abs",
     "object_intent_geometry_temperature",
     "object_w_object_key_innovation_rms",
     "object_w_object_value_innovation_rms",
@@ -3909,6 +3933,10 @@ def _recovery_assessment(
 
     gradients = candidate.get("gradients", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema26 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 26
+    )
     schema24 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 24
@@ -3969,9 +3997,18 @@ def _recovery_assessment(
         if candidate.get("epochs")
         else {}
     )
-    exact_v120_ablations = "validation_execution_ablation_coverage" in latest_val
+    # Schema26 removed the bit-exact proposal no-op from the runtime ABI.  An
+    # early run with no validation row must remain on that ABI and report the
+    # real sampling/execution checks as incomplete; it must not fall back to a
+    # legacy branch that resurrects proposal diagnostics.
+    exact_v120_ablations = (
+        schema26 or "validation_execution_ablation_coverage" in latest_val
+    )
     if exact_v120_ablations:
-        for stem in ("sampling_diagnostic", "proposal_ablation", "execution_ablation"):
+        coverage_stems = ["sampling_diagnostic", "execution_ablation"]
+        if not schema26:
+            coverage_stems.insert(1, "proposal_ablation")
+        for stem in coverage_stems:
             coverage = latest_val.get(f"validation_{stem}_coverage")
             record(
                 f"causal_ablation/{stem}_coverage",
@@ -3980,27 +4017,28 @@ def _recovery_assessment(
                 else "incomplete",
                 candidate_value=coverage,
             )
-        proposal_primary = latest_val.get("validation_proposal_primary_rmse_physical")
-        proposal_allowed = (
-            0.01 * float(proposal_primary) ** 2
-            if isinstance(proposal_primary, (int, float))
-            and math.isfinite(float(proposal_primary))
-            else None
-        )
-        proposal_gain = latest_val.get(
-            "validation_proposal_zero_mse_gain_vs_primary_physical"
-        )
-        record(
-            "causal_ablation/proposal_zero",
-            (
-                "incomplete"
-                if proposal_allowed is None or not isinstance(proposal_gain, (int, float))
-                else ("pass" if float(proposal_gain) <= proposal_allowed else "fail")
-            ),
-            baseline_value=proposal_allowed,
-            candidate_value=proposal_gain,
-            detail="positive gain means removing the path improves action",
-        )
+        if not schema26:
+            proposal_primary = latest_val.get("validation_proposal_primary_rmse_physical")
+            proposal_allowed = (
+                0.01 * float(proposal_primary) ** 2
+                if isinstance(proposal_primary, (int, float))
+                and math.isfinite(float(proposal_primary))
+                else None
+            )
+            proposal_gain = latest_val.get(
+                "validation_proposal_zero_mse_gain_vs_primary_physical"
+            )
+            record(
+                "causal_ablation/proposal_zero",
+                (
+                    "incomplete"
+                    if proposal_allowed is None or not isinstance(proposal_gain, (int, float))
+                    else ("pass" if float(proposal_gain) <= proposal_allowed else "fail")
+                ),
+                baseline_value=proposal_allowed,
+                candidate_value=proposal_gain,
+                detail="positive gain means removing the path improves action",
+            )
         execution_primary = latest_val.get(
             "validation_execution_primary_rmse_physical"
         )

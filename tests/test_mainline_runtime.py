@@ -35,7 +35,6 @@ def test_active_logging_keeps_every_current_top_owner() -> None:
         "object_w2_semantic_delta_rms": 0.7,
         "condition_goal_keep": 0.95,
         "condition_action_history_keep": 0.90,
-        "condition_proposal_keep": 0.75,
         "learning_rate_bottom_decoder": 5.6e-5,
         "inactive_ancestry_metric": 0.8,
     }
@@ -109,6 +108,10 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "object_w_typed_contribution_rms": 0.32,
             "object_intent_semantic_route_raw_rms": 0.33,
             "object_intent_semantic_relevance_mass": 0.34,
+            "object_intent_semantic_selector_null_probability": 0.36,
+            "object_intent_typed_fact_unsupported_fraction": 0.0,
+            "object_intent_semantic_differential_score_abs": 0.37,
+            "object_intent_typed_differential_norm_denominator_min": 0.25,
             "object_w_semantic_input_object_variation": 0.35,
             "object_w2_interval_0_semantic_delta_rms": 0.321,
             "object_teacher_interval_0_semantic_delta_rms": 0.322,
@@ -120,9 +123,7 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "bottom_controller_common_ratio": 0.51,
             "bottom_block_1_executed_update_rms": 0.52,
             "validation_sampling_diagnostic_coverage": 0.09,
-            "validation_proposal_ablation_coverage": 0.09,
             "validation_execution_ablation_coverage": 0.04,
-            "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
             "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
         },
     )
@@ -134,6 +135,10 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "object_w_typed_contribution_rms=0.32" in joined
     assert "object_intent_semantic_route_raw_rms=0.33" in joined
     assert "object_intent_semantic_relevance_mass=0.34" in joined
+    assert "object_intent_semantic_selector_null_probability=0.36" in joined
+    assert "object_intent_typed_fact_unsupported_fraction=0" in joined
+    assert "object_intent_semantic_differential_score_abs=0.37" in joined
+    assert "object_intent_typed_differential_norm_denominator_min=0.25" in joined
     assert "object_w_semantic_input_object_variation=0.35" in joined
     assert "object_w2_interval_0_semantic_delta_rms=0.321" in joined
     assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
@@ -145,9 +150,7 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "bottom_controller_common_ratio=0.51" in joined
     assert "bottom_block_1_executed_update_rms=0.52" in joined
     assert "validation_sampling_diagnostic_coverage=0.09" in joined
-    assert "validation_proposal_ablation_coverage=0.09" in joined
     assert "validation_execution_ablation_coverage=0.04" in joined
-    assert "validation_proposal_zero_mse_gain_vs_primary_physical=-0.01" in joined
     assert "validation_execution_full_capacity_mse_gain_vs_primary_physical=-0.02" in joined
 
 

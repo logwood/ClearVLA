@@ -344,7 +344,6 @@ def test_teacher_is_no_grad_and_supports_non_identity_transport() -> None:
         )
     target.validate()
     assert not target.semantic_delta.requires_grad
-    assert target.future_address.shape == (2, 4, 4, 2, 4, 4)
     for value in (
         target.successor_content,
         target.semantic_delta,
@@ -354,7 +353,6 @@ def test_teacher_is_no_grad_and_supports_non_identity_transport() -> None:
         target.persistence,
         target.uncertainty,
         target.validity,
-        target.future_address,
     ):
         assert value.dtype == torch.float32
         assert torch.isfinite(value).all()
@@ -398,7 +396,6 @@ def test_object_permutation_is_equivariant_through_teacher_and_p2() -> None:
         persistence=dynamics.persistence[:, :, permutation],
         uncertainty=dynamics.uncertainty[:, :, permutation],
         validity=dynamics.validity[:, :, permutation],
-        future_address=dynamics.future_address[:, :, permutation],
         object_coordinates=dynamics.object_coordinates[:, permutation],
     )
     reader = ObjectFutureEffectReader(hidden=32, content_dim=16)
@@ -534,7 +531,6 @@ def test_w_audit_switch_does_not_change_future_dynamics() -> None:
         "persistence",
         "uncertainty",
         "validity",
-        "future_address",
     ):
         torch.testing.assert_close(
             getattr(w1_without_audit, name),
@@ -577,7 +573,6 @@ def test_w_audit_switch_does_not_change_future_dynamics() -> None:
         "persistence",
         "uncertainty",
         "validity",
-        "future_address",
     ):
         torch.testing.assert_close(
             getattr(w2_without_audit, name),

@@ -32,6 +32,7 @@ def test_mainline_config_loads_one_flat_active_preset() -> None:
     assert config.data.information_uniform_fraction == 0.50
     assert config.data.information_event_fraction == 0.125
     assert config.data.information_motion_quantile == 0.70
+    assert not hasattr(config.runtime, "eval_proposal_ablation_batches")
     assert config.bottom.gripper_field_dim == 6
     assert config.bottom.physical_decode_delta_blend == 0.25
     assert config.objectives.horizon_tail_emphasis == 0.20

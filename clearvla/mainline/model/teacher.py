@@ -260,17 +260,6 @@ class ObjectFutureTeacher(nn.Module):
         # a calibration diagnostic and must not contract a diffuse-but-visible
         # target toward the current fact a second time.
         successor_per_support = matched + null_probability * current_reference
-        current_address = facts.object_to_chart.detach().float()
-        current_address = current_address / current_address.flatten(2).sum(
-            dim=-1, keepdim=True
-        )[:, :, None, None].clamp_min(1e-6)
-        # ``future_address`` remains diagnostic-only in the active mainline,
-        # but preserve the same single null fallback and unit-mass identity
-        # semantics as content.  Entropy must not rewrite it either.
-        address_per_support = (
-            candidate_posterior
-            + null_probability[..., None, None] * current_address[:, None]
-        )
 
         successor_rows: list[Tensor] = []
         transport_rows: list[Tensor] = []
@@ -279,7 +268,6 @@ class ObjectFutureTeacher(nn.Module):
         persistence_rows: list[Tensor] = []
         uncertainty_rows: list[Tensor] = []
         reliability_rows: list[Tensor] = []
-        address_rows: list[Tensor] = []
         support_counts: list[Tensor] = []
         for lower, upper in INTERVAL_BOUNDS:
             selected = ((offsets >= lower) & (offsets <= upper)).float()
@@ -338,13 +326,6 @@ class ObjectFutureTeacher(nn.Module):
                 ).sqrt()
             )
             reliability_rows.append(torch.einsum("bf,bfkd->bkd", weight, reliability_per_support))
-            address_rows.append(
-                torch.einsum(
-                    "bf,bfkcyx->bkcyx",
-                    weight,
-                    address_per_support,
-                )
-            )
             support_counts.append(selected.sum(dim=1).float().mean())
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
@@ -353,7 +334,6 @@ class ObjectFutureTeacher(nn.Module):
         persistence_probability = torch.stack(persistence_rows, dim=1)
         uncertainty = torch.stack(uncertainty_rows, dim=1)
         reliability = torch.stack(reliability_rows, dim=1)
-        future_address = torch.stack(address_rows, dim=1)
         current_validity = facts.validity.detach().float()[:, None]
         # Current object facts are visible and persistent by construction.
         # Export changes around that current state so a neutral/static future
@@ -372,7 +352,6 @@ class ObjectFutureTeacher(nn.Module):
             uncertainty=uncertainty,
             reliability=reliability,
             future_selector_validity=future_selector_validity,
-            future_address=future_address,
             object_coordinates=facts.coordinates.detach().float(),
         )
         target.validate()
@@ -439,7 +418,6 @@ class ObjectFutureTeacher(nn.Module):
             metrics[f"{row}_visibility_change"] = visibility_change[:, index].mean()
             metrics[f"{row}_persistence_change"] = persistence_change[:, index].mean()
             metrics[f"{row}_reliability"] = reliability[:, index].mean()
-            metrics[f"{row}_address_mass"] = future_address[:, index].sum(dim=(-3, -2, -1)).mean()
         return target, metrics
 
     @staticmethod

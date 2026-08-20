@@ -337,14 +337,6 @@ class ActionIntentDock:
     public_interval_carrier: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
     public_object_memory: Tensor  # [B,K,H]
-    typed_action_components: Tensor  # [B,I,type,H]
-
-    @property
-    def typed_action_context(self) -> Tensor:
-        # Type identity is formed before this consumer-specific reduction.
-        # The fixed denominator preserves exact zero when every optional type
-        # is absent; normalizing by selected mass would destroy that contract.
-        return self.typed_action_components.sum(dim=2) / (3.0**0.5)
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -359,11 +351,6 @@ class ActionIntentDock:
             self.public_object_memory.shape[0]
         ) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
-        _shape(
-            self.typed_action_components,
-            (batch, 4, 3, hidden),
-            "action-intent typed components",
-        )
 
 
 @dataclass(frozen=True)
@@ -457,7 +444,7 @@ class ObjectIntentState:
     state_change_evidence: Tensor  # [B,H]
     typed_relevance_mass: Tensor  # [B,4,K,3,1]
     typed_relevance_value: Tensor  # [B,4,K,3,R]
-    typed_action_components: Tensor  # [B,4,3,H]
+    typed_policy_components: Tensor  # [B,4,3,H]
     goal_attention: Tensor  # [B,4,Lg]
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
@@ -486,7 +473,6 @@ class ObjectIntentState:
             public_interval_carrier=self.public_interval_carrier,
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
-            typed_action_components=self.typed_action_components,
         )
 
     def world_dock(self) -> WorldIntentDock:
@@ -546,9 +532,9 @@ class ObjectIntentState:
         ) != (batch, 4, objects, 3):
             raise ValueError("typed relevance value lost interval/object/type identity")
         _shape(
-            self.typed_action_components,
+            self.typed_policy_components,
             (batch, 4, 3, hidden),
-            "typed action components",
+            "typed policy components",
         )
         self.action_dock().validate(hidden=hidden)
         self.world_dock().validate(hidden=hidden)
@@ -575,7 +561,7 @@ class ObjectIntentState:
             state_change_evidence=self.state_change_evidence,
             typed_relevance_mass=self.typed_relevance_mass[:, :, index],
             typed_relevance_value=self.typed_relevance_value[:, :, index],
-            typed_action_components=self.typed_action_components,
+            typed_policy_components=self.typed_policy_components,
             goal_attention=self.goal_attention,
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
@@ -720,7 +706,6 @@ class FutureObjectDynamics:
     uncertainty: Tensor  # [B,I,K,1]
     reliability: Tensor  # calibration only [B,I,K,1]
     future_selector_validity: Tensor  # online P2 selector [B,I,K,1]
-    future_address: Tensor  # [B,I,K,C,Y,X]
     object_coordinates: Tensor  # [B,K,2]
 
     @property
@@ -737,12 +722,6 @@ class FutureObjectDynamics:
             )
         _shape(self.current_reference, (batch, objects, width), "current object reference")
         _shape(self.successor_content, (batch, intervals, objects, width), "successor content")
-        if self.future_address.ndim != 6 or tuple(self.future_address.shape[:3]) != (
-            batch,
-            intervals,
-            objects,
-        ):
-            raise ValueError("future address must be [B,I,K,C,Y,X]")
         _shape(
             self.transport_mean,
             (batch, intervals, objects, 2),
@@ -787,7 +766,6 @@ class FutureObjectDynamics:
             uncertainty=self.uncertainty[:, :, index],
             reliability=self.reliability[:, :, index],
             future_selector_validity=self.future_selector_validity[:, :, index],
-            future_address=self.future_address[:, :, index],
             object_coordinates=self.object_coordinates[:, index],
         )
 
@@ -798,7 +776,6 @@ class FutureObjectDynamics:
         batch, objects, width = current.shape
         zeros = current.new_zeros(batch, intervals, objects, width)
         scalar = current.new_zeros(batch, intervals, objects, 1)
-        address = facts.object_to_chart[:, None].expand(-1, intervals, -1, -1, -1, -1)
         return cls(
             current_reference=current,
             successor_content=current[:, None].expand(-1, intervals, -1, -1),
@@ -812,7 +789,6 @@ class FutureObjectDynamics:
             future_selector_validity=facts.validity[:, None].expand(
                 -1, intervals, -1, -1
             ),
-            future_address=address,
             object_coordinates=facts.coordinates.to(dtype=current.dtype),
         )
 

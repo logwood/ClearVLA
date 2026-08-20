@@ -215,7 +215,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             self.config.top.action_history_condition_dropout,
             dtype=policy_input.history.executed_action_history.dtype,
         )
-        proposal_keep = condition_keep(
+        # V120 sampled this mask after goal/history even though the explicit
+        # object path masks proposal from G, P and bottom context.  Preserve
+        # the owned-generator draw cadence, but do not expose a discarded
+        # value as an active condition metric.
+        _proposal_keep_rng_compat = condition_keep(
             self.config.top.proposal_condition_dropout,
             dtype=policy_input.history.executed_action_history.dtype,
         )
@@ -300,9 +304,10 @@ class ClearVLAMainlinePolicy(nn.Module):
             evidence.grounding.late_detail,
             progressive_address=evidence.progressive_state,
         )
+        g3_rollout = grounding_canvas[:, grounding_slices["rollout"]]
         updated_trajectory, p1_metrics = self.factual_reader(
             clean_trajectory,
-            grounding_canvas[:, grounding_slices["rollout"]],
+            g3_rollout,
             p1_detail,
             phase_context=factual_intent.phase_context,
             condition_query_context=factual_intent.condition_query_context,
@@ -337,7 +342,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             ),
         }
         transition_source, transition_metrics = self.transition.build_source(
-            facts=context.facts,
+            g3_rollout=g3_rollout,
             collect_diagnostics=collect_diagnostics,
         )
         cache = OnlinePolicyCache(
@@ -372,7 +377,6 @@ class ClearVLAMainlinePolicy(nn.Module):
             **transition_metrics,
             "condition_goal_keep": goal_keep.detach().float().mean(),
             "condition_action_history_keep": history_keep.detach().float().mean(),
-            "condition_proposal_keep": proposal_keep.detach().float().mean(),
         }
 
     def build_training_targets(
@@ -481,29 +485,6 @@ class ClearVLAMainlinePolicy(nn.Module):
                 **bottom_metrics,
             },
         )
-
-    @torch.no_grad()
-    def proposal_ablation_cache(
-        self,
-        cache: OnlinePolicyCache,
-        training_state: OnlineTrainingState,
-    ) -> OnlinePolicyCache:
-        """Return the unchanged V120 object cache for a proposal intervention.
-
-        In the recovered object path the auxiliary 24-row future proposal is
-        not a P1 query and is not the controlled action.  S still reads
-        observable executed history, the V120 seed retains the separately
-        compressed history memory, and transition reads the current noisy
-        action at each ODE step.  Treating proposal-zero as either boundary
-        would recreate the schema-20 alias this repair removes.
-        """
-
-        if self.training:
-            raise ValueError("proposal ablation cache is evaluation-only")
-        cache.validate(self.config)
-        training_state.validate(self.config)
-        return cache
-
 
 __all__ = [
     "ClearVLAMainlinePolicy",

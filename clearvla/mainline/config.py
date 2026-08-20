@@ -400,7 +400,6 @@ class RuntimeConfig:
     max_train_batches: int = 0
     max_val_batches: int = 0
     eval_sampling_diagnostic_batches: int = 16
-    eval_proposal_ablation_batches: int = 16
     eval_execution_ablation_batches: int = 8
 
     def validate(self) -> None:
@@ -414,7 +413,6 @@ class RuntimeConfig:
             self.max_train_batches,
             self.max_val_batches,
             self.eval_sampling_diagnostic_batches,
-            self.eval_proposal_ablation_batches,
             self.eval_execution_ablation_batches,
         )
         if any(int(value) < 0 for value in limits):
