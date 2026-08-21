@@ -27,6 +27,7 @@ class ObjectW1WorkingState:
     near_typed: Tensor
     far_typed: Tensor
     near_field: FutureObjectDynamics
+    intent_boundary_field: FutureObjectDynamics
 
 
 class _ObjectIntervalBlock(nn.Module):
@@ -143,12 +144,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         collect_diagnostics: bool,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         intent.validate(hidden=self.hidden)
-        objects = self.object_content(facts.content)
+        public_object = self.object_content(facts.public_content)[:, None]
+        private_objects = self.object_content(facts.content_innovation)
+        # Preserve the old absolute object coordinate exactly while exposing
+        # its provenance: one public base plus K object-owned innovations.
+        # No new projection, capacity, or gain is introduced here.
+        objects = public_object + private_objects
         transport_prior = self.object_transport_prior(
             facts.transport_prior.to(dtype=facts.content.dtype)
         )
         interval = (
-            intent.public_interval_carrier
+            intent.interval_condition_innovation
             + action.tokens
         )
         normalized_goal = self.goal_memory_norm(intent.protected_goal_memory)
@@ -175,6 +181,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
             typed_components.append(component)
         typed_components_value = torch.stack(typed_components, dim=3)
+        # Typed values are a zero-preserving W working state, not a decoder
+        # sidecar.  Public context may modulate their local update but cannot
+        # suppress them to zero (the coefficient is bounded in [0.5, 1.5]).
+        typed_components_value = typed_components_value * (
+            1.0 + 0.5 * torch.tanh(base.float())[:, :, :, None]
+        ).to(dtype=typed_components_value.dtype)
         if not collect_diagnostics:
             return base, typed_components_value, {}
         if goal_attention is None:
@@ -197,6 +209,20 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "object_w_public_content_rms": public_object.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_object_innovation_rms": private_objects.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_object_innovation_variation": private_objects.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
         }
         for type_index, name in enumerate(("semantic", "appearance", "geometry")):
             component = typed_components_value[..., type_index, :].detach().float()
@@ -236,18 +262,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     ) -> FutureObjectDynamics:
         if tuple(typed_sidecars.shape) != (*hidden.shape[:-1], 3, hidden.shape[-1]):
             raise ValueError("W typed sidecars must align as [B,I,K,3,H]")
-        # W1/W2 public state contains object content, goal and clean-action
-        # context.  It may condition a typed field, but it must not be an
-        # additive value that can predict every field while ignoring S's
-        # semantic/appearance/geometry boundary.  The residual modulation is
-        # bounded in (0, 2); a zero sidecar therefore remains algebraic zero,
-        # while a real sidecar still receives the complete W1/W2 context.
-        public_modulation = (
-            1.0 + torch.tanh(hidden.float())
-        ).to(dtype=typed_sidecars.dtype)
-        semantic_hidden = typed_sidecars[..., 0, :] * public_modulation
-        appearance_hidden = typed_sidecars[..., 1, :] * public_modulation
-        geometry_hidden = typed_sidecars[..., 2, :] * public_modulation
+        # The typed states have already crossed the W blocks.  Decode those
+        # exact states directly; multiplying them by the final public carrier
+        # here previously re-publicized and often suppressed the very
+        # interval/object variation W was meant to preserve.
+        semantic_hidden = typed_sidecars[..., 0, :]
+        appearance_hidden = typed_sidecars[..., 1, :]
+        geometry_hidden = typed_sidecars[..., 2, :]
         semantic_delta = self.delta_head(semantic_hidden)
         object_transport = 0.50 * torch.tanh(
             self.transport_head(geometry_hidden).float()
@@ -271,6 +292,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             * facts.existence.detach()[:, None].float().clamp(0.0, 1.0)
             * visibility_probability
         )
+        current_selector_validity = (
+            facts.validity.float()
+            * facts.existence.detach().float().clamp(0.0, 1.0)
+        )
         current_reference = facts.content.detach()
         return FutureObjectDynamics(
             current_reference=current_reference,
@@ -282,9 +307,46 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             persistence=persistence,
             uncertainty=uncertainty,
             reliability=reliability,
+            current_selector_validity=current_selector_validity,
             future_selector_validity=future_selector_validity,
             object_coordinates=facts.coordinates.to(dtype=hidden.dtype),
         )
+
+    @staticmethod
+    def _run_typed_block(
+        block: _ObjectIntervalBlock,
+        value: Tensor,
+        *,
+        causal_interval: bool,
+    ) -> Tensor:
+        if value.ndim != 5 or int(value.shape[3]) != 3:
+            raise ValueError("typed W state must be [B,I,K,3,H]")
+        batch, intervals, objects, types, hidden = value.shape
+        typed_batch = value.permute(0, 3, 1, 2, 4).reshape(
+            batch * types, intervals, objects, hidden
+        )
+        typed_batch = block(typed_batch, causal_interval=causal_interval)
+        return typed_batch.reshape(
+            batch, types, intervals, objects, hidden
+        ).permute(0, 2, 3, 1, 4)
+
+    @staticmethod
+    def _typed_state_metrics(value: Tensor, *, prefix: str) -> dict[str, Tensor]:
+        if value.ndim != 5 or int(value.shape[3]) != 3:
+            raise ValueError("typed W diagnostics require [B,I,K,3,H]")
+        metrics: dict[str, Tensor] = {}
+        for type_index, name in enumerate(("semantic", "appearance", "geometry")):
+            typed = value[..., type_index, :].detach().float()
+            metrics[f"{prefix}_{name}_state_rms"] = typed.square().mean().sqrt()
+            metrics[f"{prefix}_{name}_state_interval_variation"] = typed.std(
+                dim=1,
+                unbiased=False,
+            ).mean()
+            metrics[f"{prefix}_{name}_state_object_variation"] = typed.std(
+                dim=2,
+                unbiased=False,
+            ).mean()
+        return metrics
 
     def forward_w1(
         self,
@@ -297,21 +359,37 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         hidden, typed_sidecars, base_metrics = self._base(
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
+        intent_boundary_field = self._field(
+            facts=facts,
+            hidden=hidden,
+            typed_sidecars=typed_sidecars,
+        )
+        intent_boundary_field.validate()
         near = self.w1(hidden[:, :2], causal_interval=True)
+        near_typed = self._run_typed_block(
+            self.w1,
+            typed_sidecars[:, :2],
+            causal_interval=True,
+        )
         field = self._field(
             facts=facts,
             hidden=near,
-            typed_sidecars=typed_sidecars[:, :2],
+            typed_sidecars=near_typed,
         )
         field.validate(expected_intervals=2)
         metrics = self._metrics(field, prefix="object_w1") if collect_diagnostics else {}
         metrics.update(base_metrics)
+        if collect_diagnostics:
+            metrics.update(
+                self._typed_state_metrics(near_typed, prefix="object_w1")
+            )
         return field, ObjectW1WorkingState(
             near=near,
             far_base=hidden[:, 2:],
-            near_typed=typed_sidecars[:, :2],
+            near_typed=near_typed,
             far_typed=typed_sidecars[:, 2:],
             near_field=field,
+            intent_boundary_field=intent_boundary_field,
         ), metrics
 
     def forward_w2(
@@ -351,10 +429,32 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             batch, objects, 2, hidden
         ).transpose(1, 2)
         far = self.w2(far, causal_interval=True)
+        typed_far_query = w1_state.far_typed.permute(0, 2, 3, 1, 4).reshape(
+            batch * objects * 3, 2, hidden
+        )
+        typed_near_memory = w1_state.near_typed.permute(
+            0, 2, 3, 1, 4
+        ).reshape(batch * objects * 3, 2, hidden)
+        typed_near_normalized = self.w1_memory_norm(typed_near_memory)
+        typed_near_update, _ = self.w1_to_w2(
+            self.w2_query_norm(typed_far_query),
+            typed_near_normalized,
+            typed_near_normalized,
+            need_weights=False,
+        )
+        typed_near_update, _ = smooth_rms_contract(typed_near_update, 0.35)
+        far_typed = (typed_far_query + typed_near_update).reshape(
+            batch, objects, 3, 2, hidden
+        ).permute(0, 3, 1, 2, 4)
+        far_typed = self._run_typed_block(
+            self.w2,
+            far_typed,
+            causal_interval=True,
+        )
         far_field = self._field(
             facts=facts,
             hidden=far,
-            typed_sidecars=w1_state.far_typed,
+            typed_sidecars=far_typed,
         )
         near_field = w1_state.near_field
         near_field.validate(expected_intervals=2)
@@ -376,6 +476,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             persistence=torch.cat((near_field.persistence, far_field.persistence), dim=1),
             uncertainty=torch.cat((near_field.uncertainty, far_field.uncertainty), dim=1),
             reliability=torch.cat((near_field.reliability, far_field.reliability), dim=1),
+            current_selector_validity=near_field.current_selector_validity,
             future_selector_validity=torch.cat(
                 (
                     near_field.future_selector_validity,
@@ -387,6 +488,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         field.validate()
         metrics = self._metrics(field, prefix="object_w2") if collect_diagnostics else {}
+        if collect_diagnostics:
+            metrics.update(
+                self._typed_state_metrics(
+                    torch.cat((w1_state.near_typed, far_typed), dim=1),
+                    prefix="object_w2",
+                )
+            )
         return field, metrics
 
     @staticmethod

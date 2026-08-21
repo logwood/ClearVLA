@@ -61,6 +61,7 @@ class _CrossRead(nn.Module):
         *,
         padding_mask: Tensor | None = None,
         diagnostics: bool = False,
+        zero_preserving_innovation: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor]:
         normalized_memory = self.memory_norm(memory)
         update, weights = self.attention(
@@ -73,7 +74,8 @@ class _CrossRead(nn.Module):
         )
         update, _ = smooth_rms_contract(update, self.maximum_rms)
         value = query + update
-        ffn, _ = smooth_rms_contract(self.ffn(value), self.maximum_rms)
+        ffn_input = update if zero_preserving_innovation else value
+        ffn, _ = smooth_rms_contract(self.ffn(ffn_input), self.maximum_rms)
         value = value + ffn
         if weights is None:
             weights = query.new_zeros(query.shape[0], query.shape[1], memory.shape[1])
@@ -131,7 +133,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.goal_read = _CrossRead(hidden, heads)
         self.goal_self = _SelfBlock(hidden, heads)
-        history_width = state_dim + action_dim + state_dim + 1
+        # State observations (-8/-4/0) and executed actions
+        # (-24/-16/-12/-8/-6/-4/-2/-1) do not describe paired rows.  Keep a
+        # typed time-union sequence: absent modalities are algebraic zero and
+        # the final scalar records state(+1) versus action(-1) ownership.
+        history_width = state_dim + action_dim + state_dim + 2
         self.history_input = nn.Sequential(
             nn.LayerNorm(history_width, elementwise_affine=False),
             nn.Linear(history_width, hidden, bias=False),
@@ -145,7 +151,6 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
         self.interval_object = _CrossRead(hidden, heads)
-        self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.typed_relevance_queries = nn.ModuleList(
             nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
         )
@@ -176,27 +181,60 @@ class StatelessObjectIntentOrganizer(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         if state_history.ndim != 3 or state.ndim != 2 or executed_history.ndim != 3:
             raise ValueError("intent history requires state/action sequences")
-        state_sequence = torch.cat((state_history, state[:, None]), dim=1)
-        length = max(int(state_sequence.shape[1]), int(executed_history.shape[1]))
-
-        def left_pad(value: Tensor, target: int) -> Tensor:
-            missing = target - int(value.shape[1])
-            if missing <= 0:
-                return value[:, -target:]
-            return torch.cat((value[:, :1].expand(-1, missing, -1), value), dim=1)
-
-        states = left_pad(state_sequence, length)
-        actions = left_pad(executed_history, length)
+        if int(state_history.shape[1]) != 3 or int(executed_history.shape[1]) != 8:
+            raise ValueError(
+                "intent history requires state offsets -8/-4/0 and the eight "
+                "executed-action offsets"
+            )
+        batch, _, state_dim = state_history.shape
+        action_dim = int(executed_history.shape[-1])
+        # The last state-history row already denotes offset zero.  Use the
+        # explicitly supplied current state at that row instead of duplicating
+        # it as a fourth observation.
+        states = torch.cat((state_history[:, :2], state[:, None]), dim=1)
         previous = torch.cat((states[:, :1], states[:, :-1]), dim=1)
-        delta = states - previous
-        offset = torch.linspace(
-            -1.0, 0.0, length, device=states.device, dtype=states.dtype
-        )[None, :, None].expand(states.shape[0], -1, -1)
-        return torch.cat((states, actions, delta, offset), dim=-1), delta
+        state_delta = states - previous
+        state_delta[:, 0] = 0
 
-    def _object_tokens(self, facts: ObjectFactSet) -> Tensor:
+        state_offsets = (-8, -4, 0)
+        action_offsets = (-24, -16, -12, -8, -6, -4, -2, -1)
+        rows: list[tuple[int, int, Tensor, Tensor, Tensor]] = []
+        zero_state = states.new_zeros(batch, state_dim)
+        zero_action = executed_history.new_zeros(batch, action_dim)
+        for index, offset in enumerate(state_offsets):
+            rows.append(
+                (offset, 0, states[:, index], zero_action, state_delta[:, index])
+            )
+        for index, offset in enumerate(action_offsets):
+            rows.append(
+                (offset, 1, zero_state, executed_history[:, index], zero_state)
+            )
+        rows.sort(key=lambda item: (item[0], item[1]))
+        packed: list[Tensor] = []
+        aligned_delta: list[Tensor] = []
+        for offset_value, source_order, state_value, action_value, delta_value in rows:
+            offset = state_value.new_full(
+                (batch, 1), float(offset_value) / 24.0
+            )
+            source = state_value.new_full(
+                (batch, 1), 1.0 if source_order == 0 else -1.0
+            )
+            packed.append(
+                torch.cat(
+                    (state_value, action_value, delta_value, offset, source), dim=-1
+                )
+            )
+            aligned_delta.append(delta_value)
+        return torch.stack(packed, dim=1), torch.stack(aligned_delta, dim=1)
+
+    def _object_tokens(self, facts: ObjectFactSet) -> tuple[Tensor, Tensor]:
         facts.validate()
-        return self.object_content(facts.content)
+        # One bias-free projection owns both coordinates.  The scene-wide
+        # value is represented once while K carries only object innovations;
+        # public + innovation is algebraically the former absolute K value.
+        public_scene = self.object_content(facts.public_content)[:, None]
+        object_innovations = self.object_content(facts.content_innovation)
+        return public_scene, object_innovations
 
     @staticmethod
     def _bounded_unit(value: Tensor, *, floor: float = 0.25) -> Tensor:
@@ -208,7 +246,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
     def _typed_relevance(
         self,
         *,
-        public_interval_carrier: Tensor,
+        interval_condition_innovation: Tensor,
         facts: ObjectFactSet,
     ) -> tuple[
         Tensor,
@@ -220,26 +258,30 @@ class StatelessObjectIntentOrganizer(nn.Module):
         Tensor,
         Tensor,
         Tensor,
+        Tensor,
     ]:
-        """Build fixed-zero typed relevance while preserving interval identity.
+        """Select typed facts from the observable, zero-centred S innovation.
 
-        The common S carrier and its zero-mean interval innovation are scored
-        separately.  A bounded residual composition lets a real interval
-        innovation use only the score range left by the common evidence.  It
-        therefore cannot manufacture interval differences when the carrier is
-        identical, nor amplify the selector beyond its original [-1, 1]
-        contract.
+        Fixed interval identities never enter this selector.  Common and
+        interval-differential evidence are additive peers; common relevance no
+        longer consumes the score range available to a real differential.
+        The signed gate is exactly zero at zero evidence, so the per-type null
+        is a genuine zero-value option rather than sigmoid(0)=0.5.
         """
 
-        common_carrier = public_interval_carrier.mean(dim=1, keepdim=True)
-        differential_carrier = public_interval_carrier - common_carrier
-        common_source = self.typed_query_norm(common_carrier)
-        # Ordinary LayerNorm would expand a tiny interval innovation toward
-        # unit variance before the bounded cosine.  Preserve exact zero and
-        # cap the new branch's Jacobian with the established normalized-chart
-        # floor instead.  The common branch remains numerically unchanged.
-        differential_source, differential_denominator = (
-            variance_floored_centered_norm(differential_carrier, 0.25)
+        common_carrier = interval_condition_innovation.mean(dim=1, keepdim=True)
+        differential_carrier = interval_condition_innovation - common_carrier
+        # Neither common nor differential evidence may turn a numerically
+        # tiny condition into a confident selector merely by passing through
+        # LayerNorm.  The shared floor preserves zero and bounds both
+        # Jacobians by the same normalized-chart contract.
+        common_source, common_denominator = variance_floored_centered_norm(
+            common_carrier,
+            0.25,
+        )
+        differential_source, differential_denominator = variance_floored_centered_norm(
+            differential_carrier,
+            0.25,
         )
         common_query = torch.stack(
             tuple(projection(common_source) for projection in self.typed_relevance_queries),
@@ -265,21 +307,21 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self._bounded_unit(differential_query),
             self._bounded_unit(typed_route),
         ).clamp(-1.0, 1.0)
-        score = (
-            common_score
-            + (1.0 - common_score.abs()) * differential_score
-        ).clamp(-1.0, 1.0)
+        score = (0.5 * (common_score + differential_score)).clamp(-1.0, 1.0)
         temperature = 0.25 + 3.75 * torch.sigmoid(
             self.typed_temperature_logit.float()
         )
-        signal_probability = torch.sigmoid(
+        signed_signal = torch.tanh(
             score * temperature.to(device=score.device)[None, None, None]
         )
+        signal_strength = signed_signal.abs()
         validity = facts.validity.float()[:, None, :, None, :].clamp(0.0, 1.0)
-        relevance_mass = signal_probability[..., None] * validity
+        relevance_mass = signal_strength[..., None] * validity
         relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
         relevance_value = (
-            relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
+            signed_signal[..., None].to(dtype=typed_route.dtype)
+            * validity.to(dtype=typed_route.dtype)
+            * typed_route[:, None]
         )
 
         components: list[Tensor] = []
@@ -302,10 +344,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
             relevance_value,
             typed_components,
             score,
-            common_score.expand(-1, public_interval_carrier.shape[1], -1, -1),
+            common_score.expand(
+                -1, interval_condition_innovation.shape[1], -1, -1
+            ),
             differential_score,
-            signal_probability,
+            signal_strength,
             temperature,
+            common_denominator,
             differential_denominator,
         )
 
@@ -327,12 +372,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
         goal_query = self.goal_queries.to(
             device=goal_memory.device, dtype=goal_memory.dtype
         ).expand(batch, -1, -1)
-        protected_goal, _, goal_attention = self.goal_read(
+        _, protected_goal, goal_attention = self.goal_read(
             goal_query,
             goal_memory,
             padding_mask=~goal_mask.to(device=goal_memory.device, dtype=torch.bool),
             diagnostics=collect_diagnostics,
+            zero_preserving_innovation=True,
         )
+        # Learned goal queries are addresses only.  Retaining their residual
+        # as a value made goal-dropout samples a trainable task prior instead
+        # of an exact language null.  The innovation path preserves query-
+        # specific reads while zero T5 content now remains algebraic zero.
         protected_goal = self.goal_self(protected_goal)
         paired_history, observed_state_delta = self._paired_history(
             state_history, state, executed_history
@@ -340,25 +390,37 @@ class StatelessObjectIntentOrganizer(nn.Module):
         history = self.history_input(paired_history)
         for block in self.history_blocks:
             history = block(history, causal=True)
-        objects = self._object_tokens(facts)
+        public_scene, objects = self._object_tokens(facts)
+        object_memory = torch.cat((public_scene, objects), dim=1)
         interval_base = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
         _, goal_innovation, interval_goal_attention = self.interval_goal(
-            interval_base, protected_goal, diagnostics=collect_diagnostics
+            interval_base,
+            protected_goal,
+            diagnostics=collect_diagnostics,
+            zero_preserving_innovation=True,
         )
         _, history_innovation, interval_history_attention = self.interval_history(
-            interval_base, history, diagnostics=collect_diagnostics
+            interval_base,
+            history,
+            diagnostics=collect_diagnostics,
+            zero_preserving_innovation=True,
         )
         _, object_innovation, interval_object_attention = self.interval_object(
-            interval_base, objects, diagnostics=collect_diagnostics
+            interval_base,
+            object_memory,
+            diagnostics=collect_diagnostics,
+            zero_preserving_innovation=True,
         )
+        interval_template = self.interval_self(interval_base)
         public_intervals = self.interval_self(
             interval_base
             + goal_innovation
             + history_innovation
             + object_innovation
         )
+        interval_condition_innovation = public_intervals - interval_template
         (
             typed_relevance_mass,
             typed_relevance_value,
@@ -368,18 +430,25 @@ class StatelessObjectIntentOrganizer(nn.Module):
             typed_differential_score,
             typed_signal_probability,
             typed_temperature,
+            typed_common_denominator,
             typed_differential_denominator,
         ) = self._typed_relevance(
-            public_interval_carrier=public_intervals,
+            interval_condition_innovation=interval_condition_innovation,
             facts=facts,
         )
         typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
         policy_intervals = public_intervals + typed_policy_context
+        policy_interval_innovation = (
+            interval_condition_innovation + typed_policy_context
+        )
         temporal_base = self.temporal_identity.to(
             device=public_intervals.device, dtype=public_intervals.dtype
         ).expand(batch, -1, -1)
-        temporal, _, _ = self.temporal_read(
-            temporal_base, public_intervals, diagnostics=False
+        temporal, temporal_innovation, temporal_attention = self.temporal_read(
+            temporal_base,
+            policy_interval_innovation,
+            diagnostics=collect_diagnostics,
+            zero_preserving_innovation=True,
         )
         state_change_values = self.state_change_input(observed_state_delta)
         state_change_history, state_change_attention = self.state_change_read(
@@ -412,10 +481,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
         state_out = ObjectIntentState(
             protected_goal_set=protected_goal,
             history_tokens=history,
+            public_scene_token=public_scene,
             object_tokens=objects,
             public_interval_carrier=public_intervals,
+            interval_condition_innovation=interval_condition_innovation,
             policy_interval_context=policy_intervals,
-            temporal_queries=temporal,
+            policy_interval_innovation=policy_interval_innovation,
+            temporal_queries=temporal_innovation,
             state_change_evidence=state_change_evidence,
             typed_relevance_mass=typed_relevance_mass,
             typed_relevance_value=typed_relevance_value,
@@ -449,6 +521,28 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_public_interval_variation": public_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
+            "object_intent_condition_innovation_rms": interval_condition_innovation
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_condition_interval_variation": interval_condition_innovation
+            .detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_policy_innovation_rms": policy_interval_innovation
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_policy_innovation_interval_variation": policy_interval_innovation
+            .detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
             "object_intent_public_condition_centered_interval_variation": (
                 public_condition_centered.std(dim=1, unbiased=False).mean()
             ),
@@ -458,10 +552,31 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_temporal_variation": temporal.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
+            "object_intent_temporal_read_innovation_rms": temporal_innovation
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_temporal_read_interval_variation": temporal_innovation
+            .detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_temporal_attention_entropy": normalized_entropy(
+                temporal_attention,
+                dim=-1,
+            )
+            .detach()
+            .mean(),
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_public_scene_content_rms": public_scene.detach().float().square().mean().sqrt(),
+            "object_intent_object_content_innovation_rms": objects.detach().float().square().mean().sqrt(),
+            "object_intent_object_content_innovation_variation": objects.detach().float().std(dim=1, unbiased=False).mean(),
             "object_intent_typed_policy_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_common_norm_denominator_min": typed_common_denominator.detach().float().amin(),
             "object_intent_typed_differential_norm_denominator_min": typed_differential_denominator.detach().float().amin(),
             "object_intent_typed_fact_unsupported_fraction": (
                 1.0 - facts.validity.detach().float().clamp(0.0, 1.0)
@@ -539,9 +654,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
 class DirectIntentFutureSupervisor(nn.Module):
     """Decode stable physical future quantities from the online S boundary.
 
-    No hidden recognizer coordinate is learned.  The public S carrier owns a
-    direct future-state prediction, while the exact typed values consumed by
-    W own matching semantic, status and transport predictions.
+    No hidden recognizer coordinate is learned.  The condition-generated S
+    innovation owns a direct future-state prediction, while the exact typed
+    W boundary owns matching semantic, status and transport predictions.
     """
 
     def __init__(
@@ -553,10 +668,8 @@ class DirectIntentFutureSupervisor(nn.Module):
         route_dim: int,
     ) -> None:
         super().__init__()
+        del content_dim, route_dim
         self.state_head = nn.Linear(hidden, state_dim, bias=False)
-        self.semantic_head = nn.Linear(route_dim, content_dim, bias=False)
-        self.status_head = nn.Linear(route_dim, 2, bias=False)
-        self.transport_head = nn.Linear(route_dim, 2, bias=False)
 
     @staticmethod
     def _supported_field_loss(
@@ -580,6 +693,7 @@ class DirectIntentFutureSupervisor(nn.Module):
         self,
         *,
         intent: ObjectIntentState,
+        intent_boundary: FutureObjectDynamics,
         future_state: Tensor,
         teacher: FutureObjectDynamics,
         current_loss_support: Tensor,
@@ -587,6 +701,7 @@ class DirectIntentFutureSupervisor(nn.Module):
         if future_state.ndim != 3:
             raise ValueError("intent supervision requires a future state sequence")
         teacher.validate()
+        intent_boundary.validate()
         intent.validate(
             horizon=int(intent.temporal_queries.shape[1]),
             hidden=int(intent.public_interval_carrier.shape[-1]),
@@ -609,16 +724,15 @@ class DirectIntentFutureSupervisor(nn.Module):
         if tuple(object_support.shape) != expected_support:
             raise ValueError("intent object support does not align with teacher")
 
-        state_prediction = self.state_head(intent.public_interval_carrier)
-        semantic_prediction = self.semantic_head(
-            intent.typed_relevance_value[..., 0, :]
+        state_prediction = self.state_head(intent.interval_condition_innovation)
+        # These are decoded with the exact W field projections and heads that
+        # consume S online.  Independent S-only heads previously let the
+        # auxiliary loss improve in a coordinate W/P never observed.
+        semantic_prediction = intent_boundary.semantic_delta
+        status_prediction = torch.cat(
+            (intent_boundary.visibility, intent_boundary.persistence), dim=-1
         )
-        status_prediction = self.status_head(
-            intent.typed_relevance_value[..., 1, :]
-        )
-        transport_prediction = self.transport_head(
-            intent.typed_relevance_value[..., 2, :]
-        )
+        transport_prediction = intent_boundary.transport_mean
         semantic_target = teacher.semantic_delta.detach()
         status_target = torch.cat(
             (teacher.visibility.detach(), teacher.persistence.detach()), dim=-1
@@ -659,12 +773,29 @@ class DirectIntentFutureSupervisor(nn.Module):
 class CoarseActionIntent(nn.Module):
     """V120 online clean action intent used exactly once by W."""
 
-    def __init__(self, *, hidden: int, action_dim: int, heads: int) -> None:
+    def __init__(
+        self, *, hidden: int, action_dim: int, route_dim: int, heads: int
+    ) -> None:
         super().__init__()
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = _CrossRead(hidden, heads)
         self.history_read = _CrossRead(hidden, heads)
+        self.typed_input = nn.ModuleList(
+            nn.Linear(route_dim, hidden, bias=False) for _ in TYPED_INTENT_NAMES
+        )
+        self.typed_memory_norm = nn.ModuleList(
+            nn.LayerNorm(hidden, elementwise_affine=False)
+            for _ in TYPED_INTENT_NAMES
+        )
+        self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.typed_read = nn.ModuleList(
+            nn.MultiheadAttention(
+                hidden, heads, bias=False, dropout=0.0, batch_first=True
+            )
+            for _ in TYPED_INTENT_NAMES
+        )
+        self.typed_router = nn.Linear(hidden, len(TYPED_INTENT_NAMES), bias=False)
         self.block = _SelfBlock(hidden, heads)
         self.action_head = nn.Linear(hidden, action_dim, bias=False)
 
@@ -675,21 +806,64 @@ class CoarseActionIntent(nn.Module):
         future_action: Tensor | None = None,
     ) -> CoarseActionIntentState:
         intent.validate(hidden=int(self.query.shape[-1]))
-        batch = int(intent.public_interval_carrier.shape[0])
+        batch = int(intent.interval_condition_innovation.shape[0])
         query = self.query.to(
-            device=intent.public_interval_carrier.device,
-            dtype=intent.public_interval_carrier.dtype,
+            device=intent.interval_condition_innovation.device,
+            dtype=intent.interval_condition_innovation.dtype,
         ).expand(batch, -1, -1)
         _, intent_delta, _ = self.intent_read(
-            query, intent.public_interval_carrier
+            query,
+            intent.interval_condition_innovation,
+            zero_preserving_innovation=True,
         )
-        _, object_delta, _ = self.object_read(query, intent.public_object_memory)
-        _, history_delta, _ = self.history_read(query, intent.history_memory)
+        _, object_delta, _ = self.object_read(
+            query,
+            torch.cat(
+                (intent.public_scene_memory, intent.object_innovation_memory),
+                dim=1,
+            ),
+            zero_preserving_innovation=True,
+        )
+        _, history_delta, _ = self.history_read(
+            query,
+            intent.history_memory,
+            zero_preserving_innovation=True,
+        )
+        typed_deltas: list[Tensor] = []
+        intervals = int(query.shape[1])
+        objects = int(intent.typed_interval_object_value.shape[2])
+        typed_query = self.typed_query_norm(query).reshape(
+            batch * intervals, 1, -1
+        )
+        for type_index, (projection, normalization, reader) in enumerate(
+            zip(self.typed_input, self.typed_memory_norm, self.typed_read)
+        ):
+            typed_memory = projection(
+                intent.typed_interval_object_value[..., type_index, :]
+            ).reshape(batch * intervals, objects, -1)
+            typed_update, _ = reader(
+                typed_query,
+                normalization(typed_memory),
+                normalization(typed_memory),
+                need_weights=False,
+            )
+            typed_update, _ = smooth_rms_contract(typed_update, 0.35)
+            typed_deltas.append(typed_update.reshape(batch, intervals, -1))
+        typed_stack = torch.stack(typed_deltas, dim=2)
+        typed_weight = torch.softmax(self.typed_router(query).float(), dim=-1)
+        typed_delta = torch.einsum(
+            "bis,bish->bih",
+            typed_weight.to(dtype=typed_stack.dtype),
+            typed_stack,
+        )
+        # The learned query is an address, not a value.  The block receives
+        # only observable innovations, so an all-zero S boundary produces an
+        # exact-zero coarse action instead of a dataset-level interval prior.
         token = self.block(
-            query
-            + intent_delta
+            intent_delta
             + object_delta
             + history_delta
+            + typed_delta
         )
         action_prediction = self.action_head(token)
         if future_action is None:
@@ -704,6 +878,37 @@ class CoarseActionIntent(nn.Module):
         return CoarseActionIntentState(
             tokens=token,
             action_prediction=action_prediction,
+            target=target,
+            loss=loss,
+        )
+
+    @staticmethod
+    def attach_training_target(
+        online: CoarseActionIntentState,
+        future_action: Tensor,
+    ) -> CoarseActionIntentState:
+        """Supervise the exact online tensor already consumed by W.
+
+        Re-running this module solely to obtain an auxiliary loss creates a
+        second autograd graph and weakens the ownership statement even when
+        dropout is disabled.  Target attachment is pure bookkeeping: it does
+        not rebuild or modify the online action-intent value.
+        """
+
+        if future_action.ndim != 3:
+            raise ValueError("coarse action target must be [B,T,A]")
+        slices = _interval_slices(int(future_action.shape[1]))
+        target = torch.stack(
+            [future_action[:, row].mean(dim=1) for row in slices], dim=1
+        ).detach()
+        if tuple(target.shape) != tuple(online.action_prediction.shape):
+            raise ValueError("coarse action prediction and target do not align")
+        loss = (
+            online.action_prediction.float() - target.float()
+        ).square().mean()
+        return CoarseActionIntentState(
+            tokens=online.tokens,
+            action_prediction=online.action_prediction,
             target=target,
             loss=loss,
         )

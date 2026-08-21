@@ -1,4 +1,4 @@
-"""Recovered V120 P2 consequence read and five-lane P3 compiler."""
+"""Typed future-effect reads and consequence-conditioned P3 compilation."""
 
 from __future__ import annotations
 
@@ -22,10 +22,9 @@ class ObjectConsequenceState:
 
 @dataclass(frozen=True)
 class ObjectPolicyPlanDeltaBank:
-    """V120 five typed lanes around one protected consequence."""
+    """Four optional innovations around one protected consequence."""
 
     protected_base: Tensor
-    factual: Tensor
     precision: Tensor
     effect: Tensor
     temporal: Tensor
@@ -34,7 +33,6 @@ class ObjectPolicyPlanDeltaBank:
     @property
     def source_names(self) -> tuple[str, ...]:
         return (
-            "p3_factual",
             "p3_precision",
             "p3_effect",
             "p3_temporal",
@@ -45,7 +43,7 @@ class ObjectPolicyPlanDeltaBank:
         expected = tuple(self.protected_base.shape)
         if len(expected) != 4:
             raise ValueError("object policy plan must be [B,T,Q,H]")
-        for name in ("factual", "precision", "effect", "temporal", "state_change"):
+        for name in ("precision", "effect", "temporal", "state_change"):
             if tuple(getattr(self, name).shape) != expected:
                 raise ValueError(f"object policy {name} lost [B,T,Q,H]")
 
@@ -54,7 +52,6 @@ class ObjectPolicyPlanDeltaBank:
         return PolicyRoleDeltaBank(
             values=torch.stack(
                 (
-                    self.factual,
                     self.precision,
                     self.effect,
                     self.temporal,
@@ -63,21 +60,38 @@ class ObjectPolicyPlanDeltaBank:
                 dim=1,
             ),
             source_names=self.source_names,
-            source_depths=(int(source_depth),) * 5,
+            source_depths=(int(source_depth),) * 4,
             protected_detail=self.protected_base,
         )
 
 
 class ObjectFutureEffectReader(nn.Module):
-    """V120 bounded interval-by-object P2 read with a null value."""
+    """Per-type bounded interval-by-object P2 reads with explicit nulls."""
 
-    def __init__(self, *, hidden: int, content_dim: int) -> None:
+    TYPE_NAMES = ("semantic", "geometry", "status")
+
+    def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
         super().__init__()
         self.hidden = int(hidden)
-        self.query_key = nn.Linear(hidden, hidden, bias=False)
-        self.effect_key = nn.Linear(content_dim, hidden, bias=False)
-        self.intent_query = nn.Linear(hidden, hidden, bias=False)
-        self.intent_key = nn.Linear(hidden, hidden, bias=False)
+        self.source_query = nn.ModuleList(
+            nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
+        )
+        self.source_key = nn.ModuleList(
+            (
+                nn.Linear(content_dim, hidden, bias=False),
+                nn.Linear(2, hidden, bias=False),
+                nn.Linear(2, hidden, bias=False),
+            )
+        )
+        self.intent_query = nn.ModuleList(
+            nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
+        )
+        self.public_intent_key = nn.ModuleList(
+            nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
+        )
+        self.typed_intent_key = nn.ModuleList(
+            nn.Linear(route_dim, hidden, bias=False) for _ in self.TYPE_NAMES
+        )
         self.coordinate_query = nn.Linear(hidden, 2, bias=False)
         self.semantic_value = nn.Linear(content_dim, hidden, bias=False)
         self.transport_value = nn.Linear(2, hidden, bias=False)
@@ -111,62 +125,98 @@ class ObjectFutureEffectReader(nn.Module):
             raise ValueError("P2 action query hidden width is invalid")
         intent.validate(horizon=horizon, hidden=self.hidden)
         intervals, objects = dynamics.semantic_delta.shape[1:3]
-        query = self._bounded_unit(self.query_key(action_query))
-        effect_key = self._bounded_unit(self.effect_key(dynamics.semantic_delta))
-        content_score = torch.einsum("btqh,bikh->btqik", query, effect_key)
-        intent_query = self._bounded_unit(self.intent_query(action_query))
-        intent_key = self._bounded_unit(self.intent_key(intent.interval_key))
-        intent_score = torch.einsum("btqh,bih->btqi", intent_query, intent_key)
+        typed_intent = intent.typed_interval_object_value
+        if tuple(typed_intent.shape[:4]) != (batch, intervals, objects, 3):
+            raise ValueError("P2 typed intent lost interval/object/type identity")
+        status_source = torch.cat(
+            (dynamics.visibility, dynamics.persistence), dim=-1
+        )
+        source_fields = (
+            dynamics.semantic_delta,
+            dynamics.transport_mean,
+            status_source,
+        )
+        source_values = (
+            self.semantic_value(dynamics.semantic_delta),
+            self.transport_value(dynamics.transport_mean),
+            self.status_value(status_source),
+        )
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
         future_coordinate = (
             dynamics.object_coordinates[:, None].float()
             + dynamics.transport_mean.float()
         ).clamp(-1.0, 1.0)
-        coordinate_score = -0.25 * (
+        coordinate_distance = (
             coordinate_query[:, :, :, None, None]
             - future_coordinate[:, None, None]
         ).square().sum(dim=-1)
-        coordinate_score = coordinate_score.clamp(-1.0, 0.0)
-        validity = (
-            dynamics.future_selector_validity.float().squeeze(-1).clamp(0.0, 1.0)
-        )
+        # Exact coordinate agreement is positive evidence; the old [-1,0]
+        # term could only punish and therefore could not establish a geometry
+        # owner when semantic scores were diffuse.
+        coordinate_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
+        future_validity = dynamics.future_selector_validity.float().squeeze(
+            -1
+        ).clamp(0.0, 1.0)
+        current_validity = dynamics.current_selector_validity.float().squeeze(
+            -1
+        ).clamp(0.0, 1.0)[:, None].expand(-1, intervals, -1)
         temperature = self._temperatures().to(device=action_query.device)
-        bounded_logit = (
-            temperature[0] * content_score
-            + temperature[1] * intent_score[..., None]
-            + temperature[2] * coordinate_score
-        )
-        logit = bounded_logit + validity.clamp_min(1e-6).log()[:, None, None]
-        flat_logit = logit.flatten(-2)
-        # One null hypothesis competes with the *set* of interval/object
-        # effects.  Comparing it with an uncorrected sum of N exponentials
-        # gives non-null an automatic N:1 prior even when every score is zero.
-        # Subtract log(N) so equal evidence yields 1:1 set-vs-null odds without
-        # imposing a learned mass quota or changing relative candidate scores.
-        candidate_partition_correction = math.log(float(max(intervals * objects, 1)))
-        corrected_flat_logit = flat_logit - candidate_partition_correction
-        posterior = torch.softmax(
-            torch.cat(
-                (corrected_flat_logit, torch.zeros_like(flat_logit[..., :1])),
+        source_scores: list[Tensor] = []
+        intent_scores: list[Tensor] = []
+        bounded_logits: list[Tensor] = []
+        posteriors: list[Tensor] = []
+        selected_values: list[Tensor] = []
+        for type_index in range(3):
+            query = self._bounded_unit(
+                self.source_query[type_index](action_query)
+            )
+            source_key = self._bounded_unit(
+                self.source_key[type_index](source_fields[type_index])
+            )
+            source_score = torch.einsum(
+                "btqh,bikh->btqik", query, source_key
+            )
+            public_key = self.public_intent_key[type_index](
+                intent.interval_key
+            )[:, :, None]
+            typed_key = self.typed_intent_key[type_index](
+                typed_intent[..., type_index, :]
+            )
+            intent_key = self._bounded_unit(public_key + typed_key)
+            intent_query = self._bounded_unit(
+                self.intent_query[type_index](action_query)
+            )
+            intent_score = torch.einsum(
+                "btqh,bikh->btqik", intent_query, intent_key
+            )
+            bounded_logit = (
+                temperature[0] * source_score
+                + temperature[1] * intent_score
+            )
+            if type_index == 1:
+                bounded_logit = bounded_logit + temperature[2] * coordinate_score
+            validity = current_validity if type_index == 2 else future_validity
+            logit = bounded_logit + validity.clamp_min(1e-6).log()[:, None, None]
+            flat_logit = logit.flatten(-2)
+            posterior = torch.softmax(
+                torch.cat((flat_logit, torch.zeros_like(flat_logit[..., :1])), dim=-1),
                 dim=-1,
-            ),
-            dim=-1,
-        )
-        typed_source_value = torch.stack(
-            (
-                self.semantic_value(dynamics.semantic_delta),
-                self.transport_value(dynamics.transport_mean),
-                self.status_value(
-                    torch.cat((dynamics.visibility, dynamics.persistence), dim=-1)
-                ),
-            ),
-            dim=-2,
-        ).reshape(batch, intervals * objects, 3, hidden)
-        selected_type_value = torch.einsum(
-            "btqn,bnsh->btqsh",
-            posterior[..., :-1].to(dtype=typed_source_value.dtype),
-            typed_source_value,
-        )
+            )
+            flat_value = source_values[type_index].reshape(
+                batch, intervals * objects, hidden
+            )
+            selected = torch.einsum(
+                "btqn,bnh->btqh",
+                posterior[..., :-1].to(dtype=flat_value.dtype),
+                flat_value,
+            )
+            source_scores.append(source_score)
+            intent_scores.append(intent_score)
+            bounded_logits.append(bounded_logit)
+            posteriors.append(posterior)
+            selected_values.append(selected)
+        posterior_by_type = torch.stack(posteriors, dim=3)
+        selected_type_value = torch.stack(selected_values, dim=3)
         type_weight = torch.softmax(self.type_query(action_query).float(), dim=-1)
         value = torch.einsum(
             "btqs,btqsh->btqh",
@@ -176,36 +226,56 @@ class ObjectFutureEffectReader(nn.Module):
         if not collect_diagnostics:
             return value, {}
         metrics: dict[str, Tensor] = {
-            "object_p2_content_score_abs": content_score.detach().abs().mean(),
-            "object_p2_content_score_max_abs": content_score.detach().abs().amax(),
-            "object_p2_intent_score_abs": intent_score.detach().abs().mean(),
-            "object_p2_intent_score_max_abs": intent_score.detach().abs().amax(),
+            "object_p2_content_score_abs": torch.stack(source_scores).detach().abs().mean(),
+            "object_p2_content_score_max_abs": torch.stack(source_scores).detach().abs().amax(),
+            "object_p2_intent_score_abs": torch.stack(intent_scores).detach().abs().mean(),
+            "object_p2_intent_score_max_abs": torch.stack(intent_scores).detach().abs().amax(),
             "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
             "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
-            "object_p2_combined_logit_max_abs": bounded_logit.detach().abs().amax(),
-            "object_p2_candidate_partition_correction": bounded_logit.new_tensor(
-                candidate_partition_correction, dtype=torch.float32
-            ),
+            "object_p2_combined_logit_max_abs": torch.stack(bounded_logits).detach().abs().amax(),
             "object_p2_temperature_content": temperature[0].detach(),
             "object_p2_temperature_intent": temperature[1].detach(),
             "object_p2_temperature_coordinate": temperature[2].detach(),
             "object_p2_posterior_entropy": normalized_entropy(
-                posterior, dim=-1
+                posterior_by_type, dim=-1
             ).detach().mean(),
-            "object_p2_posterior_max": posterior.detach().amax(dim=-1).mean(),
-            "object_p2_null_mass": posterior.detach()[..., -1].mean(),
+            "object_p2_posterior_max": posterior_by_type.detach().amax(dim=-1).mean(),
+            "object_p2_null_mass": torch.einsum(
+                "btqs,btqs->btq",
+                type_weight.detach(),
+                posterior_by_type.detach()[..., -1],
+            ).mean(),
             "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
             "object_p2_semantic_value_mass": type_weight.detach()[..., 0].mean(),
             "object_p2_geometry_value_mass": type_weight.detach()[..., 1].mean(),
             "object_p2_status_value_mass": type_weight.detach()[..., 2].mean(),
         }
-        interval_mass = posterior[..., :-1].reshape(
-            batch, horizon, basis, intervals, objects
+        for type_index, name in enumerate(self.TYPE_NAMES):
+            metrics[f"object_p2_{name}_score_max_abs"] = source_scores[
+                type_index
+            ].detach().abs().amax()
+            metrics[f"object_p2_{name}_null_mass"] = posterior_by_type[
+                ..., type_index, -1
+            ].detach().mean()
+        interval_mass_by_type = posterior_by_type[..., :-1].reshape(
+            batch, horizon, basis, 3, intervals, objects
         ).sum(dim=-1)
+        interval_mass = torch.einsum(
+            "btqs,btqsi->btqi",
+            type_weight.detach(),
+            interval_mass_by_type.detach(),
+        )
         for index in range(intervals):
             metrics[f"object_p2_interval_{index}_mass"] = (
                 interval_mass[..., index].detach().float().mean()
             )
+            for type_index, name in enumerate(self.TYPE_NAMES):
+                metrics[f"object_p2_{name}_interval_{index}_mass"] = (
+                    interval_mass_by_type[..., type_index, index]
+                    .detach()
+                    .float()
+                    .mean()
+                )
         return value, metrics
 
 
@@ -247,7 +317,7 @@ class ZeroPreservingObjectConsequence(nn.Module):
 
 
 class ObjectPolicyPlanCompiler(nn.Module):
-    """V120 factual/precision/effect/temporal/state-change P3."""
+    """Consequence-conditioned precision/effect/temporal/state-change P3."""
 
     def __init__(self, *, hidden: int, horizon: int, basis: int) -> None:
         super().__init__()
@@ -258,6 +328,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self.precision_innovation = nn.Linear(hidden, hidden, bias=False)
         self.precision_lane = nn.Linear(hidden, hidden, bias=False)
         self.effect_lane = nn.Linear(hidden, hidden, bias=False)
+        self.temporal_source = nn.Linear(hidden, hidden, bias=False)
+        self.temporal_consequence = nn.Linear(hidden, hidden, bias=False)
         self.temporal_action = nn.Linear(hidden, hidden, bias=False)
         self.temporal_lane = nn.Linear(hidden, hidden, bias=False)
         self.state_change_action = nn.Linear(hidden, hidden, bias=False)
@@ -268,35 +340,47 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self,
         *,
         p1_fact: Tensor,
+        p1_precision_innovation: Tensor,
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
-        if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
+        if (
+            tuple(action_query.shape) != expected
+            or tuple(p1_fact.shape) != expected
+            or tuple(p1_precision_innovation.shape) != expected
+        ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         # The complete factual consequence is already the protected base.
         # Optional lanes may only encode source-exclusive zero-centred
         # innovations; duplicating that base gives the bottom selector several
         # interchangeable ways to reconstruct the same fact.
-        factual = torch.zeros_like(consequence.protected_consequence)
-        # The complete P1 fact already lives in ``protected_base``.  Only the
-        # action-basis-specific precision innovation is optional evidence;
-        # copying the common P1 component into this lane recreates the
-        # deterministic protected-fact bypass under a second name.
-        precision_innovation = p1_fact - p1_fact.mean(dim=2, keepdim=True)
-        precision_condition = self.precision_innovation(precision_innovation)
+        # This is the cached V120 factual-reader write,
+        # ``updated_trajectory - clean_action_basis``.  It retains the
+        # 24-query/N=49/3x3 evidence without copying the completed P1
+        # self-write or W consequence back into an optional lane.  Action can
+        # select this evidence but cannot synthesize it.
         precision = self.precision_lane(
-            torch.tanh(self.precision_action(action_query)) * precision_condition
+            torch.tanh(self.precision_action(action_query))
+            * self.precision_innovation(p1_precision_innovation)
         )
         effect = self.effect_lane(consequence.effect + consequence.interaction)
         temporal_source = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
+        # Temporal is an optional relation, not a second public action
+        # adapter.  Requiring all three observable operands closes the direct
+        # S -> bottom lane while preserving ordinary autograd and exact-zero
+        # semantics at every missing boundary.
         temporal = self.temporal_lane(
-            temporal_source * torch.tanh(self.temporal_action(action_query))
+            self.temporal_source(temporal_source)
+            * torch.tanh(
+                self.temporal_consequence(consequence.protected_consequence)
+            )
+            * torch.tanh(self.temporal_action(action_query))
         )
         state_change_source = intent.state_change_evidence[:, None, None].expand(
             -1, self.horizon, self.basis, -1
@@ -311,25 +395,39 @@ class ObjectPolicyPlanCompiler(nn.Module):
         state_change = 0.05 * self.state_change_lane(
             state_change_source * state_change_modulation
         )
-        lanes = [factual, precision, effect, temporal, state_change]
+        lanes = [precision, effect, temporal, state_change]
         lanes = [smooth_rms_contract(value, 0.35)[0] for value in lanes]
         bank = ObjectPolicyPlanDeltaBank(
             protected_base=consequence.protected_consequence,
-            factual=lanes[0],
-            precision=lanes[1],
-            effect=lanes[2],
-            temporal=lanes[3],
-            state_change=lanes[4],
+            precision=lanes[0],
+            effect=lanes[1],
+            temporal=lanes[2],
+            state_change=lanes[3],
         )
         bank.validate()
         if not collect_diagnostics:
             return bank, {}
         return bank, {
-            "object_p3_factual_rms": lanes[0].detach().float().square().mean().sqrt(),
-            "object_p3_precision_rms": lanes[1].detach().float().square().mean().sqrt(),
-            "object_p3_effect_rms": lanes[2].detach().float().square().mean().sqrt(),
-            "object_p3_temporal_rms": lanes[3].detach().float().square().mean().sqrt(),
-            "object_p3_state_change_rms": lanes[4].detach().float().square().mean().sqrt(),
+            "object_p3_precision_input_rms": p1_precision_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_precision_rms": lanes[0].detach().float().square().mean().sqrt(),
+            "object_p3_effect_rms": lanes[1].detach().float().square().mean().sqrt(),
+            "object_p3_temporal_source_rms": temporal_source.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_consequence_rms": consequence.protected_consequence
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_rms": lanes[2].detach().float().square().mean().sqrt(),
+            "object_p3_state_change_rms": lanes[3].detach().float().square().mean().sqrt(),
         }
 
 

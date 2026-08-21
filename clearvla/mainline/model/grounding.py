@@ -140,9 +140,6 @@ class DenseObjectGrounder(nn.Module):
         if not isinstance(g3_output, nn.Linear):
             raise TypeError("G3 residual output must remain a linear layer")
         nn.init.zeros_(g3_output.weight)
-        self.decode_content_residual = nn.Linear(hidden, content_dim, bias=False)
-        nn.init.zeros_(self.decode_content_residual.weight)
-        self.decode_position = nn.Linear(16, content_dim, bias=False)
         self.maximum_update_rms = float(maximum_update_rms)
 
     def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
@@ -297,14 +294,36 @@ class DenseObjectGrounder(nn.Module):
             ),
             dim=-1,
         )
-        residual = 0.50 * torch.tanh(self.g3_residual(pair).squeeze(-1).float())
+        raw_residual = 0.50 * torch.tanh(
+            self.g3_residual(pair).squeeze(-1).float()
+        )
         # Correct the conditional K+null owner posterior.  Local-hypothesis
         # prior and physical validity remain outside this softmax, so a zero
         # G3 residual preserves both the parent posterior and its exact mass
         # semantics.
-        corrected = torch.softmax(
-            parent_owner.clamp_min(1e-8).log()
-            + torch.cat((residual, torch.zeros_like(parent_null[..., None])), dim=-1),
+        # G3 may refine *which* K object owns a candidate, but it must not
+        # change the G2 object-vs-null decision.  Correcting K+null in one
+        # softmax made any common-mode K residual an existence logit and was
+        # the structural source of the observed global-K collapse.
+        parent_k_mass = parent_owner[..., : self.objects].sum(
+            dim=-1, keepdim=True
+        )
+        parent_k_conditional = parent_owner[..., : self.objects] / parent_k_mass.clamp_min(
+            1e-8
+        )
+        common_residual = (
+            raw_residual * parent_k_conditional
+        ).sum(dim=-1, keepdim=True)
+        residual = raw_residual - common_residual
+        corrected_k_conditional = torch.softmax(
+            parent_k_conditional.clamp_min(1e-8).log() + residual,
+            dim=-1,
+        )
+        corrected = torch.cat(
+            (
+                parent_k_mass * corrected_k_conditional,
+                parent_owner[..., self.objects :],
+            ),
             dim=-1,
         )
         valid = validity.float().clamp(0.0, 1.0)
@@ -330,20 +349,25 @@ class DenseObjectGrounder(nn.Module):
             # posterior and the local-M prior may refine a read, but neither
             # can resurrect a candidate with zero corrected physical mass.
             type_index = {"semantic": 0, "appearance": 1, "geometry": 2}[name]
-            typed_prior = getattr(chart, f"candidate_{name}_prior").reshape(batch, count).float()
-            physical_prior = candidate_prior.reshape(batch, count).float()
-            prior_ratio = typed_prior / physical_prior.clamp_min(1e-6)
+            typed_prior = getattr(chart, f"candidate_{name}_prior").reshape(
+                batch, count
+            ).float()
             typed_object_probability = typed_parent[..., type_index, : self.objects]
-            physical_object_probability = parent_owner[..., : self.objects]
-            compatibility_ratio = typed_object_probability / physical_object_probability.clamp_min(
-                1e-6
-            )
-            typed_read = (
+            # The physical read is the immutable support.  Typed evidence may
+            # only reweight inside it; dividing by the physical posterior or
+            # physical prior algebraically cancelled exactly the constraint
+            # this boundary was supposed to preserve.
+            typed_weight = (
                 read.float()
-                * compatibility_ratio.transpose(1, 2)
-                * prior_ratio[:, None]
+                * typed_object_probability.transpose(1, 2)
+                * typed_prior[:, None]
             )
-            typed_read = typed_read / typed_read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            typed_denominator = typed_weight.sum(dim=-1, keepdim=True)
+            typed_read = torch.where(
+                typed_denominator > 1e-6,
+                typed_weight / typed_denominator.clamp_min(1e-6),
+                read.float(),
+            )
             # ``assignment.sum(dim=1)`` is [B,K]; keep exactly the physical
             # allocation owned by each K object while redistributing evidence
             # only inside that support.
@@ -426,6 +450,17 @@ class DenseObjectGrounder(nn.Module):
             chart.candidate_validity,
             structured_assignment,
         ).clamp(0.0, 1.0)
+        camera_joint_mass = structured_assignment.float().sum(
+            dim=(3, 4, 5)
+        )[..., None]
+        camera_observed_mass = (
+            chart.candidate_validity[..., 0].float()
+            * chart.candidate_owner_prior.float()
+        ).sum(dim=(2, 3, 4))
+        camera_evidence_mass = (
+            camera_joint_mass
+            / camera_observed_mass[:, None, :, None].clamp_min(1e-6)
+        ).clamp(0.0, 1.0)
         chart_assignment = structured_assignment.sum(dim=-1)
         # ``chart_read`` is the reverse lookup used by Teacher/P2 and is
         # normalized over space for each object.  It is *not* a per-cell owner
@@ -437,31 +472,25 @@ class DenseObjectGrounder(nn.Module):
         ].clamp_min(1e-6)
         owner_prior_per_cell = chart.candidate_owner_prior.float().sum(dim=-1).clamp_min(1e-6)
         chart_owner = chart_assignment.float() / owner_prior_per_cell[:, None]
-        coordinate_weight = (
-            chart.candidate_validity.float() * chart.candidate_owner_prior[..., None].float()
-        )
-        chart_coordinate = (chart.candidate_coordinates.float() * coordinate_weight).sum(
-            dim=-2
-        ) / coordinate_weight.sum(dim=-2).clamp_min(1e-6)
-        position = _coordinate_basis(
-            chart_coordinate.to(dtype=chart.candidate_coordinates.dtype), 16
-        )
-        # The exported full-DINO object content is itself the reconstruction
-        # base.  A zero-initialized slot residual may add object-specific
-        # detail, while the shared coordinate decoder accounts for smooth
-        # within-object variation.  This prevents a private hidden slot from
-        # satisfying the loss while the W-visible object content remains weak.
-        decoded_slot = content + self.decode_content_residual(slots)
-        decoded_position = self.decode_position(position)
-        prototype_value = decoded_slot[:, :, None, None, None, :]
-        reconstruction_value = prototype_value + decoded_position[:, None]
-        reconstructed = torch.einsum(
-            "bkcyx,bkcyxd->bcyxd",
-            chart_owner.to(dtype=reconstruction_value.dtype),
-            reconstruction_value,
-        )
         target_content = chart.dino_content.detach().float()
         observed = chart.cell_observed.detach().float()
+        # The reconstruction may only use the exported object content.  A
+        # protected public mean explains camera-wide common content; K owns
+        # only object-specific residuals.  This removes the private slot and
+        # coordinate decoders that could satisfy the G loss without improving
+        # anything visible to S/W/P.
+        public_content = (
+            target_content * observed
+        ).sum(dim=(1, 2, 3), keepdim=True) / observed.sum(
+            dim=(1, 2, 3), keepdim=True
+        ).clamp_min(1.0)
+        object_residual = content.float() - public_content[:, 0, 0, 0, None, :]
+        reconstructed = public_content + torch.einsum(
+            "bkcyx,bkd->bcyxd",
+            chart_owner,
+            object_residual,
+        )
+        reconstructed = reconstructed.to(dtype=chart.dino_content.dtype)
         reconstruction_per_cell = (
             reconstructed.float() - target_content
         ).square().mean(dim=-1, keepdim=True)
@@ -470,6 +499,7 @@ class DenseObjectGrounder(nn.Module):
         ).sum() / observed.sum().clamp_min(1.0)
         facts = ObjectFactSet(
             dense_chart=chart,
+            public_content=public_content[:, 0, 0, 0].to(dtype=content.dtype),
             content=content,
             semantic=semantic,
             appearance=appearance,
@@ -478,6 +508,7 @@ class DenseObjectGrounder(nn.Module):
             camera_transport_prior=camera_transport_prior,
             camera_support=camera_support,
             camera_validity=camera_validity,
+            camera_evidence_mass=camera_evidence_mass,
             support=support,
             existence=existence,
             validity=object_validity,
@@ -495,6 +526,19 @@ class DenseObjectGrounder(nn.Module):
         # objective. Everything below is a detached audit reduction.
         if not collect_diagnostics:
             return facts, {}
+        support_audit = camera_support.detach().float()[..., 0].flatten()
+        evidence_audit = camera_evidence_mass.detach().float()[..., 0].flatten()
+        support_centered = support_audit - support_audit.mean()
+        evidence_centered = evidence_audit - evidence_audit.mean()
+        support_evidence_correlation = (
+            (support_centered * evidence_centered).sum()
+            / torch.sqrt(
+                support_centered.square().sum()
+                * evidence_centered.square().sum()
+                + 1e-12
+            )
+        )
+        content_innovation = facts.content_innovation.detach().float()
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
             "object_grounding_dense_objective_count": reconstruction_error.new_ones(
@@ -502,6 +546,36 @@ class DenseObjectGrounder(nn.Module):
             ),
             "object_grounding_existence_mean": existence.detach().float().mean(),
             "object_grounding_validity_mean": object_validity.detach().float().mean(),
+            "object_grounding_camera_evidence_mass": camera_evidence_mass.detach()
+            .float()
+            .mean(),
+            "object_grounding_camera_evidence_mass_std": camera_evidence_mass
+            .detach()
+            .float()
+            .std(unbiased=False),
+            "object_grounding_camera_evidence_mass_min": camera_evidence_mass
+            .detach()
+            .float()
+            .amin(),
+            "object_grounding_camera_evidence_mass_max": camera_evidence_mass
+            .detach()
+            .float()
+            .amax(),
+            "object_grounding_camera_support_width_mean": camera_support.detach()
+            .float()
+            .mean(),
+            "object_grounding_camera_support_width_std": camera_support.detach()
+            .float()
+            .std(unbiased=False),
+            "object_grounding_camera_support_evidence_correlation": support_evidence_correlation,
+            "object_grounding_g3_null_identity_error": (
+                corrected[..., self.objects]
+                - parent_owner[..., self.objects]
+            )
+            .detach()
+            .float()
+            .abs()
+            .amax(),
             "object_grounding_allocation_share_mean": allocation_share.detach().float().mean(),
             # Null is a per-cell probability after summing the mutually
             # exclusive local-M hypotheses, not a mean over those hypotheses.
@@ -536,6 +610,30 @@ class DenseObjectGrounder(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "object_grounding_global_k_binder_raw_residual_rms": raw_residual
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_global_k_binder_common_residual_rms": common_residual
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_parent_k_conditional_entropy": normalized_entropy(
+                parent_k_conditional,
+                dim=-1,
+            )
+            .detach()
+            .mean(),
+            "object_grounding_corrected_k_conditional_entropy": normalized_entropy(
+                corrected_k_conditional,
+                dim=-1,
+            )
+            .detach()
+            .mean(),
             "object_grounding_prebind_typed_consensus_l1": (
                 0.5
                 * (
@@ -567,6 +665,21 @@ class DenseObjectGrounder(nn.Module):
                 .mean()
             ),
             "object_grounding_object_content_pair_cosine": self._pair_cosine(content),
+            "object_grounding_public_content_rms": facts.public_content.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_object_content_innovation_rms": content_innovation
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_object_content_innovation_variation": content_innovation
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_grounding_object_innovation_pair_cosine": self._pair_cosine(
+                facts.content_innovation
+            ),
             "object_grounding_object_chart_pair_overlap": self._pair_overlap(chart_read.flatten(2)),
             "object_grounding_semantic_appearance_posterior_l1": (
                 0.5

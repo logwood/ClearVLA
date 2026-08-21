@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import inspect
-import math
 from dataclasses import fields, is_dataclass, replace
 from unittest import mock
 
@@ -22,7 +21,10 @@ from clearvla.mainline.model.compiler import (
 )
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
 from clearvla.mainline.model.grounding import DenseObjectGrounder, dense_chart_from_local_facts
-from clearvla.mainline.model.intent import DirectIntentFutureSupervisor
+from clearvla.mainline.model.intent import (
+    DirectIntentFutureSupervisor,
+    StatelessObjectIntentOrganizer,
+)
 from clearvla.mainline.model.observation import (
     CurrentObservationCompiler,
     PatchFlowField,
@@ -242,7 +244,7 @@ def test_intent_supervisor_uses_canonical_four_interval_physical_targets() -> No
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
@@ -258,12 +260,15 @@ def test_intent_supervisor_uses_canonical_four_interval_physical_targets() -> No
         persistence=torch.zeros_like(scalar),
         uncertainty=torch.zeros_like(scalar),
         reliability=scalar,
+        current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=scalar,
         object_coordinates=torch.zeros(batch, objects, 2),
     )
     future_state = torch.randn(batch, 48, 7)
+    intent_boundary = FutureObjectDynamics.neutral(facts)
     result = top.intent_supervisor(
         intent=intent,
+        intent_boundary=intent_boundary,
         future_state=future_state,
         teacher=teacher,
         current_loss_support=torch.ones(batch, objects, cameras, 1),
@@ -277,6 +282,22 @@ def test_intent_supervisor_uses_canonical_four_interval_physical_targets() -> No
     assert tuple(result.semantic_prediction.shape) == (batch, intervals, objects, content)
     assert tuple(result.status_prediction.shape) == (batch, intervals, objects, 2)
     assert tuple(result.transport_prediction.shape) == (batch, intervals, objects, 2)
+    torch.testing.assert_close(
+        result.semantic_prediction,
+        intent_boundary.semantic_delta,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        result.transport_prediction,
+        intent_boundary.transport_mean,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert not any(
+        name.startswith(("semantic_head", "status_head", "transport_head"))
+        for name, _ in top.intent_supervisor.named_parameters()
+    )
     assert "future_action" not in inspect.signature(
         DirectIntentFutureSupervisor.forward
     ).parameters
@@ -291,7 +312,7 @@ def test_intent_typed_loss_ignores_reliability_and_selector_validity() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
@@ -308,11 +329,13 @@ def test_intent_typed_loss_ignores_reliability_and_selector_validity() -> None:
         persistence=scalar,
         uncertainty=torch.ones_like(scalar),
         reliability=scalar,
+        current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=torch.zeros(batch, intervals, objects, 1),
         object_coordinates=torch.zeros(batch, objects, 2),
     )
     kwargs = dict(
         intent=intent,
+        intent_boundary=FutureObjectDynamics.neutral(facts),
         future_state=torch.randn(batch, 48, 7),
         teacher=teacher,
         current_loss_support=torch.ones(batch, objects, cameras, 1),
@@ -353,6 +376,151 @@ def test_final_object_posterior_is_recomputed_after_last_slot_update() -> None:
         )
     facts.validate()
     assert competition.call_count == grounder.iterations + 1
+
+
+def test_g3_common_k_residual_cannot_change_object_vs_null_mass() -> None:
+    """G3 owns conditional K identity, never the parent existence decision."""
+
+    torch.manual_seed(211)
+    local = _local_facts(cameras=2, content=8, route=4, hidden=16)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=2,
+    ).eval()
+    baseline, baseline_metrics = grounder(local)
+
+    def common_residual(pair: torch.Tensor) -> torch.Tensor:
+        return torch.ones(*pair.shape[:-1], 1, device=pair.device, dtype=pair.dtype)
+
+    with mock.patch.object(
+        grounder.g3_residual,
+        "forward",
+        side_effect=common_residual,
+    ):
+        common, common_metrics = grounder(local)
+    torch.testing.assert_close(
+        common.candidate_assignment,
+        baseline.candidate_assignment,
+        atol=2e-7,
+        rtol=2e-7,
+    )
+    torch.testing.assert_close(
+        common.null_assignment,
+        baseline.null_assignment,
+        atol=2e-7,
+        rtol=2e-7,
+    )
+    assert float(baseline_metrics["object_grounding_g3_null_identity_error"]) == 0.0
+    assert float(common_metrics["object_grounding_g3_null_identity_error"]) == 0.0
+
+
+def test_typed_grounding_cannot_resurrect_zero_physical_support() -> None:
+    torch.manual_seed(212)
+    local = _local_facts(content=8, route=4, hidden=16)
+    validity = local.slot_validity.clone()
+    validity[:, :, 0, 0, 0] = 0.0
+    # Make the invalid hypothesis maximally attractive in every typed view.
+    semantic = local.semantic_owner_probs.clone()
+    appearance = local.appearance_owner_probs.clone()
+    geometry = local.geometry_owner_probs.clone()
+    for prior in (semantic, appearance, geometry):
+        prior[:, :, 0, 0] = 0.0
+        prior[:, :, 0, 0, 0] = 1.0
+    facts, _ = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )(
+        replace(
+            local,
+            slot_validity=validity,
+            semantic_owner_probs=semantic,
+            appearance_owner_probs=appearance,
+            geometry_owner_probs=geometry,
+        )
+    )
+    for assignment in (
+        facts.candidate_assignment,
+        facts.semantic_candidate_assignment,
+        facts.appearance_candidate_assignment,
+        facts.geometry_candidate_assignment,
+    ):
+        assert torch.count_nonzero(assignment[:, :, :, 0, 0, 0]) == 0
+
+
+def test_object_camera_reduction_uses_joint_evidence_mass_not_width() -> None:
+    torch.manual_seed(213)
+    facts, _ = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )(_local_facts(cameras=2, content=8, route=4, hidden=16))
+    coordinates = torch.zeros_like(facts.camera_coordinates)
+    coordinates[:, :, 0] = -1.0
+    coordinates[:, :, 1] = 1.0
+    evidence = torch.zeros_like(facts.camera_evidence_mass)
+    evidence[:, :, 0] = 0.75
+    evidence[:, :, 1] = 0.25
+    changed = replace(
+        facts,
+        camera_coordinates=coordinates,
+        camera_evidence_mass=evidence,
+        camera_support=torch.flip(facts.camera_support, dims=(2,)),
+        camera_validity=torch.ones_like(facts.camera_validity),
+    )
+    torch.testing.assert_close(
+        changed.coordinates,
+        torch.full_like(changed.coordinates, -0.5),
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+def test_object_content_boundary_is_one_public_base_plus_k_innovations() -> None:
+    torch.manual_seed(214)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    ).eval()
+    facts, _ = grounder(_local_facts(cameras=2, content=8, route=4, hidden=16))
+    assert facts.public_content.dtype == facts.content.dtype
+    torch.testing.assert_close(
+        facts.public_content[:, None] + facts.content_innovation,
+        facts.content,
+    )
+    permutation = torch.tensor([2, 0, 3, 1])
+    permuted = facts.permute(permutation)
+    torch.testing.assert_close(permuted.public_content, facts.public_content)
+    torch.testing.assert_close(
+        permuted.content_innovation,
+        facts.content_innovation[:, permutation],
+    )
+
+
+def test_s_projects_public_scene_once_and_k_only_as_content_innovations() -> None:
+    torch.manual_seed(215)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    public, private = top.intent._object_tokens(facts)
+    shift = torch.full_like(facts.public_content, 0.125)
+    shifted = replace(
+        facts,
+        public_content=facts.public_content + shift,
+        content=facts.content + shift[:, None],
+    )
+    shifted_public, shifted_private = top.intent._object_tokens(shifted)
+    torch.testing.assert_close(private, shifted_private, atol=2e-6, rtol=2e-6)
+    assert not torch.equal(public, shifted_public)
 
 
 def test_grounding_diagnostics_switch_is_math_equivalent() -> None:
@@ -942,7 +1110,7 @@ def test_w_typed_sidecars_drive_only_their_owned_output_fields() -> None:
         torch.testing.assert_close(field.uncertainty, baseline.uncertainty)
 
 
-def test_w_public_state_can_modulate_but_cannot_replace_typed_fields() -> None:
+def test_w_field_decoder_cannot_republicize_completed_typed_fields() -> None:
     torch.manual_seed(292)
     facts, _ = DenseObjectGrounder(
         hidden=16,
@@ -984,9 +1152,75 @@ def test_w_public_state_can_modulate_but_cannot_replace_typed_fields() -> None:
     typed_b = dynamics._field(
         facts=facts, hidden=public_b, typed_sidecars=typed
     )
-    assert not torch.equal(typed_a.semantic_delta, typed_b.semantic_delta)
-    assert not torch.equal(typed_a.transport_mean, typed_b.transport_mean)
-    assert not torch.equal(typed_a.visibility, typed_b.visibility)
+    torch.testing.assert_close(typed_a.semantic_delta, typed_b.semantic_delta)
+    torch.testing.assert_close(typed_a.transport_mean, typed_b.transport_mean)
+    torch.testing.assert_close(typed_a.visibility, typed_b.visibility)
+
+
+def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
+    torch.manual_seed(293)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    coarse = top.coarse_action(intent.action_dock())
+    _, typed_input, _ = top.dynamics._base(
+        facts,
+        intent.world_dock(),
+        coarse,
+        collect_diagnostics=False,
+    )
+    _, working, _ = top.dynamics.forward_w1(
+        facts=facts,
+        intent=intent.world_dock(),
+        action=coarse,
+        collect_diagnostics=False,
+    )
+    assert not torch.equal(working.near_typed, typed_input[:, :2])
+    completed, _ = top.dynamics.forward_w2(
+        facts=facts,
+        intent=intent.world_dock(),
+        action=coarse,
+        w1_state=working,
+        collect_diagnostics=False,
+    )
+    completed.validate()
+
+    zero_typed = replace(
+        intent,
+        typed_relevance_mass=torch.zeros_like(intent.typed_relevance_mass),
+        typed_relevance_value=torch.zeros_like(intent.typed_relevance_value),
+        typed_policy_components=torch.zeros_like(intent.typed_policy_components),
+        policy_interval_context=intent.public_interval_carrier,
+        policy_interval_innovation=intent.interval_condition_innovation,
+    )
+    zero_coarse = top.coarse_action(zero_typed.action_dock())
+    _, zero_working, _ = top.dynamics.forward_w1(
+        facts=facts,
+        intent=zero_typed.world_dock(),
+        action=zero_coarse,
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(zero_working.near_typed) == 0
+    assert torch.count_nonzero(zero_working.far_typed) == 0
+    zero_completed, _ = top.dynamics.forward_w2(
+        facts=facts,
+        intent=zero_typed.world_dock(),
+        action=zero_coarse,
+        w1_state=zero_working,
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(zero_completed.semantic_delta) == 0
+    assert torch.count_nonzero(zero_completed.transport_mean) == 0
+    assert torch.count_nonzero(zero_completed.visibility) == 0
+    assert torch.count_nonzero(zero_completed.persistence) == 0
 
 
 def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> None:
@@ -999,17 +1233,21 @@ def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> N
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
     blank_intent = replace(
         intent.world_dock(),
-        public_interval_carrier=torch.zeros_like(intent.public_interval_carrier),
+        interval_condition_innovation=torch.zeros_like(
+            intent.interval_condition_innovation
+        ),
     )
     signal_intent = replace(
         blank_intent,
-        public_interval_carrier=torch.randn_like(intent.public_interval_carrier),
+        interval_condition_innovation=torch.randn_like(
+            intent.interval_condition_innovation
+        ),
     )
     coarse = top.coarse_action(intent.action_dock())
     zero_action = replace(coarse, tokens=torch.zeros_like(coarse.tokens))
@@ -1047,7 +1285,7 @@ def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.zeros(1, 3, 7),
         state=torch.zeros(1, 7),
-        executed_history=torch.zeros(1, 3, 7),
+        executed_history=torch.zeros(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
@@ -1066,7 +1304,7 @@ def test_goal_changes_interval_intent_without_rewriting_object_facts() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.zeros(1, 3, 7),
         state=torch.zeros(1, 7),
-        executed_history=torch.zeros(1, 3, 7),
+        executed_history=torch.zeros(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
@@ -1097,6 +1335,7 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
         persistence=scalar,
         uncertainty=scalar,
         reliability=scalar,
+        current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=validity,
         object_coordinates=torch.zeros(batch, objects, 2),
     )
@@ -1178,6 +1417,7 @@ def test_future_interval_transition_penalizes_temporal_collapse_not_common_offse
         persistence=scalar,
         uncertainty=scalar,
         reliability=scalar,
+        current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=torch.ones(batch, intervals, objects, 1),
         object_coordinates=torch.zeros(batch, objects, 2),
     )
@@ -1383,6 +1623,7 @@ def test_teacher_camera_relabeling_preserves_object_geometry() -> None:
         camera_transport_prior=facts.camera_transport_prior[:, :, camera_permutation],
         camera_support=facts.camera_support[:, :, camera_permutation],
         camera_validity=facts.camera_validity[:, :, camera_permutation],
+        camera_evidence_mass=facts.camera_evidence_mass[:, :, camera_permutation],
         object_to_chart=facts.object_to_chart[:, :, camera_permutation],
         candidate_assignment=facts.candidate_assignment[:, :, camera_permutation],
         semantic_candidate_assignment=(
@@ -1422,7 +1663,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     goal_mask = torch.ones(1, 6, dtype=torch.bool)
     state_history = torch.randn(1, 3, 7)
     state = torch.randn(1, 7)
-    executed_history = torch.randn(1, 3, 7)
+    executed_history = torch.randn(1, 8, 7)
 
     def organize(current_facts):
         return top.intent(
@@ -1498,6 +1739,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     compiled, _ = top.compile_policy(
         DeploymentTopCache(intent=intent, predicted_dynamics=dynamics),
         p1_fact=p1_fact,
+        p1_precision_innovation=p1_fact,
         action_query=action_query,
     )
     relabeled_compiled, _ = top.compile_policy(
@@ -1506,6 +1748,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             predicted_dynamics=relabeled_dynamics,
         ),
         p1_fact=p1_fact,
+        p1_precision_innovation=p1_fact,
         action_query=action_query,
     )
     for name in ("effect",):
@@ -1540,7 +1783,7 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
         "goal_mask": torch.ones(1, 6, dtype=torch.bool),
         "state_history": torch.randn(1, 3, 7),
         "state": torch.randn(1, 7),
-        "executed_history": torch.randn(1, 3, 7),
+        "executed_history": torch.randn(1, 8, 7),
         "collect_diagnostics": False,
     }
 
@@ -1603,10 +1846,41 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
     assert float(w_metrics["object_w_typed_sidecar_rms"]) == 0.0
 
 
+def test_s_zero_goal_is_an_exact_language_null_not_a_learned_query_value() -> None:
+    torch.manual_seed(370)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.zeros(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(intent.protected_goal_set) == 0
+    _, _, metrics = top.dynamics._base(
+        facts,
+        intent.world_dock(),
+        top.coarse_action(intent.action_dock()),
+        collect_diagnostics=True,
+    )
+    assert float(metrics["object_w_goal_innovation_rms"]) == 0.0
+
+
 def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> None:
     torch.manual_seed(371)
     top = _object_top().eval()
     facts, _ = top.grounder(_local_facts(cameras=2))
+    zero = torch.zeros(1, 4, 32)
+    zero_mass, zero_value, *_ = top.intent._typed_relevance(
+        interval_condition_innovation=zero,
+        facts=facts,
+    )
+    assert torch.count_nonzero(zero_mass) == 0
+    assert torch.count_nonzero(zero_value) == 0
+
     common = torch.randn(1, 1, 32).expand(-1, 4, -1).clone()
     (
         common_mass,
@@ -1617,9 +1891,10 @@ def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> 
         common_differential_score,
         _,
         _,
+        common_denominator,
         common_differential_denominator,
     ) = top.intent._typed_relevance(
-        public_interval_carrier=common,
+        interval_condition_innovation=common,
         facts=facts,
     )
     torch.testing.assert_close(
@@ -1629,8 +1904,17 @@ def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> 
         rtol=0.0,
     )
     assert torch.count_nonzero(common_differential_score) == 0
+    assert float(common_denominator.amin()) >= 0.25
     assert float(common_differential_denominator.amin()) >= 0.25
     assert float(common_score.detach().abs().max()) <= 1.0
+
+    tiny_mass, *_ = top.intent._typed_relevance(
+        interval_condition_innovation=common * 1e-6,
+        facts=facts,
+    )
+    assert float(tiny_mass.detach().amax()) < float(
+        common_mass.detach().amax()
+    ) * 1e-3
 
     differential = common.clone()
     differential[:, 2] = differential[:, 2] + torch.randn_like(differential[:, 2])
@@ -1643,9 +1927,10 @@ def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> 
         raw_differential_score,
         _,
         _,
+        _,
         differential_denominator,
     ) = top.intent._typed_relevance(
-        public_interval_carrier=differential,
+        interval_condition_innovation=differential,
         facts=facts,
     )
     assert float(
@@ -1656,7 +1941,38 @@ def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> 
     assert float(differential_score.detach().abs().max()) <= 1.0
 
 
-def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
+def test_s_history_is_a_typed_time_union_not_fake_state_action_pairs() -> None:
+    state_history = torch.tensor([[[80.0], [40.0], [999.0]]])
+    current_state = torch.tensor([[1.0]])
+    executed = torch.tensor(
+        [[[24.0], [16.0], [12.0], [8.0], [6.0], [4.0], [2.0], [1.0]]]
+    )
+    packed, delta = StatelessObjectIntentOrganizer._paired_history(
+        state_history,
+        current_state,
+        executed,
+    )
+    assert tuple(packed.shape) == (1, 11, 5)
+    assert tuple(delta.shape) == (1, 11, 1)
+    expected_offsets = torch.tensor(
+        [-1.0, -2 / 3, -0.5, -1 / 3, -1 / 3, -1 / 4, -1 / 6, -1 / 6, -1 / 12, -1 / 24, 0.0]
+    )
+    torch.testing.assert_close(packed[0, :, -2], expected_offsets)
+    expected_owner = torch.tensor(
+        [-1, -1, -1, 1, -1, -1, 1, -1, -1, -1, 1],
+        dtype=packed.dtype,
+    )
+    torch.testing.assert_close(packed[0, :, -1], expected_owner)
+    state_rows = packed[0, :, -1] > 0
+    action_rows = ~state_rows
+    assert torch.count_nonzero(packed[0, state_rows, 1]) == 0
+    assert torch.count_nonzero(packed[0, action_rows, 0]) == 0
+    # The stale offset-zero history row is replaced, not appended or paired.
+    assert 999.0 not in packed
+    assert int((packed[0, :, 0] == 1.0).sum()) == 1
+
+
+def test_coarse_action_consumes_s_typed_dock_without_raw_g_reread() -> None:
     torch.manual_seed(372)
     top = _object_top().eval()
     facts, _ = top.grounder(_local_facts(cameras=2))
@@ -1665,13 +1981,20 @@ def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
     action_field_names = {field.name for field in fields(intent.action_dock())}
-    assert not any("typed" in name for name in action_field_names)
-    assert "typed_" not in inspect.getsource(type(top.coarse_action).forward)
+    assert "interval_condition_innovation" in action_field_names
+    assert "public_interval_carrier" not in action_field_names
+    assert "public_scene_memory" in action_field_names
+    assert "object_innovation_memory" in action_field_names
+    assert "typed_interval_object_value" in action_field_names
+    assert "typed_interval_object_value" in inspect.getsource(
+        type(top.coarse_action).forward
+    )
+    assert "facts." not in inspect.getsource(type(top.coarse_action).forward)
 
     zero_typed = replace(
         intent,
@@ -1679,10 +2002,28 @@ def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
         typed_relevance_value=torch.zeros_like(intent.typed_relevance_value),
         typed_policy_components=torch.zeros_like(intent.typed_policy_components),
         policy_interval_context=intent.public_interval_carrier,
+        policy_interval_innovation=intent.interval_condition_innovation,
     )
     coarse = top.coarse_action(intent.action_dock())
     zero_coarse = top.coarse_action(zero_typed.action_dock())
-    torch.testing.assert_close(coarse.tokens, zero_coarse.tokens, atol=0.0, rtol=0.0)
+    assert not torch.equal(coarse.tokens, zero_coarse.tokens)
+
+    dock = intent.action_dock()
+    empty_dock = replace(
+        dock,
+        interval_condition_innovation=torch.zeros_like(
+            dock.interval_condition_innovation
+        ),
+        history_memory=torch.zeros_like(dock.history_memory),
+        public_scene_memory=torch.zeros_like(dock.public_scene_memory),
+        object_innovation_memory=torch.zeros_like(dock.object_innovation_memory),
+        typed_interval_object_value=torch.zeros_like(
+            dock.typed_interval_object_value
+        ),
+    )
+    empty_coarse = top.coarse_action(empty_dock)
+    assert torch.count_nonzero(empty_coarse.tokens) == 0
+    assert torch.count_nonzero(empty_coarse.action_prediction) == 0
 
     with_typed, with_sidecars, _ = top.dynamics._base(
         facts,
@@ -1693,13 +2034,48 @@ def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
     without_typed, without_sidecars, _ = top.dynamics._base(
         facts,
         zero_typed.world_dock(),
-        zero_coarse,
+        coarse,
         collect_diagnostics=False,
     )
     # Typed evidence must not be re-publicized into W's common carrier.  It
     # crosses the boundary only through field-owned sidecars.
     torch.testing.assert_close(with_typed, without_typed, atol=0.0, rtol=0.0)
     assert not torch.equal(with_sidecars, without_sidecars)
+
+
+def test_p2_public_interval_key_does_not_duplicate_typed_policy_context() -> None:
+    torch.manual_seed(373)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    dock = intent.policy_dock()
+    torch.testing.assert_close(
+        dock.interval_key,
+        intent.interval_condition_innovation,
+        atol=0.0,
+        rtol=0.0,
+    )
+    changed = replace(
+        intent,
+        policy_interval_innovation=(
+            intent.policy_interval_innovation
+            + torch.randn_like(intent.policy_interval_innovation)
+        ),
+    )
+    torch.testing.assert_close(
+        changed.policy_dock().interval_key,
+        dock.interval_key,
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> None:
@@ -1714,6 +2090,16 @@ def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> 
     appearance_projection = relabeled_top.intent.object_appearance
     relabeled_top.intent.object_semantic = appearance_projection
     relabeled_top.intent.object_appearance = semantic_projection
+    for name in ("typed_input", "typed_memory_norm", "typed_read"):
+        modules = getattr(relabeled_top.coarse_action, name)
+        semantic_module = modules[0]
+        appearance_module = modules[1]
+        modules[0] = appearance_module
+        modules[1] = semantic_module
+    with torch.no_grad():
+        relabeled_top.coarse_action.typed_router.weight[[0, 1]] = (
+            relabeled_top.coarse_action.typed_router.weight[[1, 0]].clone()
+        )
     semantic_projection = relabeled_top.dynamics.object_semantic
     appearance_projection = relabeled_top.dynamics.object_appearance
     relabeled_top.dynamics.object_semantic = appearance_projection
@@ -1730,7 +2116,7 @@ def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> 
         "goal_mask": torch.ones(1, 6, dtype=torch.bool),
         "state_history": torch.randn(1, 3, 7),
         "state": torch.randn(1, 7),
-        "executed_history": torch.randn(1, 3, 7),
+        "executed_history": torch.randn(1, 8, 7),
         "collect_diagnostics": False,
     }
     intent = top.intent(facts=facts, **inputs)[0]
@@ -1800,7 +2186,7 @@ def test_public_intent_match_cannot_train_optional_typed_relevance() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
         facts=facts,
         collect_diagnostics=False,
     )
@@ -1810,16 +2196,13 @@ def test_public_intent_match_cannot_train_optional_typed_relevance() -> None:
     assert top.intent.typed_temperature_logit.grad is None
 
 
-def test_coarse_action_and_w_have_no_raw_typed_fact_reread() -> None:
+def test_coarse_action_and_w_only_read_typed_values_through_s_docks() -> None:
     top = _object_top()
-    for name in (
-        "semantic_read",
-        "appearance_read",
-        "geometry_read",
-        "typed_router",
-    ):
-        assert not hasattr(top.coarse_action, name)
+    assert hasattr(top.coarse_action, "typed_router")
     assert not hasattr(top.dynamics, "typed_router")
+    coarse_source = inspect.getsource(type(top.coarse_action).forward)
+    assert "typed_interval_object_value" in coarse_source
+    assert "facts." not in coarse_source
     source = inspect.getsource(type(top.dynamics)._base)
     for forbidden in ("facts.semantic", "facts.appearance", "facts.geometry"):
         assert forbidden not in source
@@ -1835,7 +2218,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
     )
     horizon, basis, hidden = 24, 2, 32
     p1_fact = torch.randn(1, horizon, basis, hidden)
@@ -1847,15 +2230,17 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     compiled, _ = top.compile_policy(
         deployment,
         p1_fact=p1_fact,
+        p1_precision_innovation=p1_fact,
         action_query=action_query,
     )
     neutral_other_query, _ = top.compile_policy(
         deployment,
         p1_fact=p1_fact,
+        p1_precision_innovation=p1_fact,
         action_query=torch.randn(1, horizon, basis, hidden),
     )
     assert torch.count_nonzero(compiled.effect) == 0
-    assert torch.count_nonzero(compiled.plan.factual) == 0
+    assert not hasattr(compiled.plan, "factual")
     assert torch.count_nonzero(compiled.plan.precision) > 0
     assert torch.count_nonzero(compiled.plan.temporal) > 0
     assert torch.count_nonzero(compiled.plan.state_change) > 0
@@ -1876,6 +2261,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
             predicted_dynamics=deployment.predicted_dynamics,
         ),
         p1_fact=p1_fact,
+        p1_precision_innovation=p1_fact,
         action_query=action_query,
     )
     # Cumulative/identity-bearing S queries are addresses internal to S.  P2
@@ -1895,7 +2281,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     )
 
 
-def test_p2_equal_candidate_evidence_has_cardinality_neutral_null_odds() -> None:
+def test_p2_equal_candidate_evidence_has_no_fixed_half_null_prior() -> None:
     batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
     scalar = torch.ones(batch, intervals, objects, 1)
     dynamics = FutureObjectDynamics(
@@ -1908,15 +2294,21 @@ def test_p2_equal_candidate_evidence_has_cardinality_neutral_null_odds() -> None
         persistence=torch.zeros_like(scalar),
         uncertainty=torch.zeros_like(scalar),
         reliability=torch.zeros_like(scalar),
+        current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=scalar,
         object_coordinates=torch.zeros(batch, objects, 2),
     )
     intent = PolicyIntentDock(
         interval_key=torch.zeros(batch, intervals, hidden),
+        typed_interval_object_value=torch.zeros(
+            batch, intervals, objects, 3, 4
+        ),
         temporal_control=torch.zeros(batch, 24, hidden),
         state_change_evidence=torch.zeros(batch, hidden),
     )
-    reader = ObjectFutureEffectReader(hidden=hidden, content_dim=content)
+    reader = ObjectFutureEffectReader(
+        hidden=hidden, content_dim=content, route_dim=4
+    )
     value, metrics = reader(
         torch.zeros(batch, 24, 2, hidden),
         dynamics,
@@ -1924,10 +2316,97 @@ def test_p2_equal_candidate_evidence_has_cardinality_neutral_null_odds() -> None
         collect_diagnostics=True,
     )
     assert torch.count_nonzero(value) == 0
-    torch.testing.assert_close(metrics["object_p2_null_mass"], torch.tensor(0.5))
+    assert float(metrics["object_p2_null_mass"]) < 0.5
+
+
+def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> None:
+    batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
+    scalar = torch.zeros(batch, intervals, objects, 1)
+    dynamics = FutureObjectDynamics(
+        current_reference=torch.zeros(batch, objects, content),
+        successor_content=torch.zeros(batch, intervals, objects, content),
+        semantic_delta=torch.zeros(batch, intervals, objects, content),
+        transport_mean=torch.zeros(batch, intervals, objects, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, 3),
+        visibility=-torch.ones_like(scalar),
+        persistence=-torch.ones_like(scalar),
+        uncertainty=torch.zeros_like(scalar),
+        reliability=torch.zeros_like(scalar),
+        current_selector_validity=torch.ones(batch, objects, 1),
+        future_selector_validity=torch.zeros_like(scalar),
+        object_coordinates=torch.zeros(batch, objects, 2),
+    )
+    intent = PolicyIntentDock(
+        interval_key=torch.zeros(batch, intervals, hidden),
+        typed_interval_object_value=torch.zeros(batch, intervals, objects, 3, 4),
+        temporal_control=torch.zeros(batch, 24, hidden),
+        state_change_evidence=torch.zeros(batch, hidden),
+    )
+    reader = ObjectFutureEffectReader(
+        hidden=hidden,
+        content_dim=content,
+        route_dim=4,
+    )
+    with torch.no_grad():
+        reader.status_value.weight.fill_(0.25)
+        reader.type_query.weight.zero_()
+    value, metrics = reader(
+        torch.zeros(batch, 24, 2, hidden),
+        dynamics,
+        intent,
+        collect_diagnostics=True,
+    )
+    assert torch.count_nonzero(value) > 0
+    assert float(metrics["object_p2_status_null_mass"]) < 0.5
+    assert float(metrics["object_p2_semantic_null_mass"]) > 0.999
+    assert float(metrics["object_p2_geometry_null_mass"]) > 0.999
+
+
+def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() -> None:
+    torch.manual_seed(403)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+    )
+    query = torch.randn(1, 24, 2, 32)
+    baseline = context.predicted_dynamics
+    _, metrics = top.effect_reader(
+        query,
+        baseline,
+        context.intent.policy_dock(),
+        collect_diagnostics=True,
+    )
+    changed = replace(
+        baseline,
+        semantic_delta=baseline.semantic_delta
+        + torch.randn_like(baseline.semantic_delta),
+    )
+    _, changed_metrics = top.effect_reader(
+        query,
+        changed,
+        context.intent.policy_dock(),
+        collect_diagnostics=True,
+    )
+    assert not torch.equal(
+        metrics["object_p2_semantic_null_mass"],
+        changed_metrics["object_p2_semantic_null_mass"],
+    )
     torch.testing.assert_close(
-        metrics["object_p2_candidate_partition_correction"],
-        torch.tensor(math.log(intervals * objects)),
+        metrics["object_p2_geometry_null_mass"],
+        changed_metrics["object_p2_geometry_null_mass"],
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        metrics["object_p2_status_null_mass"],
+        changed_metrics["object_p2_status_null_mass"],
+        atol=0.0,
+        rtol=0.0,
     )
 
 
@@ -1952,23 +2431,66 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     )
     zero_intent = PolicyIntentDock(
         interval_key=torch.zeros(batch, 4, hidden),
+        typed_interval_object_value=torch.zeros(batch, 4, 4, 3, 4),
         temporal_control=torch.zeros(batch, horizon, hidden),
         state_change_evidence=torch.zeros(batch, hidden),
     )
     bank, _ = compiler(
         p1_fact=common_fact,
+        p1_precision_innovation=common_fact,
         consequence=consequence,
         intent=zero_intent,
         action_query=action_query,
     )
-    assert torch.count_nonzero(bank.factual) == 0
-    # A fact repeated across action bases is already fully protected and is
-    # not a precision innovation.
-    assert torch.count_nonzero(bank.precision) == 0
+    assert not hasattr(bank, "factual")
+    # Precision reads the cached high-resolution P1 innovation directly; it
+    # must not disappear merely because the observation is shared across
+    # action bases.  Temporal requires both S and consequence.
+    assert torch.count_nonzero(bank.precision) > 0
     assert torch.count_nonzero(bank.temporal) == 0
     assert torch.count_nonzero(bank.state_change) == 0
     assert torch.count_nonzero(bank.effect) > 0
 
+    zero_precision, _ = compiler(
+        p1_fact=common_fact,
+        p1_precision_innovation=torch.zeros_like(common_fact),
+        consequence=consequence,
+        intent=zero_intent,
+        action_query=action_query,
+    )
+    assert torch.count_nonzero(zero_precision.precision) == 0
+    torch.testing.assert_close(
+        zero_precision.temporal,
+        bank.temporal,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+    active_intent = replace(
+        zero_intent,
+        temporal_control=torch.randn(batch, horizon, hidden),
+    )
+    active, _ = compiler(
+        p1_fact=common_fact,
+        p1_precision_innovation=common_fact,
+        consequence=consequence,
+        intent=active_intent,
+        action_query=action_query,
+    )
+    assert torch.count_nonzero(active.temporal) > 0
+    no_consequence, _ = compiler(
+        p1_fact=common_fact,
+        p1_precision_innovation=common_fact,
+        consequence=replace(
+            consequence,
+            protected_consequence=torch.zeros_like(
+                consequence.protected_consequence
+            ),
+        ),
+        intent=active_intent,
+        action_query=action_query,
+    )
+    assert torch.count_nonzero(no_consequence.temporal) == 0
     changed_consequence = replace(
         consequence,
         protected_consequence=consequence.protected_consequence
@@ -1976,12 +2498,29 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     )
     changed, _ = compiler(
         p1_fact=common_fact,
+        p1_precision_innovation=common_fact,
         consequence=changed_consequence,
-        intent=zero_intent,
+        intent=active_intent,
         action_query=action_query,
     )
-    torch.testing.assert_close(changed.precision, bank.precision, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(changed.effect, bank.effect, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(changed.precision, active.precision, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(changed.effect, active.effect, atol=0.0, rtol=0.0)
+    assert not torch.equal(changed.temporal, active.temporal)
+
+    changed_precision, _ = compiler(
+        p1_fact=common_fact,
+        p1_precision_innovation=common_fact + torch.randn_like(common_fact),
+        consequence=consequence,
+        intent=active_intent,
+        action_query=action_query,
+    )
+    assert not torch.equal(changed_precision.precision, active.precision)
+    torch.testing.assert_close(
+        changed_precision.temporal,
+        active.temporal,
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass() -> None:
@@ -1993,7 +2532,7 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
-        executed_history=torch.randn(1, 3, 7),
+        executed_history=torch.randn(1, 8, 7),
     )
     horizon, basis, hidden = 24, 2, 32
     neutral = FutureObjectDynamics.neutral(context.facts)

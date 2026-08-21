@@ -784,6 +784,25 @@ V94_ALIASES.update(
                 "object_grounding_global_k_binder_correction_l1"
             ),
             "global_k_residual": "object_grounding_global_k_binder_residual_rms",
+            "global_k_raw_residual": (
+                "object_grounding_global_k_binder_raw_residual_rms"
+            ),
+            "global_k_common_residual": (
+                "object_grounding_global_k_binder_common_residual_rms"
+            ),
+            "g3_null_identity_error": "object_grounding_g3_null_identity_error",
+            "parent_k_conditional_H": (
+                "object_grounding_parent_k_conditional_entropy"
+            ),
+            "corrected_k_conditional_H": (
+                "object_grounding_corrected_k_conditional_entropy"
+            ),
+            "camera_evidence": "object_grounding_camera_evidence_mass",
+            "camera_evidence_std": "object_grounding_camera_evidence_mass_std",
+            "camera_support_width": "object_grounding_camera_support_width_mean",
+            "camera_support_evidence_corr": (
+                "object_grounding_camera_support_evidence_correlation"
+            ),
             "g3_parent_l1": "object_grounding_g3_parent_l1",
             "prebind_consensus_l1": "object_grounding_prebind_typed_consensus_l1",
             "prebind_sem_app_l1": (
@@ -793,6 +812,16 @@ V94_ALIASES.update(
                 "object_grounding_prebind_semantic_geometry_l1"
             ),
             "object_pair_cos": "object_grounding_object_content_pair_cosine",
+            "public_content": "object_grounding_public_content_rms",
+            "object_content_innov": (
+                "object_grounding_object_content_innovation_rms"
+            ),
+            "object_content_var": (
+                "object_grounding_object_content_innovation_variation"
+            ),
+            "object_innov_pair_cos": (
+                "object_grounding_object_innovation_pair_cosine"
+            ),
             "chart_pair_overlap": "object_grounding_object_chart_pair_overlap",
             "sem_app_post_l1": (
                 "object_grounding_semantic_appearance_posterior_l1"
@@ -820,20 +849,43 @@ V94_ALIASES.update(
             "geometry_sim_H": "object_intent_interval_geometry_audit_similarity_entropy",
             "interval_var": "object_intent_interval_variation",
             "public_interval_var": "object_intent_public_interval_variation",
+            "condition_innov": "object_intent_condition_innovation_rms",
+            "condition_interval_var": (
+                "object_intent_condition_interval_variation"
+            ),
             "public_condition_interval_var": (
                 "object_intent_public_condition_centered_interval_variation"
             ),
             "policy_interval_var": "object_intent_policy_interval_variation",
+            "policy_innov": "object_intent_policy_innovation_rms",
+            "policy_innov_interval_var": (
+                "object_intent_policy_innovation_interval_variation"
+            ),
             "state_interval_var": "object_intent_interval_state_variation",
             "object_key_var": "object_intent_interval_object_key_variation",
             "object_value_var": "object_intent_interval_object_value_variation",
             "temporal_var": "object_intent_temporal_variation",
+            "temporal_read_innov": (
+                "object_intent_temporal_read_innovation_rms"
+            ),
+            "temporal_read_interval_var": (
+                "object_intent_temporal_read_interval_variation"
+            ),
+            "temporal_attention_H": "object_intent_temporal_attention_entropy",
             "goal_innov": "object_intent_goal_innovation_rms",
             "history_innov": "object_intent_history_innovation_rms",
             "object_innov": "object_intent_object_innovation_rms",
+            "public_scene_content": "object_intent_public_scene_content_rms",
+            "object_content_innov": (
+                "object_intent_object_content_innovation_rms"
+            ),
+            "object_content_var": (
+                "object_intent_object_content_innovation_variation"
+            ),
             "typed_innov": "object_intent_typed_innovation_rms",
             "typed_policy": "object_intent_typed_policy_context_rms",
             "typed_action_legacy": "object_intent_typed_action_context_rms",
+            "typed_common_denom": "object_intent_typed_common_norm_denominator_min",
             "typed_diff_denom": "object_intent_typed_differential_norm_denominator_min",
             "typed_unsupported": "object_intent_typed_fact_unsupported_fraction",
             "sem_rel": "object_intent_semantic_relevance_mass",
@@ -917,6 +969,9 @@ V94_ALIASES.update(
             "object_value_innov": "object_w_object_value_innovation_rms",
             "typed_innov": "object_w_typed_innovation_rms",
             "typed_sidecar": "object_w_typed_sidecar_rms",
+            "public_content": "object_w_public_content_rms",
+            "object_content_innov": "object_w_object_innovation_rms",
+            "object_content_var": "object_w_object_innovation_variation",
             "typed_contribution": "object_w_typed_contribution_rms",
             "semantic_contribution": "object_w_semantic_contribution_rms",
             "appearance_contribution": "object_w_appearance_contribution_rms",
@@ -929,6 +984,24 @@ V94_ALIASES.update(
             "w2_transport": "object_w2_transport_rms",
             "w2_interval_cos": "object_w2_interval_adjacent_cosine",
             "w2_object_cos": "object_w2_object_pair_cosine",
+            "w1_semantic_state_var": (
+                "object_w1_semantic_state_interval_variation"
+            ),
+            "w1_appearance_state_var": (
+                "object_w1_appearance_state_interval_variation"
+            ),
+            "w1_geometry_state_var": (
+                "object_w1_geometry_state_interval_variation"
+            ),
+            "w2_semantic_state_var": (
+                "object_w2_semantic_state_interval_variation"
+            ),
+            "w2_appearance_state_var": (
+                "object_w2_appearance_state_interval_variation"
+            ),
+            "w2_geometry_state_var": (
+                "object_w2_geometry_state_interval_variation"
+            ),
             "w2_condition_interval_var": (
                 "object_w2_condition_centered_interval_variation"
             ),
@@ -990,9 +1063,6 @@ V94_ALIASES.update(
             "coordinate_score": "object_p2_coordinate_score_abs",
             "coordinate_score_max": "object_p2_coordinate_score_max_abs",
             "combined_logit_max": "object_p2_combined_logit_max_abs",
-            "candidate_partition_correction": (
-                "object_p2_candidate_partition_correction"
-            ),
             "tau_content": "object_p2_temperature_content",
             "tau_intent": "object_p2_temperature_intent",
             "tau_coordinate": "object_p2_temperature_coordinate",
@@ -1002,6 +1072,8 @@ V94_ALIASES.update(
             "semantic_mass": "object_p2_semantic_value_mass",
             "geometry_mass": "object_p2_geometry_value_mass",
             "status_mass": "object_p2_status_value_mass",
+            "status_score_max": "object_p2_status_score_max_abs",
+            "status_null": "object_p2_status_null_mass",
             "semantic_h4_8_mass": "object_p2_semantic_interval_0_mass",
             "semantic_h8_16_mass": "object_p2_semantic_interval_1_mass",
             "semantic_h16_32_mass": "object_p2_semantic_interval_2_mass",
@@ -1010,6 +1082,10 @@ V94_ALIASES.update(
             "geometry_h8_16_mass": "object_p2_geometry_interval_1_mass",
             "geometry_h16_32_mass": "object_p2_geometry_interval_2_mass",
             "geometry_h32_48_mass": "object_p2_geometry_interval_3_mass",
+            "status_h4_8_mass": "object_p2_status_interval_0_mass",
+            "status_h8_16_mass": "object_p2_status_interval_1_mass",
+            "status_h16_32_mass": "object_p2_status_interval_2_mass",
+            "status_h32_48_mass": "object_p2_status_interval_3_mass",
             "h4_8_mass": "object_p2_interval_0_mass",
             "h8_16_mass": "object_p2_interval_1_mass",
             "h16_32_mass": "object_p2_interval_2_mass",
@@ -1021,8 +1097,11 @@ V94_ALIASES.update(
             "interaction": "object_consequence_interaction_rms",
             "consequence_ratio": "object_consequence_ratio",
             "p3_factual": "object_p3_factual_rms",
+            "p3_precision_input": "object_p3_precision_input_rms",
             "p3_precision": "object_p3_precision_rms",
             "p3_effect": "object_p3_effect_rms",
+            "p3_temporal_source": "object_p3_temporal_source_rms",
+            "p3_temporal_consequence": "object_p3_temporal_consequence_rms",
             "p3_temporal": "object_p3_temporal_rms",
             "p3_state_change": "object_p3_state_change_rms",
             "p3_centered_detail": "object_p3_centered_detail_rms",
@@ -1111,6 +1190,10 @@ STRUCTURE_KEYS = (
     "object_grounding_prototype_mse",
     "object_grounding_spatial_refinement_mse",
     "object_grounding_object_content_pair_cosine",
+    "object_grounding_public_content_rms",
+    "object_grounding_object_content_innovation_rms",
+    "object_grounding_object_content_innovation_variation",
+    "object_grounding_object_innovation_pair_cosine",
     "object_grounding_object_chart_pair_overlap",
     "object_grounding_typed_consistency",
     "object_grounding_camera_coordinate_variation",
@@ -1133,6 +1216,9 @@ STRUCTURE_KEYS = (
     "object_intent_goal_innovation_rms",
     "object_intent_history_innovation_rms",
     "object_intent_object_innovation_rms",
+    "object_intent_public_scene_content_rms",
+    "object_intent_object_content_innovation_rms",
+    "object_intent_object_content_innovation_variation",
     "object_intent_action_innovation_rms",
     "object_intent_state_change_evidence_rms",
     "object_intent_typed_carrier_ratio",
@@ -1198,6 +1284,9 @@ STRUCTURE_KEYS = (
     "object_w_action_object_interaction_rms",
     "object_w_typed_contribution_rms",
     "object_w_typed_sidecar_rms",
+    "object_w_public_content_rms",
+    "object_w_object_innovation_rms",
+    "object_w_object_innovation_variation",
     "object_w_semantic_contribution_rms",
     "object_w_semantic_contribution_interval_variation",
     "object_w_semantic_contribution_object_variation",
@@ -3992,6 +4081,10 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema28 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 28
+    )
     schema27 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 27
@@ -4002,6 +4095,24 @@ def _recovery_assessment(
         else "object_intent_interval_variation"
     )
     required_structure = (
+        (
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_object_innovation_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_object_content_innovation_variation",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_future_field_loss",
+            "object_w_object_innovation_variation",
+            "object_w_typed_sidecar_rms",
+            "object_w2_condition_centered_interval_variation",
+            "object_teacher_reliability",
+            "p1_query_chart_variation",
+            "object_p2_effect_precontract_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+        )
+        if schema28
+        else
         (
             "object_grounding_object_content_pair_cosine",
             "object_grounding_prebind_typed_consensus_l1",
@@ -4036,9 +4147,7 @@ def _recovery_assessment(
             if isinstance(value, (int, float)) and math.isfinite(float(value))
             else "incomplete"
         )
-        if name.endswith("object_content_pair_cosine") or name.endswith(
-            "object_pair_cosine"
-        ):
+        if name.endswith("pair_cosine"):
             if status == "pass" and float(value) >= 0.999:
                 status = "fail"
         record(

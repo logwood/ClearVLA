@@ -167,6 +167,11 @@ class ObjectFactSet:
     """Four global objects with a soft, reversible chart correspondence."""
 
     dense_chart: DenseFactChart
+    # One protected scene-wide content value plus K zero-centred innovations.
+    # ``content`` remains the absolute object reference required by Teacher;
+    # online S/W consumers must use ``content_innovation`` for the K axis so
+    # the public direction is not copied K times and mistaken for ownership.
+    public_content: Tensor  # [B,D]
     content: Tensor  # [B,K,D]
     semantic: Tensor  # [B,K,R]
     appearance: Tensor
@@ -175,6 +180,11 @@ class ObjectFactSet:
     camera_transport_prior: Tensor  # [B,K,C,2]
     camera_support: Tensor  # [B,K,C,1]
     camera_validity: Tensor  # [B,K,C,1]
+    # Joint physical assignment mass in each camera, normalized by the
+    # camera's observed candidate mass.  This is evidence strength; unlike
+    # ``camera_support`` it is not an object-width statistic, and unlike
+    # ``camera_validity`` it is not conditioned on an already-selected read.
+    camera_evidence_mass: Tensor  # [B,K,C,1]
     support: Tensor  # [B,K,1]
     # Read-conditioned object-vs-null confidence.  This is deliberately not
     # the fraction of total chart area allocated to an object.
@@ -204,10 +214,16 @@ class ObjectFactSet:
         return int(self.content.shape[1])
 
     @property
+    def content_innovation(self) -> Tensor:
+        """Object-owned content after removing the single public scene base."""
+
+        return self.content - self.public_content[:, None].to(dtype=self.content.dtype)
+
+    @property
     def coordinates(self) -> Tensor:
         """V120 object coordinate reduced only over physical camera support."""
 
-        weight = self.camera_validity.float() * self.camera_support.float()
+        weight = self.camera_evidence_mass.float()
         return (
             self.camera_coordinates.float() * weight
         ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
@@ -216,7 +232,7 @@ class ObjectFactSet:
     def transport_prior(self) -> Tensor:
         """V120 object transport prior reduced only over valid cameras."""
 
-        weight = self.camera_validity.float() * self.camera_support.float()
+        weight = self.camera_evidence_mass.float()
         return (
             self.camera_transport_prior.float() * weight
         ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
@@ -226,6 +242,13 @@ class ObjectFactSet:
         if self.content.ndim != 3:
             raise ValueError("object content must be [B,K,D]")
         batch, objects = self.content.shape[:2]
+        _shape(
+            self.public_content,
+            (batch, int(self.content.shape[-1])),
+            "public scene content",
+        )
+        if self.public_content.dtype != self.content.dtype:
+            raise TypeError("public and object content must share one model dtype")
         for name in ("semantic", "appearance", "geometry"):
             value = getattr(self, name)
             if tuple(value.shape[:2]) != (batch, objects) or value.ndim != 3:
@@ -250,6 +273,11 @@ class ObjectFactSet:
             self.camera_validity,
             (batch, objects, cameras, 1),
             "object camera validity",
+        )
+        _shape(
+            self.camera_evidence_mass,
+            (batch, objects, cameras, 1),
+            "object camera evidence mass",
         )
         _shape(self.support, (batch, objects, 1), "object support")
         _shape(self.existence, (batch, objects, 1), "object existence")
@@ -286,6 +314,7 @@ class ObjectFactSet:
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectFactSet(
             dense_chart=self.dense_chart,
+            public_content=self.public_content,
             content=self.content[:, index],
             semantic=self.semantic[:, index],
             appearance=self.appearance[:, index],
@@ -294,6 +323,7 @@ class ObjectFactSet:
             camera_transport_prior=self.camera_transport_prior[:, index],
             camera_support=self.camera_support[:, index],
             camera_validity=self.camera_validity[:, index],
+            camera_evidence_mass=self.camera_evidence_mass[:, index],
             support=self.support[:, index],
             existence=self.existence[:, index],
             validity=self.validity[:, index],
@@ -334,23 +364,46 @@ class FactualPrecisionDock:
 class ActionIntentDock:
     """S-owned inputs that the clean coarse-action compiler may consume."""
 
-    public_interval_carrier: Tensor  # [B,I,H]
+    interval_condition_innovation: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
-    public_object_memory: Tensor  # [B,K,H]
+    public_scene_memory: Tensor  # [B,1,H]
+    object_innovation_memory: Tensor  # [B,K,H]
+    typed_interval_object_value: Tensor  # [B,I,K,type,R]
 
     def validate(self, *, hidden: int) -> None:
-        batch = int(self.public_interval_carrier.shape[0])
+        batch = int(self.interval_condition_innovation.shape[0])
         _shape(
-            self.public_interval_carrier,
+            self.interval_condition_innovation,
             (batch, 4, hidden),
-            "action-intent public interval carrier",
+            "action-intent interval condition innovation",
         )
-        if self.history_memory.ndim != 3 or int(self.history_memory.shape[0]) != batch:
+        if (
+            self.history_memory.ndim != 3
+            or int(self.history_memory.shape[0]) != batch
+            or int(self.history_memory.shape[-1]) != hidden
+        ):
             raise ValueError("action-intent history memory must be [B,L,H]")
-        if self.public_object_memory.ndim != 3 or int(
-            self.public_object_memory.shape[0]
-        ) != batch:
-            raise ValueError("action-intent object memory must be [B,K,H]")
+        _shape(
+            self.public_scene_memory,
+            (batch, 1, hidden),
+            "action-intent public scene memory",
+        )
+        if (
+            self.object_innovation_memory.ndim != 3
+            or int(self.object_innovation_memory.shape[0]) != batch
+            or int(self.object_innovation_memory.shape[-1]) != hidden
+        ):
+            raise ValueError("action-intent object innovation memory must be [B,K,H]")
+        if self.typed_interval_object_value.ndim != 5 or tuple(
+            self.typed_interval_object_value.shape[:2]
+        ) != (batch, 4):
+            raise ValueError(
+                "action-intent typed value must retain interval/object/type axes"
+            )
+        if int(self.typed_interval_object_value.shape[3]) != 3:
+            raise ValueError(
+                "action-intent typed value lost semantic/appearance/geometry"
+            )
 
 
 @dataclass(frozen=True)
@@ -358,16 +411,16 @@ class WorldIntentDock:
     """S-owned relevance boundary consumed by W1/W2 exactly once."""
 
     protected_goal_memory: Tensor  # [B,G,H]
-    public_interval_carrier: Tensor  # [B,I,H]
+    interval_condition_innovation: Tensor  # [B,I,H]
     typed_relevance_mass: Tensor  # [B,I,K,type,1]
     typed_relevance_value: Tensor  # [B,I,K,type,R]
 
     def validate(self, *, hidden: int) -> None:
-        batch = int(self.public_interval_carrier.shape[0])
+        batch = int(self.interval_condition_innovation.shape[0])
         _shape(
-            self.public_interval_carrier,
+            self.interval_condition_innovation,
             (batch, 4, hidden),
-            "world-intent public interval carrier",
+            "world-intent interval condition innovation",
         )
         _shape(
             self.protected_goal_memory,
@@ -413,12 +466,23 @@ class PolicyIntentDock:
     """Read-only S context for the unchanged P2/P3 compilers."""
 
     interval_key: Tensor  # [B,I,H]
+    typed_interval_object_value: Tensor  # [B,I,K,type,R]
     temporal_control: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         batch = int(self.interval_key.shape[0])
         _shape(self.interval_key, (batch, 4, hidden), "policy-intent interval key")
+        if self.typed_interval_object_value.ndim != 5 or tuple(
+            self.typed_interval_object_value.shape[:2]
+        ) != (batch, 4):
+            raise ValueError(
+                "policy-intent typed value must retain interval/object/type axes"
+            )
+        if int(self.typed_interval_object_value.shape[3]) != 3:
+            raise ValueError(
+                "policy-intent typed value lost semantic/appearance/geometry"
+            )
         _shape(
             self.temporal_control,
             (batch, horizon, hidden),
@@ -437,9 +501,12 @@ class ObjectIntentState:
 
     protected_goal_set: Tensor  # [B,4,H]
     history_tokens: Tensor  # [B,L,H]
-    object_tokens: Tensor  # [B,K,H]
+    public_scene_token: Tensor  # [B,1,H]
+    object_tokens: Tensor  # [B,K,H], public-free object innovations
     public_interval_carrier: Tensor  # [B,4,H]
+    interval_condition_innovation: Tensor  # [B,4,H]
     policy_interval_context: Tensor  # [B,4,H]
+    policy_interval_innovation: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
     typed_relevance_mass: Tensor  # [B,4,K,3,1]
@@ -448,7 +515,7 @@ class ObjectIntentState:
     goal_attention: Tensor  # [B,4,Lg]
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
-    interval_object_attention: Tensor  # [B,4,K]
+    interval_object_attention: Tensor  # [B,4,1+K], public then K innovations
 
     @property
     def interval_queries(self) -> Tensor:
@@ -470,15 +537,17 @@ class ObjectIntentState:
 
     def action_dock(self) -> ActionIntentDock:
         return ActionIntentDock(
-            public_interval_carrier=self.public_interval_carrier,
+            interval_condition_innovation=self.interval_condition_innovation,
             history_memory=self.history_tokens,
-            public_object_memory=self.object_tokens,
+            public_scene_memory=self.public_scene_token,
+            object_innovation_memory=self.object_tokens,
+            typed_interval_object_value=self.typed_relevance_value,
         )
 
     def world_dock(self) -> WorldIntentDock:
         return WorldIntentDock(
             protected_goal_memory=self.protected_goal_set,
-            public_interval_carrier=self.public_interval_carrier,
+            interval_condition_innovation=self.interval_condition_innovation,
             typed_relevance_mass=self.typed_relevance_mass,
             typed_relevance_value=self.typed_relevance_value,
         )
@@ -486,7 +555,7 @@ class ObjectIntentState:
     def factual_dock(self) -> FactualIntentDock:
         batch = int(self.policy_interval_context.shape[0])
         return FactualIntentDock(
-            phase_context=self.policy_interval_context,
+            phase_context=self.policy_interval_innovation,
             condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
                 -1, 4, -1
             ),
@@ -497,7 +566,12 @@ class ObjectIntentState:
 
     def policy_dock(self) -> PolicyIntentDock:
         return PolicyIntentDock(
-            interval_key=self.policy_interval_context,
+            # P2 owns two explicit sources: public observable condition and
+            # typed interval/object values.  Feeding the already typed-enriched
+            # policy innovation here duplicated the typed route through both
+            # public_intent_key and typed_intent_key.
+            interval_key=self.interval_condition_innovation,
+            typed_interval_object_value=self.typed_relevance_value,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
         )
@@ -511,16 +585,31 @@ class ObjectIntentState:
             "public interval carrier",
         )
         _shape(
+            self.interval_condition_innovation,
+            (batch, 4, hidden),
+            "interval condition innovation",
+        )
+        _shape(
             self.policy_interval_context,
             (batch, 4, hidden),
             "policy interval context",
+        )
+        _shape(
+            self.policy_interval_innovation,
+            (batch, 4, hidden),
+            "policy interval innovation",
         )
         _shape(self.temporal_queries, (batch, horizon, hidden), "temporal queries")
         _shape(self.state_change_evidence, (batch, hidden), "state-change evidence")
         if self.history_tokens.ndim != 3 or int(self.history_tokens.shape[0]) != batch:
             raise ValueError("intent history tokens must be [B,L,H]")
         if self.object_tokens.ndim != 3 or int(self.object_tokens.shape[0]) != batch:
-            raise ValueError("object intent public tokens must be [B,K,H]")
+            raise ValueError("object intent innovation tokens must be [B,K,H]")
+        _shape(
+            self.public_scene_token,
+            (batch, 1, hidden),
+            "intent public scene token",
+        )
         objects = int(self.object_tokens.shape[1])
         _shape(
             self.typed_relevance_mass,
@@ -535,6 +624,25 @@ class ObjectIntentState:
             self.typed_policy_components,
             (batch, 4, 3, hidden),
             "typed policy components",
+        )
+        if self.goal_attention.ndim != 3 or tuple(
+            self.goal_attention.shape[:2]
+        ) != (batch, 4):
+            raise ValueError("intent goal attention must be [B,4,Lg]")
+        _shape(
+            self.interval_goal_attention,
+            (batch, 4, 4),
+            "intent interval-goal attention",
+        )
+        _shape(
+            self.interval_history_attention,
+            (batch, 4, int(self.history_tokens.shape[1])),
+            "intent interval-history attention",
+        )
+        _shape(
+            self.interval_object_attention,
+            (batch, 4, objects + 1),
+            "intent public-plus-object attention",
         )
         self.action_dock().validate(hidden=hidden)
         self.world_dock().validate(hidden=hidden)
@@ -554,9 +662,12 @@ class ObjectIntentState:
         return ObjectIntentState(
             protected_goal_set=self.protected_goal_set,
             history_tokens=self.history_tokens,
+            public_scene_token=self.public_scene_token,
             object_tokens=self.object_tokens[:, index],
             public_interval_carrier=self.public_interval_carrier,
+            interval_condition_innovation=self.interval_condition_innovation,
             policy_interval_context=self.policy_interval_context,
+            policy_interval_innovation=self.policy_interval_innovation,
             temporal_queries=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
             typed_relevance_mass=self.typed_relevance_mass[:, :, index],
@@ -565,7 +676,13 @@ class ObjectIntentState:
             goal_attention=self.goal_attention,
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
-            interval_object_attention=self.interval_object_attention[:, :, index],
+            interval_object_attention=torch.cat(
+                (
+                    self.interval_object_attention[:, :, :1],
+                    self.interval_object_attention[:, :, 1:][:, :, index],
+                ),
+                dim=2,
+            ),
         )
 
 
@@ -726,6 +843,7 @@ class FutureObjectDynamics:
     persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
     uncertainty: Tensor  # [B,I,K,1]
     reliability: Tensor  # calibration only [B,I,K,1]
+    current_selector_validity: Tensor  # observed support [B,K,1]
     future_selector_validity: Tensor  # online P2 selector [B,I,K,1]
     object_coordinates: Tensor  # [B,K,2]
 
@@ -755,6 +873,11 @@ class FutureObjectDynamics:
         )
         for name in ("visibility", "persistence", "uncertainty", "reliability"):
             _shape(getattr(self, name), (batch, intervals, objects, 1), name)
+        _shape(
+            self.current_selector_validity,
+            (batch, objects, 1),
+            "current selector validity",
+        )
         _shape(
             self.future_selector_validity,
             (batch, intervals, objects, 1),
@@ -786,6 +909,7 @@ class FutureObjectDynamics:
             persistence=self.persistence[:, :, index],
             uncertainty=self.uncertainty[:, :, index],
             reliability=self.reliability[:, :, index],
+            current_selector_validity=self.current_selector_validity[:, index],
             future_selector_validity=self.future_selector_validity[:, :, index],
             object_coordinates=self.object_coordinates[:, index],
         )
@@ -807,6 +931,9 @@ class FutureObjectDynamics:
             persistence=scalar,
             uncertainty=scalar,
             reliability=scalar,
+            current_selector_validity=(
+                facts.validity * facts.existence.detach().clamp(0.0, 1.0)
+            ),
             future_selector_validity=(
                 facts.validity * facts.existence.detach().clamp(0.0, 1.0)
             )[:, None].expand(-1, intervals, -1, -1),

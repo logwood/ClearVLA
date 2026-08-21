@@ -336,6 +336,10 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty = torch.stack(uncertainty_rows, dim=1)
         reliability = torch.stack(reliability_rows, dim=1)
         current_validity = facts.validity.detach().float()[:, None]
+        current_selector_validity = (
+            facts.validity.detach().float()
+            * facts.existence.detach().float().clamp(0.0, 1.0)
+        )
         # Current object facts are visible and persistent by construction.
         # Export changes around that current state so a neutral/static future
         # is exactly zero and cannot become a constant P2 value shortcut.
@@ -356,6 +360,7 @@ class ObjectFutureTeacher(nn.Module):
             persistence=persistence_change,
             uncertainty=uncertainty,
             reliability=reliability,
+            current_selector_validity=current_selector_validity,
             future_selector_validity=future_selector_validity,
             object_coordinates=facts.coordinates.detach().float(),
         )
@@ -375,7 +380,7 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
             "object_teacher_transport_rms": transport.square().mean().sqrt(),
             "object_teacher_covariance_rms": covariance.square().mean().sqrt(),
-            "object_teacher_current_loss_support": facts.camera_validity.detach()
+            "object_teacher_current_loss_support": facts.camera_evidence_mass.detach()
             .float()
             .mean(),
             "object_teacher_future_selector_validity": future_selector_validity.mean(),

@@ -452,18 +452,23 @@ class MainlineTrainingEngine:
         intent = encoded.training_state.top.intent
         dynamics = encoded.training_state.top.predicted_dynamics
         progress = batch.audit.frame_progress.to(
-            device=intent.public_interval_carrier.device,
+            device=intent.interval_condition_innovation.device,
             dtype=torch.float32,
         )
 
         def sample_rms(value: Tensor) -> Tensor:
             return value.detach().float().flatten(1).square().mean(dim=1).sqrt()
 
-        # Audit the supervised public carrier.  Optional typed values keep
-        # their own interval/K/type metrics and must not silently redefine the
-        # public progress diagnostic.
+        # Audit the exact public S boundary supervised by the future-state
+        # head.  The learned interval address carrier is deliberately absent:
+        # including it made a fixed query template look like observed phase
+        # progress even when the real condition innovation was zero.
         interval_energy = (
-            intent.public_interval_carrier.detach().float().square().mean(dim=-1).sqrt()
+            intent.interval_condition_innovation.detach()
+            .float()
+            .square()
+            .mean(dim=-1)
+            .sqrt()
         )
         centers = interval_energy.new_tensor((6.0, 12.0, 24.0, 40.0)) / 48.0
         energy_total = interval_energy.sum(dim=1)
@@ -471,8 +476,10 @@ class MainlineTrainingEngine:
         centroid = torch.where(energy_total > 1e-8, centroid, centroid.new_zeros(centroid.shape))
 
         interval_variation = sample_rms(
-            intent.public_interval_carrier.detach().float()
-            - intent.public_interval_carrier.detach().float().mean(dim=1, keepdim=True)
+            intent.interval_condition_innovation.detach().float()
+            - intent.interval_condition_innovation.detach()
+            .float()
+            .mean(dim=1, keepdim=True)
         )
         state_change = sample_rms(intent.state_change_evidence)
         successor_innovation = sample_rms(

@@ -337,7 +337,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "object_w": 30,
         "p1_": 10,
         "object_p2_": 20,
-        "object_p3_": 5,
+            "object_p3_": 4,
         "controlled_transition_": 5,
         "bottom_": 4,
         "evidence_": 40,
@@ -930,6 +930,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
             protected_detail=cache.factual_dock.protected_detail,
             time=time,
         )[0],
+        p1_precision_innovation=cache.factual_dock.protected_detail,
         action_query=query,
     )
     captured_transition: dict[str, torch.Tensor] = {}
@@ -1053,7 +1054,9 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert torch.count_nonzero(evidence.value_tokens[:, rollout_start:rollout_stop]) > 0
     role_bank = model.bottom._role_bank(compiled.plan)
     assert role_bank.source_names == compiled.plan.source_names
-    assert len(role_bank.source_names) == 5
+    # The protected factual base is algebraically outside optional routing.
+    # Only the four non-zero P3 innovations may compete with the explicit null.
+    assert len(role_bank.source_names) == 4
     assert torch.equal(role_bank.protected_detail, compiled.plan.protected_base)
     state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
         seed_context
@@ -1481,6 +1484,25 @@ def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlati
     }
     assert expected <= set(audit_metrics)
     assert all(torch.isfinite(value) for value in audit_metrics.values())
+
+    # A learned interval-address template is not observable progress.  If the
+    # exact supervised condition innovation is zero, its audit centroid must
+    # be the legal zero result even while the public carrier remains nonzero.
+    zero_intent = replace(
+        training_state.top.intent,
+        interval_condition_innovation=torch.zeros_like(
+            training_state.top.intent.interval_condition_innovation
+        ),
+    )
+    zero_state = replace(
+        training_state,
+        top=replace(training_state.top, intent=zero_intent),
+    )
+    zero_metrics = MainlineTrainingEngine._audit_progress_metrics(
+        batch,
+        EncodedTrainingBatch(cache=cache, training_state=zero_state, metrics=metrics),
+    )
+    assert float(zero_metrics["object_intent_audit_interval_energy_centroid"]) == 0.0
 
 
 def test_native_execution_probabilities_and_dwell_are_bounded() -> None:

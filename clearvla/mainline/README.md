@@ -15,12 +15,14 @@ config / manifest / typed online and training inputs
   -> Pre-G local chart
   -> G1/G2/G3 progressive local grounding with an N=49 rematerialization
   -> one typed-prebinding physical K+null grounder against current DINO
-  -> S interval carrier + per-type [interval,K,type] relevance and direct targets
-  -> W1/W2 field-owned four-interval future object dynamics
+     (one public scene content value + K object-owned content innovations)
+  -> S reads the public scene once, then K innovations, and forms observable
+     interval innovations + per-type [interval,K,type] relevance
+  -> typed clean action + W1/W2 field-owned four-interval object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy block
-  -> P2 bounded consequence read
-  -> P3 five V120 typed lanes
+  -> P2 independent semantic/geometry/status consequence reads
+  -> P3 four active precision/effect/temporal/state-change lanes
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
   -> exact completed-G3 anchor source + per-ODE noisy-action controlled transition
@@ -75,17 +77,17 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        27
+schema:        28
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-The verified Schema27 default graph currently measures
-`167,106,117 total / 150,711,796 trainable`; the launcher remains the
+The verified Schema28 default graph currently measures
+`172,021,189 total / 155,626,868 trainable`; the launcher remains the
 authoritative source and prints the per-module inventory for every run.
 
-Schema 26 and older are not exact-resume sources for schema 27. Formal runs
+Schema 27 and older are not exact-resume sources for schema 28. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
@@ -121,16 +123,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema27_typed_ownership_smoke \
-nohup bash scripts/smoke_mainline.sh > schema27_typed_ownership_smoke.log 2>&1 &
+OUT_DIR=runs/schema28_ownership_dataflow_smoke \
+nohup bash scripts/smoke_mainline.sh > schema28_ownership_dataflow_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema27_typed_ownership_b8 \
-nohup bash scripts/train_mainline.sh > schema27_typed_ownership_b8.log 2>&1 &
+OUT_DIR=runs/schema28_ownership_dataflow_b8 \
+nohup bash scripts/train_mainline.sh > schema28_ownership_dataflow_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -142,7 +144,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema27_typed_ownership_b8 \
+  runs/schema28_ownership_dataflow_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

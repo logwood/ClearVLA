@@ -452,6 +452,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         compiled, top_metrics = self.top.compile_policy(
             cache.top,
             p1_fact=p1_fact,
+            p1_precision_innovation=cache.factual_dock.protected_detail,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,
         )

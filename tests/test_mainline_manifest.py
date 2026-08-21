@@ -43,26 +43,26 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 27
+    assert ARCHITECTURE_MANIFEST.schema == 28
     assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "typed_prebinding_global_k_direct_s_targets_field_owned_w_cardinality_neutral_p2_exclusive_p3"
+        == "conditional_k_public_private_grounding_zero_centered_intent_single_typed_ingress_w_per_type_p2_consequence_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
+        == "restored_v120_shared_seed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_observed_current_grounding_direct_s_fields_exact_teacher_event_boost_v120_decay_three_owner_clip"
+        == "v120_mirrored_physical_flow_observed_current_grounding_shared_w_field_targets_exact_teacher_event_boost_v120_decay_three_owner_clip"
     )
     assert components.runtime == (
         "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only"
     )
 
 
-def test_schema_27_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_28_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

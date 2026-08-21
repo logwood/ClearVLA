@@ -1,4 +1,5 @@
 from dataclasses import fields, replace
+from unittest import mock
 
 import torch
 
@@ -67,14 +68,20 @@ def _context(top: ObjectIntentDynamicsTop, batch: int = 2) -> OnlineTopContext:
         goal_mask=torch.ones(batch, 6, dtype=torch.bool),
         state_history=torch.randn(batch, 3, 7),
         state=torch.randn(batch, 7),
-        executed_history=torch.randn(batch, 3, 7),
+        executed_history=torch.randn(batch, 8, 7),
     )
     return context
 
 
 def test_online_context_has_prediction_but_no_teacher_or_future_target() -> None:
     names = {field.name for field in fields(OnlineTopContext)}
-    assert names == {"facts", "intent", "coarse_action", "predicted_dynamics"}
+    assert names == {
+        "facts",
+        "intent",
+        "coarse_action",
+        "intent_boundary_dynamics",
+        "predicted_dynamics",
+    }
     assert not names & {"teacher", "teacher_dynamics", "future_supports", "future_target"}
 
 
@@ -111,6 +118,44 @@ def test_teacher_replacement_cannot_change_online_context() -> None:
     )
 
 
+def test_training_target_attaches_to_the_exact_coarse_action_consumed_by_w() -> None:
+    torch.manual_seed(8)
+    top = _top()
+    context = _context(top)
+    supports = torch.randn(2, 12, 2, 2, 2, 16)
+    offsets = torch.tensor(
+        [4, 6, 8, 10, 12, 16, 20, 24, 32, 38, 44, 48]
+    )[None].expand(2, -1)
+    action = torch.randn(2, 48, 7)
+    state = torch.randn(2, 48, 7)
+    with mock.patch.object(
+        top.coarse_action,
+        "forward",
+        side_effect=AssertionError("coarse action must not be rebuilt"),
+    ):
+        targets, _ = top.build_training_targets(
+            context,
+            future_supports=supports,
+            future_offsets=offsets,
+            future_action=action,
+            future_state=state,
+        )
+    expected_target = torch.stack(
+        (
+            action[:, 3:8].mean(dim=1),
+            action[:, 7:16].mean(dim=1),
+            action[:, 15:32].mean(dim=1),
+            action[:, 31:48].mean(dim=1),
+        ),
+        dim=1,
+    )
+    expected_loss = (
+        context.coarse_action.action_prediction.float()
+        - expected_target.float()
+    ).square().mean()
+    torch.testing.assert_close(targets.coarse_action_loss, expected_loss)
+
+
 def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     torch.manual_seed(11)
     top = _top()
@@ -140,6 +185,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
         compiled, _ = top.compile_policy(
             context.deployment_cache(),
             p1_fact=dock.protected_detail,
+            p1_precision_innovation=dock.protected_detail,
             action_query=action_query,
         )
     finally:

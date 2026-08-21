@@ -60,6 +60,7 @@ class OnlineTopContext:
     facts: ObjectFactSet
     intent: ObjectIntentState
     coarse_action: CoarseActionIntentState
+    intent_boundary_dynamics: FutureObjectDynamics
     predicted_dynamics: FutureObjectDynamics
 
     def deployment_cache(self) -> "DeploymentTopCache":
@@ -71,6 +72,7 @@ class OnlineTopContext:
     def validate(self, *, hidden: int, horizon: int) -> None:
         self.facts.validate()
         self.intent.validate(horizon=horizon, hidden=hidden)
+        self.intent_boundary_dynamics.validate()
         self.predicted_dynamics.validate()
         expected = (self.facts.batch, 4, hidden)
         if tuple(self.coarse_action.tokens.shape) != expected:
@@ -186,6 +188,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.coarse_action = CoarseActionIntent(
             hidden=hidden,
             action_dim=action_dim,
+            route_dim=route_dim,
             heads=heads,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
@@ -208,6 +211,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.effect_reader = ObjectFutureEffectReader(
             hidden=hidden,
             content_dim=content_dim,
+            route_dim=route_dim,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(
@@ -321,6 +325,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             facts=facts,
             intent=intent,
             coarse_action=coarse,
+            intent_boundary_dynamics=w1_state.intent_boundary_field,
             predicted_dynamics=predicted,
         )
         context.validate(hidden=self.hidden, horizon=self.horizon)
@@ -364,18 +369,19 @@ class ObjectIntentDynamicsTop(nn.Module):
         )
         supervision = self.intent_supervisor(
             intent=context.intent,
+            intent_boundary=context.intent_boundary_dynamics,
             future_state=future_state,
             teacher=teacher,
-            current_loss_support=context.facts.camera_validity,
+            current_loss_support=context.facts.camera_evidence_mass,
         )
-        supervised_coarse = self.coarse_action(
-            context.intent.action_dock(),
-            future_action=future_action,
+        supervised_coarse = self.coarse_action.attach_training_target(
+            context.coarse_action,
+            future_action,
         )
         coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
-            current_loss_support=context.facts.camera_validity.detach().float(),
+            current_loss_support=context.facts.camera_evidence_mass.detach().float(),
             intent_supervision=supervision,
             public_intent_loss=supervision.public_loss,
             typed_intent_loss=supervision.typed_loss,
@@ -449,6 +455,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         context: DeploymentTopCache,
         *,
         p1_fact: Tensor,
+        p1_precision_innovation: Tensor,
         action_query: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[CompiledPolicyState, dict[str, Tensor]]:
@@ -459,7 +466,9 @@ class ObjectIntentDynamicsTop(nn.Module):
         # write, not the untouched noisy-action seed.  Keeping that residual
         # order is important: it lets the future-effect reader ask questions
         # in the factual chart that P1 actually selected.
-        if tuple(p1_fact.shape) != tuple(action_query.shape):
+        if tuple(p1_fact.shape) != tuple(action_query.shape) or tuple(
+            p1_precision_innovation.shape
+        ) != tuple(action_query.shape):
             raise ValueError("completed P1 fact and action query must align")
         p1_action_query = action_query + p1_fact
         raw_effect, effect_metrics = self.effect_reader(
@@ -479,12 +488,14 @@ class ObjectIntentDynamicsTop(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         # The protected consequence already carries the complete P1+P2 base.
-        # Optional P3 lanes are modulated by the original dynamic action query
-        # so consequence cannot leak back into precision/temporal under a
-        # second name.
+        # Precision receives only the cached high-resolution P1 innovation;
+        # temporal receives consequence through an explicit multiplicative
+        # relation.  Neither lane can reconstruct the complete base under a
+        # second optional name.
         p3_action_query = action_query
         plan, plan_metrics = self.plan_compiler(
             p1_fact=p1_fact,
+            p1_precision_innovation=p1_precision_innovation,
             consequence=consequence,
             intent=context.intent.policy_dock(),
             action_query=p3_action_query,
