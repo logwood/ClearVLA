@@ -1072,6 +1072,15 @@ V94_ALIASES.update(
             "semantic_mass": "object_p2_semantic_value_mass",
             "geometry_mass": "object_p2_geometry_value_mass",
             "status_mass": "object_p2_status_value_mass",
+            "fusion_base": "object_p2_fusion_base_rms",
+            "fusion_contrast": "object_p2_fusion_contrast_rms",
+            "fusion_residual": "object_p2_fusion_residual_rms",
+            "fusion_residual_ratio": "object_p2_fusion_residual_to_base",
+            "fusion_scale_mean": "object_p2_fusion_scale_abs_mean",
+            "fusion_scale_max": "object_p2_fusion_scale_abs_max",
+            "semantic_value": "object_p2_semantic_selected_value_rms",
+            "geometry_value": "object_p2_geometry_selected_value_rms",
+            "status_value": "object_p2_status_selected_value_rms",
             "status_score_max": "object_p2_status_score_max_abs",
             "status_null": "object_p2_status_null_mass",
             "semantic_h4_8_mass": "object_p2_semantic_interval_0_mass",
@@ -1341,6 +1350,15 @@ STRUCTURE_KEYS = (
     "object_p2_geometry_posterior_entropy",
     "object_p2_semantic_value_mass",
     "object_p2_geometry_value_mass",
+    "object_p2_fusion_base_rms",
+    "object_p2_fusion_contrast_rms",
+    "object_p2_fusion_residual_rms",
+    "object_p2_fusion_residual_to_base",
+    "object_p2_fusion_scale_abs_mean",
+    "object_p2_fusion_scale_abs_max",
+    "object_p2_semantic_selected_value_rms",
+    "object_p2_geometry_selected_value_rms",
+    "object_p2_status_selected_value_rms",
     "object_p2_candidate_partition_correction",
     "object_p2_successor_innovation_rms",
     "object_consequence_effect_rms",
@@ -4081,6 +4099,10 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema29 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 29
+    )
     schema28 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 28
@@ -4095,6 +4117,28 @@ def _recovery_assessment(
         else "object_intent_interval_variation"
     )
     required_structure = (
+        (
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_object_innovation_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_object_content_innovation_variation",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_future_field_loss",
+            "object_w_object_innovation_variation",
+            "object_w_typed_sidecar_rms",
+            "object_w2_condition_centered_interval_variation",
+            "object_teacher_reliability",
+            "object_teacher_current_loss_support",
+            "p1_query_chart_variation",
+            "object_p2_effect_precontract_rms",
+            "object_p2_fusion_base_rms",
+            "object_p2_fusion_contrast_rms",
+            "object_p2_fusion_residual_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+        )
+        if schema29
+        else
         (
             "object_grounding_object_content_pair_cosine",
             "object_grounding_object_innovation_pair_cosine",

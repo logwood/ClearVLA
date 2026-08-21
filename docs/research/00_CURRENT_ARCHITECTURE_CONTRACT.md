@@ -11,7 +11,7 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        28
+manifest schema:        29
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
 release status:         local implementation verified; fresh CUDA smoke required before release
@@ -27,8 +27,10 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema28 is one integrated ownership/dataflow repair, not another additive
-> mechanism.** Complete Schema25/26/27 logs plus the source audit identified
+> **Schema29 is a focused P2 ownership repair over the integrated Schema28
+> graph, not another broad redesign.** Schema28 was one integrated
+> ownership/dataflow repair, not another additive mechanism. Complete
+> Schema25/26/27 logs plus the source audit identified
 > conditional-K, fixed-template S, typed W, per-type P2 and P3 source-semantic
 > faults. Schema28 repairs only those recorded boundaries. The exact V120 P1
 > reader, transition and complete V120 bottom remain locked.
@@ -39,7 +41,8 @@ owns serialized graph identity; typed interfaces and executable checks own
 shape, dtype, provenance and zero semantics. Do not add a version-wide
 `_validate_vXXX_*` contract.
 
-Schema28 retains the controlled Schema24/V120 fidelity recovery, including its
+Schema29 retains the controlled Schema24/V120 fidelity recovery and complete
+Schema28 G/S/W/P ownership graph, including its
 flow-time, endpoint-head, Teacher algebra, support/selector split, non-finite
 sentinel and the following four source-audited boundaries:
 
@@ -50,7 +53,7 @@ sentinel and the following four source-audited boundaries:
   where it is physically observed.
 
 It also retains V120 AdamW decay and the exact three-owner clipping lifecycle.
-Schema28 applies the following source-audited changes as one serialized graph
+Schema28 applied the following source-audited changes as one serialized graph
 identity:
 
 - G3 corrects only the conditional K distribution and preserves G2's exact
@@ -62,8 +65,10 @@ identity:
   current-reference field used by Teacher/W identity bookkeeping; it is not
   an online S/W/P2 value source;
 - semantic, appearance and geometry may only reweight candidates inside the
-  physical K support. Camera support width and pre-normalization evidence mass
-  are separate fields; only the latter owns camera reduction and loss support;
+  physical K support. Camera support width, read-conditioned physical
+  `camera_validity`, and pre-normalization assignment evidence are separate
+  fields. Evidence mass owns camera reduction/audit; physical camera validity
+  owns future and typed-S loss support;
 - object existence is a detached prior only for optional online future
   candidacy. It never masks the protected current fact, Teacher/future losses,
   or a value tensor, so learned null cannot become a global erasure shortcut;
@@ -80,7 +85,12 @@ identity:
   enter only through the matching per-type key and are not duplicated through
   the public key.
   Geometry can positively support a coordinate match, while disappearance is
-  selected from current support instead of masking its own status value;
+  selected from current support instead of masking its own status value.
+  The three selected values are complementary rather than mutually exclusive:
+  their symmetric mean is a protected fusion base and a bias-free low-rank
+  LayerScale residual may read only type contrasts. There is no outer type
+  softmax/gate; all-null stays exact zero and identical typed values cannot be
+  rewritten by the residual;
 - the protected P1+effect consequence remains outside optional P3 routes.
   The inactive factual pseudo-null lane is removed. Precision is action times
   the cached high-resolution P1 reader innovation; effect is W-effect only;
@@ -92,9 +102,9 @@ identity:
 - frame-progress diagnostics read the exact supervised S condition innovation,
   never the fixed learned interval-address carrier; progress remains audit-only.
 
-No external loss weight, block count, gain, quota, hard gate, entropy target,
-capacity or P1 learned null is added. Schema27 and older checkpoints cannot
-exact-resume Schema28.
+No external loss weight, block count, quota, hard gate, entropy target,
+capacity or P1 learned null is added. Schema28 and older checkpoints cannot
+exact-resume Schema29.
 
 Retained recovery boundaries include the exact completed-G3 rollout shared by
 P1 and transition, removal of the unconsumed `future_address`/online
@@ -278,7 +288,9 @@ supports may change targets and losses, never deployment action.
     Teacher may associate per camera internally, but W cannot predict once and
     duplicate a fake camera axis. Semantic, geometry and status have separate
     source posteriors/nulls; status uses current support so disappearance
-    cannot mask itself. P2 cannot average camera squared distances into an
+    cannot mask itself. They do not enter a second competitive selector:
+    a protected mean plus a near-zero low-rank type-contrast residual performs
+    the only final fusion. P2 cannot average camera squared distances into an
     implicit variance penalty.
 11. Neutral effect is algebraically neutral:
 
@@ -395,8 +407,11 @@ ControlledTransitionSource / State
   raw posterior moments formed from same-camera
   `future_coordinate-current_camera_coordinate` displacements.
   Reliability/entropy do not shrink targets or masks.
-- `current_loss_support [B,K,C,1]` owns future and typed-S supervision after
-  detached camera reduction. `object_existence` is detached and belongs only
+- `current_loss_support [B,K,C,1]` is the detached physical
+  `ObjectFactSet.camera_validity`; it owns future and typed-S supervision after
+  camera reduction. Assignment `camera_evidence_mass` remains camera
+  reduction/audit evidence and cannot mask training loss. `object_existence`
+  is detached and belongs only
   to optional online candidacy. `future_selector_validity [B,4,K,1]` belongs
   only to online P2 routing.
 - Action, future, flow geometry, intent scaffold, history proposal and
@@ -438,26 +453,28 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- Schema28 parameter counts are measured after implementation and must be
-  reported by the launcher. The verified default graph has `172,021,189`
-  parameters, of which `155,626,868` are trainable. Its direct-child inventory
+- Schema29 parameter counts are measured after implementation and must be
+  reported by the launcher. The verified default graph has `172,151,237`
+  parameters, of which `155,756,916` are trainable. Its direct-child inventory
   is observation `13,543,661 / 6,895,950`, top
-  `80,989,195 / 80,890,891`, history proposal
+  `81,119,243 / 81,020,939`, history proposal
   `10,014,727 / 10,010,631`, factual P1 `3,612,429 / 2,823,949`, transition
   `8,027,785 / 7,895,049`, and bottom `55,833,392 / 47,110,398`
-  (total/trainable). Schema28's top-only delta comes from typed clean-action
+  (total/trainable). Schema28's top-only delta came from typed clean-action
   reads, typed W block traversal and three independent P2 selectors; removal
   of private G decoder heads, the factual pseudo-lane and several duplicated
   P3 projections offsets part of that increase. Bottom and the exact P1 reader
-  remain unchanged.
+  remain unchanged. Schema29 removes the `1,536`-parameter outer type selector
+  and adds a `131,584`-parameter rank-64 bias-free contrast residual plus
+  LayerScale, for a net top increase of `130,048` parameters.
 - Active manifest identity:
 
   ```text
-  schema:       28
+  schema:       29
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-  top:          conditional_k_public_private_grounding_zero_centered_intent_single_typed_ingress_w_per_type_p2_consequence_p3
+  top:          conditional_k_public_private_grounding_zero_centered_intent_single_typed_ingress_w_per_type_p2_anchored_contrast_fusion_consequence_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
-  training:     v120_mirrored_physical_flow_observed_current_grounding_shared_w_field_targets_exact_teacher_event_boost_v120_decay_three_owner_clip
+  training:     v120_mirrored_physical_flow_observed_current_grounding_physical_camera_loss_support_shared_w_field_targets_exact_teacher_event_boost_v120_decay_three_owner_clip
   runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only
   ```
 
@@ -480,7 +497,8 @@ chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
 permutations, per-type S perturbation locality, exact-null goal/typed values,
 typed-owner relabeling equivariance, public-target gradient isolation,
 typed CoarseAction ownership, W1/W2 typed-state traversal, public-W inability
-to synthesize a zero typed field, per-type P2 locality, four active P3 sources,
+to synthesize a zero typed field, per-type P2 locality, anchored type-contrast
+fusion/all-null zero, physical camera loss support, four active P3 sources,
 same-camera Teacher geometry, object geometry, neutral effect, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
@@ -498,15 +516,15 @@ Use new empty output directories:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema28_ownership_dataflow_smoke \
-nohup bash scripts/smoke_mainline.sh > schema28_ownership_dataflow_smoke.log 2>&1 &
+OUT_DIR=runs/schema29_complementary_p2_smoke \
+nohup bash scripts/smoke_mainline.sh > schema29_complementary_p2_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema28_ownership_dataflow_b8 \
-nohup bash scripts/train_mainline.sh > schema28_ownership_dataflow_b8.log 2>&1 &
+OUT_DIR=runs/schema29_complementary_p2_b8 \
+nohup bash scripts/train_mainline.sh > schema29_complementary_p2_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema28_ownership_dataflow_b8 \
+  runs/schema29_complementary_p2_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

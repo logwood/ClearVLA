@@ -15,6 +15,14 @@ That file is the compact source of truth. Update it in place when an
 architectural decision changes; do not create a new versioned copy for every
 conversation.
 
+Prospective research that has not entered the active mainline scope belongs in
+`docs/research/auxiliary/`. This includes literature notes, unapproved MIP/WAM
+designs, sampler schedules, experiment matrices, and implementation sketches.
+Do not put those notes in `CURRENT_MAINLINE_ISSUES.md` or the current
+architecture contract. Promote an auxiliary decision into the mainline
+documents only when the user explicitly adopts it and the corresponding schema
+implementation is entering the active scope.
+
 Read the two detailed design documents linked from the contract only when the
 task needs their implementation details. Do not infer current behavior from an
 old experiment name: verify the active script, serialized run context, current

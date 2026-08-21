@@ -2,7 +2,7 @@
 
 更新：2026-08-21
 
-当前源码身份：Schema28 `object_intent_dynamics_323`。行为比较锚点是
+当前源码身份：Schema29 `object_intent_dynamics_323`。行为比较锚点是
 V120 `long`、提交 `0b92d359a2889a0a1b1eba256007c00ccbc54f3c` 和本地完整
 快照 `.audit/v120_exact_source_0b92d359/`。V120 是行为锚点，不是正确性公理。
 
@@ -15,7 +15,7 @@ V120 `long`、提交 `0b92d359a2889a0a1b1eba256007c00ccbc54f3c` 和本地完整
 - 曲线相关性不单独证明因果；没有冻结干预时明确写“动作影响未知”。
 - 张量存在、梯度非零、loss 下降都不等于策略正在使用该边界。
 - 不用 gain、quota、hard gate、熵/多样性目标、额外外部 loss 或人工梯度掩盖问题。
-- Schema28 必须 fresh run；Schema27 及更旧 checkpoint 不允许 exact resume。
+- Schema29 必须 fresh run；Schema28 及更旧 checkpoint 不允许 exact resume。
 
 ## O-01：S public future-state 监督与 W public working coordinate 仍不是同一物理边界
 

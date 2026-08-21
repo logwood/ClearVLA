@@ -96,7 +96,25 @@ class ObjectFutureEffectReader(nn.Module):
         self.semantic_value = nn.Linear(content_dim, hidden, bias=False)
         self.transport_value = nn.Linear(2, hidden, bias=False)
         self.status_value = nn.Linear(2, hidden, bias=False)
-        self.type_query = nn.Linear(hidden, 3, bias=False)
+        # The three sources are complementary facts, not alternatives.  Keep
+        # their symmetric mean as a protected path and learn only a low-rank
+        # correction from type *contrasts*.  This preserves the uniform V120
+        # initialization without reintroducing a type-level selector.
+        contrast_rank = max(4, int(hidden) // 8)
+        self.type_contrast_down = nn.Linear(
+            len(self.TYPE_NAMES) * hidden,
+            contrast_rank,
+            bias=False,
+        )
+        self.type_contrast_up = nn.Linear(
+            contrast_rank,
+            hidden,
+            bias=False,
+        )
+        self.type_contrast_scale = nn.Parameter(
+            torch.full((hidden,), 1.0e-4, dtype=torch.float32)
+        )
+        self.type_contrast_activation = nn.GELU()
         self.temperature_logit = nn.Parameter(torch.zeros(3))
 
     def _temperatures(self) -> Tensor:
@@ -108,6 +126,56 @@ class ObjectFutureEffectReader(nn.Module):
         return value / (
             value.square().sum(dim=-1, keepdim=True) + float(norm_floor) ** 2
         ).sqrt()
+
+    def _fuse_complementary_values(
+        self,
+        selected_type_value: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Fuse typed P2 values through an anchored contrast residual.
+
+        Each type has already made its own interval/object/null decision.  A
+        second learned softmax would turn those complementary decisions back
+        into mutually exclusive alternatives and let a high-mass null type
+        suppress the other two values.  The symmetric mean therefore remains
+        outside the learnable branch.  A small LayerScale-style residual reads
+        only deviations from that mean, providing cross-type capacity without
+        learning another selector or a common-carrier bypass.
+
+        Bias-free projections make the all-null state an exact algebraic zero.
+        Identical type values also have zero contrast, so the learned branch
+        cannot rewrite information that all three owners already agree on.
+        """
+
+        if selected_type_value.ndim < 2 or int(selected_type_value.shape[-2]) != len(
+            self.TYPE_NAMES
+        ):
+            raise ValueError("P2 complementary values must retain the three-type axis")
+        typed_value = selected_type_value.float()
+        base = typed_value.mean(dim=-2)
+        # Cyclic pairwise differences are exactly zero for bit-identical type
+        # values, unlike subtracting a floating-point three-way mean.
+        contrast = torch.stack(
+            (
+                typed_value[..., 0, :] - typed_value[..., 1, :],
+                typed_value[..., 1, :] - typed_value[..., 2, :],
+                typed_value[..., 2, :] - typed_value[..., 0, :],
+            ),
+            dim=-2,
+        )
+        flat_contrast = contrast.flatten(-2).to(dtype=selected_type_value.dtype)
+        residual = self.type_contrast_up(
+            self.type_contrast_activation(self.type_contrast_down(flat_contrast))
+        )
+        # Keep the protected base and LayerScale multiply in FP32.  The
+        # resulting tensor returns to the active policy dtype at the boundary.
+        scaled_residual = self.type_contrast_scale.float() * residual.float()
+        fused = base + scaled_residual
+        return (
+            fused.to(dtype=selected_type_value.dtype),
+            base,
+            contrast,
+            scaled_residual,
+        )
 
     def forward(
         self,
@@ -217,11 +285,8 @@ class ObjectFutureEffectReader(nn.Module):
             selected_values.append(selected)
         posterior_by_type = torch.stack(posteriors, dim=3)
         selected_type_value = torch.stack(selected_values, dim=3)
-        type_weight = torch.softmax(self.type_query(action_query).float(), dim=-1)
-        value = torch.einsum(
-            "btqs,btqsh->btqh",
-            type_weight.to(dtype=selected_type_value.dtype),
-            selected_type_value,
+        value, fusion_base, fusion_contrast, fusion_residual = (
+            self._fuse_complementary_values(selected_type_value)
         )
         if not collect_diagnostics:
             return value, {}
@@ -240,15 +305,30 @@ class ObjectFutureEffectReader(nn.Module):
                 posterior_by_type, dim=-1
             ).detach().mean(),
             "object_p2_posterior_max": posterior_by_type.detach().amax(dim=-1).mean(),
-            "object_p2_null_mass": torch.einsum(
-                "btqs,btqs->btq",
-                type_weight.detach(),
-                posterior_by_type.detach()[..., -1],
-            ).mean(),
+            "object_p2_null_mass": posterior_by_type.detach()[..., -1].mean(),
             "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
-            "object_p2_semantic_value_mass": type_weight.detach()[..., 0].mean(),
-            "object_p2_geometry_value_mass": type_weight.detach()[..., 1].mean(),
-            "object_p2_status_value_mass": type_weight.detach()[..., 2].mean(),
+            "object_p2_fusion_base_rms": fusion_base.detach().square().mean().sqrt(),
+            "object_p2_fusion_contrast_rms": fusion_contrast.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_fusion_residual_rms": fusion_residual.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_fusion_residual_to_base": fusion_residual.detach()
+            .square()
+            .mean()
+            .sqrt()
+            / fusion_base.detach().square().mean().sqrt().clamp_min(1.0e-8),
+            "object_p2_fusion_scale_abs_mean": self.type_contrast_scale.detach()
+            .float()
+            .abs()
+            .mean(),
+            "object_p2_fusion_scale_abs_max": self.type_contrast_scale.detach()
+            .float()
+            .abs()
+            .amax(),
         }
         for type_index, name in enumerate(self.TYPE_NAMES):
             metrics[f"object_p2_{name}_score_max_abs"] = source_scores[
@@ -257,14 +337,17 @@ class ObjectFutureEffectReader(nn.Module):
             metrics[f"object_p2_{name}_null_mass"] = posterior_by_type[
                 ..., type_index, -1
             ].detach().mean()
+            selected_value = selected_type_value[..., type_index, :].detach().float()
+            metrics[f"object_p2_{name}_selected_value_rms"] = (
+                selected_value.square().mean().sqrt()
+            )
+            metrics[f"object_p2_{name}_anchor_contribution_rms"] = (
+                (selected_value / float(len(self.TYPE_NAMES))).square().mean().sqrt()
+            )
         interval_mass_by_type = posterior_by_type[..., :-1].reshape(
             batch, horizon, basis, 3, intervals, objects
         ).sum(dim=-1)
-        interval_mass = torch.einsum(
-            "btqs,btqsi->btqi",
-            type_weight.detach(),
-            interval_mass_by_type.detach(),
-        )
+        interval_mass = interval_mass_by_type.detach().mean(dim=3)
         for index in range(intervals):
             metrics[f"object_p2_interval_{index}_mass"] = (
                 interval_mass[..., index].detach().float().mean()

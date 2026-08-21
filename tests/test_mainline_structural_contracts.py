@@ -1401,6 +1401,12 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
     torch.testing.assert_close(unsupported["future_dynamics"], torch.zeros(()))
 
 
+def test_training_support_uses_physical_camera_validity_not_assignment_mass() -> None:
+    source = inspect.getsource(ObjectIntentDynamicsTop.build_training_targets)
+    assert source.count("context.facts.camera_validity") == 2
+    assert "camera_evidence_mass" not in source
+
+
 def test_future_interval_transition_penalizes_temporal_collapse_not_common_offset() -> None:
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     current = torch.zeros(batch, objects, content)
@@ -2349,7 +2355,6 @@ def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> No
     )
     with torch.no_grad():
         reader.status_value.weight.fill_(0.25)
-        reader.type_query.weight.zero_()
     value, metrics = reader(
         torch.zeros(batch, 24, 2, hidden),
         dynamics,
@@ -2360,6 +2365,67 @@ def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> No
     assert float(metrics["object_p2_status_null_mass"]) < 0.5
     assert float(metrics["object_p2_semantic_null_mass"]) > 0.999
     assert float(metrics["object_p2_geometry_null_mass"]) > 0.999
+
+
+def test_p2_complementary_fusion_has_protected_mean_and_exact_zero() -> None:
+    torch.manual_seed(405)
+    reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
+    selected = torch.randn(2, 3, 2, 3, 16)
+    with torch.no_grad():
+        reader.type_contrast_scale.zero_()
+    fused, base, contrast, residual = reader._fuse_complementary_values(selected)
+    torch.testing.assert_close(base, selected.float().mean(dim=-2), atol=0.0, rtol=0.0)
+    torch.testing.assert_close(fused.float(), base, atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(residual) == 0
+    torch.testing.assert_close(
+        contrast.sum(dim=-2),
+        torch.zeros_like(base),
+        atol=2.0e-6,
+        rtol=0.0,
+    )
+
+    zeros = torch.zeros_like(selected)
+    fused_zero, base_zero, contrast_zero, residual_zero = (
+        reader._fuse_complementary_values(zeros)
+    )
+    assert torch.equal(fused_zero, zeros[..., 0, :])
+    assert torch.equal(base_zero, zeros[..., 0, :].float())
+    assert torch.equal(contrast_zero, zeros.float())
+    assert torch.equal(residual_zero, zeros[..., 0, :].float())
+
+    shared = torch.randn(2, 3, 2, 1, 16)
+    identical = shared.expand(-1, -1, -1, 3, -1).clone()
+    with torch.no_grad():
+        reader.type_contrast_scale.fill_(1.0e-4)
+    fused_same, base_same, _, _ = reader._fuse_complementary_values(identical)
+    torch.testing.assert_close(fused_same.float(), base_same, atol=0.0, rtol=0.0)
+
+
+def test_p2_complementary_fusion_starts_near_uniform_without_type_selector() -> None:
+    torch.manual_seed(406)
+    reader = ObjectFutureEffectReader(hidden=32, content_dim=8, route_dim=4)
+    assert not hasattr(reader, "type_query")
+    selected = torch.randn(2, 24, 2, 3, 32, requires_grad=True)
+    fused, base, _, residual = reader._fuse_complementary_values(selected)
+    residual_ratio = residual.square().mean().sqrt() / base.square().mean().sqrt()
+    assert float(residual_ratio.detach()) < 1.0e-3
+    fused.float().sum().backward()
+    assert selected.grad is not None
+    for type_index in range(3):
+        assert torch.count_nonzero(selected.grad[..., type_index, :]) > 0
+
+
+def test_p2_complementary_fusion_owns_cpu_bf16_boundary() -> None:
+    torch.manual_seed(407)
+    reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
+    selected = torch.randn(1, 4, 2, 3, 16, dtype=torch.bfloat16)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        fused, base, contrast, residual = reader._fuse_complementary_values(selected)
+    assert fused.dtype == torch.bfloat16
+    assert base.dtype == torch.float32
+    assert contrast.dtype == torch.float32
+    assert residual.dtype == torch.float32
+    assert torch.isfinite(fused).all()
 
 
 def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() -> None:

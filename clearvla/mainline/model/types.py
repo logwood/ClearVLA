@@ -181,9 +181,10 @@ class ObjectFactSet:
     camera_support: Tensor  # [B,K,C,1]
     camera_validity: Tensor  # [B,K,C,1]
     # Joint physical assignment mass in each camera, normalized by the
-    # camera's observed candidate mass.  This is evidence strength; unlike
-    # ``camera_support`` it is not an object-width statistic, and unlike
-    # ``camera_validity`` it is not conditioned on an already-selected read.
+    # camera's observed candidate mass.  This is evidence strength used for
+    # camera reduction and audit; unlike ``camera_support`` it is not an
+    # object-width statistic, and unlike ``camera_validity`` it is not an
+    # independent physical loss-support field.
     camera_evidence_mass: Tensor  # [B,K,C,1]
     support: Tensor  # [B,K,1]
     # Read-conditioned object-vs-null confidence.  This is deliberately not

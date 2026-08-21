@@ -372,7 +372,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             intent_boundary=context.intent_boundary_dynamics,
             future_state=future_state,
             teacher=teacher,
-            current_loss_support=context.facts.camera_evidence_mass,
+            current_loss_support=context.facts.camera_validity,
         )
         supervised_coarse = self.coarse_action.attach_training_target(
             context.coarse_action,
@@ -381,7 +381,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
-            current_loss_support=context.facts.camera_evidence_mass.detach().float(),
+            current_loss_support=context.facts.camera_validity.detach().float(),
             intent_supervision=supervision,
             public_intent_loss=supervision.public_loss,
             typed_intent_loss=supervision.typed_loss,

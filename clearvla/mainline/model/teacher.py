@@ -380,7 +380,7 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
             "object_teacher_transport_rms": transport.square().mean().sqrt(),
             "object_teacher_covariance_rms": covariance.square().mean().sqrt(),
-            "object_teacher_current_loss_support": facts.camera_evidence_mass.detach()
+            "object_teacher_current_loss_support": facts.camera_validity.detach()
             .float()
             .mean(),
             "object_teacher_future_selector_validity": future_selector_validity.mean(),
