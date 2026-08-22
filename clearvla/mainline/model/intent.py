@@ -259,14 +259,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
         Tensor,
         Tensor,
         Tensor,
+        Tensor,
+        Tensor,
     ]:
-        """Select typed facts from the observable, zero-centred S innovation.
+        """Build protected common and signed interval-residual typed values.
 
-        Fixed interval identities never enter this selector.  Common and
-        interval-differential evidence are additive peers; common relevance no
-        longer consumes the score range available to a real differential.
-        The signed gate is exactly zero at zero evidence, so the per-type null
-        is a genuine zero-value option rather than sigmoid(0)=0.5.
+        Fixed interval identities never enter either selector.  The common
+        carrier and interval-centred carrier are normalized and scored
+        independently, then exported as different value objects.  They are
+        never averaged into one scalar selector, so common evidence cannot
+        consume the range or ownership of a real interval residual.
         """
 
         common_carrier = interval_condition_innovation.mean(dim=1, keepdim=True)
@@ -307,48 +309,94 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self._bounded_unit(differential_query),
             self._bounded_unit(typed_route),
         ).clamp(-1.0, 1.0)
-        score = (0.5 * (common_score + differential_score)).clamp(-1.0, 1.0)
         temperature = 0.25 + 3.75 * torch.sigmoid(
             self.typed_temperature_logit.float()
         )
-        signed_signal = torch.tanh(
-            score * temperature.to(device=score.device)[None, None, None]
+        common_score = common_score[:, 0]
+        common_signal = torch.tanh(
+            common_score
+            * temperature.to(device=common_score.device)[None, None]
         )
-        signal_strength = signed_signal.abs()
-        validity = facts.validity.float()[:, None, :, None, :].clamp(0.0, 1.0)
-        relevance_mass = signal_strength[..., None] * validity
-        relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
-        relevance_value = (
-            signed_signal[..., None].to(dtype=typed_route.dtype)
-            * validity.to(dtype=typed_route.dtype)
+        residual_signal = torch.tanh(
+            differential_score
+            * temperature.to(device=differential_score.device)[None, None, None]
+        )
+        residual_signal = residual_signal - residual_signal.mean(
+            dim=1, keepdim=True
+        )
+        # One shared scale per object/type preserves the zero-mean identity
+        # while keeping the signed selector in [-1, 1].
+        residual_signal = residual_signal / residual_signal.abs().amax(
+            dim=1, keepdim=True
+        ).clamp_min(1.0)
+        common_validity = facts.validity.float()[:, :, None, :].clamp(0.0, 1.0)
+        interval_validity = common_validity[:, None]
+        common_mass = (
+            common_signal.abs()[..., None] * common_validity
+        ).to(dtype=typed_route.dtype)
+        common_value = (
+            common_signal[..., None].to(dtype=typed_route.dtype)
+            * common_validity.to(dtype=typed_route.dtype)
+            * typed_route
+        )
+        interval_residual_mass = (
+            residual_signal.abs()[..., None] * interval_validity
+        ).to(dtype=typed_route.dtype)
+        interval_residual_value = (
+            residual_signal[..., None].to(dtype=typed_route.dtype)
+            * interval_validity.to(dtype=typed_route.dtype)
             * typed_route[:, None]
         )
 
-        components: list[Tensor] = []
+        common_components: list[Tensor] = []
+        residual_components: list[Tensor] = []
         for type_index, projection in enumerate(
             (self.object_semantic, self.object_appearance, self.object_geometry)
         ):
-            # K is a fixed identity axis.  A fixed mean preserves zero and
-            # cannot cancel the optionality by renormalizing selected mass.
-            selected_route = relevance_value[..., type_index, :].mean(dim=2)
-            component, _ = smooth_rms_contract(projection(selected_route), 0.35)
-            components.append(component)
-        typed_components = torch.stack(components, dim=2)
-        raw_context = typed_components.sum(dim=2) / (3.0**0.5)
-        _, context_scale = smooth_rms_contract(raw_context, 0.35)
-        typed_components = typed_components * context_scale[:, :, None].to(
-            dtype=typed_components.dtype
+            common_route = common_value[..., type_index, :].mean(dim=1)
+            common_component, _ = smooth_rms_contract(
+                projection(common_route), 0.35
+            )
+            common_components.append(common_component)
+            residual_route = interval_residual_value[
+                ..., type_index, :
+            ].mean(dim=2)
+            residual_component, _ = smooth_rms_contract(
+                projection(residual_route), 0.35
+            )
+            residual_components.append(residual_component)
+        typed_common_components = torch.stack(common_components, dim=1)
+        typed_interval_residual_components = torch.stack(
+            residual_components, dim=2
+        )
+        common_raw_context = typed_common_components.sum(dim=1) / (3.0**0.5)
+        _, common_context_scale = smooth_rms_contract(common_raw_context, 0.35)
+        typed_common_components = typed_common_components * common_context_scale[
+            :, None
+        ].to(dtype=typed_common_components.dtype)
+        residual_raw_context = (
+            typed_interval_residual_components.sum(dim=2) / (3.0**0.5)
+        )
+        _, residual_context_scale = smooth_rms_contract(
+            residual_raw_context, 0.35
+        )
+        typed_interval_residual_components = (
+            typed_interval_residual_components
+            * residual_context_scale[:, :, None].to(
+                dtype=typed_interval_residual_components.dtype
+            )
         )
         return (
-            relevance_mass,
-            relevance_value,
-            typed_components,
-            score,
-            common_score.expand(
-                -1, interval_condition_innovation.shape[1], -1, -1
-            ),
+            common_mass,
+            common_value,
+            interval_residual_mass,
+            interval_residual_value,
+            typed_common_components,
+            typed_interval_residual_components,
+            common_score,
             differential_score,
-            signal_strength,
+            common_signal.abs(),
+            residual_signal.abs(),
             temperature,
             common_denominator,
             differential_denominator,
@@ -422,13 +470,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
         )
         interval_condition_innovation = public_intervals - interval_template
         (
-            typed_relevance_mass,
-            typed_relevance_value,
-            typed_policy_components,
-            typed_relevance_score,
+            typed_common_mass,
+            typed_common_value,
+            typed_interval_residual_mass,
+            typed_interval_residual_value,
+            typed_common_policy_components,
+            typed_interval_residual_policy_components,
             typed_common_score,
             typed_differential_score,
-            typed_signal_probability,
+            typed_common_signal_strength,
+            typed_residual_signal_strength,
             typed_temperature,
             typed_common_denominator,
             typed_differential_denominator,
@@ -436,7 +487,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
             interval_condition_innovation=interval_condition_innovation,
             facts=facts,
         )
-        typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
+        typed_common_policy_context = (
+            typed_common_policy_components.sum(dim=1) / (3.0**0.5)
+        )
+        typed_interval_residual_policy_context = (
+            typed_interval_residual_policy_components.sum(dim=2) / (3.0**0.5)
+        )
+        typed_policy_context = (
+            typed_common_policy_context[:, None]
+            + typed_interval_residual_policy_context
+        )
         policy_intervals = public_intervals + typed_policy_context
         policy_interval_innovation = (
             interval_condition_innovation + typed_policy_context
@@ -489,9 +549,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
             policy_interval_innovation=policy_interval_innovation,
             temporal_queries=temporal_innovation,
             state_change_evidence=state_change_evidence,
-            typed_relevance_mass=typed_relevance_mass,
-            typed_relevance_value=typed_relevance_value,
-            typed_policy_components=typed_policy_components,
+            typed_common_mass=typed_common_mass,
+            typed_common_value=typed_common_value,
+            typed_interval_residual_mass=typed_interval_residual_mass,
+            typed_interval_residual_value=typed_interval_residual_value,
+            typed_common_policy_components=typed_common_policy_components,
+            typed_interval_residual_policy_components=(
+                typed_interval_residual_policy_components
+            ),
             goal_attention=goal_attention,
             interval_goal_attention=interval_goal_attention,
             interval_history_attention=interval_history_attention,
@@ -576,6 +641,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_object_content_innovation_rms": objects.detach().float().square().mean().sqrt(),
             "object_intent_object_content_innovation_variation": objects.detach().float().std(dim=1, unbiased=False).mean(),
             "object_intent_typed_policy_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_common_policy_context_rms": typed_common_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_interval_residual_policy_context_rms": typed_interval_residual_policy_context.detach().float().square().mean().sqrt(),
             "object_intent_typed_common_norm_denominator_min": typed_common_denominator.detach().float().amin(),
             "object_intent_typed_differential_norm_denominator_min": typed_differential_denominator.detach().float().amin(),
             "object_intent_typed_fact_unsupported_fraction": (
@@ -592,14 +659,20 @@ class StatelessObjectIntentOrganizer(nn.Module):
         }
         raw_routes = (facts.semantic, facts.appearance, facts.geometry)
         for type_index, name in enumerate(TYPED_INTENT_NAMES):
-            mass = typed_relevance_mass[..., type_index, 0].detach().float()
-            selected = typed_relevance_value[..., type_index, :].detach().float()
-            condition_centered = selected - selected.mean(dim=0, keepdim=True)
-            component = typed_policy_components[..., type_index, :].detach().float()
-            selector_null = (
-                1.0
-                - typed_signal_probability[..., type_index].detach().float()
-            )
+            common_mass = typed_common_mass[..., type_index, 0].detach().float()
+            common_selected = typed_common_value[..., type_index, :].detach().float()
+            residual_mass = typed_interval_residual_mass[
+                ..., type_index, 0
+            ].detach().float()
+            residual_selected = typed_interval_residual_value[
+                ..., type_index, :
+            ].detach().float()
+            common_component = typed_common_policy_components[
+                ..., type_index, :
+            ].detach().float()
+            residual_component = typed_interval_residual_policy_components[
+                ..., type_index, :
+            ].detach().float()
             metrics.update(
                 {
                     f"object_intent_{name}_route_raw_rms": raw_routes[type_index]
@@ -608,29 +681,41 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     .square()
                     .mean()
                     .sqrt(),
-                    f"object_intent_{name}_relevance_mass": mass.mean(),
-                    f"object_intent_{name}_selector_null_probability": selector_null.mean(),
-                    f"object_intent_{name}_selected_value_rms": selected.square()
+                    f"object_intent_{name}_common_relevance_mass": common_mass.mean(),
+                    f"object_intent_{name}_common_signal_absence": (
+                        1.0
+                        - typed_common_signal_strength[..., type_index]
+                        .detach()
+                        .float()
+                    ).mean(),
+                    f"object_intent_{name}_common_value_rms": common_selected.square()
                     .mean()
                     .sqrt(),
-                    f"object_intent_{name}_object_variation": selected.std(
-                        dim=2, unbiased=False
-                    ).mean(),
-                    f"object_intent_{name}_interval_variation": selected.std(
+                    f"object_intent_{name}_common_object_variation": common_selected.std(
                         dim=1, unbiased=False
                     ).mean(),
-                    f"object_intent_{name}_condition_centered_interval_variation": (
-                        condition_centered.std(dim=1, unbiased=False).mean()
-                    ),
-                    f"object_intent_{name}_policy_context_rms": component.square()
+                    f"object_intent_{name}_interval_residual_mass": residual_mass.mean(),
+                    f"object_intent_{name}_interval_residual_signal_absence": (
+                        1.0
+                        - typed_residual_signal_strength[..., type_index]
+                        .detach()
+                        .float()
+                    ).mean(),
+                    f"object_intent_{name}_interval_residual_value_rms": residual_selected.square()
                     .mean()
                     .sqrt(),
-                    f"object_intent_{name}_score_abs": typed_relevance_score[
-                        ..., type_index
-                    ]
-                    .detach()
-                    .abs()
-                    .mean(),
+                    f"object_intent_{name}_interval_residual_object_variation": residual_selected.std(
+                        dim=2, unbiased=False
+                    ).mean(),
+                    f"object_intent_{name}_interval_residual_variation": residual_selected.std(
+                        dim=1, unbiased=False
+                    ).mean(),
+                    f"object_intent_{name}_common_policy_context_rms": common_component.square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_interval_residual_policy_context_rms": residual_component.square()
+                    .mean()
+                    .sqrt(),
                     f"object_intent_{name}_common_score_abs": typed_common_score[
                         ..., type_index
                     ]
@@ -676,16 +761,31 @@ class DirectIntentFutureSupervisor(nn.Module):
         prediction: Tensor,
         target: Tensor,
         object_support: Tensor,
+        *,
+        scale: Tensor | None = None,
     ) -> Tensor:
         if tuple(prediction.shape) != tuple(target.shape):
             raise ValueError("typed intent prediction and target must align")
         if object_support.ndim != 3 or int(object_support.shape[-1]) != 1:
             raise ValueError("typed intent support must be [B,K,1]")
-        mask = object_support[:, None].expand(
-            prediction.shape[0], prediction.shape[1], prediction.shape[2], 1
-        )
+        if prediction.ndim == 3:
+            mask = object_support
+        elif prediction.ndim == 4:
+            mask = object_support[:, None].expand(
+                prediction.shape[0], prediction.shape[1], prediction.shape[2], 1
+            )
+        else:
+            raise ValueError("typed intent field must be [B,K,D] or [B,I,K,D]")
+        prediction_value = prediction.float()
+        target_value = target.detach().float()
+        if scale is not None:
+            scale_value = scale.detach().float().clamp_min(1.0e-4)
+            while scale_value.ndim < prediction_value.ndim:
+                scale_value = scale_value.unsqueeze(1)
+            prediction_value = prediction_value / scale_value
+            target_value = target_value / scale_value
         error = F.smooth_l1_loss(
-            prediction.float(), target.detach().float(), reduction="none"
+            prediction_value, target_value, reduction="none"
         ).mean(dim=-1, keepdim=True)
         return (error * mask).sum() / mask.sum().clamp_min(1.0)
 
@@ -741,14 +841,62 @@ class DirectIntentFutureSupervisor(nn.Module):
         public_loss = F.smooth_l1_loss(
             state_prediction.float(), state_summary.detach().float()
         )
-        semantic_loss = self._supported_field_loss(
-            semantic_prediction, semantic_target, object_support
+        semantic_scale = teacher.current_reference.detach().float().square().mean(
+            dim=-1, keepdim=True
+        ).sqrt().clamp_min(0.25)
+        semantic_common_loss = self._supported_field_loss(
+            intent_boundary.semantic_common,
+            teacher.semantic_common.detach(),
+            object_support,
+            scale=semantic_scale,
         )
-        status_loss = self._supported_field_loss(
-            status_prediction, status_target, object_support
+        semantic_residual_loss = self._supported_field_loss(
+            intent_boundary.semantic_interval_residual,
+            teacher.semantic_interval_residual.detach(),
+            object_support,
+            scale=semantic_scale,
         )
-        transport_loss = self._supported_field_loss(
-            transport_prediction, transport_target, object_support
+        semantic_loss = 0.5 * (semantic_common_loss + semantic_residual_loss)
+        status_common_loss = self._supported_field_loss(
+            torch.cat(
+                (intent_boundary.visibility_common, intent_boundary.persistence_common),
+                dim=-1,
+            ),
+            torch.cat(
+                (teacher.visibility_common, teacher.persistence_common), dim=-1
+            ).detach(),
+            object_support,
+        )
+        status_residual_loss = self._supported_field_loss(
+            torch.cat(
+                (
+                    intent_boundary.visibility_interval_residual,
+                    intent_boundary.persistence_interval_residual,
+                ),
+                dim=-1,
+            ),
+            torch.cat(
+                (
+                    teacher.visibility_interval_residual,
+                    teacher.persistence_interval_residual,
+                ),
+                dim=-1,
+            ).detach(),
+            object_support,
+        )
+        status_loss = 0.5 * (status_common_loss + status_residual_loss)
+        transport_common_loss = self._supported_field_loss(
+            intent_boundary.transport_common,
+            teacher.transport_common.detach(),
+            object_support,
+        )
+        transport_residual_loss = self._supported_field_loss(
+            intent_boundary.transport_interval_residual,
+            teacher.transport_interval_residual.detach(),
+            object_support,
+        )
+        transport_loss = 0.5 * (
+            transport_common_loss + transport_residual_loss
         )
         typed_loss = (semantic_loss + status_loss + transport_loss) / 3.0
         result = IntentFutureSupervision(
@@ -762,8 +910,14 @@ class DirectIntentFutureSupervisor(nn.Module):
             transport_target=transport_target,
             public_loss=public_loss,
             semantic_loss=semantic_loss,
+            semantic_common_loss=semantic_common_loss,
+            semantic_residual_loss=semantic_residual_loss,
             status_loss=status_loss,
+            status_common_loss=status_common_loss,
+            status_residual_loss=status_residual_loss,
             transport_loss=transport_loss,
+            transport_common_loss=transport_common_loss,
+            transport_residual_loss=transport_residual_loss,
             typed_loss=typed_loss,
         )
         result.validate()
@@ -781,21 +935,33 @@ class CoarseActionIntent(nn.Module):
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = _CrossRead(hidden, heads)
         self.history_read = _CrossRead(hidden, heads)
-        self.typed_input = nn.ModuleList(
-            nn.Linear(route_dim, hidden, bias=False) for _ in TYPED_INTENT_NAMES
-        )
-        self.typed_memory_norm = nn.ModuleList(
-            nn.LayerNorm(hidden, elementwise_affine=False)
+        # Schema31 removes the duplicate typed CoarseAction path, but the
+        # retained block and every module constructed after it must keep the
+        # Schema30 initialization under the same seed.  Consume exactly the
+        # random draws of the removed Linear/MHA weights as short-lived CPU
+        # objects.  They are never registered, serialized, moved to CUDA or
+        # executed, so this preserves controlled initialization without
+        # retaining dead parameters or runtime memory.
+        removed_typed_inputs = tuple(
+            nn.Linear(route_dim, hidden, bias=False)
             for _ in TYPED_INTENT_NAMES
         )
-        self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.typed_read = nn.ModuleList(
+        removed_typed_reads = tuple(
             nn.MultiheadAttention(
-                hidden, heads, bias=False, dropout=0.0, batch_first=True
+                hidden,
+                heads,
+                bias=False,
+                dropout=0.0,
+                batch_first=True,
             )
             for _ in TYPED_INTENT_NAMES
         )
-        self.typed_router = nn.Linear(hidden, len(TYPED_INTENT_NAMES), bias=False)
+        removed_typed_router = nn.Linear(
+            hidden,
+            len(TYPED_INTENT_NAMES),
+            bias=False,
+        )
+        del removed_typed_inputs, removed_typed_reads, removed_typed_router
         self.block = _SelfBlock(hidden, heads)
         self.action_head = nn.Linear(hidden, action_dim, bias=False)
 
@@ -829,41 +995,14 @@ class CoarseActionIntent(nn.Module):
             intent.history_memory,
             zero_preserving_innovation=True,
         )
-        typed_deltas: list[Tensor] = []
-        intervals = int(query.shape[1])
-        objects = int(intent.typed_interval_object_value.shape[2])
-        typed_query = self.typed_query_norm(query).reshape(
-            batch * intervals, 1, -1
-        )
-        for type_index, (projection, normalization, reader) in enumerate(
-            zip(self.typed_input, self.typed_memory_norm, self.typed_read)
-        ):
-            typed_memory = projection(
-                intent.typed_interval_object_value[..., type_index, :]
-            ).reshape(batch * intervals, objects, -1)
-            typed_update, _ = reader(
-                typed_query,
-                normalization(typed_memory),
-                normalization(typed_memory),
-                need_weights=False,
-            )
-            typed_update, _ = smooth_rms_contract(typed_update, 0.35)
-            typed_deltas.append(typed_update.reshape(batch, intervals, -1))
-        typed_stack = torch.stack(typed_deltas, dim=2)
-        typed_weight = torch.softmax(self.typed_router(query).float(), dim=-1)
-        typed_delta = torch.einsum(
-            "bis,bish->bih",
-            typed_weight.to(dtype=typed_stack.dtype),
-            typed_stack,
-        )
         # The learned query is an address, not a value.  The block receives
-        # only observable innovations, so an all-zero S boundary produces an
-        # exact-zero coarse action instead of a dataset-level interval prior.
+        # only public observable innovations.  Typed K/type values have one
+        # owner and enter W through WorldIntentDock; rereading them here used
+        # to create a second, publicized S->coarse-action->W ingress.
         token = self.block(
             intent_delta
             + object_delta
             + history_delta
-            + typed_delta
         )
         action_prediction = self.action_head(token)
         if future_action is None:

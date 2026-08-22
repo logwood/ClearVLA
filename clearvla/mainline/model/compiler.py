@@ -195,27 +195,57 @@ class ObjectFutureEffectReader(nn.Module):
             raise ValueError("P2 action query hidden width is invalid")
         intent.validate(horizon=horizon, hidden=self.hidden)
         intervals, objects = dynamics.semantic_delta.shape[1:3]
-        typed_intent = intent.typed_interval_object_value
-        if tuple(typed_intent.shape[:4]) != (batch, intervals, objects, 3):
-            raise ValueError("P2 typed intent lost interval/object/type identity")
-        status_source = torch.cat(
-            (dynamics.visibility, dynamics.persistence), dim=-1
+        typed_common_intent = intent.typed_common_object_value
+        typed_residual_intent = intent.typed_interval_residual_value
+        if tuple(typed_common_intent.shape[:3]) != (batch, objects, 3):
+            raise ValueError("P2 typed common intent lost object/type identity")
+        if tuple(typed_residual_intent.shape[:4]) != (
+            batch,
+            intervals,
+            objects,
+            3,
+        ):
+            raise ValueError("P2 typed residual intent lost interval/object/type identity")
+        status_common = torch.cat(
+            (dynamics.visibility_common, dynamics.persistence_common), dim=-1
         )
-        source_fields = (
-            dynamics.semantic_delta,
-            dynamics.transport_mean,
-            status_source,
+        status_residual = torch.cat(
+            (
+                dynamics.visibility_interval_residual,
+                dynamics.persistence_interval_residual,
+            ),
+            dim=-1,
         )
-        source_values = (
-            self.semantic_value(dynamics.semantic_delta),
-            self.transport_value(dynamics.transport_mean),
-            self.status_value(status_source),
+        common_source_fields = (
+            dynamics.semantic_common,
+            dynamics.transport_common,
+            status_common,
+        )
+        residual_source_fields = (
+            dynamics.semantic_interval_residual,
+            dynamics.transport_interval_residual,
+            status_residual,
+        )
+        common_source_values = (
+            self.semantic_value(dynamics.semantic_common),
+            self.transport_value(dynamics.transport_common),
+            self.status_value(status_common),
+        )
+        residual_source_values = (
+            self.semantic_value(dynamics.semantic_interval_residual),
+            self.transport_value(dynamics.transport_interval_residual),
+            self.status_value(status_residual),
         )
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
-        future_coordinate = (
-            dynamics.object_coordinates[:, None].float()
-            + dynamics.transport_mean.float()
+        common_coordinate = (
+            dynamics.object_coordinates.float() + dynamics.transport_common
         ).clamp(-1.0, 1.0)
+        future_coordinate = (
+            dynamics.object_coordinates[:, None].float() + dynamics.transport_mean.float()
+        ).clamp(-1.0, 1.0)
+        common_coordinate_distance = (
+            coordinate_query[:, :, :, None] - common_coordinate[:, None, None]
+        ).square().sum(dim=-1)
         coordinate_distance = (
             coordinate_query[:, :, :, None, None]
             - future_coordinate[:, None, None]
@@ -223,106 +253,257 @@ class ObjectFutureEffectReader(nn.Module):
         # Exact coordinate agreement is positive evidence; the old [-1,0]
         # term could only punish and therefore could not establish a geometry
         # owner when semantic scores were diffuse.
+        common_coordinate_score = (
+            1.0 - 0.5 * common_coordinate_distance
+        ).clamp(-1.0, 1.0)
         coordinate_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
-        future_validity = dynamics.future_selector_validity.float().squeeze(
-            -1
-        ).clamp(0.0, 1.0)
         current_validity = dynamics.current_selector_validity.float().squeeze(
             -1
-        ).clamp(0.0, 1.0)[:, None].expand(-1, intervals, -1)
+        ).clamp(0.0, 1.0)
+        residual_validity = current_validity[:, None].expand(-1, intervals, -1)
         temperature = self._temperatures().to(device=action_query.device)
-        source_scores: list[Tensor] = []
-        intent_scores: list[Tensor] = []
-        bounded_logits: list[Tensor] = []
-        posteriors: list[Tensor] = []
-        selected_values: list[Tensor] = []
+        common_source_scores: list[Tensor] = []
+        residual_source_scores: list[Tensor] = []
+        common_intent_scores: list[Tensor] = []
+        residual_intent_scores: list[Tensor] = []
+        common_bounded_logits: list[Tensor] = []
+        residual_bounded_logits: list[Tensor] = []
+        common_posteriors: list[Tensor] = []
+        residual_posteriors: list[Tensor] = []
+        selected_common_values: list[Tensor] = []
+        selected_residual_values: list[Tensor] = []
         for type_index in range(3):
             query = self._bounded_unit(
                 self.source_query[type_index](action_query)
             )
-            source_key = self._bounded_unit(
-                self.source_key[type_index](source_fields[type_index])
+            common_source_key = self._bounded_unit(
+                self.source_key[type_index](common_source_fields[type_index])
             )
-            source_score = torch.einsum(
-                "btqh,bikh->btqik", query, source_key
+            common_source_score = torch.einsum(
+                "btqh,bkh->btqk", query, common_source_key
             )
-            public_key = self.public_intent_key[type_index](
-                intent.interval_key
+            residual_source_key = self._bounded_unit(
+                self.source_key[type_index](residual_source_fields[type_index])
+            )
+            residual_source_score = torch.einsum(
+                "btqh,bikh->btqik", query, residual_source_key
+            )
+            common_public_key = self.public_intent_key[type_index](
+                intent.common_key
+            )[:, None]
+            common_typed_key = self.typed_intent_key[type_index](
+                typed_common_intent[..., type_index, :]
+            )
+            common_intent_key = self._bounded_unit(
+                common_public_key + common_typed_key
+            )
+            residual_public_key = self.public_intent_key[type_index](
+                intent.interval_residual_key
             )[:, :, None]
-            typed_key = self.typed_intent_key[type_index](
-                typed_intent[..., type_index, :]
+            residual_typed_key = self.typed_intent_key[type_index](
+                typed_residual_intent[..., type_index, :]
             )
-            intent_key = self._bounded_unit(public_key + typed_key)
+            residual_intent_key = self._bounded_unit(
+                residual_public_key + residual_typed_key
+            )
             intent_query = self._bounded_unit(
                 self.intent_query[type_index](action_query)
             )
-            intent_score = torch.einsum(
-                "btqh,bikh->btqik", intent_query, intent_key
+            common_intent_score = torch.einsum(
+                "btqh,bkh->btqk", intent_query, common_intent_key
             )
-            bounded_logit = (
-                temperature[0] * source_score
-                + temperature[1] * intent_score
+            residual_intent_score = torch.einsum(
+                "btqh,bikh->btqik", intent_query, residual_intent_key
+            )
+            common_bounded_logit = (
+                temperature[0] * common_source_score
+                + temperature[1] * common_intent_score
+            )
+            residual_bounded_logit = (
+                temperature[0] * residual_source_score
+                + temperature[1] * residual_intent_score
             )
             if type_index == 1:
-                bounded_logit = bounded_logit + temperature[2] * coordinate_score
-            validity = current_validity if type_index == 2 else future_validity
-            logit = bounded_logit + validity.clamp_min(1e-6).log()[:, None, None]
-            flat_logit = logit.flatten(-2)
-            posterior = torch.softmax(
+                common_bounded_logit = (
+                    common_bounded_logit
+                    + temperature[2] * common_coordinate_score
+                )
+                residual_bounded_logit = (
+                    residual_bounded_logit
+                    + temperature[2] * coordinate_score
+                )
+
+            current_support = current_validity > 0.0
+            common_has_support = current_support.any(dim=-1)
+            common_logit = common_bounded_logit + torch.where(
+                current_support,
+                current_validity.clamp_min(1e-6).log(),
+                torch.zeros_like(current_validity),
+            )[:, None, None]
+            common_logit = common_logit.masked_fill(
+                ~current_support[:, None, None],
+                -torch.inf,
+            )
+            # Softmax over an all-invalid row is undefined.  The replacement
+            # logits are bookkeeping only; multiplying by has_support makes
+            # the returned common posterior and value algebraically zero.
+            common_logit = torch.where(
+                common_has_support[:, None, None, None],
+                common_logit,
+                torch.zeros_like(common_logit),
+            )
+            common_posterior = torch.softmax(common_logit, dim=-1)
+            common_posterior = common_posterior * common_has_support[
+                :, None, None, None
+            ].to(dtype=common_posterior.dtype)
+            common_selected = torch.einsum(
+                "btqk,bkh->btqh",
+                common_posterior.to(dtype=common_source_values[type_index].dtype),
+                common_source_values[type_index],
+            )
+
+            residual_support = residual_validity > 0.0
+            residual_logit = residual_bounded_logit + torch.where(
+                residual_support,
+                residual_validity.clamp_min(1e-6).log(),
+                torch.zeros_like(residual_validity),
+            )[:, None, None]
+            residual_logit = residual_logit.masked_fill(
+                ~residual_support[:, None, None],
+                -torch.inf,
+            )
+            flat_logit = residual_logit.flatten(-2)
+            residual_posterior = torch.softmax(
                 torch.cat((flat_logit, torch.zeros_like(flat_logit[..., :1])), dim=-1),
                 dim=-1,
             )
-            flat_value = source_values[type_index].reshape(
+            flat_value = residual_source_values[type_index].reshape(
                 batch, intervals * objects, hidden
             )
-            selected = torch.einsum(
+            residual_selected = torch.einsum(
                 "btqn,bnh->btqh",
-                posterior[..., :-1].to(dtype=flat_value.dtype),
+                residual_posterior[..., :-1].to(dtype=flat_value.dtype),
                 flat_value,
             )
-            source_scores.append(source_score)
-            intent_scores.append(intent_score)
-            bounded_logits.append(bounded_logit)
-            posteriors.append(posterior)
-            selected_values.append(selected)
-        posterior_by_type = torch.stack(posteriors, dim=3)
-        selected_type_value = torch.stack(selected_values, dim=3)
-        value, fusion_base, fusion_contrast, fusion_residual = (
-            self._fuse_complementary_values(selected_type_value)
+            common_source_scores.append(common_source_score)
+            residual_source_scores.append(residual_source_score)
+            common_intent_scores.append(common_intent_score)
+            residual_intent_scores.append(residual_intent_score)
+            common_bounded_logits.append(common_bounded_logit)
+            residual_bounded_logits.append(residual_bounded_logit)
+            common_posteriors.append(common_posterior)
+            residual_posteriors.append(residual_posterior)
+            selected_common_values.append(common_selected)
+            selected_residual_values.append(residual_selected)
+        common_posterior_by_type = torch.stack(common_posteriors, dim=3)
+        residual_posterior_by_type = torch.stack(residual_posteriors, dim=3)
+        selected_common_type_value = torch.stack(selected_common_values, dim=3)
+        selected_residual_type_value = torch.stack(selected_residual_values, dim=3)
+        common_value, common_fusion_base, common_fusion_contrast, common_fusion_residual = (
+            self._fuse_complementary_values(selected_common_type_value)
         )
+        residual_value, residual_fusion_base, residual_fusion_contrast, residual_fusion_residual = (
+            self._fuse_complementary_values(selected_residual_type_value)
+        )
+        value = common_value + residual_value
         if not collect_diagnostics:
             return value, {}
+        source_score_abs = torch.stack(
+            tuple(score.detach().abs().mean() for score in (
+                *common_source_scores,
+                *residual_source_scores,
+            ))
+        ).mean()
+        source_score_max = torch.stack(
+            tuple(score.detach().abs().amax() for score in (
+                *common_source_scores,
+                *residual_source_scores,
+            ))
+        ).amax()
+        intent_score_abs = torch.stack(
+            tuple(score.detach().abs().mean() for score in (
+                *common_intent_scores,
+                *residual_intent_scores,
+            ))
+        ).mean()
+        intent_score_max = torch.stack(
+            tuple(score.detach().abs().amax() for score in (
+                *common_intent_scores,
+                *residual_intent_scores,
+            ))
+        ).amax()
         metrics: dict[str, Tensor] = {
-            "object_p2_content_score_abs": torch.stack(source_scores).detach().abs().mean(),
-            "object_p2_content_score_max_abs": torch.stack(source_scores).detach().abs().amax(),
-            "object_p2_intent_score_abs": torch.stack(intent_scores).detach().abs().mean(),
-            "object_p2_intent_score_max_abs": torch.stack(intent_scores).detach().abs().amax(),
-            "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
-            "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
-            "object_p2_combined_logit_max_abs": torch.stack(bounded_logits).detach().abs().amax(),
+            "object_p2_content_score_abs": source_score_abs,
+            "object_p2_content_score_max_abs": source_score_max,
+            "object_p2_intent_score_abs": intent_score_abs,
+            "object_p2_intent_score_max_abs": intent_score_max,
+            "object_p2_coordinate_score_abs": 0.5 * (
+                common_coordinate_score.detach().abs().mean()
+                + coordinate_score.detach().abs().mean()
+            ),
+            "object_p2_coordinate_score_max_abs": torch.maximum(
+                common_coordinate_score.detach().abs().amax(),
+                coordinate_score.detach().abs().amax(),
+            ),
+            "object_p2_combined_logit_max_abs": torch.stack(
+                tuple(logit.detach().abs().amax() for logit in (
+                    *common_bounded_logits,
+                    *residual_bounded_logits,
+                ))
+            ).amax(),
             "object_p2_temperature_content": temperature[0].detach(),
             "object_p2_temperature_intent": temperature[1].detach(),
             "object_p2_temperature_coordinate": temperature[2].detach(),
-            "object_p2_posterior_entropy": normalized_entropy(
-                posterior_by_type, dim=-1
+            "object_p2_common_posterior_entropy": normalized_entropy(
+                common_posterior_by_type, dim=-1
             ).detach().mean(),
-            "object_p2_posterior_max": posterior_by_type.detach().amax(dim=-1).mean(),
-            "object_p2_null_mass": posterior_by_type.detach()[..., -1].mean(),
+            "object_p2_common_posterior_max": common_posterior_by_type.detach()
+            .amax(dim=-1)
+            .mean(),
+            "object_p2_residual_posterior_entropy": normalized_entropy(
+                residual_posterior_by_type, dim=-1
+            ).detach().mean(),
+            "object_p2_residual_posterior_max": residual_posterior_by_type.detach()
+            .amax(dim=-1)
+            .mean(),
+            "object_p2_residual_null_mass": residual_posterior_by_type.detach()[
+                ..., -1
+            ].mean(),
+            "object_p2_protected_common_rms": common_value.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_optional_residual_rms": residual_value.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
-            "object_p2_fusion_base_rms": fusion_base.detach().square().mean().sqrt(),
-            "object_p2_fusion_contrast_rms": fusion_contrast.detach()
+            "object_p2_common_fusion_base_rms": common_fusion_base.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_fusion_residual_rms": fusion_residual.detach()
+            "object_p2_common_fusion_residual_rms": common_fusion_residual.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_fusion_residual_to_base": fusion_residual.detach()
+            "object_p2_residual_fusion_base_rms": residual_fusion_base.detach()
             .square()
             .mean()
-            .sqrt()
-            / fusion_base.detach().square().mean().sqrt().clamp_min(1.0e-8),
+            .sqrt(),
+            "object_p2_residual_fusion_residual_rms": residual_fusion_residual.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_common_fusion_contrast_rms": common_fusion_contrast.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_residual_fusion_contrast_rms": residual_fusion_contrast.detach()
+            .square()
+            .mean()
+            .sqrt(),
             "object_p2_fusion_scale_abs_mean": self.type_contrast_scale.detach()
             .float()
             .abs()
@@ -333,31 +514,35 @@ class ObjectFutureEffectReader(nn.Module):
             .amax(),
         }
         for type_index, name in enumerate(self.TYPE_NAMES):
-            metrics[f"object_p2_{name}_score_max_abs"] = source_scores[
-                type_index
-            ].detach().abs().amax()
-            metrics[f"object_p2_{name}_null_mass"] = posterior_by_type[
+            metrics[f"object_p2_{name}_score_max_abs"] = torch.maximum(
+                common_source_scores[type_index].detach().abs().amax(),
+                residual_source_scores[type_index].detach().abs().amax(),
+            )
+            metrics[f"object_p2_{name}_residual_null_mass"] = residual_posterior_by_type[
                 ..., type_index, -1
             ].detach().mean()
-            selected_value = selected_type_value[..., type_index, :].detach().float()
-            metrics[f"object_p2_{name}_selected_value_rms"] = (
-                selected_value.square().mean().sqrt()
+            common_selected_value = selected_common_type_value[
+                ..., type_index, :
+            ].detach().float()
+            residual_selected_value = selected_residual_type_value[
+                ..., type_index, :
+            ].detach().float()
+            metrics[f"object_p2_{name}_common_selected_value_rms"] = (
+                common_selected_value.square().mean().sqrt()
             )
-            metrics[f"object_p2_{name}_anchor_contribution_rms"] = (
-                (
-                    selected_value / math.sqrt(float(len(self.TYPE_NAMES)))
-                ).square().mean().sqrt()
+            metrics[f"object_p2_{name}_residual_selected_value_rms"] = (
+                residual_selected_value.square().mean().sqrt()
             )
-        interval_mass_by_type = posterior_by_type[..., :-1].reshape(
+        interval_mass_by_type = residual_posterior_by_type[..., :-1].reshape(
             batch, horizon, basis, 3, intervals, objects
         ).sum(dim=-1)
         interval_mass = interval_mass_by_type.detach().mean(dim=3)
         for index in range(intervals):
-            metrics[f"object_p2_interval_{index}_mass"] = (
+            metrics[f"object_p2_residual_interval_{index}_mass"] = (
                 interval_mass[..., index].detach().float().mean()
             )
             for type_index, name in enumerate(self.TYPE_NAMES):
-                metrics[f"object_p2_{name}_interval_{index}_mass"] = (
+                metrics[f"object_p2_{name}_residual_interval_{index}_mass"] = (
                     interval_mass_by_type[..., type_index, index]
                     .detach()
                     .float()

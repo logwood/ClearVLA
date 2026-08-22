@@ -386,6 +386,8 @@ def future_dynamics_terms(
         target_value: Tensor,
         *,
         scale_floored: bool,
+        normalized_weight: float = 1.0,
+        direction_weight: float = 0.10,
     ) -> Tensor:
         prediction_f = prediction_value.float()
         target_f = target_value.detach().float()
@@ -422,44 +424,100 @@ def future_dynamics_terms(
         direction = 0.5 * (
             prediction_direction - target_direction
         ).square().mean(dim=-1, keepdim=True)
-        return raw + normalized + 0.10 * direction
+        return (
+            raw
+            + float(normalized_weight) * normalized
+            + float(direction_weight) * direction
+        )
 
-    successor_error = row_loss(
-        prediction.successor_content,
-        target.successor_content,
-        scale_floored=False,
-    )
-    successor = masked(successor_error, object_validity)
-    semantic_delta_error = row_loss(
+    def decomposed_loss(
+        prediction_value: Tensor,
+        target_value: Tensor,
+        *,
+        scale_floored: bool,
+        normalized_weight: float = 1.0,
+        direction_weight: float = 0.10,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        prediction_common = prediction_value.float().mean(dim=1)
+        target_common = target_value.detach().float().mean(dim=1)
+        prediction_residual = prediction_value.float() - prediction_common[:, None]
+        target_residual = target_value.detach().float() - target_common[:, None]
+        common_error = row_loss(
+            prediction_common[:, None],
+            target_common[:, None],
+            scale_floored=scale_floored,
+            normalized_weight=normalized_weight,
+            direction_weight=direction_weight,
+        )
+        residual_error = row_loss(
+            prediction_residual,
+            target_residual,
+            scale_floored=scale_floored,
+            normalized_weight=normalized_weight,
+            direction_weight=direction_weight,
+        )
+        common = masked(common_error, object_validity[:, :1])
+        residual = masked(residual_error, object_validity)
+        return common, residual, common_error, residual_error
+
+    (
+        semantic_common,
+        semantic_residual,
+        semantic_common_error,
+        semantic_residual_error,
+    ) = decomposed_loss(
         prediction.semantic_delta,
         target.semantic_delta,
         scale_floored=True,
+        # V120/Schema30 assigned 0.30 to the algebraically duplicate raw
+        # successor objective and 0.25 to raw+normalized+0.10*direction.
+        # Removing the duplicate must preserve that gradient geometry:
+        #   0.55*raw + 0.25*normalized + 0.025*direction.
+        # The outer semantic coefficient below is 0.55, hence these exact
+        # internal ratios.  Common/residual then split the same budget 50/50.
+        normalized_weight=5.0 / 11.0,
+        direction_weight=1.0 / 22.0,
     )
-    semantic_delta = masked(semantic_delta_error, object_validity)
-    transport_error = row_loss(
+    semantic_delta = 0.5 * (semantic_common + semantic_residual)
+    (
+        transport_common,
+        transport_residual,
+        transport_common_error,
+        transport_residual_error,
+    ) = decomposed_loss(
         prediction.transport_mean,
         target.transport_mean,
         scale_floored=False,
     )
-    transport = masked(transport_error, object_validity)
+    transport = 0.5 * (transport_common + transport_residual)
     covariance_error = row_loss(
         prediction.transport_covariance,
         target.transport_covariance,
         scale_floored=False,
     )
     covariance = masked(covariance_error, object_validity)
-    visibility_error = row_loss(
+    (
+        visibility_common,
+        visibility_residual,
+        visibility_common_error,
+        visibility_residual_error,
+    ) = decomposed_loss(
         prediction.visibility,
         target.visibility,
         scale_floored=False,
     )
-    visibility = masked(visibility_error, object_validity)
-    persistence_error = row_loss(
+    visibility = 0.5 * (visibility_common + visibility_residual)
+    (
+        persistence_common,
+        persistence_residual,
+        persistence_common_error,
+        persistence_residual_error,
+    ) = decomposed_loss(
         prediction.persistence,
         target.persistence,
         scale_floored=False,
     )
-    persistence = masked(persistence_error, object_validity)
+    persistence = 0.5 * (persistence_common + persistence_residual)
     uncertainty_error = row_loss(
         prediction.uncertainty,
         target.uncertainty,
@@ -467,12 +525,12 @@ def future_dynamics_terms(
     )
     uncertainty = masked(uncertainty_error, object_validity)
     semantic_transition_prediction = (
-        prediction.semantic_delta.float()[:, 1:]
-        - prediction.semantic_delta.float()[:, :-1]
+        prediction.semantic_interval_residual[:, 1:]
+        - prediction.semantic_interval_residual[:, :-1]
     )
     semantic_transition_target = (
-        target.semantic_delta.detach().float()[:, 1:]
-        - target.semantic_delta.detach().float()[:, :-1]
+        target.semantic_interval_residual.detach()[:, 1:]
+        - target.semantic_interval_residual.detach()[:, :-1]
     )
     transition_error = row_loss(
         semantic_transition_prediction,
@@ -485,8 +543,7 @@ def future_dynamics_terms(
     )
     transition = masked(transition_error, transition_validity)
     total = (
-        0.30 * successor
-        + 0.25 * semantic_delta
+        0.55 * semantic_delta
         + 0.15 * transport
         + 0.05 * covariance
         + 0.08 * visibility
@@ -495,12 +552,19 @@ def future_dynamics_terms(
     )
     terms = {
         "future_dynamics": total,
-        "future_successor": successor,
         "future_semantic_delta": semantic_delta,
+        "future_semantic_common": semantic_common,
+        "future_semantic_residual": semantic_residual,
         "future_transport": transport,
+        "future_transport_common": transport_common,
+        "future_transport_residual": transport_residual,
         "future_covariance": covariance,
         "future_visibility": visibility,
+        "future_visibility_common": visibility_common,
+        "future_visibility_residual": visibility_residual,
         "future_persistence": persistence,
+        "future_persistence_common": persistence_common,
+        "future_persistence_residual": persistence_residual,
         "future_uncertainty": uncertainty,
         "future_transition": transition,
     }
@@ -515,14 +579,11 @@ def future_dynamics_terms(
         for index in range(prediction.intervals):
             interval_slice = slice(index, index + 1)
             interval_validity = object_validity[:, interval_slice]
-            terms[f"future_interval_{index}_successor"] = masked(
-                successor_error[:, interval_slice], interval_validity
-            ).detach()
             terms[f"future_interval_{index}_semantic_delta"] = masked(
-                semantic_delta_error[:, interval_slice], interval_validity
+                semantic_residual_error[:, interval_slice], interval_validity
             ).detach()
             terms[f"future_interval_{index}_transport"] = masked(
-                transport_error[:, interval_slice],
+                transport_residual_error[:, interval_slice],
                 interval_validity,
             ).detach()
     return terms

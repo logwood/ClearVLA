@@ -340,6 +340,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             .float()
             .std(dim=1, unbiased=False)
             .mean(),
+            "object_w_prediction_common_effect_rms": predicted.semantic_common.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_prediction_interval_residual_rms": predicted.semantic_interval_residual
+            .detach()
+            .square()
+            .mean()
+            .sqrt(),
             "object_coarse_action_rms": coarse.action_prediction.detach()
             .float()
             .square()
@@ -396,8 +405,14 @@ class ObjectIntentDynamicsTop(nn.Module):
             "object_intent_public_future_state_loss": supervision.public_loss.detach(),
             "object_intent_typed_future_field_loss": supervision.typed_loss.detach(),
             "object_intent_typed_semantic_loss": supervision.semantic_loss.detach(),
+            "object_intent_typed_semantic_common_loss": supervision.semantic_common_loss.detach(),
+            "object_intent_typed_semantic_residual_loss": supervision.semantic_residual_loss.detach(),
             "object_intent_typed_status_loss": supervision.status_loss.detach(),
+            "object_intent_typed_status_common_loss": supervision.status_common_loss.detach(),
+            "object_intent_typed_status_residual_loss": supervision.status_residual_loss.detach(),
             "object_intent_typed_transport_loss": supervision.transport_loss.detach(),
+            "object_intent_typed_transport_common_loss": supervision.transport_common_loss.detach(),
+            "object_intent_typed_transport_residual_loss": supervision.transport_residual_loss.detach(),
             "object_intent_future_state_prediction_rms": supervision.state_prediction
             .detach()
             .float()
@@ -419,6 +434,26 @@ class ObjectIntentDynamicsTop(nn.Module):
             "object_intent_typed_semantic_target_rms": supervision.semantic_target
             .detach()
             .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_semantic_common_prediction_rms": context.intent_boundary_dynamics.semantic_common
+            .detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_semantic_common_target_rms": teacher.semantic_common
+            .detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_semantic_residual_prediction_rms": context.intent_boundary_dynamics.semantic_interval_residual
+            .detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_semantic_residual_target_rms": teacher.semantic_interval_residual
+            .detach()
             .square()
             .mean()
             .sqrt(),

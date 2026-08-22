@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Mapping, cast
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 30
+CAPABILITY_SCHEMA = 31
 LAYOUT_NAME = "clearvla_mainline"
 LAYOUT_SCHEMA = 1
 TOPOLOGY = (3, 2, 3)
@@ -25,9 +25,9 @@ class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
     observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_bank"
-    top: str = "conditional_k_null_independent_reconstruction_zero_centered_intent_single_typed_ingress_w_per_type_p2_variance_preserving_contrast_fusion_consequence_p3"
+    top: str = "conditional_k_reconstruction_common_residual_intent_single_typed_ingress_w_protected_common_optional_residual_p2_consequence_p3"
     bottom: str = "restored_v120_shared_seed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
-    training: str = "v120_mirrored_physical_flow_observed_current_grounding_physical_camera_loss_support_shared_w_field_targets_exact_teacher_event_boost_v120_decay_three_owner_clip"
+    training: str = "v120_mirrored_physical_flow_observed_current_grounding_partial_ot_teacher_common_residual_targets_physical_camera_loss_support_event_boost_v120_decay_three_owner_clip"
     runtime: str = "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only"
 
     def validate(self) -> None:

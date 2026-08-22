@@ -66,6 +66,75 @@ class ObjectFutureTeacher(nn.Module):
 
         return offsets.float() / float(self.flow_reference_frames)
 
+    @staticmethod
+    def _partial_assignment(
+        score: Tensor,
+        *,
+        dustbin_score: float = 0.0,
+        iterations: int = 20,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return row-normalized real and dustbin mass via partial OT.
+
+        ``score`` is ``[..., K, N]``.  The augmented transport has one
+        dustbin row and column.  Real rows each carry unit mass, real columns
+        each accept unit mass, and the two dustbins absorb unmatched objects
+        or future cells.  The fixed dustbin has no learned parameter and the
+        whole routine runs on the no-grad Teacher plane.
+        """
+
+        if score.ndim < 3:
+            raise ValueError("partial assignment score must be [...,K,N]")
+        objects, candidates = int(score.shape[-2]), int(score.shape[-1])
+        if objects < 1 or candidates < 1:
+            raise ValueError("partial assignment requires real rows and columns")
+        alpha = score.new_tensor(float(dustbin_score))
+        bins_object = alpha.expand(*score.shape[:-2], objects, 1)
+        bins_candidate = alpha.expand(*score.shape[:-2], 1, candidates)
+        bin_corner = alpha.expand(*score.shape[:-2], 1, 1)
+        coupling = torch.cat(
+            (
+                torch.cat((score, bins_object), dim=-1),
+                torch.cat((bins_candidate, bin_corner), dim=-1),
+            ),
+            dim=-2,
+        )
+        normalizer = -math.log(float(objects + candidates))
+        log_mu = torch.cat(
+            (
+                score.new_full((*score.shape[:-2], objects), normalizer),
+                score.new_full(
+                    (*score.shape[:-2], 1),
+                    math.log(float(candidates)) + normalizer,
+                ),
+            ),
+            dim=-1,
+        )
+        log_nu = torch.cat(
+            (
+                score.new_full((*score.shape[:-2], candidates), normalizer),
+                score.new_full(
+                    (*score.shape[:-2], 1),
+                    math.log(float(objects)) + normalizer,
+                ),
+            ),
+            dim=-1,
+        )
+        u = torch.zeros_like(log_mu)
+        v = torch.zeros_like(log_nu)
+        for _ in range(int(iterations)):
+            u = log_mu - torch.logsumexp(coupling + v.unsqueeze(-2), dim=-1)
+            v = log_nu - torch.logsumexp(
+                coupling + u.unsqueeze(-1), dim=-2
+            )
+        log_transport = coupling + u.unsqueeze(-1) + v.unsqueeze(-2)
+        # Undo the common marginal normalizer.  Every real object row then
+        # sums to one across real candidates plus its dustbin probability.
+        transport = torch.exp(log_transport - normalizer)
+        real = transport[..., :objects, :candidates]
+        null = transport[..., :objects, candidates:]
+        row_error = (real.sum(dim=-1, keepdim=True) + null - 1.0).abs()
+        return real, null, row_error
+
     @torch.no_grad()
     def forward(
         self,
@@ -204,37 +273,49 @@ class ObjectFutureTeacher(nn.Module):
         camera_prior = facts.object_to_chart.detach().float().sum(dim=(-2, -1))
         camera_prior = camera_prior / camera_prior.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         camera_log = camera_prior.clamp_min(1e-5).log()[:, None, :, :, None, None]
-        # Camera prior already integrates to one across cameras.  Normalize
-        # the spatial candidate partition so one null hypothesis does not lose
-        # merely because it competes with Y*X cells.  A fixed contrastive
-        # temperature then rewards genuinely matching DINO evidence.
+        # Remove the broad spatial background of each fixed DINO key before
+        # matching.  Diffuse positive cosine is not evidence that one specific
+        # future cell belongs to this object and must not suppress dustbin by
+        # candidate count alone.
+        semantic_background = semantic.mean(
+            dim=(-3, -2, -1), keepdim=True
+        )
+        appearance_background = appearance.mean(
+            dim=(-3, -2, -1), keepdim=True
+        )
+        semantic_contrast = semantic - semantic_background
+        appearance_contrast = appearance - appearance_background
+        # Camera priors already sum to one across cameras.  Dividing the
+        # spatial evidence by Y*X gives a diffuse, background-level field one
+        # unit of aggregate evidence rather than Y*X accidental votes against
+        # the dustbin.  A localized positive contrast can still overcome this
+        # fixed calibration; no learned threshold or matching quota is added.
         candidate_logit = (
-            4.5 * semantic
-            + 1.5 * appearance
+            4.5 * semantic_contrast
+            + 1.5 * appearance_contrast
             + geometry
             + camera_log
-            - math.log(float(max(rows * columns, 1)))
+            - math.log(float(rows * columns))
         )
         candidate_flat = candidate_logit.flatten(3)
-        null_logit = torch.zeros(
-            batch,
-            supports,
-            objects,
-            1,
-            device=future_supports.device,
-            dtype=candidate_flat.dtype,
+        candidate_flat_probability, null_probability, assignment_row_error = (
+            self._partial_assignment(
+                candidate_flat,
+                dustbin_score=0.0,
+                iterations=20,
+            )
         )
-        posterior = torch.softmax(torch.cat((candidate_flat, null_logit), dim=-1), dim=-1)
-        candidate_posterior = posterior[..., :-1].reshape(
+        candidate_posterior = candidate_flat_probability.reshape(
             batch, supports, objects, cameras, rows, columns
         )
-        null_probability = posterior[..., -1:]
+        posterior = torch.cat(
+            (candidate_flat_probability, null_probability), dim=-1
+        )
         support_content = (
             future_supports.detach()
             .float()
             .reshape(batch, supports, cameras * rows * columns, width)
         )
-        candidate_flat_probability = candidate_posterior.flatten(3)
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
         candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(
             cameras, -1, -1, -1
@@ -255,6 +336,22 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty_per_support = null_probability + visibility_per_support * entropy
         association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
         reliability_per_support = visibility_per_support * association_confidence
+        conditional_candidate = candidate_flat_probability / visibility_per_support.clamp_min(
+            1.0e-8
+        )
+        conditional_entropy = -(
+            conditional_candidate.clamp_min(1.0e-8)
+            * conditional_candidate.clamp_min(1.0e-8).log()
+        ).sum(dim=-1, keepdim=True)
+        effective_support = torch.exp(conditional_entropy) * (
+            visibility_per_support > 1.0e-8
+        )
+        column_ownership = candidate_flat_probability / candidate_flat_probability.sum(
+            dim=2, keepdim=True
+        ).clamp_min(1.0e-8)
+        mutual_assignment_mass = (
+            candidate_flat_probability * column_ownership
+        ).sum(dim=-1, keepdim=True)
         current_reference = facts.content.detach().float()[:, None]
         # This is the exact V120 physical target algebra.  Null mass already
         # supplies the only identity fallback.  Association confidence remains
@@ -391,6 +488,21 @@ class ObjectFutureTeacher(nn.Module):
             .abs()
             .amax(),
             "object_teacher_null_probability": null_probability.mean(),
+            "object_teacher_dustbin_probability": null_probability.mean(),
+            "object_teacher_effective_support": effective_support.mean(),
+            "object_teacher_mutual_assignment_mass": mutual_assignment_mass.mean(),
+            "object_teacher_partial_assignment_row_error": assignment_row_error.amax(),
+            "object_teacher_best_minus_background": candidate_logit.detach()
+            .float()
+            .amax(dim=(-3, -2, -1))
+            .mean(),
+            "object_teacher_interval_residual_rms": target.semantic_interval_residual
+            .square()
+            .mean()
+            .sqrt(),
+            "object_teacher_common_effect_rms": target.semantic_common.square()
+            .mean()
+            .sqrt(),
             "object_teacher_semantic_max": semantic.detach().float().amax(dim=(-3, -2, -1)).mean(),
             "object_teacher_semantic_margin": (
                 semantic.detach().float().amax(dim=(-3, -2, -1))

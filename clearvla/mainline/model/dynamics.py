@@ -24,8 +24,9 @@ class ObjectW1WorkingState:
 
     near: Tensor
     far_base: Tensor
-    near_typed: Tensor
-    far_typed: Tensor
+    common_typed: Tensor
+    near_residual_typed: Tensor
+    far_residual_typed: Tensor
     near_field: FutureObjectDynamics
     intent_boundary_field: FutureObjectDynamics
 
@@ -142,7 +143,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action: CoarseActionIntentState,
         *,
         collect_diagnostics: bool,
-    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         intent.validate(hidden=self.hidden)
         public_object = self.object_content(facts.public_content)[:, None]
         private_objects = self.object_content(facts.content_innovation)
@@ -171,24 +172,37 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             + interval[:, :, None]
             + goal_update[:, :, None]
         )
-        typed_components = []
+        common_components = []
+        residual_components = []
         for type_index, projection in enumerate(
             (self.object_semantic, self.object_appearance, self.object_geometry)
         ):
-            component, _ = smooth_rms_contract(
-                projection(intent.typed_relevance_value[..., type_index, :]),
+            common_component, _ = smooth_rms_contract(
+                projection(intent.typed_common_value[..., type_index, :]),
                 0.35,
             )
-            typed_components.append(component)
-        typed_components_value = torch.stack(typed_components, dim=3)
-        # Typed values are a zero-preserving W working state, not a decoder
-        # sidecar.  Public context may modulate their local update but cannot
-        # suppress them to zero (the coefficient is bounded in [0.5, 1.5]).
-        typed_components_value = typed_components_value * (
+            common_components.append(common_component)
+            residual_component, _ = smooth_rms_contract(
+                projection(
+                    intent.typed_interval_residual_value[..., type_index, :]
+                ),
+                0.35,
+            )
+            residual_components.append(residual_component)
+        typed_common = torch.stack(common_components, dim=2)
+        typed_residual = torch.stack(residual_components, dim=3)
+        # Public context may modulate an already non-zero typed value, but it
+        # cannot additively synthesize either effect owner.  Common remains
+        # interval-free; residual retains [I,K,type] all the way through W.
+        common_base = base.mean(dim=1)
+        typed_common = typed_common * (
+            1.0 + 0.5 * torch.tanh(common_base.float())[:, :, None]
+        ).to(dtype=typed_common.dtype)
+        typed_residual = typed_residual * (
             1.0 + 0.5 * torch.tanh(base.float())[:, :, :, None]
-        ).to(dtype=typed_components_value.dtype)
+        ).to(dtype=typed_residual.dtype)
         if not collect_diagnostics:
-            return base, typed_components_value, {}
+            return base, typed_common, typed_residual, {}
         if goal_attention is None:
             goal_attention = interval.new_zeros(
                 interval.shape[0],
@@ -204,7 +218,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 / math.log(float(max(int(goal_attention.shape[-1]), 2)))
             ).mean(),
             "object_w_goal_innovation_rms": goal_update.detach().float().square().mean().sqrt(),
-            "object_w_typed_sidecar_rms": typed_components_value.detach()
+            "object_w_typed_common_state_rms": typed_common.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_typed_interval_residual_state_rms": typed_residual.detach()
             .float()
             .square()
             .mean()
@@ -225,78 +244,126 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .mean(),
         }
         for type_index, name in enumerate(("semantic", "appearance", "geometry")):
-            component = typed_components_value[..., type_index, :].detach().float()
-            input_mass = intent.typed_relevance_mass[
+            common_component = typed_common[..., type_index, :].detach().float()
+            residual_component = typed_residual[..., type_index, :].detach().float()
+            common_mass = intent.typed_common_mass[..., type_index, 0].detach().float()
+            residual_mass = intent.typed_interval_residual_mass[
                 ..., type_index, 0
             ].detach().float()
-            input_value = intent.typed_relevance_value[
+            common_value = intent.typed_common_value[..., type_index, :].detach().float()
+            residual_value = intent.typed_interval_residual_value[
                 ..., type_index, :
             ].detach().float()
-            metrics[f"object_w_{name}_contribution_rms"] = (
-                component.square().mean().sqrt()
+            metrics[f"object_w_{name}_common_contribution_rms"] = (
+                common_component.square().mean().sqrt()
             )
-            metrics[f"object_w_{name}_contribution_interval_variation"] = (
-                component.std(dim=1, unbiased=False).mean()
+            metrics[f"object_w_{name}_common_contribution_object_variation"] = (
+                common_component.std(dim=1, unbiased=False).mean()
             )
-            metrics[f"object_w_{name}_contribution_object_variation"] = (
-                component.std(dim=2, unbiased=False).mean()
+            metrics[f"object_w_{name}_residual_contribution_rms"] = (
+                residual_component.square().mean().sqrt()
             )
-            metrics[f"object_w_{name}_input_relevance_mass"] = input_mass.mean()
-            metrics[f"object_w_{name}_input_value_rms"] = (
-                input_value.square().mean().sqrt()
+            metrics[f"object_w_{name}_residual_contribution_interval_variation"] = (
+                residual_component.std(dim=1, unbiased=False).mean()
             )
-            metrics[f"object_w_{name}_input_interval_variation"] = (
-                input_value.std(dim=1, unbiased=False).mean()
+            metrics[f"object_w_{name}_residual_contribution_object_variation"] = (
+                residual_component.std(dim=2, unbiased=False).mean()
             )
-            metrics[f"object_w_{name}_input_object_variation"] = (
-                input_value.std(dim=2, unbiased=False).mean()
+            metrics[f"object_w_{name}_common_input_mass"] = common_mass.mean()
+            metrics[f"object_w_{name}_residual_input_mass"] = residual_mass.mean()
+            metrics[f"object_w_{name}_common_input_value_rms"] = (
+                common_value.square().mean().sqrt()
             )
-        return base, typed_components_value, metrics
+            metrics[f"object_w_{name}_residual_input_value_rms"] = (
+                residual_value.square().mean().sqrt()
+            )
+        return base, typed_common, typed_residual, metrics
 
     def _field(
         self,
         *,
         facts: ObjectFactSet,
         hidden: Tensor,
-        typed_sidecars: Tensor,
+        typed_common: Tensor,
+        typed_interval_residual: Tensor,
     ) -> FutureObjectDynamics:
-        if tuple(typed_sidecars.shape) != (*hidden.shape[:-1], 3, hidden.shape[-1]):
-            raise ValueError("W typed sidecars must align as [B,I,K,3,H]")
-        # The typed states have already crossed the W blocks.  Decode those
-        # exact states directly; multiplying them by the final public carrier
-        # here previously re-publicized and often suppressed the very
-        # interval/object variation W was meant to preserve.
-        semantic_hidden = typed_sidecars[..., 0, :]
-        appearance_hidden = typed_sidecars[..., 1, :]
-        geometry_hidden = typed_sidecars[..., 2, :]
-        semantic_delta = self.delta_head(semantic_hidden)
-        object_transport = 0.50 * torch.tanh(
-            self.transport_head(geometry_hidden).float()
-        ).to(dtype=hidden.dtype)
+        if tuple(typed_common.shape) != (
+            hidden.shape[0], hidden.shape[2], 3, hidden.shape[-1]
+        ):
+            raise ValueError("W typed common state must align as [B,K,3,H]")
+        if tuple(typed_interval_residual.shape) != (
+            *hidden.shape[:-1], 3, hidden.shape[-1]
+        ):
+            raise ValueError("W typed residual must align as [B,I,K,3,H]")
+
+        semantic_common = self.delta_head(typed_common[..., 0, :]).float()
+        semantic_residual = self.delta_head(
+            typed_interval_residual[..., 0, :]
+        ).float()
+        semantic_residual = semantic_residual - semantic_residual.mean(
+            dim=1, keepdim=True
+        )
+        semantic_delta = (semantic_common[:, None] + semantic_residual).to(
+            dtype=hidden.dtype
+        )
+
+        transport_common = 0.50 * torch.tanh(
+            self.transport_head(typed_common[..., 2, :]).float()
+        )
+        transport_residual = 0.50 * torch.tanh(
+            self.transport_head(typed_interval_residual[..., 2, :]).float()
+        )
+        transport_residual = transport_residual - transport_residual.mean(
+            dim=1, keepdim=True
+        )
+        object_transport = (transport_common[:, None] + transport_residual).to(
+            dtype=hidden.dtype
+        )
         object_covariance = F.softplus(
-            self.covariance_head(geometry_hidden).float()
+            self.covariance_head(typed_interval_residual[..., 2, :]).float()
         ).to(dtype=hidden.dtype)
-        visibility = (
-            1.0 - 2.0 * torch.sigmoid(self.visibility_head(appearance_hidden).float())
-        ).to(dtype=hidden.dtype)
-        persistence = (
-            1.0 - 2.0 * torch.sigmoid(self.persistence_head(appearance_hidden).float())
-        ).to(dtype=hidden.dtype)
+        visibility_common = -torch.tanh(
+            0.5 * self.visibility_head(typed_common[..., 1, :]).float()
+        )
+        visibility_residual = -torch.tanh(
+            0.5 * self.visibility_head(
+                typed_interval_residual[..., 1, :]
+            ).float()
+        )
+        visibility_residual = visibility_residual - visibility_residual.mean(
+            dim=1, keepdim=True
+        )
+        visibility = (visibility_common[:, None] + visibility_residual).to(
+            dtype=hidden.dtype
+        )
+        persistence_common = -torch.tanh(
+            0.5 * self.persistence_head(typed_common[..., 1, :]).float()
+        )
+        persistence_residual = -torch.tanh(
+            0.5 * self.persistence_head(
+                typed_interval_residual[..., 1, :]
+            ).float()
+        )
+        persistence_residual = persistence_residual - persistence_residual.mean(
+            dim=1, keepdim=True
+        )
+        persistence = (persistence_common[:, None] + persistence_residual).to(
+            dtype=hidden.dtype
+        )
         uncertainty = F.softplus(
             self.uncertainty_head(hidden).float()
         ).to(dtype=hidden.dtype)
         reliability = torch.zeros_like(uncertainty)
-        visibility_probability = (1.0 + visibility.float()).clamp(0.0, 1.0)
-        future_selector_validity = (
-            facts.validity[:, None].float()
-            * facts.existence.detach()[:, None].float().clamp(0.0, 1.0)
-            * visibility_probability
-        )
         current_selector_validity = (
             facts.validity.float()
             * facts.existence.detach().float().clamp(0.0, 1.0)
         )
-        current_reference = facts.content.detach()
+        # Predicted visibility is a status value, not authority to erase the
+        # semantic/geometry candidates supervised in the same field.
+        future_selector_validity = current_selector_validity[:, None].expand(
+            -1, hidden.shape[1], -1, -1
+        )
+        current_reference = facts.content.detach().to(dtype=hidden.dtype)
         return FutureObjectDynamics(
             current_reference=current_reference,
             successor_content=current_reference[:, None] + semantic_delta,
@@ -356,25 +423,27 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action: CoarseActionIntentState,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics, ObjectW1WorkingState, dict[str, Tensor]]:
-        hidden, typed_sidecars, base_metrics = self._base(
+        hidden, typed_common, typed_residual, base_metrics = self._base(
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
         intent_boundary_field = self._field(
             facts=facts,
             hidden=hidden,
-            typed_sidecars=typed_sidecars,
+            typed_common=typed_common,
+            typed_interval_residual=typed_residual,
         )
         intent_boundary_field.validate()
         near = self.w1(hidden[:, :2], causal_interval=True)
         near_typed = self._run_typed_block(
             self.w1,
-            typed_sidecars[:, :2],
+            typed_residual[:, :2],
             causal_interval=True,
         )
         field = self._field(
             facts=facts,
             hidden=near,
-            typed_sidecars=near_typed,
+            typed_common=typed_common,
+            typed_interval_residual=near_typed,
         )
         field.validate(expected_intervals=2)
         metrics = self._metrics(field, prefix="object_w1") if collect_diagnostics else {}
@@ -386,8 +455,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         return field, ObjectW1WorkingState(
             near=near,
             far_base=hidden[:, 2:],
-            near_typed=near_typed,
-            far_typed=typed_sidecars[:, 2:],
+            common_typed=typed_common,
+            near_residual_typed=near_typed,
+            far_residual_typed=typed_residual[:, 2:],
             near_field=field,
             intent_boundary_field=intent_boundary_field,
         ), metrics
@@ -406,10 +476,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             w1_state.far_base.shape[1:3]
         ) != (2, facts.objects):
             raise ValueError("W2 requires both completed W1 intervals")
-        if tuple(w1_state.near_typed.shape[1:4]) != (2, facts.objects, 3) or tuple(
-            w1_state.far_typed.shape[1:4]
+        if tuple(w1_state.near_residual_typed.shape[1:4]) != (2, facts.objects, 3) or tuple(
+            w1_state.far_residual_typed.shape[1:4]
         ) != (2, facts.objects, 3):
-            raise ValueError("W2 typed sidecars lost interval/object/type identity")
+            raise ValueError("W2 typed residual lost interval/object/type identity")
         batch, _, objects, hidden = w1_state.near.shape
         far_query = w1_state.far_base.transpose(1, 2).reshape(
             batch * objects, 2, hidden
@@ -429,10 +499,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             batch, objects, 2, hidden
         ).transpose(1, 2)
         far = self.w2(far, causal_interval=True)
-        typed_far_query = w1_state.far_typed.permute(0, 2, 3, 1, 4).reshape(
+        typed_far_query = w1_state.far_residual_typed.permute(0, 2, 3, 1, 4).reshape(
             batch * objects * 3, 2, hidden
         )
-        typed_near_memory = w1_state.near_typed.permute(
+        typed_near_memory = w1_state.near_residual_typed.permute(
             0, 2, 3, 1, 4
         ).reshape(batch * objects * 3, 2, hidden)
         typed_near_normalized = self.w1_memory_norm(typed_near_memory)
@@ -451,47 +521,27 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             far_typed,
             causal_interval=True,
         )
-        far_field = self._field(
-            facts=facts,
-            hidden=far,
-            typed_sidecars=far_typed,
+        completed_residual = torch.cat(
+            (w1_state.near_residual_typed, far_typed), dim=1
         )
-        near_field = w1_state.near_field
-        near_field.validate(expected_intervals=2)
-        field = FutureObjectDynamics(
-            current_reference=near_field.current_reference,
-            successor_content=torch.cat(
-                (near_field.successor_content, far_field.successor_content), dim=1
-            ),
-            semantic_delta=torch.cat(
-                (near_field.semantic_delta, far_field.semantic_delta), dim=1
-            ),
-            transport_mean=torch.cat(
-                (near_field.transport_mean, far_field.transport_mean), dim=1
-            ),
-            transport_covariance=torch.cat(
-                (near_field.transport_covariance, far_field.transport_covariance), dim=1
-            ),
-            visibility=torch.cat((near_field.visibility, far_field.visibility), dim=1),
-            persistence=torch.cat((near_field.persistence, far_field.persistence), dim=1),
-            uncertainty=torch.cat((near_field.uncertainty, far_field.uncertainty), dim=1),
-            reliability=torch.cat((near_field.reliability, far_field.reliability), dim=1),
-            current_selector_validity=near_field.current_selector_validity,
-            future_selector_validity=torch.cat(
-                (
-                    near_field.future_selector_validity,
-                    far_field.future_selector_validity,
-                ),
-                dim=1,
-            ),
-            object_coordinates=near_field.object_coordinates,
+        # W blocks may introduce a common component into their private
+        # interval carrier.  Remove it once at the public field boundary so
+        # only the protected common owner can represent shared future effect.
+        completed_residual = completed_residual - completed_residual.mean(
+            dim=1, keepdim=True
+        )
+        field = self._field(
+            facts=facts,
+            hidden=torch.cat((w1_state.near, far), dim=1),
+            typed_common=w1_state.common_typed,
+            typed_interval_residual=completed_residual,
         )
         field.validate()
         metrics = self._metrics(field, prefix="object_w2") if collect_diagnostics else {}
         if collect_diagnostics:
             metrics.update(
                 self._typed_state_metrics(
-                    torch.cat((w1_state.near_typed, far_typed), dim=1),
+                    completed_residual,
                     prefix="object_w2",
                 )
             )

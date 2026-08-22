@@ -369,7 +369,6 @@ class ActionIntentDock:
     history_memory: Tensor  # [B,L,H]
     public_scene_memory: Tensor  # [B,1,H]
     object_innovation_memory: Tensor  # [B,K,H]
-    typed_interval_object_value: Tensor  # [B,I,K,type,R]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.interval_condition_innovation.shape[0])
@@ -395,26 +394,18 @@ class ActionIntentDock:
             or int(self.object_innovation_memory.shape[-1]) != hidden
         ):
             raise ValueError("action-intent object innovation memory must be [B,K,H]")
-        if self.typed_interval_object_value.ndim != 5 or tuple(
-            self.typed_interval_object_value.shape[:2]
-        ) != (batch, 4):
-            raise ValueError(
-                "action-intent typed value must retain interval/object/type axes"
-            )
-        if int(self.typed_interval_object_value.shape[3]) != 3:
-            raise ValueError(
-                "action-intent typed value lost semantic/appearance/geometry"
-            )
 
 
 @dataclass(frozen=True)
 class WorldIntentDock:
-    """S-owned relevance boundary consumed by W1/W2 exactly once."""
+    """S-owned common/residual boundary consumed by W1/W2 exactly once."""
 
     protected_goal_memory: Tensor  # [B,G,H]
     interval_condition_innovation: Tensor  # [B,I,H]
-    typed_relevance_mass: Tensor  # [B,I,K,type,1]
-    typed_relevance_value: Tensor  # [B,I,K,type,R]
+    typed_common_mass: Tensor  # [B,K,type,1]
+    typed_common_value: Tensor  # [B,K,type,R]
+    typed_interval_residual_mass: Tensor  # [B,I,K,type,1]
+    typed_interval_residual_value: Tensor  # [B,I,K,type,R]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.interval_condition_innovation.shape[0])
@@ -428,18 +419,30 @@ class WorldIntentDock:
             (batch, 4, hidden),
             "world-intent protected goal memory",
         )
-        if self.typed_relevance_mass.ndim != 5:
-            raise ValueError("typed relevance mass must be [B,I,K,type,1]")
-        if tuple(self.typed_relevance_mass.shape[:2]) != (batch, 4):
-            raise ValueError("typed relevance mass lost its interval axis")
-        if int(self.typed_relevance_mass.shape[3]) != 3 or int(
-            self.typed_relevance_mass.shape[-1]
+        if self.typed_common_mass.ndim != 4:
+            raise ValueError("typed common mass must be [B,K,type,1]")
+        if tuple(self.typed_common_mass.shape[:1]) != (batch,):
+            raise ValueError("typed common mass lost its batch axis")
+        if int(self.typed_common_mass.shape[2]) != 3 or int(
+            self.typed_common_mass.shape[-1]
         ) != 1:
-            raise ValueError("typed relevance mass lost semantic/appearance/geometry")
-        if self.typed_relevance_value.ndim != 5 or tuple(
-            self.typed_relevance_value.shape[:4]
-        ) != tuple(self.typed_relevance_mass.shape[:4]):
-            raise ValueError("typed relevance value does not align with its mass")
+            raise ValueError("typed common mass lost semantic/appearance/geometry")
+        if self.typed_common_value.ndim != 4 or tuple(
+            self.typed_common_value.shape[:3]
+        ) != tuple(self.typed_common_mass.shape[:3]):
+            raise ValueError("typed common value does not align with its mass")
+        if self.typed_interval_residual_mass.ndim != 5 or tuple(
+            self.typed_interval_residual_mass.shape[:2]
+        ) != (batch, 4):
+            raise ValueError("typed interval residual mass must be [B,I,K,type,1]")
+        if tuple(self.typed_interval_residual_mass.shape[2:4]) != tuple(
+            self.typed_common_mass.shape[1:3]
+        ) or int(self.typed_interval_residual_mass.shape[-1]) != 1:
+            raise ValueError("typed common/residual mass axes do not align")
+        if self.typed_interval_residual_value.ndim != 5 or tuple(
+            self.typed_interval_residual_value.shape[:4]
+        ) != tuple(self.typed_interval_residual_mass.shape[:4]):
+            raise ValueError("typed interval residual value does not align with its mass")
 
 
 @dataclass(frozen=True)
@@ -464,26 +467,39 @@ class FactualIntentDock:
 
 @dataclass(frozen=True)
 class PolicyIntentDock:
-    """Read-only S context for the unchanged P2/P3 compilers."""
+    """Read-only S context for complementary P2 and unchanged P3."""
 
-    interval_key: Tensor  # [B,I,H]
-    typed_interval_object_value: Tensor  # [B,I,K,type,R]
+    common_key: Tensor  # [B,H]
+    interval_residual_key: Tensor  # [B,I,H]
+    typed_common_object_value: Tensor  # [B,K,type,R]
+    typed_interval_residual_value: Tensor  # [B,I,K,type,R]
     temporal_control: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
 
     def validate(self, *, horizon: int, hidden: int) -> None:
-        batch = int(self.interval_key.shape[0])
-        _shape(self.interval_key, (batch, 4, hidden), "policy-intent interval key")
-        if self.typed_interval_object_value.ndim != 5 or tuple(
-            self.typed_interval_object_value.shape[:2]
+        batch = int(self.common_key.shape[0])
+        _shape(self.common_key, (batch, hidden), "policy-intent common key")
+        _shape(
+            self.interval_residual_key,
+            (batch, 4, hidden),
+            "policy-intent interval residual key",
+        )
+        if self.typed_common_object_value.ndim != 4 or tuple(
+            self.typed_common_object_value.shape[:1]
+        ) != (batch,):
+            raise ValueError("policy-intent typed common value must be [B,K,type,R]")
+        if int(self.typed_common_object_value.shape[2]) != 3:
+            raise ValueError("policy-intent typed common value lost its type axis")
+        if self.typed_interval_residual_value.ndim != 5 or tuple(
+            self.typed_interval_residual_value.shape[:2]
         ) != (batch, 4):
             raise ValueError(
-                "policy-intent typed value must retain interval/object/type axes"
+                "policy-intent typed residual must retain interval/object/type axes"
             )
-        if int(self.typed_interval_object_value.shape[3]) != 3:
-            raise ValueError(
-                "policy-intent typed value lost semantic/appearance/geometry"
-            )
+        if tuple(self.typed_interval_residual_value.shape[2:4]) != tuple(
+            self.typed_common_object_value.shape[1:3]
+        ):
+            raise ValueError("policy-intent common/residual object axes do not align")
         _shape(
             self.temporal_control,
             (batch, horizon, hidden),
@@ -510,9 +526,12 @@ class ObjectIntentState:
     policy_interval_innovation: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
-    typed_relevance_mass: Tensor  # [B,4,K,3,1]
-    typed_relevance_value: Tensor  # [B,4,K,3,R]
-    typed_policy_components: Tensor  # [B,4,3,H]
+    typed_common_mass: Tensor  # [B,K,3,1]
+    typed_common_value: Tensor  # [B,K,3,R]
+    typed_interval_residual_mass: Tensor  # [B,4,K,3,1]
+    typed_interval_residual_value: Tensor  # [B,4,K,3,R]
+    typed_common_policy_components: Tensor  # [B,3,H]
+    typed_interval_residual_policy_components: Tensor  # [B,4,3,H]
     goal_attention: Tensor  # [B,4,Lg]
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
@@ -524,39 +543,34 @@ class ObjectIntentState:
 
         return self.policy_interval_context
 
-    @property
-    def interval_semantic_attention(self) -> Tensor:
-        return self.typed_relevance_mass[..., 0, 0]
-
-    @property
-    def interval_appearance_attention(self) -> Tensor:
-        return self.typed_relevance_mass[..., 1, 0]
-
-    @property
-    def interval_geometry_attention(self) -> Tensor:
-        return self.typed_relevance_mass[..., 2, 0]
-
     def action_dock(self) -> ActionIntentDock:
         return ActionIntentDock(
             interval_condition_innovation=self.interval_condition_innovation,
             history_memory=self.history_tokens,
             public_scene_memory=self.public_scene_token,
             object_innovation_memory=self.object_tokens,
-            typed_interval_object_value=self.typed_relevance_value,
         )
 
     def world_dock(self) -> WorldIntentDock:
         return WorldIntentDock(
             protected_goal_memory=self.protected_goal_set,
             interval_condition_innovation=self.interval_condition_innovation,
-            typed_relevance_mass=self.typed_relevance_mass,
-            typed_relevance_value=self.typed_relevance_value,
+            typed_common_mass=self.typed_common_mass,
+            typed_common_value=self.typed_common_value,
+            typed_interval_residual_mass=self.typed_interval_residual_mass,
+            typed_interval_residual_value=self.typed_interval_residual_value,
         )
 
     def factual_dock(self) -> FactualIntentDock:
         batch = int(self.policy_interval_context.shape[0])
+        common_policy = self.typed_common_policy_components.sum(dim=1) / (3.0**0.5)
         return FactualIntentDock(
-            phase_context=self.policy_interval_innovation,
+            # P1 may use the protected common intent as an address condition,
+            # but interval-residual future values remain owned by W/P2.
+            phase_context=(
+                self.interval_condition_innovation
+                + common_policy[:, None].expand(batch, 4, -1)
+            ),
             condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
                 -1, 4, -1
             ),
@@ -566,13 +580,13 @@ class ObjectIntentState:
         )
 
     def policy_dock(self) -> PolicyIntentDock:
+        public_common = self.interval_condition_innovation.mean(dim=1)
+        public_residual = self.interval_condition_innovation - public_common[:, None]
         return PolicyIntentDock(
-            # P2 owns two explicit sources: public observable condition and
-            # typed interval/object values.  Feeding the already typed-enriched
-            # policy innovation here duplicated the typed route through both
-            # public_intent_key and typed_intent_key.
-            interval_key=self.interval_condition_innovation,
-            typed_interval_object_value=self.typed_relevance_value,
+            common_key=public_common,
+            interval_residual_key=public_residual,
+            typed_common_object_value=self.typed_common_value,
+            typed_interval_residual_value=self.typed_interval_residual_value,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
         )
@@ -612,19 +626,29 @@ class ObjectIntentState:
             "intent public scene token",
         )
         objects = int(self.object_tokens.shape[1])
+        _shape(self.typed_common_mass, (batch, objects, 3, 1), "typed common mass")
+        if self.typed_common_value.ndim != 4 or tuple(
+            self.typed_common_value.shape[:3]
+        ) != (batch, objects, 3):
+            raise ValueError("typed common value lost object/type identity")
         _shape(
-            self.typed_relevance_mass,
+            self.typed_interval_residual_mass,
             (batch, 4, objects, 3, 1),
-            "typed relevance mass",
+            "typed interval residual mass",
         )
-        if self.typed_relevance_value.ndim != 5 or tuple(
-            self.typed_relevance_value.shape[:4]
+        if self.typed_interval_residual_value.ndim != 5 or tuple(
+            self.typed_interval_residual_value.shape[:4]
         ) != (batch, 4, objects, 3):
-            raise ValueError("typed relevance value lost interval/object/type identity")
+            raise ValueError("typed residual value lost interval/object/type identity")
         _shape(
-            self.typed_policy_components,
+            self.typed_common_policy_components,
+            (batch, 3, hidden),
+            "typed common policy components",
+        )
+        _shape(
+            self.typed_interval_residual_policy_components,
             (batch, 4, 3, hidden),
-            "typed policy components",
+            "typed interval residual policy components",
         )
         if self.goal_attention.ndim != 3 or tuple(
             self.goal_attention.shape[:2]
@@ -671,9 +695,14 @@ class ObjectIntentState:
             policy_interval_innovation=self.policy_interval_innovation,
             temporal_queries=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
-            typed_relevance_mass=self.typed_relevance_mass[:, :, index],
-            typed_relevance_value=self.typed_relevance_value[:, :, index],
-            typed_policy_components=self.typed_policy_components,
+            typed_common_mass=self.typed_common_mass[:, index],
+            typed_common_value=self.typed_common_value[:, index],
+            typed_interval_residual_mass=self.typed_interval_residual_mass[:, :, index],
+            typed_interval_residual_value=self.typed_interval_residual_value[:, :, index],
+            typed_common_policy_components=self.typed_common_policy_components,
+            typed_interval_residual_policy_components=(
+                self.typed_interval_residual_policy_components
+            ),
             goal_attention=self.goal_attention,
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
@@ -706,8 +735,14 @@ class IntentFutureSupervision:
     transport_target: Tensor
     public_loss: Tensor
     semantic_loss: Tensor
+    semantic_common_loss: Tensor
+    semantic_residual_loss: Tensor
     status_loss: Tensor
+    status_common_loss: Tensor
+    status_residual_loss: Tensor
     transport_loss: Tensor
+    transport_common_loss: Tensor
+    transport_residual_loss: Tensor
     typed_loss: Tensor
 
     def validate(self) -> None:
@@ -728,8 +763,14 @@ class IntentFutureSupervision:
         scalar_losses = (
             self.public_loss,
             self.semantic_loss,
+            self.semantic_common_loss,
+            self.semantic_residual_loss,
             self.status_loss,
+            self.status_common_loss,
+            self.status_residual_loss,
             self.transport_loss,
+            self.transport_common_loss,
+            self.transport_residual_loss,
             self.typed_loss,
         )
         if any(value.ndim != 0 for value in scalar_losses):
@@ -845,12 +886,88 @@ class FutureObjectDynamics:
     uncertainty: Tensor  # [B,I,K,1]
     reliability: Tensor  # calibration only [B,I,K,1]
     current_selector_validity: Tensor  # observed support [B,K,1]
-    future_selector_validity: Tensor  # online P2 selector [B,I,K,1]
+    # Teacher/online visibility-support diagnostic.  P2 authority comes only
+    # from current_selector_validity so a predicted disappearance cannot erase
+    # the very status effect that reports it.
+    future_selector_validity: Tensor  # diagnostic support [B,I,K,1]
     object_coordinates: Tensor  # [B,K,2]
 
     @property
     def intervals(self) -> int:
         return int(self.semantic_delta.shape[1])
+
+    @staticmethod
+    def _common(value: Tensor) -> Tensor:
+        """Return the protected effect shared across all future intervals."""
+
+        if value.ndim < 3:
+            raise ValueError("future effect must retain an interval axis")
+        # Decomposition is one shared physical interface.  Compute it in
+        # FP32 even when the online carrier is BF16 so interval centring does
+        # not depend on autocast rounding at each downstream consumer.
+        return value.float().mean(dim=1)
+
+    @classmethod
+    def _residual(cls, value: Tensor) -> Tensor:
+        """Return the exact zero-mean interval residual of one effect field."""
+
+        common = cls._common(value)
+        return value.float() - common[:, None]
+
+    @property
+    def semantic_common(self) -> Tensor:
+        return self._common(self.semantic_delta)
+
+    @property
+    def semantic_interval_residual(self) -> Tensor:
+        return self._residual(self.semantic_delta)
+
+    @property
+    def transport_common(self) -> Tensor:
+        return self._common(self.transport_mean)
+
+    @property
+    def transport_interval_residual(self) -> Tensor:
+        return self._residual(self.transport_mean)
+
+    @property
+    def visibility_common(self) -> Tensor:
+        return self._common(self.visibility)
+
+    @property
+    def visibility_interval_residual(self) -> Tensor:
+        return self._residual(self.visibility)
+
+    @property
+    def persistence_common(self) -> Tensor:
+        return self._common(self.persistence)
+
+    @property
+    def persistence_interval_residual(self) -> Tensor:
+        return self._residual(self.persistence)
+
+    def validate_effect_decomposition(self) -> None:
+        """Check the exact common-plus-residual algebra used by S/W/P2."""
+
+        for name in ("semantic_delta", "transport_mean", "visibility", "persistence"):
+            value = getattr(self, name)
+            common = self._common(value)
+            residual = self._residual(value)
+            if not torch.allclose(
+                value.float(),
+                common[:, None] + residual,
+                atol=2.0e-6,
+                rtol=0.0,
+            ):
+                raise ValueError(f"future {name} common/residual identity failed")
+            residual_mean = residual.mean(dim=1)
+            if not torch.allclose(
+                residual_mean,
+                torch.zeros_like(residual_mean),
+                atol=2.0e-6,
+                rtol=0.0,
+            ):
+                raise ValueError(f"future {name} residual is not interval-centred")
 
     def validate(self, *, expected_intervals: int = 4) -> None:
         if self.current_reference.ndim != 3 or self.semantic_delta.ndim != 4:

@@ -893,6 +893,12 @@ V94_ALIASES.update(
             ),
             "typed_innov": "object_intent_typed_innovation_rms",
             "typed_policy": "object_intent_typed_policy_context_rms",
+            "typed_common_policy": (
+                "object_intent_typed_common_policy_context_rms"
+            ),
+            "typed_residual_policy": (
+                "object_intent_typed_interval_residual_policy_context_rms"
+            ),
             "typed_action_legacy": "object_intent_typed_action_context_rms",
             "typed_common_denom": "object_intent_typed_common_norm_denominator_min",
             "typed_diff_denom": "object_intent_typed_differential_norm_denominator_min",
@@ -905,6 +911,23 @@ V94_ALIASES.update(
             "sem_value": "object_intent_semantic_selected_value_rms",
             "sem_k_var": "object_intent_semantic_object_variation",
             "sem_i_var": "object_intent_semantic_interval_variation",
+            "sem_common_mass": "object_intent_semantic_common_relevance_mass",
+            "sem_common_absence": (
+                "object_intent_semantic_common_signal_absence"
+            ),
+            "sem_common_value": "object_intent_semantic_common_value_rms",
+            "sem_residual_mass": (
+                "object_intent_semantic_interval_residual_mass"
+            ),
+            "sem_residual_absence": (
+                "object_intent_semantic_interval_residual_signal_absence"
+            ),
+            "sem_residual_value": (
+                "object_intent_semantic_interval_residual_value_rms"
+            ),
+            "sem_residual_var": (
+                "object_intent_semantic_interval_residual_variation"
+            ),
             "app_rel": "object_intent_appearance_relevance_mass",
             "app_null": "object_intent_appearance_null_mass",
             "app_selector_null": "object_intent_appearance_selector_null_probability",
@@ -913,6 +936,23 @@ V94_ALIASES.update(
             "app_value": "object_intent_appearance_selected_value_rms",
             "app_k_var": "object_intent_appearance_object_variation",
             "app_i_var": "object_intent_appearance_interval_variation",
+            "app_common_mass": "object_intent_appearance_common_relevance_mass",
+            "app_common_absence": (
+                "object_intent_appearance_common_signal_absence"
+            ),
+            "app_common_value": "object_intent_appearance_common_value_rms",
+            "app_residual_mass": (
+                "object_intent_appearance_interval_residual_mass"
+            ),
+            "app_residual_absence": (
+                "object_intent_appearance_interval_residual_signal_absence"
+            ),
+            "app_residual_value": (
+                "object_intent_appearance_interval_residual_value_rms"
+            ),
+            "app_residual_var": (
+                "object_intent_appearance_interval_residual_variation"
+            ),
             "geo_rel": "object_intent_geometry_relevance_mass",
             "geo_null": "object_intent_geometry_null_mass",
             "geo_selector_null": "object_intent_geometry_selector_null_probability",
@@ -921,11 +961,44 @@ V94_ALIASES.update(
             "geo_value": "object_intent_geometry_selected_value_rms",
             "geo_k_var": "object_intent_geometry_object_variation",
             "geo_i_var": "object_intent_geometry_interval_variation",
+            "geo_common_mass": "object_intent_geometry_common_relevance_mass",
+            "geo_common_absence": (
+                "object_intent_geometry_common_signal_absence"
+            ),
+            "geo_common_value": "object_intent_geometry_common_value_rms",
+            "geo_residual_mass": (
+                "object_intent_geometry_interval_residual_mass"
+            ),
+            "geo_residual_absence": (
+                "object_intent_geometry_interval_residual_signal_absence"
+            ),
+            "geo_residual_value": (
+                "object_intent_geometry_interval_residual_value_rms"
+            ),
+            "geo_residual_var": (
+                "object_intent_geometry_interval_residual_variation"
+            ),
             "public_future_loss": "object_intent_public_future_state_loss",
             "typed_future_loss": "object_intent_typed_future_field_loss",
             "typed_semantic_loss": "object_intent_typed_semantic_loss",
+            "typed_semantic_common_loss": (
+                "object_intent_typed_semantic_common_loss"
+            ),
+            "typed_semantic_residual_loss": (
+                "object_intent_typed_semantic_residual_loss"
+            ),
             "typed_status_loss": "object_intent_typed_status_loss",
+            "typed_status_common_loss": "object_intent_typed_status_common_loss",
+            "typed_status_residual_loss": (
+                "object_intent_typed_status_residual_loss"
+            ),
             "typed_transport_loss": "object_intent_typed_transport_loss",
+            "typed_transport_common_loss": (
+                "object_intent_typed_transport_common_loss"
+            ),
+            "typed_transport_residual_loss": (
+                "object_intent_typed_transport_residual_loss"
+            ),
             "future_state_prediction": (
                 "object_intent_future_state_prediction_rms"
             ),
@@ -978,6 +1051,8 @@ V94_ALIASES.update(
             "object_value_innov": "object_w_object_value_innovation_rms",
             "typed_innov": "object_w_typed_innovation_rms",
             "typed_sidecar": "object_w_typed_sidecar_rms",
+            "typed_common": "object_w_typed_common_state_rms",
+            "typed_residual": "object_w_typed_interval_residual_state_rms",
             "public_content": "object_w_public_content_rms",
             "object_content_innov": "object_w_object_innovation_rms",
             "object_content_var": "object_w_object_innovation_variation",
@@ -1014,10 +1089,19 @@ V94_ALIASES.update(
             "w2_condition_interval_var": (
                 "object_w2_condition_centered_interval_variation"
             ),
+            "prediction_common": "object_w_prediction_common_effect_rms",
+            "prediction_residual": "object_w_prediction_interval_residual_rms",
             "teacher_visibility": "object_teacher_visibility",
             "teacher_visibility_change": "object_teacher_visibility_change",
             "teacher_persistence_change": "object_teacher_persistence_change",
             "teacher_null": "object_teacher_null_probability",
+            "teacher_dustbin": "object_teacher_dustbin_probability",
+            "teacher_effective_support": "object_teacher_effective_support",
+            "teacher_mutual_mass": "object_teacher_mutual_assignment_mass",
+            "teacher_row_error": "object_teacher_partial_assignment_row_error",
+            "teacher_background_margin": "object_teacher_best_minus_background",
+            "teacher_common": "object_teacher_common_effect_rms",
+            "teacher_residual": "object_teacher_interval_residual_rms",
             "teacher_sem_max": "object_teacher_semantic_max",
             "teacher_sem_margin": "object_teacher_semantic_margin",
             "teacher_app_max": "object_teacher_appearance_max",
@@ -1040,6 +1124,10 @@ V94_ALIASES.update(
             "persistence_loss": "object_future_persistence",
             "uncertainty_loss": "object_future_uncertainty",
             "transition_loss": "object_future_transition",
+            "semantic_common_loss": "loss_future_semantic_common",
+            "semantic_residual_loss": "loss_future_semantic_residual",
+            "transport_common_loss": "loss_future_transport_common",
+            "transport_residual_loss": "loss_future_transport_residual",
             "pred_cos": "object_future_prediction_adjacent_cosine",
             "target_cos": "object_future_target_adjacent_cosine",
             "pred_var": "object_future_prediction_interval_variation",
@@ -1078,20 +1166,56 @@ V94_ALIASES.update(
             "posterior_H": "object_p2_posterior_entropy",
             "posterior_max": "object_p2_posterior_max",
             "null": "object_p2_null_mass",
+            "common_H": "object_p2_common_posterior_entropy",
+            "common_max": "object_p2_common_posterior_max",
+            "residual_H": "object_p2_residual_posterior_entropy",
+            "residual_max": "object_p2_residual_posterior_max",
+            "residual_null": "object_p2_residual_null_mass",
+            "protected_common": "object_p2_protected_common_rms",
+            "optional_residual": "object_p2_optional_residual_rms",
             "semantic_mass": "object_p2_semantic_value_mass",
             "geometry_mass": "object_p2_geometry_value_mass",
             "status_mass": "object_p2_status_value_mass",
             "fusion_base": "object_p2_fusion_base_rms",
             "fusion_contrast": "object_p2_fusion_contrast_rms",
             "fusion_residual": "object_p2_fusion_residual_rms",
+            "common_fusion_base": "object_p2_common_fusion_base_rms",
+            "common_fusion_contrast": "object_p2_common_fusion_contrast_rms",
+            "common_fusion_residual": "object_p2_common_fusion_residual_rms",
+            "residual_fusion_base": "object_p2_residual_fusion_base_rms",
+            "residual_fusion_contrast": (
+                "object_p2_residual_fusion_contrast_rms"
+            ),
+            "residual_fusion_residual": (
+                "object_p2_residual_fusion_residual_rms"
+            ),
             "fusion_residual_ratio": "object_p2_fusion_residual_to_base",
             "fusion_scale_mean": "object_p2_fusion_scale_abs_mean",
             "fusion_scale_max": "object_p2_fusion_scale_abs_max",
             "semantic_value": "object_p2_semantic_selected_value_rms",
             "geometry_value": "object_p2_geometry_selected_value_rms",
             "status_value": "object_p2_status_selected_value_rms",
+            "semantic_common_value": (
+                "object_p2_semantic_common_selected_value_rms"
+            ),
+            "geometry_common_value": (
+                "object_p2_geometry_common_selected_value_rms"
+            ),
+            "status_common_value": "object_p2_status_common_selected_value_rms",
+            "semantic_residual_value": (
+                "object_p2_semantic_residual_selected_value_rms"
+            ),
+            "geometry_residual_value": (
+                "object_p2_geometry_residual_selected_value_rms"
+            ),
+            "status_residual_value": (
+                "object_p2_status_residual_selected_value_rms"
+            ),
             "status_score_max": "object_p2_status_score_max_abs",
             "status_null": "object_p2_status_null_mass",
+            "semantic_residual_null": "object_p2_semantic_residual_null_mass",
+            "geometry_residual_null": "object_p2_geometry_residual_null_mass",
+            "status_residual_null": "object_p2_status_residual_null_mass",
             "semantic_h4_8_mass": "object_p2_semantic_interval_0_mass",
             "semantic_h8_16_mass": "object_p2_semantic_interval_1_mass",
             "semantic_h16_32_mass": "object_p2_semantic_interval_2_mass",
@@ -1244,6 +1368,8 @@ STRUCTURE_KEYS = (
     "object_intent_state_change_evidence_rms",
     "object_intent_typed_carrier_ratio",
     "object_intent_typed_policy_context_rms",
+    "object_intent_typed_common_policy_context_rms",
+    "object_intent_typed_interval_residual_policy_context_rms",
     "object_intent_typed_action_context_rms",
     "object_intent_typed_differential_norm_denominator_min",
     "object_intent_typed_fact_unsupported_fraction",
@@ -1259,6 +1385,13 @@ STRUCTURE_KEYS = (
     "object_intent_semantic_common_score_abs",
     "object_intent_semantic_differential_score_abs",
     "object_intent_semantic_temperature",
+    "object_intent_semantic_common_relevance_mass",
+    "object_intent_semantic_common_signal_absence",
+    "object_intent_semantic_common_value_rms",
+    "object_intent_semantic_interval_residual_mass",
+    "object_intent_semantic_interval_residual_signal_absence",
+    "object_intent_semantic_interval_residual_value_rms",
+    "object_intent_semantic_interval_residual_variation",
     "object_intent_appearance_route_raw_rms",
     "object_intent_appearance_relevance_mass",
     "object_intent_appearance_null_mass",
@@ -1271,6 +1404,13 @@ STRUCTURE_KEYS = (
     "object_intent_appearance_common_score_abs",
     "object_intent_appearance_differential_score_abs",
     "object_intent_appearance_temperature",
+    "object_intent_appearance_common_relevance_mass",
+    "object_intent_appearance_common_signal_absence",
+    "object_intent_appearance_common_value_rms",
+    "object_intent_appearance_interval_residual_mass",
+    "object_intent_appearance_interval_residual_signal_absence",
+    "object_intent_appearance_interval_residual_value_rms",
+    "object_intent_appearance_interval_residual_variation",
     "object_intent_geometry_route_raw_rms",
     "object_intent_geometry_relevance_mass",
     "object_intent_geometry_null_mass",
@@ -1284,8 +1424,14 @@ STRUCTURE_KEYS = (
     "object_intent_public_future_state_loss",
     "object_intent_typed_future_field_loss",
     "object_intent_typed_semantic_loss",
+    "object_intent_typed_semantic_common_loss",
+    "object_intent_typed_semantic_residual_loss",
     "object_intent_typed_status_loss",
+    "object_intent_typed_status_common_loss",
+    "object_intent_typed_status_residual_loss",
     "object_intent_typed_transport_loss",
+    "object_intent_typed_transport_common_loss",
+    "object_intent_typed_transport_residual_loss",
     "object_intent_future_state_prediction_rms",
     "object_intent_future_state_target_rms",
     "object_intent_typed_semantic_prediction_rms",
@@ -1299,12 +1445,21 @@ STRUCTURE_KEYS = (
     "object_intent_geometry_common_score_abs",
     "object_intent_geometry_differential_score_abs",
     "object_intent_geometry_temperature",
+    "object_intent_geometry_common_relevance_mass",
+    "object_intent_geometry_common_signal_absence",
+    "object_intent_geometry_common_value_rms",
+    "object_intent_geometry_interval_residual_mass",
+    "object_intent_geometry_interval_residual_signal_absence",
+    "object_intent_geometry_interval_residual_value_rms",
+    "object_intent_geometry_interval_residual_variation",
     "object_w_object_key_innovation_rms",
     "object_w_object_value_innovation_rms",
     "object_w_intent_object_interaction_rms",
     "object_w_action_object_interaction_rms",
     "object_w_typed_contribution_rms",
     "object_w_typed_sidecar_rms",
+    "object_w_typed_common_state_rms",
+    "object_w_typed_interval_residual_state_rms",
     "object_w_public_content_rms",
     "object_w_object_innovation_rms",
     "object_w_object_innovation_variation",
@@ -1330,6 +1485,8 @@ STRUCTURE_KEYS = (
     "object_w_geometry_input_interval_variation",
     "object_w_geometry_input_object_variation",
     "object_w_prediction_interval_variation",
+    "object_w_prediction_common_effect_rms",
+    "object_w_prediction_interval_residual_rms",
     "object_w1_semantic_delta_rms",
     "object_w1_transport_rms",
     "object_w1_interval_adjacent_cosine",
@@ -1340,6 +1497,13 @@ STRUCTURE_KEYS = (
     "object_w2_object_pair_cosine",
     "object_w2_condition_centered_interval_variation",
     "object_teacher_reliability",
+    "object_teacher_dustbin_probability",
+    "object_teacher_effective_support",
+    "object_teacher_mutual_assignment_mass",
+    "object_teacher_partial_assignment_row_error",
+    "object_teacher_best_minus_background",
+    "object_teacher_common_effect_rms",
+    "object_teacher_interval_residual_rms",
     "object_teacher_semantic_delta_rms",
     "object_teacher_transport_rms",
     "object_teacher_covariance_rms",
@@ -1349,6 +1513,14 @@ STRUCTURE_KEYS = (
     "loss_future_current_loss_support",
     "loss_future_prediction_selector_validity",
     "loss_future_target_selector_validity",
+    "loss_future_semantic_common",
+    "loss_future_semantic_residual",
+    "loss_future_transport_common",
+    "loss_future_transport_residual",
+    "loss_future_visibility_common",
+    "loss_future_visibility_residual",
+    "loss_future_persistence_common",
+    "loss_future_persistence_residual",
     "sampling_update_time_first",
     "sampling_update_time_last",
     "sampling_endpoint_head_time",
@@ -1362,6 +1534,23 @@ STRUCTURE_KEYS = (
     "object_p2_geometry_posterior_entropy",
     "object_p2_semantic_value_mass",
     "object_p2_geometry_value_mass",
+    "object_p2_common_posterior_entropy",
+    "object_p2_common_posterior_max",
+    "object_p2_residual_posterior_entropy",
+    "object_p2_residual_posterior_max",
+    "object_p2_residual_null_mass",
+    "object_p2_protected_common_rms",
+    "object_p2_optional_residual_rms",
+    "object_p2_effect_precontract_rms",
+    "object_p2_common_fusion_base_rms",
+    "object_p2_common_fusion_contrast_rms",
+    "object_p2_common_fusion_residual_rms",
+    "object_p2_residual_fusion_base_rms",
+    "object_p2_residual_fusion_contrast_rms",
+    "object_p2_residual_fusion_residual_rms",
+    "object_p2_semantic_residual_null_mass",
+    "object_p2_geometry_residual_null_mass",
+    "object_p2_status_residual_null_mass",
     "object_p2_fusion_base_rms",
     "object_p2_fusion_contrast_rms",
     "object_p2_fusion_residual_rms",
@@ -4111,6 +4300,10 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema31 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 31
+    )
     schema30 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 30
@@ -4133,6 +4326,39 @@ def _recovery_assessment(
         else "object_intent_interval_variation"
     )
     required_structure = (
+        (
+            "object_grounding_reconstruction_object_mass_mean",
+            "object_grounding_reconstruction_active_fraction",
+            "object_grounding_reconstruction_conditional_owner_entropy",
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_object_innovation_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_object_content_innovation_variation",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_common_policy_context_rms",
+            "object_intent_typed_interval_residual_policy_context_rms",
+            "object_intent_typed_semantic_common_loss",
+            "object_intent_typed_semantic_residual_loss",
+            "object_w_object_innovation_variation",
+            "object_w_typed_common_state_rms",
+            "object_w_typed_interval_residual_state_rms",
+            "object_w_prediction_common_effect_rms",
+            "object_w_prediction_interval_residual_rms",
+            "object_teacher_dustbin_probability",
+            "object_teacher_effective_support",
+            "object_teacher_common_effect_rms",
+            "object_teacher_interval_residual_rms",
+            "object_teacher_current_loss_support",
+            "p1_query_chart_variation",
+            "object_p2_protected_common_rms",
+            "object_p2_optional_residual_rms",
+            "object_p2_residual_null_mass",
+            "object_p2_effect_precontract_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+        )
+        if schema31
+        else
         (
             "object_grounding_reconstruction_object_mass_mean",
             "object_grounding_reconstruction_active_fraction",
