@@ -97,9 +97,9 @@ class ObjectFutureEffectReader(nn.Module):
         self.transport_value = nn.Linear(2, hidden, bias=False)
         self.status_value = nn.Linear(2, hidden, bias=False)
         # The three sources are complementary facts, not alternatives.  Keep
-        # their symmetric mean as a protected path and learn only a low-rank
-        # correction from type *contrasts*.  This preserves the uniform V120
-        # initialization without reintroducing a type-level selector.
+        # their variance-preserving symmetric sum as a protected path and
+        # learn only a low-rank correction from type *contrasts*.  This avoids
+        # both the old type selector and the later fixed /3 amplitude loss.
         contrast_rank = max(4, int(hidden) // 8)
         self.type_contrast_down = nn.Linear(
             len(self.TYPE_NAMES) * hidden,
@@ -136,9 +136,11 @@ class ObjectFutureEffectReader(nn.Module):
         Each type has already made its own interval/object/null decision.  A
         second learned softmax would turn those complementary decisions back
         into mutually exclusive alternatives and let a high-mass null type
-        suppress the other two values.  The symmetric mean therefore remains
-        outside the learnable branch.  A small LayerScale-style residual reads
-        only deviations from that mean, providing cross-type capacity without
+        suppress the other two values.  Their symmetric sum divided by
+        ``sqrt(3)`` therefore remains outside the learnable branch.  Unlike a
+        fixed mean, this preserves the scale of independent complementary
+        channels at initialization.  A small LayerScale-style residual reads
+        only pairwise contrasts, providing cross-type capacity without
         learning another selector or a common-carrier bypass.
 
         Bias-free projections make the all-null state an exact algebraic zero.
@@ -151,7 +153,7 @@ class ObjectFutureEffectReader(nn.Module):
         ):
             raise ValueError("P2 complementary values must retain the three-type axis")
         typed_value = selected_type_value.float()
-        base = typed_value.mean(dim=-2)
+        base = typed_value.sum(dim=-2) / math.sqrt(float(len(self.TYPE_NAMES)))
         # Cyclic pairwise differences are exactly zero for bit-identical type
         # values, unlike subtracting a floating-point three-way mean.
         contrast = torch.stack(
@@ -342,7 +344,9 @@ class ObjectFutureEffectReader(nn.Module):
                 selected_value.square().mean().sqrt()
             )
             metrics[f"object_p2_{name}_anchor_contribution_rms"] = (
-                (selected_value / float(len(self.TYPE_NAMES))).square().mean().sqrt()
+                (
+                    selected_value / math.sqrt(float(len(self.TYPE_NAMES)))
+                ).square().mean().sqrt()
             )
         interval_mass_by_type = posterior_by_type[..., :-1].reshape(
             batch, horizon, basis, 3, intervals, objects

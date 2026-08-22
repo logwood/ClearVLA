@@ -26,6 +26,37 @@ def _coordinate_basis(coordinates: Tensor, width: int) -> Tensor:
     return value[..., : int(width)].to(dtype=coordinates.dtype)
 
 
+def _conditional_k_reconstruction_assignment(
+    conditional_owner: Tensor,
+    candidate_prior: Tensor,
+    candidate_validity: Tensor,
+) -> Tensor:
+    """Build a null-independent reconstruction assignment over local M and K.
+
+    The online K+null posterior and its absolute object mass remain untouched.
+    Reconstruction instead consumes the already-computed conditional-K
+    posterior, normalized local-hypothesis prior and observable validity.  The
+    input is already a softmax-normalized conditional distribution; this
+    helper deliberately performs no further normalization.  Learned null mass
+    is therefore absent from both the value and the Jacobian, while true
+    candidate invalidity may still return a cell to the protected public base.
+    """
+
+    if conditional_owner.ndim != 3:
+        raise ValueError("conditional K owner must be [B,N,K]")
+    if int(conditional_owner.shape[-1]) < 1:
+        raise ValueError("conditional K owner requires at least one slot")
+    if tuple(candidate_prior.shape) != tuple(conditional_owner.shape[:-1]) + (1,):
+        raise ValueError("candidate prior must align as [B,N,1]")
+    if tuple(candidate_validity.shape) != tuple(candidate_prior.shape):
+        raise ValueError("candidate validity must align as [B,N,1]")
+    return (
+        conditional_owner.float().clamp_min(0.0)
+        * candidate_prior.float().clamp_min(0.0)
+        * candidate_validity.float().clamp(0.0, 1.0)
+    )
+
+
 def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
     """Preserve every local hypothesis while exposing a dense DINO target."""
 
@@ -328,6 +359,11 @@ class DenseObjectGrounder(nn.Module):
         )
         valid = validity.float().clamp(0.0, 1.0)
         prior = candidate_prior.float().clamp_min(0.0)
+        reconstruction_assignment = _conditional_k_reconstruction_assignment(
+            corrected_k_conditional,
+            prior,
+            valid,
+        )
         assignment = corrected[..., : self.objects] * valid * prior
         null_assignment = (
             corrected[..., self.objects] * valid[..., 0] + (1.0 - valid[..., 0])
@@ -418,6 +454,9 @@ class DenseObjectGrounder(nn.Module):
             batch, self.objects, *candidate_shape
         )
         structured_null = null_assignment.reshape(batch, *candidate_shape)
+        structured_reconstruction_assignment = reconstruction_assignment.transpose(
+            1, 2
+        ).reshape(batch, self.objects, *candidate_shape)
 
         def camera_aggregate(value: Tensor, weight: Tensor) -> Tensor:
             """Aggregate inside each real camera without recreating C later."""
@@ -470,15 +509,18 @@ class DenseObjectGrounder(nn.Module):
         chart_read = chart_assignment / chart_assignment.flatten(2).sum(dim=-1)[
             ..., None, None, None
         ].clamp_min(1e-6)
-        owner_prior_per_cell = chart.candidate_owner_prior.float().sum(dim=-1).clamp_min(1e-6)
-        chart_owner = chart_assignment.float() / owner_prior_per_cell[:, None]
+        reconstruction_owner = structured_reconstruction_assignment.sum(dim=-1)
+        reconstruction_object_mass = reconstruction_owner.sum(dim=1, keepdim=True)
         target_content = chart.dino_content.detach().float()
         observed = chart.cell_observed.detach().float()
         # The reconstruction may only use the exported object content.  A
         # protected public mean explains camera-wide common content; K owns
-        # only object-specific residuals.  This removes the private slot and
-        # coordinate decoders that could satisfy the G loss without improving
-        # anything visible to S/W/P.
+        # only object-specific residuals.  Reconstruction uses the conditional
+        # K owner rather than absolute object-vs-null mass: a learned null is a
+        # legal routing hypothesis, but it cannot switch off the only pressure
+        # that makes the exported K content identifiable.  No private decoder
+        # or new capacity sits between this loss and the values consumed by
+        # S/W/Teacher.
         public_content = (
             target_content * observed
         ).sum(dim=(1, 2, 3), keepdim=True) / observed.sum(
@@ -487,7 +529,7 @@ class DenseObjectGrounder(nn.Module):
         object_residual = content.float() - public_content[:, 0, 0, 0, None, :]
         reconstructed = public_content + torch.einsum(
             "bkcyx,bkd->bcyxd",
-            chart_owner,
+            reconstruction_owner,
             object_residual,
         )
         reconstructed = reconstructed.to(dtype=chart.dino_content.dtype)
@@ -539,6 +581,24 @@ class DenseObjectGrounder(nn.Module):
             )
         )
         content_innovation = facts.content_innovation.detach().float()
+        reconstruction_owner_active = (
+            reconstruction_object_mass.detach().float() > 1.0e-6
+        )
+        reconstruction_conditional_owner = torch.where(
+            reconstruction_owner_active,
+            reconstruction_owner.detach().float()
+            / reconstruction_object_mass.detach().float().clamp_min(1.0e-6),
+            torch.zeros_like(reconstruction_owner.detach().float()),
+        )
+        reconstruction_owner_entropy = normalized_entropy(
+            reconstruction_conditional_owner, dim=1
+        )
+        reconstruction_owner_entropy = (
+            reconstruction_owner_entropy
+            * reconstruction_owner_active[:, 0].to(
+                dtype=reconstruction_owner_entropy.dtype
+            )
+        ).sum() / reconstruction_owner_active[:, 0].float().sum().clamp_min(1.0)
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
             "object_grounding_dense_objective_count": reconstruction_error.new_ones(
@@ -546,6 +606,15 @@ class DenseObjectGrounder(nn.Module):
             ),
             "object_grounding_existence_mean": existence.detach().float().mean(),
             "object_grounding_validity_mean": object_validity.detach().float().mean(),
+            "object_grounding_reconstruction_object_mass_mean": (
+                reconstruction_object_mass.detach().float().mean()
+            ),
+            "object_grounding_reconstruction_active_fraction": (
+                reconstruction_owner_active.detach().float().mean()
+            ),
+            "object_grounding_reconstruction_conditional_owner_entropy": (
+                reconstruction_owner_entropy
+            ),
             "object_grounding_camera_evidence_mass": camera_evidence_mass.detach()
             .float()
             .mean(),

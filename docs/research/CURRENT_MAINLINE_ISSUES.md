@@ -1,8 +1,8 @@
 # ClearVLA 当前主线纯问题账本
 
-更新：2026-08-21
+更新：2026-08-22
 
-当前源码身份：Schema29 `object_intent_dynamics_323`。行为比较锚点是
+当前源码身份：Schema30 `object_intent_dynamics_323`。行为比较锚点是
 V120 `long`、提交 `0b92d359a2889a0a1b1eba256007c00ccbc54f3c` 和本地完整
 快照 `.audit/v120_exact_source_0b92d359/`。V120 是行为锚点，不是正确性公理。
 
@@ -15,7 +15,7 @@ V120 `long`、提交 `0b92d359a2889a0a1b1eba256007c00ccbc54f3c` 和本地完整
 - 曲线相关性不单独证明因果；没有冻结干预时明确写“动作影响未知”。
 - 张量存在、梯度非零、loss 下降都不等于策略正在使用该边界。
 - 不用 gain、quota、hard gate、熵/多样性目标、额外外部 loss 或人工梯度掩盖问题。
-- Schema29 必须 fresh run；Schema28 及更旧 checkpoint 不允许 exact resume。
+- Schema30 必须 fresh run；Schema29 及更旧 checkpoint 不允许 exact resume。
 
 ## O-01：S public future-state 监督与 W public working coordinate 仍不是同一物理边界
 
@@ -125,14 +125,14 @@ G geometry variation 和 P2 geometry posterior；必要时再独立审查 flow �
 V120、Schema24--27 都出现过早期下降后中远程或 gripper 回弹。S/W 公共化、P1 self-write、
 Teacher 质量、数据中 gripper event 稀疏都可能贡献，但现有证据不能把它归给单一模块。
 
-关闭条件：Schema28 必须完成八轮；同时看 train/val action、first/tail、四 horizon bands、arm、
+关闭条件：Schema30 必须完成八轮；同时看 train/val action、first/tail、四 horizon bands、arm、
 gripper、event/motion 和 condition-keep 分层。不能用 best checkpoint 或前 2200 batch 代替全程。
 
 ## O-09：当前因果日志仍不足以把“边界改善”升级为“动作收益”
 
 **类型：可观测性债务。置信度：高。**
 
-Schema28 已增加 conditional-K、camera evidence、G/S/W public-vs-K innovation、
+Schema30 已增加 conditional-K reconstruction、camera evidence、G/S/W public-vs-K innovation、
 S common/differential denominator、W typed state、per-type P2 和 P3 operand 指标；
 frame-progress audit 只读取真实 condition innovation。结构测试覆盖 exact zero、permutation 和
 forbidden input。但普通
@@ -143,12 +143,13 @@ nohup 仍不能替代冻结 checkpoint 的链式干预，尤其是 protected P1 
 `boundary -> P2/consequence -> bottom source -> action` 报告效应与置信区间。只有边界和最终 action
 都离开零，才声称策略实际使用该信息。
 
-## Schema28 放行检查
+## Schema30 放行检查
 
 - fresh BF16 smoke；旧 schema exact resume 必须拒绝；Teacher 部署调用为零；
 - batch 8 总进程显存不超过 22 GiB，并记录吞吐；
-- 对齐 batch 2200 比较 V120/Schema27：conditional-K entropy、camera evidence、
-  G/S/W public-vs-K innovation、S condition/typed、W per-type variation、
-  P2 per-type null/interval mass、P3 precision/effect/temporal；
+- 对齐 batch 2200 比较 V120/Schema25/Schema29：conditional-K entropy、
+  null-independent reconstruction mass/entropy、camera evidence、G/S/W
+  public-vs-K innovation、S condition/typed、W per-type variation、P2 per-type
+  null/interval mass、variance-preserving fusion base、P3 precision/effect/temporal；
 - 完成八个 epoch并检查 O-07/O-08；
 - 若接线边界健康但 action 无收益，归类为数据/可识别性问题，不继续叠加结构补丁。

@@ -508,12 +508,12 @@ Re-check these against current source rather than assuming they remain true:
     `clearvla/tools/audit_policy_logs.py`.  The `22 GiB` process estimate is a
     dedicated-GPU release check; it is not a model-side memory loss or a
     substitute for recording batch size and hardware conditions.
-69. The active Schema27 graph lives under `clearvla/mainline/`, not the legacy
+69. The active Schema30 graph lives under `clearvla/mainline/`, not the legacy
     `clearvla/policy/object_intent_dynamics_323/` package. Progressive V120
     observation/G is adapted by `model/restored_observation.py`; global-K
     typed pre-binding and the sole current-DINO reconstruction objective live
     in `model/grounding.py`.
-70. Schema27 S and its training-only direct physical decoders live in
+70. Schema30 S and its training-only direct physical decoders live in
     `model/intent.py`. `DirectIntentFutureSupervisor` has no future-action
     input and no hidden recognizer coordinate. Online S remains Teacher-free;
     `model/top.py::build_training_targets` is the only call boundary that
@@ -522,12 +522,13 @@ Re-check these against current source rather than assuming they remain true:
     multiplicatively modulate semantic/appearance/geometry sidecars, but a
     zero typed sidecar cannot produce semantic, transport, visibility or
     persistence value. Only `FutureObjectDynamics` crosses W->P.
-72. P2 candidate-set/null correction, zero-preserving consequence and
-    source-exclusive P3 lanes live in `model/compiler.py`. The factual P3 row
-    is retained only for the five-row bottom ABI and is algebraic zero;
-    precision receives basis-centred P1 innovation, effect receives W effect,
-    and temporal receives S temporal control.
-73. Schema27's finite-check/local/main/controller gradient lifecycle is in
+72. P2 per-type nulls, variance-preserving complementary fusion,
+    zero-preserving consequence and source-exclusive P3 lanes live in
+    `model/compiler.py`. The factual pseudo-row is absent; protected
+    consequence enters the bottom outside optional routes. Precision receives
+    basis-centred P1 innovation, effect receives W effect, and temporal
+    receives S temporal control.
+73. Schema30's finite-check/local/main/controller gradient lifecycle is in
     `training/engine.py`; optimizer ownership is in `training/optimizer.py`.
     `runtime/logging.py` stores raw/postlocal/postglobal role norms, while
     `tools/audit_policy_logs.py` enforces separate main/controller bounds.

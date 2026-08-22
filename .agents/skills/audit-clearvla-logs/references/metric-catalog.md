@@ -787,12 +787,19 @@ Known compatibility aliases require care: historical `future_latent` and `action
   reconstruction owner for K=4 global objects. Interpret it with existence,
   null mass, owner/chart entropy and object-content pair cosine. No individual
   entropy or cosine is a target or usage quota.
+- Schema30 makes this reconstruction conditional on K while retaining
+  observable local-candidate validity. Read
+  `object_grounding_reconstruction_object_mass_mean`,
+  `object_grounding_reconstruction_active_fraction`, and
+  `object_grounding_reconstruction_conditional_owner_entropy` together.
+  Learned object-vs-null mass cannot attenuate these reconstruction owners;
+  true invalid support can. These are diagnostics, not a non-null quota.
 - `object_grounding_existence_mean` is the object-vs-null confidence evaluated
   on each object's own read support. `object_grounding_allocation_share_mean`
   is the different audit quantity measuring its fraction of valid chart mass.
   `object_grounding_validity_mean` is observable physical support and is the
   only one of these three values that may mask Teacher/future/S losses.
-  Schema27 also uses detached existence as an *online optional-candidate
+  The active graph also uses detached existence as an *online optional-candidate
   prior* in W/P2; it never multiplies the protected current fact or a training
   loss. Allocation remains audit-only. Null mass is summed over the mutually
   exclusive local-M hypotheses per cell;
@@ -831,14 +838,17 @@ Known compatibility aliases require care: historical `future_latent` and `action
   association difficulty, not action-path gates.
 - P2 content/intent/coordinate score maxima are construction-bounded to 1;
   temperatures are bounded to `[0.25,4]`. The combined bounded score excludes
-  the negative validity log-mask and cannot exceed 12. Schema27 subtracts
-  `log(intervals*objects)` from the non-null candidate set before the single
-  null competes; with equal scores and full validity, set/null mass is exactly
-  `0.5/0.5`. Semantic/geometry/status mass and four interval masses are
-  descriptive posterior ownership, never optimization targets.
-- `object_p2_effect_rms`, consequence effect/interaction and the five P3 lane
-  RMS values locate the W-to-action handoff. The fifth object lane is
-  `p3_state_change`, weakly scaled at `0.05`; `p3_terminal` and an external
+  the negative validity log-mask and cannot exceed 12. The active graph does
+  not apply a candidate-count correction, so each type needs its own null/mass
+  interpretation. Semantic/geometry/status are complementary values:
+  Schema30 protects their `sum/sqrt(3)` base and permits only a near-zero
+  contrast residual; it has no outer type selector. Fusion base, contrast and
+  residual RMS must be read with per-type selected-value RMS. Type and four
+  interval masses are descriptive posterior ownership, never targets.
+- `object_p2_effect_precontract_rms`, consequence effect/interaction and the
+  four active P3 lane RMS values locate the W-to-action handoff. The fourth
+  optional object lane is `p3_state_change`, weakly scaled at `0.05`;
+  `p3_terminal`, an all-zero factual pseudo-lane, and an external
   completion-derived execution bias are schema mismatches for this capability.
   Neutral FutureObjectDynamics must give exact-zero P2 effect and interaction;
   a nonzero neutral value is a structural failure.

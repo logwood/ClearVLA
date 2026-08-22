@@ -20,7 +20,11 @@ from clearvla.mainline.model.compiler import (
     ObjectPolicyPlanCompiler,
 )
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
-from clearvla.mainline.model.grounding import DenseObjectGrounder, dense_chart_from_local_facts
+from clearvla.mainline.model.grounding import (
+    DenseObjectGrounder,
+    _conditional_k_reconstruction_assignment,
+    dense_chart_from_local_facts,
+)
 from clearvla.mainline.model.intent import (
     DirectIntentFutureSupervisor,
     StatelessObjectIntentOrganizer,
@@ -196,6 +200,88 @@ def test_grounder_reconstructs_the_independent_observed_dino_chart() -> None:
         iterations=1,
     )(masked)
     assert float(metrics["object_grounding_reconstruction_mse"]) == 0.0
+
+
+def test_grounder_reconstruction_assignment_is_null_independent_and_zero_safe() -> None:
+    torch.manual_seed(201)
+    conditional_k = torch.softmax(torch.randn(2, 7, 4), dim=-1)
+    local_prior = torch.rand(2, 7, 1)
+    validity = torch.ones_like(local_prior)
+    assignment = _conditional_k_reconstruction_assignment(
+        conditional_k,
+        local_prior,
+        validity,
+    )
+    torch.testing.assert_close(
+        assignment.sum(dim=-1, keepdim=True),
+        local_prior,
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+
+    # Changing object-vs-null mass cannot change the conditional-K posterior
+    # presented to reconstruction.
+    high_k_mass = 0.9 * conditional_k
+    low_k_mass = 0.001 * conditional_k
+    high_conditional = high_k_mass / high_k_mass.sum(dim=-1, keepdim=True)
+    low_conditional = low_k_mass / low_k_mass.sum(dim=-1, keepdim=True)
+    scaled = _conditional_k_reconstruction_assignment(
+        low_conditional,
+        local_prior,
+        validity,
+    )
+    high = _conditional_k_reconstruction_assignment(
+        high_conditional,
+        local_prior,
+        validity,
+    )
+    torch.testing.assert_close(scaled, assignment, atol=1.0e-6, rtol=1.0e-6)
+    torch.testing.assert_close(high, assignment, atol=1.0e-6, rtol=1.0e-6)
+
+    zeros = _conditional_k_reconstruction_assignment(
+        torch.zeros_like(conditional_k),
+        local_prior,
+        validity,
+    )
+    assert torch.equal(zeros, torch.zeros_like(zeros))
+
+    invalid = _conditional_k_reconstruction_assignment(
+        conditional_k,
+        local_prior,
+        torch.zeros_like(validity),
+    )
+    assert torch.equal(invalid, torch.zeros_like(invalid))
+
+
+def test_grounder_dense_reconstruction_uses_exported_conditional_k_content() -> None:
+    torch.manual_seed(202)
+    local = _local_facts(content=8, route=4, hidden=16, observed=True)
+    facts, metrics = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )(local)
+    assignment = facts.candidate_assignment.float()
+    k_mass = assignment.sum(dim=1, keepdim=True)
+    conditional_k = torch.where(
+        k_mass > 1.0e-8,
+        assignment / k_mass.clamp_min(1.0e-8),
+        torch.zeros_like(assignment),
+    )
+    local_prior = facts.dense_chart.candidate_owner_prior[:, None].float()
+    reconstruction_owner = (conditional_k * local_prior).sum(dim=-1)
+    expected = facts.public_content[:, None, None, None] + torch.einsum(
+        "bkcyx,bkd->bcyxd",
+        reconstruction_owner,
+        facts.content_innovation.float(),
+    )
+    torch.testing.assert_close(
+        facts.reconstructed_dino.float(), expected, atol=2.0e-6, rtol=1.0e-5
+    )
+    assert float(metrics["object_grounding_reconstruction_object_mass_mean"]) > 0.99
+    assert float(metrics["object_grounding_reconstruction_active_fraction"]) == 1.0
 
 
 def test_typed_compatibility_votes_before_one_physical_k_binding() -> None:
@@ -2367,14 +2453,15 @@ def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> No
     assert float(metrics["object_p2_geometry_null_mass"]) > 0.999
 
 
-def test_p2_complementary_fusion_has_protected_mean_and_exact_zero() -> None:
+def test_p2_complementary_fusion_has_variance_preserving_base_and_exact_zero() -> None:
     torch.manual_seed(405)
     reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
     selected = torch.randn(2, 3, 2, 3, 16)
     with torch.no_grad():
         reader.type_contrast_scale.zero_()
     fused, base, contrast, residual = reader._fuse_complementary_values(selected)
-    torch.testing.assert_close(base, selected.float().mean(dim=-2), atol=0.0, rtol=0.0)
+    expected_base = selected.float().sum(dim=-2) / (3.0**0.5)
+    torch.testing.assert_close(base, expected_base, atol=0.0, rtol=0.0)
     torch.testing.assert_close(fused.float(), base, atol=0.0, rtol=0.0)
     assert torch.count_nonzero(residual) == 0
     torch.testing.assert_close(
@@ -2397,7 +2484,16 @@ def test_p2_complementary_fusion_has_protected_mean_and_exact_zero() -> None:
     identical = shared.expand(-1, -1, -1, 3, -1).clone()
     with torch.no_grad():
         reader.type_contrast_scale.fill_(1.0e-4)
-    fused_same, base_same, _, _ = reader._fuse_complementary_values(identical)
+    fused_same, base_same, _, residual_same = reader._fuse_complementary_values(
+        identical
+    )
+    torch.testing.assert_close(
+        base_same,
+        (3.0**0.5) * shared[..., 0, :].float(),
+        atol=2.0e-6,
+        rtol=1.0e-6,
+    )
+    assert torch.count_nonzero(residual_same) == 0
     torch.testing.assert_close(fused_same.float(), base_same, atol=0.0, rtol=0.0)
 
 

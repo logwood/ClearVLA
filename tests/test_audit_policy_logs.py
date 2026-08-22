@@ -1656,6 +1656,57 @@ class AuditPolicyLogsTest(unittest.TestCase):
             "incomplete",
         )
 
+    def test_schema30_recovery_requires_null_independent_grounding_metrics(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema30"
+        candidate["manifest"]["architecture_schema"] = 30
+        active_structure = (
+            "object_grounding_reconstruction_object_mass_mean",
+            "object_grounding_reconstruction_active_fraction",
+            "object_grounding_reconstruction_conditional_owner_entropy",
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_object_innovation_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_object_content_innovation_variation",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_future_field_loss",
+            "object_w_object_innovation_variation",
+            "object_w_typed_sidecar_rms",
+            "object_w2_condition_centered_interval_variation",
+            "object_teacher_reliability",
+            "object_teacher_current_loss_support",
+            "p1_query_chart_variation",
+            "object_p2_effect_precontract_rms",
+            "object_p2_fusion_base_rms",
+            "object_p2_fusion_contrast_rms",
+            "object_p2_fusion_residual_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+        )
+        candidate["structure"] = {
+            name: {"tail_median": 0.5 if name.endswith("pair_cosine") else 0.1}
+            for name in active_structure
+        }
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        for name in active_structure:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+
+        candidate["structure"].pop(
+            "object_grounding_reconstruction_conditional_owner_entropy"
+        )
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[
+                "structure/object_grounding_reconstruction_conditional_owner_entropy"
+            ],
+            "incomplete",
+        )
+
     def test_global_k_binder_is_presence_only_across_changed_semantics(self) -> None:
         baseline = _complete_recovery_summary("v120")
         parent = deepcopy(baseline)

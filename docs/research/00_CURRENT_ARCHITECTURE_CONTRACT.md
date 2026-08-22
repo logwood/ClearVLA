@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -11,7 +11,7 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        29
+manifest schema:        30
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
 release status:         local implementation verified; fresh CUDA smoke required before release
@@ -27,8 +27,8 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema29 is a focused P2 ownership repair over the integrated Schema28
-> graph, not another broad redesign.** Schema28 was one integrated
+> **Schema30 is a focused G-reconstruction/P2-amplitude repair over the
+> integrated Schema29 graph, not another broad redesign.** Schema28 was one integrated
 > ownership/dataflow repair, not another additive mechanism. Complete
 > Schema25/26/27 logs plus the source audit identified
 > conditional-K, fixed-template S, typed W, per-type P2 and P3 source-semantic
@@ -41,8 +41,8 @@ owns serialized graph identity; typed interfaces and executable checks own
 shape, dtype, provenance and zero semantics. Do not add a version-wide
 `_validate_vXXX_*` contract.
 
-Schema29 retains the controlled Schema24/V120 fidelity recovery and complete
-Schema28 G/S/W/P ownership graph, including its
+Schema30 retains the controlled Schema24/V120 fidelity recovery and complete
+Schema29 G/S/W/P ownership graph, including its
 flow-time, endpoint-head, Teacher algebra, support/selector split, non-finite
 sentinel and the following four source-audited boundaries:
 
@@ -87,7 +87,8 @@ identity:
   Geometry can positively support a coordinate match, while disappearance is
   selected from current support instead of masking its own status value.
   The three selected values are complementary rather than mutually exclusive:
-  their symmetric mean is a protected fusion base and a bias-free low-rank
+  their variance-preserving symmetric sum (`sum/sqrt(3)`) is a protected
+  fusion base and a bias-free low-rank
   LayerScale residual may read only type contrasts. There is no outer type
   softmax/gate; all-null stays exact zero and identical typed values cannot be
   rewritten by the residual;
@@ -103,8 +104,28 @@ identity:
   never the fixed learned interval-address carrier; progress remains audit-only.
 
 No external loss weight, block count, quota, hard gate, entropy target,
-capacity or P1 learned null is added. Schema28 and older checkpoints cannot
-exact-resume Schema29.
+capacity or P1 learned null is added. Schema29 and older checkpoints cannot
+exact-resume Schema30 because the protected P2
+fusion algebra and G reconstruction gradient semantics changed.
+
+Schema30 applies two source- and log-audited algebraic repairs without adding
+parameters or changing module construction/RNG order:
+
+- the dense G objective uses G3's conditional-K posterior times normalized
+  local-M prior and observable validity. Learned object-vs-null mass remains
+  available to routing, but can no
+  longer attenuate the only reconstruction pressure on exported K content;
+  the denominator never contains learned null mass, so the repair introduces
+  no inverse-null-mass Jacobian;
+- P2 keeps the three independent semantic/geometry/status posteriors and the
+  existing contrast-only LayerScale branch, but replaces the fixed `/3` mean
+  with `sum/sqrt(3)`. This preserves independent-channel variance without
+  restoring Schema25's erroneous outer type softmax.
+
+Schema25 history is diagnostic only: it already preserved typed S->W ownership
+and avoided the later `/3` dilution, but its P2 type-softmax made complementary
+fields mutually exclusive and its private G reconstruction decoder could
+satisfy loss outside the values consumed by S/W. Neither path is restored.
 
 Retained recovery boundaries include the exact completed-G3 rollout shared by
 P1 and transition, removal of the unconsumed `future_address`/online
@@ -248,6 +269,8 @@ supports may change targets and losses, never deployment action.
    compatibility is evaluated before binding, but its consensus creates only
    one physical assignment; typed reads can refine only inside that support.
    The reconstruction target is the independent observed current-DINO chart.
+   Reconstruction uses conditional K ownership times the local-M prior;
+   absolute learned-null mass cannot scale the K residual toward zero.
    `ObjectFactSet` exports one public content value and K object innovations;
    repeating the public direction as K owned values is forbidden. Absolute K
    content is retained only for Teacher's current-reference identity.
@@ -289,8 +312,9 @@ supports may change targets and losses, never deployment action.
     duplicate a fake camera axis. Semantic, geometry and status have separate
     source posteriors/nulls; status uses current support so disappearance
     cannot mask itself. They do not enter a second competitive selector:
-    a protected mean plus a near-zero low-rank type-contrast residual performs
-    the only final fusion. P2 cannot average camera squared distances into an
+    a protected variance-preserving `sum/sqrt(3)` base plus a near-zero
+    low-rank type-contrast residual performs the only final fusion. P2 cannot
+    average camera squared distances into an
     implicit variance penalty.
 11. Neutral effect is algebraically neutral:
 
@@ -453,7 +477,7 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- Schema29 parameter counts are measured after implementation and must be
+- Schema30 parameter counts are measured after implementation and must be
   reported by the launcher. The verified default graph has `172,151,237`
   parameters, of which `155,756,916` are trainable. Its direct-child inventory
   is observation `13,543,661 / 6,895,950`, top
@@ -464,15 +488,17 @@ ControlledTransitionSource / State
   reads, typed W block traversal and three independent P2 selectors; removal
   of private G decoder heads, the factual pseudo-lane and several duplicated
   P3 projections offsets part of that increase. Bottom and the exact P1 reader
-  remain unchanged. Schema29 removes the `1,536`-parameter outer type selector
+  remain unchanged. Schema29 removed the `1,536`-parameter outer type selector
   and adds a `131,584`-parameter rank-64 bias-free contrast residual plus
-  LayerScale, for a net top increase of `130,048` parameters.
+  LayerScale, for a net top increase of `130,048` parameters. Schema30 changes
+  only algebra on existing tensors, so both the parameter inventory and module
+  initialization/RNG cadence are identical to Schema29.
 - Active manifest identity:
 
   ```text
-  schema:       29
+  schema:       30
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-  top:          conditional_k_public_private_grounding_zero_centered_intent_single_typed_ingress_w_per_type_p2_anchored_contrast_fusion_consequence_p3
+  top:          conditional_k_null_independent_reconstruction_zero_centered_intent_single_typed_ingress_w_per_type_p2_variance_preserving_contrast_fusion_consequence_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
   training:     v120_mirrored_physical_flow_observed_current_grounding_physical_camera_loss_support_shared_w_field_targets_exact_teacher_event_boost_v120_decay_three_owner_clip
   runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only
@@ -516,15 +542,15 @@ Use new empty output directories:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema29_complementary_p2_smoke \
-nohup bash scripts/smoke_mainline.sh > schema29_complementary_p2_smoke.log 2>&1 &
+OUT_DIR=runs/schema30_null_independent_g_p2_smoke \
+nohup bash scripts/smoke_mainline.sh > schema30_null_independent_g_p2_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema29_complementary_p2_b8 \
-nohup bash scripts/train_mainline.sh > schema29_complementary_p2_b8.log 2>&1 &
+OUT_DIR=runs/schema30_null_independent_g_p2_b8 \
+nohup bash scripts/train_mainline.sh > schema30_null_independent_g_p2_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema29_complementary_p2_b8 \
+  runs/schema30_null_independent_g_p2_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text
