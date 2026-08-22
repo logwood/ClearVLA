@@ -171,6 +171,27 @@ class DenseObjectGrounder(nn.Module):
         if not isinstance(g3_output, nn.Linear):
             raise TypeError("G3 residual output must remain a linear layer")
         nn.init.zeros_(g3_output.weight)
+        # Restore V120's useful reconstruction bandwidth, but make the
+        # decoded slot residual part of the one exported object value.  The
+        # historical implementation decoded a private slot only for the
+        # reconstruction loss, so S/Teacher/W never received what that loss
+        # learned.  Zero initialization preserves the former online value at
+        # step zero while ordinary reconstruction gradients can enrich it.
+        # New zero-residual capacity must not silently reshuffle every module
+        # constructed after the grounder. Linear construction initializes
+        # eagerly, so preserve the global CPU RNG around these new owners.
+        construction_rng = torch.get_rng_state()
+        self.decode_content_residual = nn.Linear(hidden, content_dim, bias=False)
+        self.decode_public_position = nn.Linear(16, content_dim, bias=False)
+        torch.set_rng_state(construction_rng)
+        nn.init.zeros_(self.decode_content_residual.weight)
+        # This shared coordinate term is a protected public spatial basis. It
+        # cannot encode K identity and is centred below, so it cannot replace
+        # either the public scene value or an object-owned slot residual. Zero
+        # initialization keeps the former reconstruction and online values
+        # exact at step zero while the dense objective supplies ordinary
+        # gradients to both new decoders.
+        nn.init.zeros_(self.decode_public_position.weight)
         self.maximum_update_rms = float(maximum_update_rms)
 
     def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
@@ -415,7 +436,9 @@ class DenseObjectGrounder(nn.Module):
         target_candidates = chart.dino_content[..., None, :].expand(
             *chart.candidate_content.shape[:-1], chart.dino_content.shape[-1]
         )
-        content = aggregate(target_candidates)
+        aggregated_content = aggregate(target_candidates)
+        canonical_slot_residual = self.decode_content_residual(slots)
+        content = aggregated_content + canonical_slot_residual
         semantic, semantic_read, semantic_assignment = typed_reweight(
             "semantic", chart.candidate_semantic
         )
@@ -518,16 +541,37 @@ class DenseObjectGrounder(nn.Module):
         # only object-specific residuals.  Reconstruction uses the conditional
         # K owner rather than absolute object-vs-null mass: a learned null is a
         # legal routing hypothesis, but it cannot switch off the only pressure
-        # that makes the exported K content identifiable.  No private decoder
-        # or new capacity sits between this loss and the values consumed by
-        # S/W/Teacher.
+        # that makes the exported K content identifiable.  The slot decoder
+        # has already been folded into ``content`` above, so no private value
+        # exists between this loss and S/Teacher/W/P2.
         public_content = (
             target_content * observed
         ).sum(dim=(1, 2, 3), keepdim=True) / observed.sum(
             dim=(1, 2, 3), keepdim=True
         ).clamp_min(1.0)
+        coordinate_weight = (
+            chart.candidate_validity.float()
+            * chart.candidate_owner_prior[..., None].float()
+        )
+        chart_coordinate = (
+            chart.candidate_coordinates.float() * coordinate_weight
+        ).sum(dim=-2) / coordinate_weight.sum(dim=-2).clamp_min(1e-6)
+        public_position = self.decode_public_position(
+            _coordinate_basis(
+                chart_coordinate.to(dtype=chart.candidate_coordinates.dtype),
+                16,
+            )
+        ).float()
+        # Keep the spatial term strictly zero-mean over observed cells.  The
+        # scene-wide mean remains owned by public_content; position explains
+        # only shared within-scene variation.
+        public_position = public_position - (
+            public_position * observed
+        ).sum(dim=(1, 2, 3), keepdim=True) / observed.sum(
+            dim=(1, 2, 3), keepdim=True
+        ).clamp_min(1.0)
         object_residual = content.float() - public_content[:, 0, 0, 0, None, :]
-        reconstructed = public_content + torch.einsum(
+        reconstructed = public_content + public_position + torch.einsum(
             "bkcyx,bkd->bcyxd",
             reconstruction_owner,
             object_residual,
@@ -599,8 +643,63 @@ class DenseObjectGrounder(nn.Module):
                 dtype=reconstruction_owner_entropy.dtype
             )
         ).sum() / reconstruction_owner_active[:, 0].float().sum().clamp_min(1.0)
+        # A small correction norm is not enough to decide whether G3 is
+        # functionally idle: the same residual can either be irrelevant on a
+        # well-separated parent or flip an ambiguous assignment. Record the
+        # parent margin and the realized discrete change on the exact physical
+        # support used by the binder. These remain audit-only and introduce
+        # no assignment pressure.
+        if self.objects > 1:
+            parent_top2 = parent_k_conditional.detach().float().topk(
+                k=2, dim=-1
+            ).values
+            corrected_top2 = corrected_k_conditional.detach().float().topk(
+                k=2, dim=-1
+            ).values
+            parent_margin = parent_top2[..., 0] - parent_top2[..., 1]
+            corrected_margin = corrected_top2[..., 0] - corrected_top2[..., 1]
+            assignment_changed = (
+                parent_k_conditional.detach().argmax(dim=-1)
+                != corrected_k_conditional.detach().argmax(dim=-1)
+            ).float()
+        else:
+            parent_margin = parent_k_conditional.detach().float()[..., 0]
+            corrected_margin = corrected_k_conditional.detach().float()[..., 0]
+            assignment_changed = torch.zeros_like(parent_margin)
+        binder_support = (
+            valid.detach().float()[..., 0]
+            * prior.detach().float()[..., 0]
+            * (parent_k_mass.detach().float()[..., 0] > 1.0e-6).float()
+        )
+        binder_support_sum = binder_support.sum().clamp_min(1.0)
+        parent_margin_mean = (parent_margin * binder_support).sum() / binder_support_sum
+        corrected_margin_mean = (
+            corrected_margin * binder_support
+        ).sum() / binder_support_sum
+        assignment_change_fraction = (
+            assignment_changed * binder_support
+        ).sum() / binder_support_sum
+        residual_to_parent_margin = (
+            residual.detach().float().square().mean(dim=-1).sqrt()
+            / parent_margin.clamp_min(1.0e-4)
+        )
+        residual_to_parent_margin = (
+            residual_to_parent_margin * binder_support
+        ).sum() / binder_support_sum
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
+            "object_grounding_aggregated_content_rms": (
+                aggregated_content.detach().float().square().mean().sqrt()
+            ),
+            "object_grounding_canonical_slot_residual_rms": (
+                canonical_slot_residual.detach().float().square().mean().sqrt()
+            ),
+            "object_grounding_canonical_content_rms": (
+                content.detach().float().square().mean().sqrt()
+            ),
+            "object_grounding_public_position_rms": (
+                public_position.detach().float().square().mean().sqrt()
+            ),
             "object_grounding_dense_objective_count": reconstruction_error.new_ones(
                 (), dtype=torch.float32
             ),
@@ -703,6 +802,12 @@ class DenseObjectGrounder(nn.Module):
             )
             .detach()
             .mean(),
+            "object_grounding_g3_parent_top2_margin": parent_margin_mean,
+            "object_grounding_g3_corrected_top2_margin": corrected_margin_mean,
+            "object_grounding_g3_assignment_change_fraction": assignment_change_fraction,
+            "object_grounding_g3_residual_to_parent_margin_ratio": (
+                residual_to_parent_margin
+            ),
             "object_grounding_prebind_typed_consensus_l1": (
                 0.5
                 * (

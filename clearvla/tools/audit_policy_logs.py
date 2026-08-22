@@ -1332,6 +1332,10 @@ STRUCTURE_KEYS = (
     "object_grounding_reconstruction_object_mass_mean",
     "object_grounding_reconstruction_active_fraction",
     "object_grounding_reconstruction_conditional_owner_entropy",
+    "object_grounding_aggregated_content_rms",
+    "object_grounding_canonical_slot_residual_rms",
+    "object_grounding_canonical_content_rms",
+    "object_grounding_public_position_rms",
     "object_grounding_prototype_mse",
     "object_grounding_spatial_refinement_mse",
     "object_grounding_object_content_pair_cosine",
@@ -1345,6 +1349,14 @@ STRUCTURE_KEYS = (
     "object_grounding_g3_parent_l1",
     "object_grounding_global_k_binder_correction_l1",
     "object_grounding_global_k_binder_residual_rms",
+    "object_grounding_global_k_binder_raw_residual_rms",
+    "object_grounding_global_k_binder_common_residual_rms",
+    "object_grounding_parent_k_conditional_entropy",
+    "object_grounding_corrected_k_conditional_entropy",
+    "object_grounding_g3_parent_top2_margin",
+    "object_grounding_g3_corrected_top2_margin",
+    "object_grounding_g3_assignment_change_fraction",
+    "object_grounding_g3_residual_to_parent_margin_ratio",
     "object_grounding_prebind_typed_consensus_l1",
     "object_grounding_prebind_semantic_appearance_l1",
     "object_grounding_prebind_semantic_geometry_l1",
@@ -1460,6 +1472,12 @@ STRUCTURE_KEYS = (
     "object_w_typed_sidecar_rms",
     "object_w_typed_common_state_rms",
     "object_w_typed_interval_residual_state_rms",
+    "object_w_common_base_interaction_rms",
+    "object_w_residual_base_interaction_rms",
+    "object_w_common_base_interaction_denominator_min",
+    "object_w_residual_base_interaction_denominator_min",
+    "object_w1_common_processing_delta_rms",
+    "object_w2_common_processing_delta_rms",
     "object_w_public_content_rms",
     "object_w_object_innovation_rms",
     "object_w_object_innovation_variation",
@@ -1542,6 +1560,9 @@ STRUCTURE_KEYS = (
     "object_p2_protected_common_rms",
     "object_p2_optional_residual_rms",
     "object_p2_effect_precontract_rms",
+    "object_p2_camera_mixture_effective_count",
+    "object_p2_camera_support_fraction",
+    "object_p2_camera_coordinate_variation",
     "object_p2_common_fusion_base_rms",
     "object_p2_common_fusion_contrast_rms",
     "object_p2_common_fusion_residual_rms",
@@ -1565,6 +1586,7 @@ STRUCTURE_KEYS = (
     "object_consequence_effect_rms",
     "object_consequence_interaction_rms",
     "object_p3_precision_base_rms",
+    "object_p3_precision_rms",
     "object_p3_precision_consequence_interaction_rms",
     "object_p3_temporal_base_rms",
     "object_p3_temporal_consequence_interaction_rms",
@@ -1577,6 +1599,11 @@ STRUCTURE_KEYS = (
     "bottom_controller_private_ratio",
     "bottom_protected_update_rms",
     "bottom_controlled_transition_value_rms",
+    "evidence_trajectory_summary_norm",
+    "evidence_policy_delta_attnres_source_mass_trajectory_basis0",
+    "evidence_policy_delta_attnres_source_mass_trajectory_basis1",
+    "evidence_policy_delta_attnres_source_mass_trajectory_basis2",
+    "evidence_policy_delta_attnres_source_mass_trajectory_basis3",
 )
 
 GRADIENT_KEYS = (
@@ -4300,6 +4327,10 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema32 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 32
+    )
     schema31 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 31
@@ -4326,6 +4357,57 @@ def _recovery_assessment(
         else "object_intent_interval_variation"
     )
     required_structure = (
+        (
+            "object_grounding_reconstruction_object_mass_mean",
+            "object_grounding_reconstruction_active_fraction",
+            "object_grounding_reconstruction_conditional_owner_entropy",
+            "object_grounding_canonical_slot_residual_rms",
+            "object_grounding_public_position_rms",
+            "object_grounding_g3_parent_top2_margin",
+            "object_grounding_g3_corrected_top2_margin",
+            "object_grounding_g3_assignment_change_fraction",
+            "object_grounding_g3_residual_to_parent_margin_ratio",
+            "object_grounding_object_content_pair_cosine",
+            "object_grounding_object_innovation_pair_cosine",
+            "object_grounding_prebind_typed_consensus_l1",
+            "object_intent_object_content_innovation_variation",
+            "object_intent_public_condition_centered_interval_variation",
+            "object_intent_typed_common_policy_context_rms",
+            "object_intent_typed_interval_residual_policy_context_rms",
+            "object_w_object_innovation_variation",
+            "object_w_typed_common_state_rms",
+            "object_w_typed_interval_residual_state_rms",
+            "object_w_common_base_interaction_rms",
+            "object_w_residual_base_interaction_rms",
+            "object_w_common_base_interaction_denominator_min",
+            "object_w_residual_base_interaction_denominator_min",
+            "object_w1_common_processing_delta_rms",
+            "object_w2_common_processing_delta_rms",
+            "object_w_prediction_common_effect_rms",
+            "object_w_prediction_interval_residual_rms",
+            "object_teacher_dustbin_probability",
+            "object_teacher_effective_support",
+            "object_teacher_common_effect_rms",
+            "object_teacher_interval_residual_rms",
+            "object_teacher_current_loss_support",
+            "p1_query_chart_variation",
+            "object_p2_camera_mixture_effective_count",
+            "object_p2_camera_support_fraction",
+            "object_p2_camera_coordinate_variation",
+            "object_p2_protected_common_rms",
+            "object_p2_optional_residual_rms",
+            "object_p2_residual_null_mass",
+            "object_p2_effect_precontract_rms",
+            "object_p3_precision_rms",
+            "bottom_capacity_mean",
+            "evidence_trajectory_summary_norm",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis0",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis1",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis2",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis3",
+        )
+        if schema32
+        else
         (
             "object_grounding_reconstruction_object_mass_mean",
             "object_grounding_reconstruction_active_fraction",

@@ -237,26 +237,82 @@ class ObjectFutureEffectReader(nn.Module):
             self.status_value(status_residual),
         )
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
+        camera_coordinate = dynamics.camera_coordinates.float()
+        camera_weight = dynamics.camera_weights.float()[..., 0].clamp_min(0.0)
+        camera_count = int(camera_coordinate.shape[2])
+        camera_mass = camera_weight.sum(dim=-1, keepdim=True)
+        camera_has_support = camera_mass[..., 0] > 1.0e-8
+        uniform_camera = torch.full_like(
+            camera_weight, 1.0 / float(max(camera_count, 1))
+        )
+        normalized_camera_weight = torch.where(
+            camera_mass > 1.0e-8,
+            camera_weight / camera_mass.clamp_min(1.0e-8),
+            uniform_camera,
+        )
+        camera_coordinate_mean = (
+            normalized_camera_weight[..., None] * camera_coordinate
+        ).sum(dim=2)
+        camera_coordinate_variation = (
+            normalized_camera_weight[..., None]
+            * (
+                camera_coordinate
+                - camera_coordinate_mean[:, :, None]
+            ).square()
+        ).sum(dim=2).mean(dim=-1).sqrt()
+        camera_coordinate_variation = (
+            camera_coordinate_variation * camera_has_support.float()
+        ).mean()
         common_coordinate = (
-            dynamics.object_coordinates.float() + dynamics.transport_common
+            camera_coordinate
+            + dynamics.transport_common[:, :, None].float()
         ).clamp(-1.0, 1.0)
         future_coordinate = (
-            dynamics.object_coordinates[:, None].float() + dynamics.transport_mean.float()
+            camera_coordinate[:, None]
+            + dynamics.transport_mean[:, :, :, None].float()
         ).clamp(-1.0, 1.0)
         common_coordinate_distance = (
-            coordinate_query[:, :, :, None] - common_coordinate[:, None, None]
+            coordinate_query[:, :, :, None, None]
+            - common_coordinate[:, None, None]
         ).square().sum(dim=-1)
         coordinate_distance = (
-            coordinate_query[:, :, :, None, None]
+            coordinate_query[:, :, :, None, None, None]
             - future_coordinate[:, None, None]
         ).square().sum(dim=-1)
         # Exact coordinate agreement is positive evidence; the old [-1,0]
         # term could only punish and therefore could not establish a geometry
         # owner when semantic scores were diffuse.
-        common_coordinate_score = (
+        common_camera_score = (
             1.0 - 0.5 * common_coordinate_distance
         ).clamp(-1.0, 1.0)
-        coordinate_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
+        camera_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
+        camera_log_weight = normalized_camera_weight.clamp_min(1.0e-8).log()
+        # A log mixture scores real camera hypotheses without first averaging
+        # their normalized-image coordinates into a point that belongs to no
+        # view.  Since weights sum to one and every component score lies in
+        # [-1,1], both mixed scores preserve the same bounded contract.
+        common_coordinate_score = torch.logsumexp(
+            common_camera_score + camera_log_weight[:, None, None],
+            dim=-1,
+        ).clamp(-1.0, 1.0)
+        coordinate_score = torch.logsumexp(
+            camera_score + camera_log_weight[:, None, None, None],
+            dim=-1,
+        ).clamp(-1.0, 1.0)
+        # Uniform weights above are a finite arithmetic fallback only.  They
+        # must not turn missing camera evidence into a semantic geometry
+        # prior.  Other P2 fields may still use the valid object; the geometry
+        # contribution itself is exactly neutral without an observed camera.
+        common_coordinate_score = torch.where(
+            camera_has_support[:, None, None],
+            common_coordinate_score,
+            torch.zeros_like(common_coordinate_score),
+        )
+        coordinate_score = torch.where(
+            camera_has_support[:, None, None, None],
+            coordinate_score,
+            torch.zeros_like(coordinate_score),
+        )
         current_validity = dynamics.current_selector_validity.float().squeeze(
             -1
         ).clamp(0.0, 1.0)
@@ -444,6 +500,18 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_coordinate_score_max_abs": torch.maximum(
                 common_coordinate_score.detach().abs().amax(),
                 coordinate_score.detach().abs().amax(),
+            ),
+            "object_p2_camera_mixture_effective_count": torch.exp(
+                -(
+                    normalized_camera_weight.detach().clamp_min(1.0e-8)
+                    * normalized_camera_weight.detach().clamp_min(1.0e-8).log()
+                ).sum(dim=-1)
+            ).mul(camera_has_support.detach().float()).mean(),
+            "object_p2_camera_support_fraction": camera_has_support.detach()
+            .float()
+            .mean(),
+            "object_p2_camera_coordinate_variation": (
+                camera_coordinate_variation.detach()
             ),
             "object_p2_combined_logit_max_abs": torch.stack(
                 tuple(logit.detach().abs().amax() for logit in (

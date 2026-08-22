@@ -459,7 +459,11 @@ class ObjectFutureTeacher(nn.Module):
             reliability=reliability,
             current_selector_validity=current_selector_validity,
             future_selector_validity=future_selector_validity,
-            object_coordinates=facts.coordinates.detach().float(),
+            camera_coordinates=facts.camera_coordinates.detach().float(),
+            camera_weights=(
+                facts.camera_evidence_mass.detach().float()
+                * facts.camera_validity.detach().float()
+            ),
         )
         target.validate()
         if not collect_diagnostics:

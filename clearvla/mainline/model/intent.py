@@ -1,4 +1,4 @@
-"""Stateless intent, direct future supervision and coarse action."""
+"""Stateless intent, observable state supervision and coarse action."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ from .types import (
     INTERVAL_BOUNDS,
     ActionIntentDock,
     CoarseActionIntentState,
-    FutureObjectDynamics,
-    IntentFutureSupervision,
+    IntentStateSupervision,
     ObjectFactSet,
     ObjectIntentState,
     normalized_entropy,
@@ -736,12 +735,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
         return state_out, metrics
 
 
-class DirectIntentFutureSupervisor(nn.Module):
-    """Decode stable physical future quantities from the online S boundary.
+class ObservableIntentStateSupervisor(nn.Module):
+    """Supervise only the observable state boundary owned by S.
 
-    No hidden recognizer coordinate is learned.  The condition-generated S
-    innovation owns a direct future-state prediction, while the exact typed
-    W boundary owns matching semantic, status and transport predictions.
+    Semantic, geometry and status effects are owned by W.  Decoding those
+    same teacher targets before W made an identity W1/W2 a valid optimum even
+    though the auxiliary coefficient was small.  This module deliberately
+    has no object-effect heads or W field argument.
     """
 
     def __init__(
@@ -749,59 +749,18 @@ class DirectIntentFutureSupervisor(nn.Module):
         *,
         hidden: int,
         state_dim: int,
-        content_dim: int,
-        route_dim: int,
     ) -> None:
         super().__init__()
-        del content_dim, route_dim
         self.state_head = nn.Linear(hidden, state_dim, bias=False)
-
-    @staticmethod
-    def _supported_field_loss(
-        prediction: Tensor,
-        target: Tensor,
-        object_support: Tensor,
-        *,
-        scale: Tensor | None = None,
-    ) -> Tensor:
-        if tuple(prediction.shape) != tuple(target.shape):
-            raise ValueError("typed intent prediction and target must align")
-        if object_support.ndim != 3 or int(object_support.shape[-1]) != 1:
-            raise ValueError("typed intent support must be [B,K,1]")
-        if prediction.ndim == 3:
-            mask = object_support
-        elif prediction.ndim == 4:
-            mask = object_support[:, None].expand(
-                prediction.shape[0], prediction.shape[1], prediction.shape[2], 1
-            )
-        else:
-            raise ValueError("typed intent field must be [B,K,D] or [B,I,K,D]")
-        prediction_value = prediction.float()
-        target_value = target.detach().float()
-        if scale is not None:
-            scale_value = scale.detach().float().clamp_min(1.0e-4)
-            while scale_value.ndim < prediction_value.ndim:
-                scale_value = scale_value.unsqueeze(1)
-            prediction_value = prediction_value / scale_value
-            target_value = target_value / scale_value
-        error = F.smooth_l1_loss(
-            prediction_value, target_value, reduction="none"
-        ).mean(dim=-1, keepdim=True)
-        return (error * mask).sum() / mask.sum().clamp_min(1.0)
 
     def forward(
         self,
         *,
         intent: ObjectIntentState,
-        intent_boundary: FutureObjectDynamics,
         future_state: Tensor,
-        teacher: FutureObjectDynamics,
-        current_loss_support: Tensor,
-    ) -> IntentFutureSupervision:
+    ) -> IntentStateSupervision:
         if future_state.ndim != 3:
             raise ValueError("intent supervision requires a future state sequence")
-        teacher.validate()
-        intent_boundary.validate()
         intent.validate(
             horizon=int(intent.temporal_queries.shape[1]),
             hidden=int(intent.public_interval_carrier.shape[-1]),
@@ -811,114 +770,14 @@ class DirectIntentFutureSupervisor(nn.Module):
         state_summary = torch.stack(
             [future_state[:, row].mean(dim=1) for row in slices], dim=1
         )
-        if current_loss_support.ndim != 4 or int(current_loss_support.shape[-1]) != 1:
-            raise ValueError("intent current loss support must be [B,K,C,1]")
-        if int(current_loss_support.shape[0]) != int(future_state.shape[0]):
-            raise ValueError("intent current loss support batch does not align")
-        object_support = current_loss_support.detach().float().amax(dim=2)
-        expected_support = (
-            teacher.semantic_delta.shape[0],
-            teacher.semantic_delta.shape[2],
-            1,
-        )
-        if tuple(object_support.shape) != expected_support:
-            raise ValueError("intent object support does not align with teacher")
-
         state_prediction = self.state_head(intent.interval_condition_innovation)
-        # These are decoded with the exact W field projections and heads that
-        # consume S online.  Independent S-only heads previously let the
-        # auxiliary loss improve in a coordinate W/P never observed.
-        semantic_prediction = intent_boundary.semantic_delta
-        status_prediction = torch.cat(
-            (intent_boundary.visibility, intent_boundary.persistence), dim=-1
-        )
-        transport_prediction = intent_boundary.transport_mean
-        semantic_target = teacher.semantic_delta.detach()
-        status_target = torch.cat(
-            (teacher.visibility.detach(), teacher.persistence.detach()), dim=-1
-        )
-        transport_target = teacher.transport_mean.detach()
-        public_loss = F.smooth_l1_loss(
+        loss = F.smooth_l1_loss(
             state_prediction.float(), state_summary.detach().float()
         )
-        semantic_scale = teacher.current_reference.detach().float().square().mean(
-            dim=-1, keepdim=True
-        ).sqrt().clamp_min(0.25)
-        semantic_common_loss = self._supported_field_loss(
-            intent_boundary.semantic_common,
-            teacher.semantic_common.detach(),
-            object_support,
-            scale=semantic_scale,
-        )
-        semantic_residual_loss = self._supported_field_loss(
-            intent_boundary.semantic_interval_residual,
-            teacher.semantic_interval_residual.detach(),
-            object_support,
-            scale=semantic_scale,
-        )
-        semantic_loss = 0.5 * (semantic_common_loss + semantic_residual_loss)
-        status_common_loss = self._supported_field_loss(
-            torch.cat(
-                (intent_boundary.visibility_common, intent_boundary.persistence_common),
-                dim=-1,
-            ),
-            torch.cat(
-                (teacher.visibility_common, teacher.persistence_common), dim=-1
-            ).detach(),
-            object_support,
-        )
-        status_residual_loss = self._supported_field_loss(
-            torch.cat(
-                (
-                    intent_boundary.visibility_interval_residual,
-                    intent_boundary.persistence_interval_residual,
-                ),
-                dim=-1,
-            ),
-            torch.cat(
-                (
-                    teacher.visibility_interval_residual,
-                    teacher.persistence_interval_residual,
-                ),
-                dim=-1,
-            ).detach(),
-            object_support,
-        )
-        status_loss = 0.5 * (status_common_loss + status_residual_loss)
-        transport_common_loss = self._supported_field_loss(
-            intent_boundary.transport_common,
-            teacher.transport_common.detach(),
-            object_support,
-        )
-        transport_residual_loss = self._supported_field_loss(
-            intent_boundary.transport_interval_residual,
-            teacher.transport_interval_residual.detach(),
-            object_support,
-        )
-        transport_loss = 0.5 * (
-            transport_common_loss + transport_residual_loss
-        )
-        typed_loss = (semantic_loss + status_loss + transport_loss) / 3.0
-        result = IntentFutureSupervision(
+        result = IntentStateSupervision(
             state_prediction=state_prediction,
             state_target=state_summary.detach(),
-            semantic_prediction=semantic_prediction,
-            semantic_target=semantic_target,
-            status_prediction=status_prediction,
-            status_target=status_target,
-            transport_prediction=transport_prediction,
-            transport_target=transport_target,
-            public_loss=public_loss,
-            semantic_loss=semantic_loss,
-            semantic_common_loss=semantic_common_loss,
-            semantic_residual_loss=semantic_residual_loss,
-            status_loss=status_loss,
-            status_common_loss=status_common_loss,
-            status_residual_loss=status_residual_loss,
-            transport_loss=transport_loss,
-            transport_common_loss=transport_common_loss,
-            transport_residual_loss=transport_residual_loss,
-            typed_loss=typed_loss,
+            loss=loss,
         )
         result.validate()
         return result
@@ -1055,6 +914,6 @@ class CoarseActionIntent(nn.Module):
 
 __all__ = [
     "CoarseActionIntent",
-    "DirectIntentFutureSupervisor",
+    "ObservableIntentStateSupervisor",
     "StatelessObjectIntentOrganizer",
 ]

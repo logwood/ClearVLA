@@ -216,7 +216,7 @@ def _module_parameter_context(
         "grounding_g1_g2_g3": model.top.grounding_blocks,
         "global_object_grounder": model.top.grounder,
         "stateless_intent": model.top.intent,
-        "intent_future_supervisor": model.top.intent_supervisor,
+        "intent_state_supervisor": model.top.intent_supervisor,
         "coarse_action_intent": model.top.coarse_action,
         "future_dynamics_w1_w2": model.top.dynamics,
         "history_action_proposal": model.history_proposal,

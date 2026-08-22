@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import smooth_rms_contract
+from .routing import smooth_rms_contract, variance_floored_centered_norm
 from .types import (
     CoarseActionIntentState,
     FutureObjectDynamics,
@@ -28,7 +28,6 @@ class ObjectW1WorkingState:
     near_residual_typed: Tensor
     far_residual_typed: Tensor
     near_field: FutureObjectDynamics
-    intent_boundary_field: FutureObjectDynamics
 
 
 class _ObjectIntervalBlock(nn.Module):
@@ -106,6 +105,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
         self.object_transport_prior = nn.Linear(2, hidden, bias=False)
+        self.base_interaction_norm = nn.LayerNorm(
+            hidden, elementwise_affine=False
+        )
+        # One shared full-rank interaction is used by every type and by both
+        # common/residual owners.  It is bias-free and reads a product with
+        # the typed value, so a missing typed owner remains exact zero while
+        # the complete object/action/goal base can change a present effect.
+        construction_rng = torch.get_rng_state()
+        self.typed_base_interaction = nn.Linear(hidden, hidden, bias=False)
+        torch.set_rng_state(construction_rng)
+        nn.init.zeros_(self.typed_base_interaction.weight)
         self.goal_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.goal_memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.goal_read = nn.MultiheadAttention(
@@ -135,6 +145,30 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         nn.init.zeros_(self.persistence_head.weight)
         nn.init.zeros_(self.uncertainty_head.weight)
         nn.init.constant_(self.uncertainty_head.bias, -2.0)
+
+    def _interact_with_base(
+        self, typed: Tensor, base: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Inject the complete W condition without creating a free carrier."""
+
+        if tuple(typed.shape[:-2]) != tuple(base.shape[:-1]) or int(
+            typed.shape[-1]
+        ) != self.hidden:
+            raise ValueError("typed/base W interaction axes do not align")
+        base_value = torch.tanh(self.base_interaction_norm(base).float())
+        # Never unit-normalize a weak typed owner. A fixed variance floor
+        # preserves exact zero and keeps the small-signal Jacobian bounded,
+        # so the full base cannot turn numerical dust into a strong effect.
+        typed_value, denominator = variance_floored_centered_norm(typed, 0.25)
+        typed_value = typed_value.float()
+        product = typed_value * base_value[..., None, :]
+        interaction, _ = smooth_rms_contract(
+            self.typed_base_interaction(
+                product.to(dtype=typed.dtype)
+            ),
+            0.35,
+        )
+        return typed + interaction, interaction, denominator
 
     def _base(
         self,
@@ -191,16 +225,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             residual_components.append(residual_component)
         typed_common = torch.stack(common_components, dim=2)
         typed_residual = torch.stack(residual_components, dim=3)
-        # Public context may modulate an already non-zero typed value, but it
-        # cannot additively synthesize either effect owner.  Common remains
-        # interval-free; residual retains [I,K,type] all the way through W.
+        # The protected typed values remain outside the interaction.  The
+        # complete W base enters only through a bias-free typed-by-base product:
+        # it can reorganize a present owner but cannot synthesize one from
+        # zero. Common remains interval-free; residual retains [I,K,type].
         common_base = base.mean(dim=1)
-        typed_common = typed_common * (
-            1.0 + 0.5 * torch.tanh(common_base.float())[:, :, None]
-        ).to(dtype=typed_common.dtype)
-        typed_residual = typed_residual * (
-            1.0 + 0.5 * torch.tanh(base.float())[:, :, :, None]
-        ).to(dtype=typed_residual.dtype)
+        typed_common, common_interaction, common_interaction_denominator = self._interact_with_base(
+            typed_common, common_base
+        )
+        typed_residual, residual_interaction, residual_interaction_denominator = self._interact_with_base(
+            typed_residual, base
+        )
         if not collect_diagnostics:
             return base, typed_common, typed_residual, {}
         if goal_attention is None:
@@ -228,6 +263,22 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "object_w_common_base_interaction_rms": common_interaction.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_residual_base_interaction_rms": residual_interaction.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_common_base_interaction_denominator_min": (
+                common_interaction_denominator.detach().float().amin()
+            ),
+            "object_w_residual_base_interaction_denominator_min": (
+                residual_interaction_denominator.detach().float().amin()
+            ),
             "object_w_public_content_rms": public_object.detach()
             .float()
             .square()
@@ -376,7 +427,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             reliability=reliability,
             current_selector_validity=current_selector_validity,
             future_selector_validity=future_selector_validity,
-            object_coordinates=facts.coordinates.to(dtype=hidden.dtype),
+            camera_coordinates=facts.camera_coordinates.to(dtype=hidden.dtype),
+            camera_weights=(
+                facts.camera_evidence_mass.float()
+                * facts.camera_validity.float()
+            ).to(dtype=hidden.dtype),
         )
 
     @staticmethod
@@ -396,6 +451,34 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         return typed_batch.reshape(
             batch, types, intervals, objects, hidden
         ).permute(0, 2, 3, 1, 4)
+
+    @classmethod
+    def _run_owned_typed_block(
+        cls,
+        block: _ObjectIntervalBlock,
+        common: Tensor,
+        residual: Tensor,
+        *,
+        causal_interval: bool,
+    ) -> tuple[Tensor, Tensor]:
+        """Run one W block over its common owner and interval innovations.
+
+        Common is the first causal token for every object/type.  It therefore
+        receives real W capacity while remaining a distinct owner; interval
+        rows may read it, but it is never recovered by averaging residuals.
+        """
+
+        if common.ndim != 4 or residual.ndim != 5:
+            raise ValueError("owned typed W state lost common/residual axes")
+        if tuple(residual.shape[:1] + residual.shape[2:]) != tuple(common.shape):
+            raise ValueError("owned typed W common/residual axes do not align")
+        combined = torch.cat((common[:, None], residual), dim=1)
+        completed = cls._run_typed_block(
+            block,
+            combined,
+            causal_interval=causal_interval,
+        )
+        return completed[:, 0], completed[:, 1:]
 
     @staticmethod
     def _typed_state_metrics(value: Tensor, *, prefix: str) -> dict[str, Tensor]:
@@ -426,23 +509,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         hidden, typed_common, typed_residual, base_metrics = self._base(
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
-        intent_boundary_field = self._field(
-            facts=facts,
-            hidden=hidden,
-            typed_common=typed_common,
-            typed_interval_residual=typed_residual,
-        )
-        intent_boundary_field.validate()
         near = self.w1(hidden[:, :2], causal_interval=True)
-        near_typed = self._run_typed_block(
+        w1_common, near_typed = self._run_owned_typed_block(
             self.w1,
+            typed_common,
             typed_residual[:, :2],
             causal_interval=True,
         )
         field = self._field(
             facts=facts,
             hidden=near,
-            typed_common=typed_common,
+            typed_common=w1_common,
             typed_interval_residual=near_typed,
         )
         field.validate(expected_intervals=2)
@@ -452,14 +529,16 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             metrics.update(
                 self._typed_state_metrics(near_typed, prefix="object_w1")
             )
+            metrics["object_w1_common_processing_delta_rms"] = (
+                w1_common.detach().float() - typed_common.detach().float()
+            ).square().mean().sqrt()
         return field, ObjectW1WorkingState(
             near=near,
             far_base=hidden[:, 2:],
-            common_typed=typed_common,
+            common_typed=w1_common,
             near_residual_typed=near_typed,
             far_residual_typed=typed_residual[:, 2:],
             near_field=field,
-            intent_boundary_field=intent_boundary_field,
         ), metrics
 
     def forward_w2(
@@ -499,12 +578,24 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             batch, objects, 2, hidden
         ).transpose(1, 2)
         far = self.w2(far, causal_interval=True)
-        typed_far_query = w1_state.far_residual_typed.permute(0, 2, 3, 1, 4).reshape(
-            batch * objects * 3, 2, hidden
+        # Common is a real W owner, not a pre-W bypass.  Carry it as the first
+        # causal token in both the near memory and far query.  W2 can refine
+        # that owner from W1 evidence while far residuals retain their own two
+        # interval identities.
+        typed_far_owned = torch.cat(
+            (w1_state.common_typed[:, None], w1_state.far_residual_typed),
+            dim=1,
         )
-        typed_near_memory = w1_state.near_residual_typed.permute(
+        typed_near_owned = torch.cat(
+            (w1_state.common_typed[:, None], w1_state.near_residual_typed),
+            dim=1,
+        )
+        typed_far_query = typed_far_owned.permute(0, 2, 3, 1, 4).reshape(
+            batch * objects * 3, 3, hidden
+        )
+        typed_near_memory = typed_near_owned.permute(
             0, 2, 3, 1, 4
-        ).reshape(batch * objects * 3, 2, hidden)
+        ).reshape(batch * objects * 3, 3, hidden)
         typed_near_normalized = self.w1_memory_norm(typed_near_memory)
         typed_near_update, _ = self.w1_to_w2(
             self.w2_query_norm(typed_far_query),
@@ -513,14 +604,16 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             need_weights=False,
         )
         typed_near_update, _ = smooth_rms_contract(typed_near_update, 0.35)
-        far_typed = (typed_far_query + typed_near_update).reshape(
-            batch, objects, 3, 2, hidden
+        completed_far_owned = (typed_far_query + typed_near_update).reshape(
+            batch, objects, 3, 3, hidden
         ).permute(0, 3, 1, 2, 4)
-        far_typed = self._run_typed_block(
+        completed_far_owned = self._run_typed_block(
             self.w2,
-            far_typed,
+            completed_far_owned,
             causal_interval=True,
         )
+        w2_common = completed_far_owned[:, 0]
+        far_typed = completed_far_owned[:, 1:]
         completed_residual = torch.cat(
             (w1_state.near_residual_typed, far_typed), dim=1
         )
@@ -533,7 +626,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         field = self._field(
             facts=facts,
             hidden=torch.cat((w1_state.near, far), dim=1),
-            typed_common=w1_state.common_typed,
+            typed_common=w2_common,
             typed_interval_residual=completed_residual,
         )
         field.validate()
@@ -545,6 +638,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     prefix="object_w2",
                 )
             )
+            metrics["object_w2_common_processing_delta_rms"] = (
+                w2_common.detach().float()
+                - w1_state.common_typed.detach().float()
+            ).square().mean().sqrt()
         return field, metrics
 
     @staticmethod

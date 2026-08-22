@@ -533,6 +533,11 @@ def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
     assert groups["bottom_capacity/nodecay"]["lr"] == base * 1.4
     assert groups["bottom_capacity/nodecay"]["weight_decay"] == 0.0
     assert not any(name.startswith("bottom_capacity/decay") for name in groups)
+    grounder_names = set(groups["grounder/decay"]["parameter_names"])
+    dynamics_names = set(groups["dynamics/decay"]["parameter_names"])
+    assert "top.grounder.decode_content_residual.weight" in grounder_names
+    assert "top.grounder.decode_public_position.weight" in grounder_names
+    assert "top.dynamics.typed_base_interaction.weight" in dynamics_names
     context = _optimizer_group_context(optimizer, config)
     history = context["history_proposal/decay"]
     assert history["base_learning_rate"] == base

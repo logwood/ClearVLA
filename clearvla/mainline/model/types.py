@@ -722,59 +722,28 @@ StatelessIntentBundle = ObjectIntentState
 
 
 @dataclass(frozen=True)
-class IntentFutureSupervision:
-    """Stable physical targets decoded from the online S boundaries."""
+class IntentStateSupervision:
+    """The one auxiliary target owned by S itself.
+
+    Future object effects belong to W and are supervised only at the
+    :class:`FutureObjectDynamics` boundary.  S retains a small observable
+    state-summary objective; it no longer decodes a second copy of W's
+    semantic, geometry or status fields.
+    """
 
     state_prediction: Tensor  # [B,4,S]
     state_target: Tensor  # [B,4,S]
-    semantic_prediction: Tensor  # [B,4,K,D]
-    semantic_target: Tensor
-    status_prediction: Tensor  # [B,4,K,2]
-    status_target: Tensor
-    transport_prediction: Tensor  # [B,4,K,2]
-    transport_target: Tensor
-    public_loss: Tensor
-    semantic_loss: Tensor
-    semantic_common_loss: Tensor
-    semantic_residual_loss: Tensor
-    status_loss: Tensor
-    status_common_loss: Tensor
-    status_residual_loss: Tensor
-    transport_loss: Tensor
-    transport_common_loss: Tensor
-    transport_residual_loss: Tensor
-    typed_loss: Tensor
+    loss: Tensor
 
     def validate(self) -> None:
         if self.state_prediction.ndim != 3 or tuple(
             self.state_prediction.shape
         ) != tuple(self.state_target.shape):
             raise ValueError("intent state prediction/target must align as [B,4,S]")
-        batch = int(self.state_prediction.shape[0])
         if int(self.state_prediction.shape[1]) != 4:
             raise ValueError("intent state target lost the four interval axis")
-        for name in ("semantic", "status", "transport"):
-            prediction = getattr(self, f"{name}_prediction")
-            target = getattr(self, f"{name}_target")
-            if prediction.ndim != 4 or tuple(prediction.shape) != tuple(target.shape):
-                raise ValueError(f"intent {name} prediction/target must be [B,4,K,*]")
-            if tuple(prediction.shape[:2]) != (batch, 4):
-                raise ValueError(f"intent {name} target lost batch/interval identity")
-        scalar_losses = (
-            self.public_loss,
-            self.semantic_loss,
-            self.semantic_common_loss,
-            self.semantic_residual_loss,
-            self.status_loss,
-            self.status_common_loss,
-            self.status_residual_loss,
-            self.transport_loss,
-            self.transport_common_loss,
-            self.transport_residual_loss,
-            self.typed_loss,
-        )
-        if any(value.ndim != 0 for value in scalar_losses):
-            raise ValueError("intent future supervision losses must be scalars")
+        if self.loss.ndim != 0:
+            raise ValueError("intent state supervision loss must be scalar")
 
 
 @dataclass(frozen=True)
@@ -890,7 +859,11 @@ class FutureObjectDynamics:
     # from current_selector_validity so a predicted disappearance cannot erase
     # the very status effect that reports it.
     future_selector_validity: Tensor  # diagnostic support [B,I,K,1]
-    object_coordinates: Tensor  # [B,K,2]
+    # Current object geometry remains a real camera mixture.  Reducing these
+    # coordinates to one normalized-image mean creates a point that belongs
+    # to no camera and silently penalizes multi-view objects in P2.
+    camera_coordinates: Tensor  # [B,K,C,2]
+    camera_weights: Tensor  # [B,K,C,1]
 
     @property
     def intervals(self) -> int:
@@ -1001,10 +974,14 @@ class FutureObjectDynamics:
             (batch, intervals, objects, 1),
             "future selector validity",
         )
+        if self.camera_coordinates.ndim != 4 or tuple(
+            self.camera_coordinates.shape[:2]
+        ) != (batch, objects) or int(self.camera_coordinates.shape[-1]) != 2:
+            raise ValueError("future camera coordinates must be [B,K,C,2]")
         _shape(
-            self.object_coordinates,
-            (batch, objects, 2),
-            "future object coordinates",
+            self.camera_weights,
+            (*self.camera_coordinates.shape[:-1], 1),
+            "future camera weights",
         )
 
     def permute(self, permutation: Tensor) -> "FutureObjectDynamics":
@@ -1029,7 +1006,8 @@ class FutureObjectDynamics:
             reliability=self.reliability[:, :, index],
             current_selector_validity=self.current_selector_validity[:, index],
             future_selector_validity=self.future_selector_validity[:, :, index],
-            object_coordinates=self.object_coordinates[:, index],
+            camera_coordinates=self.camera_coordinates[:, index],
+            camera_weights=self.camera_weights[:, index],
         )
 
     @classmethod
@@ -1055,7 +1033,11 @@ class FutureObjectDynamics:
             future_selector_validity=(
                 facts.validity * facts.existence.detach().clamp(0.0, 1.0)
             )[:, None].expand(-1, intervals, -1, -1),
-            object_coordinates=facts.coordinates.to(dtype=current.dtype),
+            camera_coordinates=facts.camera_coordinates.to(dtype=current.dtype),
+            camera_weights=(
+                facts.camera_evidence_mass.float()
+                * facts.camera_validity.float()
+            ).to(dtype=current.dtype),
         )
 
 
@@ -1063,9 +1045,8 @@ class FutureObjectDynamics:
 class ObjectTopTrainingTargets:
     teacher_dynamics: FutureObjectDynamics | None
     current_loss_support: Tensor  # training-only current facts [B,K,C,1]
-    intent_supervision: IntentFutureSupervision | None
+    intent_supervision: IntentStateSupervision | None
     public_intent_loss: Tensor
-    typed_intent_loss: Tensor
     coarse_action_loss: Tensor
     history_proposal_loss: Tensor
     object_reconstruction_loss: Tensor
@@ -1074,7 +1055,6 @@ class ObjectTopTrainingTargets:
     def total_unweighted(self) -> Tensor:
         return (
             self.public_intent_loss
-            + self.typed_intent_loss
             + self.coarse_action_loss
             + self.history_proposal_loss
             + self.object_reconstruction_loss

@@ -6,7 +6,8 @@ active capability.  It has three calls with non-overlapping authority:
 ``build_online_context``
     Current observation/history/language only.  Produces G, S and W once.
 ``build_training_targets``
-    Training-only no-grad Teacher-G plus direct S/loss targets.  It cannot
+    Training-only no-grad Teacher-G plus the S-owned observable-state target.
+    It cannot
     mutate or replace the online context.
 ``compile_policy``
     ODE-step-dependent P2/P3 read from the completed dynamic P1 fact.
@@ -38,7 +39,7 @@ from .dynamics import ObjectFutureDynamicsCompiler
 from .grounding import DenseObjectGrounder
 from .intent import (
     CoarseActionIntent,
-    DirectIntentFutureSupervisor,
+    ObservableIntentStateSupervisor,
     StatelessObjectIntentOrganizer,
 )
 from .routing import smooth_rms_contract
@@ -60,7 +61,6 @@ class OnlineTopContext:
     facts: ObjectFactSet
     intent: ObjectIntentState
     coarse_action: CoarseActionIntentState
-    intent_boundary_dynamics: FutureObjectDynamics
     predicted_dynamics: FutureObjectDynamics
 
     def deployment_cache(self) -> "DeploymentTopCache":
@@ -72,7 +72,6 @@ class OnlineTopContext:
     def validate(self, *, hidden: int, horizon: int) -> None:
         self.facts.validate()
         self.intent.validate(horizon=horizon, hidden=hidden)
-        self.intent_boundary_dynamics.validate()
         self.predicted_dynamics.validate()
         expected = (self.facts.batch, 4, hidden)
         if tuple(self.coarse_action.tokens.shape) != expected:
@@ -202,11 +201,9 @@ class ObjectIntentDynamicsTop(nn.Module):
             key_dim=teacher_key_dim,
             flow_reference_frames=flow_reference_frames,
         )
-        self.intent_supervisor = DirectIntentFutureSupervisor(
+        self.intent_supervisor = ObservableIntentStateSupervisor(
             hidden=hidden,
             state_dim=state_dim,
-            content_dim=content_dim,
-            route_dim=route_dim,
         )
         self.effect_reader = ObjectFutureEffectReader(
             hidden=hidden,
@@ -325,7 +322,6 @@ class ObjectIntentDynamicsTop(nn.Module):
             facts=facts,
             intent=intent,
             coarse_action=coarse,
-            intent_boundary_dynamics=w1_state.intent_boundary_field,
             predicted_dynamics=predicted,
         )
         context.validate(hidden=self.hidden, horizon=self.horizon)
@@ -378,10 +374,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         )
         supervision = self.intent_supervisor(
             intent=context.intent,
-            intent_boundary=context.intent_boundary_dynamics,
             future_state=future_state,
-            teacher=teacher,
-            current_loss_support=context.facts.camera_validity,
         )
         supervised_coarse = self.coarse_action.attach_training_target(
             context.coarse_action,
@@ -392,8 +385,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             teacher_dynamics=teacher,
             current_loss_support=context.facts.camera_validity.detach().float(),
             intent_supervision=supervision,
-            public_intent_loss=supervision.public_loss,
-            typed_intent_loss=supervision.typed_loss,
+            public_intent_loss=supervision.loss,
             coarse_action_loss=coarse_loss,
             history_proposal_loss=coarse_loss.new_zeros(()),
             object_reconstruction_loss=context.facts.reconstruction_error,
@@ -402,17 +394,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             return targets, {}
         metrics = {
             **teacher_metrics,
-            "object_intent_public_future_state_loss": supervision.public_loss.detach(),
-            "object_intent_typed_future_field_loss": supervision.typed_loss.detach(),
-            "object_intent_typed_semantic_loss": supervision.semantic_loss.detach(),
-            "object_intent_typed_semantic_common_loss": supervision.semantic_common_loss.detach(),
-            "object_intent_typed_semantic_residual_loss": supervision.semantic_residual_loss.detach(),
-            "object_intent_typed_status_loss": supervision.status_loss.detach(),
-            "object_intent_typed_status_common_loss": supervision.status_common_loss.detach(),
-            "object_intent_typed_status_residual_loss": supervision.status_residual_loss.detach(),
-            "object_intent_typed_transport_loss": supervision.transport_loss.detach(),
-            "object_intent_typed_transport_common_loss": supervision.transport_common_loss.detach(),
-            "object_intent_typed_transport_residual_loss": supervision.transport_residual_loss.detach(),
+            "object_intent_public_future_state_loss": supervision.loss.detach(),
             "object_intent_future_state_prediction_rms": supervision.state_prediction
             .detach()
             .float()
@@ -420,62 +402,6 @@ class ObjectIntentDynamicsTop(nn.Module):
             .mean()
             .sqrt(),
             "object_intent_future_state_target_rms": supervision.state_target
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_semantic_prediction_rms": supervision.semantic_prediction
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_semantic_target_rms": supervision.semantic_target
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_semantic_common_prediction_rms": context.intent_boundary_dynamics.semantic_common
-            .detach()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_semantic_common_target_rms": teacher.semantic_common
-            .detach()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_semantic_residual_prediction_rms": context.intent_boundary_dynamics.semantic_interval_residual
-            .detach()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_semantic_residual_target_rms": teacher.semantic_interval_residual
-            .detach()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_status_prediction_rms": supervision.status_prediction
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_status_target_rms": supervision.status_target
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_transport_prediction_rms": supervision.transport_prediction
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_intent_typed_transport_target_rms": supervision.transport_target
             .detach()
             .float()
             .square()

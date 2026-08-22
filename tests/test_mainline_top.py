@@ -79,7 +79,6 @@ def test_online_context_has_prediction_but_no_teacher_or_future_target() -> None
         "facts",
         "intent",
         "coarse_action",
-        "intent_boundary_dynamics",
         "predicted_dynamics",
     }
     assert not names & {"teacher", "teacher_dynamics", "future_supports", "future_target"}

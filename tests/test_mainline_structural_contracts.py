@@ -30,7 +30,7 @@ from clearvla.mainline.model.grounding import (
 from clearvla.mainline.model.intent import (
     TYPED_INTENT_NAMES,
     CoarseActionIntent,
-    DirectIntentFutureSupervisor,
+    ObservableIntentStateSupervisor,
     StatelessObjectIntentOrganizer,
     _CrossRead,
     _SelfBlock,
@@ -259,7 +259,7 @@ def test_grounder_reconstruction_assignment_is_null_independent_and_zero_safe() 
     assert torch.equal(invalid, torch.zeros_like(invalid))
 
 
-def test_grounder_dense_reconstruction_uses_exported_conditional_k_content() -> None:
+def test_grounder_reconstruction_uses_canonical_k_content_plus_public_position() -> None:
     torch.manual_seed(202)
     local = _local_facts(content=8, route=4, hidden=16, observed=True)
     facts, metrics = DenseObjectGrounder(
@@ -278,14 +278,22 @@ def test_grounder_dense_reconstruction_uses_exported_conditional_k_content() -> 
     )
     local_prior = facts.dense_chart.candidate_owner_prior[:, None].float()
     reconstruction_owner = (conditional_k * local_prior).sum(dim=-1)
-    expected = facts.public_content[:, None, None, None] + torch.einsum(
+    canonical_part = facts.public_content[:, None, None, None] + torch.einsum(
         "bkcyx,bkd->bcyxd",
         reconstruction_owner,
         facts.content_innovation.float(),
     )
+    public_position = facts.reconstructed_dino.float() - canonical_part
     torch.testing.assert_close(
-        facts.reconstructed_dino.float(), expected, atol=2.0e-6, rtol=1.0e-5
+        public_position.mean(dim=(1, 2, 3)),
+        torch.zeros_like(public_position.mean(dim=(1, 2, 3))),
+        atol=2.0e-6,
+        rtol=0.0,
     )
+    # Both added capacities are exact zero at initialization, preserving the
+    # former forward distribution while remaining in the dense objective.
+    assert float(metrics["object_grounding_public_position_rms"]) == 0.0
+    assert float(metrics["object_grounding_canonical_slot_residual_rms"]) == 0.0
     assert float(metrics["object_grounding_reconstruction_object_mass_mean"]) > 0.99
     assert float(metrics["object_grounding_reconstruction_active_fraction"]) == 1.0
 
@@ -340,30 +348,11 @@ def test_intent_supervisor_uses_canonical_four_interval_physical_targets() -> No
         facts=facts,
         collect_diagnostics=False,
     )
-    batch, intervals, objects, content, cameras = 1, 4, facts.objects, 16, 1
-    scalar = torch.ones(batch, intervals, objects, 1)
-    teacher = FutureObjectDynamics(
-        current_reference=torch.randn(batch, objects, content),
-        successor_content=torch.randn(batch, intervals, objects, content),
-        semantic_delta=torch.randn(batch, intervals, objects, content),
-        transport_mean=torch.randn(batch, intervals, objects, 2),
-        transport_covariance=torch.rand(batch, intervals, objects, 3),
-        visibility=torch.zeros_like(scalar),
-        persistence=torch.zeros_like(scalar),
-        uncertainty=torch.zeros_like(scalar),
-        reliability=scalar,
-        current_selector_validity=torch.ones(batch, objects, 1),
-        future_selector_validity=scalar,
-        object_coordinates=torch.zeros(batch, objects, 2),
-    )
+    batch, intervals = 1, 4
     future_state = torch.randn(batch, 48, 7)
-    intent_boundary = FutureObjectDynamics.neutral(facts)
     result = top.intent_supervisor(
         intent=intent,
-        intent_boundary=intent_boundary,
         future_state=future_state,
-        teacher=teacher,
-        current_loss_support=torch.ones(batch, objects, cameras, 1),
     )
     expected_state = torch.stack(
         [future_state[:, lower - 1 : upper].mean(dim=1) for lower, upper in INTERVAL_BOUNDS],
@@ -371,31 +360,12 @@ def test_intent_supervisor_uses_canonical_four_interval_physical_targets() -> No
     )
     torch.testing.assert_close(result.state_target, expected_state)
     assert tuple(result.state_prediction.shape) == (batch, intervals, 7)
-    assert tuple(result.semantic_prediction.shape) == (batch, intervals, objects, content)
-    assert tuple(result.status_prediction.shape) == (batch, intervals, objects, 2)
-    assert tuple(result.transport_prediction.shape) == (batch, intervals, objects, 2)
-    torch.testing.assert_close(
-        result.semantic_prediction,
-        intent_boundary.semantic_delta,
-        atol=0.0,
-        rtol=0.0,
-    )
-    torch.testing.assert_close(
-        result.transport_prediction,
-        intent_boundary.transport_mean,
-        atol=0.0,
-        rtol=0.0,
-    )
-    assert not any(
-        name.startswith(("semantic_head", "status_head", "transport_head"))
-        for name, _ in top.intent_supervisor.named_parameters()
-    )
-    assert "future_action" not in inspect.signature(
-        DirectIntentFutureSupervisor.forward
-    ).parameters
+    assert set(dict(top.intent_supervisor.named_parameters())) == {"state_head.weight"}
+    parameters = inspect.signature(ObservableIntentStateSupervisor.forward).parameters
+    assert set(parameters) == {"self", "intent", "future_state"}
 
 
-def test_intent_typed_loss_ignores_reliability_and_selector_validity() -> None:
+def test_intent_supervisor_has_no_w_or_teacher_target_boundary() -> None:
     torch.manual_seed(22)
     top = _object_top()
     facts, _ = top.grounder(_local_facts(cameras=1))
@@ -408,45 +378,13 @@ def test_intent_typed_loss_ignores_reliability_and_selector_validity() -> None:
         facts=facts,
         collect_diagnostics=False,
     )
-    batch, intervals, objects, content, cameras = 1, 4, facts.objects, 16, 1
-    current = torch.randn(batch, objects, content)
-    scalar = torch.zeros(batch, intervals, objects, 1)
-    teacher = FutureObjectDynamics(
-        current_reference=current,
-        successor_content=current[:, None].expand(-1, intervals, -1, -1),
-        semantic_delta=torch.ones(batch, intervals, objects, content),
-        transport_mean=torch.zeros(batch, intervals, objects, 2),
-        transport_covariance=torch.zeros(batch, intervals, objects, 3),
-        visibility=scalar,
-        persistence=scalar,
-        uncertainty=torch.ones_like(scalar),
-        reliability=scalar,
-        current_selector_validity=torch.ones(batch, objects, 1),
-        future_selector_validity=torch.zeros(batch, intervals, objects, 1),
-        object_coordinates=torch.zeros(batch, objects, 2),
-    )
-    kwargs = dict(
+    result = top.intent_supervisor(
         intent=intent,
-        intent_boundary=FutureObjectDynamics.neutral(facts),
-        future_state=torch.randn(batch, 48, 7),
-        teacher=teacher,
-        current_loss_support=torch.ones(batch, objects, cameras, 1),
+        future_state=torch.randn(1, 48, 7),
     )
-    result = top.intent_supervisor(**kwargs)
-    changed = top.intent_supervisor(
-        **{
-            **kwargs,
-            "teacher": replace(
-                teacher,
-                reliability=torch.ones_like(teacher.reliability),
-                future_selector_validity=torch.ones_like(
-                    teacher.future_selector_validity
-                ),
-            ),
-        }
-    )
-    torch.testing.assert_close(result.semantic_target, torch.ones_like(result.semantic_target))
-    torch.testing.assert_close(result.typed_loss, changed.typed_loss)
+    assert result.loss.ndim == 0
+    assert not hasattr(result, "typed_loss")
+    assert not hasattr(result, "semantic_prediction")
 
 
 def test_final_object_posterior_is_recomputed_after_last_slot_update() -> None:
@@ -1058,6 +996,35 @@ def test_grounder_has_no_learned_typed_or_prototype_shortcut_heads() -> None:
     assert not any("masked" in name for name in names)
 
 
+def test_grounder_canonical_slot_residual_is_exported_and_supervised() -> None:
+    """The decoded K residual is the canonical fact, not a private recon head."""
+
+    torch.manual_seed(2201)
+    local = _local_facts(cameras=2, content=8, route=4, hidden=16)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )
+    baseline, _ = grounder(local)
+    assert torch.count_nonzero(grounder.decode_content_residual.weight) == 0
+    with torch.no_grad():
+        grounder.decode_content_residual.weight.copy_(
+            0.05 * torch.randn_like(grounder.decode_content_residual.weight)
+        )
+    canonical, metrics = grounder(local)
+    assert not torch.equal(canonical.content, baseline.content)
+    assert not torch.equal(canonical.content_innovation, baseline.content_innovation)
+    assert float(metrics["object_grounding_canonical_slot_residual_rms"]) > 0.0
+    canonical.reconstruction_error.backward()
+    gradient = grounder.decode_content_residual.weight.grad
+    assert gradient is not None and torch.count_nonzero(gradient) > 0
+    position_gradient = grounder.decode_public_position.weight.grad
+    assert position_gradient is not None and torch.count_nonzero(position_gradient) > 0
+
+
 def test_grounder_does_not_reinject_public_chart_into_object_candidates() -> None:
     torch.manual_seed(221)
     grounder = DenseObjectGrounder(
@@ -1275,6 +1242,45 @@ def test_w_field_decoder_cannot_republicize_completed_typed_fields() -> None:
     torch.testing.assert_close(typed_a.visibility, typed_b.visibility)
 
 
+def test_w_full_base_interaction_is_zero_preserving_and_condition_sensitive() -> None:
+    torch.manual_seed(2921)
+    dynamics = ObjectFutureDynamicsCompiler(
+        hidden=16, content_dim=8, route_dim=4, heads=4
+    )
+    with torch.no_grad():
+        dynamics.typed_base_interaction.weight.copy_(torch.eye(16))
+    typed = torch.randn(2, 4, 3, 16)
+    base = torch.randn(2, 4, 16)
+    first, first_interaction, first_denominator = dynamics._interact_with_base(
+        typed, base
+    )
+    second, _, _ = dynamics._interact_with_base(typed, base.roll(1, dims=0))
+    assert not torch.equal(first, second)
+    assert torch.count_nonzero(first_interaction) > 0
+
+    _, tiny_interaction, tiny_denominator = dynamics._interact_with_base(
+        typed * 1.0e-6, base
+    )
+    assert float(
+        (
+            tiny_interaction.float().square().mean().sqrt()
+            / first_interaction.float().square().mean().sqrt().clamp_min(1.0e-8)
+        ).detach()
+    ) < 1.0e-4
+    assert float(first_denominator.detach().amin()) >= 0.25
+    assert float(tiny_denominator.detach().amin()) >= 0.25
+
+    zero = torch.zeros_like(typed)
+    zero_output, zero_interaction, zero_denominator = dynamics._interact_with_base(
+        zero, base
+    )
+    assert torch.equal(zero_output, zero)
+    assert torch.equal(zero_interaction, zero)
+    torch.testing.assert_close(
+        zero_denominator, torch.full_like(zero_denominator, 0.25)
+    )
+
+
 def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
     torch.manual_seed(293)
     top = _object_top().eval()
@@ -1301,16 +1307,17 @@ def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
         action=coarse,
         collect_diagnostics=False,
     )
-    torch.testing.assert_close(working.common_typed, common_input)
+    assert not torch.equal(working.common_typed, common_input)
     assert not torch.equal(working.near_residual_typed, residual_input[:, :2])
-    completed, _ = top.dynamics.forward_w2(
+    completed, completed_metrics = top.dynamics.forward_w2(
         facts=facts,
         intent=intent.world_dock(),
         action=coarse,
         w1_state=working,
-        collect_diagnostics=False,
+        collect_diagnostics=True,
     )
     completed.validate()
+    assert float(completed_metrics["object_w2_common_processing_delta_rms"]) > 0.0
 
     zero_typed = replace(
         intent,
@@ -1468,7 +1475,8 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
         reliability=scalar,
         current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=validity,
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, cameras, 2),
+        camera_weights=torch.ones(batch, objects, cameras, 1),
     )
     prediction = replace(
         target,
@@ -1536,7 +1544,7 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
 
 def test_training_support_uses_physical_camera_validity_not_assignment_mass() -> None:
     source = inspect.getsource(ObjectIntentDynamicsTop.build_training_targets)
-    assert source.count("context.facts.camera_validity") == 2
+    assert source.count("context.facts.camera_validity") == 1
     assert "camera_evidence_mass" not in source
 
 
@@ -1558,7 +1566,8 @@ def test_future_interval_transition_penalizes_temporal_collapse_not_common_offse
         reliability=scalar,
         current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=torch.ones(batch, intervals, objects, 1),
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, cameras, 2),
+        camera_weights=torch.ones(batch, objects, cameras, 1),
     )
     shifted = replace(target, semantic_delta=semantic + 7.0)
     collapsed = replace(target, semantic_delta=torch.zeros_like(semantic))
@@ -1599,7 +1608,8 @@ def test_semantic_deduplication_preserves_historical_gradient_coefficients() -> 
         reliability=scalar,
         current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=torch.ones(batch, intervals, objects, 1),
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, cameras, 2),
+        camera_weights=torch.ones(batch, objects, cameras, 1),
     )
     semantic = torch.full_like(target.semantic_delta, 1.0e-3)
     prediction = replace(
@@ -1859,9 +1869,11 @@ def test_teacher_camera_relabeling_preserves_object_geometry() -> None:
         facts=permuted_facts,
         future_supports=supports[:, :, camera_permutation],
         future_offsets=offsets,
-    )
+        )
     for field in fields(FutureObjectDynamics):
         expected = getattr(target, field.name)
+        if field.name in {"camera_coordinates", "camera_weights"}:
+            expected = expected[:, :, camera_permutation]
         torch.testing.assert_close(
             getattr(relabeled, field.name),
             expected,
@@ -2634,7 +2646,8 @@ def test_p2_equal_candidate_evidence_has_no_fixed_half_null_prior() -> None:
         reliability=torch.zeros_like(scalar),
         current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=scalar,
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, 1, 2),
+        camera_weights=torch.ones(batch, objects, 1, 1),
     )
     intent = PolicyIntentDock(
         common_key=torch.zeros(batch, hidden),
@@ -2682,7 +2695,8 @@ def test_p2_protected_common_survives_when_interval_residual_is_exactly_zero() -
         reliability=torch.zeros(batch, intervals, objects, 1),
         current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=torch.ones(batch, intervals, objects, 1),
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, 1, 2),
+        camera_weights=torch.ones(batch, objects, 1, 1),
     )
     intent = PolicyIntentDock(
         common_key=torch.zeros(batch, hidden),
@@ -2769,7 +2783,8 @@ def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> No
         reliability=torch.zeros_like(scalar),
         current_selector_validity=torch.ones(batch, objects, 1),
         future_selector_validity=torch.zeros_like(scalar),
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, 1, 2),
+        camera_weights=torch.ones(batch, objects, 1, 1),
     )
     intent = PolicyIntentDock(
         common_key=torch.zeros(batch, hidden),
@@ -2803,6 +2818,79 @@ def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> No
     assert float(metrics["object_p2_geometry_residual_null_mass"]) < 0.5
 
 
+def test_p2_real_camera_mixture_is_camera_permutation_invariant() -> None:
+    torch.manual_seed(4041)
+    batch, intervals, objects, cameras, content, hidden = 2, 4, 3, 3, 6, 8
+    scalar = torch.zeros(batch, intervals, objects, 1)
+    dynamics = FutureObjectDynamics(
+        current_reference=torch.randn(batch, objects, content),
+        successor_content=torch.randn(batch, intervals, objects, content),
+        semantic_delta=torch.randn(batch, intervals, objects, content),
+        transport_mean=0.1 * torch.randn(batch, intervals, objects, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, 3),
+        visibility=scalar,
+        persistence=scalar,
+        uncertainty=scalar,
+        reliability=scalar,
+        current_selector_validity=torch.ones(batch, objects, 1),
+        future_selector_validity=torch.ones(batch, intervals, objects, 1),
+        camera_coordinates=torch.tanh(
+            torch.randn(batch, objects, cameras, 2)
+        ),
+        camera_weights=torch.rand(batch, objects, cameras, 1),
+    )
+    intent = PolicyIntentDock(
+        common_key=torch.randn(batch, hidden),
+        interval_residual_key=torch.randn(batch, intervals, hidden),
+        typed_common_object_value=torch.randn(batch, objects, 3, 4),
+        typed_interval_residual_value=torch.randn(
+            batch, intervals, objects, 3, 4
+        ),
+        temporal_control=torch.randn(batch, 24, hidden),
+        state_change_evidence=torch.randn(batch, hidden),
+    )
+    reader = ObjectFutureEffectReader(
+        hidden=hidden, content_dim=content, route_dim=4
+    ).eval()
+    query = torch.randn(batch, 24, 2, hidden)
+    baseline, baseline_metrics = reader(
+        query, dynamics, intent, collect_diagnostics=True
+    )
+    camera_permutation = torch.tensor([2, 0, 1])
+    relabeled = replace(
+        dynamics,
+        camera_coordinates=dynamics.camera_coordinates[:, :, camera_permutation],
+        camera_weights=dynamics.camera_weights[:, :, camera_permutation],
+    )
+    permuted, permuted_metrics = reader(
+        query, relabeled, intent, collect_diagnostics=True
+    )
+    torch.testing.assert_close(permuted, baseline, atol=2.0e-6, rtol=1.0e-6)
+    for name in (
+        "object_p2_coordinate_score_abs",
+        "object_p2_coordinate_score_max_abs",
+        "object_p2_camera_mixture_effective_count",
+        "object_p2_camera_support_fraction",
+        "object_p2_camera_coordinate_variation",
+    ):
+        torch.testing.assert_close(
+            permuted_metrics[name], baseline_metrics[name], atol=2.0e-6, rtol=1.0e-6
+        )
+
+    no_camera = replace(
+        dynamics,
+        camera_weights=torch.zeros_like(dynamics.camera_weights),
+    )
+    _, no_camera_metrics = reader(
+        query, no_camera, intent, collect_diagnostics=True
+    )
+    assert float(no_camera_metrics["object_p2_coordinate_score_abs"]) == 0.0
+    assert float(no_camera_metrics["object_p2_coordinate_score_max_abs"]) == 0.0
+    assert float(no_camera_metrics["object_p2_camera_mixture_effective_count"]) == 0.0
+    assert float(no_camera_metrics["object_p2_camera_support_fraction"]) == 0.0
+    assert float(no_camera_metrics["object_p2_camera_coordinate_variation"]) == 0.0
+
+
 def test_p2_invalid_objects_have_exactly_zero_common_and_residual_support() -> None:
     batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
     scalar = torch.zeros(batch, intervals, objects, 1)
@@ -2819,7 +2907,8 @@ def test_p2_invalid_objects_have_exactly_zero_common_and_residual_support() -> N
         reliability=scalar,
         current_selector_validity=validity,
         future_selector_validity=torch.ones_like(scalar),
-        object_coordinates=torch.zeros(batch, objects, 2),
+        camera_coordinates=torch.zeros(batch, objects, 1, 2),
+        camera_weights=torch.ones(batch, objects, 1, 1),
     )
     semantic = baseline.semantic_delta.clone()
     transport = baseline.transport_mean.clone()
