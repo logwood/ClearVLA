@@ -10,11 +10,11 @@ active capability.  It has three calls with non-overlapping authority:
     It cannot
     mutate or replace the online context.
 ``compile_policy``
-    ODE-step-dependent P2/P3 read from the completed dynamic P1 fact.
+    ODE-step-dependent P2/P3 read from the typed live P1 policy state.
 
 P1's expensive current-detail read is built exactly once by the independent
-factual reader.  The live policy write is completed at each ODE step before it
-enters this composer; P2/P3 cannot reopen a visual bank.
+factual reader. The live policy write is completed at each ODE step but remains
+separate from the factual base; P2/P3 cannot reopen a visual bank.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from .routing import smooth_rms_contract
 from .teacher import ObjectFutureTeacher
 from .types import (
     CoarseActionIntentState,
+    CompletedP1PolicyState,
     FutureObjectDynamics,
     LocalFactSet,
     ObjectFactSet,
@@ -360,6 +361,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         future_supports: Tensor,
         future_offsets: Tensor,
         future_action: Tensor,
+        current_state: Tensor,
         future_state: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[ObjectTopTrainingTargets, dict[str, Tensor]]:
@@ -374,6 +376,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         )
         supervision = self.intent_supervisor(
             intent=context.intent,
+            current_state=current_state,
             future_state=future_state,
         )
         supervised_coarse = self.coarse_action.attach_training_target(
@@ -383,7 +386,9 @@ class ObjectIntentDynamicsTop(nn.Module):
         coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
-            current_loss_support=context.facts.camera_validity.detach().float(),
+            current_loss_support=(
+                context.facts.camera_chart_availability.detach().float()
+            ),
             intent_supervision=supervision,
             public_intent_loss=supervision.loss,
             coarse_action_loss=coarse_loss,
@@ -394,16 +399,23 @@ class ObjectIntentDynamicsTop(nn.Module):
             return targets, {}
         metrics = {
             **teacher_metrics,
-            "object_intent_public_future_state_loss": supervision.loss.detach(),
-            "object_intent_future_state_prediction_rms": supervision.state_prediction
+            "object_intent_public_future_increment_loss": supervision.loss.detach(),
+            "object_intent_future_increment_prediction_rms": supervision.state_prediction
             .detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_intent_future_state_target_rms": supervision.state_target
+            "object_intent_future_increment_target_rms": supervision.state_target
             .detach()
             .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_future_cumulative_reconstruction_error": (
+                supervision.state_prediction.detach().float().cumsum(dim=1)
+                - supervision.state_target.detach().float().cumsum(dim=1)
+            )
             .square()
             .mean()
             .sqrt(),
@@ -415,25 +427,24 @@ class ObjectIntentDynamicsTop(nn.Module):
         self,
         context: DeploymentTopCache,
         *,
-        p1_fact: Tensor,
-        p1_precision_innovation: Tensor,
+        p1_state: CompletedP1PolicyState,
         action_query: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[CompiledPolicyState, dict[str, Tensor]]:
         """Run dynamic P2/P3; no observation or teacher input is accepted."""
 
         context.validate(hidden=self.hidden, horizon=self.horizon)
-        # V120's P2 query was the live trajectory *after* the P1 factual
-        # write, not the untouched noisy-action seed.  Keeping that residual
-        # order is important: it lets the future-effect reader ask questions
-        # in the factual chart that P1 actually selected.
-        if tuple(p1_fact.shape) != tuple(action_query.shape) or tuple(
-            p1_precision_innovation.shape
-        ) != tuple(action_query.shape):
-            raise ValueError("completed P1 fact and action query must align")
-        p1_action_query = action_query + p1_fact
+        p1_state.validate(
+            horizon=self.horizon,
+            basis=self.basis,
+            hidden=self.hidden,
+        )
+        if tuple(p1_state.factual_base.shape) != tuple(action_query.shape):
+            raise ValueError("completed P1 policy state and action query must align")
+        # Preserve V120's post-P1 P2 query exactly while keeping the live
+        # policy-block write outside the observation-owned factual base.
         raw_effect, effect_metrics = self.effect_reader(
-            p1_action_query,
+            p1_state.effect_query,
             context.predicted_dynamics,
             context.intent.policy_dock(),
             collect_diagnostics=collect_diagnostics,
@@ -444,19 +455,16 @@ class ObjectIntentDynamicsTop(nn.Module):
         # seen by P3 and the controlled-transition coefficient geometry.
         effect, effect_contract = smooth_rms_contract(raw_effect, 0.35)
         consequence, consequence_metrics = self.consequence(
-            factual_base=p1_fact,
+            factual_base=p1_state.factual_base,
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
-        # The protected consequence already carries the complete P1+P2 base.
-        # Precision receives only the cached high-resolution P1 innovation;
-        # temporal receives consequence through an explicit multiplicative
-        # relation.  Neither lane can reconstruct the complete base under a
-        # second optional name.
+        # The protected consequence carries only the static P1 fact plus W
+        # effect.  The live P1 write remains an optional precision residual.
         p3_action_query = action_query
         plan, plan_metrics = self.plan_compiler(
-            p1_fact=p1_fact,
-            p1_precision_innovation=p1_precision_innovation,
+            p1_factual_detail=p1_state.factual_base,
+            p1_policy_residual=p1_state.policy_precision_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),
             action_query=p3_action_query,

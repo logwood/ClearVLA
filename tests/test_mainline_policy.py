@@ -881,29 +881,63 @@ def test_p1_has_no_global_object_value_or_learned_null_shortcut() -> None:
     assert torch.count_nonzero(cache.factual_dock.protected_detail) > 0
 
 
-def test_dynamic_p1_completes_cached_detail_at_each_ode_time() -> None:
+def test_dynamic_p1_splits_static_fact_from_live_policy_residual() -> None:
     torch.manual_seed(472)
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
-    batch = _batch(config)
-    cache, _, _ = model.encode_online(batch.online)
-    physical = model.action_codec.encode(
-        batch.action_target.normalized,
-        batch.online.history.action_state,
+    shape = (
+        1,
+        config.dimensions.action_horizon,
+        config.dimensions.action_basis_tokens,
+        config.dimensions.hidden_size,
     )
-    query = model.bottom.action_query(physical, torch.full((1,), 0.25))
+    protected_detail = torch.randn(*shape, requires_grad=True)
+    query = torch.randn(*shape, requires_grad=True)
     first, first_metrics = model.bottom.complete_p1_fact(
         action_query=query,
-        protected_detail=cache.factual_dock.protected_detail,
+        protected_detail=protected_detail,
         time=torch.full((1,), 0.25),
         collect_diagnostics=True,
     )
     second, _ = model.bottom.complete_p1_fact(
         action_query=query,
-        protected_detail=cache.factual_dock.protected_detail,
+        protected_detail=protected_detail,
         time=torch.full((1,), 0.75),
     )
-    assert not torch.equal(first, second)
+    torch.testing.assert_close(
+        first.factual_base,
+        protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        second.factual_base,
+        protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert not torch.equal(
+        first.policy_precision_residual,
+        second.policy_precision_residual,
+    )
+    torch.testing.assert_close(
+        first.effect_query,
+        query + first.factual_base + first.policy_precision_residual,
+        atol=0.0,
+        rtol=0.0,
+    )
+    factual_action_gradient = torch.autograd.grad(
+        first.factual_base.float().sum(),
+        query,
+        allow_unused=True,
+        retain_graph=True,
+    )[0]
+    assert factual_action_gradient is None
+    effect_action_gradient = torch.autograd.grad(
+        first.effect_query.float().sum(),
+        query,
+    )[0]
+    assert torch.count_nonzero(effect_action_gradient) > 0
     assert first_metrics["p1_protected_detail_rms"] > 0
     assert first_metrics["p1_dynamic_delta_rms"] > 0
     assert first_metrics["p1_completed_fact_rms"] > 0
@@ -928,15 +962,31 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         executed_memory=cache.executed_memory,
         action_history_keep=cache.action_history_keep,
     )
+    p1_state, _ = model.bottom.complete_p1_fact(
+        action_query=query,
+        protected_detail=cache.factual_dock.protected_detail,
+        time=time,
+    )
     compiled, _ = model.top.compile_policy(
         cache.top,
-        p1_fact=model.bottom.complete_p1_fact(
-            action_query=query,
-            protected_detail=cache.factual_dock.protected_detail,
-            time=time,
-        )[0],
-        p1_precision_innovation=cache.factual_dock.protected_detail,
+        p1_state=p1_state,
         action_query=query,
+    )
+    torch.testing.assert_close(
+        compiled.consequence.factual_base,
+        cache.factual_dock.protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        compiled.plan.protected_base,
+        (
+            cache.factual_dock.protected_detail
+            + compiled.consequence.effect
+            + compiled.consequence.interaction
+        ),
+        atol=0.0,
+        rtol=0.0,
     )
     captured_transition: dict[str, torch.Tensor] = {}
 

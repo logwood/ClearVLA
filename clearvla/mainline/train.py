@@ -643,12 +643,13 @@ def main() -> None:
             f"shape_mismatch={len(report.shape_mismatch)} rejected={len(report.rejected)}",
             flush=True,
         )
+    module_parameters = _module_parameter_context(model)
     context = {
         "config": config.as_dict(),
         "identity": identity.as_dict(),
         "optimizer_roles": ownership.role_counts,
         "optimizer_groups": _optimizer_group_context(optimizer, config),
-        "module_parameters": _module_parameter_context(model),
+        "module_parameters": module_parameters,
         "dataset_sizes": {name: len(value) for name, value in bundle.datasets.items()},
         "splits": {name: list(value) for name, value in bundle.splits.items()},
         "skipped": list(bundle.skipped),
@@ -662,6 +663,41 @@ def main() -> None:
             "state_sha256": identity.dataset.state_normalizer_sha256,
         },
     }
+    total_parameters = sum(int(parameter.numel()) for parameter in model.parameters())
+    trainable_parameters = sum(
+        int(parameter.numel())
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+    print(
+        "[mainline-identity] "
+        f"schema={identity.manifest['schema']} "
+        f"manifest={identity.manifest_digest[:12]} "
+        f"source={identity.source.digest[:12]} "
+        f"git={identity.git_commit[:12]} "
+        f"action_norm={context['normalizer_fingerprints']['action_v120']} "
+        f"state_norm={context['normalizer_fingerprints']['state_v120']} "
+        f"parameters={total_parameters} trainable={trainable_parameters}",
+        flush=True,
+    )
+    module_labels = (
+        ("G", "grounding_g1_g2_g3"),
+        ("grounder", "global_object_grounder"),
+        ("S", "stateless_intent"),
+        ("W", "future_dynamics_w1_w2"),
+        ("P1", "factual_precision_p1"),
+        ("P2", "future_effect_p2"),
+        ("P3", "policy_compiler_p3"),
+        ("bottom", "retained_bottom"),
+    )
+    print(
+        "[mainline-modules] "
+        + " ".join(
+            f"{label}={module_parameters[name]['parameter_count']}"
+            for label, name in module_labels
+        ),
+        flush=True,
+    )
     # Preflight uses the deterministic validation sampler and separate RNGs;
     # it must not consume formal training shuffle, condition-dropout or flow
     # randomness.

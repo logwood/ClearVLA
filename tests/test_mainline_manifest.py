@@ -43,26 +43,26 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 34
+    assert ARCHITECTURE_MANIFEST.schema == 35
     assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "canonical_decoded_k_content_stateless_state_supervision_w_separated_common_residual_near_far_bridge_typed_base_interaction_camera_mixture_public_typed_w_interval_mapped_scale_bounded_p2_consequence_p3"
+        == "single_content_k_identity_incremental_stateless_intent_causal_w_near_far_camera_specific_effect_static_fact_dynamic_precision_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
+        == "restored_v120_shared_seed_typed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_observed_current_grounding_partial_ot_single_w_future_effect_target_physical_camera_loss_support_event_boost_v120_decay_three_owner_clip"
+        == "v120_mirrored_physical_flow_observed_current_grounding_partial_ot_neutral_status_camera_specific_future_loss_support_event_boost_v120_decay_three_owner_clip"
     )
     assert components.runtime == (
         "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only"
     )
 
 
-def test_schema_34_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_35_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

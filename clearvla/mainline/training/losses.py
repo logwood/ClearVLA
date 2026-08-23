@@ -479,23 +479,33 @@ def future_dynamics_terms(
         direction_weight=1.0 / 22.0,
     )
     semantic_delta = 0.5 * (semantic_common + semantic_residual)
-    (
-        transport_common,
-        transport_residual,
-        transport_common_error,
-        transport_residual_error,
-    ) = decomposed_loss(
-        prediction.transport_mean,
-        target.transport_mean,
+    transport_prediction_common = prediction.transport_mean.float().mean(dim=1)
+    transport_target_common = target.transport_mean.detach().float().mean(dim=1)
+    transport_prediction_residual = (
+        prediction.transport_mean.float() - transport_prediction_common[:, None]
+    )
+    transport_target_residual = (
+        target.transport_mean.detach().float() - transport_target_common[:, None]
+    )
+    transport_common_error = row_loss(
+        transport_prediction_common[:, None],
+        transport_target_common[:, None],
         scale_floored=False,
     )
+    transport_residual_error = row_loss(
+        transport_prediction_residual,
+        transport_target_residual,
+        scale_floored=False,
+    )
+    transport_common = masked(transport_common_error, camera_validity[:, :1])
+    transport_residual = masked(transport_residual_error, camera_validity)
     transport = 0.5 * (transport_common + transport_residual)
     covariance_error = row_loss(
         prediction.transport_covariance,
         target.transport_covariance,
         scale_floored=False,
     )
-    covariance = masked(covariance_error, object_validity)
+    covariance = masked(covariance_error, camera_validity)
     (
         visibility_common,
         visibility_residual,
@@ -518,12 +528,6 @@ def future_dynamics_terms(
         scale_floored=False,
     )
     persistence = 0.5 * (persistence_common + persistence_residual)
-    uncertainty_error = row_loss(
-        prediction.uncertainty,
-        target.uncertainty,
-        scale_floored=False,
-    )
-    uncertainty = masked(uncertainty_error, object_validity)
     semantic_transition_prediction = (
         prediction.semantic_interval_residual[:, 1:]
         - prediction.semantic_interval_residual[:, :-1]
@@ -548,7 +552,6 @@ def future_dynamics_terms(
         + 0.05 * covariance
         + 0.08 * visibility
         + 0.07 * persistence
-        + 0.10 * uncertainty
     )
     terms = {
         "future_dynamics": total,
@@ -565,7 +568,6 @@ def future_dynamics_terms(
         "future_persistence": persistence,
         "future_persistence_common": persistence_common,
         "future_persistence_residual": persistence_residual,
-        "future_uncertainty": uncertainty,
         "future_transition": transition,
     }
     if collect_diagnostics:
@@ -575,6 +577,15 @@ def future_dynamics_terms(
         )
         terms["future_target_selector_validity"] = (
             target.future_selector_validity.detach().float().mean()
+        )
+        terms["future_target_semantic_delta_rms"] = (
+            target.semantic_delta.detach().float().square().mean().sqrt()
+        )
+        terms["future_target_transport_rms"] = (
+            target.transport_mean.detach().float().square().mean().sqrt()
+        )
+        terms["future_target_covariance_rms"] = (
+            target.transport_covariance.detach().float().square().mean().sqrt()
         )
         for index in range(prediction.intervals):
             interval_slice = slice(index, index + 1)

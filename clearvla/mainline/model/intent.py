@@ -328,7 +328,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         residual_signal = residual_signal / residual_signal.abs().amax(
             dim=1, keepdim=True
         ).clamp_min(1.0)
-        common_validity = facts.validity.float()[:, :, None, :].clamp(0.0, 1.0)
+        common_validity = facts.chart_availability.float()[:, :, None, :].clamp(
+            0.0, 1.0
+        )
         interval_validity = common_validity[:, None]
         common_mass = (
             common_signal.abs()[..., None] * common_validity
@@ -525,7 +527,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             state_change_attention = history.new_zeros(batch, 1, history.shape[1])
         state_change_history = state_change_history[:, 0]
         transport_tokens = self.state_change_transport(facts.transport_prior)
-        transport_validity = facts.validity.to(
+        transport_validity = facts.chart_availability.to(
             device=transport_tokens.device, dtype=transport_tokens.dtype
         )
         state_change_transport = (
@@ -662,7 +664,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_typed_common_norm_denominator_min": typed_common_denominator.detach().float().amin(),
             "object_intent_typed_differential_norm_denominator_min": typed_differential_denominator.detach().float().amin(),
             "object_intent_typed_fact_unsupported_fraction": (
-                1.0 - facts.validity.detach().float().clamp(0.0, 1.0)
+                1.0 - facts.chart_availability.detach().float().clamp(0.0, 1.0)
             ).mean(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": facts.transport_prior.detach().float().square().mean().sqrt(),
@@ -757,7 +759,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
 
 
 class ObservableIntentStateSupervisor(nn.Module):
-    """Supervise only the observable state boundary owned by S.
+    """Supervise adjacent observable-state increments owned by S.
 
     Semantic, geometry and status effects are owned by W.  Decoding those
     same teacher targets before W made an identity W1/W2 a valid optimum even
@@ -778,26 +780,34 @@ class ObservableIntentStateSupervisor(nn.Module):
         self,
         *,
         intent: ObjectIntentState,
+        current_state: Tensor,
         future_state: Tensor,
     ) -> IntentStateSupervision:
         if future_state.ndim != 3:
             raise ValueError("intent supervision requires a future state sequence")
+        if current_state.ndim != 2 or tuple(current_state.shape) != (
+            int(future_state.shape[0]),
+            int(future_state.shape[-1]),
+        ):
+            raise ValueError("intent current state must align as [B,S]")
         intent.validate(
             horizon=int(intent.temporal_queries.shape[1]),
             hidden=int(intent.public_interval_carrier.shape[-1]),
         )
         length = int(future_state.shape[1])
         slices = _interval_slices(length)
-        state_summary = torch.stack(
+        interval_mean = torch.stack(
             [future_state[:, row].mean(dim=1) for row in slices], dim=1
         )
+        previous = torch.cat((current_state[:, None], interval_mean[:, :-1]), dim=1)
+        state_increment = interval_mean - previous
         state_prediction = self.state_head(intent.interval_condition_innovation)
         loss = F.smooth_l1_loss(
-            state_prediction.float(), state_summary.detach().float()
+            state_prediction.float(), state_increment.detach().float()
         )
         result = IntentStateSupervision(
             state_prediction=state_prediction,
-            state_target=state_summary.detach(),
+            state_target=state_increment.detach(),
             loss=loss,
         )
         result.validate()

@@ -243,6 +243,35 @@ class ObjectFutureEffectReader(nn.Module):
             3,
         ):
             raise ValueError("P2 typed residual intent lost interval/object/type identity")
+        camera_coordinate = dynamics.camera_coordinates.float()
+        camera_availability = dynamics.camera_chart_availability.float()[..., 0].clamp(
+            0.0, 1.0
+        )
+        camera_weight = (
+            dynamics.camera_weights.float()[..., 0].clamp_min(0.0)
+            * camera_availability
+        )
+        camera_count = int(camera_coordinate.shape[2])
+        camera_mass = camera_weight.sum(dim=-1, keepdim=True)
+        camera_has_support = camera_mass[..., 0] > 1.0e-8
+        uniform_camera = torch.full_like(
+            camera_weight, 1.0 / float(max(camera_count, 1))
+        )
+        normalized_camera_weight = torch.where(
+            camera_mass > 1.0e-8,
+            camera_weight / camera_mass.clamp_min(1.0e-8),
+            uniform_camera,
+        )
+        # Geometry values remain object-level complementary effects, but the
+        # same physical camera measure used by coordinate scoring performs the
+        # reduction.  The camera-specific transport/covariance themselves stay
+        # intact through the coordinate consumer below.
+        transport_object = (
+            dynamics.transport_mean.float()
+            * normalized_camera_weight[:, None, :, :, None]
+        ).sum(dim=3)
+        transport_common = transport_object.mean(dim=1)
+        transport_residual = transport_object - transport_common[:, None]
         status_common = torch.cat(
             (dynamics.visibility_common, dynamics.persistence_common), dim=-1
         )
@@ -255,22 +284,22 @@ class ObjectFutureEffectReader(nn.Module):
         )
         common_source_fields = (
             dynamics.semantic_common,
-            dynamics.transport_common,
+            transport_common,
             status_common,
         )
         residual_source_fields = (
             dynamics.semantic_interval_residual,
-            dynamics.transport_interval_residual,
+            transport_residual,
             status_residual,
         )
         common_projected_values = (
             self.semantic_value(dynamics.semantic_common),
-            self.transport_value(dynamics.transport_common),
+            self.transport_value(transport_common),
             self.status_value(status_common),
         )
         residual_projected_values = (
             self.semantic_value(dynamics.semantic_interval_residual),
-            self.transport_value(dynamics.transport_interval_residual),
+            self.transport_value(transport_residual),
             self.status_value(status_residual),
         )
         common_value_contracts = tuple(
@@ -290,19 +319,6 @@ class ObjectFutureEffectReader(nn.Module):
             scale for _, scale in residual_value_contracts
         )
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
-        camera_coordinate = dynamics.camera_coordinates.float()
-        camera_weight = dynamics.camera_weights.float()[..., 0].clamp_min(0.0)
-        camera_count = int(camera_coordinate.shape[2])
-        camera_mass = camera_weight.sum(dim=-1, keepdim=True)
-        camera_has_support = camera_mass[..., 0] > 1.0e-8
-        uniform_camera = torch.full_like(
-            camera_weight, 1.0 / float(max(camera_count, 1))
-        )
-        normalized_camera_weight = torch.where(
-            camera_mass > 1.0e-8,
-            camera_weight / camera_mass.clamp_min(1.0e-8),
-            uniform_camera,
-        )
         camera_coordinate_mean = (
             normalized_camera_weight[..., None] * camera_coordinate
         ).sum(dim=2)
@@ -318,20 +334,45 @@ class ObjectFutureEffectReader(nn.Module):
         ).mean()
         common_coordinate = (
             camera_coordinate
-            + dynamics.transport_common[:, :, None].float()
+            + dynamics.transport_common.float()
         ).clamp(-1.0, 1.0)
         future_coordinate = (
             camera_coordinate[:, None]
-            + dynamics.transport_mean[:, :, :, None].float()
+            + dynamics.transport_mean.float()
         ).clamp(-1.0, 1.0)
-        common_coordinate_distance = (
+        common_coordinate_delta = (
             coordinate_query[:, :, :, None, None]
             - common_coordinate[:, None, None]
-        ).square().sum(dim=-1)
-        coordinate_distance = (
+        )
+        coordinate_delta = (
             coordinate_query[:, :, :, None, None, None]
             - future_coordinate[:, None, None]
-        ).square().sum(dim=-1)
+        )
+
+        def covariance_aware_distance(delta: Tensor, covariance: Tensor) -> Tensor:
+            # One half-cell standard deviation in normalized 8x8 coordinates
+            # is the identity metric.  Therefore zero predicted covariance
+            # exactly recovers the former Euclidean squared distance, while a
+            # larger PSD covariance broadens uncertainty without moving its
+            # centre or changing the value path.
+            variance_floor = 1.0 / float(7 * 7)
+            xx = covariance[..., 0].float().clamp_min(0.0) + variance_floor
+            xy = covariance[..., 1].float()
+            yy = covariance[..., 2].float().clamp_min(0.0) + variance_floor
+            determinant = (xx * yy - xy.square()).clamp_min(variance_floor**2)
+            dx, dy = delta[..., 0], delta[..., 1]
+            return variance_floor * (
+                yy * dx.square() - 2.0 * xy * dx * dy + xx * dy.square()
+            ) / determinant
+
+        common_coordinate_distance = covariance_aware_distance(
+            common_coordinate_delta,
+            dynamics.transport_covariance.float().mean(dim=1)[:, None, None],
+        )
+        coordinate_distance = covariance_aware_distance(
+            coordinate_delta,
+            dynamics.transport_covariance.float()[:, None, None],
+        )
         # Exact coordinate agreement is positive evidence; the old [-1,0]
         # term could only punish and therefore could not establish a geometry
         # owner when semantic scores were diffuse.
@@ -366,7 +407,7 @@ class ObjectFutureEffectReader(nn.Module):
             coordinate_score,
             torch.zeros_like(coordinate_score),
         )
-        current_validity = dynamics.current_selector_validity.float().squeeze(
+        current_validity = dynamics.chart_availability.float().squeeze(
             -1
         ).clamp(0.0, 1.0)
         residual_validity = current_validity[:, None].expand(-1, intervals, -1)
@@ -1026,8 +1067,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
     def forward(
         self,
         *,
-        p1_fact: Tensor,
-        p1_precision_innovation: Tensor,
+        p1_factual_detail: Tensor,
+        p1_policy_residual: Tensor,
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
@@ -1036,36 +1077,39 @@ class ObjectPolicyPlanCompiler(nn.Module):
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
         if (
             tuple(action_query.shape) != expected
-            or tuple(p1_fact.shape) != expected
-            or tuple(p1_precision_innovation.shape) != expected
+            or tuple(p1_factual_detail.shape) != expected
+            or tuple(p1_policy_residual.shape) != expected
         ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
-        # The complete factual consequence is already the protected base.
+        # The static factual consequence is already the protected base.
         # Optional lanes may only encode source-exclusive zero-centred
-        # innovations; duplicating that base gives the bottom selector several
-        # interchangeable ways to reconstruct the same fact.
-        # This is the cached V120 factual-reader write,
-        # ``updated_trajectory - clean_action_basis``.  It retains the
-        # 24-query/N=49/3x3 evidence without copying the completed P1
-        # self-write or W consequence back into an optional lane.  Action can
-        # select this evidence but cannot synthesize it.
+        # innovations; neither static detail nor the live policy residual is
+        # copied into another protected carrier. Precision is the sole owner
+        # of both P1 signals below.
+        # Reuse the established precision projection for both P1-owned
+        # signals.  Separate calls preserve the old static-detail path exactly
+        # when the live residual is zero, add no parameter, and make either
+        # source independently intervenable.  Bias-free linearity keeps the
+        # joint-zero state algebraically zero.
+        static_precision = self.precision_innovation(p1_factual_detail)
+        dynamic_precision = self.precision_innovation(p1_policy_residual)
         precision = self.precision_lane(
             torch.tanh(self.precision_action(action_query))
-            * self.precision_innovation(p1_precision_innovation)
+            * (static_precision + dynamic_precision)
         )
         effect = self.effect_lane(consequence.effect + consequence.interaction)
+        temporal_effect = consequence.effect + consequence.interaction
         temporal_source = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
-        # Temporal is an optional relation, not a second public action
-        # adapter.  Requiring all three observable operands closes the direct
-        # S -> bottom lane while preserving ordinary autograd and exact-zero
-        # semantics at every missing boundary.
+        # Temporal is a W-effect relation, not a second factual carrier.
+        # Requiring S, W effect and action makes neutral W an exact temporal
+        # null while leaving the independently owned state-change lane intact.
         temporal = self.temporal_lane(
             self.temporal_source(temporal_source)
             * torch.tanh(
-                self.temporal_consequence(consequence.protected_consequence)
+                self.temporal_consequence(temporal_effect)
             )
             * torch.tanh(self.temporal_action(action_query))
         )
@@ -1095,7 +1139,20 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if not collect_diagnostics:
             return bank, {}
         return bank, {
-            "object_p3_precision_input_rms": p1_precision_innovation.detach()
+            "object_p3_precision_input_rms": (
+                p1_factual_detail + p1_policy_residual
+            )
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_precision_static_input_rms": p1_factual_detail.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_precision_dynamic_input_rms": p1_policy_residual.detach()
             .float()
             .square()
             .mean()
@@ -1107,7 +1164,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p3_temporal_consequence_rms": consequence.protected_consequence
+            "object_p3_temporal_consequence_rms": temporal_effect
             .detach()
             .float()
             .square()

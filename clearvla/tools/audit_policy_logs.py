@@ -987,7 +987,8 @@ V94_ALIASES.update(
             "geo_residual_var": (
                 "object_intent_geometry_interval_residual_variation"
             ),
-            "public_future_loss": "object_intent_public_future_state_loss",
+            "public_increment_loss": "object_intent_public_future_increment_loss",
+            "legacy_public_future_loss": "object_intent_public_future_state_loss",
             "typed_future_loss": "object_intent_typed_future_field_loss",
             "typed_semantic_loss": "object_intent_typed_semantic_loss",
             "typed_semantic_common_loss": (
@@ -1008,10 +1009,15 @@ V94_ALIASES.update(
             "typed_transport_residual_loss": (
                 "object_intent_typed_transport_residual_loss"
             ),
-            "future_state_prediction": (
-                "object_intent_future_state_prediction_rms"
+            "future_increment_prediction": (
+                "object_intent_future_increment_prediction_rms"
             ),
-            "future_state_target": "object_intent_future_state_target_rms",
+            "future_increment_target": (
+                "object_intent_future_increment_target_rms"
+            ),
+            "future_cumulative_error": (
+                "object_intent_future_cumulative_reconstruction_error"
+            ),
             "typed_semantic_prediction": (
                 "object_intent_typed_semantic_prediction_rms"
             ),
@@ -1131,7 +1137,7 @@ V94_ALIASES.update(
             "covariance_loss": "object_future_covariance",
             "visibility_loss": "object_future_visibility",
             "persistence_loss": "object_future_persistence",
-            "uncertainty_loss": "object_future_uncertainty",
+            "legacy_uncertainty_loss": "object_future_uncertainty",
             "transition_loss": "object_future_transition",
             "semantic_common_loss": "loss_future_semantic_common",
             "semantic_residual_loss": "loss_future_semantic_residual",
@@ -1357,6 +1363,9 @@ V94_ALIASES.update(
             "consequence_effect": "object_consequence_effect_rms",
             "interaction": "object_consequence_interaction_rms",
             "consequence_ratio": "object_consequence_ratio",
+            "p1_factual_base": "p1_factual_base_rms",
+            "p1_policy_precision": "p1_policy_precision_residual_rms",
+            "p1_effect_query": "p1_effect_query_rms",
             "p3_factual": "object_p3_factual_rms",
             "p3_precision_input": "object_p3_precision_input_rms",
             "p3_precision": "object_p3_precision_rms",
@@ -1564,6 +1573,10 @@ STRUCTURE_KEYS = (
     "object_intent_appearance_condition_centered_interval_variation",
     "object_intent_geometry_condition_centered_interval_variation",
     "object_intent_public_future_state_loss",
+    "object_intent_public_future_increment_loss",
+    "object_intent_future_increment_prediction_rms",
+    "object_intent_future_increment_target_rms",
+    "object_intent_future_cumulative_reconstruction_error",
     "object_intent_typed_future_field_loss",
     "object_intent_typed_semantic_loss",
     "object_intent_typed_semantic_common_loss",
@@ -1662,6 +1675,9 @@ STRUCTURE_KEYS = (
     "loss_future_current_loss_support",
     "loss_future_prediction_selector_validity",
     "loss_future_target_selector_validity",
+    "loss_future_target_semantic_delta_rms",
+    "loss_future_target_transport_rms",
+    "loss_future_target_covariance_rms",
     "loss_future_semantic_common",
     "loss_future_semantic_residual",
     "loss_future_transport_common",
@@ -1677,8 +1693,17 @@ STRUCTURE_KEYS = (
     "sampling_endpoint_head_calls",
     "object_teacher_adjacent_cosine",
     "object_teacher_interval_variation",
+    "p1_query_rows",
+    "p1_query_chunk",
+    "p1_microgrid_side",
+    "p1_microgrid_tokens",
+    "p1_microgrid_value_rms",
+    "p1_spatial_variation",
     "p1_query_chart_variation",
     "p1_query_coordinate_variation",
+    "p1_factual_base_rms",
+    "p1_policy_precision_residual_rms",
+    "p1_effect_query_rms",
     "object_p2_semantic_posterior_entropy",
     "object_p2_geometry_posterior_entropy",
     "object_p2_semantic_value_mass",

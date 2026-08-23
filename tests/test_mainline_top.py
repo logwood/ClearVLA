@@ -5,7 +5,15 @@ import torch
 
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.model import FactualPrecisionDock, LocalFactSet
-from clearvla.mainline.model.top import ObjectIntentDynamicsTop, OnlineTopContext
+from clearvla.mainline.model.top import (
+    DeploymentTopCache,
+    ObjectIntentDynamicsTop,
+    OnlineTopContext,
+)
+from clearvla.mainline.model.types import (
+    CompletedP1PolicyState,
+    FutureObjectDynamics,
+)
 from clearvla.mainline.v120_core.profile import build_v120_visual_config
 
 
@@ -94,11 +102,13 @@ def test_teacher_replacement_cannot_change_online_context() -> None:
     offsets = torch.tensor([4, 6, 8, 10, 12, 16, 20, 24, 32, 38, 44, 48])[None].expand(2, -1)
     action = torch.randn(2, 48, 7)
     state = torch.randn(2, 48, 7)
+    current_state = torch.randn(2, 7)
     target_a, _ = top.build_training_targets(
         context,
         future_supports=supports_a,
         future_offsets=offsets,
         future_action=action,
+        current_state=current_state,
         future_state=state,
     )
     target_b, _ = top.build_training_targets(
@@ -106,6 +116,7 @@ def test_teacher_replacement_cannot_change_online_context() -> None:
         future_supports=supports_b,
         future_offsets=offsets,
         future_action=action,
+        current_state=current_state,
         future_state=state,
     )
     assert torch.equal(online_before, context.predicted_dynamics.semantic_delta)
@@ -127,6 +138,7 @@ def test_training_target_attaches_to_the_exact_coarse_action_consumed_by_w() -> 
     )[None].expand(2, -1)
     action = torch.randn(2, 48, 7)
     state = torch.randn(2, 48, 7)
+    current_state = torch.randn(2, 7)
     with mock.patch.object(
         top.coarse_action,
         "forward",
@@ -137,6 +149,7 @@ def test_training_target_attaches_to_the_exact_coarse_action_consumed_by_w() -> 
             future_supports=supports,
             future_offsets=offsets,
             future_action=action,
+            current_state=current_state,
             future_state=state,
         )
     expected_target = torch.stack(
@@ -158,12 +171,31 @@ def test_training_target_attaches_to_the_exact_coarse_action_consumed_by_w() -> 
 def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     torch.manual_seed(11)
     top = _top()
-    context = _context(top)
+    facts, _ = top.grounder(_local_facts())
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(2, 6, 12),
+        goal_mask=torch.ones(2, 6, dtype=torch.bool),
+        state_history=torch.randn(2, 3, 7),
+        state=torch.randn(2, 7),
+        executed_history=torch.randn(2, 8, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    deployment = DeploymentTopCache(
+        intent=intent,
+        predicted_dynamics=FutureObjectDynamics.neutral(facts),
+    )
     batch, horizon, basis, hidden = 2, 24, 2, 32
     dock = FactualPrecisionDock(
         protected_detail=torch.randn(batch, horizon, basis, hidden),
     )
     action_query = torch.randn(batch, horizon, basis, hidden)
+    policy_residual = torch.randn_like(action_query)
+    p1_state = CompletedP1PolicyState(
+        factual_base=dock.protected_detail,
+        policy_precision_residual=policy_residual,
+        effect_query=action_query + dock.protected_detail + policy_residual,
+    )
     captured: dict[str, torch.Tensor] = {}
 
     def capture_p2(_module, args, _kwargs):
@@ -171,6 +203,8 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
 
     def capture_p3(_module, _args, kwargs):
         captured["p3_query"] = kwargs["action_query"].detach().clone()
+        captured["p3_static"] = kwargs["p1_factual_detail"].detach().clone()
+        captured["p3_dynamic"] = kwargs["p1_policy_residual"].detach().clone()
 
     p2_hook = top.effect_reader.register_forward_pre_hook(
         capture_p2,
@@ -182,9 +216,8 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     )
     try:
         compiled, _ = top.compile_policy(
-            context.deployment_cache(),
-            p1_fact=dock.protected_detail,
-            p1_precision_innovation=dock.protected_detail,
+            deployment,
+            p1_state=p1_state,
             action_query=action_query,
         )
     finally:
@@ -194,13 +227,25 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     assert tuple(compiled.plan.protected_base.shape) == (batch, horizon, basis, hidden)
     torch.testing.assert_close(
         captured["p2_query"],
-        action_query + dock.protected_detail,
+        p1_state.effect_query,
         atol=0.0,
         rtol=0.0,
     )
     torch.testing.assert_close(
         captured["p3_query"],
         action_query,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        captured["p3_static"], dock.protected_detail, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        captured["p3_dynamic"], policy_residual, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        compiled.consequence.factual_base,
+        dock.protected_detail,
         atol=0.0,
         rtol=0.0,
     )

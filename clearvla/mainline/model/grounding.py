@@ -83,7 +83,7 @@ def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
         uniform_prior,
     )
     chart = DenseFactChart(
-        public_scene_base=local.public_scene_base,
+        g3_public_scene_audit=local.public_scene_base,
         dino_content=dense_content,
         cell_observed=local.cell_observed,
         candidate_content=local.content_slots,
@@ -195,31 +195,22 @@ class DenseObjectGrounder(nn.Module):
         self.maximum_update_rms = float(maximum_update_rms)
 
     def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
-        """Return the public audit key without re-injecting the scene chart."""
+        """Return the sole content value used by global-K slot updates."""
 
         content = self.content_key(chart.candidate_content)
-        typed = (
-            self.semantic_key(chart.candidate_semantic)
-            + self.appearance_key(chart.candidate_appearance)
-            + self.geometry_key(chart.candidate_geometry)
-        ) / math.sqrt(3.0)
-        coordinate = self.coordinate_key(_coordinate_basis(chart.candidate_coordinates, 16))
-        return self.candidate_norm(content + typed + coordinate)
+        return self.candidate_norm(content)
 
     def _candidate_key_views(self, chart: DenseFactChart) -> Tensor:
-        """Return separate semantic/appearance/geometry pre-binding keys.
+        """Return typed keys without copying full content into either sidecar.
 
-        The three posteriors vote on one physical K+null assignment.  They are
-        not three object identities and cannot resurrect mass outside the
-        resulting physical support.
+        Content alone owns the K+null base. Semantic and appearance may only
+        provide bounded conditional-K corrections, while geometry is retained
+        solely for a typed read inside the resulting physical support.
         """
 
-        content = self.content_key(chart.candidate_content)
         coordinate = self.coordinate_key(_coordinate_basis(chart.candidate_coordinates, 16))
-        semantic = self.candidate_norm(content + self.semantic_key(chart.candidate_semantic))
-        appearance = self.candidate_norm(
-            content + self.appearance_key(chart.candidate_appearance)
-        )
+        semantic = self.candidate_norm(self.semantic_key(chart.candidate_semantic))
+        appearance = self.candidate_norm(self.appearance_key(chart.candidate_appearance))
         geometry = self.candidate_norm(
             coordinate + self.geometry_key(chart.candidate_geometry)
         )
@@ -228,14 +219,40 @@ class DenseObjectGrounder(nn.Module):
     def _competition(
         self,
         slots: Tensor,
+        candidate_content: Tensor,
         candidate_views: Tensor,
         validity: Tensor,
         candidate_prior: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        if candidate_content.ndim != 3:
+            raise ValueError("content candidate view must be [B,N,H]")
         if candidate_views.ndim != 4 or int(candidate_views.shape[-2]) != 3:
             raise ValueError("typed candidate views must be [B,N,3,H]")
         batch, count, _, _ = candidate_views.shape
+        if tuple(candidate_content.shape) != (batch, count, self.hidden):
+            raise ValueError("content and typed candidate views must align")
         slot_key = self.slot_norm(slots)
+        base_k_logits = torch.einsum(
+            "bkh,bnh->bnk", slot_key.float(), candidate_content.float()
+        ) / math.sqrt(float(self.hidden))
+        base_null_logit = torch.einsum(
+            "bnh,bqh->bnq",
+            candidate_content.float(),
+            self.null_key.to(
+                device=candidate_content.device,
+                dtype=candidate_content.dtype,
+            )
+            .expand(batch, -1, -1)
+            .float(),
+        )
+        base_owner = torch.softmax(
+            torch.cat((base_k_logits, base_null_logit), dim=-1),
+            dim=-1,
+        )
+        base_k_mass = base_owner[..., : self.objects].sum(dim=-1, keepdim=True)
+        base_k_conditional = base_owner[..., : self.objects] / base_k_mass.clamp_min(
+            1.0e-8
+        )
         typed_slot_key = torch.stack(
             tuple(projection(slot_key) for projection in self.slot_typed_keys),
             dim=2,
@@ -243,28 +260,42 @@ class DenseObjectGrounder(nn.Module):
         logits = torch.einsum(
             "bkvh,bnvh->bnkv", typed_slot_key.float(), candidate_views.float()
         ) / math.sqrt(float(self.hidden))
-        null = torch.einsum(
-            "bnvh,bqh->bnvq",
-            candidate_views.float(),
-            self.null_key.to(
-                device=candidate_views.device, dtype=candidate_views.dtype
+        # Every typed correction is bounded independently. Semantic and
+        # appearance together can move a conditional-K logit by at most 0.5;
+        # neither can alter content's exact object-vs-null mass. Geometry gets
+        # the same bounded typed posterior for support-internal reads but is
+        # deliberately excluded from the physical owner below.
+        typed_correction = 0.25 * torch.tanh(logits)
+
+        def conditional_owner(correction: Tensor) -> Tensor:
+            common = (
+                correction * base_k_conditional
+            ).sum(dim=-1, keepdim=True)
+            conditional = torch.softmax(
+                base_k_conditional.clamp_min(1.0e-8).log()
+                + correction
+                - common,
+                dim=-1,
             )
-            .expand(batch, -1, -1)
-            .float(),
-        ).permute(0, 1, 3, 2)
+            return torch.cat(
+                (
+                    base_k_mass * conditional,
+                    base_owner[..., self.objects :],
+                ),
+                dim=-1,
+            )
+
+        typed_owner = torch.stack(
+            tuple(conditional_owner(typed_correction[..., index]) for index in range(3)),
+            dim=2,
+        )
         # ``owner`` is conditional on one local candidate.  The local prior
         # is applied afterwards as joint mixture mass.  Only true invalidity
         # may move probability to null; ``1 - candidate_prior`` denotes other
         # hypotheses at the same cell, not absence.
-        typed_logits = torch.cat((logits, null), dim=2)
-        typed_owner = torch.softmax(typed_logits, dim=2)
-        # One physical object identity is selected from the consensus of the
-        # three typed compatibility views.  Averaging three already-normalized
-        # posteriors would retain three competing object identities and merely
-        # blur them after the fact; averaging bounded logits before the single
-        # softmax makes semantic/appearance/geometry genuine pre-binding
-        # evidence for the same K+null assignment.
-        owner = torch.softmax(typed_logits.mean(dim=-1), dim=2)
+        owner = conditional_owner(
+            typed_correction[..., 0] + typed_correction[..., 1]
+        )
         valid = validity.float().reshape(batch, count, 1).clamp(0.0, 1.0)
         prior = candidate_prior.float().reshape(batch, count, 1).clamp_min(0.0)
         object_mass = owner[..., : self.objects] * valid * prior
@@ -273,7 +304,7 @@ class DenseObjectGrounder(nn.Module):
         ]
         read = object_mass.transpose(1, 2)
         read = read / read.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        return owner, typed_owner.permute(0, 1, 3, 2), object_mass, null_mass, read
+        return owner, typed_owner, object_mass, null_mass, read
 
     def forward(
         self,
@@ -305,7 +336,7 @@ class DenseObjectGrounder(nn.Module):
         read: Tensor | None = None
         for _ in range(self.iterations):
             parent_owner, typed_parent, _, parent_null, read = self._competition(
-                slots, candidate_views, validity, candidate_prior
+                slots, candidates, candidate_views, validity, candidate_prior
             )
             update = torch.einsum(
                 "bkn,bnh->bkh",
@@ -328,7 +359,7 @@ class DenseObjectGrounder(nn.Module):
         # a new G3 slot state.  Recompute the parent posterior once so the
         # bounded G3 correction is genuinely relative to the final binder.
         parent_owner, typed_parent, _, parent_null, read = self._competition(
-            slots, candidate_views, validity, candidate_prior
+            slots, candidates, candidate_views, validity, candidate_prior
         )
         if (
             parent_owner is None
@@ -508,7 +539,7 @@ class DenseObjectGrounder(nn.Module):
             chart.candidate_support[..., None],
             structured_geometry_assignment,
         )
-        camera_validity = camera_aggregate(
+        camera_chart_availability = camera_aggregate(
             chart.candidate_validity,
             structured_assignment,
         ).clamp(0.0, 1.0)
@@ -593,11 +624,11 @@ class DenseObjectGrounder(nn.Module):
             camera_coordinates=camera_coordinates,
             camera_transport_prior=camera_transport_prior,
             camera_support=camera_support,
-            camera_validity=camera_validity,
+            camera_chart_availability=camera_chart_availability,
             camera_evidence_mass=camera_evidence_mass,
             support=support,
             existence=existence,
-            validity=object_validity,
+            chart_availability=object_validity,
             object_to_chart=chart_read,
             candidate_assignment=structured_assignment,
             semantic_candidate_assignment=structured_semantic_assignment,
@@ -885,7 +916,9 @@ class DenseObjectGrounder(nn.Module):
             .float()
             .std(dim=2, unbiased=False)
             .mean(),
-            "object_grounding_candidate_key_rms": candidate_views.detach()
+            "object_grounding_candidate_key_rms": torch.cat(
+                (candidates[:, :, None], candidate_views), dim=2
+            ).detach()
             .float()
             .square()
             .mean()

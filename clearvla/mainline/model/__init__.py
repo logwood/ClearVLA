@@ -30,6 +30,7 @@ from .transition import ControlledTransitionDynamics
 from .types import (
     ActionIntentDock,
     CoarseActionIntentState,
+    CompletedP1PolicyState,
     ControlledTransitionState,
     DenseFactChart,
     FactualIntentDock,
@@ -52,6 +53,7 @@ __all__ = [
     "ClearVLAMainlinePolicy",
     "CoarseActionIntent",
     "CoarseActionIntentState",
+    "CompletedP1PolicyState",
     "CompiledPolicyState",
     "ControlledTransitionDynamics",
     "ControlledTransitionState",

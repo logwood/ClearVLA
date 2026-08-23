@@ -109,7 +109,7 @@ class DenseFactChart:
     spatial mean.
     """
 
-    public_scene_base: Tensor  # [B,C,Y,X,H]
+    g3_public_scene_audit: Tensor  # G3-local audit carrier [B,C,Y,X,H]
     dino_content: Tensor  # [B,C,Y,X,D]
     cell_observed: Tensor  # bool [B,C,Y,X,1]
     candidate_content: Tensor  # [B,C,Y,X,M,D]
@@ -126,7 +126,7 @@ class DenseFactChart:
     candidate_transport_prior: Tensor  # [B,C,Y,X,M,2]
 
     def validate(self) -> None:
-        if self.public_scene_base.ndim != 5 or self.dino_content.ndim != 5:
+        if self.g3_public_scene_audit.ndim != 5 or self.dino_content.ndim != 5:
             raise ValueError("dense fact charts must retain [B,C,Y,X,*]")
         if self.candidate_content.ndim != 6:
             raise ValueError("dense candidates must retain [B,C,Y,X,M,*]")
@@ -153,8 +153,8 @@ class DenseFactChart:
         if tuple(self.candidate_transport_prior.shape) != (*prefix, 2):
             raise ValueError("candidate transport prior is misaligned")
         chart_prefix = prefix[:4]
-        if tuple(self.public_scene_base.shape[:4]) != chart_prefix:
-            raise ValueError("public chart lost camera/spatial identity")
+        if tuple(self.g3_public_scene_audit.shape[:4]) != chart_prefix:
+            raise ValueError("G3 audit chart lost camera/spatial identity")
         if tuple(self.dino_content.shape[:4]) != chart_prefix:
             raise ValueError("DINO chart lost camera/spatial identity")
         _shape(self.cell_observed, (*chart_prefix, 1), "dense observed-cell mask")
@@ -179,11 +179,11 @@ class ObjectFactSet:
     camera_coordinates: Tensor  # [B,K,C,2]
     camera_transport_prior: Tensor  # [B,K,C,2]
     camera_support: Tensor  # [B,K,C,1]
-    camera_validity: Tensor  # [B,K,C,1]
+    camera_chart_availability: Tensor  # observable camera/chart support [B,K,C,1]
     # Joint physical assignment mass in each camera, normalized by the
     # camera's observed candidate mass.  This is evidence strength used for
     # camera reduction and audit; unlike ``camera_support`` it is not an
-    # object-width statistic, and unlike ``camera_validity`` it is not an
+    # object-width statistic, and unlike ``camera_chart_availability`` it is not an
     # independent physical loss-support field.
     camera_evidence_mass: Tensor  # [B,K,C,1]
     support: Tensor  # [B,K,1]
@@ -192,7 +192,7 @@ class ObjectFactSet:
     existence: Tensor  # [B,K,1]
     # Physical support of the object's own read.  Unlike existence this is a
     # legal-source mask, not a learned confidence or allocation prior.
-    validity: Tensor  # [B,K,1]
+    chart_availability: Tensor  # observable object/chart support [B,K,1]
     object_to_chart: Tensor  # read posterior [B,K,C,Y,X]
     candidate_assignment: Tensor  # joint local-prior competition mass [B,K,C,Y,X,M]
     # One physical K+null assignment owns object identity.  These three
@@ -271,9 +271,9 @@ class ObjectFactSet:
             "object camera support",
         )
         _shape(
-            self.camera_validity,
+            self.camera_chart_availability,
             (batch, objects, cameras, 1),
-            "object camera validity",
+            "object camera chart availability",
         )
         _shape(
             self.camera_evidence_mass,
@@ -282,7 +282,11 @@ class ObjectFactSet:
         )
         _shape(self.support, (batch, objects, 1), "object support")
         _shape(self.existence, (batch, objects, 1), "object existence")
-        _shape(self.validity, (batch, objects, 1), "object validity")
+        _shape(
+            self.chart_availability,
+            (batch, objects, 1),
+            "object chart availability",
+        )
         chart = self.dense_chart.dino_content
         expected_chart = (batch, objects, *chart.shape[1:4])
         _shape(self.object_to_chart, expected_chart, "object-to-chart posterior")
@@ -323,11 +327,11 @@ class ObjectFactSet:
             camera_coordinates=self.camera_coordinates[:, index],
             camera_transport_prior=self.camera_transport_prior[:, index],
             camera_support=self.camera_support[:, index],
-            camera_validity=self.camera_validity[:, index],
+            camera_chart_availability=self.camera_chart_availability[:, index],
             camera_evidence_mass=self.camera_evidence_mass[:, index],
             support=self.support[:, index],
             existence=self.existence[:, index],
-            validity=self.validity[:, index],
+            chart_availability=self.chart_availability[:, index],
             object_to_chart=self.object_to_chart[:, index],
             candidate_assignment=self.candidate_assignment[:, index],
             semantic_candidate_assignment=(self.semantic_candidate_assignment[:, index]),
@@ -359,6 +363,44 @@ class FactualPrecisionDock:
             raise ValueError("V120 P1 requires at least one action-basis lane")
         if basis is not None and int(self.protected_detail.shape[2]) != int(basis):
             raise ValueError("V120 P1 action-basis axis does not match the model")
+
+
+@dataclass(frozen=True)
+class CompletedP1PolicyState:
+    """Live P1 policy state with factual and action-written ownership split.
+
+    ``factual_base`` is the cached, observation-owned P1 detail and therefore
+    has no noisy-action dependency. ``policy_precision_residual`` is the live
+    V120 policy-block write. ``effect_query`` preserves V120's post-P1 query
+    seen by P2 without relabeling the live policy residual as a fact.
+    """
+
+    factual_base: Tensor  # [B,24,Q,H]
+    policy_precision_residual: Tensor  # [B,24,Q,H]
+    effect_query: Tensor  # action query + factual base + policy residual
+
+    def validate(
+        self,
+        *,
+        horizon: int = 24,
+        basis: int | None = None,
+        hidden: int | None = None,
+    ) -> None:
+        expected = tuple(self.factual_base.shape)
+        if len(expected) != 4:
+            raise ValueError("completed P1 policy state must be [B,T,Q,H]")
+        if int(expected[1]) != int(horizon):
+            raise ValueError("completed P1 policy state lost its horizon axis")
+        if basis is not None and int(expected[2]) != int(basis):
+            raise ValueError("completed P1 policy state lost its action-basis axis")
+        if hidden is not None and int(expected[3]) != int(hidden):
+            raise ValueError("completed P1 policy state has the wrong hidden width")
+        for name in ("policy_precision_residual", "effect_query"):
+            value = getattr(self, name)
+            if tuple(value.shape) != expected:
+                raise ValueError(f"completed P1 {name} must align with factual_base")
+            if value.device != self.factual_base.device:
+                raise ValueError(f"completed P1 {name} must share factual_base device")
 
 
 @dataclass(frozen=True)
@@ -734,8 +776,8 @@ class IntentStateSupervision:
     semantic, geometry or status fields.
     """
 
-    state_prediction: Tensor  # [B,4,S]
-    state_target: Tensor  # [B,4,S]
+    state_prediction: Tensor  # adjacent interval increment [B,4,S]
+    state_target: Tensor  # adjacent interval increment [B,4,S]
     loss: Tensor
 
     def validate(self) -> None:
@@ -851,21 +893,20 @@ class FutureObjectDynamics:
     current_reference: Tensor  # [B,K,D]
     successor_content: Tensor  # [B,I,K,D]
     semantic_delta: Tensor  # [B,I,K,D]
-    transport_mean: Tensor  # [B,I,K,2]
-    transport_covariance: Tensor  # [B,I,K,3]
+    transport_mean: Tensor  # camera-specific [B,I,K,C,2]
+    transport_covariance: Tensor  # PSD xx/xy/yy [B,I,K,C,3]
     visibility: Tensor  # zero-centred visibility change [B,I,K,1]
     persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
-    uncertainty: Tensor  # [B,I,K,1]
-    reliability: Tensor  # calibration only [B,I,K,1]
-    current_selector_validity: Tensor  # observed support [B,K,1]
+    chart_availability: Tensor  # observable support [B,K,1]
     # Teacher/online visibility-support diagnostic.  P2 authority comes only
-    # from current_selector_validity so a predicted disappearance cannot erase
+    # from chart_availability so a predicted disappearance cannot erase
     # the very status effect that reports it.
     future_selector_validity: Tensor  # diagnostic support [B,I,K,1]
     # Current object geometry remains a real camera mixture.  Reducing these
     # coordinates to one normalized-image mean creates a point that belongs
     # to no camera and silently penalizes multi-view objects in P2.
     camera_coordinates: Tensor  # [B,K,C,2]
+    camera_chart_availability: Tensor  # observable camera/chart support [B,K,C,1]
     camera_weights: Tensor  # [B,K,C,1]
 
     @property
@@ -957,20 +998,20 @@ class FutureObjectDynamics:
         _shape(self.successor_content, (batch, intervals, objects, width), "successor content")
         _shape(
             self.transport_mean,
-            (batch, intervals, objects, 2),
+            (batch, intervals, objects, int(self.camera_coordinates.shape[2]), 2),
             "transport mean",
         )
         _shape(
             self.transport_covariance,
-            (batch, intervals, objects, 3),
+            (batch, intervals, objects, int(self.camera_coordinates.shape[2]), 3),
             "transport covariance",
         )
-        for name in ("visibility", "persistence", "uncertainty", "reliability"):
+        for name in ("visibility", "persistence"):
             _shape(getattr(self, name), (batch, intervals, objects, 1), name)
         _shape(
-            self.current_selector_validity,
+            self.chart_availability,
             (batch, objects, 1),
-            "current selector validity",
+            "chart availability",
         )
         _shape(
             self.future_selector_validity,
@@ -985,6 +1026,11 @@ class FutureObjectDynamics:
             self.camera_weights,
             (*self.camera_coordinates.shape[:-1], 1),
             "future camera weights",
+        )
+        _shape(
+            self.camera_chart_availability,
+            (*self.camera_coordinates.shape[:-1], 1),
+            "future camera chart availability",
         )
 
     def permute(self, permutation: Tensor) -> "FutureObjectDynamics":
@@ -1005,11 +1051,10 @@ class FutureObjectDynamics:
             transport_covariance=self.transport_covariance[:, :, index],
             visibility=self.visibility[:, :, index],
             persistence=self.persistence[:, :, index],
-            uncertainty=self.uncertainty[:, :, index],
-            reliability=self.reliability[:, :, index],
-            current_selector_validity=self.current_selector_validity[:, index],
+            chart_availability=self.chart_availability[:, index],
             future_selector_validity=self.future_selector_validity[:, :, index],
             camera_coordinates=self.camera_coordinates[:, index],
+            camera_chart_availability=self.camera_chart_availability[:, index],
             camera_weights=self.camera_weights[:, index],
         )
 
@@ -1024,22 +1069,33 @@ class FutureObjectDynamics:
             current_reference=current,
             successor_content=current[:, None].expand(-1, intervals, -1, -1),
             semantic_delta=zeros,
-            transport_mean=current.new_zeros(batch, intervals, objects, 2),
-            transport_covariance=current.new_zeros(batch, intervals, objects, 3),
+            transport_mean=current.new_zeros(
+                batch,
+                intervals,
+                objects,
+                int(facts.camera_coordinates.shape[2]),
+                2,
+            ),
+            transport_covariance=current.new_zeros(
+                batch,
+                intervals,
+                objects,
+                int(facts.camera_coordinates.shape[2]),
+                3,
+            ),
             visibility=scalar,
             persistence=scalar,
-            uncertainty=scalar,
-            reliability=scalar,
-            current_selector_validity=(
-                facts.validity * facts.existence.detach().clamp(0.0, 1.0)
+            chart_availability=facts.chart_availability,
+            future_selector_validity=facts.chart_availability[:, None].expand(
+                -1, intervals, -1, -1
             ),
-            future_selector_validity=(
-                facts.validity * facts.existence.detach().clamp(0.0, 1.0)
-            )[:, None].expand(-1, intervals, -1, -1),
             camera_coordinates=facts.camera_coordinates.to(dtype=current.dtype),
+            camera_chart_availability=facts.camera_chart_availability.to(
+                dtype=current.dtype
+            ),
             camera_weights=(
                 facts.camera_evidence_mass.float()
-                * facts.camera_validity.float()
+                * facts.camera_chart_availability.float()
             ).to(dtype=current.dtype),
         )
 

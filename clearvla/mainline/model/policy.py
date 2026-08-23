@@ -75,6 +75,7 @@ class OnlineTrainingState:
     observation: ObservationEvidence
     top: OnlineTopContext
     history_proposal: HistoryActionProposalState
+    current_state: Tensor  # observable current robot state [B,S]
 
     def validate(self, config: ExperimentConfig) -> None:
         self.observation.validate()
@@ -91,6 +92,11 @@ class OnlineTrainingState:
                 + config.top.proposal_summary_tokens
             ),
         )
+        if tuple(self.current_state.shape) != (
+            int(self.top.facts.batch),
+            int(config.dimensions.state_dim),
+        ):
+            raise ValueError("training current state must be [B,S]")
 
 
 @dataclass(frozen=True)
@@ -358,6 +364,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             observation=evidence,
             top=context,
             history_proposal=history_proposal,
+            current_state=conditioned_policy_input.history.state,
         )
         cache.validate(self.config)
         training_state.validate(self.config)
@@ -397,6 +404,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             future_supports=self.observation.teacher_supports(future.dino_supports),
             future_offsets=future.offsets,
             future_action=future.action_sequence,
+            current_state=training_state.current_state,
             future_state=future.state_sequence,
             collect_diagnostics=collect_diagnostics,
         )
@@ -443,7 +451,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             action_history_keep=cache.action_history_keep,
             role=cache.role_table,
         )
-        p1_fact, p1_metrics = self.bottom.complete_p1_fact(
+        p1_state, p1_metrics = self.bottom.complete_p1_fact(
             action_query=action_query,
             protected_detail=cache.factual_dock.protected_detail,
             time=time,
@@ -451,8 +459,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
         compiled, top_metrics = self.top.compile_policy(
             cache.top,
-            p1_fact=p1_fact,
-            p1_precision_innovation=cache.factual_dock.protected_detail,
+            p1_state=p1_state,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,
         )

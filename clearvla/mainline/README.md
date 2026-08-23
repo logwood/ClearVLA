@@ -18,11 +18,11 @@ config / manifest / typed online and training inputs
      (one public scene content value + K object-owned content innovations)
   -> S reads the public scene once, then K innovations, and forms observable
      interval innovations + per-type [interval,K,type] relevance
-  -> typed clean action + W1/W2 field-owned four-interval object dynamics
+  -> typed clean action + causal W1-near/W2-far four-interval object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
-  -> per-ODE V120 P1 policy block
-  -> P2 independent semantic/geometry/status consequence reads
-     -> protected variance-preserving fusion + low-rank type-contrast residual
+  -> per-ODE V120 P1 policy-precision residual (static fact stays protected)
+  -> P2 semantic/geometry/status consequence reads with camera-specific
+     transport/covariance and one consistent physical camera measure
   -> P3 four active precision/effect/temporal/state-change lanes
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
@@ -78,17 +78,17 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        30
+schema:        35
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-The verified Schema30 default graph currently measures
-`172,151,237 total / 155,756,916 trainable`; the launcher remains the
-authoritative source and prints the per-module inventory for every run.
+Schema35 counts are measured rather than copied from an ancestral schema. The
+launcher prints the total/trainable count and compact G/S/W/P/bottom summary,
+then writes the complete per-module inventory into run context.
 
-Schema 29 and older are not exact-resume sources for schema 30. Formal runs
+Schema 34 and older are not exact-resume sources for schema 35. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
@@ -124,16 +124,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema30_null_independent_g_p2_smoke \
-nohup bash scripts/smoke_mainline.sh > schema30_null_independent_g_p2_smoke.log 2>&1 &
+OUT_DIR=runs/schema35_causal_ownership_smoke \
+nohup bash scripts/smoke_mainline.sh > schema35_causal_ownership_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema30_null_independent_g_p2_b8 \
-nohup bash scripts/train_mainline.sh > schema30_null_independent_g_p2_b8.log 2>&1 &
+OUT_DIR=runs/schema35_causal_ownership_b8 \
+nohup bash scripts/train_mainline.sh > schema35_causal_ownership_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -145,9 +145,9 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema30_null_independent_g_p2_b8 \
+  runs/schema35_causal_ownership_b8 \
   --recovery-baseline v120_long.log \
-  --recovery-parent mainline_v120_contract_repair_b8.log \
+  --recovery-parent schema34_mapped_temporal_units_b8.log \
   --tail 120 --require-recovery --format text
 ```
 
