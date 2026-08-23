@@ -1361,6 +1361,57 @@ def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
     assert torch.count_nonzero(zero_completed.persistence) == 0
 
 
+def test_w2_near_residual_can_update_far_but_not_the_common_owner() -> None:
+    """W2 common has zero Jacobian to W1 near-interval residuals."""
+
+    torch.manual_seed(294)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    coarse = top.coarse_action(intent.action_dock())
+    _, working, _ = top.dynamics.forward_w1(
+        facts=facts,
+        intent=intent.world_dock(),
+        action=coarse,
+        collect_diagnostics=False,
+    )
+    with torch.no_grad():
+        top.dynamics.delta_head.weight.normal_(mean=0.0, std=0.05)
+    near_residual = (
+        working.near_residual_typed.detach().clone().requires_grad_(True)
+    )
+    completed, metrics = top.dynamics.forward_w2(
+        facts=facts,
+        intent=intent.world_dock(),
+        action=coarse,
+        w1_state=replace(working, near_residual_typed=near_residual),
+        collect_diagnostics=True,
+    )
+    common_gradient = torch.autograd.grad(
+        completed.semantic_common.square().sum(),
+        near_residual,
+        retain_graph=True,
+        allow_unused=True,
+    )[0]
+    if common_gradient is not None:
+        assert float(common_gradient.detach().abs().amax()) < 1.0e-8
+    far_gradient = torch.autograd.grad(
+        completed.semantic_interval_residual[:, 2:].square().sum(),
+        near_residual,
+        allow_unused=False,
+    )[0]
+    assert torch.count_nonzero(far_gradient.detach()) > 0
+    assert float(metrics["object_w2_near_to_far_residual_update_rms"]) > 0.0
+
+
 def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> None:
 
     torch.manual_seed(31)
@@ -2669,7 +2720,18 @@ def test_p2_equal_candidate_evidence_has_no_fixed_half_null_prior() -> None:
         collect_diagnostics=True,
     )
     assert torch.count_nonzero(value) == 0
-    assert float(metrics["object_p2_residual_null_mass"]) < 0.5
+    torch.testing.assert_close(
+        metrics["object_p2_residual_null_mass"],
+        torch.tensor(1.0 / float(intervals * objects + 1)),
+        atol=1.0e-7,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        metrics["object_p2_shared_interval_null_mass"],
+        metrics["object_p2_residual_null_mass"],
+        atol=1.0e-7,
+        rtol=0.0,
+    )
     assert float(metrics["object_p2_protected_common_rms"]) == 0.0
 
 
@@ -3052,22 +3114,155 @@ def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() ->
         context.intent.policy_dock(),
         collect_diagnostics=True,
     )
+    # Temporal/null ownership is shared and reads only S public interval keys;
+    # changing one W typed field may only change its within-interval K read.
+    torch.testing.assert_close(
+        metrics["object_p2_shared_interval_null_mass"],
+        changed_metrics["object_p2_shared_interval_null_mass"],
+        atol=0.0,
+        rtol=0.0,
+    )
     assert not torch.equal(
-        metrics["object_p2_semantic_residual_null_mass"],
-        changed_metrics["object_p2_semantic_residual_null_mass"],
+        metrics["object_p2_semantic_residual_selected_value_rms"],
+        changed_metrics["object_p2_semantic_residual_selected_value_rms"],
     )
     torch.testing.assert_close(
-        metrics["object_p2_geometry_residual_null_mass"],
-        changed_metrics["object_p2_geometry_residual_null_mass"],
+        metrics["object_p2_geometry_residual_selected_value_rms"],
+        changed_metrics["object_p2_geometry_residual_selected_value_rms"],
         atol=0.0,
         rtol=0.0,
     )
     torch.testing.assert_close(
-        metrics["object_p2_status_residual_null_mass"],
-        changed_metrics["object_p2_status_residual_null_mass"],
+        metrics["object_p2_status_residual_selected_value_rms"],
+        changed_metrics["object_p2_status_residual_selected_value_rms"],
         atol=0.0,
         rtol=0.0,
     )
+
+
+def test_p2_shared_interval_route_is_independent_of_typed_object_evidence() -> None:
+    """Typed W/S object evidence selects K inside, never the time interval."""
+
+    torch.manual_seed(408)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+    )
+    query = torch.randn(1, 24, 2, 32)
+    dynamics = context.predicted_dynamics
+    intent = context.intent.policy_dock()
+    baseline, baseline_metrics = top.effect_reader(
+        query,
+        dynamics,
+        intent,
+        collect_diagnostics=True,
+    )
+    semantic_delta = dynamics.semantic_delta + torch.randn_like(
+        dynamics.semantic_delta
+    )
+    changed_dynamics = replace(
+        dynamics,
+        successor_content=dynamics.current_reference[:, None] + semantic_delta,
+        semantic_delta=semantic_delta,
+        transport_mean=dynamics.transport_mean
+        + 0.2 * torch.randn_like(dynamics.transport_mean),
+        visibility=dynamics.visibility + torch.randn_like(dynamics.visibility),
+        persistence=dynamics.persistence
+        + torch.randn_like(dynamics.persistence),
+    )
+    changed_intent = replace(
+        intent,
+        typed_interval_residual_value=(
+            intent.typed_interval_residual_value
+            + torch.randn_like(intent.typed_interval_residual_value)
+        ),
+    )
+    changed, changed_metrics = top.effect_reader(
+        query,
+        changed_dynamics,
+        changed_intent,
+        collect_diagnostics=True,
+    )
+    assert not torch.equal(changed, baseline)
+    for name in (
+        "object_p2_shared_interval_score_abs",
+        "object_p2_shared_interval_score_max_abs",
+        "object_p2_shared_interval_posterior_entropy",
+        "object_p2_shared_interval_posterior_max",
+        "object_p2_shared_interval_null_mass",
+        "object_p2_shared_interval_horizon_variation",
+    ):
+        torch.testing.assert_close(
+            changed_metrics[name],
+            baseline_metrics[name],
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert float(baseline_metrics["object_p2_type_interval_disagreement_max_abs"]) < 1.0e-6
+    assert float(changed_metrics["object_p2_type_interval_disagreement_max_abs"]) < 1.0e-6
+    for interval in range(4):
+        expected = baseline_metrics[f"object_p2_residual_interval_{interval}_mass"]
+        for type_name in ("semantic", "geometry", "status"):
+            torch.testing.assert_close(
+                baseline_metrics[
+                    f"object_p2_{type_name}_residual_interval_{interval}_mass"
+                ],
+                expected,
+                atol=1.0e-6,
+                rtol=0.0,
+            )
+
+
+def test_p2_shared_interval_route_responds_to_public_s_interval_keys() -> None:
+    """The isolated temporal owner must remain live, not merely independent."""
+
+    torch.manual_seed(409)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+    )
+    query = torch.randn(1, 24, 2, 32)
+    dynamics = context.predicted_dynamics
+    intent = context.intent.policy_dock()
+    _, baseline_metrics = top.effect_reader(
+        query,
+        dynamics,
+        intent,
+        collect_diagnostics=True,
+    )
+    changed_intent = replace(
+        intent,
+        interval_residual_key=intent.interval_residual_key.roll(1, dims=1),
+    )
+    _, changed_metrics = top.effect_reader(
+        query,
+        dynamics,
+        changed_intent,
+        collect_diagnostics=True,
+    )
+    baseline_mass = torch.stack(
+        [
+            baseline_metrics[f"object_p2_residual_interval_{index}_mass"]
+            for index in range(4)
+        ]
+    )
+    changed_mass = torch.stack(
+        [
+            changed_metrics[f"object_p2_residual_interval_{index}_mass"]
+            for index in range(4)
+        ]
+    )
+    assert not torch.allclose(changed_mass, baseline_mass, atol=1.0e-7, rtol=0.0)
 
 
 def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:

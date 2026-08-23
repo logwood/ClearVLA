@@ -578,24 +578,19 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             batch, objects, 2, hidden
         ).transpose(1, 2)
         far = self.w2(far, causal_interval=True)
-        # Common is a real W owner, not a pre-W bypass.  Carry it as the first
-        # causal token in both the near memory and far query.  W2 can refine
-        # that owner from W1 evidence while far residuals retain their own two
-        # interval identities.
-        typed_far_owned = torch.cat(
-            (w1_state.common_typed[:, None], w1_state.far_residual_typed),
-            dim=1,
-        )
-        typed_near_owned = torch.cat(
-            (w1_state.common_typed[:, None], w1_state.near_residual_typed),
-            dim=1,
-        )
-        typed_far_query = typed_far_owned.permute(0, 2, 3, 1, 4).reshape(
-            batch * objects * 3, 3, hidden
-        )
-        typed_near_memory = typed_near_owned.permute(
+        # Near interval innovations may inform the two far interval
+        # innovations, but they must not be able to rewrite the protected
+        # cross-interval common owner.  The old unmasked cross-attention put
+        # ``common + near`` in one memory and therefore let near residuals leak
+        # into the W2 common row.  Keep this bridge residual-only, then run W2
+        # with common as the first causal row: far rows may read common, while
+        # common cannot read either near or far residuals.
+        typed_far_query = w1_state.far_residual_typed.permute(
             0, 2, 3, 1, 4
-        ).reshape(batch * objects * 3, 3, hidden)
+        ).reshape(batch * objects * 3, 2, hidden)
+        typed_near_memory = w1_state.near_residual_typed.permute(
+            0, 2, 3, 1, 4
+        ).reshape(batch * objects * 3, 2, hidden)
         typed_near_normalized = self.w1_memory_norm(typed_near_memory)
         typed_near_update, _ = self.w1_to_w2(
             self.w2_query_norm(typed_far_query),
@@ -604,16 +599,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             need_weights=False,
         )
         typed_near_update, _ = smooth_rms_contract(typed_near_update, 0.35)
-        completed_far_owned = (typed_far_query + typed_near_update).reshape(
-            batch, objects, 3, 3, hidden
+        far_with_near = (typed_far_query + typed_near_update).reshape(
+            batch, objects, 3, 2, hidden
         ).permute(0, 3, 1, 2, 4)
-        completed_far_owned = self._run_typed_block(
+        w2_common, far_typed = self._run_owned_typed_block(
             self.w2,
-            completed_far_owned,
+            w1_state.common_typed,
+            far_with_near,
             causal_interval=True,
         )
-        w2_common = completed_far_owned[:, 0]
-        far_typed = completed_far_owned[:, 1:]
         completed_residual = torch.cat(
             (w1_state.near_residual_typed, far_typed), dim=1
         )
@@ -642,6 +636,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 w2_common.detach().float()
                 - w1_state.common_typed.detach().float()
             ).square().mean().sqrt()
+            metrics["object_w2_near_to_far_residual_update_rms"] = (
+                typed_near_update.detach().float().square().mean().sqrt()
+            )
         return field, metrics
 
     @staticmethod

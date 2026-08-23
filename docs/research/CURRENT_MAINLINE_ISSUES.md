@@ -1,13 +1,14 @@
 # ClearVLA 当前主线纯问题账本
 
-更新：2026-08-22
+更新：2026-08-23
 
-当前源码身份：Schema32 `object_intent_dynamics_323`。行为比较锚点仍是 V120
+当前源码身份：Schema33 `object_intent_dynamics_323`。行为比较锚点仍是 V120
 `long`、提交 `0b92d359a2889a0a1b1eba256007c00ccbc54f3c` 与本地完整快照
 `.audit/v120_exact_source_0b92d359/`。V120 是行为锚点，不是正确性公理。
 
 本文件只记录当前源码仍未解决的问题。已经落地的 canonical G、S 单一状态监督、
-W-owned common/residual、camera-mixture P2、Teacher partial assignment 与目标代数
+W-owned common/residual、W2 residual-only bridge、共享时间/typed-object P2、
+camera-mixture P2、Teacher partial assignment 与目标代数
 属于当前架构，不在这里保留旧故障副本。
 
 ## 记账规则
@@ -17,7 +18,7 @@ W-owned common/residual、camera-mixture P2、Teacher partial assignment 与目�
 - 曲线相关性不单独证明因果；没有冻结干预时明确写“动作影响未知”。
 - 张量存在、梯度非零、loss 下降都不等于策略正在使用该边界。
 - 不用 gain、quota、hard gate、熵/多样性目标、额外外部 loss 或人工梯度掩盖问题。
-- Schema32 必须 fresh run；Schema31 及更旧 checkpoint 不允许 exact resume。
+- Schema33 必须 fresh run；Schema32 及更旧 checkpoint 不允许 exact resume。
 
 ## O-01：global-K 绑定后的有界校正器几乎没有实际 assignment 权限
 
@@ -106,7 +107,7 @@ V120 与多个恢复 schema 都出现过早期下降后中远程或 gripper 回�
 目标质量、flow 几何、event 稀疏和数据覆盖都可能贡献，现有证据不能把它归给单一模块。
 Schema32 改善的是确定的信息流闭环，不等于自动消除后期泛化问题。
 
-关闭条件：Schema32 完成八轮；同时看 train/val action、first/tail、四 horizon bands、
+关闭条件：Schema33 完成八轮；同时看 train/val action、first/tail、四 horizon bands、
 arm/gripper、event/motion 与 condition-keep 分层。不能用 best checkpoint 或 batch 2200
 代替全程。
 
@@ -119,7 +120,7 @@ typed S→W 入口、W common/residual 都经过 W-owned blocks、同一监督�
 camera mixture、P2 common 不可被 null 丢弃、residual 保留精确零 null，以及
 `effect -> consequence -> P3/bottom` 接线连续。这些证明的是结构正确性，不是动作净收益。
 
-关闭条件：用同一冻结 Schema32 checkpoint 分层 zero/shuffle，并按
+关闭条件：用同一冻结 Schema33 checkpoint 分层 zero/shuffle，并按
 `source boundary -> W field -> P2/consequence -> bottom source -> action` 报告效应和置信区间。
 只有边界与最终 action 都离开零，才声称策略使用该信息。不同 schema 同名但操作数改变的指标
 不得直接做数值排名。长跑还必须证明 canonical slot/public-position capacity 实际获得梯度并
@@ -137,7 +138,7 @@ camera mixture、P2 common 不可被 null 丢弃、residual 保留精确零 null
   没有干预证据前不得统一归因给 S/W。
 - O-10 是完整曲线放行门，O-11 是因果放行门。两者未关闭前，不能宣称已经超过 V120。
 
-## Schema32 后续检查
+## Schema33 后续检查
 
 - fresh smoke：五步部署、Teacher 零调用、dtype/finite、参数 inventory；
 - 同 iter 对比 V120/Schema25/Schema30 的 action、G/S/W/P、flow 和三阶段梯度；

@@ -1,8 +1,8 @@
 # ClearVLA 当前信息流与适配问题账本
 
-更新：2026-08-22
+更新：2026-08-23
 
-审查身份：Schema32 `object_intent_dynamics_323`。当前源码、完成的
+审查身份：Schema33 `object_intent_dynamics_323`。当前源码、完成的
 Schema31/V31 日志、V120 `long` 行为锚点以及本地完整快照
 `.audit/v120_exact_source_0b92d359/` 已交叉核对。
 

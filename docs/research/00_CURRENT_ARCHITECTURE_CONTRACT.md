@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-22
+Updated: 2026-08-23
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -13,10 +13,10 @@ cross-references rather than duplicating one risk under two names.
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        32
+manifest schema:        33
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         local implementation verified; fresh CUDA smoke required before release
+release status:         local structural verification passed (180 tests); fresh CUDA smoke required before release
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -29,14 +29,27 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema32 closes four continuous information-flow defects found in the
-> completed Schema31/V31 run; it is not a new top architecture.** Exact V120
-> P1, transition, flow, P3 and bottom remain locked. The active changes are:
-> the decoded K content is now the canonical fact consumed downstream; S owns
-> only an observable future-state auxiliary; W common and residual both cross
-> their W blocks and can use full conditions only through a zero-preserving
-> typed-by-base interaction; P2 scores the real camera-coordinate mixture
-> instead of a fictitious averaged coordinate.
+> **Schema33 closes two ownership defects demonstrated by the completed
+> Schema32 run; it is not a new top architecture.** Exact V120 G, Teacher, S,
+> P1, P3, transition, flow and bottom remain locked. W2 now lets only its far
+> residual rows read W1 near residuals; protected common crosses W2 as the
+> first causal row and cannot absorb near-interval innovations. P2 keeps its
+> protected common K reads, but factorizes optional residual routing into one
+> shared interval/null posterior followed by semantic/geometry/status object
+> posteriors inside the selected interval. Object evidence and transport
+> distance can therefore choose *what* to read without silently choosing
+> *when* all complementary fields are read.
+
+No block, parameter, loss, gain, quota or hard gate is added. The one shared
+P2 null has an exact-zero value and a fixed `-log(K)` measure correction, so
+factorizing a neutral `I*K+1` competition does not inflate its prior from
+`1/(I*K+1)` to `1/(I+1)`. This correction depends only on the fixed schema
+width K, not on learned scores or per-example active-object counts.
+
+Schema32 ancestry closed four earlier continuous information-flow defects:
+canonical decoded K content, the observable-only S auxiliary, W-owned
+common/residual typed-by-base interaction and real-camera P2 geometry. Those
+boundaries remain active in Schema33.
 
 The new G decoders and W interaction are zero-initialized without advancing
 the retained graph's construction RNG. Therefore pre-existing parameter
@@ -51,7 +64,7 @@ owns serialized graph identity; typed interfaces and executable checks own
 shape, dtype, provenance and zero semantics. Do not add a version-wide
 `_validate_vXXX_*` contract.
 
-Schema32 retains the controlled Schema24/V120 fidelity recovery and complete
+Schema33 retains the controlled Schema24/V120 fidelity recovery and complete
 Schema29 G/S/W/P ownership graph, including its
 flow-time, endpoint-head, Teacher algebra, support/selector split, non-finite
 sentinel and the following four source-audited boundaries:
@@ -89,17 +102,22 @@ identity:
   innovations and cannot duplicate the K/type carrier;
 - S exports protected `[B,K,type,*]` common values and signed zero-mean
   `[B,4,K,type,*]` residual values. Both are W-owned working states: W1
-  processes common with the near intervals, and W2 processes it again while
-  far intervals causally read W1. Full object/action/goal conditions enter
+  processes common with the near intervals. W2 lets only far residual rows
+  cross-read W1 near residual rows, then processes common as its first causal
+  row; near residuals can change far residuals but cannot rewrite common.
+  Full object/action/goal conditions enter
   these narrow typed states only through a bias-free zero-preserving product
   whose typed normalization has a fixed `0.25` variance floor, so absent or
   tiny typed evidence cannot be normalized into a strong owner. The exact combined
   `FutureObjectDynamics` is both supervised and consumed by P2; no free W
   hidden crosses the boundary;
 - P2 owns independent semantic, geometry and status reads on two supports.
-  Common effect is selected over physical K without learned null. Interval
-  residual is selected over interval×K with a zero-value null. Both use
-  matching S common/residual keys, and invalid objects have exact zero support.
+  Common effect is selected over physical K without learned null. Optional
+  residual uses one shared S/action-conditioned interval posterior with one
+  exact-zero null, followed by independent per-type K posteriors inside each
+  interval. Invalid objects have exact zero support. Content, typed intent and
+  geometry choose K only after the interval is fixed; geometry cannot bias the
+  temporal posterior toward short displacements.
   Geometry can positively support a coordinate match, while disappearance is
   selected from current support instead of masking its own status value.
   The three selected values are complementary rather than mutually exclusive:
@@ -120,9 +138,9 @@ identity:
   never the fixed learned interval-address carrier; progress remains audit-only.
 
 No external loss weight, block count, quota, hard gate, entropy target,
-capacity or P1 learned null is added. Schema31 and older checkpoints cannot
-exact-resume Schema32 because G/S/W/P2 typed interfaces and target algebra
-changed.
+capacity or P1 learned null is added. Schema32 and older checkpoints cannot
+exact-resume Schema33 because the W2 ownership direction and P2 routing
+algebra changed.
 
 Schema31 ancestry changed Teacher association from a one-sided softmax to fixed-
 dustbin partial assignment. Semantic/appearance scores are measured relative
@@ -226,7 +244,8 @@ one ObjectFactSet public content + K innovations/transport
     + causal clean CoarseActionIntent from observable public innovations
     -> bias-free zero-preserving typed-by-full-base interaction
     -> W1: common plus 4-8 and 8-16 states cross the block
-    -> W2: common plus 16-32 and 32-48 states causally read W1
+    -> W2: far residuals read near residuals; protected common is causal-first
+       and cannot read near/far residuals
     -> one supervised common+residual FutureObjectDynamics field
 
 completed progressive chart + S + four clean action bases
@@ -244,7 +263,8 @@ current noisy action + flow time + cached protected detail
 
 completed P1 fact + FutureObjectDynamics + S + noisy-action query
     -> P2 protected common K reads without learned null
-    -> P2 optional interval-residual reads with zero-value null
+    -> one shared action/S interval-or-null posterior
+    -> per-type semantic/geometry/status K reads inside each interval
     -> bounded geometry score over the real weighted camera-coordinate mixture
     -> complementary semantic/geometry/status fusion per boundary
     -> zero-preserving protected consequence
@@ -339,7 +359,9 @@ supports may change targets and losses, never deployment action.
    type axis. Full object/action/goal conditions can change a present typed
    state only through a bias-free typed-by-base interaction; they cannot create
    an effect from a zero typed state. Field heads decode the exact common plus
-   residual sum. The only W value below W is the directly supervised
+   residual sum. W2's near-to-far bridge is residual-only: near residuals may
+   update far residuals, but common has zero Jacobian to that bridge. The only
+   W value below W is the directly supervised
    `FutureObjectDynamics`; no public or private free W carrier crosses into P.
    W may reconstruct an absolute object coordinate only as the explicit sum
    of the single public projection and each K innovation projection.
@@ -362,9 +384,11 @@ supports may change targets and losses, never deployment action.
     coordinate; P2 combines bounded per-camera scores as a weighted
     probability log-mixture. It cannot average normalized image coordinates
     into a fictitious point or duplicate a prediction with `expand`.
-    Semantic, geometry and status each use a
-    protected common K posterior without learned null plus an optional
-    interval×K residual posterior with a zero-value null. All use the same
+    Semantic, geometry and status each use a protected common K posterior
+    without learned null. Optional residual first uses one shared
+    action/S-public interval-or-null posterior and then three independent K
+    posteriors inside each interval. Content, typed-object intent and geometry
+    cannot change the shared temporal posterior. All use the same
     current physical support; the existence factor is detached while the
     current factual read retains ordinary action gradients. Predicted
     disappearance therefore cannot mask itself or erase semantic/geometry
@@ -547,7 +571,8 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- Schema32 parameter counts are measured after implementation and must be
+- Schema33 parameter counts are identical to Schema32 because both repairs
+  reuse the existing W cross-attention and P2 projections. They must be
   reported by the launcher. The verified default graph has `169,622,469`
   parameters, of which `153,228,148` are trainable. Its direct-child inventory
   is observation `13,543,661 / 6,895,950`, top
@@ -569,9 +594,9 @@ ControlledTransitionSource / State
 - Active manifest identity:
 
   ```text
-  schema:       32
+  schema:       33
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-  top:          canonical_decoded_k_content_stateless_state_supervision_w_owned_common_residual_typed_base_interaction_camera_mixture_p2_consequence_p3
+  top:          canonical_decoded_k_content_stateless_state_supervision_w_residual_only_near_far_bridge_typed_base_interaction_camera_mixture_shared_interval_typed_object_p2_consequence_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
   training:     v120_mirrored_physical_flow_observed_current_grounding_partial_ot_single_w_future_effect_target_physical_camera_loss_support_event_boost_v120_decay_three_owner_clip
   runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only
@@ -596,10 +621,12 @@ chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
 permutations, per-type S perturbation locality, exact-null goal/typed values,
 typed-owner relabeling equivariance, public-target gradient isolation,
 single typed S→W ingress, W common/residual decomposition and typed-state
-traversal, canonical decoded-K export, W common traversal and zero-preserving
+traversal, W2 near-residual-to-common zero Jacobian and near-to-far residual
+connectivity, canonical decoded-K export, W common traversal and zero-preserving
 typed-by-base conditioning, public-W inability to synthesize a zero typed field, partial-OT
 dustbin/candidate-count calibration, mandatory P2 common evidence, optional
-residual exact null, invalid-K exclusion, per-type P2 locality, anchored
+residual exact null, shared interval/typed-object factorization, temporal/object
+isolation, invalid-K exclusion, per-type P2 locality, anchored
 type-contrast fusion/all-null zero, physical camera loss support, real-camera
 P2 permutation invariance, four active P3 sources,
 same-camera Teacher geometry, object geometry, neutral effect, endpoint lifecycle,
@@ -619,15 +646,15 @@ Use new empty output directories:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema32_continuous_information_flow_smoke \
-nohup bash scripts/smoke_mainline.sh > schema32_continuous_information_flow_smoke.log 2>&1 &
+OUT_DIR=runs/schema33_owned_w2_factorized_p2_smoke \
+nohup bash scripts/smoke_mainline.sh > schema33_owned_w2_factorized_p2_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema32_continuous_information_flow_b8 \
-nohup bash scripts/train_mainline.sh > schema32_continuous_information_flow_b8.log 2>&1 &
+OUT_DIR=runs/schema33_owned_w2_factorized_p2_b8 \
+nohup bash scripts/train_mainline.sh > schema33_owned_w2_factorized_p2_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema32_continuous_information_flow_b8 \
+  runs/schema33_owned_w2_factorized_p2_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

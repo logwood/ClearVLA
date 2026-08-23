@@ -1171,6 +1171,35 @@ V94_ALIASES.update(
             "residual_H": "object_p2_residual_posterior_entropy",
             "residual_max": "object_p2_residual_posterior_max",
             "residual_null": "object_p2_residual_null_mass",
+            "shared_interval_score": "object_p2_shared_interval_score_abs",
+            "shared_interval_score_max": (
+                "object_p2_shared_interval_score_max_abs"
+            ),
+            "shared_interval_H": (
+                "object_p2_shared_interval_posterior_entropy"
+            ),
+            "shared_interval_max": "object_p2_shared_interval_posterior_max",
+            "shared_interval_null": "object_p2_shared_interval_null_mass",
+            "shared_interval_effective": (
+                "object_p2_shared_interval_effective_count"
+            ),
+            "shared_interval_horizon_var": (
+                "object_p2_shared_interval_horizon_variation"
+            ),
+            "inner_object_H": (
+                "object_p2_within_interval_object_posterior_entropy"
+            ),
+            "inner_object_max": (
+                "object_p2_within_interval_object_posterior_max"
+            ),
+            "inner_object_effective": (
+                "object_p2_within_interval_object_effective_count"
+            ),
+            "type_interval_disagreement": (
+                "object_p2_type_interval_disagreement_max_abs"
+            ),
+            "residual_cancellation": "object_p2_residual_cancellation_ratio",
+            "residual_to_common": "object_p2_residual_to_common_rms_ratio",
             "protected_common": "object_p2_protected_common_rms",
             "optional_residual": "object_p2_optional_residual_rms",
             "semantic_mass": "object_p2_semantic_value_mass",
@@ -1478,6 +1507,7 @@ STRUCTURE_KEYS = (
     "object_w_residual_base_interaction_denominator_min",
     "object_w1_common_processing_delta_rms",
     "object_w2_common_processing_delta_rms",
+    "object_w2_near_to_far_residual_update_rms",
     "object_w_public_content_rms",
     "object_w_object_innovation_rms",
     "object_w_object_innovation_variation",
@@ -1557,6 +1587,19 @@ STRUCTURE_KEYS = (
     "object_p2_residual_posterior_entropy",
     "object_p2_residual_posterior_max",
     "object_p2_residual_null_mass",
+    "object_p2_shared_interval_score_abs",
+    "object_p2_shared_interval_score_max_abs",
+    "object_p2_shared_interval_posterior_entropy",
+    "object_p2_shared_interval_posterior_max",
+    "object_p2_shared_interval_null_mass",
+    "object_p2_shared_interval_effective_count",
+    "object_p2_shared_interval_horizon_variation",
+    "object_p2_within_interval_object_posterior_entropy",
+    "object_p2_within_interval_object_posterior_max",
+    "object_p2_within_interval_object_effective_count",
+    "object_p2_type_interval_disagreement_max_abs",
+    "object_p2_residual_cancellation_ratio",
+    "object_p2_residual_to_common_rms_ratio",
     "object_p2_protected_common_rms",
     "object_p2_optional_residual_rms",
     "object_p2_effect_precontract_rms",
@@ -4327,6 +4370,10 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema33 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 33
+    )
     schema32 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 32
@@ -4533,6 +4580,19 @@ def _recovery_assessment(
             "bottom_capacity_mean",
         )
     )
+    if schema33:
+        required_structure = (
+            *required_structure,
+            "object_w2_near_to_far_residual_update_rms",
+            "object_p2_shared_interval_posterior_entropy",
+            "object_p2_shared_interval_posterior_max",
+            "object_p2_shared_interval_null_mass",
+            "object_p2_within_interval_object_posterior_entropy",
+            "object_p2_within_interval_object_posterior_max",
+            "object_p2_type_interval_disagreement_max_abs",
+            "object_p2_residual_cancellation_ratio",
+            "object_p2_residual_to_common_rms_ratio",
+        )
     for name in required_structure:
         value = structure.get(name, {}).get("tail_median")
         status = (

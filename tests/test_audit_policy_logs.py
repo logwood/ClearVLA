@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from clearvla.tools.audit_policy_logs import (
+    STRUCTURE_KEYS,
     BatchPoint,
     ParsedRun,
-    STRUCTURE_KEYS,
     _recovery_assessment,
     build_summary,
     parse_log,
@@ -1836,6 +1836,45 @@ class AuditPolicyLogsTest(unittest.TestCase):
             "incomplete",
         )
         self.assertTrue(set(active_structure).issubset(set(STRUCTURE_KEYS)))
+
+    def test_schema33_recovery_requires_owned_w2_and_factorized_p2_audits(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema33"
+        candidate["manifest"]["architecture_schema"] = 33
+        candidate["structure"] = {
+            name: {"tail_median": 0.5 if name.endswith("pair_cosine") else 0.1}
+            for name in STRUCTURE_KEYS
+        }
+        required = (
+            "object_w2_near_to_far_residual_update_rms",
+            "object_p2_shared_interval_posterior_entropy",
+            "object_p2_shared_interval_posterior_max",
+            "object_p2_shared_interval_null_mass",
+            "object_p2_within_interval_object_posterior_entropy",
+            "object_p2_within_interval_object_posterior_max",
+            "object_p2_type_interval_disagreement_max_abs",
+            "object_p2_residual_cancellation_ratio",
+            "object_p2_residual_to_common_rms_ratio",
+        )
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        for name in required:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+
+        candidate["structure"].pop(
+            "object_p2_shared_interval_posterior_entropy"
+        )
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[
+                "structure/object_p2_shared_interval_posterior_entropy"
+            ],
+            "incomplete",
+        )
 
     def test_global_k_binder_is_presence_only_across_changed_semantics(self) -> None:
         baseline = _complete_recovery_summary("v120")
