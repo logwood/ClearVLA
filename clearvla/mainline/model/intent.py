@@ -573,15 +573,28 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_goal_attention_entropy": normalized_entropy(
                 goal_attention, dim=-1
             ).detach().mean(),
+            "object_intent_goal_attention_max": goal_attention.detach()
+            .float()
+            .amax(dim=-1)
+            .mean(),
             "object_intent_interval_goal_entropy": normalized_entropy(
                 interval_goal_attention, dim=-1
             ).detach().mean(),
+            "object_intent_interval_goal_attention_max": (
+                interval_goal_attention.detach().float().amax(dim=-1).mean()
+            ),
             "object_intent_interval_history_entropy": normalized_entropy(
                 interval_history_attention, dim=-1
             ).detach().mean(),
+            "object_intent_interval_history_attention_max": (
+                interval_history_attention.detach().float().amax(dim=-1).mean()
+            ),
             "object_intent_interval_object_entropy": normalized_entropy(
                 interval_object_attention, dim=-1
             ).detach().mean(),
+            "object_intent_interval_object_attention_max": (
+                interval_object_attention.detach().float().amax(dim=-1).mean()
+            ),
             "object_intent_public_interval_variation": public_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
@@ -633,6 +646,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             )
             .detach()
             .mean(),
+            "object_intent_temporal_attention_max": temporal_attention.detach()
+            .float()
+            .amax(dim=-1)
+            .mean(),
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
@@ -655,6 +672,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_state_change_attention_entropy": normalized_entropy(
                 state_change_attention, dim=-1
             ).detach().mean(),
+            "object_intent_state_change_attention_max": state_change_attention.detach()
+            .float()
+            .amax(dim=-1)
+            .mean(),
         }
         raw_routes = (facts.semantic, facts.appearance, facts.geometry)
         for type_index, name in enumerate(TYPED_INTENT_NAMES):

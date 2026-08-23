@@ -13,10 +13,10 @@ cross-references rather than duplicating one risk under two names.
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        33
+manifest schema:        34
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         local structural verification passed (180 tests); fresh CUDA smoke required before release
+release status:         local structural verification passed (185 tests); fresh CUDA smoke required before release
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -29,19 +29,26 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema33 closes two ownership defects demonstrated by the completed
-> Schema32 run; it is not a new top architecture.** Exact V120 G, Teacher, S,
-> P1, P3, transition, flow and bottom remain locked. W2 now lets only its far
-> residual rows read W1 near residuals; protected common crosses W2 as the
-> first causal row and cannot absorb near-interval innovations. P2 keeps its
-> protected common K reads, but factorizes optional residual routing into one
-> shared interval/null posterior followed by semantic/geometry/status object
-> posteriors inside the selected interval. Object evidence and transport
-> distance can therefore choose *what* to read without silently choosing
-> *when* all complementary fields are read.
+> **Schema34 repairs the information loss exposed by the completed Schema33
+> run; it is not a new top architecture.** Exact V120 G, Teacher, S, P1, P3,
+> transition, flow and bottom remain locked. W common and interval-residual
+> owners now cross the same W1/W2 parameters in separate calls, so neither has
+> a Jacobian to the other; W2 retains only the explicit near-residual-to-far-
+> residual bridge. P2 keeps one shared interval/null posterior followed by
+> independent semantic/geometry/status K posteriors, but the temporal evidence
+> is no longer public-S-only: bounded public S, explicitly mapped typed S and
+> supervised W compatibility contribute symmetrically. Raw coordinate distance
+> remains a K-selection score rather than an independent temporal logit.
 
-No block, parameter, loss, gain, quota or hard gate is added. The one shared
-P2 null has an exact-zero value and a fixed `-log(K)` measure correction, so
+No block, parameter, loss, gain, quota or hard gate is added. P2 maps its
+consumer types explicitly as `semantic<-semantic`, `geometry<-geometry`, and
+`status<-appearance`; integer positions from the two type vocabularies are
+never treated as equivalent. Each projected complementary candidate crosses a
+one-sided, zero-preserving RMS contract with maximum `0.35/sqrt(3)` before the
+soft read. The contract can suppress a field whose native units would dominate
+the protected sum, but it cannot amplify weak/zero evidence or assert that
+three fields carry equal information. The one shared P2 null has an exact-zero
+value and a fixed `-log(K)` measure correction, so
 factorizing a neutral `I*K+1` competition does not inflate its prior from
 `1/(I*K+1)` to `1/(I+1)`. This correction depends only on the fixed schema
 width K, not on learned scores or per-example active-object counts.
@@ -49,7 +56,7 @@ width K, not on learned scores or per-example active-object counts.
 Schema32 ancestry closed four earlier continuous information-flow defects:
 canonical decoded K content, the observable-only S auxiliary, W-owned
 common/residual typed-by-base interaction and real-camera P2 geometry. Those
-boundaries remain active in Schema33.
+boundaries remain active in Schema34.
 
 The new G decoders and W interaction are zero-initialized without advancing
 the retained graph's construction RNG. Therefore pre-existing parameter
@@ -64,7 +71,7 @@ owns serialized graph identity; typed interfaces and executable checks own
 shape, dtype, provenance and zero semantics. Do not add a version-wide
 `_validate_vXXX_*` contract.
 
-Schema33 retains the controlled Schema24/V120 fidelity recovery and complete
+Schema34 retains the controlled Schema24/V120 fidelity recovery and complete
 Schema29 G/S/W/P ownership graph, including its
 flow-time, endpoint-head, Teacher algebra, support/selector split, non-finite
 sentinel and the following four source-audited boundaries:
@@ -102,9 +109,10 @@ identity:
   innovations and cannot duplicate the K/type carrier;
 - S exports protected `[B,K,type,*]` common values and signed zero-mean
   `[B,4,K,type,*]` residual values. Both are W-owned working states: W1
-  processes common with the near intervals. W2 lets only far residual rows
-  cross-read W1 near residual rows, then processes common as its first causal
-  row; near residuals can change far residuals but cannot rewrite common.
+  processes common and near residuals through the same parameters in separate
+  owner calls. W2 lets only far residual rows cross-read W1 near residual rows,
+  then again processes common and far residuals separately; neither owner can
+  rewrite the other.
   Full object/action/goal conditions enter
   these narrow typed states only through a bias-free zero-preserving product
   whose typed normalization has a fixed `0.25` variance floor, so absent or
@@ -113,15 +121,18 @@ identity:
   hidden crosses the boundary;
 - P2 owns independent semantic, geometry and status reads on two supports.
   Common effect is selected over physical K without learned null. Optional
-  residual uses one shared S/action-conditioned interval posterior with one
+  residual uses one shared action-conditioned interval posterior with one
   exact-zero null, followed by independent per-type K posteriors inside each
-  interval. Invalid objects have exact zero support. Content, typed intent and
-  geometry choose K only after the interval is fixed; geometry cannot bias the
-  temporal posterior toward short displacements.
+  interval. Invalid objects have exact zero support. Public S, the matching
+  typed-S owner and supervised W compatibility contribute bounded temporal
+  evidence after a normalized within-interval K read. Raw geometry distance
+  is not added directly to the temporal score and therefore cannot by itself
+  bias time toward short displacements.
   Geometry can positively support a coordinate match, while disappearance is
   selected from current support instead of masking its own status value.
   The three selected values are complementary rather than mutually exclusive:
-  their variance-preserving symmetric sum (`sum/sqrt(3)`) is a protected
+  each candidate first crosses a one-sided per-field RMS contract; their
+  variance-preserving symmetric sum (`sum/sqrt(3)`) is a protected
   fusion base and a bias-free low-rank
   LayerScale residual may read only type contrasts. There is no outer type
   softmax/gate; all-null stays exact zero and identical typed values cannot be
@@ -138,9 +149,9 @@ identity:
   never the fixed learned interval-address carrier; progress remains audit-only.
 
 No external loss weight, block count, quota, hard gate, entropy target,
-capacity or P1 learned null is added. Schema32 and older checkpoints cannot
-exact-resume Schema33 because the W2 ownership direction and P2 routing
-algebra changed.
+capacity or P1 learned null is added. Schema33 and older checkpoints cannot
+exact-resume Schema34 because W owner connectivity, P2 temporal evidence,
+typed provenance and value-unit algebra changed.
 
 Schema31 ancestry changed Teacher association from a one-sided softmax to fixed-
 dustbin partial assignment. Semantic/appearance scores are measured relative
@@ -356,7 +367,9 @@ supports may change targets and losses, never deployment action.
 8. W1 owns the two near intervals and W2 the two far intervals. S owns the one
    learned interval coordinate. W's common semantic/appearance/geometry state
    and signed residual states both cross their owned blocks without mixing the
-   type axis. Full object/action/goal conditions can change a present typed
+   type axis or reading each other: the shared W parameters are applied in
+   separate common/residual calls. Full object/action/goal conditions can
+   change a present typed
    state only through a bias-free typed-by-base interaction; they cannot create
    an effect from a zero typed state. Field heads decode the exact common plus
    residual sum. W2's near-to-far bridge is residual-only: near residuals may
@@ -386,14 +399,19 @@ supports may change targets and losses, never deployment action.
     into a fictitious point or duplicate a prediction with `expand`.
     Semantic, geometry and status each use a protected common K posterior
     without learned null. Optional residual first uses one shared
-    action/S-public interval-or-null posterior and then three independent K
-    posteriors inside each interval. Content, typed-object intent and geometry
-    cannot change the shared temporal posterior. All use the same
+    interval-or-null posterior and then three independent K posteriors inside
+    each interval. The shared temporal score is a bounded symmetric opinion
+    pool over public S, explicitly mapped typed S and supervised W
+    compatibility; raw coordinate distance is not an additive temporal score.
+    P2's consumer-to-S mapping is fixed as `(semantic=0, geometry=2,
+    status=1)`. All use the same
     current physical support; the existence factor is detached while the
     current factual read retains ordinary action gradients. Predicted
     disappearance therefore cannot mask itself or erase semantic/geometry
-    candidates. They do not enter a second competitive selector:
-    a protected variance-preserving `sum/sqrt(3)` base plus a near-zero
+    candidates. Each projected candidate is one-sided RMS-bounded before the
+    soft read and can never be amplified by that contract. They do not enter a
+    second competitive selector: a protected variance-preserving
+    `sum/sqrt(3)` base plus a near-zero
     low-rank type-contrast residual performs the only final fusion. P2 cannot
     average camera squared distances into an
     implicit variance penalty.
@@ -571,8 +589,8 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- Schema33 parameter counts are identical to Schema32 because both repairs
-  reuse the existing W cross-attention and P2 projections. They must be
+- Schema34 parameter counts are identical to Schema33/Schema32 because the
+  repairs reuse the existing W blocks and P2 projections. They must be
   reported by the launcher. The verified default graph has `169,622,469`
   parameters, of which `153,228,148` are trainable. Its direct-child inventory
   is observation `13,543,661 / 6,895,950`, top
@@ -621,13 +639,13 @@ chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
 permutations, per-type S perturbation locality, exact-null goal/typed values,
 typed-owner relabeling equivariance, public-target gradient isolation,
 single typed S→W ingress, W common/residual decomposition and typed-state
-traversal, W2 near-residual-to-common zero Jacobian and near-to-far residual
-connectivity, canonical decoded-K export, W common traversal and zero-preserving
+traversal, bidirectional common/residual zero Jacobian and W2 near-to-far
+residual connectivity, canonical decoded-K export and zero-preserving
 typed-by-base conditioning, public-W inability to synthesize a zero typed field, partial-OT
 dustbin/candidate-count calibration, mandatory P2 common evidence, optional
-residual exact null, shared interval/typed-object factorization, temporal/object
-isolation, invalid-K exclusion, per-type P2 locality, anchored
-type-contrast fusion/all-null zero, physical camera loss support, real-camera
+residual exact null, public/typed/W shared-time evidence, explicit S-to-P2 type
+mapping, invalid-K exclusion, per-type K locality, one-sided value-unit contract,
+anchored type-contrast fusion/all-null zero, physical camera loss support, real-camera
 P2 permutation invariance, four active P3 sources,
 same-camera Teacher geometry, object geometry, neutral effect, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
@@ -646,17 +664,17 @@ Use new empty output directories:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema33_owned_w2_factorized_p2_smoke \
-nohup bash scripts/smoke_mainline.sh > schema33_owned_w2_factorized_p2_smoke.log 2>&1 &
+OUT_DIR=runs/schema34_mapped_temporal_units_smoke \
+nohup bash scripts/smoke_mainline.sh > schema34_mapped_temporal_units_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema33_owned_w2_factorized_p2_b8 \
-nohup bash scripts/train_mainline.sh > schema33_owned_w2_factorized_p2_b8.log 2>&1 &
+OUT_DIR=runs/schema34_mapped_temporal_units_b8 \
+nohup bash scripts/train_mainline.sh > schema34_mapped_temporal_units_b8.log 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema33_owned_w2_factorized_p2_b8 \
+  runs/schema34_mapped_temporal_units_b8 \
   --recovery-baseline v120_long.log \
-  --recovery-parent mainline_v120_contract_repair_b8.log \
+  --recovery-parent runs/schema33_owned_w2_factorized_p2_b8 \
   --tail 120 --require-recovery --format text
 ```
 

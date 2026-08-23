@@ -2,7 +2,7 @@
 
 更新：2026-08-23
 
-审查身份：Schema33 `object_intent_dynamics_323`。当前源码、完成的
+审查身份：Schema34 `object_intent_dynamics_323`。当前源码、完成的
 Schema31/V31 日志、V120 `long` 行为锚点以及本地完整快照
 `.audit/v120_exact_source_0b92d359/` 已交叉核对。
 
@@ -13,6 +13,10 @@ hard gate、熵目标、人工梯度或削弱健康旁路来伪造关闭。
 Schema32 已关闭并从本账本删除的四项确定性故障是：私有 current-DINO 重建容量、
 W 的窄 typed 调制、W common/重复 S 目标旁路，以及 P2 的虚构跨相机均值坐标。
 它们的现行边界只记录在 `00_CURRENT_ARCHITECTURE_CONTRACT.md`。
+
+Schema34 已关闭 W2/P2 的确定性 owner/时间证据接线和日志语义问题。P2 value 单位适配的
+正式日志确认与 Teacher 分散上限由总账 `CURRENT_MAINLINE_ISSUES.md` 的 O-13/O-14 管理。
+本文件不以另一组 IF 编号复制这些问题；IF-05–IF-08 只保留不同的独立适配风险。
 
 ## IF-05：S→P1 factual dock 将完整 Goal/History 再压成 mean/last 摘要
 

@@ -453,7 +453,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         ).permute(0, 2, 3, 1, 4)
 
     @classmethod
-    def _run_owned_typed_block(
+    def _run_separated_owned_typed_block(
         cls,
         block: _ObjectIntervalBlock,
         common: Tensor,
@@ -461,24 +461,32 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         *,
         causal_interval: bool,
     ) -> tuple[Tensor, Tensor]:
-        """Run one W block over its common owner and interval innovations.
+        """Run common and interval owners through one shared-parameter block.
 
-        Common is the first causal token for every object/type.  It therefore
-        receives real W capacity while remaining a distinct owner; interval
-        rows may read it, but it is never recovered by averaging residuals.
+        The two owners need the same W capacity, but they are not sequence
+        positions of one carrier.  Concatenating common as causal row zero lets
+        every residual repeatedly read it; later interval centring cannot undo
+        the interval-dependent nonlinear write.  Separate calls preserve the
+        owner boundary while reusing the exact same parameters.  Observable
+        facts, action and goal have already entered each present owner through
+        the zero-preserving typed-by-base interaction in :meth:`_base`.
         """
 
         if common.ndim != 4 or residual.ndim != 5:
             raise ValueError("owned typed W state lost common/residual axes")
         if tuple(residual.shape[:1] + residual.shape[2:]) != tuple(common.shape):
             raise ValueError("owned typed W common/residual axes do not align")
-        combined = torch.cat((common[:, None], residual), dim=1)
-        completed = cls._run_typed_block(
+        completed_common = cls._run_typed_block(
             block,
-            combined,
+            common[:, None],
+            causal_interval=False,
+        )
+        completed_residual = cls._run_typed_block(
+            block,
+            residual,
             causal_interval=causal_interval,
         )
-        return completed[:, 0], completed[:, 1:]
+        return completed_common[:, 0], completed_residual
 
     @staticmethod
     def _typed_state_metrics(value: Tensor, *, prefix: str) -> dict[str, Tensor]:
@@ -510,7 +518,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
         near = self.w1(hidden[:, :2], causal_interval=True)
-        w1_common, near_typed = self._run_owned_typed_block(
+        w1_common, near_typed = self._run_separated_owned_typed_block(
             self.w1,
             typed_common,
             typed_residual[:, :2],
@@ -582,9 +590,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         # innovations, but they must not be able to rewrite the protected
         # cross-interval common owner.  The old unmasked cross-attention put
         # ``common + near`` in one memory and therefore let near residuals leak
-        # into the W2 common row.  Keep this bridge residual-only, then run W2
-        # with common as the first causal row: far rows may read common, while
-        # common cannot read either near or far residuals.
+        # into the W2 common row.  Keep this bridge residual-only, then process
+        # common and far residuals as separate owners through the same W2
+        # parameters.  Neither owner can rewrite the other.
         typed_far_query = w1_state.far_residual_typed.permute(
             0, 2, 3, 1, 4
         ).reshape(batch * objects * 3, 2, hidden)
@@ -602,7 +610,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         far_with_near = (typed_far_query + typed_near_update).reshape(
             batch, objects, 3, 2, hidden
         ).permute(0, 3, 1, 2, 4)
-        w2_common, far_typed = self._run_owned_typed_block(
+        w2_common, far_typed = self._run_separated_owned_typed_block(
             self.w2,
             w1_state.common_typed,
             far_with_near,

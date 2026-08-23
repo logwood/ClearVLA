@@ -846,9 +846,13 @@ V94_ALIASES.update(
         },
         "object_intent": {
             "goal_H": "object_intent_goal_attention_entropy",
+            "goal_max": "object_intent_goal_attention_max",
             "interval_goal_H": "object_intent_interval_goal_entropy",
+            "interval_goal_max": "object_intent_interval_goal_attention_max",
             "history_H": "object_intent_interval_history_entropy",
+            "history_max": "object_intent_interval_history_attention_max",
             "object_H": "object_intent_interval_object_entropy",
+            "object_max": "object_intent_interval_object_attention_max",
             "semantic_H": "object_intent_interval_semantic_entropy",
             "appearance_H": "object_intent_interval_appearance_entropy",
             "geometry_H": "object_intent_interval_geometry_entropy",
@@ -881,6 +885,11 @@ V94_ALIASES.update(
                 "object_intent_temporal_read_interval_variation"
             ),
             "temporal_attention_H": "object_intent_temporal_attention_entropy",
+            "temporal_attention_max": "object_intent_temporal_attention_max",
+            "state_change_attention_H": (
+                "object_intent_state_change_attention_entropy"
+            ),
+            "state_change_attention_max": "object_intent_state_change_attention_max",
             "goal_innov": "object_intent_goal_innovation_rms",
             "history_innov": "object_intent_history_innovation_rms",
             "object_innov": "object_intent_object_innovation_rms",
@@ -1175,6 +1184,43 @@ V94_ALIASES.update(
             "shared_interval_score_max": (
                 "object_p2_shared_interval_score_max_abs"
             ),
+            "shared_interval_public_score": (
+                "object_p2_shared_interval_public_score_abs"
+            ),
+            "shared_interval_typed_score": (
+                "object_p2_shared_interval_typed_score_abs"
+            ),
+            "shared_interval_w_score": "object_p2_shared_interval_w_score_abs",
+            "shared_interval_precontract_max": (
+                "object_p2_shared_interval_precontract_score_max_abs"
+            ),
+            "semantic_shared_interval_public": (
+                "object_p2_semantic_shared_interval_public_score_abs"
+            ),
+            "semantic_shared_interval_typed": (
+                "object_p2_semantic_shared_interval_typed_score_abs"
+            ),
+            "semantic_shared_interval_w": (
+                "object_p2_semantic_shared_interval_w_score_abs"
+            ),
+            "geometry_shared_interval_public": (
+                "object_p2_geometry_shared_interval_public_score_abs"
+            ),
+            "geometry_shared_interval_typed": (
+                "object_p2_geometry_shared_interval_typed_score_abs"
+            ),
+            "geometry_shared_interval_w": (
+                "object_p2_geometry_shared_interval_w_score_abs"
+            ),
+            "status_shared_interval_public": (
+                "object_p2_status_shared_interval_public_score_abs"
+            ),
+            "status_shared_interval_typed": (
+                "object_p2_status_shared_interval_typed_score_abs"
+            ),
+            "status_shared_interval_w": (
+                "object_p2_status_shared_interval_w_score_abs"
+            ),
             "shared_interval_H": (
                 "object_p2_shared_interval_posterior_entropy"
             ),
@@ -1198,7 +1244,15 @@ V94_ALIASES.update(
             "type_interval_disagreement": (
                 "object_p2_type_interval_disagreement_max_abs"
             ),
+            # Schema33 used the misleading ``residual_cancellation`` display
+            # name for a retained-RMS ratio.  Preserve that canonical old key
+            # only for historical parsing; Schema34 emits the explicit trio.
             "residual_cancellation": "object_p2_residual_cancellation_ratio",
+            "residual_retained": "object_p2_residual_retained_rms_ratio",
+            "residual_cancelled": "object_p2_residual_cancelled_rms_fraction",
+            "residual_cancellation_support": (
+                "object_p2_residual_cancellation_support_fraction"
+            ),
             "residual_to_common": "object_p2_residual_to_common_rms_ratio",
             "protected_common": "object_p2_protected_common_rms",
             "optional_residual": "object_p2_optional_residual_rms",
@@ -1239,6 +1293,42 @@ V94_ALIASES.update(
             ),
             "status_residual_value": (
                 "object_p2_status_residual_selected_value_rms"
+            ),
+            "semantic_common_candidate": (
+                "object_p2_semantic_common_projected_candidate_value_rms"
+            ),
+            "geometry_common_candidate": (
+                "object_p2_geometry_common_projected_candidate_value_rms"
+            ),
+            "status_common_candidate": (
+                "object_p2_status_common_projected_candidate_value_rms"
+            ),
+            "semantic_residual_candidate": (
+                "object_p2_semantic_residual_projected_candidate_value_rms"
+            ),
+            "geometry_residual_candidate": (
+                "object_p2_geometry_residual_projected_candidate_value_rms"
+            ),
+            "status_residual_candidate": (
+                "object_p2_status_residual_projected_candidate_value_rms"
+            ),
+            "semantic_common_contract_scale": (
+                "object_p2_semantic_common_value_contract_scale_mean"
+            ),
+            "geometry_common_contract_scale": (
+                "object_p2_geometry_common_value_contract_scale_mean"
+            ),
+            "status_common_contract_scale": (
+                "object_p2_status_common_value_contract_scale_mean"
+            ),
+            "semantic_residual_contract_scale": (
+                "object_p2_semantic_residual_value_contract_scale_mean"
+            ),
+            "geometry_residual_contract_scale": (
+                "object_p2_geometry_residual_value_contract_scale_mean"
+            ),
+            "status_residual_contract_scale": (
+                "object_p2_status_residual_value_contract_scale_mean"
             ),
             "status_score_max": "object_p2_status_score_max_abs",
             "status_null": "object_p2_status_null_mass",
@@ -1392,6 +1482,17 @@ STRUCTURE_KEYS = (
     "object_grounding_candidate_key_rms",
     "object_grounding_full_dino_value_rms",
     "object_intent_goal_attention_entropy",
+    "object_intent_goal_attention_max",
+    "object_intent_interval_goal_entropy",
+    "object_intent_interval_goal_attention_max",
+    "object_intent_interval_history_entropy",
+    "object_intent_interval_history_attention_max",
+    "object_intent_interval_object_entropy",
+    "object_intent_interval_object_attention_max",
+    "object_intent_temporal_attention_entropy",
+    "object_intent_temporal_attention_max",
+    "object_intent_state_change_attention_entropy",
+    "object_intent_state_change_attention_max",
     "object_intent_interval_variation",
     "object_intent_public_interval_variation",
     "object_intent_public_condition_centered_interval_variation",
@@ -1589,6 +1690,19 @@ STRUCTURE_KEYS = (
     "object_p2_residual_null_mass",
     "object_p2_shared_interval_score_abs",
     "object_p2_shared_interval_score_max_abs",
+    "object_p2_shared_interval_public_score_abs",
+    "object_p2_shared_interval_typed_score_abs",
+    "object_p2_shared_interval_w_score_abs",
+    "object_p2_shared_interval_precontract_score_max_abs",
+    "object_p2_semantic_shared_interval_public_score_abs",
+    "object_p2_semantic_shared_interval_typed_score_abs",
+    "object_p2_semantic_shared_interval_w_score_abs",
+    "object_p2_geometry_shared_interval_public_score_abs",
+    "object_p2_geometry_shared_interval_typed_score_abs",
+    "object_p2_geometry_shared_interval_w_score_abs",
+    "object_p2_status_shared_interval_public_score_abs",
+    "object_p2_status_shared_interval_typed_score_abs",
+    "object_p2_status_shared_interval_w_score_abs",
     "object_p2_shared_interval_posterior_entropy",
     "object_p2_shared_interval_posterior_max",
     "object_p2_shared_interval_null_mass",
@@ -1599,6 +1713,9 @@ STRUCTURE_KEYS = (
     "object_p2_within_interval_object_effective_count",
     "object_p2_type_interval_disagreement_max_abs",
     "object_p2_residual_cancellation_ratio",
+    "object_p2_residual_retained_rms_ratio",
+    "object_p2_residual_cancelled_rms_fraction",
+    "object_p2_residual_cancellation_support_fraction",
     "object_p2_residual_to_common_rms_ratio",
     "object_p2_protected_common_rms",
     "object_p2_optional_residual_rms",
@@ -1615,6 +1732,24 @@ STRUCTURE_KEYS = (
     "object_p2_semantic_residual_null_mass",
     "object_p2_geometry_residual_null_mass",
     "object_p2_status_residual_null_mass",
+    "object_p2_semantic_common_selected_value_rms",
+    "object_p2_geometry_common_selected_value_rms",
+    "object_p2_status_common_selected_value_rms",
+    "object_p2_semantic_residual_selected_value_rms",
+    "object_p2_geometry_residual_selected_value_rms",
+    "object_p2_status_residual_selected_value_rms",
+    "object_p2_semantic_common_projected_candidate_value_rms",
+    "object_p2_geometry_common_projected_candidate_value_rms",
+    "object_p2_status_common_projected_candidate_value_rms",
+    "object_p2_semantic_residual_projected_candidate_value_rms",
+    "object_p2_geometry_residual_projected_candidate_value_rms",
+    "object_p2_status_residual_projected_candidate_value_rms",
+    "object_p2_semantic_common_value_contract_scale_mean",
+    "object_p2_geometry_common_value_contract_scale_mean",
+    "object_p2_status_common_value_contract_scale_mean",
+    "object_p2_semantic_residual_value_contract_scale_mean",
+    "object_p2_geometry_residual_value_contract_scale_mean",
+    "object_p2_status_residual_value_contract_scale_mean",
     "object_p2_fusion_base_rms",
     "object_p2_fusion_contrast_rms",
     "object_p2_fusion_residual_rms",
@@ -3645,6 +3780,17 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
         for key in STRUCTURE_KEYS
         if (stats := stats_with_epoch_fallback(key)) is not None
     }
+    # Schema33's historical key was named as cancellation even though its
+    # formula measured retained RMS.  Expose that value under the corrected
+    # semantic name for cross-schema reading, but do not fabricate a cancelled
+    # fraction because the old log did not record active-support coverage.
+    if (
+        "object_p2_residual_retained_rms_ratio" not in structure
+        and "object_p2_residual_cancellation_ratio" in structure
+    ):
+        structure["object_p2_residual_retained_rms_ratio"] = dict(
+            structure["object_p2_residual_cancellation_ratio"]
+        )
     gradients = {
         key: stats for key in GRADIENT_KEYS if (stats := stats_with_epoch_fallback(key)) is not None
     }
@@ -4370,6 +4516,10 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema34 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 34
+    )
     schema33 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 33
@@ -4590,8 +4740,40 @@ def _recovery_assessment(
             "object_p2_within_interval_object_posterior_entropy",
             "object_p2_within_interval_object_posterior_max",
             "object_p2_type_interval_disagreement_max_abs",
-            "object_p2_residual_cancellation_ratio",
             "object_p2_residual_to_common_rms_ratio",
+        )
+        required_structure = (
+            *required_structure,
+            *(
+                (
+                    "object_p2_residual_retained_rms_ratio",
+                    "object_p2_residual_cancelled_rms_fraction",
+                    "object_p2_residual_cancellation_support_fraction",
+                    "object_p2_shared_interval_public_score_abs",
+                    "object_p2_shared_interval_typed_score_abs",
+                    "object_p2_shared_interval_w_score_abs",
+                    "object_p2_semantic_shared_interval_typed_score_abs",
+                    "object_p2_geometry_shared_interval_typed_score_abs",
+                    "object_p2_status_shared_interval_typed_score_abs",
+                    "object_p2_semantic_shared_interval_w_score_abs",
+                    "object_p2_geometry_shared_interval_w_score_abs",
+                    "object_p2_status_shared_interval_w_score_abs",
+                    "object_p2_semantic_common_projected_candidate_value_rms",
+                    "object_p2_geometry_common_projected_candidate_value_rms",
+                    "object_p2_status_common_projected_candidate_value_rms",
+                    "object_p2_semantic_residual_projected_candidate_value_rms",
+                    "object_p2_geometry_residual_projected_candidate_value_rms",
+                    "object_p2_status_residual_projected_candidate_value_rms",
+                    "object_p2_semantic_common_value_contract_scale_mean",
+                    "object_p2_geometry_common_value_contract_scale_mean",
+                    "object_p2_status_common_value_contract_scale_mean",
+                    "object_p2_semantic_residual_value_contract_scale_mean",
+                    "object_p2_geometry_residual_value_contract_scale_mean",
+                    "object_p2_status_residual_value_contract_scale_mean",
+                )
+                if schema34
+                else ("object_p2_residual_cancellation_ratio",)
+            ),
         )
     for name in required_structure:
         value = structure.get(name, {}).get("tail_median")

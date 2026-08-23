@@ -1412,6 +1412,43 @@ def test_w2_near_residual_can_update_far_but_not_the_common_owner() -> None:
     assert float(metrics["object_w2_near_to_far_residual_update_rms"]) > 0.0
 
 
+def test_w_block_common_and_interval_owners_have_zero_cross_jacobian() -> None:
+    """Shared W parameters must not turn owner separation into shared state."""
+
+    torch.manual_seed(295)
+    compiler = ObjectFutureDynamicsCompiler(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        heads=4,
+    ).eval()
+    common = torch.randn(1, 3, 3, 16, requires_grad=True)
+    residual = torch.randn(1, 4, 3, 3, 16, requires_grad=True)
+    completed_common, completed_residual = (
+        compiler._run_separated_owned_typed_block(
+            compiler.w1,
+            common,
+            residual,
+            causal_interval=True,
+        )
+    )
+    common_from_residual = torch.autograd.grad(
+        completed_common.square().sum(),
+        residual,
+        retain_graph=True,
+        allow_unused=True,
+    )[0]
+    residual_from_common = torch.autograd.grad(
+        completed_residual.square().sum(),
+        common,
+        allow_unused=True,
+    )[0]
+    if common_from_residual is not None:
+        assert torch.count_nonzero(common_from_residual.detach()) == 0
+    if residual_from_common is not None:
+        assert torch.count_nonzero(residual_from_common.detach()) == 0
+
+
 def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> None:
 
     torch.manual_seed(31)
@@ -3084,6 +3121,78 @@ def test_p2_complementary_fusion_owns_cpu_bf16_boundary() -> None:
     assert torch.isfinite(fused).all()
 
 
+def test_p2_complementary_value_contract_is_one_sided_and_exact_zero() -> None:
+    reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
+    limit = reader.COMPLEMENTARY_VALUE_MAX_RMS
+
+    zero = torch.zeros(2, 3, 16)
+    contracted_zero, zero_scale = reader._contract_complementary_value(zero)
+    assert torch.equal(contracted_zero, zero)
+    torch.testing.assert_close(zero_scale, torch.ones_like(zero_scale))
+
+    tiny = torch.full((2, 3, 16), 1.0e-4)
+    contracted_tiny, tiny_scale = reader._contract_complementary_value(tiny)
+    assert bool((tiny_scale <= 1.0).all())
+    torch.testing.assert_close(contracted_tiny, tiny, atol=1.0e-7, rtol=1.0e-6)
+
+    large = torch.full((2, 3, 16), 100.0)
+    contracted_large, large_scale = reader._contract_complementary_value(large)
+    contracted_rms = contracted_large.float().square().mean(dim=-1).sqrt()
+    assert bool((large_scale < 1.0).all())
+    assert float(contracted_rms.amax()) <= limit * 1.0001
+
+
+def test_p2_consumer_type_names_map_to_the_matching_s_owner() -> None:
+    """P2 semantic/geometry/status must read S semantic/geometry/appearance."""
+
+    torch.manual_seed(410)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+    )
+    intent = context.intent.policy_dock()
+    captured: list[list[torch.Tensor]] = [[], [], []]
+    handles = []
+    for type_index, module in enumerate(top.effect_reader.typed_intent_key):
+        handles.append(
+            module.register_forward_pre_hook(
+                lambda _module, inputs, index=type_index: captured[index].append(
+                    inputs[0].detach().clone()
+                )
+            )
+        )
+    try:
+        top.effect_reader(
+            torch.randn(1, 24, 2, 32),
+            context.predicted_dynamics,
+            intent,
+            collect_diagnostics=False,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    for p2_index, s_index in enumerate((0, 2, 1)):
+        assert len(captured[p2_index]) == 2
+        torch.testing.assert_close(
+            captured[p2_index][0],
+            intent.typed_common_object_value[..., s_index, :],
+            atol=0.0,
+            rtol=0.0,
+        )
+        torch.testing.assert_close(
+            captured[p2_index][1],
+            intent.typed_interval_residual_value[..., s_index, :],
+            atol=0.0,
+            rtol=0.0,
+        )
+
+
 def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() -> None:
     torch.manual_seed(403)
     top = _object_top().eval()
@@ -3114,34 +3223,36 @@ def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() ->
         context.intent.policy_dock(),
         collect_diagnostics=True,
     )
-    # Temporal/null ownership is shared and reads only S public interval keys;
-    # changing one W typed field may only change its within-interval K read.
-    torch.testing.assert_close(
+    # Semantic W evidence is a legal contributor to the one shared temporal
+    # posterior, so the final geometry/status values may move with that shared
+    # interval.  Their *within-interval K selectors* remain type-local.
+    assert not torch.equal(
+        metrics["object_p2_shared_interval_w_score_abs"],
+        changed_metrics["object_p2_shared_interval_w_score_abs"],
+    )
+    assert not torch.equal(
         metrics["object_p2_shared_interval_null_mass"],
         changed_metrics["object_p2_shared_interval_null_mass"],
-        atol=0.0,
-        rtol=0.0,
     )
     assert not torch.equal(
         metrics["object_p2_semantic_residual_selected_value_rms"],
         changed_metrics["object_p2_semantic_residual_selected_value_rms"],
     )
-    torch.testing.assert_close(
-        metrics["object_p2_geometry_residual_selected_value_rms"],
-        changed_metrics["object_p2_geometry_residual_selected_value_rms"],
-        atol=0.0,
-        rtol=0.0,
-    )
-    torch.testing.assert_close(
-        metrics["object_p2_status_residual_selected_value_rms"],
-        changed_metrics["object_p2_status_residual_selected_value_rms"],
-        atol=0.0,
-        rtol=0.0,
-    )
+    for type_name in ("geometry", "status"):
+        for suffix in (
+            "within_interval_object_posterior_entropy",
+            "within_interval_object_posterior_max",
+        ):
+            torch.testing.assert_close(
+                metrics[f"object_p2_{type_name}_{suffix}"],
+                changed_metrics[f"object_p2_{type_name}_{suffix}"],
+                atol=0.0,
+                rtol=0.0,
+            )
 
 
-def test_p2_shared_interval_route_is_independent_of_typed_object_evidence() -> None:
-    """Typed W/S object evidence selects K inside, never the time interval."""
+def test_p2_shared_interval_route_reads_typed_s_and_w_object_evidence() -> None:
+    """The temporal owner must not collapse back to public-S-only routing."""
 
     torch.manual_seed(408)
     top = _object_top().eval()
@@ -3190,19 +3301,12 @@ def test_p2_shared_interval_route_is_independent_of_typed_object_evidence() -> N
     )
     assert not torch.equal(changed, baseline)
     for name in (
+        "object_p2_shared_interval_typed_score_abs",
+        "object_p2_shared_interval_w_score_abs",
         "object_p2_shared_interval_score_abs",
-        "object_p2_shared_interval_score_max_abs",
-        "object_p2_shared_interval_posterior_entropy",
-        "object_p2_shared_interval_posterior_max",
         "object_p2_shared_interval_null_mass",
-        "object_p2_shared_interval_horizon_variation",
     ):
-        torch.testing.assert_close(
-            changed_metrics[name],
-            baseline_metrics[name],
-            atol=0.0,
-            rtol=0.0,
-        )
+        assert not torch.equal(changed_metrics[name], baseline_metrics[name])
     assert float(baseline_metrics["object_p2_type_interval_disagreement_max_abs"]) < 1.0e-6
     assert float(changed_metrics["object_p2_type_interval_disagreement_max_abs"]) < 1.0e-6
     for interval in range(4):
@@ -3263,6 +3367,65 @@ def test_p2_shared_interval_route_responds_to_public_s_interval_keys() -> None:
         ]
     )
     assert not torch.allclose(changed_mass, baseline_mass, atol=1.0e-7, rtol=0.0)
+
+
+def test_p2_residual_retention_metrics_are_support_aware_and_complementary() -> None:
+    torch.manual_seed(411)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+    )
+    query = torch.randn(1, 24, 2, 32)
+    dynamics = context.predicted_dynamics
+    interval_scale = torch.tensor(
+        [-1.0, -0.25, 0.25, 1.0],
+        dtype=dynamics.semantic_delta.dtype,
+    ).view(1, 4, 1, 1)
+    semantic_delta = dynamics.semantic_delta + interval_scale * torch.randn_like(
+        dynamics.semantic_delta[:, :1]
+    )
+    dynamics = replace(
+        dynamics,
+        semantic_delta=semantic_delta,
+        successor_content=dynamics.current_reference[:, None] + semantic_delta,
+    )
+    _, metrics = top.effect_reader(
+        query,
+        dynamics,
+        context.intent.policy_dock(),
+        collect_diagnostics=True,
+    )
+    retained = metrics["object_p2_residual_retained_rms_ratio"]
+    cancelled = metrics["object_p2_residual_cancelled_rms_fraction"]
+    support = metrics["object_p2_residual_cancellation_support_fraction"]
+    assert 0.0 <= float(retained) <= 1.0
+    assert 0.0 <= float(cancelled) <= 1.0
+    assert 0.0 < float(support) <= 1.0
+    torch.testing.assert_close(
+        retained + cancelled,
+        torch.ones_like(retained),
+        atol=1.0e-6,
+        rtol=0.0,
+    )
+
+    _, neutral_metrics = top.effect_reader(
+        query,
+        FutureObjectDynamics.neutral(context.facts),
+        context.intent.policy_dock(),
+        collect_diagnostics=True,
+    )
+    assert float(
+        neutral_metrics["object_p2_residual_cancellation_support_fraction"]
+    ) == 0.0
+    assert float(neutral_metrics["object_p2_residual_retained_rms_ratio"]) == 0.0
+    assert float(
+        neutral_metrics["object_p2_residual_cancelled_rms_fraction"]
+    ) == 0.0
 
 
 def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:

@@ -1876,6 +1876,48 @@ class AuditPolicyLogsTest(unittest.TestCase):
             "incomplete",
         )
 
+    def test_schema34_recovery_requires_mapped_temporal_and_value_unit_audits(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema34"
+        candidate["manifest"]["architecture_schema"] = 34
+        candidate["structure"] = {
+            name: {"tail_median": 0.5 if name.endswith("pair_cosine") else 0.1}
+            for name in STRUCTURE_KEYS
+        }
+        required = (
+            "object_p2_residual_retained_rms_ratio",
+            "object_p2_residual_cancelled_rms_fraction",
+            "object_p2_residual_cancellation_support_fraction",
+            "object_p2_shared_interval_public_score_abs",
+            "object_p2_shared_interval_typed_score_abs",
+            "object_p2_shared_interval_w_score_abs",
+            "object_p2_semantic_shared_interval_typed_score_abs",
+            "object_p2_geometry_shared_interval_typed_score_abs",
+            "object_p2_status_shared_interval_typed_score_abs",
+            "object_p2_semantic_common_projected_candidate_value_rms",
+            "object_p2_geometry_common_projected_candidate_value_rms",
+            "object_p2_status_common_projected_candidate_value_rms",
+            "object_p2_semantic_common_value_contract_scale_mean",
+            "object_p2_geometry_common_value_contract_scale_mean",
+            "object_p2_status_common_value_contract_scale_mean",
+        )
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        for name in required:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+
+        missing_name = "object_p2_geometry_common_value_contract_scale_mean"
+        candidate["structure"].pop(missing_name)
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[f"structure/{missing_name}"],
+            "incomplete",
+        )
+
     def test_global_k_binder_is_presence_only_across_changed_semantics(self) -> None:
         baseline = _complete_recovery_summary("v120")
         parent = deepcopy(baseline)

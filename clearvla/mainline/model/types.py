@@ -471,8 +471,11 @@ class PolicyIntentDock:
 
     common_key: Tensor  # [B,H]
     interval_residual_key: Tensor  # [B,I,H]
-    typed_common_object_value: Tensor  # [B,K,type,R]
-    typed_interval_residual_value: Tensor  # [B,I,K,type,R]
+    # Both typed axes retain S/W owner order:
+    # semantic / appearance / geometry.  P2 consumer order is different and
+    # must use an explicit named mapping rather than matching integer indices.
+    typed_common_object_value: Tensor  # [B,K,S-type,R]
+    typed_interval_residual_value: Tensor  # [B,I,K,S-type,R]
     temporal_control: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
 

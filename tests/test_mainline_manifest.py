@@ -43,11 +43,11 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 33
+    assert ARCHITECTURE_MANIFEST.schema == 34
     assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "canonical_decoded_k_content_stateless_state_supervision_w_residual_only_near_far_bridge_typed_base_interaction_camera_mixture_shared_interval_typed_object_p2_consequence_p3"
+        == "canonical_decoded_k_content_stateless_state_supervision_w_separated_common_residual_near_far_bridge_typed_base_interaction_camera_mixture_public_typed_w_interval_mapped_scale_bounded_p2_consequence_p3"
     )
     assert (
         components.bottom
@@ -62,7 +62,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
 
 
-def test_schema_33_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_34_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

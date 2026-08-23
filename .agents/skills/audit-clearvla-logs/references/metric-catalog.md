@@ -805,7 +805,9 @@ Known compatibility aliases require care: historical `future_latent` and `action
   exclusive local-M hypotheses per cell;
   `object_grounding_mass_conservation_error` must stay at numerical zero.
 - S has four interval queries but no phase/progress variable.
-  `object_intent_*_attention_entropy` reports normalized read dispersion;
+  `object_intent_*_attention_entropy` reports normalized read dispersion and
+  the matching `*_attention_max` reports peak mass. Read both: entropy near one
+  is only interpretable together with memory width and max;
   `goal/history/object` innovation RMS reports actual writes. In Schema27 the
   free-gauge `online_match/plan_recognition` target is absent: public S predicts
   future state directly and the exact typed S->W values predict matching
@@ -840,11 +842,28 @@ Known compatibility aliases require care: historical `future_latent` and `action
   temperatures are bounded to `[0.25,4]`. The combined bounded score excludes
   the negative validity log-mask and cannot exceed 12. The active graph does
   not apply a candidate-count correction, so each type needs its own null/mass
-  interpretation. Semantic/geometry/status are complementary values:
-  Schema30 protects their `sum/sqrt(3)` base and permits only a near-zero
-  contrast residual; it has no outer type selector. Fusion base, contrast and
-  residual RMS must be read with per-type selected-value RMS. Type and four
-  interval masses are descriptive posterior ownership, never targets.
+  interpretation. Semantic/geometry/status are complementary values. Schema34
+  explicitly maps S owners as `semantic<-semantic / geometry<-geometry /
+  status<-appearance`; per-type shared-interval public/typed/W score rows
+  diagnose that provenance. The single interval posterior is a bounded
+  symmetric opinion pool over those three evidence families, followed by
+  independent per-type K reads. Raw coordinate score is not added directly to
+  the shared temporal logit.
+  Schema30's protected `sum/sqrt(3)` base and near-zero contrast residual remain
+  active, with no outer type selector. Before the soft read, each projected
+  candidate crosses a one-sided `0.35/sqrt(3)` RMS contract. Read projected
+  candidate RMS, contract scale and selected-value RMS together: scale below
+  one means native-unit suppression, while scale one does not prove a weak
+  field carries useful information. The contract never amplifies zero or weak
+  values. Type and four interval masses are descriptive posterior ownership,
+  never targets.
+- Schema34 names temporal residual retention explicitly. Read
+  `object_p2_residual_retained_rms_ratio` and
+  `object_p2_residual_cancelled_rms_fraction` only with
+  `object_p2_residual_cancellation_support_fraction`. Schema33's historical
+  `object_p2_residual_cancellation_ratio` was actually a retained ratio; the
+  auditor maps it only to the retained semantic and never fabricates a
+  cancelled fraction for old logs.
 - `object_p2_effect_precontract_rms`, consequence effect/interaction and the
   four active P3 lane RMS values locate the W-to-action handoff. The fourth
   optional object lane is `p3_state_change`, weakly scaled at `0.05`;
