@@ -379,7 +379,17 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         and parameter.grad is not None
         and not bool(parameter.grad.detach().abs().sum() > 0)
     ]
-    assert dormant == []
+    # Visibility/persistence have an exact-zero, independently supervised
+    # neutral target because this dataset has no physical occlusion labels.
+    # Their zero-initialized head and sole appearance projection are therefore
+    # at the true optimum on an untouched fresh model.  A separate perturbed
+    # status test proves that ordinary autograd reconnects this restorative
+    # regularizer; none of these tensors is an action-path consumer.
+    assert set(dormant) == {
+        "top.dynamics.object_appearance.weight",
+        "top.dynamics.visibility_head.weight",
+        "top.dynamics.persistence_head.weight",
+    }
 
     # Cross the serialized V120 warm-up boundary and verify that the same
     # ordinary task graph opens every mature execution owner.
@@ -917,12 +927,12 @@ def test_dynamic_p1_splits_static_fact_from_live_policy_residual() -> None:
         rtol=0.0,
     )
     assert not torch.equal(
-        first.policy_precision_residual,
-        second.policy_precision_residual,
+        first.policy_query_residual,
+        second.policy_query_residual,
     )
     torch.testing.assert_close(
         first.effect_query,
-        query + first.factual_base + first.policy_precision_residual,
+        query + first.factual_base + first.policy_query_residual,
         atol=0.0,
         rtol=0.0,
     )
@@ -941,6 +951,38 @@ def test_dynamic_p1_splits_static_fact_from_live_policy_residual() -> None:
     assert first_metrics["p1_protected_detail_rms"] > 0
     assert first_metrics["p1_dynamic_delta_rms"] > 0
     assert first_metrics["p1_completed_fact_rms"] > 0
+
+
+def test_dynamic_p1_policy_modulation_is_smoothly_bounded_before_hidden_use() -> None:
+    torch.manual_seed(473)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config)
+    shape = (
+        1,
+        config.dimensions.action_horizon,
+        config.dimensions.action_basis_tokens,
+        config.dimensions.hidden_size,
+    )
+    query = torch.randn(*shape, requires_grad=True)
+    detail = torch.randn(*shape, requires_grad=True)
+    with torch.no_grad():
+        model.bottom.p1_policy_block.mod.weight.fill_(1.0e4)
+        model.bottom.p1_policy_block.mod.bias.fill_(1.0e4)
+    state, metrics = model.bottom.complete_p1_fact(
+        action_query=query,
+        protected_detail=detail,
+        time=torch.full((1,), 0.5),
+        collect_diagnostics=True,
+    )
+    assert float(metrics["p1_policy_modulation_contract_enabled"]) == 1.0
+    assert float(metrics["p1_policy_modulation_shift_raw_max_abs"]) > 4.0
+    assert float(metrics["p1_policy_modulation_scale_raw_max_abs"]) > 4.0
+    assert float(metrics["p1_policy_modulation_shift_max_abs"]) <= 4.0001
+    assert float(metrics["p1_policy_modulation_scale_max_abs"]) <= 4.0001
+    assert torch.isfinite(state.effect_query).all()
+    state.effect_query.float().square().mean().backward()
+    assert model.bottom.p1_policy_block.mod.weight.grad is not None
+    assert torch.isfinite(model.bottom.p1_policy_block.mod.weight.grad).all()
 
 
 def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() -> None:

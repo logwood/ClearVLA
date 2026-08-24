@@ -66,27 +66,25 @@ class ObjectPolicyPlanDeltaBank:
 
 
 class ObjectFutureEffectReader(nn.Module):
-    """Bounded P2 reads with shared time and typed object ownership.
+    """Bounded P2 reads with a public time prior and matched typed owners.
 
-    Protected common effects keep their per-type K reads.  Optional residual
-    effects first select one shared future interval (or one exact-zero null),
-    then semantic/geometry/status independently select an object inside that
-    interval.  Public S, typed S and supervised W compatibility jointly decide
-    *when*; object count and raw coordinate distance cannot silently take over
-    that shared temporal decision.
+    Semantic and geometry are complementary effect values.  They share one
+    protected public-S temporal prior, then each adds only its matching typed-S
+    and supervised-W evidence before selecting an interval/null and an object.
+    Status is deliberately absent: without independent visibility labels its
+    neutral W target is a regularizer, not a legal action value or route vote.
     """
 
-    TYPE_NAMES = ("semantic", "geometry", "status")
-    # S/W retain semantic/appearance/geometry in that order.  P2 consumes
-    # semantic/geometry/status, where status is decoded from W appearance and
-    # transport is decoded from W geometry.  Never rely on matching integer
-    # positions across these two differently named type systems.
-    S_TYPE_INDEX_BY_P2 = (0, 2, 1)
-    # Each complementary lane owns an equal share of the established 0.35
-    # hidden-update RMS budget.  This is a one-sided contract: it can prevent
-    # native-unit magnitude from monopolising the protected sum, but it never
-    # expands a weak or exactly-zero lane.
-    COMPLEMENTARY_VALUE_MAX_RMS = 0.35 / math.sqrt(3.0)
+    TYPE_NAMES = ("semantic", "geometry")
+    # S/W retain semantic/appearance/geometry in that order.  P2 consumes only
+    # semantic and geometry values; semantic maps to S semantic (0), while
+    # geometry maps to S geometry (2).  Never rely on matching integer
+    # positions across these differently named type systems.
+    S_TYPE_INDEX_BY_P2 = (0, 2)
+    # A sparse active owner must retain its native hidden unit.  Each value is
+    # therefore bounded only from above at the established P2 update budget;
+    # the final combined effect is contracted once at the caller boundary.
+    COMPLEMENTARY_VALUE_MAX_RMS = 0.35
 
     def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
         super().__init__()
@@ -98,13 +96,14 @@ class ObjectFutureEffectReader(nn.Module):
             (
                 nn.Linear(content_dim, hidden, bias=False),
                 nn.Linear(2, hidden, bias=False),
-                nn.Linear(2, hidden, bias=False),
             )
         )
         self.intent_query = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
         )
-        self.public_intent_key = nn.ModuleList(
+        self.public_interval_query = nn.Linear(hidden, hidden, bias=False)
+        self.public_interval_key = nn.Linear(hidden, hidden, bias=False)
+        self.common_intent_key = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
         )
         self.typed_intent_key = nn.ModuleList(
@@ -113,26 +112,6 @@ class ObjectFutureEffectReader(nn.Module):
         self.coordinate_query = nn.Linear(hidden, 2, bias=False)
         self.semantic_value = nn.Linear(content_dim, hidden, bias=False)
         self.transport_value = nn.Linear(2, hidden, bias=False)
-        self.status_value = nn.Linear(2, hidden, bias=False)
-        # The three sources are complementary facts, not alternatives.  Keep
-        # their variance-preserving symmetric sum as a protected path and
-        # learn only a low-rank correction from type *contrasts*.  This avoids
-        # both the old type selector and the later fixed /3 amplitude loss.
-        contrast_rank = max(4, int(hidden) // 8)
-        self.type_contrast_down = nn.Linear(
-            len(self.TYPE_NAMES) * hidden,
-            contrast_rank,
-            bias=False,
-        )
-        self.type_contrast_up = nn.Linear(
-            contrast_rank,
-            hidden,
-            bias=False,
-        )
-        self.type_contrast_scale = nn.Parameter(
-            torch.full((hidden,), 1.0e-4, dtype=torch.float32)
-        )
-        self.type_contrast_activation = nn.GELU()
         self.temperature_logit = nn.Parameter(torch.zeros(3))
 
     def _temperatures(self) -> Tensor:
@@ -164,56 +143,29 @@ class ObjectFutureEffectReader(nn.Module):
     def _fuse_complementary_values(
         self,
         selected_type_value: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Fuse typed P2 values through an anchored contrast residual.
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Add complementary semantic and geometry values without attenuation.
 
-        Each type has already made its own interval/object/null decision.  A
-        second learned softmax would turn those complementary decisions back
-        into mutually exclusive alternatives and let a high-mass null type
-        suppress the other two values.  Their symmetric sum divided by
-        ``sqrt(3)`` therefore remains outside the learnable branch.  Unlike a
-        fixed mean, this preserves the scale of independent complementary
-        channels at initialization.  A small LayerScale-style residual reads
-        only pairwise contrasts, providing cross-type capacity without
-        learning another selector or a common-carrier bypass.
-
-        Bias-free projections make the all-null state an exact algebraic zero.
-        Identical type values also have zero contrast, so the learned branch
-        cannot rewrite information that all three owners already agree on.
+        The two values have already crossed one-sided unit contracts and made
+        matched route decisions.  Addition preserves either owner exactly
+        when the other is zero; the all-zero state remains exact zero.  The
+        caller's established 0.35 effect contract owns the combined upper
+        bound, so no fixed average, learned type selector, or corrective gain
+        is needed here.
         """
 
         if selected_type_value.ndim < 2 or int(selected_type_value.shape[-2]) != len(
             self.TYPE_NAMES
         ):
-            raise ValueError("P2 complementary values must retain the three-type axis")
-        # Candidate values have already crossed their per-type unit contract
-        # before the soft read.  Fusion therefore only combines comparable,
-        # bounded owner values and does not perform a second normalization.
+            raise ValueError("P2 complementary values must retain the active type axis")
         typed_value = selected_type_value.float()
-        base = typed_value.sum(dim=-2) / math.sqrt(float(len(self.TYPE_NAMES)))
-        # Cyclic pairwise differences are exactly zero for bit-identical type
-        # values, unlike subtracting a floating-point three-way mean.
-        contrast = torch.stack(
-            (
-                typed_value[..., 0, :] - typed_value[..., 1, :],
-                typed_value[..., 1, :] - typed_value[..., 2, :],
-                typed_value[..., 2, :] - typed_value[..., 0, :],
-            ),
-            dim=-2,
-        )
-        flat_contrast = contrast.flatten(-2).to(dtype=selected_type_value.dtype)
-        residual = self.type_contrast_up(
-            self.type_contrast_activation(self.type_contrast_down(flat_contrast))
-        )
-        # Keep the protected base and LayerScale multiply in FP32.  The
-        # resulting tensor returns to the active policy dtype at the boundary.
-        scaled_residual = self.type_contrast_scale.float() * residual.float()
-        fused = base + scaled_residual
+        semantic = typed_value[..., 0, :]
+        geometry = typed_value[..., 1, :]
+        fused = semantic + geometry
         return (
             fused.to(dtype=selected_type_value.dtype),
-            base,
-            contrast,
-            scaled_residual,
+            semantic,
+            geometry,
         )
 
     def forward(
@@ -272,35 +224,21 @@ class ObjectFutureEffectReader(nn.Module):
         ).sum(dim=3)
         transport_common = transport_object.mean(dim=1)
         transport_residual = transport_object - transport_common[:, None]
-        status_common = torch.cat(
-            (dynamics.visibility_common, dynamics.persistence_common), dim=-1
-        )
-        status_residual = torch.cat(
-            (
-                dynamics.visibility_interval_residual,
-                dynamics.persistence_interval_residual,
-            ),
-            dim=-1,
-        )
         common_source_fields = (
             dynamics.semantic_common,
             transport_common,
-            status_common,
         )
         residual_source_fields = (
             dynamics.semantic_interval_residual,
             transport_residual,
-            status_residual,
         )
         common_projected_values = (
             self.semantic_value(dynamics.semantic_common),
             self.transport_value(transport_common),
-            self.status_value(status_common),
         )
         residual_projected_values = (
             self.semantic_value(dynamics.semantic_interval_residual),
             self.transport_value(transport_residual),
-            self.status_value(status_residual),
         )
         common_value_contracts = tuple(
             self._contract_complementary_value(value)
@@ -416,6 +354,20 @@ class ObjectFutureEffectReader(nn.Module):
         common_has_support = current_support.any(dim=-1)
         residual_support = residual_validity > 0.0
         interval_has_support = residual_support.any(dim=-1)
+        public_interval_query = self._bounded_unit(
+            self.public_interval_query(action_query)
+        )
+        public_interval_key = self._bounded_unit(
+            self.public_interval_key(intent.interval_residual_key)
+        )
+        # This is the one protected temporal prior shared by all active effect
+        # owners.  It contains no typed/W value and therefore cannot let one
+        # owner select another owner's future interval.
+        public_interval_score = torch.einsum(
+            "btqh,bih->btqi",
+            public_interval_query,
+            public_interval_key,
+        )
         common_source_scores: list[Tensor] = []
         residual_source_scores: list[Tensor] = []
         common_intent_scores: list[Tensor] = []
@@ -429,7 +381,7 @@ class ObjectFutureEffectReader(nn.Module):
         residual_object_posteriors: list[Tensor] = []
         selected_common_values: list[Tensor] = []
         selected_residual_values_by_interval: list[Tensor] = []
-        for type_index in range(3):
+        for type_index in range(len(self.TYPE_NAMES)):
             intent_type_index = self.S_TYPE_INDEX_BY_P2[type_index]
             query = self._bounded_unit(
                 self.source_query[type_index](action_query)
@@ -446,7 +398,7 @@ class ObjectFutureEffectReader(nn.Module):
             residual_source_score = torch.einsum(
                 "btqh,bikh->btqik", query, residual_source_key
             )
-            common_public_key = self.public_intent_key[type_index](
+            common_public_key = self.common_intent_key[type_index](
                 intent.common_key
             )[:, None]
             common_typed_key = self.typed_intent_key[type_index](
@@ -454,11 +406,6 @@ class ObjectFutureEffectReader(nn.Module):
             )
             common_intent_key = self._bounded_unit(
                 common_public_key + common_typed_key
-            )
-            interval_public_key = self._bounded_unit(
-                self.public_intent_key[type_index](
-                    intent.interval_residual_key
-                )
             )
             residual_typed_key = self._bounded_unit(
                 self.typed_intent_key[type_index](
@@ -473,9 +420,6 @@ class ObjectFutureEffectReader(nn.Module):
             )
             residual_intent_score = torch.einsum(
                 "btqh,bikh->btqik", intent_query, residual_typed_key
-            )
-            interval_public_score = torch.einsum(
-                "btqh,bih->btqi", intent_query, interval_public_key
             )
             common_bounded_logit = (
                 temperature[0] * common_source_score
@@ -572,7 +516,7 @@ class ObjectFutureEffectReader(nn.Module):
             residual_source_scores.append(residual_source_score)
             common_intent_scores.append(common_intent_score)
             residual_intent_scores.append(residual_intent_score)
-            interval_public_scores.append(interval_public_score)
+            interval_public_scores.append(public_interval_score)
             interval_typed_scores.append(interval_typed_score)
             interval_w_scores.append(interval_w_score)
             common_bounded_logits.append(common_bounded_logit)
@@ -584,56 +528,53 @@ class ObjectFutureEffectReader(nn.Module):
                 residual_selected_by_interval
             )
 
-        # One temporal posterior remains shared by all complementary values,
-        # but its evidence is no longer public-S-only.  For every P2 type it
-        # combines the matching public S compatibility with the object-
-        # conditioned typed-S and supervised-W compatibilities.  All nine
-        # terms are already in [-1, 1]; sqrt(9)=3 is the symmetric variance
-        # scale and tanh keeps the final score constructionally bounded.  The
-        # K posterior is normalized inside each interval, so object count
-        # cannot masquerade as temporal evidence.  Coordinate distance still
-        # selects geometry's object only and never enters this score directly.
-        shared_public_score = torch.stack(interval_public_scores, dim=0).sum(
-            dim=0
-        ) / 3.0
-        shared_typed_score = torch.stack(interval_typed_scores, dim=0).sum(
-            dim=0
-        ) / 3.0
-        shared_w_score = torch.stack(interval_w_scores, dim=0).sum(dim=0) / 3.0
-        shared_interval_precontract_score = (
-            shared_public_score + shared_typed_score + shared_w_score
+        # Public S is the shared temporal prior.  Each active owner adds only
+        # its matching typed-S and supervised-W likelihood before selecting a
+        # future interval or exact-zero null.  This is a product-of-evidence
+        # factorization, not an outer type competition: semantic cannot choose
+        # geometry's value and a neutral status field has no vote at all.
+        interval_typed_score_by_type = torch.stack(interval_typed_scores, dim=3)
+        interval_w_score_by_type = torch.stack(interval_w_scores, dim=3)
+        type_interval_precontract_score = (
+            public_interval_score[..., None, :]
+            + interval_typed_score_by_type
+            + interval_w_score_by_type
         )
-        shared_interval_score = torch.tanh(shared_interval_precontract_score)
-        shared_interval_bounded_logit = temperature[1] * shared_interval_score
-        shared_interval_logit = shared_interval_bounded_logit
-        shared_interval_logit = shared_interval_logit.masked_fill(
-            ~interval_has_support[:, None, None],
+        type_interval_score = torch.tanh(type_interval_precontract_score)
+        type_interval_bounded_logit = temperature[1] * type_interval_score
+        type_interval_logit = type_interval_bounded_logit.masked_fill(
+            ~interval_has_support[:, None, None, None],
             -torch.inf,
         )
-        # One null competes with four interval measures, each of which owns K
-        # object candidates.  The fixed -log(K) correction preserves the old
-        # neutral 1/(I*K+1) null prior without making K scores or active counts
-        # part of temporal selection.  The null value itself is exact zero.
-        shared_null_logit = torch.full_like(
-            shared_interval_logit[..., :1],
+        # Each type owns one null competing with I interval measures, each of
+        # which already owns a conditional K posterior.  -log(K) preserves
+        # the neutral 1/(I*K+1) prior without making object count a time score.
+        type_null_logit = torch.full_like(
+            type_interval_logit[..., :1],
             -math.log(float(max(objects, 1))),
         )
-        shared_interval_posterior = torch.softmax(
-            torch.cat((shared_interval_logit, shared_null_logit), dim=-1),
+        type_interval_posterior = torch.softmax(
+            torch.cat((type_interval_logit, type_null_logit), dim=-1),
             dim=-1,
         )
-        shared_interval_mass = shared_interval_posterior[..., :-1]
+        type_interval_mass = type_interval_posterior[..., :-1]
 
         selected_residual_values: list[Tensor] = []
         residual_posteriors: list[Tensor] = []
-        for residual_selected_by_interval, residual_object_posterior in zip(
-            selected_residual_values_by_interval,
-            residual_object_posteriors,
+        for type_index, (
+            residual_selected_by_interval,
+            residual_object_posterior,
+        ) in enumerate(
+            zip(
+                selected_residual_values_by_interval,
+                residual_object_posteriors,
+            )
         ):
+            interval_mass_for_type = type_interval_mass[..., type_index, :]
             selected_residual_values.append(
                 torch.einsum(
                     "btqi,btqih->btqh",
-                    shared_interval_mass.to(
+                    interval_mass_for_type.to(
                         dtype=residual_selected_by_interval.dtype
                     ),
                     residual_selected_by_interval,
@@ -641,13 +582,16 @@ class ObjectFutureEffectReader(nn.Module):
             )
             # Retain the historical flattened posterior shape for diagnostics
             # and consumers of lossless metrics.  Its factorization is exact:
-            # p(i,k)=pi(i)*rho(k|i), with one shared null at the final entry.
+            # p_z(i,k)=pi_z(i)*rho_z(k|i), with one typed null at the end.
             joint_real = (
-                shared_interval_mass[..., None] * residual_object_posterior
+                interval_mass_for_type[..., None] * residual_object_posterior
             ).flatten(-2)
             residual_posteriors.append(
                 torch.cat(
-                    (joint_real, shared_interval_posterior[..., -1:]),
+                    (
+                        joint_real,
+                        type_interval_posterior[..., type_index, -1:],
+                    ),
                     dim=-1,
                 )
             )
@@ -663,25 +607,24 @@ class ObjectFutureEffectReader(nn.Module):
         )
         selected_common_type_value = torch.stack(selected_common_values, dim=3)
         selected_residual_type_value = torch.stack(selected_residual_values, dim=3)
-        (
-            common_value,
-            common_fusion_base,
-            common_fusion_contrast,
-            common_fusion_residual,
-        ) = self._fuse_complementary_values(selected_common_type_value)
-        (
-            residual_value,
-            residual_fusion_base,
-            residual_fusion_contrast,
-            residual_fusion_residual,
-        ) = self._fuse_complementary_values(selected_residual_type_value)
+        common_value, common_semantic_value, common_geometry_value = (
+            self._fuse_complementary_values(selected_common_type_value)
+        )
+        residual_value, residual_semantic_value, residual_geometry_value = (
+            self._fuse_complementary_values(selected_residual_type_value)
+        )
         value = common_value + residual_value
         if not collect_diagnostics:
             return value, {}
         interval_mass_by_type = residual_posterior_by_type[..., :-1].reshape(
-            batch, horizon, basis, 3, intervals, objects
+            batch,
+            horizon,
+            basis,
+            len(self.TYPE_NAMES),
+            intervals,
+            objects,
         ).sum(dim=-1)
-        interval_mass = shared_interval_mass.detach()
+        interval_mass = interval_mass_by_type.detach().mean(dim=3)
         inner_support_weight = interval_has_support[
             :, None, None, None, :
         ].detach().float()
@@ -706,7 +649,7 @@ class ObjectFutureEffectReader(nn.Module):
         selected_type_rms = selected_residual_type_value.detach().float()
         selected_type_rms = selected_type_rms.square().mean(dim=-1).sqrt()
         weighted_interval_type_rms = (
-            shared_interval_mass.detach().float()[..., None]
+            type_interval_mass.detach().float().transpose(-1, -2)
             * interval_type_rms
         ).sum(dim=3)
         cancellation_support = weighted_interval_type_rms > 1.0e-8
@@ -741,14 +684,16 @@ class ObjectFutureEffectReader(nn.Module):
             tuple(score.detach().abs().mean() for score in (
                 *common_intent_scores,
                 *residual_intent_scores,
-                shared_interval_score,
+                public_interval_score,
+                type_interval_score,
             ))
         ).mean()
         intent_score_max = torch.stack(
             tuple(score.detach().abs().amax() for score in (
                 *common_intent_scores,
                 *residual_intent_scores,
-                shared_interval_score,
+                public_interval_score,
+                type_interval_score,
             ))
         ).amax()
         metrics: dict[str, Tensor] = {
@@ -780,7 +725,7 @@ class ObjectFutureEffectReader(nn.Module):
                 tuple(logit.detach().abs().amax() for logit in (
                     *common_bounded_logits,
                     *residual_bounded_logits,
-                    shared_interval_bounded_logit,
+                    type_interval_bounded_logit,
                 ))
             ).amax(),
             "object_p2_temperature_content": temperature[0].detach(),
@@ -801,45 +746,48 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_residual_null_mass": residual_posterior_by_type.detach()[
                 ..., -1
             ].mean(),
-            "object_p2_shared_interval_score_abs": shared_interval_score.detach()
+            "object_p2_public_interval_score_abs": public_interval_score.detach()
             .abs()
             .mean(),
-            "object_p2_shared_interval_score_max_abs": shared_interval_score.detach()
+            "object_p2_public_interval_score_max_abs": public_interval_score.detach()
             .abs()
             .amax(),
-            "object_p2_shared_interval_public_score_abs": shared_public_score.detach()
+            "object_p2_type_interval_score_abs": type_interval_score.detach()
             .abs()
             .mean(),
-            "object_p2_shared_interval_typed_score_abs": shared_typed_score.detach()
+            "object_p2_type_interval_score_max_abs": type_interval_score.detach()
             .abs()
-            .mean(),
-            "object_p2_shared_interval_w_score_abs": shared_w_score.detach()
-            .abs()
-            .mean(),
-            "object_p2_shared_interval_precontract_score_max_abs": (
-                shared_interval_precontract_score.detach().abs().amax()
+            .amax(),
+            "object_p2_type_interval_typed_score_abs": (
+                interval_typed_score_by_type.detach().abs().mean()
             ),
-            "object_p2_shared_interval_posterior_entropy": normalized_entropy(
-                shared_interval_posterior,
+            "object_p2_type_interval_w_score_abs": (
+                interval_w_score_by_type.detach().abs().mean()
+            ),
+            "object_p2_type_interval_precontract_score_max_abs": (
+                type_interval_precontract_score.detach().abs().amax()
+            ),
+            "object_p2_type_interval_posterior_entropy": normalized_entropy(
+                type_interval_posterior,
                 dim=-1,
             ).detach().mean(),
-            "object_p2_shared_interval_posterior_max": (
-                shared_interval_posterior.detach().amax(dim=-1).mean()
+            "object_p2_type_interval_posterior_max": (
+                type_interval_posterior.detach().amax(dim=-1).mean()
             ),
-            "object_p2_shared_interval_null_mass": (
-                shared_interval_posterior.detach()[..., -1].mean()
+            "object_p2_type_interval_null_mass": (
+                type_interval_posterior.detach()[..., -1].mean()
             ),
-            "object_p2_shared_interval_effective_count": torch.exp(
+            "object_p2_type_interval_effective_count": torch.exp(
                 -(
-                    shared_interval_posterior.detach().float()
-                    * shared_interval_posterior.detach()
+                    type_interval_posterior.detach().float()
+                    * type_interval_posterior.detach()
                     .float()
                     .clamp_min(1.0e-8)
                     .log()
                 ).sum(dim=-1)
             ).mean(),
-            "object_p2_shared_interval_horizon_variation": (
-                shared_interval_mass.detach()
+            "object_p2_type_interval_horizon_variation": (
+                type_interval_mass.detach()
                 .float()
                 .std(dim=1, unbiased=False)
                 .mean()
@@ -887,52 +835,53 @@ class ObjectFutureEffectReader(nn.Module):
                 .clamp_min(1.0e-8)
             ),
             "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
-            "object_p2_common_fusion_base_rms": common_fusion_base.detach()
+            "object_p2_common_semantic_component_rms": common_semantic_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_common_fusion_residual_rms": common_fusion_residual.detach()
+            "object_p2_common_geometry_component_rms": common_geometry_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_residual_fusion_base_rms": residual_fusion_base.detach()
+            "object_p2_residual_semantic_component_rms": residual_semantic_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_residual_fusion_residual_rms": residual_fusion_residual.detach()
+            "object_p2_residual_geometry_component_rms": residual_geometry_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_common_fusion_contrast_rms": common_fusion_contrast.detach()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_p2_residual_fusion_contrast_rms": residual_fusion_contrast.detach()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_p2_fusion_scale_abs_mean": self.type_contrast_scale.detach()
-            .float()
-            .abs()
-            .mean(),
-            "object_p2_fusion_scale_abs_max": self.type_contrast_scale.detach()
-            .float()
-            .abs()
-            .amax(),
+            "object_p2_status_consumer_active": value.new_zeros(
+                (), dtype=torch.float32
+            ),
         }
         for type_index, name in enumerate(self.TYPE_NAMES):
             metrics[f"object_p2_{name}_score_max_abs"] = torch.maximum(
                 common_source_scores[type_index].detach().abs().amax(),
                 residual_source_scores[type_index].detach().abs().amax(),
             )
-            metrics[f"object_p2_{name}_shared_interval_public_score_abs"] = (
+            metrics[f"object_p2_{name}_interval_public_score_abs"] = (
                 interval_public_scores[type_index].detach().float().abs().mean()
             )
-            metrics[f"object_p2_{name}_shared_interval_typed_score_abs"] = (
+            metrics[f"object_p2_{name}_interval_typed_score_abs"] = (
                 interval_typed_scores[type_index].detach().float().abs().mean()
             )
-            metrics[f"object_p2_{name}_shared_interval_w_score_abs"] = (
+            metrics[f"object_p2_{name}_interval_w_score_abs"] = (
                 interval_w_scores[type_index].detach().float().abs().mean()
+            )
+            metrics[f"object_p2_{name}_interval_posterior_entropy"] = (
+                normalized_entropy(
+                    type_interval_posterior[..., type_index, :],
+                    dim=-1,
+                )
+                .detach()
+                .mean()
+            )
+            metrics[f"object_p2_{name}_interval_posterior_max"] = (
+                type_interval_posterior[..., type_index, :]
+                .detach()
+                .amax(dim=-1)
+                .mean()
             )
             metrics[f"object_p2_{name}_residual_null_mass"] = residual_posterior_by_type[
                 ..., type_index, -1
@@ -1068,7 +1017,6 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self,
         *,
         p1_factual_detail: Tensor,
-        p1_policy_residual: Tensor,
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
@@ -1078,7 +1026,6 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if (
             tuple(action_query.shape) != expected
             or tuple(p1_factual_detail.shape) != expected
-            or tuple(p1_policy_residual.shape) != expected
         ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
@@ -1086,17 +1033,17 @@ class ObjectPolicyPlanCompiler(nn.Module):
         # Optional lanes may only encode source-exclusive zero-centred
         # innovations; neither static detail nor the live policy residual is
         # copied into another protected carrier. Precision is the sole owner
-        # of both P1 signals below.
-        # Reuse the established precision projection for both P1-owned
-        # signals.  Separate calls preserve the old static-detail path exactly
-        # when the live residual is zero, add no parameter, and make either
-        # source independently intervenable.  Bias-free linearity keeps the
-        # joint-zero state algebraically zero.
+        # of the cached P1 factual signal below.
+        # P3 precision owns the cached high-resolution factual detail.  The
+        # live V120 policy-block residual is a P2 query refinement, not another
+        # precision value.  Feeding it here gave one dynamic tensor two action
+        # exits and let Schema35 drive both the P1 block and this lane to their
+        # amplitude limits while bypassing W.  The action query still provides
+        # the legal time/noisy-action modulation.
         static_precision = self.precision_innovation(p1_factual_detail)
-        dynamic_precision = self.precision_innovation(p1_policy_residual)
         precision = self.precision_lane(
             torch.tanh(self.precision_action(action_query))
-            * (static_precision + dynamic_precision)
+            * static_precision
         )
         effect = self.effect_lane(consequence.effect + consequence.interaction)
         temporal_effect = consequence.effect + consequence.interaction
@@ -1139,20 +1086,12 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if not collect_diagnostics:
             return bank, {}
         return bank, {
-            "object_p3_precision_input_rms": (
-                p1_factual_detail + p1_policy_residual
-            )
-            .detach()
+            "object_p3_precision_input_rms": p1_factual_detail.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
             "object_p3_precision_static_input_rms": p1_factual_detail.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_p3_precision_dynamic_input_rms": p1_policy_residual.detach()
             .float()
             .square()
             .mean()

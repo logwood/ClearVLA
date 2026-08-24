@@ -367,16 +367,18 @@ class FactualPrecisionDock:
 
 @dataclass(frozen=True)
 class CompletedP1PolicyState:
-    """Live P1 policy state with factual and action-written ownership split.
+    """Live P1 state with factual and P2-query ownership split.
 
     ``factual_base`` is the cached, observation-owned P1 detail and therefore
-    has no noisy-action dependency. ``policy_precision_residual`` is the live
-    V120 policy-block write. ``effect_query`` preserves V120's post-P1 query
-    seen by P2 without relabeling the live policy residual as a fact.
+    has no noisy-action dependency. ``policy_query_residual`` is the live V120
+    policy-block write and is owned only by P2's effect query.  It is neither a
+    fact nor a second P3 precision value. ``effect_query`` preserves V120's
+    post-P1 query seen by P2 without giving the query refinement a parallel
+    action-writing exit.
     """
 
     factual_base: Tensor  # [B,24,Q,H]
-    policy_precision_residual: Tensor  # [B,24,Q,H]
+    policy_query_residual: Tensor  # [B,24,Q,H]
     effect_query: Tensor  # action query + factual base + policy residual
 
     def validate(
@@ -395,7 +397,7 @@ class CompletedP1PolicyState:
             raise ValueError("completed P1 policy state lost its action-basis axis")
         if hidden is not None and int(expected[3]) != int(hidden):
             raise ValueError("completed P1 policy state has the wrong hidden width")
-        for name in ("policy_precision_residual", "effect_query"):
+        for name in ("policy_query_residual", "effect_query"):
             value = getattr(self, name)
             if tuple(value.shape) != expected:
                 raise ValueError(f"completed P1 {name} must align with factual_base")

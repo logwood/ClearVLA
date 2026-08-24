@@ -8,16 +8,17 @@ audit ledger; prospective ideas belong under `docs/research/auxiliary/`.
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        35
+manifest schema:        36
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               single-stage end-to-end
 behavioral reference:   V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
-checkpoint policy:      fresh run; Schema34 exact resume rejected
+checkpoint policy:      fresh run; Schema35 exact resume rejected
 deployment integration: five Euler updates at 0,.2,.4,.6,.8
 endpoint heads:         one full dynamic forward at 1.0, action not updated
 ```
 
-Schema35 is a causal-ownership repair. It does not add blocks, route quotas,
+Schema36 closes the dynamic-P1/P3 double exit and P2 owner mismatch exposed by
+the failed Schema35 run. It does not add blocks, route quotas,
 hard gates, entropy targets, artificial gradients, new external losses, or
 bottom capacity. Pre-G, the V120 static high-resolution P1 reader, controlled
 transition, Evidence MMDiT, CVAE/workspace, execution controller and action
@@ -55,7 +56,7 @@ G3 chart + S + clean action bases
   -> static P1, once per observation
   -> FactualPrecisionDock(protected_detail)
 
-noisy-action query + static P1 + dynamic P1 precision residual
+noisy-action query + static P1 + dynamic P1 query residual
   -> P2 effect query over supervised W fields
   -> consequence = static fact + W effect + interaction
   -> P3 precision/effect/temporal/state-change lanes
@@ -194,24 +195,35 @@ The dynamic boundary is explicit:
 ```text
 CompletedP1PolicyState
   factual_base               = static protected_detail
-  policy_precision_residual  = dynamic action/time residual
+  policy_query_residual      = dynamic action/time query refinement
   effect_query               = action + factual_base + policy residual
 ```
 
 `factual_base` is independent of noisy action and time. The dynamic residual
-may condition P2 queries and P3 precision, but cannot enter the protected fact,
-transition factual source or bottom protected base.
+conditions only P2's effect query. It cannot enter P3 precision, the protected
+fact, transition factual source or bottom protected base. The inherited P1
+policy block retains its ordinary residual computation, but its AdaLN
+shift/scale crosses a smooth absolute bound of 4 before attention/FFN use;
+raw and contracted modulation, Q/K, FFN input and every residual stage are
+logged separately.
 
 P2:
 
-- reads only supervised W semantic/geometry/status fields, matching S typed
-  intent, the effect query and observable chart support;
+- reads supervised W semantic and geometry fields, matching S typed intent,
+  the effect query and observable chart support;
 - uses one normalized physical camera measure for both transport value
   reduction and camera-coordinate scoring;
 - uses bounded covariance-aware camera mixture scores; coordinate changes K
   matching only and never votes directly on interval time;
-- keeps semantic, geometry and status as complementary typed values with an
-  exact zero null per type;
+- keeps semantic and geometry as complementary typed values with an exact zero
+  null per type;
+- owns one protected public-S interval prior, after which semantic and geometry
+  each add only their matching typed-S and W evidence and select their own
+  interval/null; there is no outer type competition;
+- adds the two one-sided-bounded values directly, so either owner is preserved
+  when the other is exact zero; the caller contracts the combined effect once;
+- visibility/persistence remain neutral W supervision and diagnostics. Without
+  an independent label they have no P2 action value or route vote;
 - cannot reopen RGB/DINO or read generic W hidden.
 
 Consequence is zero-preserving:
@@ -224,7 +236,8 @@ protected_consequence = static_fact + effect + interaction
 
 P3 has four active lanes:
 
-- precision reads static high-resolution detail and dynamic P1 residual;
+- precision reads static high-resolution detail only, modulated by the current
+  action query;
 - effect reads only `W_effect + interaction`;
 - temporal requires S temporal control, `W_effect + interaction`, and action;
 - state-change reads independent observable state-change evidence.
@@ -259,7 +272,7 @@ ObjectTopTrainingTargets
   current_loss_support                 [B,K,C,1]
 
 CompletedP1PolicyState
-  factual_base / policy_precision_residual / effect_query [B,24,4,H]
+  factual_base / policy_query_residual / effect_query [B,24,4,H]
 ```
 
 K and camera permutations must be equivariant through G->Teacher->W->P2.
@@ -278,8 +291,11 @@ K and camera permutations must be equivariant through G->Teacher->W->P2.
   losses.
 - V120 optimizer decay ownership, decoder-local clip, global clip and first
   non-finite parameter sentinel remain unchanged.
-- Every trainable top parameter must receive ordinary autograd once initial
-  zero-output boundaries have taken their first optimizer update.
+- Every non-neutral trainable top parameter must receive ordinary autograd once
+  initial zero-output boundaries have taken their first optimizer update.
+  Visibility/persistence and their W appearance projection are the explicit
+  exception at the exact zero target; perturbing either head must reconnect all
+  three parameters through the neutral status loss.
 
 ## Runtime, identity and observability
 
@@ -300,10 +316,10 @@ K and camera permutations must be equivariant through G->Teacher->W->P2.
 Active manifest ABI:
 
 ```text
-schema:       35
+schema:       36
 observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-top:          single_content_k_identity_incremental_stateless_intent_causal_w_near_far_camera_specific_effect_static_fact_dynamic_precision_p3
-bottom:       restored_v120_shared_seed_typed_dynamic_p1_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
+top:          single_content_k_identity_incremental_stateless_intent_causal_w_near_far_camera_specific_effect_matched_semantic_geometry_p2_static_fact_single_precision_p3
+bottom:       restored_v120_shared_seed_typed_bounded_dynamic_p1_query_only_four_active_plan_lanes_exact_g3_anchor_transition_evidence_mmdit_dense512_execution
 training:     v120_mirrored_physical_flow_observed_current_grounding_partial_ot_neutral_status_camera_specific_future_loss_support_event_boost_v120_decay_three_owner_clip
 runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only
 ```
@@ -324,12 +340,12 @@ Fresh smoke and long run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema35_causal_ownership_smoke \
-nohup bash scripts/smoke_mainline.sh > schema35_causal_ownership_smoke.log 2>&1 &
+OUT_DIR=runs/schema36_p1_p2_closure_smoke \
+nohup bash scripts/smoke_mainline.sh > schema36_p1_p2_closure_smoke.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema35_causal_ownership_b8 \
-nohup bash scripts/train_mainline.sh > schema35_causal_ownership_b8.log 2>&1 &
+OUT_DIR=runs/schema36_p1_p2_closure_b8 \
+nohup bash scripts/train_mainline.sh > schema36_p1_p2_closure_b8.log 2>&1 &
 ```
 
 Storage defaults:

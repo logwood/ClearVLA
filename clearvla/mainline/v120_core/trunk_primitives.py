@@ -562,6 +562,17 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         # the variance floor. This smooth eighth-order bound is effectively
         # identity near the initialized scale of one and asymptotes to four.
         self.normalization_affine_max = 4.0
+        # The compact mainline executes the first V120 policy block at every
+        # dynamic call.  Schema35 proved that bounding only the written
+        # residual does not bound the hidden AdaLN Jacobian when a downstream
+        # consumer drives the block into saturation.  Reuse the established
+        # smooth absolute bound (eighth-order and effectively identity around
+        # zero) for this policy-only modulation boundary.  Grounding keeps its
+        # exact inherited modulation and is not changed by this repair.
+        self.modulation_amplitude_contract = bool(
+            self.complete_numerical_contract and role == "policy"
+        )
+        self.modulation_absolute_max = self.normalization_affine_max
         self.directed_canvas_attention = bool(
             int(getattr(config, "flow_jepa_enabled", 0))
             and int(getattr(config, "flow_jepa_directed_canvas_attention", 0))
@@ -700,8 +711,20 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             )
         return smooth_rms_contract(update, self.residual_max_update_rms)
 
-    @staticmethod
-    def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+    def _contract_modulation(
+        self, shift: Tensor, scale: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        if self.modulation_amplitude_contract:
+            shift = smooth_absolute_contract(
+                shift, self.modulation_absolute_max
+            )
+            scale = smooth_absolute_contract(
+                scale, self.modulation_absolute_max
+            )
+        return shift, scale
+
+    def modulate(self, x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        shift, scale = self._contract_modulation(shift, scale)
         return x * (1 + scale[:, None]) + shift[:, None]
 
     @staticmethod
@@ -906,6 +929,27 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         sa_s, sa_c, sa_g, ca_s, ca_c, ca_g, dy_s, dy_c, dy_g, ff_s, ff_c, ff_g = self.mod(
             mod_embed + role_mod
         ).chunk(12, dim=-1)
+        modulation_shift_raw_max_abs = torch.stack(
+            (sa_s, ca_s, dy_s, ff_s), dim=0
+        ).detach().float().abs().amax()
+        modulation_scale_raw_max_abs = torch.stack(
+            (sa_c, ca_c, dy_c, ff_c), dim=0
+        ).detach().float().abs().amax()
+        contracted_modulations = tuple(
+            self._contract_modulation(shift, scale)
+            for shift, scale in (
+                (sa_s, sa_c),
+                (ca_s, ca_c),
+                (dy_s, dy_c),
+                (ff_s, ff_c),
+            )
+        )
+        modulation_shift_max_abs = torch.stack(
+            tuple(row[0] for row in contracted_modulations), dim=0
+        ).detach().float().abs().amax()
+        modulation_scale_max_abs = torch.stack(
+            tuple(row[1] for row in contracted_modulations), dim=0
+        ).detach().float().abs().amax()
         write_mask = self._role_write_mask(canvas, slices)
         residual_contract_metrics: dict[str, Tensor] = {}
         residual_raw_rows: list[Tensor] = []
@@ -1032,6 +1076,7 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
 
         value = normalize(self.n1, canvas)
         qk = self.modulate(value, sa_s, sa_c)
+        self_qk_rms = qk.detach().float().square().mean().sqrt()
         query_context_rms = canvas.new_zeros((), dtype=torch.float32)
         if rollout_query_context is not None:
             rollout_slice = slices["rollout"]
@@ -1288,9 +1333,9 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
                 dim=1,
             )
 
-        update = self.ffn(
-            self.modulate(normalize(self.n3, canvas), ff_s, ff_c)
-        )
+        ffn_input = self.modulate(normalize(self.n3, canvas), ff_s, ff_c)
+        ffn_input_rms = ffn_input.detach().float().square().mean().sqrt()
+        update = self.ffn(ffn_input)
         g_ff = torch.sigmoid(ff_g)
         update = self._structure_world_canvas_update(self.drop(update), slices)
         if self.residual_contract_after_gate:
@@ -1351,6 +1396,16 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
                     float(self.complete_numerical_contract),
                     dtype=torch.float32,
                 ),
+                "modulation_contract_enabled": canvas.new_tensor(
+                    float(self.modulation_amplitude_contract),
+                    dtype=torch.float32,
+                ),
+                "modulation_shift_max_abs": modulation_shift_max_abs,
+                "modulation_scale_max_abs": modulation_scale_max_abs,
+                "modulation_shift_raw_max_abs": modulation_shift_raw_max_abs,
+                "modulation_scale_raw_max_abs": modulation_scale_raw_max_abs,
+                "self_qk_rms": self_qk_rms,
+                "ffn_input_rms": ffn_input_rms,
                 "normalization_denominator_min": (
                     torch.stack(normalization_denominator_rows).amin()
                     if normalization_denominator_rows

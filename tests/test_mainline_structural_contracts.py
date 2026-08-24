@@ -2505,7 +2505,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     policy_residual = torch.randn_like(p1_fact)
     p1_state = CompletedP1PolicyState(
         factual_base=p1_fact,
-        policy_precision_residual=policy_residual,
+        policy_query_residual=policy_residual,
         effect_query=action_query + p1_fact + policy_residual,
     )
     compiled, _ = top.compile_policy(
@@ -3127,7 +3127,7 @@ def test_neutral_w_preserves_precision_but_zeros_effect_and_temporal() -> None:
     policy_residual = torch.randn_like(p1_fact)
     p1_state = CompletedP1PolicyState(
         factual_base=p1_fact,
-        policy_precision_residual=policy_residual,
+        policy_query_residual=policy_residual,
         effect_query=action_query + p1_fact + policy_residual,
     )
     compiled, _ = top.compile_policy(
@@ -3140,7 +3140,7 @@ def test_neutral_w_preserves_precision_but_zeros_effect_and_temporal() -> None:
         deployment,
         p1_state=CompletedP1PolicyState(
             factual_base=p1_fact,
-            policy_precision_residual=policy_residual,
+            policy_query_residual=policy_residual,
             effect_query=other_action_query + p1_fact + policy_residual,
         ),
         action_query=other_action_query,
@@ -3233,7 +3233,7 @@ def test_p2_equal_candidate_evidence_has_no_fixed_half_null_prior() -> None:
         rtol=0.0,
     )
     torch.testing.assert_close(
-        metrics["object_p2_shared_interval_null_mass"],
+        metrics["object_p2_type_interval_null_mass"],
         metrics["object_p2_residual_null_mass"],
         atol=1.0e-7,
         rtol=0.0,
@@ -3285,7 +3285,6 @@ def test_p2_protected_common_survives_when_interval_residual_is_exactly_zero() -
     with torch.no_grad():
         reader.semantic_value.weight.fill_(0.125)
         reader.transport_value.weight.fill_(0.125)
-        reader.status_value.weight.fill_(0.125)
     value, metrics = reader(
         torch.zeros(batch, 24, 2, hidden),
         dynamics,
@@ -3337,7 +3336,39 @@ def test_p2_effect_gradient_reaches_w_heads_and_s_typed_queries() -> None:
     assert nonzero(top.intent.typed_relevance_queries[0].weight)
 
 
-def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> None:
+def test_neutral_status_regularizer_reconnects_when_perturbed() -> None:
+    """Zero status is an optimum, not a disconnected trainable branch."""
+
+    torch.manual_seed(4061)
+    top = _object_top()
+    with torch.no_grad():
+        top.dynamics.visibility_head.weight.fill_(0.02)
+        top.dynamics.persistence_head.weight.fill_(0.02)
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
+    )
+    target = FutureObjectDynamics.neutral(context.facts)
+    terms = future_dynamics_terms(
+        context.predicted_dynamics,
+        target,
+        current_loss_support=context.facts.camera_chart_availability,
+    )
+    (terms["future_visibility"] + terms["future_persistence"]).backward()
+    for parameter in (
+        top.dynamics.object_appearance.weight,
+        top.dynamics.visibility_head.weight,
+        top.dynamics.persistence_head.weight,
+    ):
+        assert parameter.grad is not None
+        assert torch.count_nonzero(parameter.grad.detach()) > 0
+
+
+def test_p2_neutral_status_is_not_an_action_value_or_route_vote() -> None:
     batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
     scalar = torch.zeros(batch, intervals, objects, 1)
     dynamics = FutureObjectDynamics(
@@ -3369,21 +3400,36 @@ def test_p2_disappearance_status_is_not_self_masked_by_future_visibility() -> No
         content_dim=content,
         route_dim=4,
     )
-    with torch.no_grad():
-        reader.status_value.weight.fill_(0.25)
     value, metrics = reader(
         torch.zeros(batch, 24, 2, hidden),
         dynamics,
         intent,
         collect_diagnostics=True,
     )
-    assert torch.count_nonzero(value) > 0
-    assert float(metrics["object_p2_status_common_selected_value_rms"]) > 0.0
-    # Future selector validity is diagnostic-only at this boundary.  All
-    # optional residuals retain the same current physical support.
-    assert float(metrics["object_p2_status_residual_null_mass"]) < 0.5
-    assert float(metrics["object_p2_semantic_residual_null_mass"]) < 0.5
-    assert float(metrics["object_p2_geometry_residual_null_mass"]) < 0.5
+    neutral = replace(
+        dynamics,
+        visibility=torch.zeros_like(dynamics.visibility),
+        persistence=torch.zeros_like(dynamics.persistence),
+        future_selector_validity=torch.ones_like(
+            dynamics.future_selector_validity
+        ),
+    )
+    neutral_value, neutral_metrics = reader(
+        torch.zeros(batch, 24, 2, hidden),
+        neutral,
+        intent,
+        collect_diagnostics=True,
+    )
+    torch.testing.assert_close(value, neutral_value, atol=0.0, rtol=0.0)
+    assert float(metrics["object_p2_status_consumer_active"]) == 0.0
+    for name in (
+        "object_p2_type_interval_null_mass",
+        "object_p2_semantic_residual_null_mass",
+        "object_p2_geometry_residual_null_mass",
+    ):
+        torch.testing.assert_close(
+            metrics[name], neutral_metrics[name], atol=0.0, rtol=0.0
+        )
 
 
 def test_p2_real_camera_mixture_is_camera_permutation_invariant() -> None:
@@ -3524,74 +3570,55 @@ def test_p2_invalid_objects_have_exactly_zero_common_and_residual_support() -> N
     torch.testing.assert_close(changed_value, baseline_value, atol=0.0, rtol=0.0)
 
 
-def test_p2_complementary_fusion_has_variance_preserving_base_and_exact_zero() -> None:
+def test_p2_complementary_fusion_preserves_single_owner_and_exact_zero() -> None:
     torch.manual_seed(405)
     reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
-    selected = torch.randn(2, 3, 2, 3, 16)
-    with torch.no_grad():
-        reader.type_contrast_scale.zero_()
-    fused, base, contrast, residual = reader._fuse_complementary_values(selected)
-    expected_base = selected.float().sum(dim=-2) / (3.0**0.5)
-    torch.testing.assert_close(base, expected_base, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(fused.float(), base, atol=0.0, rtol=0.0)
-    assert torch.count_nonzero(residual) == 0
-    torch.testing.assert_close(
-        contrast.sum(dim=-2),
-        torch.zeros_like(base),
-        atol=2.0e-6,
-        rtol=0.0,
-    )
+    selected = torch.randn(2, 3, 2, 2, 16)
+    fused, semantic, geometry = reader._fuse_complementary_values(selected)
+    expected = selected.float().sum(dim=-2)
+    torch.testing.assert_close(fused.float(), expected, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(semantic, selected[..., 0, :].float())
+    torch.testing.assert_close(geometry, selected[..., 1, :].float())
 
     zeros = torch.zeros_like(selected)
-    fused_zero, base_zero, contrast_zero, residual_zero = (
+    fused_zero, semantic_zero, geometry_zero = (
         reader._fuse_complementary_values(zeros)
     )
     assert torch.equal(fused_zero, zeros[..., 0, :])
-    assert torch.equal(base_zero, zeros[..., 0, :].float())
-    assert torch.equal(contrast_zero, zeros.float())
-    assert torch.equal(residual_zero, zeros[..., 0, :].float())
+    assert torch.equal(semantic_zero, zeros[..., 0, :].float())
+    assert torch.equal(geometry_zero, zeros[..., 1, :].float())
 
-    shared = torch.randn(2, 3, 2, 1, 16)
-    identical = shared.expand(-1, -1, -1, 3, -1).clone()
-    with torch.no_grad():
-        reader.type_contrast_scale.fill_(1.0e-4)
-    fused_same, base_same, _, residual_same = reader._fuse_complementary_values(
-        identical
+    semantic_only = selected.clone()
+    semantic_only[..., 1, :].zero_()
+    fused_semantic, semantic_value, geometry_value = (
+        reader._fuse_complementary_values(semantic_only)
     )
-    torch.testing.assert_close(
-        base_same,
-        (3.0**0.5) * shared[..., 0, :].float(),
-        atol=2.0e-6,
-        rtol=1.0e-6,
-    )
-    assert torch.count_nonzero(residual_same) == 0
-    torch.testing.assert_close(fused_same.float(), base_same, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(fused_semantic.float(), semantic_value)
+    assert torch.count_nonzero(geometry_value) == 0
 
 
 def test_p2_complementary_fusion_starts_near_uniform_without_type_selector() -> None:
     torch.manual_seed(406)
     reader = ObjectFutureEffectReader(hidden=32, content_dim=8, route_dim=4)
     assert not hasattr(reader, "type_query")
-    selected = torch.randn(2, 24, 2, 3, 32, requires_grad=True)
-    fused, base, _, residual = reader._fuse_complementary_values(selected)
-    residual_ratio = residual.square().mean().sqrt() / base.square().mean().sqrt()
-    assert float(residual_ratio.detach()) < 1.0e-3
+    assert not hasattr(reader, "type_contrast_down")
+    selected = torch.randn(2, 24, 2, 2, 32, requires_grad=True)
+    fused, _, _ = reader._fuse_complementary_values(selected)
     fused.float().sum().backward()
     assert selected.grad is not None
-    for type_index in range(3):
+    for type_index in range(2):
         assert torch.count_nonzero(selected.grad[..., type_index, :]) > 0
 
 
 def test_p2_complementary_fusion_owns_cpu_bf16_boundary() -> None:
     torch.manual_seed(407)
     reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
-    selected = torch.randn(1, 4, 2, 3, 16, dtype=torch.bfloat16)
+    selected = torch.randn(1, 4, 2, 2, 16, dtype=torch.bfloat16)
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        fused, base, contrast, residual = reader._fuse_complementary_values(selected)
+        fused, semantic, geometry = reader._fuse_complementary_values(selected)
     assert fused.dtype == torch.bfloat16
-    assert base.dtype == torch.float32
-    assert contrast.dtype == torch.float32
-    assert residual.dtype == torch.float32
+    assert semantic.dtype == torch.float32
+    assert geometry.dtype == torch.float32
     assert torch.isfinite(fused).all()
 
 
@@ -3617,7 +3644,7 @@ def test_p2_complementary_value_contract_is_one_sided_and_exact_zero() -> None:
 
 
 def test_p2_consumer_type_names_map_to_the_matching_s_owner() -> None:
-    """P2 semantic/geometry/status must read S semantic/geometry/appearance."""
+    """P2 semantic/geometry must read the matching S semantic/geometry."""
 
     torch.manual_seed(410)
     top = _object_top().eval()
@@ -3630,7 +3657,7 @@ def test_p2_consumer_type_names_map_to_the_matching_s_owner() -> None:
         executed_history=torch.randn(1, 8, 7),
     )
     intent = context.intent.policy_dock()
-    captured: list[list[torch.Tensor]] = [[], [], []]
+    captured: list[list[torch.Tensor]] = [[], []]
     handles = []
     for type_index, module in enumerate(top.effect_reader.typed_intent_key):
         handles.append(
@@ -3651,7 +3678,7 @@ def test_p2_consumer_type_names_map_to_the_matching_s_owner() -> None:
         for handle in handles:
             handle.remove()
 
-    for p2_index, s_index in enumerate((0, 2, 1)):
+    for p2_index, s_index in enumerate((0, 2)):
         assert len(captured[p2_index]) == 2
         torch.testing.assert_close(
             captured[p2_index][0],
@@ -3667,7 +3694,7 @@ def test_p2_consumer_type_names_map_to_the_matching_s_owner() -> None:
         )
 
 
-def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() -> None:
+def test_p2_semantic_intervention_cannot_change_geometry_selector() -> None:
     torch.manual_seed(403)
     top = _object_top().eval()
     context, _ = top.build_online_context(
@@ -3697,36 +3724,38 @@ def test_p2_semantic_intervention_cannot_change_geometry_or_status_selector() ->
         context.intent.policy_dock(),
         collect_diagnostics=True,
     )
-    # Semantic W evidence is a legal contributor to the one shared temporal
-    # posterior, so the final geometry/status values may move with that shared
-    # interval.  Their *within-interval K selectors* remain type-local.
+    # Semantic W evidence owns semantic interval/object selection only.  It
+    # cannot move geometry's interval or within-interval object posterior.
     assert not torch.equal(
-        metrics["object_p2_shared_interval_w_score_abs"],
-        changed_metrics["object_p2_shared_interval_w_score_abs"],
+        metrics["object_p2_semantic_interval_w_score_abs"],
+        changed_metrics["object_p2_semantic_interval_w_score_abs"],
     )
     assert not torch.equal(
-        metrics["object_p2_shared_interval_null_mass"],
-        changed_metrics["object_p2_shared_interval_null_mass"],
+        metrics["object_p2_semantic_residual_null_mass"],
+        changed_metrics["object_p2_semantic_residual_null_mass"],
     )
     assert not torch.equal(
         metrics["object_p2_semantic_residual_selected_value_rms"],
         changed_metrics["object_p2_semantic_residual_selected_value_rms"],
     )
-    for type_name in ("geometry", "status"):
-        for suffix in (
-            "within_interval_object_posterior_entropy",
-            "within_interval_object_posterior_max",
-        ):
-            torch.testing.assert_close(
-                metrics[f"object_p2_{type_name}_{suffix}"],
-                changed_metrics[f"object_p2_{type_name}_{suffix}"],
-                atol=0.0,
-                rtol=0.0,
-            )
+    for suffix in (
+        "interval_w_score_abs",
+        "residual_null_mass",
+        "interval_posterior_entropy",
+        "interval_posterior_max",
+        "within_interval_object_posterior_entropy",
+        "within_interval_object_posterior_max",
+    ):
+        torch.testing.assert_close(
+            metrics[f"object_p2_geometry_{suffix}"],
+            changed_metrics[f"object_p2_geometry_{suffix}"],
+            atol=0.0,
+            rtol=0.0,
+        )
 
 
-def test_p2_shared_interval_route_reads_typed_s_and_w_object_evidence() -> None:
-    """The temporal owner must not collapse back to public-S-only routing."""
+def test_p2_matched_interval_routes_read_typed_s_and_w_object_evidence() -> None:
+    """Each active owner adds its own typed-S and W temporal evidence."""
 
     torch.manual_seed(408)
     top = _object_top().eval()
@@ -3756,9 +3785,6 @@ def test_p2_shared_interval_route_reads_typed_s_and_w_object_evidence() -> None:
         semantic_delta=semantic_delta,
         transport_mean=dynamics.transport_mean
         + 0.2 * torch.randn_like(dynamics.transport_mean),
-        visibility=dynamics.visibility + torch.randn_like(dynamics.visibility),
-        persistence=dynamics.persistence
-        + torch.randn_like(dynamics.persistence),
     )
     changed_intent = replace(
         intent,
@@ -3775,29 +3801,21 @@ def test_p2_shared_interval_route_reads_typed_s_and_w_object_evidence() -> None:
     )
     assert not torch.equal(changed, baseline)
     for name in (
-        "object_p2_shared_interval_typed_score_abs",
-        "object_p2_shared_interval_w_score_abs",
-        "object_p2_shared_interval_score_abs",
-        "object_p2_shared_interval_null_mass",
+        "object_p2_type_interval_typed_score_abs",
+        "object_p2_type_interval_w_score_abs",
+        "object_p2_type_interval_score_abs",
+        "object_p2_type_interval_null_mass",
     ):
         assert not torch.equal(changed_metrics[name], baseline_metrics[name])
-    assert float(baseline_metrics["object_p2_type_interval_disagreement_max_abs"]) < 1.0e-6
-    assert float(changed_metrics["object_p2_type_interval_disagreement_max_abs"]) < 1.0e-6
-    for interval in range(4):
-        expected = baseline_metrics[f"object_p2_residual_interval_{interval}_mass"]
-        for type_name in ("semantic", "geometry", "status"):
-            torch.testing.assert_close(
-                baseline_metrics[
-                    f"object_p2_{type_name}_residual_interval_{interval}_mass"
-                ],
-                expected,
-                atol=1.0e-6,
-                rtol=0.0,
-            )
+    # Distinct typed/W evidence is now allowed—and expected—to produce
+    # distinct semantic and geometry time posteriors.
+    assert float(
+        changed_metrics["object_p2_type_interval_disagreement_max_abs"]
+    ) > 0.0
 
 
-def test_p2_shared_interval_route_responds_to_public_s_interval_keys() -> None:
-    """The isolated temporal owner must remain live, not merely independent."""
+def test_p2_public_interval_prior_responds_to_public_s_interval_keys() -> None:
+    """The shared public prior remains live for both matched type routes."""
 
     torch.manual_seed(409)
     top = _object_top().eval()
@@ -3841,6 +3859,29 @@ def test_p2_shared_interval_route_responds_to_public_s_interval_keys() -> None:
         ]
     )
     assert not torch.allclose(changed_mass, baseline_mass, atol=1.0e-7, rtol=0.0)
+    for type_name in ("semantic", "geometry"):
+        baseline_typed_mass = torch.stack(
+            [
+                baseline_metrics[
+                    f"object_p2_{type_name}_residual_interval_{index}_mass"
+                ]
+                for index in range(4)
+            ]
+        )
+        changed_typed_mass = torch.stack(
+            [
+                changed_metrics[
+                    f"object_p2_{type_name}_residual_interval_{index}_mass"
+                ]
+                for index in range(4)
+            ]
+        )
+        assert not torch.allclose(
+            changed_typed_mass,
+            baseline_typed_mass,
+            atol=1.0e-7,
+            rtol=0.0,
+        )
 
 
 def test_p2_residual_retention_metrics_are_support_aware_and_complementary() -> None:
@@ -3931,7 +3972,6 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     )
     bank, _ = compiler(
         p1_factual_detail=common_fact,
-        p1_policy_residual=torch.zeros_like(common_fact),
         consequence=consequence,
         intent=zero_intent,
         action_query=action_query,
@@ -3947,7 +3987,6 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
 
     zero_precision, _ = compiler(
         p1_factual_detail=torch.zeros_like(common_fact),
-        p1_policy_residual=torch.zeros_like(common_fact),
         consequence=consequence,
         intent=zero_intent,
         action_query=action_query,
@@ -3966,7 +4005,6 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     )
     active, _ = compiler(
         p1_factual_detail=common_fact,
-        p1_policy_residual=torch.zeros_like(common_fact),
         consequence=consequence,
         intent=active_intent,
         action_query=action_query,
@@ -3974,7 +4012,6 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     assert torch.count_nonzero(active.temporal) > 0
     no_effect, _ = compiler(
         p1_factual_detail=common_fact,
-        p1_policy_residual=torch.zeros_like(common_fact),
         consequence=replace(
             consequence,
             effect=torch.zeros_like(consequence.effect),
@@ -3995,7 +4032,6 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     )
     changed, _ = compiler(
         p1_factual_detail=common_fact,
-        p1_policy_residual=torch.zeros_like(common_fact),
         consequence=changed_consequence,
         intent=active_intent,
         action_query=action_query,
@@ -4007,50 +4043,10 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
         changed.state_change, active.state_change, atol=0.0, rtol=0.0
     )
 
-    policy_residual = torch.randn_like(common_fact)
-    dynamic_precision, _ = compiler(
-        p1_factual_detail=common_fact,
-        p1_policy_residual=policy_residual,
-        consequence=consequence,
-        intent=active_intent,
-        action_query=action_query,
-    )
-    assert not torch.equal(dynamic_precision.precision, active.precision)
-    torch.testing.assert_close(
-        dynamic_precision.protected_base,
-        active.protected_base,
-        atol=0.0,
-        rtol=0.0,
-    )
-    torch.testing.assert_close(
-        dynamic_precision.temporal,
-        active.temporal,
-        atol=0.0,
-        rtol=0.0,
-    )
-    static_zero, _ = compiler(
-        p1_factual_detail=torch.zeros_like(common_fact),
-        p1_policy_residual=policy_residual,
-        consequence=consequence,
-        intent=active_intent,
-        action_query=action_query,
-    )
-    dynamic_zero, _ = compiler(
-        p1_factual_detail=common_fact,
-        p1_policy_residual=torch.zeros_like(common_fact),
-        consequence=consequence,
-        intent=active_intent,
-        action_query=action_query,
-    )
-    assert not torch.equal(static_zero.precision, dynamic_precision.precision)
-    assert not torch.equal(dynamic_zero.precision, dynamic_precision.precision)
-    for lane in ("effect", "temporal", "state_change"):
-        torch.testing.assert_close(
-            getattr(static_zero, lane), getattr(dynamic_precision, lane), atol=0.0, rtol=0.0
-        )
-        torch.testing.assert_close(
-            getattr(dynamic_zero, lane), getattr(dynamic_precision, lane), atol=0.0, rtol=0.0
-        )
+    # The dynamic P1 policy block refines P2's query upstream.  P3 accepts no
+    # live P1 residual argument, so precision has exactly one P1-owned value
+    # source: the cached high-resolution factual detail.
+    assert "p1_policy_residual" not in inspect.signature(compiler.forward).parameters
 
 
 def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass() -> None:

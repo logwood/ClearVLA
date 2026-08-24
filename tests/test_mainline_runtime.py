@@ -128,12 +128,13 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "object_intent_interval_object_attention_max": 0.16,
             "object_intent_state_change_attention_entropy": 0.85,
             "object_intent_state_change_attention_max": 0.15,
-            "object_p2_shared_interval_typed_score_abs": 0.21,
-            "object_p2_shared_interval_w_score_abs": 0.22,
+            "object_p2_type_interval_typed_score_abs": 0.21,
+            "object_p2_type_interval_w_score_abs": 0.22,
             "object_p2_residual_retained_rms_ratio": 0.61,
             "object_p2_residual_cancelled_rms_fraction": 0.39,
             "object_p2_residual_cancellation_support_fraction": 0.99,
-            "object_p2_status_common_value_contract_scale_mean": 0.88,
+            "object_p2_status_consumer_active": 0.0,
+            "p1_policy_modulation_scale_max_abs": 0.88,
             "p1_completed_fact_rms": 0.4,
             "object_p3_effect_rms": 0.41,
             "bottom_capacity_mean": 0.5,
@@ -171,12 +172,13 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "object_intent_interval_object_attention_max=0.16" in joined
     assert "object_intent_state_change_attention_entropy=0.85" in joined
     assert "object_intent_state_change_attention_max=0.15" in joined
-    assert "object_p2_shared_interval_typed_score_abs=0.21" in joined
-    assert "object_p2_shared_interval_w_score_abs=0.22" in joined
+    assert "object_p2_type_interval_typed_score_abs=0.21" in joined
+    assert "object_p2_type_interval_w_score_abs=0.22" in joined
     assert "object_p2_residual_retained_rms_ratio=0.61" in joined
     assert "object_p2_residual_cancelled_rms_fraction=0.39" in joined
     assert "object_p2_residual_cancellation_support_fraction=0.99" in joined
-    assert "object_p2_status_common_value_contract_scale_mean=0.88" in joined
+    assert "object_p2_status_consumer_active=0" in joined
+    assert "p1_policy_modulation_scale_max_abs=0.88" in joined
     assert "p1_completed_fact_rms=0.4" in joined
     assert "object_p3_effect_rms=0.41" in joined
     assert "bottom_capacity_mean=0.5" in joined

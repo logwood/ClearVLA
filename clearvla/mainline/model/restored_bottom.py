@@ -308,7 +308,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         completed_policy_residual = protected_detail + dynamic_delta
         state = CompletedP1PolicyState(
             factual_base=protected_detail,
-            policy_precision_residual=dynamic_delta,
+            policy_query_residual=dynamic_delta,
             effect_query=action_query + protected_detail + dynamic_delta,
         )
         state.validate(
@@ -341,7 +341,7 @@ class RestoredV120EvidenceBottom(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "p1_policy_precision_residual_rms": state.policy_precision_residual.detach()
+            "p1_policy_query_residual_rms": state.policy_query_residual.detach()
             .float()
             .square()
             .mean()
@@ -357,9 +357,49 @@ class RestoredV120EvidenceBottom(nn.Module):
             .mean()
             .sqrt(),
         }
+        # The V120 block already computes its internal numerical contract.
+        # Forwarding only the final written RMS hid the exact pre-NaN growth
+        # point in Schema35, so expose the complete existing boundary without
+        # adding another diagnostic network or changing the forward value.
         for source, target in (
+            (
+                "modulation_contract_enabled",
+                "p1_policy_modulation_contract_enabled",
+            ),
+            ("gate_self", "p1_policy_self_gate"),
+            ("gate_ffn", "p1_policy_ffn_gate"),
+            ("residual_self_raw_rms", "p1_policy_self_raw_rms"),
+            ("residual_self_proposed_rms", "p1_policy_self_proposed_rms"),
+            ("residual_self_bounded_rms", "p1_policy_self_bounded_rms"),
             ("residual_self_written_rms", "p1_policy_self_written_rms"),
+            ("residual_self_compression", "p1_policy_self_compression"),
+            ("residual_ffn_raw_rms", "p1_policy_ffn_raw_rms"),
+            ("residual_ffn_proposed_rms", "p1_policy_ffn_proposed_rms"),
+            ("residual_ffn_bounded_rms", "p1_policy_ffn_bounded_rms"),
             ("residual_ffn_written_rms", "p1_policy_ffn_written_rms"),
+            ("residual_ffn_compression", "p1_policy_ffn_compression"),
+            ("residual_raw_rms", "p1_policy_residual_raw_rms"),
+            ("residual_proposed_rms", "p1_policy_residual_proposed_rms"),
+            ("residual_bounded_rms", "p1_policy_residual_bounded_rms"),
+            ("residual_written_rms", "p1_policy_residual_written_rms"),
+            ("residual_compression", "p1_policy_residual_compression"),
+            (
+                "normalization_denominator_min",
+                "p1_policy_normalization_denominator_min",
+            ),
+            ("normalization_gain_max", "p1_policy_normalization_gain_max"),
+            ("modulation_shift_max_abs", "p1_policy_modulation_shift_max_abs"),
+            ("modulation_scale_max_abs", "p1_policy_modulation_scale_max_abs"),
+            (
+                "modulation_shift_raw_max_abs",
+                "p1_policy_modulation_shift_raw_max_abs",
+            ),
+            (
+                "modulation_scale_raw_max_abs",
+                "p1_policy_modulation_scale_raw_max_abs",
+            ),
+            ("self_qk_rms", "p1_policy_self_qk_rms"),
+            ("ffn_input_rms", "p1_policy_ffn_input_rms"),
         ):
             value = block_metrics.get(source)
             if value is not None:
