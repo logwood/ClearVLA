@@ -17,6 +17,70 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
+def register_gradient_rms_metric(
+    value: Tensor,
+    metrics: dict[str, Tensor],
+    name: str,
+) -> None:
+    """Record the ordinary backward RMS at one named tensor boundary.
+
+    The scalar slot is returned with the normal diagnostic dictionary and is
+    filled only if autograd actually reaches ``value``.  The hook returns the
+    incoming gradient unchanged, so this is an ownership probe rather than a
+    training mechanism.  A zero slot therefore has a precise meaning: either
+    the boundary is outside the current loss graph or its gradient is exactly
+    zero.
+    """
+
+    slot = value.new_zeros((), dtype=torch.float32)
+    metrics[name] = slot
+    if not torch.is_grad_enabled() or not value.requires_grad:
+        return
+
+    def capture(gradient: Tensor) -> Tensor:
+        with torch.no_grad():
+            slot.copy_(gradient.detach().float().square().mean().sqrt())
+        return gradient
+
+    value.register_hook(capture)
+
+
+def register_gradient_axis_rms_metrics(
+    value: Tensor,
+    metrics: dict[str, Tensor],
+    names: tuple[str, ...],
+    *,
+    dim: int,
+) -> None:
+    """Record one backward RMS per owner on an existing typed axis.
+
+    Registering one hook on the actual consumed tensor matters: creating
+    diagnostic views *after* a consumer has already run would produce views
+    with no downstream edge and falsely report zero gradients.
+    """
+
+    axis = int(dim)
+    if axis < 0:
+        axis += value.ndim
+    if not 0 <= axis < value.ndim:
+        raise ValueError("gradient diagnostic axis is out of range")
+    if int(value.shape[axis]) != len(names):
+        raise ValueError("gradient diagnostic names do not match the owner axis")
+    slots = tuple(value.new_zeros((), dtype=torch.float32) for _ in names)
+    metrics.update(dict(zip(names, slots, strict=True)))
+    if not torch.is_grad_enabled() or not value.requires_grad:
+        return
+
+    def capture(gradient: Tensor) -> Tensor:
+        with torch.no_grad():
+            for index, slot in enumerate(slots):
+                owned = gradient.select(axis, index)
+                slot.copy_(owned.detach().float().square().mean().sqrt())
+        return gradient
+
+    value.register_hook(capture)
+
+
 def smooth_rms_contract(
     value: Tensor,
     max_rms: float,
@@ -38,6 +102,36 @@ def smooth_rms_contract(
     normalized_square = mean_square / (maximum * maximum)
     scale = (1.0 + normalized_square.square()).pow(-0.25)
     return value * scale.to(dtype=value.dtype), scale
+
+
+def canonical_common_residual(
+    value: Tensor,
+    *,
+    dim: int,
+) -> tuple[Tensor, Tensor]:
+    """Split one carrier without discarding a post-transform common mode.
+
+    Common/residual ownership must be established *after* every nonlinear,
+    normalization, conditional read, and per-token contract that can recreate
+    a common component.  The decomposition is performed in FP32 even under
+    autocast so BF16 reduction error is not promoted into a real interval
+    innovation.  A second correction transfers the residual reduction error
+    back to the common owner; no threshold, detach, gain, or learned parameter
+    is involved.
+    """
+
+    axis = int(dim)
+    if axis < 0:
+        axis += value.ndim
+    if not 0 <= axis < value.ndim:
+        raise ValueError("common/residual dimension is out of range")
+    value_f = value.float()
+    common = value_f.mean(dim=axis)
+    residual = value_f - common.unsqueeze(axis)
+    correction = residual.mean(dim=axis)
+    common = common + correction
+    residual = residual - correction.unsqueeze(axis)
+    return common, residual
 
 
 def variance_floored_centered_norm(

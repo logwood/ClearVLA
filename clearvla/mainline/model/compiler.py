@@ -8,34 +8,124 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .routing import PolicyRoleDeltaBank, smooth_rms_contract
+from .routing import (
+    PolicyRoleDeltaBank,
+    register_gradient_axis_rms_metrics,
+    register_gradient_rms_metric,
+    smooth_rms_contract,
+)
 from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
+
+
+@dataclass(frozen=True)
+class TypedP2EffectRead:
+    """P2 effect with semantic/geometry ownership intact.
+
+    The type axis is ordered exactly as :attr:`ObjectFutureEffectReader.TYPE_NAMES`.
+    ``physical_sum`` is the only untyped view and is formed by a literal sum;
+    no selector or averaging is allowed at this boundary.
+    """
+
+    effect_by_type: Tensor  # [B,T,Q,2,H], semantic then geometry
+
+    def validate(self) -> None:
+        if self.effect_by_type.ndim != 5:
+            raise ValueError("typed P2 effect must be [B,T,Q,type,H]")
+        if int(self.effect_by_type.shape[-2]) != 2:
+            raise ValueError("typed P2 effect must retain semantic/geometry")
+
+    @property
+    def semantic(self) -> Tensor:
+        self.validate()
+        return self.effect_by_type[..., 0, :]
+
+    @property
+    def geometry(self) -> Tensor:
+        self.validate()
+        return self.effect_by_type[..., 1, :]
+
+    @property
+    def physical_sum(self) -> Tensor:
+        self.validate()
+        return self.effect_by_type.sum(dim=-2)
 
 
 @dataclass(frozen=True)
 class ObjectConsequenceState:
     factual_base: Tensor
-    effect: Tensor
-    interaction: Tensor
+    effect_by_type: Tensor
+    interaction_by_type: Tensor
     protected_consequence: Tensor
+
+    @property
+    def effect(self) -> Tensor:
+        """Physical semantic-plus-geometry effect."""
+
+        return self.effect_by_type.sum(dim=-2)
+
+    @property
+    def interaction(self) -> Tensor:
+        """Physical semantic-plus-geometry interaction."""
+
+        return self.interaction_by_type.sum(dim=-2)
+
+    def typed_effect(self) -> Tensor:
+        """Return the mandatory live typed effect sidecar."""
+
+        return self.effect_by_type
+
+    def typed_interaction(self) -> Tensor:
+        """Return the live typed interaction sidecar."""
+
+        return self.interaction_by_type
+
+    def validate(self) -> None:
+        expected = tuple(self.factual_base.shape)
+        if len(expected) != 4:
+            raise ValueError("object consequence must be [B,T,Q,H]")
+        if tuple(self.protected_consequence.shape) != expected:
+            raise ValueError("object protected consequence lost [B,T,Q,H]")
+        typed_effect = self.typed_effect()
+        typed_interaction = self.typed_interaction()
+        typed_expected = (*expected[:-1], 2, expected[-1])
+        if tuple(typed_effect.shape) != typed_expected:
+            raise ValueError("object consequence effect lost its type axis")
+        if tuple(typed_interaction.shape) != typed_expected:
+            raise ValueError("object consequence interaction lost its type axis")
 
 
 @dataclass(frozen=True)
 class ObjectPolicyPlanDeltaBank:
-    """Four optional innovations around one protected consequence."""
+    """Six optional typed innovations around one protected consequence."""
 
     protected_base: Tensor
     precision: Tensor
-    effect: Tensor
-    temporal: Tensor
+    effect_semantic: Tensor
+    effect_geometry: Tensor
+    temporal_semantic: Tensor
+    temporal_geometry: Tensor
     state_change: Tensor
+
+    @property
+    def effect(self) -> Tensor:
+        """Compatibility view; the routed bank retains the two typed lanes."""
+
+        return self.effect_semantic + self.effect_geometry
+
+    @property
+    def temporal(self) -> Tensor:
+        """Compatibility view; the routed bank retains the two typed lanes."""
+
+        return self.temporal_semantic + self.temporal_geometry
 
     @property
     def source_names(self) -> tuple[str, ...]:
         return (
             "p3_precision",
-            "p3_effect",
-            "p3_temporal",
+            "p3_effect_semantic",
+            "p3_effect_geometry",
+            "p3_temporal_semantic",
+            "p3_temporal_geometry",
             "p3_state_change",
         )
 
@@ -43,7 +133,14 @@ class ObjectPolicyPlanDeltaBank:
         expected = tuple(self.protected_base.shape)
         if len(expected) != 4:
             raise ValueError("object policy plan must be [B,T,Q,H]")
-        for name in ("precision", "effect", "temporal", "state_change"):
+        for name in (
+            "precision",
+            "effect_semantic",
+            "effect_geometry",
+            "temporal_semantic",
+            "temporal_geometry",
+            "state_change",
+        ):
             if tuple(getattr(self, name).shape) != expected:
                 raise ValueError(f"object policy {name} lost [B,T,Q,H]")
 
@@ -53,14 +150,16 @@ class ObjectPolicyPlanDeltaBank:
             values=torch.stack(
                 (
                     self.precision,
-                    self.effect,
-                    self.temporal,
+                    self.effect_semantic,
+                    self.effect_geometry,
+                    self.temporal_semantic,
+                    self.temporal_geometry,
                     self.state_change,
                 ),
                 dim=1,
             ),
             source_names=self.source_names,
-            source_depths=(int(source_depth),) * 4,
+            source_depths=(int(source_depth),) * 6,
             protected_detail=self.protected_base,
         )
 
@@ -71,8 +170,8 @@ class ObjectFutureEffectReader(nn.Module):
     Semantic and geometry are complementary effect values.  They share one
     protected public-S temporal prior, then each adds only its matching typed-S
     and supervised-W evidence before selecting an interval/null and an object.
-    Status is deliberately absent: without independent visibility labels its
-    neutral W target is a regularizer, not a legal action value or route vote.
+    Status is deliberately absent: without independent visibility labels it
+    has neither an active target nor a legal action value or route vote.
     """
 
     TYPE_NAMES = ("semantic", "geometry")
@@ -81,9 +180,9 @@ class ObjectFutureEffectReader(nn.Module):
     # geometry maps to S geometry (2).  Never rely on matching integer
     # positions across these differently named type systems.
     S_TYPE_INDEX_BY_P2 = (0, 2)
-    # A sparse active owner must retain its native hidden unit.  Each value is
-    # therefore bounded only from above at the established P2 update budget;
-    # the final combined effect is contracted once at the caller boundary.
+    # A sparse active owner must retain its native hidden unit. Semantic and
+    # geometry are therefore contracted only after their physical sum exists;
+    # the one shared scale is copied back onto both typed sidecars.
     COMPLEMENTARY_VALUE_MAX_RMS = 0.35
 
     def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
@@ -117,22 +216,6 @@ class ObjectFutureEffectReader(nn.Module):
     def _temperatures(self) -> Tensor:
         return 0.25 + 3.75 * torch.sigmoid(self.temperature_logit.float())
 
-    @classmethod
-    def _contract_complementary_value(
-        cls,
-        value: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        """Apply the one-sided, zero-preserving P2 value-unit contract.
-
-        Keeping this boundary named makes two properties executable rather
-        than documentary: weak values are never amplified, and exact zero
-        remains exact zero.  The operation is applied before any soft read so
-        a high-native-unit candidate cannot win the protected sum merely by
-        being selected more often.
-        """
-
-        return smooth_rms_contract(value, cls.COMPLEMENTARY_VALUE_MAX_RMS)
-
     @staticmethod
     def _bounded_unit(value: Tensor, *, norm_floor: float = 0.25) -> Tensor:
         value = value.float()
@@ -143,30 +226,30 @@ class ObjectFutureEffectReader(nn.Module):
     def _fuse_complementary_values(
         self,
         selected_type_value: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Add complementary semantic and geometry values without attenuation.
+    ) -> tuple[TypedP2EffectRead, Tensor, Tensor]:
+        """Physically sum both types once and share its one RMS contract.
 
-        The two values have already crossed one-sided unit contracts and made
-        matched route decisions.  Addition preserves either owner exactly
-        when the other is zero; the all-zero state remains exact zero.  The
-        caller's established 0.35 effect contract owns the combined upper
-        bound, so no fixed average, learned type selector, or corrective gain
-        is needed here.
+        Applying the returned scale to the still-typed values preserves their
+        relative physical contribution exactly.  It also prevents either a
+        per-type limiter or a later untyped limiter from changing the typed
+        sidecar seen by consequence/P3.
         """
 
         if selected_type_value.ndim < 2 or int(selected_type_value.shape[-2]) != len(
             self.TYPE_NAMES
         ):
             raise ValueError("P2 complementary values must retain the active type axis")
-        typed_value = selected_type_value.float()
-        semantic = typed_value[..., 0, :]
-        geometry = typed_value[..., 1, :]
-        fused = semantic + geometry
-        return (
-            fused.to(dtype=selected_type_value.dtype),
-            semantic,
-            geometry,
+        raw_combined = selected_type_value.sum(dim=-2)
+        _, shared_scale = smooth_rms_contract(
+            raw_combined,
+            self.COMPLEMENTARY_VALUE_MAX_RMS,
         )
+        contracted_by_type = selected_type_value * shared_scale.to(
+            dtype=selected_type_value.dtype
+        )[..., None, :]
+        read = TypedP2EffectRead(effect_by_type=contracted_by_type)
+        read.validate()
+        return read, raw_combined, shared_scale
 
     def forward(
         self,
@@ -175,7 +258,7 @@ class ObjectFutureEffectReader(nn.Module):
         intent: PolicyIntentDock,
         *,
         collect_diagnostics: bool,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> tuple[TypedP2EffectRead, dict[str, Tensor]]:
         dynamics.validate()
         if action_query.ndim != 4:
             raise ValueError("P2 action query must be [B,T,Q,H]")
@@ -199,9 +282,13 @@ class ObjectFutureEffectReader(nn.Module):
         camera_availability = dynamics.camera_chart_availability.float()[..., 0].clamp(
             0.0, 1.0
         )
-        camera_weight = (
-            dynamics.camera_weights.float()[..., 0].clamp_min(0.0)
-            * camera_availability
+        # ``camera_weights`` is the producer-owned physical evidence measure
+        # and already includes chart availability. Mask illegal cameras but do
+        # not multiply that measure a second time.
+        camera_weight = torch.where(
+            camera_availability > 0.0,
+            dynamics.camera_weights.float()[..., 0].clamp_min(0.0),
+            torch.zeros_like(camera_availability),
         )
         camera_count = int(camera_coordinate.shape[2])
         camera_mass = camera_weight.sum(dim=-1, keepdim=True)
@@ -214,16 +301,11 @@ class ObjectFutureEffectReader(nn.Module):
             camera_weight / camera_mass.clamp_min(1.0e-8),
             uniform_camera,
         )
-        # Geometry values remain object-level complementary effects, but the
-        # same physical camera measure used by coordinate scoring performs the
-        # reduction.  The camera-specific transport/covariance themselves stay
-        # intact through the coordinate consumer below.
-        transport_object = (
-            dynamics.transport_mean.float()
-            * normalized_camera_weight[:, None, :, :, None]
-        ).sum(dim=3)
-        transport_common = transport_object.mean(dim=1)
-        transport_residual = transport_object - transport_common[:, None]
+        # Camera is a physical geometry hypothesis axis, not a preprocessing
+        # nuisance axis.  Keep KxC through the action-conditioned posterior;
+        # only the selected geometry value below may reduce camera.
+        transport_common = dynamics.transport_common
+        transport_residual = dynamics.transport_interval_residual
         common_source_fields = (
             dynamics.semantic_common,
             transport_common,
@@ -240,22 +322,10 @@ class ObjectFutureEffectReader(nn.Module):
             self.semantic_value(dynamics.semantic_interval_residual),
             self.transport_value(transport_residual),
         )
-        common_value_contracts = tuple(
-            self._contract_complementary_value(value)
-            for value in common_projected_values
-        )
-        residual_value_contracts = tuple(
-            self._contract_complementary_value(value)
-            for value in residual_projected_values
-        )
-        common_source_values = tuple(value for value, _ in common_value_contracts)
-        residual_source_values = tuple(value for value, _ in residual_value_contracts)
-        common_value_contract_scales = tuple(
-            scale for _, scale in common_value_contracts
-        )
-        residual_value_contract_scales = tuple(
-            scale for _, scale in residual_value_contracts
-        )
+        # Do not contract typed candidates independently.  P2 owns one shared
+        # physical effect budget after both conditional reads complete.
+        common_source_values = common_projected_values
+        residual_source_values = residual_projected_values
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
         camera_coordinate_mean = (
             normalized_camera_weight[..., None] * camera_coordinate
@@ -318,42 +388,44 @@ class ObjectFutureEffectReader(nn.Module):
             1.0 - 0.5 * common_coordinate_distance
         ).clamp(-1.0, 1.0)
         camera_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
-        camera_log_weight = normalized_camera_weight.clamp_min(1.0e-8).log()
-        # A log mixture scores real camera hypotheses without first averaging
-        # their normalized-image coordinates into a point that belongs to no
-        # view.  Since weights sum to one and every component score lies in
-        # [-1,1], both mixed scores preserve the same bounded contract.
-        common_coordinate_score = torch.logsumexp(
-            common_camera_score + camera_log_weight[:, None, None],
-            dim=-1,
-        ).clamp(-1.0, 1.0)
-        coordinate_score = torch.logsumexp(
-            camera_score + camera_log_weight[:, None, None, None],
-            dim=-1,
-        ).clamp(-1.0, 1.0)
+        # These scores stay on KxC.  Camera evidence enters as the physical
+        # posterior measure below, after the noisy action has scored every
+        # joint hypothesis; there is no pre-read log-mixture or value mean.
+        common_coordinate_score = common_camera_score
+        coordinate_score = camera_score
         # Uniform weights above are a finite arithmetic fallback only.  They
         # must not turn missing camera evidence into a semantic geometry
         # prior.  Other P2 fields may still use the valid object; the geometry
         # contribution itself is exactly neutral without an observed camera.
         common_coordinate_score = torch.where(
-            camera_has_support[:, None, None],
+            camera_availability[:, None, None] > 0.0,
             common_coordinate_score,
             torch.zeros_like(common_coordinate_score),
         )
         coordinate_score = torch.where(
-            camera_has_support[:, None, None, None],
+            camera_availability[:, None, None, None] > 0.0,
             coordinate_score,
             torch.zeros_like(coordinate_score),
         )
         current_validity = dynamics.chart_availability.float().squeeze(
             -1
         ).clamp(0.0, 1.0)
-        residual_validity = current_validity[:, None].expand(-1, intervals, -1)
+        geometry_current_validity = (
+            current_validity[..., None]
+            * normalized_camera_weight
+            * camera_has_support[..., None].float()
+        )
+        common_validities = (
+            current_validity,
+            geometry_current_validity,
+        )
+        residual_validities = (
+            current_validity[:, None].expand(-1, intervals, -1),
+            geometry_current_validity[:, None].expand(
+                -1, intervals, -1, -1
+            ),
+        )
         temperature = self._temperatures().to(device=action_query.device)
-        current_support = current_validity > 0.0
-        common_has_support = current_support.any(dim=-1)
-        residual_support = residual_validity > 0.0
-        interval_has_support = residual_support.any(dim=-1)
         public_interval_query = self._bounded_unit(
             self.public_interval_query(action_query)
         )
@@ -379,6 +451,7 @@ class ObjectFutureEffectReader(nn.Module):
         residual_bounded_logits: list[Tensor] = []
         common_posteriors: list[Tensor] = []
         residual_object_posteriors: list[Tensor] = []
+        interval_supports: list[Tensor] = []
         selected_common_values: list[Tensor] = []
         selected_residual_values_by_interval: list[Tensor] = []
         for type_index in range(len(self.TYPE_NAMES)):
@@ -389,15 +462,23 @@ class ObjectFutureEffectReader(nn.Module):
             common_source_key = self._bounded_unit(
                 self.source_key[type_index](common_source_fields[type_index])
             )
-            common_source_score = torch.einsum(
-                "btqh,bkh->btqk", query, common_source_key
-            )
             residual_source_key = self._bounded_unit(
                 self.source_key[type_index](residual_source_fields[type_index])
             )
-            residual_source_score = torch.einsum(
-                "btqh,bikh->btqik", query, residual_source_key
-            )
+            if type_index == 0:
+                common_source_score = torch.einsum(
+                    "btqh,bkh->btqk", query, common_source_key
+                )
+                residual_source_score = torch.einsum(
+                    "btqh,bikh->btqik", query, residual_source_key
+                )
+            else:
+                common_source_score = torch.einsum(
+                    "btqh,bkch->btqkc", query, common_source_key
+                )
+                residual_source_score = torch.einsum(
+                    "btqh,bikch->btqikc", query, residual_source_key
+                )
             common_public_key = self.common_intent_key[type_index](
                 intent.common_key
             )[:, None]
@@ -421,6 +502,13 @@ class ObjectFutureEffectReader(nn.Module):
             residual_intent_score = torch.einsum(
                 "btqh,bikh->btqik", intent_query, residual_typed_key
             )
+            if type_index == 1:
+                common_intent_score = common_intent_score[..., None].expand_as(
+                    common_source_score
+                )
+                residual_intent_score = residual_intent_score[..., None].expand_as(
+                    residual_source_score
+                )
             common_bounded_logit = (
                 temperature[0] * common_source_score
                 + temperature[1] * common_intent_score
@@ -439,10 +527,16 @@ class ObjectFutureEffectReader(nn.Module):
                     + temperature[2] * coordinate_score
                 )
 
+            common_validity = common_validities[type_index]
+            residual_validity = residual_validities[type_index]
+            current_support = common_validity > 0.0
+            residual_support = residual_validity > 0.0
+            common_has_support = current_support.flatten(start_dim=1).any(dim=-1)
+            interval_has_support = residual_support.flatten(start_dim=2).any(dim=-1)
             common_logit = common_bounded_logit + torch.where(
                 current_support,
-                current_validity.clamp_min(1e-6).log(),
-                torch.zeros_like(current_validity),
+                common_validity.clamp_min(1e-6).log(),
+                torch.zeros_like(common_validity),
             )[:, None, None]
             common_logit = common_logit.masked_fill(
                 ~current_support[:, None, None],
@@ -453,17 +547,20 @@ class ObjectFutureEffectReader(nn.Module):
             # the returned common posterior and value algebraically zero.
             common_logit = torch.where(
                 common_has_support[:, None, None, None],
-                common_logit,
-                torch.zeros_like(common_logit),
+                common_logit.flatten(start_dim=3),
+                torch.zeros_like(common_logit.flatten(start_dim=3)),
             )
             common_posterior = torch.softmax(common_logit, dim=-1)
             common_posterior = common_posterior * common_has_support[
                 :, None, None, None
             ].to(dtype=common_posterior.dtype)
+            common_source_value = common_source_values[type_index].reshape(
+                batch, -1, self.hidden
+            )
             common_selected = torch.einsum(
-                "btqk,bkh->btqh",
-                common_posterior.to(dtype=common_source_values[type_index].dtype),
-                common_source_values[type_index],
+                "btqn,bnh->btqh",
+                common_posterior.to(dtype=common_source_value.dtype),
+                common_source_value,
             )
 
             residual_logit = residual_bounded_logit + torch.where(
@@ -475,9 +572,13 @@ class ObjectFutureEffectReader(nn.Module):
                 ~residual_support[:, None, None],
                 -torch.inf,
             )
+            residual_logit = residual_logit.reshape(
+                batch, horizon, basis, intervals, -1
+            )
             # Object ownership is normalized only inside its already chosen
-            # interval.  An all-invalid interval is bookkeeping-zero here and
-            # is structurally excluded by the shared outer posterior below.
+            # interval. Geometry's candidate is the joint KxC hypothesis, so
+            # camera compression happens only after this action-conditioned
+            # posterior is complete.
             residual_logit = torch.where(
                 interval_has_support[:, None, None, :, None],
                 residual_logit,
@@ -493,12 +594,15 @@ class ObjectFutureEffectReader(nn.Module):
                     dtype=residual_object_posterior.dtype
                 )
             )
+            residual_source_value = residual_source_values[type_index].reshape(
+                batch, intervals, -1, self.hidden
+            )
             residual_selected_by_interval = torch.einsum(
-                "btqik,bikh->btqih",
+                "btqin,binh->btqih",
                 residual_object_posterior.to(
-                    dtype=residual_source_values[type_index].dtype
+                    dtype=residual_source_value.dtype
                 ),
-                residual_source_values[type_index],
+                residual_source_value,
             )
             # The shared temporal owner reads the compatibility of the object
             # that this type would actually use inside each interval.  This
@@ -506,11 +610,15 @@ class ObjectFutureEffectReader(nn.Module):
             # keeping raw coordinate distance out of the time score.
             interval_w_score = (
                 residual_object_posterior.float()
-                * residual_source_score.float()
+                * residual_source_score.float().reshape(
+                    batch, horizon, basis, intervals, -1
+                )
             ).sum(dim=-1)
             interval_typed_score = (
                 residual_object_posterior.float()
-                * residual_intent_score.float()
+                * residual_intent_score.float().reshape(
+                    batch, horizon, basis, intervals, -1
+                )
             ).sum(dim=-1)
             common_source_scores.append(common_source_score)
             residual_source_scores.append(residual_source_score)
@@ -523,6 +631,7 @@ class ObjectFutureEffectReader(nn.Module):
             residual_bounded_logits.append(residual_bounded_logit)
             common_posteriors.append(common_posterior)
             residual_object_posteriors.append(residual_object_posterior)
+            interval_supports.append(interval_has_support)
             selected_common_values.append(common_selected)
             selected_residual_values_by_interval.append(
                 residual_selected_by_interval
@@ -542,16 +651,22 @@ class ObjectFutureEffectReader(nn.Module):
         )
         type_interval_score = torch.tanh(type_interval_precontract_score)
         type_interval_bounded_logit = temperature[1] * type_interval_score
+        type_interval_has_support = torch.stack(interval_supports, dim=1)
         type_interval_logit = type_interval_bounded_logit.masked_fill(
-            ~interval_has_support[:, None, None, None],
+            ~type_interval_has_support[:, None, None],
             -torch.inf,
         )
         # Each type owns one null competing with I interval measures, each of
-        # which already owns a conditional K posterior.  -log(K) preserves
-        # the neutral 1/(I*K+1) prior without making object count a time score.
-        type_null_logit = torch.full_like(
-            type_interval_logit[..., :1],
-            -math.log(float(max(objects, 1))),
+        # which already owns a conditional semantic-K or geometry-KxC
+        # posterior. The type-specific offset preserves the corresponding
+        # neutral 1/(I*N+1) prior without turning candidate count into a time
+        # score.
+        type_candidate_count = type_interval_logit.new_tensor(
+            (float(max(objects, 1)), float(max(objects * camera_count, 1)))
+        )
+        type_null_logit = -type_candidate_count.log()[None, None, None, :, None]
+        type_null_logit = type_null_logit.expand(
+            batch, horizon, basis, len(self.TYPE_NAMES), 1
         )
         type_interval_posterior = torch.softmax(
             torch.cat((type_interval_logit, type_null_logit), dim=-1),
@@ -595,55 +710,59 @@ class ObjectFutureEffectReader(nn.Module):
                     dim=-1,
                 )
             )
-        common_posterior_by_type = torch.stack(common_posteriors, dim=3)
-        residual_posterior_by_type = torch.stack(residual_posteriors, dim=3)
-        residual_object_posterior_by_type = torch.stack(
-            residual_object_posteriors,
-            dim=3,
-        )
         residual_value_by_interval_and_type = torch.stack(
             selected_residual_values_by_interval,
             dim=4,
         )
         selected_common_type_value = torch.stack(selected_common_values, dim=3)
         selected_residual_type_value = torch.stack(selected_residual_values, dim=3)
-        common_value, common_semantic_value, common_geometry_value = (
-            self._fuse_complementary_values(selected_common_type_value)
+        selected_type_value = (
+            selected_common_type_value + selected_residual_type_value
         )
-        residual_value, residual_semantic_value, residual_geometry_value = (
-            self._fuse_complementary_values(selected_residual_type_value)
+        effect_read, raw_value, shared_effect_scale = (
+            self._fuse_complementary_values(selected_type_value)
         )
-        value = common_value + residual_value
         if not collect_diagnostics:
-            return value, {}
-        interval_mass_by_type = residual_posterior_by_type[..., :-1].reshape(
-            batch,
-            horizon,
-            basis,
-            len(self.TYPE_NAMES),
-            intervals,
-            objects,
-        ).sum(dim=-1)
+            return effect_read, {}
+        common_value = selected_common_type_value.sum(dim=3)
+        residual_value = selected_residual_type_value.sum(dim=3)
+        common_semantic_value = selected_common_type_value[..., 0, :]
+        common_geometry_value = selected_common_type_value[..., 1, :]
+        residual_semantic_value = selected_residual_type_value[..., 0, :]
+        residual_geometry_value = selected_residual_type_value[..., 1, :]
+        interval_mass_by_type = type_interval_mass
         interval_mass = interval_mass_by_type.detach().mean(dim=3)
-        inner_support_weight = interval_has_support[
-            :, None, None, None, :
+        inner_support_weight = type_interval_has_support[
+            :, None, None
         ].detach().float()
         inner_support_denominator = (
             inner_support_weight.sum()
-            * float(horizon * basis * len(self.TYPE_NAMES))
+            * float(horizon * basis)
         ).clamp_min(1.0)
-        inner_entropy = normalized_entropy(
-            residual_object_posterior_by_type,
-            dim=-1,
-        ).detach()
-        inner_max = residual_object_posterior_by_type.detach().amax(dim=-1)
-        inner_raw_entropy = -(
-            residual_object_posterior_by_type.detach().float()
-            * residual_object_posterior_by_type.detach()
-            .float()
-            .clamp_min(1.0e-8)
-            .log()
-        ).sum(dim=-1)
+        inner_entropy = torch.stack(
+            tuple(
+                normalized_entropy(posterior, dim=-1).detach()
+                for posterior in residual_object_posteriors
+            ),
+            dim=3,
+        )
+        inner_max = torch.stack(
+            tuple(
+                posterior.detach().amax(dim=-1)
+                for posterior in residual_object_posteriors
+            ),
+            dim=3,
+        )
+        inner_raw_entropy = torch.stack(
+            tuple(
+                -(
+                    posterior.detach().float()
+                    * posterior.detach().float().clamp_min(1.0e-8).log()
+                ).sum(dim=-1)
+                for posterior in residual_object_posteriors
+            ),
+            dim=3,
+        )
         interval_type_rms = residual_value_by_interval_and_type.detach().float()
         interval_type_rms = interval_type_rms.square().mean(dim=-1).sqrt()
         selected_type_rms = selected_residual_type_value.detach().float()
@@ -696,6 +815,36 @@ class ObjectFutureEffectReader(nn.Module):
                 type_interval_score,
             ))
         ).amax()
+        common_posterior_entropy = torch.stack(
+            tuple(
+                normalized_entropy(posterior, dim=-1).detach().mean()
+                for posterior in common_posteriors
+            )
+        ).mean()
+        common_posterior_max = torch.stack(
+            tuple(
+                posterior.detach().amax(dim=-1).mean()
+                for posterior in common_posteriors
+            )
+        ).mean()
+        residual_posterior_entropy = torch.stack(
+            tuple(
+                normalized_entropy(posterior, dim=-1).detach().mean()
+                for posterior in residual_posteriors
+            )
+        ).mean()
+        residual_posterior_max = torch.stack(
+            tuple(
+                posterior.detach().amax(dim=-1).mean()
+                for posterior in residual_posteriors
+            )
+        ).mean()
+        residual_null_mass = torch.stack(
+            tuple(
+                posterior.detach()[..., -1].mean()
+                for posterior in residual_posteriors
+            )
+        ).mean()
         metrics: dict[str, Tensor] = {
             "object_p2_content_score_abs": source_score_abs,
             "object_p2_content_score_max_abs": source_score_max,
@@ -731,21 +880,11 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_temperature_content": temperature[0].detach(),
             "object_p2_temperature_intent": temperature[1].detach(),
             "object_p2_temperature_coordinate": temperature[2].detach(),
-            "object_p2_common_posterior_entropy": normalized_entropy(
-                common_posterior_by_type, dim=-1
-            ).detach().mean(),
-            "object_p2_common_posterior_max": common_posterior_by_type.detach()
-            .amax(dim=-1)
-            .mean(),
-            "object_p2_residual_posterior_entropy": normalized_entropy(
-                residual_posterior_by_type, dim=-1
-            ).detach().mean(),
-            "object_p2_residual_posterior_max": residual_posterior_by_type.detach()
-            .amax(dim=-1)
-            .mean(),
-            "object_p2_residual_null_mass": residual_posterior_by_type.detach()[
-                ..., -1
-            ].mean(),
+            "object_p2_common_posterior_entropy": common_posterior_entropy,
+            "object_p2_common_posterior_max": common_posterior_max,
+            "object_p2_residual_posterior_entropy": residual_posterior_entropy,
+            "object_p2_residual_posterior_max": residual_posterior_max,
+            "object_p2_residual_null_mass": residual_null_mass,
             "object_p2_public_interval_score_abs": public_interval_score.detach()
             .abs()
             .mean(),
@@ -834,7 +973,35 @@ class ObjectFutureEffectReader(nn.Module):
                 .sqrt()
                 .clamp_min(1.0e-8)
             ),
-            "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
+            "object_p2_effect_precontract_rms": raw_value.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_effect_contract_min": shared_effect_scale.detach()
+            .float()
+            .amin(),
+            "object_p2_effect_postcontract_rms": effect_read.physical_sum.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_shared_effect_contract_scale_mean": shared_effect_scale.detach()
+            .float()
+            .mean(),
+            "object_p2_shared_effect_contract_compression": (
+                1.0 - shared_effect_scale.detach().float()
+            ).mean(),
+            "object_p2_semantic_postcontract_rms": effect_read.semantic.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_geometry_postcontract_rms": effect_read.geometry.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_p2_common_semantic_component_rms": common_semantic_value.detach()
             .square()
             .mean()
@@ -851,9 +1018,6 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p2_status_consumer_active": value.new_zeros(
-                (), dtype=torch.float32
-            ),
         }
         for type_index, name in enumerate(self.TYPE_NAMES):
             metrics[f"object_p2_{name}_score_max_abs"] = torch.maximum(
@@ -883,9 +1047,9 @@ class ObjectFutureEffectReader(nn.Module):
                 .amax(dim=-1)
                 .mean()
             )
-            metrics[f"object_p2_{name}_residual_null_mass"] = residual_posterior_by_type[
-                ..., type_index, -1
-            ].detach().mean()
+            metrics[f"object_p2_{name}_residual_null_mass"] = residual_posteriors[
+                type_index
+            ].detach()[..., -1].mean()
             common_selected_value = selected_common_type_value[
                 ..., type_index, :
             ].detach().float()
@@ -915,16 +1079,20 @@ class ObjectFutureEffectReader(nn.Module):
                 .sqrt()
             )
             metrics[f"object_p2_{name}_common_value_contract_scale_mean"] = (
-                common_value_contract_scales[type_index].detach()
-                .float()
-                .mean()
+                shared_effect_scale.detach().float().mean()
             )
             metrics[f"object_p2_{name}_residual_value_contract_scale_mean"] = (
-                residual_value_contract_scales[type_index].detach()
-                .float()
+                shared_effect_scale.detach().float().mean()
+            )
+            metrics[f"object_p2_{name}_common_posterior_entropy"] = (
+                normalized_entropy(common_posteriors[type_index], dim=-1)
+                .detach()
                 .mean()
             )
-            type_support_weight = inner_support_weight[..., 0, :]
+            metrics[f"object_p2_{name}_common_posterior_max"] = (
+                common_posteriors[type_index].detach().amax(dim=-1).mean()
+            )
+            type_support_weight = inner_support_weight[..., type_index, :]
             type_support_denominator = (
                 type_support_weight.sum() * float(horizon * basis)
             ).clamp_min(1.0)
@@ -942,6 +1110,34 @@ class ObjectFutureEffectReader(nn.Module):
                 ).sum()
                 / type_support_denominator
             )
+        metrics["object_p2_geometry_common_joint_kc_posterior_entropy"] = metrics[
+            "object_p2_geometry_common_posterior_entropy"
+        ]
+        metrics["object_p2_geometry_common_joint_kc_posterior_max"] = metrics[
+            "object_p2_geometry_common_posterior_max"
+        ]
+        metrics["object_p2_geometry_residual_joint_kc_posterior_entropy"] = (
+            (
+                inner_entropy[..., 1, :]
+                * inner_support_weight[..., 1, :]
+            ).sum()
+            / (
+                inner_support_weight[..., 1, :].sum() * float(horizon * basis)
+            ).clamp_min(1.0)
+        )
+        metrics["object_p2_geometry_residual_joint_kc_posterior_max"] = (
+            (
+                inner_max[..., 1, :]
+                * inner_support_weight[..., 1, :]
+            ).sum()
+            / (
+                inner_support_weight[..., 1, :].sum() * float(horizon * basis)
+            ).clamp_min(1.0)
+        )
+        metrics["object_p2_geometry_joint_kc_candidate_count"] = raw_value.new_tensor(
+            float(objects * camera_count),
+            dtype=torch.float32,
+        )
         for index in range(intervals):
             metrics[f"object_p2_residual_interval_{index}_mass"] = (
                 interval_mass[..., index].float().mean()
@@ -953,7 +1149,17 @@ class ObjectFutureEffectReader(nn.Module):
                     .float()
                     .mean()
                 )
-        return value, metrics
+        if self.training:
+            register_gradient_axis_rms_metrics(
+                effect_read.effect_by_type,
+                metrics,
+                (
+                    "gradient_tensor_p2_semantic_effect_rms",
+                    "gradient_tensor_p2_geometry_effect_rms",
+                ),
+                dim=-2,
+            )
+        return effect_read, metrics
 
 
 class ZeroPreservingObjectConsequence(nn.Module):
@@ -968,29 +1174,57 @@ class ZeroPreservingObjectConsequence(nn.Module):
         self,
         *,
         factual_base: Tensor,
-        effect: Tensor,
+        effect: TypedP2EffectRead,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectConsequenceState, dict[str, Tensor]]:
-        if tuple(factual_base.shape) != tuple(effect.shape):
+        if not isinstance(effect, TypedP2EffectRead):
+            raise TypeError("Schema37 consequence requires TypedP2EffectRead")
+        effect.validate()
+        effect_by_type = effect.effect_by_type
+        expected_typed = (*factual_base.shape[:-1], 2, factual_base.shape[-1])
+        if tuple(effect_by_type.shape) != tuple(expected_typed):
             raise ValueError("factual base and effect must align")
-        interaction = self.interaction(torch.tanh(self.fact(factual_base)) * effect)
-        protected = factual_base + effect + interaction
+        factual_interaction = torch.tanh(self.fact(factual_base))[..., None, :]
+        interaction_by_type = self.interaction(
+            factual_interaction * effect_by_type
+        )
+        physical_effect = effect_by_type.sum(dim=-2)
+        interaction = interaction_by_type.sum(dim=-2)
+        protected = factual_base + physical_effect + interaction
         state = ObjectConsequenceState(
             factual_base=factual_base,
-            effect=effect,
-            interaction=interaction,
+            effect_by_type=effect_by_type,
+            interaction_by_type=interaction_by_type,
             protected_consequence=protected,
         )
+        state.validate()
         if not collect_diagnostics:
             return state, {}
-        return state, {
-            "object_consequence_effect_rms": effect.detach().float().square().mean().sqrt(),
+        metrics = {
+            "object_consequence_effect_rms": physical_effect.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_consequence_interaction_rms": interaction.detach().float().square().mean().sqrt(),
             "object_consequence_ratio": (
-                (effect + interaction).detach().float().square().mean().sqrt()
+                (physical_effect + interaction).detach().float().square().mean().sqrt()
                 / factual_base.detach().float().square().mean().sqrt().clamp_min(1e-6)
             ),
         }
+        for type_index, name in enumerate(ObjectFutureEffectReader.TYPE_NAMES):
+            metrics[f"object_consequence_{name}_effect_rms"] = effect_by_type[
+                ..., type_index, :
+            ].detach().float().square().mean().sqrt()
+            metrics[f"object_consequence_{name}_interaction_rms"] = (
+                interaction_by_type[..., type_index, :]
+                .detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
+            )
+        return state, metrics
 
 
 class ObjectPolicyPlanCompiler(nn.Module):
@@ -1029,6 +1263,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
+        consequence.validate()
         # The static factual consequence is already the protected base.
         # Optional lanes may only encode source-exclusive zero-centred
         # innovations; neither static detail nor the live policy residual is
@@ -1045,21 +1280,30 @@ class ObjectPolicyPlanCompiler(nn.Module):
             torch.tanh(self.precision_action(action_query))
             * static_precision
         )
-        effect = self.effect_lane(consequence.effect + consequence.interaction)
-        temporal_effect = consequence.effect + consequence.interaction
+        typed_effect = consequence.typed_effect() + consequence.typed_interaction()
+        effect_semantic = self.effect_lane(typed_effect[..., 0, :])
+        effect_geometry = self.effect_lane(typed_effect[..., 1, :])
+        temporal_effect = typed_effect.sum(dim=-2)
         temporal_source = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
         # Temporal is a W-effect relation, not a second factual carrier.
         # Requiring S, W effect and action makes neutral W an exact temporal
         # null while leaving the independently owned state-change lane intact.
-        temporal = self.temporal_lane(
-            self.temporal_source(temporal_source)
-            * torch.tanh(
-                self.temporal_consequence(temporal_effect)
+        temporal_source_value = self.temporal_source(temporal_source)
+        temporal_action_value = torch.tanh(self.temporal_action(action_query))
+
+        def typed_temporal_lane(type_index: int) -> Tensor:
+            return self.temporal_lane(
+                temporal_source_value
+                * torch.tanh(
+                    self.temporal_consequence(typed_effect[..., type_index, :])
+                )
+                * temporal_action_value
             )
-            * torch.tanh(self.temporal_action(action_query))
-        )
+
+        temporal_semantic = typed_temporal_lane(0)
+        temporal_geometry = typed_temporal_lane(1)
         state_change_source = intent.state_change_evidence[:, None, None].expand(
             -1, self.horizon, self.basis, -1
         )
@@ -1073,19 +1317,28 @@ class ObjectPolicyPlanCompiler(nn.Module):
         state_change = 0.05 * self.state_change_lane(
             state_change_source * state_change_modulation
         )
-        lanes = [precision, effect, temporal, state_change]
+        lanes = [
+            precision,
+            effect_semantic,
+            effect_geometry,
+            temporal_semantic,
+            temporal_geometry,
+            state_change,
+        ]
         lanes = [smooth_rms_contract(value, 0.35)[0] for value in lanes]
         bank = ObjectPolicyPlanDeltaBank(
             protected_base=consequence.protected_consequence,
             precision=lanes[0],
-            effect=lanes[1],
-            temporal=lanes[2],
-            state_change=lanes[3],
+            effect_semantic=lanes[1],
+            effect_geometry=lanes[2],
+            temporal_semantic=lanes[3],
+            temporal_geometry=lanes[4],
+            state_change=lanes[5],
         )
         bank.validate()
         if not collect_diagnostics:
             return bank, {}
-        return bank, {
+        metrics = {
             "object_p3_precision_input_rms": p1_factual_detail.detach()
             .float()
             .square()
@@ -1097,7 +1350,21 @@ class ObjectPolicyPlanCompiler(nn.Module):
             .mean()
             .sqrt(),
             "object_p3_precision_rms": lanes[0].detach().float().square().mean().sqrt(),
-            "object_p3_effect_rms": lanes[1].detach().float().square().mean().sqrt(),
+            "object_p3_effect_rms": bank.effect.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_effect_semantic_rms": lanes[1].detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_effect_geometry_rms": lanes[2].detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_p3_temporal_source_rms": temporal_source.detach()
             .float()
             .square()
@@ -1109,9 +1376,31 @@ class ObjectPolicyPlanCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p3_temporal_rms": lanes[2].detach().float().square().mean().sqrt(),
-            "object_p3_state_change_rms": lanes[3].detach().float().square().mean().sqrt(),
+            "object_p3_temporal_rms": bank.temporal.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_semantic_rms": lanes[3].detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_geometry_rms": lanes[4].detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_state_change_rms": lanes[5].detach().float().square().mean().sqrt(),
         }
+        if self.training:
+            for name, lane in zip(bank.source_names, lanes, strict=True):
+                register_gradient_rms_metric(
+                    lane,
+                    metrics,
+                    f"gradient_tensor_{name}_rms",
+                )
+        return bank, metrics
 
 
 __all__ = [
@@ -1119,5 +1408,6 @@ __all__ = [
     "ObjectFutureEffectReader",
     "ObjectPolicyPlanCompiler",
     "ObjectPolicyPlanDeltaBank",
+    "TypedP2EffectRead",
     "ZeroPreservingObjectConsequence",
 ]

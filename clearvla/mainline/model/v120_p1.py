@@ -22,6 +22,7 @@ from ..v120_core.role_delta_attnres import (
     smooth_rms_contract,
 )
 
+
 @dataclass(frozen=True)
 class SharedFactualGlimpseBank:
     """One basis-free P1 value read exposed to basis-specific P2 consumers.
@@ -1457,13 +1458,15 @@ class LateRawDetailPolicyReader(nn.Module):
         *,
         clean_basis_tokens: Tensor,
         factual_condition: Tensor,
+        typed_factual_condition: Tensor | None,
         world_horizon: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Build four action-invariant factual queries per horizon.
 
         A learned set read summarizes the clean basis identities.  It is
-        deliberately conditioned on W and the non-action phase/goal/history
-        context, while the noisy trajectory remains owned by P2.
+        deliberately conditioned on W and the non-action public/goal/history
+        context.  The typed S context enters only its matching factual role;
+        the noisy trajectory remains owned by P2.
         """
 
         if (
@@ -1481,6 +1484,10 @@ class LateRawDetailPolicyReader(nn.Module):
             raise ValueError("clean basis token width does not match the reader")
         if tuple(factual_condition.shape) != (batch, horizon, hidden):
             raise ValueError("factual condition must be [B,T,H]")
+        if typed_factual_condition is not None and tuple(
+            typed_factual_condition.shape
+        ) != (batch, horizon, 3, hidden):
+            raise ValueError("typed factual condition must be [B,T,3,H]")
         if (
             world_horizon.ndim != 4
 
@@ -1521,6 +1528,39 @@ class LateRawDetailPolicyReader(nn.Module):
                 ),
                 dim=2,
             )
+            if typed_factual_condition is not None:
+                # S has already conditionally read K; retain its three typed
+                # owners at the only P1 location where those identities have
+                # a matching meaning.  Reuse the established bias-free role
+                # projections, inject no typed value into coverage, and keep
+                # the old query bit-exact when typed context is zero.
+                typed_by_camera = typed_factual_condition[:, :, :, None].expand(
+                    -1,
+                    -1,
+                    -1,
+                    cameras,
+                    -1,
+                )
+                normalized_typed = self.shared_p1_context_norm(typed_by_camera)
+                typed_role_query = torch.stack(
+                    tuple(
+                        self.shared_p1_role_query[name](
+                            normalized_typed[:, :, type_index]
+                        )
+                        for type_index, name in enumerate(
+                            ("semantic", "appearance", "geometry")
+                        )
+                    ),
+                    dim=2,
+                )
+                typed_role_query = self.phase_query_scale * typed_role_query
+                role_queries = torch.cat(
+                    (
+                        role_queries[:, :, :3] + typed_role_query,
+                        role_queries[:, :, 3:],
+                    ),
+                    dim=2,
+                )
             glimpse_query = (
                 public_context_query[:, :, None] + role_queries
             ) / math.sqrt(2.0)
@@ -1878,6 +1918,7 @@ class LateRawDetailPolicyReader(nn.Module):
         *,
         clean_basis_tokens: Tensor | None = None,
         factual_condition: Tensor | None = None,
+        typed_factual_condition: Tensor | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         bank = detail.address_bank
@@ -2368,6 +2409,7 @@ class LateRawDetailPolicyReader(nn.Module):
             query, shared_basis_entropy = self._shared_factual_p1_query(
                 clean_basis_tokens=clean_basis_tokens,
                 factual_condition=factual_condition,
+                typed_factual_condition=typed_factual_condition,
                 world_horizon=world_horizon_grid.mean(dim=(3, 4)),
             )
             address_basis = 1
@@ -4271,6 +4313,7 @@ class LateRawDetailPolicyReader(nn.Module):
         phase_context: Tensor | None = None,
         condition_query_context: Tensor | None = None,
         history_query_context: Tensor | None = None,
+        typed_interval_context: Tensor | None = None,
         clean_basis_tokens: Tensor | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
@@ -4314,6 +4357,7 @@ class LateRawDetailPolicyReader(nn.Module):
         phase_query_delta = zero_context
         condition_query_delta = zero_context
         history_query_delta = zero_context
+        typed_factual_condition: Tensor | None = None
         if self.phase_query_proj is not None:
             expected_context = (
                 (batch, int(cfg.future_anchors), self.hidden)
@@ -4341,6 +4385,7 @@ class LateRawDetailPolicyReader(nn.Module):
                 if (
                     condition_query_context is not None
                     or history_query_context is not None
+                    or typed_interval_context is not None
                     or self.condition_query_proj is not None
                     or self.history_query_proj is not None
                 ):
@@ -4392,6 +4437,42 @@ class LateRawDetailPolicyReader(nn.Module):
                         self.phase_query_scale
                         * self.history_query_proj(history_input)
                     )
+                    expected_typed_context = (
+                        batch,
+                        int(cfg.future_anchors),
+                        3,
+                        self.hidden,
+                    )
+                    if self.object_intent_dynamics_mainline:
+                        if typed_interval_context is None or tuple(
+                            typed_interval_context.shape
+                        ) != expected_typed_context:
+                            raise ValueError(
+                                "typed factual query has the wrong context schema"
+                            )
+                        typed_input = typed_interval_context.to(
+                            device=trajectory.device,
+                            dtype=trajectory.dtype,
+                        )
+                        typed_factual_condition = (
+                            _align_milestone_tokens_to_horizon(
+                                typed_input[:, : len(boundaries)]
+                                .permute(0, 2, 1, 3)
+                                .reshape(
+                                    batch * 3,
+                                    len(boundaries),
+                                    self.hidden,
+                                ),
+                                horizon,
+                                boundaries=boundaries,
+                            )
+                            .reshape(batch, 3, horizon, self.hidden)
+                            .permute(0, 2, 1, 3)
+                        )
+                    elif typed_interval_context is not None:
+                        raise ValueError(
+                            "typed factual context requires the object-intent mainline"
+                        )
         elif phase_context is not None:
             raise ValueError("phase_context was supplied while phase routing is disabled")
         elif condition_query_context is not None:
@@ -4402,6 +4483,10 @@ class LateRawDetailPolicyReader(nn.Module):
 
             raise ValueError(
                 "history query context was supplied while phase routing is disabled"
+            )
+        elif typed_interval_context is not None:
+            raise ValueError(
+                "typed factual context was supplied while phase routing is disabled"
             )
         cameras = int(cfg.num_cameras)
         grid = int(cfg.future_grid_size)
@@ -4515,6 +4600,7 @@ class LateRawDetailPolicyReader(nn.Module):
                 detail,
                 clean_basis_tokens=clean_basis_tokens,
                 factual_condition=factual_condition,
+                typed_factual_condition=typed_factual_condition,
                 collect_diagnostics=collect_diagnostics,
             )
             if collect_diagnostics:
@@ -4526,6 +4612,15 @@ class LateRawDetailPolicyReader(nn.Module):
                 )
                 metrics["flow_jepa_history_detail_query_norm"] = (
                     history_query_delta.detach().float().norm(dim=-1).mean()
+                )
+                metrics["flow_jepa_typed_factual_query_context_rms"] = (
+                    typed_factual_condition.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt()
+                    if typed_factual_condition is not None
+                    else trajectory.new_zeros((), dtype=torch.float32)
                 )
             return updated.reshape_as(trajectory_tokens), metrics
         if self.soft_address_lattice:

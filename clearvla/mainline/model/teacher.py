@@ -308,9 +308,6 @@ class ObjectFutureTeacher(nn.Module):
         candidate_posterior = candidate_flat_probability.reshape(
             batch, supports, objects, cameras, rows, columns
         )
-        posterior = torch.cat(
-            (candidate_flat_probability, null_probability), dim=-1
-        )
         support_content = (
             future_supports.detach()
             .float()
@@ -341,37 +338,44 @@ class ObjectFutureTeacher(nn.Module):
             null_probability=null_probability,
             null_camera_measure=current_camera_measure,
         )
-        entropy = -(posterior.clamp_min(1e-8) * posterior.clamp_min(1e-8).log()).sum(
-            dim=-1, keepdim=True
-        ) / math.log(float(cameras * rows * columns + 1))
-        association_real_mass_per_support = 1.0 - null_probability
-        # A confident null match is still epistemically uncertain about the
-        # future object state.  Plain posterior entropy would incorrectly call
-        # it certain, so null mass supplies the fallback uncertainty floor.
-        uncertainty_per_support = (
-            null_probability + association_real_mass_per_support * entropy
-        )
-        association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
-        reliability_per_support = (
-            association_real_mass_per_support * association_confidence
-        )
-        conditional_candidate = (
-            candidate_flat_probability
-            / association_real_mass_per_support.clamp_min(1.0e-8)
-        )
-        conditional_entropy = -(
-            conditional_candidate.clamp_min(1.0e-8)
-            * conditional_candidate.clamp_min(1.0e-8).log()
-        ).sum(dim=-1, keepdim=True)
-        effective_support = torch.exp(conditional_entropy) * (
-            association_real_mass_per_support > 1.0e-8
-        )
-        column_ownership = candidate_flat_probability / candidate_flat_probability.sum(
-            dim=2, keepdim=True
-        ).clamp_min(1.0e-8)
-        mutual_assignment_mass = (
-            candidate_flat_probability * column_ownership
-        ).sum(dim=-1, keepdim=True)
+        if collect_diagnostics:
+            posterior = torch.cat(
+                (candidate_flat_probability, null_probability), dim=-1
+            )
+            entropy = -(
+                posterior.clamp_min(1e-8) * posterior.clamp_min(1e-8).log()
+            ).sum(dim=-1, keepdim=True) / math.log(
+                float(cameras * rows * columns + 1)
+            )
+            association_real_mass_per_support = 1.0 - null_probability
+            # A confident null match is still epistemically uncertain about
+            # the future object state.  These quantities are diagnostics only;
+            # they never contract the physical successor/geometry target.
+            uncertainty_per_support = (
+                null_probability + association_real_mass_per_support * entropy
+            )
+            association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
+            reliability_per_support = (
+                association_real_mass_per_support * association_confidence
+            )
+            conditional_candidate = (
+                candidate_flat_probability
+                / association_real_mass_per_support.clamp_min(1.0e-8)
+            )
+            conditional_entropy = -(
+                conditional_candidate.clamp_min(1.0e-8)
+                * conditional_candidate.clamp_min(1.0e-8).log()
+            ).sum(dim=-1, keepdim=True)
+            effective_support = torch.exp(conditional_entropy) * (
+                association_real_mass_per_support > 1.0e-8
+            )
+            column_ownership = (
+                candidate_flat_probability
+                / candidate_flat_probability.sum(dim=2, keepdim=True).clamp_min(1.0e-8)
+            )
+            mutual_assignment_mass = (
+                candidate_flat_probability * column_ownership
+            ).sum(dim=-1, keepdim=True)
         current_reference = facts.content.detach().float()[:, None]
         # This is the exact V120 physical target algebra.  Null mass already
         # supplies the only identity fallback.  Association confidence remains
@@ -415,55 +419,47 @@ class ObjectFutureTeacher(nn.Module):
                     covariance_per_support,
                 )
             )
-            interval_association_real_mass = torch.einsum(
-                "bf,bfkd->bkd",
-                weight,
-                association_real_mass_per_support,
-            )
-            association_real_mass_rows.append(interval_association_real_mass)
-            uncertainty_rows.append(
-                torch.einsum("bf,bfkd->bkd", weight, uncertainty_per_support)
-                + (
+            if collect_diagnostics:
+                interval_association_real_mass = torch.einsum(
+                    "bf,bfkd->bkd",
+                    weight,
+                    association_real_mass_per_support,
+                )
+                association_real_mass_rows.append(interval_association_real_mass)
+                uncertainty_rows.append(
+                    torch.einsum("bf,bfkd->bkd", weight, uncertainty_per_support)
+                    + (
+                        torch.einsum(
+                            "bf,bfkd->bkd",
+                            weight,
+                            (successor_per_support - interval_successor[:, None])
+                            .square()
+                            .mean(dim=-1, keepdim=True),
+                        )
+                    ).sqrt()
+                )
+                reliability_rows.append(
                     torch.einsum(
-                        "bf,bfkd->bkd",
-                        weight,
-                        (successor_per_support - interval_successor[:, None])
-                        .square()
-                        .mean(dim=-1, keepdim=True),
+                        "bf,bfkd->bkd", weight, reliability_per_support
                     )
-                ).sqrt()
-            )
-            reliability_rows.append(torch.einsum("bf,bfkd->bkd", weight, reliability_per_support))
-            support_counts.append(selected.sum(dim=1).float().mean())
+                )
+                support_counts.append(selected.sum(dim=1).float().mean())
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
         covariance = torch.stack(covariance_rows, dim=1)
-        association_real_mass = torch.stack(association_real_mass_rows, dim=1)
-        uncertainty = torch.stack(uncertainty_rows, dim=1)
-        reliability = torch.stack(reliability_rows, dim=1)
         current_chart_availability = facts.chart_availability.detach().float()
-        current_validity = current_chart_availability[:, None]
-        # Dustbin is an association-null probability, not an observable
-        # disappearance label. It remains the sole successor identity fallback
-        # and contributes to uncertainty/reliability above, but status targets
-        # stay at the exact neutral value until physical future visibility is
-        # independently observable. Future selector support therefore carries
-        # only detached current chart availability, never dustbin or existence.
-        visibility_change = torch.zeros_like(association_real_mass)
-        persistence_change = torch.zeros_like(association_real_mass)
-        future_selector_validity = current_validity.expand_as(
-            association_real_mass
-        )
+        # Dustbin is association uncertainty plus the successor identity
+        # fallback above.  With no independently observed disappearance or
+        # persistence label it must not be decoded into a physical status
+        # target.  Current chart availability remains the only online/loss
+        # support authority in the typed interfaces.
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
             semantic_delta=(successor - facts.content.detach().float()[:, None]),
             transport_mean=transport,
             transport_covariance=covariance,
-            visibility=visibility_change,
-            persistence=persistence_change,
             chart_availability=current_chart_availability,
-            future_selector_validity=future_selector_validity,
             camera_coordinates=facts.camera_coordinates.detach().float(),
             camera_chart_availability=(
                 facts.camera_chart_availability.detach().float()
@@ -476,10 +472,11 @@ class ObjectFutureTeacher(nn.Module):
         target.validate()
         if not collect_diagnostics:
             return target, {}
+        association_real_mass = torch.stack(association_real_mass_rows, dim=1)
+        uncertainty = torch.stack(uncertainty_rows, dim=1)
+        reliability = torch.stack(reliability_rows, dim=1)
         metrics = {
             "object_teacher_association_real_mass": association_real_mass.mean(),
-            "object_teacher_visibility_change": visibility_change.mean(),
-            "object_teacher_persistence_change": persistence_change.mean(),
             "object_teacher_uncertainty": uncertainty.mean(),
             "object_teacher_reliability": reliability.mean(),
             "object_teacher_association_confidence": association_confidence.mean(),
@@ -492,7 +489,6 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_current_loss_support": facts.camera_chart_availability.detach()
             .float()
             .mean(),
-            "object_teacher_future_selector_validity": future_selector_validity.mean(),
             "object_teacher_successor_delta_identity_max_abs": (
                 target.semantic_delta
                 - (target.successor_content - target.current_reference[:, None])
@@ -545,8 +541,6 @@ class ObjectFutureTeacher(nn.Module):
                 target.semantic_delta[:, index].square().mean().sqrt()
             )
             metrics[f"{row}_transport_rms"] = transport[:, index].square().mean().sqrt()
-            metrics[f"{row}_visibility_change"] = visibility_change[:, index].mean()
-            metrics[f"{row}_persistence_change"] = persistence_change[:, index].mean()
             metrics[f"{row}_reliability"] = reliability[:, index].mean()
         return target, metrics
 

@@ -198,9 +198,9 @@ class PolicyRoleDeltaBank:
 
     ``values`` keeps source depth and action basis explicit:
     ``[batch, source, horizon, basis, hidden]``.  ``protected_detail`` is the
-    already world-conditioned high-resolution write made at the W->P boundary;
-    it remains a separate additive lane and therefore cannot lose a
-    source-survival softmax competition against coarser world/policy values.
+    P2 consequence base (static P1 fact plus the typed W effect/interaction).
+    It remains a separate no-null additive lane and therefore cannot lose a
+    source-survival softmax competition against optional P3 innovations.
     """
 
     values: Tensor
@@ -255,6 +255,7 @@ class RoleDeltaAttnRes(nn.Module):
         route_dim: int,
         *,
         max_sources: int,
+        initialization_source_rows: int | None = None,
         include_null: bool = True,
         max_value_rms: float | None = None,
         normalization_floor: float | None = None,
@@ -265,6 +266,16 @@ class RoleDeltaAttnRes(nn.Module):
         self.hidden_size = int(hidden_size)
         self.route_dim = int(route_dim)
         self.max_sources = int(max_sources)
+        initialization_rows = (
+            self.max_sources
+            if initialization_source_rows is None
+            else int(initialization_source_rows)
+        )
+        if initialization_rows < self.max_sources:
+            raise ValueError(
+                "role-delta initialization rows cannot be smaller than its "
+                "serialized source count"
+            )
         self.include_null = bool(include_null)
         self.max_value_rms = (
             None if max_value_rms is None else float(max_value_rms)
@@ -278,9 +289,18 @@ class RoleDeltaAttnRes(nn.Module):
             raise ValueError("role-delta normalization floor must be positive")
         self.query_proj = nn.Linear(self.hidden_size, self.route_dim, bias=False)
         self.key_proj = nn.Linear(self.hidden_size, self.route_dim, bias=False)
+        # Schema37 serializes only four action-basis identities, but the
+        # Schema36 parent sampled 5 lanes x 4 bases before initializing the
+        # query/key projections.  Drawing the complete historical table here
+        # and retaining only the active prefix keeps every live parameter and
+        # all subsequently constructed bottom modules on the controlled
+        # initialization stream.  The discarded rows are never registered,
+        # serialized, moved to CUDA, or executed.
+        initialization = torch.randn(initialization_rows, self.route_dim) * 0.02
         self.source_key = nn.Parameter(
-            torch.randn(self.max_sources, self.route_dim) * 0.02
+            initialization[: self.max_sources].clone()
         )
+        del initialization
         if self.include_null:
             self.null_key = nn.Parameter(torch.zeros(1, self.route_dim))
         else:

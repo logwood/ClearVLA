@@ -9,7 +9,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import smooth_rms_contract, variance_floored_centered_norm
+from .routing import (
+    canonical_common_residual,
+    register_gradient_axis_rms_metrics,
+    smooth_rms_contract,
+    variance_floored_centered_norm,
+)
 from .types import (
     CoarseActionIntentState,
     FutureObjectDynamics,
@@ -25,13 +30,65 @@ class ObjectW1WorkingState:
     near: Tensor
     far_base: Tensor
     common_typed: Tensor
-    near_residual_typed: Tensor
-    far_residual_typed: Tensor
-    near_field: FutureObjectDynamics
+    near_interval_innovation: Tensor
+    far_interval_innovation: Tensor
     common_base_interaction: Tensor
     common_base_interaction_denominator: Tensor
-    near_residual_base_interaction: Tensor
-    near_residual_base_interaction_denominator: Tensor
+    near_interval_base_interaction: Tensor
+    near_interval_base_interaction_denominator: Tensor
+    near_common_condition_interaction: Tensor
+    near_common_condition_denominator: Tensor
+
+
+@dataclass(frozen=True)
+class WConditionSources:
+    """Named inputs to the sole generic W condition fusion.
+
+    The generic carrier is a condition, never an exported future value.  Keep
+    provenance until this one declared compose boundary so diagnostics and
+    interventions can identify which source changed W without introducing a
+    learned selector, null route, or an additional block.
+    """
+
+    public_object: Tensor  # [B,1,H]
+    private_object: Tensor  # [B,K,H]
+    transport_prior: Tensor  # [B,K,H]
+    interval_intent: Tensor  # [B,I,H]
+    coarse_action: Tensor  # [B,I,H]
+    goal_update: Tensor  # [B,I,H]
+
+    def compose(self) -> Tensor:
+        if self.public_object.ndim != 3 or int(self.public_object.shape[1]) != 1:
+            raise ValueError("W public object condition must be [B,1,H]")
+        if self.private_object.ndim != 3 or self.transport_prior.ndim != 3:
+            raise ValueError("W object conditions must retain [B,K,H]")
+        if tuple(self.private_object.shape) != tuple(self.transport_prior.shape):
+            raise ValueError("W private object and transport conditions must align")
+        if self.interval_intent.ndim != 3 or self.coarse_action.ndim != 3:
+            raise ValueError("W interval conditions must retain [B,I,H]")
+        if tuple(self.interval_intent.shape) != tuple(self.coarse_action.shape) or tuple(
+            self.interval_intent.shape
+        ) != tuple(self.goal_update.shape):
+            raise ValueError("W intent/action/goal interval conditions must align")
+        if int(self.public_object.shape[0]) != int(self.private_object.shape[0]) or int(
+            self.public_object.shape[-1]
+        ) != int(self.private_object.shape[-1]):
+            raise ValueError("W public/private object conditions must align")
+        if int(self.interval_intent.shape[0]) != int(self.private_object.shape[0]) or int(
+            self.interval_intent.shape[-1]
+        ) != int(self.private_object.shape[-1]):
+            raise ValueError("W object and interval conditions must align")
+
+        # Preserve the established arithmetic order exactly.  The dataclass
+        # changes provenance visibility, not the numerical condition.
+        objects = self.public_object + self.private_object
+        interval = self.interval_intent + self.coarse_action
+        return (
+            objects[:, None]
+            + self.transport_prior[:, None]
+            + interval[:, :, None]
+            + self.goal_update[:, :, None]
+        )
 
 
 class _ObjectIntervalBlock(nn.Module):
@@ -149,11 +206,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         torch.set_rng_state(camera_construction_rng)
         self.transport_head = nn.Linear(hidden, 2, bias=False)
         self.covariance_head = nn.Linear(hidden, 3)
-        # Status changes are optional typed values.  A free bias can learn the
-        # dataset-wide mean disappearance/persistence and bypass the
-        # appearance sidecar entirely, so both heads are bias-free.
-        self.visibility_head = nn.Linear(hidden, 1, bias=False)
-        self.persistence_head = nn.Linear(hidden, 1, bias=False)
+        # Removing the two dead status heads must not silently re-seed every
+        # subsequently constructed P2/P3 module in a controlled fresh-run
+        # comparison.  Consume their historical initialization draws without
+        # registering, serializing or executing the discarded parameters.
+        removed_status_heads = (
+            nn.Linear(hidden, 1, bias=False),
+            nn.Linear(hidden, 1, bias=False),
+        )
+        del removed_status_heads
         nn.init.zeros_(self.delta_head.weight)
         nn.init.zeros_(self.transport_head.weight)
         nn.init.zeros_(self.covariance_head.weight)
@@ -165,8 +226,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     dtype=self.covariance_head.bias.dtype,
                 )
             )
-        nn.init.zeros_(self.visibility_head.weight)
-        nn.init.zeros_(self.persistence_head.weight)
 
     def _interact_with_base(
         self, typed: Tensor, base: Tensor
@@ -192,6 +251,65 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         return typed + interaction, interaction, denominator
 
+    def _condition_interval_on_common(
+        self,
+        interval_innovation: Tensor,
+        common: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Let protected common condition an existing interval innovation.
+
+        The operation is one-way and zero preserving.  Common never reads the
+        interval state, while an exact-zero interval innovation remains exact
+        zero even for a nonzero common state.  Reuse the established shared
+        bias-free interaction rather than adding another owner or parameter.
+        """
+
+        if interval_innovation.ndim != 5 or common.ndim != 4:
+            raise ValueError("W common conditioner requires typed interval/common states")
+        if tuple(interval_innovation.shape[:1] + interval_innovation.shape[2:]) != tuple(
+            common.shape
+        ):
+            raise ValueError("W common and interval owner axes do not align")
+        interval_value, denominator = variance_floored_centered_norm(
+            interval_innovation,
+            0.25,
+        )
+        common_value, _ = variance_floored_centered_norm(common, 0.25)
+        product = interval_value.float() * torch.tanh(common_value.float())[:, None]
+        interaction, _ = smooth_rms_contract(
+            self.typed_base_interaction(product.to(dtype=interval_innovation.dtype)),
+            0.35,
+        )
+        return interval_innovation + interaction, interaction, denominator
+
+    @staticmethod
+    def _appearance_condition_semantic(
+        semantic: Tensor,
+        appearance: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Use appearance as evidence for semantic successor content.
+
+        There is no observable visibility/persistence target in the current
+        dataset.  Appearance therefore conditions the full-DINO successor
+        owner rather than inventing an independent physical status value.
+        Either missing input makes the optional modulation exact zero.
+        """
+
+        if tuple(semantic.shape) != tuple(appearance.shape):
+            raise ValueError("W semantic and appearance owner axes do not align")
+        appearance_value, denominator = variance_floored_centered_norm(
+            appearance,
+            0.25,
+        )
+        modulation, _ = smooth_rms_contract(
+            (
+                semantic.float()
+                * torch.tanh(appearance_value.float())
+            ).to(dtype=semantic.dtype),
+            0.35,
+        )
+        return semantic + modulation, modulation, denominator
+
     def _base(
         self,
         facts: ObjectFactSet,
@@ -203,17 +321,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         intent.validate(hidden=self.hidden)
         public_object = self.object_content(facts.public_content)[:, None]
         private_objects = self.object_content(facts.content_innovation)
-        # Preserve the old absolute object coordinate exactly while exposing
-        # its provenance: one public base plus K object-owned innovations.
-        # No new projection, capacity, or gain is introduced here.
-        objects = public_object + private_objects
+        # Preserve the old public/private object provenance until the single
+        # declared condition-compose boundary below.  No new projection,
+        # capacity, or gain is introduced here.
         transport_prior = self.object_transport_prior(
             facts.transport_prior.to(dtype=facts.content.dtype)
         )
-        interval = (
-            intent.interval_condition_innovation
-            + action.tokens
-        )
+        interval_intent = intent.interval_condition_innovation
+        coarse_action = action.tokens
+        interval = interval_intent + coarse_action
         normalized_goal = self.goal_memory_norm(intent.protected_goal_memory)
         goal_update, goal_attention = self.goal_read(
             self.goal_query_norm(interval),
@@ -222,12 +338,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             need_weights=collect_diagnostics,
             average_attn_weights=True,
         )
-        base = (
-            objects[:, None]
-            + transport_prior[:, None]
-            + interval[:, :, None]
-            + goal_update[:, :, None]
+        condition_sources = WConditionSources(
+            public_object=public_object,
+            private_object=private_objects,
+            transport_prior=transport_prior,
+            interval_intent=interval_intent,
+            coarse_action=coarse_action,
+            goal_update=goal_update,
         )
+        base = condition_sources.compose()
         common_components = []
         residual_components = []
         for type_index, projection in enumerate(
@@ -247,6 +366,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             residual_components.append(residual_component)
         typed_common = torch.stack(common_components, dim=2)
         typed_residual = torch.stack(residual_components, dim=3)
+        # Per-token contracts can recreate an interval-common component even
+        # when S's raw K/type residual was centred.  Close the owner boundary
+        # here, after the final W-side projection, without changing the
+        # reconstructed per-interval typed condition.
+        typed_correction, typed_residual = canonical_common_residual(
+            typed_residual,
+            dim=1,
+        )
+        typed_common = typed_common.float() + typed_correction
         # These are protected owner inputs, not completed W states.  Each
         # typed-by-base interaction is deliberately delayed until the matching
         # common/near/far owner has crossed its generic W block.  This prevents
@@ -268,13 +396,34 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 / math.log(float(max(int(goal_attention.shape[-1]), 2)))
             ).mean(),
             "object_w_goal_innovation_rms": goal_update.detach().float().square().mean().sqrt(),
+            "object_w_interval_intent_condition_rms": interval_intent.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_coarse_action_condition_rms": coarse_action.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_transport_prior_condition_rms": transport_prior.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_w_typed_common_state_rms": typed_common.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_w_typed_interval_residual_state_rms": typed_residual.detach()
+            "object_w_typed_interval_innovation_state_rms": typed_residual.detach()
             .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_typed_interval_input_mean_rms": typed_residual.detach()
+            .float()
+            .mean(dim=1)
             .square()
             .mean()
             .sqrt(),
@@ -335,27 +484,30 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         facts: ObjectFactSet,
         hidden: Tensor,
         typed_common: Tensor,
-        typed_interval_residual: Tensor,
-        far_owned_gauge_start: int | None = None,
+        typed_interval_innovation: Tensor,
     ) -> FutureObjectDynamics:
         if tuple(typed_common.shape) != (
             hidden.shape[0], hidden.shape[2], 3, hidden.shape[-1]
         ):
             raise ValueError("W typed common state must align as [B,K,3,H]")
-        if tuple(typed_interval_residual.shape) != (
+        if tuple(typed_interval_innovation.shape) != (
             *hidden.shape[:-1], 3, hidden.shape[-1]
         ):
-            raise ValueError("W typed residual must align as [B,I,K,3,H]")
+            raise ValueError("W typed innovation must align as [B,I,K,3,H]")
 
-        semantic_common = self.delta_head(typed_common[..., 0, :]).float()
-        semantic_residual = self.delta_head(
-            typed_interval_residual[..., 0, :]
-        ).float()
-        semantic_residual = self._maybe_apply_far_owned_gauge(
-            semantic_residual,
-            far_owned_gauge_start,
+        semantic_common_state, _, _ = self._appearance_condition_semantic(
+            typed_common[..., 0, :],
+            typed_common[..., 1, :],
         )
-        semantic_delta = (semantic_common[:, None] + semantic_residual).to(
+        semantic_interval_state, _, _ = self._appearance_condition_semantic(
+            typed_interval_innovation[..., 0, :],
+            typed_interval_innovation[..., 1, :],
+        )
+        semantic_common = self.delta_head(semantic_common_state).float()
+        semantic_innovation = self.delta_head(
+            semantic_interval_state
+        ).float()
+        semantic_delta = (semantic_common[:, None] + semantic_innovation).to(
             dtype=hidden.dtype
         )
 
@@ -371,13 +523,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self.transport_head(
                 self._camera_geometry_carrier(
                     facts,
-                    typed_interval_residual[..., 2, :],
+                    typed_interval_innovation[..., 2, :],
                 )
             ).float()
-        )
-        transport_residual = self._maybe_apply_far_owned_gauge(
-            transport_residual,
-            far_owned_gauge_start,
         )
         object_transport = (transport_common[:, None] + transport_residual).to(
             dtype=hidden.dtype
@@ -386,7 +534,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self._camera_geometry_carrier(
                 facts,
                 typed_common[:, None, ..., 2, :]
-                + typed_interval_residual[..., 2, :],
+                + typed_interval_innovation[..., 2, :],
             )
         ).float()
         # The normalized 8x8 chart spacing is 2/7. Bound each diagonal from
@@ -405,43 +553,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         object_covariance = torch.stack(
             (variance_xx, covariance_xy, variance_yy),
             dim=-1,
-        ).to(dtype=hidden.dtype)
-        visibility_common = -torch.tanh(
-            0.5 * self.visibility_head(typed_common[..., 1, :]).float()
         )
-        visibility_residual = -torch.tanh(
-            0.5 * self.visibility_head(
-                typed_interval_residual[..., 1, :]
-            ).float()
-        )
-        visibility_residual = self._maybe_apply_far_owned_gauge(
-            visibility_residual,
-            far_owned_gauge_start,
-        )
-        visibility = (visibility_common[:, None] + visibility_residual).to(
-            dtype=hidden.dtype
-        )
-        persistence_common = -torch.tanh(
-            0.5 * self.persistence_head(typed_common[..., 1, :]).float()
-        )
-        persistence_residual = -torch.tanh(
-            0.5 * self.persistence_head(
-                typed_interval_residual[..., 1, :]
-            ).float()
-        )
-        persistence_residual = self._maybe_apply_far_owned_gauge(
-            persistence_residual,
-            far_owned_gauge_start,
-        )
-        persistence = (persistence_common[:, None] + persistence_residual).to(
-            dtype=hidden.dtype
-        )
+        # Keep the complete PSD triple in FP32.  Independently rounding xx,
+        # xy and yy to BF16 can turn a valid matrix into a negative-
+        # determinant one; casting it back to float in P2 cannot recover the
+        # lost relation.  This field is tiny and every legal consumer already
+        # computes covariance geometry in FP32.
         chart_availability = facts.chart_availability.float()
-        # Predicted visibility is a status value, not authority to erase the
-        # semantic/geometry candidates supervised in the same field.
-        future_selector_validity = chart_availability[:, None].expand(
-            -1, hidden.shape[1], -1, -1
-        )
         current_reference = facts.content.detach().to(dtype=hidden.dtype)
         return FutureObjectDynamics(
             current_reference=current_reference,
@@ -449,10 +567,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             semantic_delta=semantic_delta,
             transport_mean=object_transport,
             transport_covariance=object_covariance,
-            visibility=visibility,
-            persistence=persistence,
             chart_availability=chart_availability,
-            future_selector_validity=future_selector_validity,
             camera_coordinates=facts.camera_coordinates.to(dtype=hidden.dtype),
             camera_chart_availability=facts.camera_chart_availability.to(
                 dtype=hidden.dtype
@@ -520,55 +635,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         return carrier * (1.0 + condition)
 
     @staticmethod
-    def _complete_with_far_owned_zero_mean(near: Tensor, far: Tensor) -> Tensor:
-        """Close the interval gauge without allowing far to rewrite near.
-
-        The W1 rows are already public owner values.  Any common component
-        left by W processing is therefore removed only from the W2 rows.  The
-        final rounding closure is also charged to the last far row; gradients
-        remain the ordinary derivatives of this algebra.
-        """
-
-        if near.ndim != far.ndim or tuple(near.shape[:1] + near.shape[2:]) != tuple(
-            far.shape[:1] + far.shape[2:]
-        ):
-            raise ValueError("near/far causal gauge axes do not align")
-        far_intervals = int(far.shape[1])
-        if int(near.shape[1]) < 1 or far_intervals < 1:
-            raise ValueError("causal gauge requires non-empty near and far owners")
-        correction = (
-            near.sum(dim=1, keepdim=True) + far.sum(dim=1, keepdim=True)
-        ) / float(far_intervals)
-        corrected_far = far - correction
-        rounding_residual = near.sum(dim=1, keepdim=True) + corrected_far.sum(
-            dim=1, keepdim=True
-        )
-        corrected_far = torch.cat(
-            (
-                corrected_far[:, :-1],
-                corrected_far[:, -1:] - rounding_residual,
-            ),
-            dim=1,
-        )
-        return torch.cat((near, corrected_far), dim=1)
-
-    @classmethod
-    def _maybe_apply_far_owned_gauge(
-        cls,
-        value: Tensor,
-        far_owned_gauge_start: int | None,
-    ) -> Tensor:
-        if far_owned_gauge_start is None:
-            return value
-        start = int(far_owned_gauge_start)
-        if not 0 < start < int(value.shape[1]):
-            raise ValueError("far-owned gauge must split non-empty near/far rows")
-        return cls._complete_with_far_owned_zero_mean(
-            value[:, :start],
-            value[:, start:],
-        )
-
-    @staticmethod
     def _run_typed_block(
         block: _ObjectIntervalBlock,
         value: Tensor,
@@ -591,36 +657,37 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         cls,
         block: _ObjectIntervalBlock,
         common: Tensor,
-        residual: Tensor,
+        interval_innovation: Tensor,
         *,
         causal_interval: bool,
     ) -> tuple[Tensor, Tensor]:
         """Run common and interval owners through one shared-parameter block.
 
         The two owners need the same W capacity, but they are not sequence
-        positions of one carrier.  Concatenating common as causal row zero lets
-        every residual repeatedly read it; later interval centring cannot undo
-        the interval-dependent nonlinear write.  Separate calls preserve the
-        owner boundary while reusing the exact same parameters.  Observable
-        facts, action and goal have already entered each present owner through
-        the zero-preserving typed-by-base interaction in :meth:`_base`.
+        positions of one carrier.  Separate calls preserve that owner boundary
+        while reusing the exact same parameters.  The explicit one-way
+        conditioner is applied only after both owners complete this block, so
+        common can inform a present innovation without becoming a writable
+        causal row.
         """
 
-        if common.ndim != 4 or residual.ndim != 5:
-            raise ValueError("owned typed W state lost common/residual axes")
-        if tuple(residual.shape[:1] + residual.shape[2:]) != tuple(common.shape):
-            raise ValueError("owned typed W common/residual axes do not align")
+        if common.ndim != 4 or interval_innovation.ndim != 5:
+            raise ValueError("owned typed W state lost common/interval axes")
+        if tuple(
+            interval_innovation.shape[:1] + interval_innovation.shape[2:]
+        ) != tuple(common.shape):
+            raise ValueError("owned typed W common/interval axes do not align")
         completed_common = cls._run_typed_block(
             block,
             common[:, None],
             causal_interval=False,
         )
-        completed_residual = cls._run_typed_block(
+        completed_innovation = cls._run_typed_block(
             block,
-            residual,
+            interval_innovation,
             causal_interval=causal_interval,
         )
-        return completed_common[:, 0], completed_residual
+        return completed_common[:, 0], completed_innovation
 
     @staticmethod
     def _typed_state_metrics(value: Tensor, *, prefix: str) -> dict[str, Tensor]:
@@ -647,8 +714,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         intent: WorldIntentDock,
         action: CoarseActionIntentState,
         collect_diagnostics: bool = False,
-    ) -> tuple[FutureObjectDynamics, ObjectW1WorkingState, dict[str, Tensor]]:
-        hidden, typed_common, typed_residual, base_metrics = self._base(
+    ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
+        hidden, typed_common, typed_interval_input, base_metrics = self._base(
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
         near = self.w1(hidden[:, :2], causal_interval=True)
@@ -656,7 +723,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self._run_separated_owned_typed_block(
                 self.w1,
                 typed_common,
-                typed_residual[:, :2],
+                typed_interval_input[:, :2],
                 causal_interval=True,
             )
         )
@@ -666,21 +733,52 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             w1_common_before_interaction,
             hidden.mean(dim=1),
         )
-        # Near residuals read only the completed generic W1 near rows, once.
-        near_typed, near_interaction, near_denominator = self._interact_with_base(
+        # The completed protected common may condition a present near
+        # innovation, but cannot create one or be rewritten by it.
+        (
+            near_with_common,
+            near_common_interaction,
+            near_common_denominator,
+        ) = self._condition_interval_on_common(
             near_before_interaction,
+            w1_common,
+        )
+        # Near innovations then read the completed generic W1 near rows once.
+        near_typed, near_interaction, near_denominator = self._interact_with_base(
+            near_with_common,
             near,
         )
-        field = self._field(
-            facts=facts,
-            hidden=near,
-            typed_common=w1_common,
-            typed_interval_residual=near_typed,
-        )
-        field.validate(expected_intervals=2)
-        metrics = self._metrics(field, prefix="object_w1") if collect_diagnostics else {}
+        # W1's completed common/near owners are consumed directly by W2 and
+        # decoded once as part of the final four-interval field.  Materializing
+        # a second W1 field on every ordinary batch creates a complete decoder
+        # autograd graph with no loss or policy consumer.  Retain that view only
+        # for explicit diagnostics and release it instead of carrying it in the
+        # W1 working state.
+        field: FutureObjectDynamics | None = None
+        metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            field = self._field(
+                facts=facts,
+                hidden=near,
+                typed_common=w1_common,
+                typed_interval_innovation=near_typed,
+            )
+            field.validate(expected_intervals=2)
+            metrics.update(self._metrics(field, prefix="object_w1"))
         metrics.update(base_metrics)
         if collect_diagnostics:
+            _, common_appearance_modulation, common_appearance_denominator = (
+                self._appearance_condition_semantic(
+                    w1_common[..., 0, :],
+                    w1_common[..., 1, :],
+                )
+            )
+            _, near_appearance_modulation, near_appearance_denominator = (
+                self._appearance_condition_semantic(
+                    near_typed[..., 0, :],
+                    near_typed[..., 1, :],
+                )
+            )
             metrics.update(
                 self._typed_state_metrics(near_typed, prefix="object_w1")
             )
@@ -691,7 +789,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     .square()
                     .mean()
                     .sqrt(),
-                    "object_w_typed_interval_residual_state_rms": near_typed.detach()
+                    "object_w_typed_interval_innovation_state_rms": near_typed.detach()
                     .float()
                     .square()
                     .mean()
@@ -701,7 +799,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     .square()
                     .mean()
                     .sqrt(),
-                    "object_w_residual_base_interaction_rms": near_interaction.detach()
+                    "object_w_interval_base_interaction_rms": near_interaction.detach()
                     .float()
                     .square()
                     .mean()
@@ -709,9 +807,31 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     "object_w_common_base_interaction_denominator_min": common_denominator.detach()
                     .float()
                     .amin(),
-                    "object_w_residual_base_interaction_denominator_min": near_denominator.detach()
+                    "object_w_interval_base_interaction_denominator_min": near_denominator.detach()
                     .float()
                     .amin(),
+                    "object_w_common_to_interval_interaction_rms": near_common_interaction.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_common_to_interval_denominator_min": near_common_denominator.detach()
+                    .float()
+                    .amin(),
+                    "object_w_appearance_semantic_common_modulation_rms": common_appearance_modulation.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_appearance_semantic_interval_modulation_rms": near_appearance_modulation.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_appearance_semantic_denominator_min": torch.minimum(
+                        common_appearance_denominator.detach().float().amin(),
+                        near_appearance_denominator.detach().float().amin(),
+                    ),
                 }
             )
             metrics["object_w1_common_processing_delta_rms"] = (
@@ -722,13 +842,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             near=near,
             far_base=hidden[:, 2:],
             common_typed=w1_common,
-            near_residual_typed=near_typed,
-            far_residual_typed=typed_residual[:, 2:],
-            near_field=field,
+            near_interval_innovation=near_typed,
+            far_interval_innovation=typed_interval_input[:, 2:],
             common_base_interaction=common_interaction,
             common_base_interaction_denominator=common_denominator,
-            near_residual_base_interaction=near_interaction,
-            near_residual_base_interaction_denominator=near_denominator,
+            near_interval_base_interaction=near_interaction,
+            near_interval_base_interaction_denominator=near_denominator,
+            near_common_condition_interaction=near_common_interaction,
+            near_common_condition_denominator=near_common_denominator,
         ), metrics
 
     def forward_w2(
@@ -745,10 +866,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             w1_state.far_base.shape[1:3]
         ) != (2, facts.objects):
             raise ValueError("W2 requires both completed W1 intervals")
-        if tuple(w1_state.near_residual_typed.shape[1:4]) != (2, facts.objects, 3) or tuple(
-            w1_state.far_residual_typed.shape[1:4]
+        if tuple(w1_state.near_interval_innovation.shape[1:4]) != (
+            2,
+            facts.objects,
+            3,
+        ) or tuple(
+            w1_state.far_interval_innovation.shape[1:4]
         ) != (2, facts.objects, 3):
-            raise ValueError("W2 typed residual lost interval/object/type identity")
+            raise ValueError("W2 typed innovation lost interval/object/type identity")
         batch, _, objects, hidden = w1_state.near.shape
         far_query = w1_state.far_base.transpose(1, 2).reshape(
             batch * objects, 2, hidden
@@ -769,13 +894,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         ).transpose(1, 2)
         far = self.w2(far, causal_interval=True)
         # Near interval innovations may inform the two far interval
-        # innovations.  The bridge is residual-only: W2 neither processes nor
+        # innovations.  The bridge is innovation-only: W2 neither processes nor
         # interacts with the protected common owner, and it never rewrites a
         # completed W1 near row.
-        typed_far_query = w1_state.far_residual_typed.permute(
+        typed_far_query = w1_state.far_interval_innovation.permute(
             0, 2, 3, 1, 4
         ).reshape(batch * objects * 3, 2, hidden)
-        typed_near_memory = w1_state.near_residual_typed.permute(
+        typed_near_memory = w1_state.near_interval_innovation.permute(
             0, 2, 3, 1, 4
         ).reshape(batch * objects * 3, 2, hidden)
         typed_near_normalized = self.w1_memory_norm(typed_near_memory)
@@ -794,38 +919,79 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             far_with_near,
             causal_interval=True,
         )
-        # Far residuals read only the completed generic W2 far rows, once.
+        # W2 reads the completed W1 near innovations and the generic far rows;
+        # it has no second direct common ingress.  Common already conditioned
+        # the near owner in W1, so rereading it here would duplicate that
+        # source and violate the declared W1(common+near) -> W2(far) boundary.
         far_typed, far_interaction, far_denominator = self._interact_with_base(
             far_before_interaction,
             far,
         )
-        completed_residual = self._complete_with_far_owned_zero_mean(
-            w1_state.near_residual_typed,
-            far_typed,
+        # Do not re-centre nonlinear W states.  W2 owns both far rows, and a
+        # same-direction far change is a legal long-horizon innovation rather
+        # than a gauge degree of freedom.  Common/residual remain exact derived
+        # views of the exported full field in FutureObjectDynamics.
+        completed_innovation = torch.cat(
+            (w1_state.near_interval_innovation, far_typed),
+            dim=1,
         )
+        gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            register_gradient_axis_rms_metrics(
+                w1_state.common_typed,
+                gradient_metrics,
+                (
+                    "gradient_tensor_w_semantic_common_rms",
+                    "gradient_tensor_w_appearance_common_rms",
+                    "gradient_tensor_w_geometry_common_rms",
+                ),
+                dim=-2,
+            )
+            register_gradient_axis_rms_metrics(
+                completed_innovation,
+                gradient_metrics,
+                (
+                    "gradient_tensor_w_semantic_interval_rms",
+                    "gradient_tensor_w_appearance_interval_rms",
+                    "gradient_tensor_w_geometry_interval_rms",
+                ),
+                dim=-2,
+            )
         field = self._field(
             facts=facts,
             hidden=torch.cat((w1_state.near, far), dim=1),
             typed_common=w1_state.common_typed,
-            typed_interval_residual=completed_residual,
-            far_owned_gauge_start=2,
+            typed_interval_innovation=completed_innovation,
         )
         field.validate()
         metrics = self._metrics(field, prefix="object_w2") if collect_diagnostics else {}
+        metrics.update(gradient_metrics)
         if collect_diagnostics:
+            _, common_appearance_modulation, common_appearance_denominator = (
+                self._appearance_condition_semantic(
+                    w1_state.common_typed[..., 0, :],
+                    w1_state.common_typed[..., 1, :],
+                )
+            )
+            _, interval_appearance_modulation, interval_appearance_denominator = (
+                self._appearance_condition_semantic(
+                    completed_innovation[..., 0, :],
+                    completed_innovation[..., 1, :],
+                )
+            )
             metrics.update(
                 self._typed_state_metrics(
-                    completed_residual,
+                    completed_innovation,
                     prefix="object_w2",
                 )
             )
-            residual_interaction = torch.cat(
-                (w1_state.near_residual_base_interaction, far_interaction),
+            interval_interaction = torch.cat(
+                (w1_state.near_interval_base_interaction, far_interaction),
                 dim=1,
             )
-            residual_denominator = torch.cat(
+            interval_denominator = torch.cat(
                 (
-                    w1_state.near_residual_base_interaction_denominator,
+                    w1_state.near_interval_base_interaction_denominator,
                     far_denominator,
                 ),
                 dim=1,
@@ -837,7 +1003,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     .square()
                     .mean()
                     .sqrt(),
-                    "object_w_typed_interval_residual_state_rms": completed_residual.detach()
+                    "object_w_typed_interval_innovation_state_rms": completed_innovation.detach()
                     .float()
                     .square()
                     .mean()
@@ -847,7 +1013,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     .square()
                     .mean()
                     .sqrt(),
-                    "object_w_residual_base_interaction_rms": residual_interaction.detach()
+                    "object_w_interval_base_interaction_rms": interval_interaction.detach()
                     .float()
                     .square()
                     .mean()
@@ -857,15 +1023,37 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                         .float()
                         .amin()
                     ),
-                    "object_w_residual_base_interaction_denominator_min": residual_denominator.detach()
+                    "object_w_interval_base_interaction_denominator_min": interval_denominator.detach()
                     .float()
                     .amin(),
+                    "object_w_common_to_interval_interaction_rms": w1_state.near_common_condition_interaction.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_common_to_interval_denominator_min": w1_state.near_common_condition_denominator.detach()
+                    .float()
+                    .amin(),
+                    "object_w_appearance_semantic_common_modulation_rms": common_appearance_modulation.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_appearance_semantic_interval_modulation_rms": interval_appearance_modulation.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_appearance_semantic_denominator_min": torch.minimum(
+                        common_appearance_denominator.detach().float().amin(),
+                        interval_appearance_denominator.detach().float().amin(),
+                    ),
                 }
             )
             metrics["object_w2_common_processing_delta_rms"] = (
                 w1_state.common_typed.detach().new_zeros(())
             )
-            metrics["object_w2_near_to_far_residual_update_rms"] = (
+            metrics["object_w2_near_to_far_innovation_update_rms"] = (
                 typed_near_update.detach().float().square().mean().sqrt()
             )
         return field, metrics
@@ -903,11 +1091,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             f"{prefix}_interval_adjacent_cosine": adjacent,
             f"{prefix}_object_pair_cosine": pair,
             f"{prefix}_transport_rms": field.transport_mean.detach().float().square().mean().sqrt(),
-            f"{prefix}_future_selector_validity": field.future_selector_validity
-            .detach()
-            .float()
-            .mean(),
         }
 
 
-__all__ = ["ObjectFutureDynamicsCompiler", "ObjectW1WorkingState"]
+__all__ = [
+    "ObjectFutureDynamicsCompiler",
+    "ObjectW1WorkingState",
+    "WConditionSources",
+]

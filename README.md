@@ -2,38 +2,32 @@
 
 ## Current Object Intent–Dynamics 3-2-3 Mainline
 
-The current experiment candidate is the `object_intent_dynamics_323`
-capability, logged as V122. The numeric label is bookkeeping; source selection
-and checkpoint identity use the capability manifest. The top graph has K=4
-global grounded objects plus an explicit null. Protected query identity is
-separate from causal interval innovations in the stateless online intent
-organizer; the future recognizer remains training-only. W1/W2 model object
-dynamics over `4-8 / 8-16 / 16-32 / 32-48`, P1 uses an `ObjectFactualDock`,
-P2 keeps semantic routing separate from camera-specific geometry and exposes
-only relative validity calibration, and P3 carries centred precision, temporal
-and observable state-change innovations. The Evidence MMDiT/CVAE/workspace
-bottom remains intact behind exactly one protected-consequence ingress.
+The active experiment is the capability-owned implementation under
+`clearvla/mainline/`, selected by the serialized `object_intent_dynamics_323`
+manifest. Its active architecture schema is 37; numeric V-labels and the old
+monolithic `clearvla/policy/` graph are ancestry, not source-selection
+mechanisms. Schema37 retains G1-G3, four future intervals, the V120 static P1,
+the Evidence MMDiT/CVAE/workspace bottom and execution path while preserving
+S/W/P2/P3 owner axes through their actual action-query consumers. The compact
+executed graph and checkpoint policy are documented in
+`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
 
-Batch-eight memory smoke (diagnostic synchronization is enabled, so do not use
-its timing as throughput):
+Smoke (batch 1 by default; it executes backward and five-step deployment):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OBJECT_323_BATCH_SIZE=8 \
-SMOKE_TRAIN_BATCHES=2 \
-OUT_DIR=runs/v122_object_323_identity_innovation_b8_memory_smoke \
-nohup bash scripts/current_object_intent_dynamics_323_smoke.sh \
-  > v122_object_323_identity_innovation_b8_memory_smoke.log 2>&1 &
+OUT_DIR=runs/schema37_information_conservation_smoke \
+nohup bash scripts/smoke_mainline.sh \
+  > schema37_information_conservation_smoke.log 2>&1 &
 ```
 
-Long run:
+Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OBJECT_323_BATCH_SIZE=8 \
-OUT_DIR=runs/v122_object_intent_dynamics_323_identity_innovation_b8 \
-nohup bash scripts/current_object_intent_dynamics_323.sh \
-  > v122_object_intent_dynamics_323_identity_innovation_b8.log 2>&1 &
+OUT_DIR=runs/schema37_information_conservation_b8 \
+nohup bash scripts/train_mainline.sh \
+  > schema37_information_conservation_b8.log 2>&1 &
 ```
 
 The raw HDF5 default remains
@@ -41,7 +35,8 @@ The raw HDF5 default remains
 launchers use `/data/senwang/data` only for decoded/DINO caches and
 `/data/senwang/checkpoint` for T5/model weights. `DATA_ROOT`, `CACHE_DIR`,
 `DINO_CACHE_DIR` and `T5_CONDITION_PATH` remain individually overridable.
-Top resume is intentionally rejected because the object graph is fresh-only.
+Schema36 resume, optimizer resume and bottom-only migration are rejected;
+Schema37 formal experiments start fresh in an absent or empty output directory.
 
 Do not start the long run unless the batch-eight smoke remains below 22.0 GiB
 total device use and completes backward plus five-step deployment. The
@@ -57,9 +52,10 @@ the full policy trunk.
 
 ## Current Layout
 
-当前 policy 主线已经迁移到 `clearvla/policy/`；训练与烟测入口就是上一节的两个
-capability 脚本。V53、V87、V118 和 V119 脚本只保留作历史回放，
-不应被当作当前默认实验。
+当前实验主线位于 `clearvla/mainline/`；唯一默认训练与烟测入口是上一节的
+`scripts/train_mainline.sh` 和 `scripts/smoke_mainline.sh`。`clearvla/policy/`
+以及带 V-number 的脚本仅用于历史回放，不应被当作当前默认实验或 checkpoint
+身份来源。
 
 性能审计与 reader/DCT 的保留边界见：
 `docs/performance/typed_reader_dct_performance_audit.md`。
@@ -75,10 +71,10 @@ bash run_current_policy.sh
 
 `run_current_policy.sh` dispatches to `scripts/current_v53_full.sh`.
 
-## Recommended Experiments
+## Historical V53 Replay Examples
 
-Run these as controlled comparisons. V53-A and V53-B are the default mainline;
-the second experiment adds V53-C only.
+The commands below reproduce archived V53 comparisons only. They are not the
+active mainline and must not be used to start a Schema37 experiment.
 
 ### Experiment 1: V53-A + V53-B
 
@@ -122,7 +118,7 @@ nohup bash run_current_policy.sh > v53abc_canvas_serial_b8.log 2>&1 &
 
 If running both at the same time, put the second command on another free GPU.
 
-## Key Log Fields
+## Historical V53 Key Log Fields
 
 - `cxgate`, `xnorm`, `xratio`: direct `x_t` branch gate and branch strength.
 - `cscan`, `clat`: depth-scan condition norm and lateral concat condition norm.

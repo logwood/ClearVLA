@@ -992,6 +992,33 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   checkpoint identity.  Do not compare V120's short MD5 directly with the
   SHA-256 and call the data contract different.
 
+### Schema37 information conservation
+
+- Schema37 is identified by the exact serialized architecture schema `37`,
+  not by a V-number. Its recovery surface must not inherit Schema36 status
+  fields or the former joint `trajectory_basis*` simplex.
+- S exports FP32-canonical public common/residual and typed common/residual
+  owners. Read reconstruction/zero-mean errors together with goal, history and
+  typed boundary gradients; a finite carrier alone is not ownership evidence.
+- W exports one supervised four-interval field. W1 near-only decode exists only
+  on diagnostic batches; ordinary batches carry W1 owner state into W2 and
+  decode once. Appearance conditions semantic value without creating one from
+  zero, while geometry retains KxC and FP32 covariance through P2.
+- P2 semantic and geometry are complementary fields under one shared `.35`
+  contract. Their post-contract sum must equal the physical effect; neither
+  type competes for the other's probability mass.
+- P3 has six active lanes (`precision`, two typed effects, two typed temporal,
+  `state_change`). Each has an independent shared-parameter `4 basis + null`
+  read. Interpret lane-local null/non-null masses independently and pair them
+  with the final lane-sum pre/post-contract metrics.
+- The 19 `gradient_tensor_*` rows are carrier-level presence diagnostics. An
+  exact zero is meaningful evidence and remains complete; missing or nonfinite
+  is incomplete. Optimizer-owner gradients remain separate three-stage
+  raw/postlocal/postglobal rows and retain their ordinary nonzero health check.
+- Per-interval transport diagnostics use per-camera physical support. W
+  progress correlation reads the algebraic `semantic_delta`, not a BF16
+  `successor-current` reconstruction that can round away small effects.
+
 ## Gradients and interventions
 
 - Compare gradients by module and phase; do not compare a scalar parameter norm and a large-module norm as if they had identical dimensionality.

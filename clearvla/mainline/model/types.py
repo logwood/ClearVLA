@@ -366,20 +366,56 @@ class FactualPrecisionDock:
 
 
 @dataclass(frozen=True)
+class P2QueryDock:
+    """The only dynamic P1 boundary consumed by P2.
+
+    Keeping the three owners separate until the actual P2 consumer makes the
+    dynamic residual a query refinement rather than a second factual or policy
+    value.  ``combined`` intentionally preserves the established numerical sum.
+    """
+
+    action_query: Tensor  # [B,24,Q,H]
+    factual_base: Tensor  # [B,24,Q,H]
+    policy_query_residual: Tensor  # [B,24,Q,H]
+
+    def validate(self) -> None:
+        expected = tuple(self.action_query.shape)
+        if len(expected) != 4:
+            raise ValueError("P2 query dock must be [B,T,Q,H]")
+        for name in ("factual_base", "policy_query_residual"):
+            value = getattr(self, name)
+            if tuple(value.shape) != expected:
+                raise ValueError(f"P2 query {name} must align with action_query")
+            if value.device != self.action_query.device:
+                raise ValueError(f"P2 query {name} must share action_query device")
+
+    def combined(self) -> Tensor:
+        self.validate()
+        return self.action_query + self.factual_base + self.policy_query_residual
+
+
+@dataclass(frozen=True)
 class CompletedP1PolicyState:
     """Live P1 state with factual and P2-query ownership split.
 
     ``factual_base`` is the cached, observation-owned P1 detail and therefore
     has no noisy-action dependency. ``policy_query_residual`` is the live V120
     policy-block write and is owned only by P2's effect query.  It is neither a
-    fact nor a second P3 precision value. ``effect_query`` preserves V120's
-    post-P1 query seen by P2 without giving the query refinement a parallel
-    action-writing exit.
+    fact nor a second P3 precision value.  The three values are combined only
+    by :class:`P2QueryDock` at P2's real consumer boundary.
     """
 
     factual_base: Tensor  # [B,24,Q,H]
     policy_query_residual: Tensor  # [B,24,Q,H]
-    effect_query: Tensor  # action query + factual base + policy residual
+
+    def p2_dock(self, action_query: Tensor) -> P2QueryDock:
+        dock = P2QueryDock(
+            action_query=action_query,
+            factual_base=self.factual_base,
+            policy_query_residual=self.policy_query_residual,
+        )
+        dock.validate()
+        return dock
 
     def validate(
         self,
@@ -397,7 +433,7 @@ class CompletedP1PolicyState:
             raise ValueError("completed P1 policy state lost its action-basis axis")
         if hidden is not None and int(expected[3]) != int(hidden):
             raise ValueError("completed P1 policy state has the wrong hidden width")
-        for name in ("policy_query_residual", "effect_query"):
+        for name in ("policy_query_residual",):
             value = getattr(self, name)
             if tuple(value.shape) != expected:
                 raise ValueError(f"completed P1 {name} must align with factual_base")
@@ -491,22 +527,40 @@ class WorldIntentDock:
 
 @dataclass(frozen=True)
 class FactualIntentDock:
-    """Read-only S context for the unchanged V120 P1 factual reader."""
+    """Owner-preserving S context for the unchanged V120 P1 reader.
 
-    phase_context: Tensor  # [B,I,H]
-    condition_query_context: Tensor  # [B,I,H]
-    history_query_context: Tensor  # [B,I,H]
+    K is conditionally read inside S; P1 receives the resulting interval/type
+    context rather than a fixed K mean or an expanded global summary.
+    """
+
+    public_interval_context: Tensor  # [B,I,H]
+    goal_interval_context: Tensor  # [B,I,H]
+    history_interval_context: Tensor  # [B,I,H]
+    typed_interval_context: Tensor  # [B,I,3,H]
 
     def validate(self, *, hidden: int) -> None:
-        batch = int(self.phase_context.shape[0])
+        batch = int(self.public_interval_context.shape[0])
         expected = (batch, 4, hidden)
-        _shape(self.phase_context, expected, "factual-intent phase context")
         _shape(
-            self.condition_query_context,
+            self.public_interval_context,
             expected,
-            "factual-intent condition context",
+            "factual-intent public interval context",
         )
-        _shape(self.history_query_context, expected, "factual-intent history context")
+        _shape(
+            self.goal_interval_context,
+            expected,
+            "factual-intent goal interval context",
+        )
+        _shape(
+            self.history_interval_context,
+            expected,
+            "factual-intent history interval context",
+        )
+        _shape(
+            self.typed_interval_context,
+            (batch, 4, 3, hidden),
+            "factual-intent typed interval context",
+        )
 
 
 @dataclass(frozen=True)
@@ -569,6 +623,10 @@ class ObjectIntentState:
     object_tokens: Tensor  # [B,K,H], public-free object innovations
     public_interval_carrier: Tensor  # [B,4,H]
     interval_condition_innovation: Tensor  # [B,4,H]
+    public_common_condition: Tensor  # [B,H]
+    public_interval_residual_condition: Tensor  # [B,4,H]
+    goal_interval_context: Tensor  # [B,4,H]
+    history_interval_context: Tensor  # [B,4,H]
     policy_interval_context: Tensor  # [B,4,H]
     policy_interval_innovation: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
@@ -609,29 +667,20 @@ class ObjectIntentState:
         )
 
     def factual_dock(self) -> FactualIntentDock:
-        batch = int(self.policy_interval_context.shape[0])
-        common_policy = self.typed_common_policy_components.sum(dim=1) / (3.0**0.5)
         return FactualIntentDock(
-            # P1 may use the protected common intent as an address condition,
-            # but interval-residual future values remain owned by W/P2.
-            phase_context=(
-                self.interval_condition_innovation
-                + common_policy[:, None].expand(batch, 4, -1)
-            ),
-            condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
-                -1, 4, -1
-            ),
-            history_query_context=self.history_tokens[:, -1:, :].expand(
-                batch, 4, -1
+            public_interval_context=self.interval_condition_innovation,
+            goal_interval_context=self.goal_interval_context,
+            history_interval_context=self.history_interval_context,
+            typed_interval_context=(
+                self.typed_common_policy_components[:, None]
+                + self.typed_interval_residual_policy_components
             ),
         )
 
     def policy_dock(self) -> PolicyIntentDock:
-        public_common = self.interval_condition_innovation.mean(dim=1)
-        public_residual = self.interval_condition_innovation - public_common[:, None]
         return PolicyIntentDock(
-            common_key=public_common,
-            interval_residual_key=public_residual,
+            common_key=self.public_common_condition,
+            interval_residual_key=self.public_interval_residual_condition,
             typed_common_object_value=self.typed_common_value,
             typed_interval_residual_value=self.typed_interval_residual_value,
             temporal_control=self.temporal_queries,
@@ -650,6 +699,26 @@ class ObjectIntentState:
             self.interval_condition_innovation,
             (batch, 4, hidden),
             "interval condition innovation",
+        )
+        _shape(
+            self.public_common_condition,
+            (batch, hidden),
+            "public common condition",
+        )
+        _shape(
+            self.public_interval_residual_condition,
+            (batch, 4, hidden),
+            "public interval residual condition",
+        )
+        _shape(
+            self.goal_interval_context,
+            (batch, 4, hidden),
+            "goal interval context",
+        )
+        _shape(
+            self.history_interval_context,
+            (batch, 4, hidden),
+            "history interval context",
         )
         _shape(
             self.policy_interval_context,
@@ -738,6 +807,12 @@ class ObjectIntentState:
             object_tokens=self.object_tokens[:, index],
             public_interval_carrier=self.public_interval_carrier,
             interval_condition_innovation=self.interval_condition_innovation,
+            public_common_condition=self.public_common_condition,
+            public_interval_residual_condition=(
+                self.public_interval_residual_condition
+            ),
+            goal_interval_context=self.goal_interval_context,
+            history_interval_context=self.history_interval_context,
             policy_interval_context=self.policy_interval_context,
             policy_interval_innovation=self.policy_interval_innovation,
             temporal_queries=self.temporal_queries,
@@ -775,7 +850,7 @@ class IntentStateSupervision:
     Future object effects belong to W and are supervised only at the
     :class:`FutureObjectDynamics` boundary.  S retains a small observable
     state-summary objective; it no longer decodes a second copy of W's
-    semantic, geometry or status fields.
+    semantic or geometry fields.
     """
 
     state_prediction: Tensor  # adjacent interval increment [B,4,S]
@@ -897,13 +972,7 @@ class FutureObjectDynamics:
     semantic_delta: Tensor  # [B,I,K,D]
     transport_mean: Tensor  # camera-specific [B,I,K,C,2]
     transport_covariance: Tensor  # PSD xx/xy/yy [B,I,K,C,3]
-    visibility: Tensor  # zero-centred visibility change [B,I,K,1]
-    persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
     chart_availability: Tensor  # observable support [B,K,1]
-    # Teacher/online visibility-support diagnostic.  P2 authority comes only
-    # from chart_availability so a predicted disappearance cannot erase
-    # the very status effect that reports it.
-    future_selector_validity: Tensor  # diagnostic support [B,I,K,1]
     # Current object geometry remains a real camera mixture.  Reducing these
     # coordinates to one normalized-image mean creates a point that belongs
     # to no camera and silently penalizes multi-view objects in P2.
@@ -949,26 +1018,10 @@ class FutureObjectDynamics:
     def transport_interval_residual(self) -> Tensor:
         return self._residual(self.transport_mean)
 
-    @property
-    def visibility_common(self) -> Tensor:
-        return self._common(self.visibility)
-
-    @property
-    def visibility_interval_residual(self) -> Tensor:
-        return self._residual(self.visibility)
-
-    @property
-    def persistence_common(self) -> Tensor:
-        return self._common(self.persistence)
-
-    @property
-    def persistence_interval_residual(self) -> Tensor:
-        return self._residual(self.persistence)
-
     def validate_effect_decomposition(self) -> None:
         """Check the exact common-plus-residual algebra used by S/W/P2."""
 
-        for name in ("semantic_delta", "transport_mean", "visibility", "persistence"):
+        for name in ("semantic_delta", "transport_mean"):
             value = getattr(self, name)
             common = self._common(value)
             residual = self._residual(value)
@@ -1008,17 +1061,14 @@ class FutureObjectDynamics:
             (batch, intervals, objects, int(self.camera_coordinates.shape[2]), 3),
             "transport covariance",
         )
-        for name in ("visibility", "persistence"):
-            _shape(getattr(self, name), (batch, intervals, objects, 1), name)
+        if self.transport_covariance.dtype != torch.float32:
+            raise ValueError(
+                "future transport covariance must retain its FP32 PSD boundary"
+            )
         _shape(
             self.chart_availability,
             (batch, objects, 1),
             "chart availability",
-        )
-        _shape(
-            self.future_selector_validity,
-            (batch, intervals, objects, 1),
-            "future selector validity",
         )
         if self.camera_coordinates.ndim != 4 or tuple(
             self.camera_coordinates.shape[:2]
@@ -1051,10 +1101,7 @@ class FutureObjectDynamics:
             semantic_delta=self.semantic_delta[:, :, index],
             transport_mean=self.transport_mean[:, :, index],
             transport_covariance=self.transport_covariance[:, :, index],
-            visibility=self.visibility[:, :, index],
-            persistence=self.persistence[:, :, index],
             chart_availability=self.chart_availability[:, index],
-            future_selector_validity=self.future_selector_validity[:, :, index],
             camera_coordinates=self.camera_coordinates[:, index],
             camera_chart_availability=self.camera_chart_availability[:, index],
             camera_weights=self.camera_weights[:, index],
@@ -1066,7 +1113,6 @@ class FutureObjectDynamics:
         current = facts.content
         batch, objects, width = current.shape
         zeros = current.new_zeros(batch, intervals, objects, width)
-        scalar = current.new_zeros(batch, intervals, objects, 1)
         return cls(
             current_reference=current,
             successor_content=current[:, None].expand(-1, intervals, -1, -1),
@@ -1078,19 +1124,16 @@ class FutureObjectDynamics:
                 int(facts.camera_coordinates.shape[2]),
                 2,
             ),
-            transport_covariance=current.new_zeros(
+            transport_covariance=torch.zeros(
                 batch,
                 intervals,
                 objects,
                 int(facts.camera_coordinates.shape[2]),
                 3,
+                device=current.device,
+                dtype=torch.float32,
             ),
-            visibility=scalar,
-            persistence=scalar,
             chart_availability=facts.chart_availability,
-            future_selector_validity=facts.chart_availability[:, None].expand(
-                -1, intervals, -1, -1
-            ),
             camera_coordinates=facts.camera_coordinates.to(dtype=current.dtype),
             camera_chart_availability=facts.camera_chart_availability.to(
                 dtype=current.dtype

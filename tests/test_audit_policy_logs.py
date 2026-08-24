@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from clearvla.tools.audit_policy_logs import (
+    SCHEMA37_OWNER_GRADIENT_ROLES,
+    SCHEMA37_REQUIRED_STRUCTURE_KEYS,
+    SCHEMA37_TENSOR_GRADIENT_KEYS,
     STRUCTURE_KEYS,
     BatchPoint,
     ParsedRun,
@@ -1964,6 +1967,78 @@ class AuditPolicyLogsTest(unittest.TestCase):
         }
         self.assertEqual(
             missing_checks[f"structure/{missing_name}"],
+            "incomplete",
+        )
+
+    def test_schema37_recovery_uses_exact_active_ownership_surface(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema37"
+        candidate["manifest"]["architecture_schema"] = 37
+        candidate["structure"] = {
+            name: {
+                "tail_median": (
+                    0.5 if name.endswith("pair_cosine") else 0.1
+                )
+            }
+            for name in SCHEMA37_REQUIRED_STRUCTURE_KEYS
+        }
+        candidate["gradients"].update(
+            {
+                name: {"tail_median": 0.0}
+                for name in SCHEMA37_TENSOR_GRADIENT_KEYS
+            }
+        )
+        candidate["gradients"].update(
+            {
+                f"gradient_{stage}_{role}_l2": {"tail_median": 0.01}
+                for stage in ("raw", "postlocal", "postglobal")
+                for role in SCHEMA37_OWNER_GRADIENT_ROLES
+            }
+        )
+
+        removed_schema36_metrics = (
+            "object_p2_status_consumer_active",
+            "object_p2_status_common_projected_candidate_value_rms",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis0",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis1",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis2",
+            "evidence_policy_delta_attnres_source_mass_trajectory_basis3",
+        )
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+
+        for name in SCHEMA37_REQUIRED_STRUCTURE_KEYS:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+        for name in removed_schema36_metrics:
+            self.assertNotIn(f"structure/{name}", checks)
+        for name in SCHEMA37_TENSOR_GRADIENT_KEYS:
+            self.assertEqual(checks[f"tensor_gradient/{name}"], "pass")
+        for stage in ("raw", "postlocal", "postglobal"):
+            for role in SCHEMA37_OWNER_GRADIENT_ROLES:
+                name = f"gradient_{stage}_{role}_l2"
+                self.assertEqual(checks[f"gradient/{name}"], "pass")
+
+        missing_structure = "object_p2_geometry_postcontract_rms"
+        candidate["structure"].pop(missing_structure)
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[f"structure/{missing_structure}"],
+            "incomplete",
+        )
+
+        candidate["structure"][missing_structure] = {"tail_median": 0.1}
+        missing_gradient = "gradient_tensor_w_appearance_interval_rms"
+        candidate["gradients"].pop(missing_gradient)
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[f"tensor_gradient/{missing_gradient}"],
             "incomplete",
         )
 

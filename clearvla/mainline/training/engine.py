@@ -482,10 +482,11 @@ class MainlineTrainingEngine:
             .mean(dim=1, keepdim=True)
         )
         state_change = sample_rms(intent.state_change_evidence)
-        successor_innovation = sample_rms(
-            dynamics.successor_content.detach().float()
-            - dynamics.current_reference.detach().float()[:, None]
-        )
+        # ``semantic_delta`` is the exported algebraic owner.  Reconstructing
+        # it as BF16 successor-current can round small but real W effects to
+        # zero and corrupt only this audit correlation while the loss/P2 path
+        # remains active.
+        successor_innovation = sample_rms(dynamics.semantic_delta)
         w_interval_variation = sample_rms(
             dynamics.semantic_delta.detach().float()
             - dynamics.semantic_delta.detach().float().mean(dim=1, keepdim=True)

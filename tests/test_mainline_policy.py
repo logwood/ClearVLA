@@ -379,17 +379,11 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         and parameter.grad is not None
         and not bool(parameter.grad.detach().abs().sum() > 0)
     ]
-    # Visibility/persistence have an exact-zero, independently supervised
-    # neutral target because this dataset has no physical occlusion labels.
-    # Their zero-initialized head and sole appearance projection are therefore
-    # at the true optimum on an untouched fresh model.  A separate perturbed
-    # status test proves that ordinary autograd reconnects this restorative
-    # regularizer; none of these tensors is an action-path consumer.
-    assert set(dormant) == {
-        "top.dynamics.object_appearance.weight",
-        "top.dynamics.visibility_head.weight",
-        "top.dynamics.persistence_head.weight",
-    }
+    # Schema37 removes the unsupervised status heads and makes appearance a
+    # zero-preserving conditioner of the supervised semantic successor.  After
+    # the initialized action-facing heads have taken one update, every active
+    # owner therefore carries ordinary task gradient.
+    assert dormant == []
 
     # Cross the serialized V120 warm-up boundary and verify that the same
     # ordinary task graph opens every mature execution owner.
@@ -931,7 +925,7 @@ def test_dynamic_p1_splits_static_fact_from_live_policy_residual() -> None:
         second.policy_query_residual,
     )
     torch.testing.assert_close(
-        first.effect_query,
+        first.p2_dock(query).combined(),
         query + first.factual_base + first.policy_query_residual,
         atol=0.0,
         rtol=0.0,
@@ -944,7 +938,7 @@ def test_dynamic_p1_splits_static_fact_from_live_policy_residual() -> None:
     )[0]
     assert factual_action_gradient is None
     effect_action_gradient = torch.autograd.grad(
-        first.effect_query.float().sum(),
+        first.p2_dock(query).combined().float().sum(),
         query,
     )[0]
     assert torch.count_nonzero(effect_action_gradient) > 0
@@ -979,8 +973,9 @@ def test_dynamic_p1_policy_modulation_is_smoothly_bounded_before_hidden_use() ->
     assert float(metrics["p1_policy_modulation_scale_raw_max_abs"]) > 4.0
     assert float(metrics["p1_policy_modulation_shift_max_abs"]) <= 4.0001
     assert float(metrics["p1_policy_modulation_scale_max_abs"]) <= 4.0001
-    assert torch.isfinite(state.effect_query).all()
-    state.effect_query.float().square().mean().backward()
+    p2_query = state.p2_dock(query).combined()
+    assert torch.isfinite(p2_query).all()
+    p2_query.float().square().mean().backward()
     assert model.bottom.p1_policy_block.mod.weight.grad is not None
     assert torch.isfinite(model.bottom.p1_policy_block.mod.weight.grad).all()
 
@@ -1152,8 +1147,16 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     role_bank = model.bottom._role_bank(compiled.plan)
     assert role_bank.source_names == compiled.plan.source_names
     # The protected factual base is algebraically outside optional routing.
-    # Only the four non-zero P3 innovations may compete with the explicit null.
-    assert len(role_bank.source_names) == 4
+    # Six typed P3 innovations retain lane identity into the bottom.  Each lane
+    # owns its own basis+null route rather than entering one cross-lane simplex.
+    assert role_bank.source_names == (
+        "p3_precision",
+        "p3_effect_semantic",
+        "p3_effect_geometry",
+        "p3_temporal_semantic",
+        "p3_temporal_geometry",
+        "p3_state_change",
+    )
     assert torch.equal(role_bank.protected_detail, compiled.plan.protected_base)
     state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
         seed_context
@@ -1581,6 +1584,39 @@ def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlati
     }
     assert expected <= set(audit_metrics)
     assert all(torch.isfinite(value) for value in audit_metrics.values())
+
+    # The exact W owner is semantic_delta.  A BF16 successor reconstruction
+    # may round small deltas away, so changing only the redundant successor
+    # view must not change the progress audit.
+    successor_only = replace(
+        training_state.top.predicted_dynamics,
+        successor_content=torch.randn_like(
+            training_state.top.predicted_dynamics.successor_content
+        ),
+    )
+    successor_only_state = replace(
+        training_state,
+        top=replace(
+            training_state.top,
+            predicted_dynamics=successor_only,
+        ),
+    )
+    successor_only_metrics = MainlineTrainingEngine._audit_progress_metrics(
+        batch,
+        EncodedTrainingBatch(
+            cache=cache,
+            training_state=successor_only_state,
+            metrics=metrics,
+        ),
+    )
+    torch.testing.assert_close(
+        successor_only_metrics[
+            "object_w_audit_frame_progress_successor_correlation"
+        ],
+        audit_metrics["object_w_audit_frame_progress_successor_correlation"],
+        atol=0.0,
+        rtol=0.0,
+    )
 
     # A learned interval-address template is not observable progress.  If the
     # exact supervised condition innovation is zero, its audit centroid must

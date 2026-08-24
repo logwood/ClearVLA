@@ -6,7 +6,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import smooth_rms_contract, variance_floored_centered_norm
+from .routing import (
+    canonical_common_residual,
+    smooth_rms_contract,
+    variance_floored_centered_norm,
+)
 from .types import (
     INTERVAL_BOUNDS,
     ActionIntentDock,
@@ -320,9 +324,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
             differential_score
             * temperature.to(device=differential_score.device)[None, None, None]
         )
-        residual_signal = residual_signal - residual_signal.mean(
-            dim=1, keepdim=True
+        # ``tanh`` does not commute with interval centring.  The nonlinear
+        # residual mean is therefore a real typed common value, not a gauge to
+        # discard.  Transfer it to the common owner before exposing the
+        # zero-mean interval residual.  This keeps the established selector
+        # heads and null comparison while closing the previous information
+        # loss at the common/residual boundary.
+        residual_mean_correction, residual_signal = canonical_common_residual(
+            residual_signal,
+            dim=1,
         )
+        common_signal = common_signal + residual_mean_correction
         # One shared scale per object/type preserves the zero-mean identity
         # while keeping the signed selector in [-1, 1].
         residual_signal = residual_signal / residual_signal.abs().amax(
@@ -332,21 +344,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
             0.0, 1.0
         )
         interval_validity = common_validity[:, None]
-        common_mass = (
-            common_signal.abs()[..., None] * common_validity
-        ).to(dtype=typed_route.dtype)
+        typed_route_f = typed_route.float()
+        common_mass = common_signal.abs()[..., None] * common_validity
         common_value = (
-            common_signal[..., None].to(dtype=typed_route.dtype)
-            * common_validity.to(dtype=typed_route.dtype)
-            * typed_route
+            common_signal[..., None]
+            * common_validity
+            * typed_route_f
         )
-        interval_residual_mass = (
-            residual_signal.abs()[..., None] * interval_validity
-        ).to(dtype=typed_route.dtype)
+        interval_residual_mass = residual_signal.abs()[..., None] * interval_validity
         interval_residual_value = (
-            residual_signal[..., None].to(dtype=typed_route.dtype)
-            * interval_validity.to(dtype=typed_route.dtype)
-            * typed_route[:, None]
+            residual_signal[..., None]
+            * interval_validity
+            * typed_route_f[:, None]
         )
 
         common_components: list[Tensor] = []
@@ -354,14 +363,22 @@ class StatelessObjectIntentOrganizer(nn.Module):
         for type_index, projection in enumerate(
             (self.object_semantic, self.object_appearance, self.object_geometry)
         ):
-            common_route = common_value[..., type_index, :].mean(dim=1)
+            common_numerator = common_value[..., type_index, :].sum(dim=1)
+            common_denominator_mass = common_mass[
+                ..., type_index, 0
+            ].sum(dim=1).clamp_min(1.0)
+            common_route = common_numerator / common_denominator_mass[:, None]
             common_component, _ = smooth_rms_contract(
                 projection(common_route), 0.35
             )
             common_components.append(common_component)
-            residual_route = interval_residual_value[
+            residual_numerator = interval_residual_value[
                 ..., type_index, :
-            ].mean(dim=2)
+            ].sum(dim=2)
+            residual_denominator_mass = interval_residual_mass[
+                ..., type_index, 0
+            ].sum(dim=2).clamp_min(1.0)
+            residual_route = residual_numerator / residual_denominator_mass[..., None]
             residual_component, _ = smooth_rms_contract(
                 projection(residual_route), 0.35
             )
@@ -369,6 +386,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
         typed_common_components = torch.stack(common_components, dim=1)
         typed_interval_residual_components = torch.stack(
             residual_components, dim=2
+        )
+        # Conditional K masses, bias-free projections and their per-token RMS
+        # contracts do not commute with interval centring.  Canonicalize at the
+        # actual S consumer boundary and transfer the recreated common mode to
+        # the matching type owner.  The per-interval sum is unchanged.
+        component_correction, typed_interval_residual_components = (
+            canonical_common_residual(
+                typed_interval_residual_components,
+                dim=1,
+            )
+        )
+        typed_common_components = (
+            typed_common_components.float() + component_correction
         )
         common_raw_context = typed_common_components.sum(dim=1) / (3.0**0.5)
         _, common_context_scale = smooth_rms_contract(common_raw_context, 0.35)
@@ -379,11 +409,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             typed_interval_residual_components.sum(dim=2) / (3.0**0.5)
         )
         _, residual_context_scale = smooth_rms_contract(
-            residual_raw_context, 0.35
+            residual_raw_context.reshape(int(residual_raw_context.shape[0]), -1),
+            0.35,
         )
         typed_interval_residual_components = (
             typed_interval_residual_components
-            * residual_context_scale[:, :, None].to(
+            * residual_context_scale[:, None, None].to(
                 dtype=typed_interval_residual_components.dtype
             )
         )
@@ -469,7 +500,25 @@ class StatelessObjectIntentOrganizer(nn.Module):
             + history_innovation
             + object_innovation
         )
-        interval_condition_innovation = public_intervals - interval_template
+        raw_interval_condition_innovation = public_intervals - interval_template
+        # Contract the complete [I,H] public value with one per-sample scale.
+        # Per-interval contracts would alter the relative interval geometry;
+        # applying the shared scale first makes the following common/residual
+        # decomposition exact and reconstructible.
+        contracted_public_flat, public_condition_scale = smooth_rms_contract(
+            raw_interval_condition_innovation.reshape(batch, -1),
+            0.35,
+        )
+        interval_condition_innovation = contracted_public_flat.reshape_as(
+            raw_interval_condition_innovation
+        )
+        public_common_condition, public_interval_residual_condition = (
+            canonical_common_residual(
+                interval_condition_innovation,
+                dim=1,
+            )
+        )
+        public_intervals = interval_template + interval_condition_innovation
         (
             typed_common_mass,
             typed_common_value,
@@ -546,6 +595,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             object_tokens=objects,
             public_interval_carrier=public_intervals,
             interval_condition_innovation=interval_condition_innovation,
+            public_common_condition=public_common_condition,
+            public_interval_residual_condition=(
+                public_interval_residual_condition
+            ),
+            goal_interval_context=goal_innovation,
+            history_interval_context=history_innovation,
             policy_interval_context=policy_intervals,
             policy_interval_innovation=policy_interval_innovation,
             temporal_queries=temporal_innovation,
@@ -606,6 +661,43 @@ class StatelessObjectIntentOrganizer(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "object_intent_condition_raw_rms": raw_interval_condition_innovation
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_condition_contract_scale": public_condition_scale
+            .detach()
+            .float()
+            .mean(),
+            "object_intent_public_common_rms": public_common_condition
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_public_residual_rms": public_interval_residual_condition
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_public_reconstruction_max_abs": (
+                public_common_condition[:, None]
+                + public_interval_residual_condition
+                - interval_condition_innovation.float()
+            )
+            .detach()
+            .abs()
+            .amax(),
+            "object_intent_public_residual_mean_max_abs": (
+                public_interval_residual_condition.detach()
+                .float()
+                .mean(dim=1)
+                .abs()
+                .amax()
+            ),
             "object_intent_condition_interval_variation": interval_condition_innovation
             .detach()
             .float()
@@ -661,6 +753,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_typed_policy_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
             "object_intent_typed_common_policy_context_rms": typed_common_policy_context.detach().float().square().mean().sqrt(),
             "object_intent_typed_interval_residual_policy_context_rms": typed_interval_residual_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_policy_residual_mean_rms": (
+                typed_interval_residual_policy_components.detach()
+                .float()
+                .mean(dim=1)
+                .square()
+                .mean()
+                .sqrt()
+            ),
             "object_intent_typed_common_norm_denominator_min": typed_common_denominator.detach().float().amin(),
             "object_intent_typed_differential_norm_denominator_min": typed_differential_denominator.detach().float().amin(),
             "object_intent_typed_fact_unsupported_fraction": (
@@ -761,7 +861,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
 class ObservableIntentStateSupervisor(nn.Module):
     """Supervise adjacent observable-state increments owned by S.
 
-    Semantic, geometry and status effects are owned by W.  Decoding those
+    Semantic and geometry effects are owned by W.  Decoding those
     same teacher targets before W made an identity W1/W2 a valid optimum even
     though the auxiliary coefficient was small.  This module deliberately
     has no object-effect heads or W field argument.

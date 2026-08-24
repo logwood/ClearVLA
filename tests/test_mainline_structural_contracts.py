@@ -20,6 +20,8 @@ from clearvla.mainline.model.compiler import (
     ObjectConsequenceState,
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
+    TypedP2EffectRead,
+    ZeroPreservingObjectConsequence,
 )
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
 from clearvla.mainline.model.grounding import (
@@ -46,8 +48,8 @@ from clearvla.mainline.model.policy import OnlinePolicyCache
 from clearvla.mainline.model.teacher import ObjectFutureTeacher
 from clearvla.mainline.model.top import DeploymentTopCache, ObjectIntentDynamicsTop
 from clearvla.mainline.model.types import (
-    CompletedP1PolicyState,
     INTERVAL_BOUNDS,
+    CompletedP1PolicyState,
     FutureObjectDynamics,
     LocalFactSet,
     PolicyIntentDock,
@@ -55,6 +57,7 @@ from clearvla.mainline.model.types import (
 from clearvla.mainline.training.losses import flow_geometry_terms, future_dynamics_terms
 from clearvla.mainline.v120_core.profile import build_v120_visual_config
 from clearvla.mainline.v120_core.refinement import NestedLowRankContractionBank
+from clearvla.mainline.v120_core.role_delta_attnres import RoleDeltaAttnRes
 
 
 def _assert_same_typed_value(left, right) -> None:
@@ -77,6 +80,56 @@ def test_feature_chart_sampling_owns_the_fp16_bf16_boundary() -> None:
     assert sampled.dtype == torch.float32
     assert tuple(sampled.shape) == (1, 2, 2, 2, 4, 8)
     assert bool(valid.all())
+
+
+def test_lane_local_bottom_selector_preserves_parent_initialization_stream() -> None:
+    """Removing serialized source rows must not rerandomize the live bottom."""
+
+    torch.manual_seed(37001)
+    parent = RoleDeltaAttnRes(
+        16,
+        8,
+        max_sources=20,
+        max_value_rms=0.35,
+        normalization_floor=0.25,
+    )
+    parent_next = nn.Linear(16, 16, bias=False)
+
+    torch.manual_seed(37001)
+    current = RoleDeltaAttnRes(
+        16,
+        8,
+        max_sources=4,
+        initialization_source_rows=20,
+        max_value_rms=0.35,
+        normalization_floor=0.25,
+    )
+    current_next = nn.Linear(16, 16, bias=False)
+
+    torch.testing.assert_close(
+        current.source_key,
+        parent.source_key[:4],
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        current.query_proj.weight,
+        parent.query_proj.weight,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        current.key_proj.weight,
+        parent.key_proj.weight,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        current_next.weight,
+        parent_next.weight,
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def _local_facts(
@@ -1139,7 +1192,7 @@ def test_grounder_does_not_reinject_public_chart_into_object_candidates() -> Non
     assert not any("public_address_key" in name for name in names)
 
 
-def test_w_zero_initialized_visibility_preserves_current_selector_support() -> None:
+def test_w_exports_no_unobserved_status_and_keeps_current_chart_authority() -> None:
     torch.manual_seed(25)
     facts, _ = DenseObjectGrounder(
         hidden=16,
@@ -1158,14 +1211,24 @@ def test_w_zero_initialized_visibility_preserves_current_selector_support() -> N
         facts=facts,
         hidden=torch.zeros(1, 2, 4, 16),
         typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=torch.zeros(1, 2, 4, 3, 16),
+        typed_interval_innovation=torch.zeros(1, 2, 4, 3, 16),
     )
-    torch.testing.assert_close(
-        field.future_selector_validity,
-        facts.chart_availability[:, None].expand(-1, 2, -1, -1),
-        atol=0.0,
-        rtol=0.0,
-    )
+    assert {field.name for field in fields(FutureObjectDynamics)} == {
+        "current_reference",
+        "successor_content",
+        "semantic_delta",
+        "transport_mean",
+        "transport_covariance",
+        "chart_availability",
+        "camera_coordinates",
+        "camera_chart_availability",
+        "camera_weights",
+    }
+    assert not hasattr(dynamics, "visibility_head")
+    assert not hasattr(dynamics, "persistence_head")
+    assert not hasattr(field, "future_selector_validity")
+    assert not hasattr(field, "visibility")
+    assert not hasattr(field, "persistence")
     torch.testing.assert_close(
         field.chart_availability,
         facts.chart_availability,
@@ -1173,21 +1236,9 @@ def test_w_zero_initialized_visibility_preserves_current_selector_support() -> N
         rtol=0.0,
     )
 
-    # Predicted visibility is a status value, not authority to erase the
-    # semantic/geometry candidates supervised in the same W field.
-    with torch.no_grad():
-        dynamics.visibility_head.weight.fill_(20.0)
-    appearance = torch.zeros(1, 2, 4, 3, 16)
-    appearance[..., 1, :] = 1.0
-    suppressed = dynamics._field(
-        facts=facts,
-        hidden=torch.zeros(1, 2, 4, 16),
-        typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=appearance,
-    )
     torch.testing.assert_close(
-        suppressed.future_selector_validity,
-        field.future_selector_validity,
+        field.camera_chart_availability,
+        facts.camera_chart_availability,
         atol=0.0,
         rtol=0.0,
     )
@@ -1210,7 +1261,7 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
         facts=facts,
         hidden=torch.zeros(1, 2, 4, 16, requires_grad=True),
         typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=torch.zeros(1, 2, 4, 3, 16),
+        typed_interval_innovation=torch.zeros(1, 2, 4, 3, 16),
     )
     innovation = field.successor_content - field.current_reference[:, None]
     assert torch.count_nonzero(innovation) == 0
@@ -1218,7 +1269,7 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
     assert facts.content.grad is None or torch.count_nonzero(facts.content.grad) == 0
 
 
-def test_w_typed_common_residual_values_drive_only_owned_output_fields() -> None:
+def test_w_appearance_conditions_semantic_zero_preservingly_with_gradients() -> None:
     torch.manual_seed(291)
     facts, _ = DenseObjectGrounder(
         hidden=16,
@@ -1230,52 +1281,74 @@ def test_w_typed_common_residual_values_drive_only_owned_output_fields() -> None
     dynamics = ObjectFutureDynamicsCompiler(
         hidden=16, content_dim=8, route_dim=4, heads=4
     )
+    semantic = torch.randn(1, 2, 4, 16, requires_grad=True)
+    appearance = torch.randn_like(semantic, requires_grad=True)
+    conditioned, modulation, denominator = dynamics._appearance_condition_semantic(
+        semantic,
+        appearance,
+    )
+    assert torch.count_nonzero(modulation) > 0
+    assert float(denominator.detach().amin()) >= 0.25
+    semantic_gradient, appearance_gradient = torch.autograd.grad(
+        conditioned.float().square().sum(),
+        (semantic, appearance),
+    )
+    assert torch.count_nonzero(semantic_gradient) > 0
+    assert torch.count_nonzero(appearance_gradient) > 0
+
+    appearance_zero, modulation_zero, _ = dynamics._appearance_condition_semantic(
+        semantic.detach(),
+        torch.zeros_like(appearance),
+    )
+    torch.testing.assert_close(appearance_zero, semantic.detach(), atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(modulation_zero) == 0
+    semantic_zero, semantic_zero_modulation, _ = (
+        dynamics._appearance_condition_semantic(
+            torch.zeros_like(semantic),
+            appearance.detach(),
+        )
+    )
+    assert torch.count_nonzero(semantic_zero) == 0
+    assert torch.count_nonzero(semantic_zero_modulation) == 0
+
+    # Appearance is no longer decoded as an unsupervised status value.  It can
+    # modulate the semantic owner, while geometry remains the sole camera-value
+    # owner and retains the real C axis.
     with torch.no_grad():
         dynamics.delta_head.weight.fill_(0.05)
         dynamics.transport_head.weight.fill_(0.05)
         dynamics.covariance_head.weight.fill_(0.05)
-        dynamics.visibility_head.weight.fill_(0.05)
-        dynamics.persistence_head.weight.fill_(0.05)
     hidden = torch.zeros(1, 2, 4, 16)
-    zero = torch.zeros(1, 2, 4, 3, 16)
     common = torch.zeros(1, 4, 3, 16)
-    baseline = dynamics._field(
+    interval = torch.zeros(1, 2, 4, 3, 16)
+    interval[..., 0, :] = semantic.detach()
+    semantic_only = dynamics._field(
         facts=facts,
         hidden=hidden,
         typed_common=common,
-        typed_interval_residual=zero,
+        typed_interval_innovation=interval,
     )
-
-    def changed(type_index: int) -> FutureObjectDynamics:
-        sidecars = zero.clone()
-        sidecars[..., type_index, :] = torch.randn_like(
-            sidecars[..., type_index, :]
-        )
-        return dynamics._field(
-            facts=facts,
-            hidden=hidden,
-            typed_common=common,
-            typed_interval_residual=sidecars,
-        )
-
-    semantic = changed(0)
-    assert not torch.equal(semantic.semantic_delta, baseline.semantic_delta)
-    torch.testing.assert_close(semantic.transport_mean, baseline.transport_mean)
-    torch.testing.assert_close(semantic.visibility, baseline.visibility)
-
-    appearance = changed(1)
-    assert not torch.equal(appearance.visibility, baseline.visibility)
-    assert not torch.equal(appearance.persistence, baseline.persistence)
-    torch.testing.assert_close(appearance.semantic_delta, baseline.semantic_delta)
-    torch.testing.assert_close(appearance.transport_mean, baseline.transport_mean)
-
-    geometry = changed(2)
-    assert not torch.equal(geometry.transport_mean, baseline.transport_mean)
-    assert not torch.equal(
-        geometry.transport_covariance, baseline.transport_covariance
+    interval[..., 1, :] = appearance.detach()
+    with_appearance = dynamics._field(
+        facts=facts,
+        hidden=hidden,
+        typed_common=common,
+        typed_interval_innovation=interval,
     )
-    torch.testing.assert_close(geometry.semantic_delta, baseline.semantic_delta)
-    torch.testing.assert_close(geometry.visibility, baseline.visibility)
+    assert not torch.equal(with_appearance.semantic_delta, semantic_only.semantic_delta)
+    torch.testing.assert_close(
+        with_appearance.transport_mean,
+        semantic_only.transport_mean,
+    )
+    interval.zero_()
+    interval[..., 2, :] = torch.randn_like(interval[..., 2, :])
+    geometry = dynamics._field(
+        facts=facts,
+        hidden=hidden,
+        typed_common=common,
+        typed_interval_innovation=interval,
+    )
+    assert torch.count_nonzero(geometry.semantic_delta) == 0
     assert geometry.transport_mean.shape == (1, 2, 4, 2, 2)
     assert geometry.transport_covariance.shape == (1, 2, 4, 2, 3)
 
@@ -1313,13 +1386,13 @@ def test_w_camera_geometry_head_is_equivariant_local_and_psd() -> None:
         facts=first_facts,
         hidden=hidden,
         typed_common=typed_common,
-        typed_interval_residual=typed_residual,
+        typed_interval_innovation=typed_residual,
     )
     second = dynamics._field(
         facts=second_facts,
         hidden=hidden,
         typed_common=typed_common,
-        typed_interval_residual=typed_residual,
+        typed_interval_innovation=typed_residual,
     )
     assert not torch.equal(second.transport_mean[..., 0, :], first.transport_mean[..., 0, :])
     torch.testing.assert_close(
@@ -1348,7 +1421,7 @@ def test_w_camera_geometry_head_is_equivariant_local_and_psd() -> None:
         facts=permuted_facts,
         hidden=hidden,
         typed_common=typed_common,
-        typed_interval_residual=typed_residual,
+        typed_interval_innovation=typed_residual,
     )
     torch.testing.assert_close(
         permuted.transport_mean,
@@ -1371,6 +1444,35 @@ def test_w_camera_geometry_head_is_equivariant_local_and_psd() -> None:
     assert bool((determinant >= -1.0e-7).all())
 
 
+def test_w_camera_covariance_retains_fp32_psd_under_bf16_autocast() -> None:
+    torch.manual_seed(2912)
+    facts, _ = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )(_local_facts(cameras=2, content=8, route=4, hidden=16))
+    dynamics = ObjectFutureDynamicsCompiler(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        heads=4,
+    )
+    with torch.no_grad():
+        dynamics.covariance_head.weight.normal_(mean=0.0, std=1.5)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        field = dynamics._field(
+            facts=facts,
+            hidden=torch.zeros(1, 4, 4, 16),
+            typed_common=torch.randn(1, 4, 3, 16),
+            typed_interval_innovation=torch.randn(1, 4, 4, 3, 16),
+        )
+    assert field.transport_covariance.dtype == torch.float32
+    xx, xy, yy = field.transport_covariance.unbind(dim=-1)
+    assert bool((xx * yy - xy.square() >= -1.0e-7).all())
+
+
 def test_w_field_decoder_cannot_republicize_completed_typed_fields() -> None:
     torch.manual_seed(292)
     facts, _ = DenseObjectGrounder(
@@ -1386,8 +1488,6 @@ def test_w_field_decoder_cannot_republicize_completed_typed_fields() -> None:
     with torch.no_grad():
         dynamics.delta_head.weight.fill_(0.05)
         dynamics.transport_head.weight.fill_(0.05)
-        dynamics.visibility_head.weight.fill_(0.05)
-        dynamics.persistence_head.weight.fill_(0.05)
     zero = torch.zeros(1, 2, 4, 3, 16)
     public_a = torch.randn(1, 2, 4, 16)
     public_b = torch.randn_like(public_a)
@@ -1395,20 +1495,15 @@ def test_w_field_decoder_cannot_republicize_completed_typed_fields() -> None:
         facts=facts,
         hidden=public_a,
         typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=zero,
+        typed_interval_innovation=zero,
     )
     zero_b = dynamics._field(
         facts=facts,
         hidden=public_b,
         typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=zero,
+        typed_interval_innovation=zero,
     )
-    for name in (
-        "semantic_delta",
-        "transport_mean",
-        "visibility",
-        "persistence",
-    ):
+    for name in ("semantic_delta", "transport_mean"):
         torch.testing.assert_close(getattr(zero_a, name), getattr(zero_b, name))
         assert torch.count_nonzero(getattr(zero_a, name)) == 0
 
@@ -1417,17 +1512,16 @@ def test_w_field_decoder_cannot_republicize_completed_typed_fields() -> None:
         facts=facts,
         hidden=public_a,
         typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=typed,
+        typed_interval_innovation=typed,
     )
     typed_b = dynamics._field(
         facts=facts,
         hidden=public_b,
         typed_common=torch.zeros(1, 4, 3, 16),
-        typed_interval_residual=typed,
+        typed_interval_innovation=typed,
     )
     torch.testing.assert_close(typed_a.semantic_delta, typed_b.semantic_delta)
     torch.testing.assert_close(typed_a.transport_mean, typed_b.transport_mean)
-    torch.testing.assert_close(typed_a.visibility, typed_b.visibility)
 
 
 def test_w_full_base_interaction_is_zero_preserving_and_condition_sensitive() -> None:
@@ -1514,7 +1608,7 @@ def test_w_typed_base_interaction_is_deferred_to_each_completed_owner() -> None:
         collect_diagnostics=True,
     )
     assert float(w1_metrics["object_w_common_base_interaction_rms"]) > 0.0
-    assert float(w1_metrics["object_w_residual_base_interaction_rms"]) > 0.0
+    assert float(w1_metrics["object_w_interval_base_interaction_rms"]) > 0.0
     _, w2_metrics = top.dynamics.forward_w2(
         facts=facts,
         intent=intent.world_dock(),
@@ -1552,7 +1646,7 @@ def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
         collect_diagnostics=True,
     )
     assert not torch.equal(working.common_typed, common_input)
-    assert not torch.equal(working.near_residual_typed, residual_input[:, :2])
+    assert not torch.equal(working.near_interval_innovation, residual_input[:, :2])
     assert float(w1_metrics["object_w1_common_processing_delta_rms"]) > 0.0
     completed, completed_metrics = top.dynamics.forward_w2(
         facts=facts,
@@ -1591,8 +1685,8 @@ def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
         collect_diagnostics=False,
     )
     assert torch.count_nonzero(zero_working.common_typed) == 0
-    assert torch.count_nonzero(zero_working.near_residual_typed) == 0
-    assert torch.count_nonzero(zero_working.far_residual_typed) == 0
+    assert torch.count_nonzero(zero_working.near_interval_innovation) == 0
+    assert torch.count_nonzero(zero_working.far_interval_innovation) == 0
     zero_completed, _ = top.dynamics.forward_w2(
         facts=facts,
         intent=zero_typed.world_dock(),
@@ -1602,12 +1696,10 @@ def test_w_typed_values_cross_w1_and_w2_and_preserve_exact_zero() -> None:
     )
     assert torch.count_nonzero(zero_completed.semantic_delta) == 0
     assert torch.count_nonzero(zero_completed.transport_mean) == 0
-    assert torch.count_nonzero(zero_completed.visibility) == 0
-    assert torch.count_nonzero(zero_completed.persistence) == 0
 
 
-def test_w2_near_residual_can_update_far_but_not_the_common_owner() -> None:
-    """W2 common has zero Jacobian to W1 near-interval residuals."""
+def test_w2_near_innovation_updates_far_without_rereading_common() -> None:
+    """W2 reads near innovation while forwarding W1 common unchanged."""
 
     torch.manual_seed(294)
     top = _object_top().eval()
@@ -1622,43 +1714,60 @@ def test_w2_near_residual_can_update_far_but_not_the_common_owner() -> None:
         collect_diagnostics=False,
     )
     coarse = top.coarse_action(intent.action_dock())
-    _, working, _ = top.dynamics.forward_w1(
+    quiet_field, working, _ = top.dynamics.forward_w1(
         facts=facts,
         intent=intent.world_dock(),
         action=coarse,
         collect_diagnostics=False,
     )
+    assert quiet_field is None
+    assert not hasattr(working, "near_field")
     with torch.no_grad():
         top.dynamics.delta_head.weight.normal_(mean=0.0, std=0.05)
-    near_residual = (
-        working.near_residual_typed.detach().clone().requires_grad_(True)
+    near_innovation = (
+        working.near_interval_innovation.detach().clone().requires_grad_(True)
     )
-    completed, metrics = top.dynamics.forward_w2(
-        facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
-        w1_state=replace(working, near_residual_typed=near_residual),
-        collect_diagnostics=True,
+    captured: dict[str, torch.Tensor] = {}
+    original_field = top.dynamics._field
+
+    def capture_field(**kwargs):
+        captured["typed_common"] = kwargs["typed_common"]
+        captured["typed_interval_innovation"] = kwargs[
+            "typed_interval_innovation"
+        ]
+        return original_field(**kwargs)
+
+    with mock.patch.object(top.dynamics, "_field", side_effect=capture_field):
+        completed, metrics = top.dynamics.forward_w2(
+            facts=facts,
+            intent=intent.world_dock(),
+            action=coarse,
+            w1_state=replace(working, near_interval_innovation=near_innovation),
+            collect_diagnostics=True,
+        )
+    torch.testing.assert_close(
+        captured["typed_common"],
+        working.common_typed,
+        atol=0.0,
+        rtol=0.0,
     )
-    common_gradient = torch.autograd.grad(
-        completed.semantic_common.square().sum(),
-        near_residual,
-        retain_graph=True,
-        allow_unused=True,
-    )[0]
-    if common_gradient is not None:
-        assert float(common_gradient.detach().abs().amax()) < 1.0e-8
+    torch.testing.assert_close(
+        captured["typed_interval_innovation"][:, :2],
+        near_innovation,
+        atol=0.0,
+        rtol=0.0,
+    )
     far_gradient = torch.autograd.grad(
-        completed.semantic_interval_residual[:, 2:].square().sum(),
-        near_residual,
+        completed.semantic_delta[:, 2:].square().sum(),
+        near_innovation,
         allow_unused=False,
     )[0]
     assert torch.count_nonzero(far_gradient.detach()) > 0
-    assert float(metrics["object_w2_near_to_far_residual_update_rms"]) > 0.0
+    assert float(metrics["object_w2_near_to_far_innovation_update_rms"]) > 0.0
 
 
-def test_w2_public_fields_preserve_near_causality_and_owner_gauges() -> None:
-    """The exported W ABI, not a private carrier, owns the causal proof."""
+def test_w2_preserves_near_rows_and_retains_same_direction_far_innovation() -> None:
+    """Far cannot rewrite near, and its common-mode direction is not erased."""
 
     torch.manual_seed(2941)
     top = _object_top().eval()
@@ -1677,18 +1786,17 @@ def test_w2_public_fields_preserve_near_causality_and_owner_gauges() -> None:
         top.dynamics.delta_head.weight.normal_(mean=0.0, std=0.05)
         top.dynamics.transport_head.weight.normal_(mean=0.0, std=0.05)
         top.dynamics.covariance_head.weight.normal_(mean=0.0, std=0.05)
-        top.dynamics.visibility_head.weight.normal_(mean=0.0, std=0.05)
-        top.dynamics.persistence_head.weight.normal_(mean=0.0, std=0.05)
         top.dynamics.typed_base_interaction.weight.normal_(mean=0.0, std=0.05)
-    _, working, _ = top.dynamics.forward_w1(
+    near_field, working, _ = top.dynamics.forward_w1(
         facts=facts,
         intent=intent.world_dock(),
         action=coarse,
-        collect_diagnostics=False,
+        collect_diagnostics=True,
     )
+    assert near_field is not None
     far_base = working.far_base.detach().clone().requires_grad_(True)
     far_typed = (
-        working.far_residual_typed.detach().clone().requires_grad_(True)
+        working.far_interval_innovation.detach().clone().requires_grad_(True)
     )
     completed, _ = top.dynamics.forward_w2(
         facts=facts,
@@ -1697,7 +1805,7 @@ def test_w2_public_fields_preserve_near_causality_and_owner_gauges() -> None:
         w1_state=replace(
             working,
             far_base=far_base,
-            far_residual_typed=far_typed,
+            far_interval_innovation=far_typed,
         ),
         collect_diagnostics=False,
     )
@@ -1706,12 +1814,10 @@ def test_w2_public_fields_preserve_near_causality_and_owner_gauges() -> None:
         "semantic_delta",
         "transport_mean",
         "transport_covariance",
-        "visibility",
-        "persistence",
     ):
         torch.testing.assert_close(
             getattr(completed, name)[:, :2],
-            getattr(working.near_field, name),
+            getattr(near_field, name),
             # The 2-row and 4-row shared Linear kernels may accumulate in a
             # different FP order; causal equality is proved exactly by JVP
             # below rather than by requiring bitwise GEMM identity.
@@ -1726,8 +1832,6 @@ def test_w2_public_fields_preserve_near_causality_and_owner_gauges() -> None:
             "semantic_delta",
             "transport_mean",
             "transport_covariance",
-            "visibility",
-            "persistence",
         )
     )
     far_to_near = torch.autograd.grad(
@@ -1740,77 +1844,31 @@ def test_w2_public_fields_preserve_near_causality_and_owner_gauges() -> None:
         if gradient is not None:
             assert torch.count_nonzero(gradient.detach()) == 0
 
-    for residual in (
-        completed.semantic_interval_residual,
-        completed.transport_interval_residual,
-        completed.visibility_interval_residual,
-        completed.persistence_interval_residual,
-    ):
-        torch.testing.assert_close(
-            residual.sum(dim=1),
-            torch.zeros_like(residual[:, 0]),
-            atol=2.0e-6,
-            rtol=0.0,
-        )
-
-    common_typed = (
-        working.common_typed.detach().clone().requires_grad_(True)
+    same_direction = torch.randn_like(working.far_interval_innovation[:, :1]).expand_as(
+        working.far_interval_innovation
     )
-    near_typed = (
-        working.near_residual_typed.detach().clone().requires_grad_(True)
-    )
-    owner_far_typed = (
-        working.far_residual_typed.detach().clone().requires_grad_(True)
-    )
-    owner_field, _ = top.dynamics.forward_w2(
+    shifted_field, _ = top.dynamics.forward_w2(
         facts=facts,
         intent=intent.world_dock(),
         action=coarse,
         w1_state=replace(
             working,
-            common_typed=common_typed,
-            near_residual_typed=near_typed,
-            far_residual_typed=owner_far_typed,
+            far_interval_innovation=(
+                working.far_interval_innovation + 0.2 * same_direction
+            ),
         ),
         collect_diagnostics=False,
     )
-    common_public = sum(
-        value.float().square().sum()
-        for value in (
-            owner_field.semantic_common,
-            owner_field.transport_common,
-            owner_field.visibility_common,
-            owner_field.persistence_common,
-        )
+    assert not torch.equal(
+        shifted_field.semantic_delta[:, 2:],
+        completed.semantic_delta[:, 2:],
     )
-    residual_to_common = torch.autograd.grad(
-        common_public,
-        (near_typed, owner_far_typed),
-        retain_graph=True,
-        allow_unused=True,
+    assert not torch.equal(
+        shifted_field.semantic_common,
+        completed.semantic_common,
     )
-    for gradient in residual_to_common:
-        if gradient is not None:
-            assert torch.count_nonzero(gradient.detach()) == 0
-    residual_public = sum(
-        value.float().square().sum()
-        for value in (
-            owner_field.semantic_interval_residual,
-            owner_field.transport_interval_residual,
-            owner_field.visibility_interval_residual,
-            owner_field.persistence_interval_residual,
-        )
-    )
-    common_to_residual = torch.autograd.grad(
-        residual_public,
-        common_typed,
-        allow_unused=True,
-    )[0]
-    if common_to_residual is not None:
-        # Public residual properties re-form mean subtraction in FP32; the
-        # algebraic common cancellation is exact, with only reduction-order
-        # roundoff in the reported JVP.
-        assert float(common_to_residual.detach().abs().amax()) < 1.0e-7
+    assert not hasattr(top.dynamics, "_complete_with_far_owned_zero_mean")
+    assert not hasattr(top.dynamics, "_maybe_apply_far_owned_gauge")
 
 
 def test_w_block_common_and_interval_owners_have_zero_cross_jacobian() -> None:
@@ -1950,18 +2008,13 @@ def test_goal_changes_interval_intent_without_rewriting_object_facts() -> None:
 def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -> None:
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     current = torch.randn(batch, objects, content)
-    scalar = torch.zeros(batch, intervals, objects, 1)
-    validity = torch.ones(batch, intervals, objects, 1)
     target = FutureObjectDynamics(
         current_reference=current,
         successor_content=current[:, None].expand(-1, intervals, -1, -1),
         semantic_delta=torch.zeros(batch, intervals, objects, content),
         transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
         transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
-        visibility=scalar,
-        persistence=scalar,
         chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=validity,
         camera_coordinates=torch.zeros(batch, objects, cameras, 2),
         camera_chart_availability=torch.ones(batch, objects, cameras, 1),
         camera_weights=torch.ones(batch, objects, cameras, 1),
@@ -1995,24 +2048,6 @@ def test_future_neutral_fallback_remains_supervised_when_reliability_is_zero() -
     assert unreliable_content["future_semantic_residual"] == 0
     assert unreliable_content["future_semantic_delta"] > 0
 
-    # Predicted/target future support is diagnostic only: it is neither a loss
-    # mask nor P2 routing authority, so status cannot self-mask its own value.
-    selector_changed_target = replace(
-        target,
-        future_selector_validity=torch.zeros_like(target.future_selector_validity),
-    )
-    selector_changed_prediction = replace(
-        prediction,
-        future_selector_validity=torch.zeros_like(prediction.future_selector_validity),
-    )
-    selector_changed = future_dynamics_terms(
-        selector_changed_prediction,
-        selector_changed_target,
-        current_loss_support=current_support,
-    )
-    for name in unreliable:
-        torch.testing.assert_close(selector_changed[name], unreliable[name])
-
     unsupported = future_dynamics_terms(
         prediction,
         target,
@@ -2027,10 +2062,51 @@ def test_training_support_uses_physical_camera_validity_not_assignment_mass() ->
     assert "camera_evidence_mass" not in source
 
 
+def test_future_transport_interval_diagnostic_uses_camera_support() -> None:
+    """An invalid camera must not contaminate the per-interval audit row."""
+
+    batch, intervals, objects, cameras, content = 1, 4, 1, 2, 4
+    current = torch.zeros(batch, objects, content)
+    target = FutureObjectDynamics(
+        current_reference=current,
+        successor_content=current[:, None].expand(-1, intervals, -1, -1),
+        semantic_delta=torch.zeros(batch, intervals, objects, content),
+        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
+        chart_availability=torch.ones(batch, objects, 1),
+        camera_coordinates=torch.zeros(batch, objects, cameras, 2),
+        camera_chart_availability=torch.ones(batch, objects, cameras, 1),
+        camera_weights=torch.full((batch, objects, cameras, 1), 0.5),
+    )
+    invalid_camera_error = torch.zeros_like(target.transport_mean)
+    invalid_camera_error[:, 0, :, 1] = 1.0
+    prediction = replace(target, transport_mean=invalid_camera_error)
+    camera_support = torch.tensor([[[[1.0], [0.0]]]])
+    masked_terms = future_dynamics_terms(
+        prediction,
+        target,
+        current_loss_support=camera_support,
+        collect_diagnostics=True,
+    )
+    torch.testing.assert_close(masked_terms["future_transport"], torch.zeros(()))
+    for index in range(intervals):
+        torch.testing.assert_close(
+            masked_terms[f"future_interval_{index}_transport"],
+            torch.zeros(()),
+        )
+
+    supported_terms = future_dynamics_terms(
+        prediction,
+        target,
+        current_loss_support=torch.ones_like(camera_support),
+        collect_diagnostics=True,
+    )
+    assert supported_terms["future_interval_0_transport"] > 0
+
+
 def test_future_interval_transition_penalizes_temporal_collapse_not_common_offset() -> None:
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     current = torch.zeros(batch, objects, content)
-    scalar = torch.zeros(batch, intervals, objects, 1)
     interval = torch.arange(intervals, dtype=torch.float32)[None, :, None, None]
     semantic = interval.expand(batch, intervals, objects, content).clone()
     target = FutureObjectDynamics(
@@ -2039,10 +2115,7 @@ def test_future_interval_transition_penalizes_temporal_collapse_not_common_offse
         semantic_delta=semantic,
         transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
         transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
-        visibility=scalar,
-        persistence=scalar,
         chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=torch.ones(batch, intervals, objects, 1),
         camera_coordinates=torch.zeros(batch, objects, cameras, 2),
         camera_chart_availability=torch.ones(batch, objects, cameras, 1),
         camera_weights=torch.ones(batch, objects, cameras, 1),
@@ -2073,17 +2146,13 @@ def test_semantic_deduplication_preserves_historical_gradient_coefficients() -> 
 
     batch, intervals, objects, cameras, content = 1, 4, 1, 1, 4
     current = torch.zeros(batch, objects, content)
-    scalar = torch.zeros(batch, intervals, objects, 1)
     target = FutureObjectDynamics(
         current_reference=current,
         successor_content=current[:, None].expand(-1, intervals, -1, -1),
         semantic_delta=torch.zeros(batch, intervals, objects, content),
         transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
         transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
-        visibility=scalar,
-        persistence=scalar,
         chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=torch.ones(batch, intervals, objects, 1),
         camera_coordinates=torch.zeros(batch, objects, cameras, 2),
         camera_chart_availability=torch.ones(batch, objects, cameras, 1),
         camera_weights=torch.ones(batch, objects, cameras, 1),
@@ -2159,23 +2228,20 @@ def test_teacher_partial_matching_prefers_a_local_semantic_peak_over_diffuse_opp
         low_target.semantic_delta,
         low_target.successor_content - low_target.current_reference[:, None],
     )
-    expected_availability = facts.chart_availability.detach()[:, None].expand_as(
-        high_target.future_selector_validity
-    )
     for target in (high_target, low_target):
-        assert torch.equal(target.visibility, torch.zeros_like(target.visibility))
-        assert torch.equal(target.persistence, torch.zeros_like(target.persistence))
         assert not hasattr(target, "uncertainty")
         assert not hasattr(target, "reliability")
         torch.testing.assert_close(
-            target.future_selector_validity,
-            expected_availability,
+            target.chart_availability,
+            facts.chart_availability.detach(),
             atol=0.0,
             rtol=0.0,
         )
     for metrics in (high_metrics, low_metrics):
         assert "object_teacher_uncertainty" in metrics
         assert "object_teacher_reliability" in metrics
+        assert not any("visibility" in name or "persistence" in name for name in metrics)
+        assert "object_teacher_future_selector_validity" not in metrics
 
 
 def test_teacher_count_calibrated_partial_matching_uses_dustbin_for_diffuse_scores() -> None:
@@ -2268,13 +2334,9 @@ def test_diffuse_teacher_keeps_raw_successor_without_reliability_contraction() -
         ).all()
     )
     assert metrics["object_teacher_reliability"] < 1.0
-    assert torch.equal(target.visibility, torch.zeros_like(target.visibility))
-    assert torch.equal(target.persistence, torch.zeros_like(target.persistence))
     torch.testing.assert_close(
-        target.future_selector_validity,
-        facts.chart_availability.detach()[:, None].expand_as(
-            target.future_selector_validity
-        ),
+        target.chart_availability,
+        facts.chart_availability.detach(),
         atol=0.0,
         rtol=0.0,
     )
@@ -2506,7 +2568,6 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     p1_state = CompletedP1PolicyState(
         factual_base=p1_fact,
         policy_query_residual=policy_residual,
-        effect_query=action_query + p1_fact + policy_residual,
     )
     compiled, _ = top.compile_policy(
         DeploymentTopCache(intent=intent, predicted_dynamics=dynamics),
@@ -2521,21 +2582,33 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
         p1_state=p1_state,
         action_query=action_query,
     )
-    for name in ("effect",):
-        assert torch.allclose(
-            getattr(relabeled_compiled, name),
-            getattr(compiled, name),
-            atol=2e-5,
-            rtol=2e-5,
-        )
-    for name in ("factual_base", "effect", "interaction", "protected_consequence"):
+    assert torch.allclose(
+        relabeled_compiled.consequence.effect_by_type,
+        compiled.consequence.effect_by_type,
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    for name in (
+        "factual_base",
+        "effect_by_type",
+        "interaction_by_type",
+        "protected_consequence",
+    ):
         assert torch.allclose(
             getattr(relabeled_compiled.consequence, name),
             getattr(compiled.consequence, name),
             atol=2e-5,
             rtol=2e-5,
         ), name
-    for name in ("protected_base", "precision", "temporal", "state_change"):
+    for name in (
+        "protected_base",
+        "precision",
+        "effect_semantic",
+        "effect_geometry",
+        "temporal_semantic",
+        "temporal_geometry",
+        "state_change",
+    ):
         assert torch.allclose(
             getattr(relabeled_compiled.plan, name),
             getattr(compiled.plan, name),
@@ -2637,7 +2710,7 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
         collect_diagnostics=True,
     )
     assert float(w_metrics["object_w_typed_common_state_rms"]) == 0.0
-    assert float(w_metrics["object_w_typed_interval_residual_state_rms"]) == 0.0
+    assert float(w_metrics["object_w_typed_interval_innovation_state_rms"]) == 0.0
 
 
 def test_s_zero_goal_is_an_exact_language_null_not_a_learned_query_value() -> None:
@@ -2717,16 +2790,16 @@ def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> 
     differential[:, 2] = differential[:, 2] + torch.randn_like(differential[:, 2])
     (
         _,
-        _,
+        differential_common_value,
         differential_mass,
         differential_value,
         _,
         _,
-        _,
+        differential_common_score,
         raw_differential_score,
         _,
         _,
-        _,
+        typed_temperature,
         _,
         differential_denominator,
     ) = top.intent._typed_relevance(
@@ -2745,6 +2818,131 @@ def test_s_typed_selector_uses_real_interval_innovation_without_forcing_it() -> 
     assert torch.count_nonzero(raw_differential_score) > 0
     assert float(differential_denominator.amin()) >= 0.25
     assert float(raw_differential_score.detach().abs().max()) <= 1.0
+
+    # The nonlinear differential signal generally has a nonzero interval
+    # mean.  Schema37 transfers that mean into the typed common owner before
+    # applying one shared, one-sided scale to the centered residual.  The mean
+    # is therefore retained exactly rather than being discarded as a gauge.
+    raw_common_signal = torch.tanh(
+        differential_common_score * typed_temperature[None, None]
+    )
+    raw_residual_signal = torch.tanh(
+        raw_differential_score * typed_temperature[None, None, None]
+    )
+    residual_mean = raw_residual_signal.mean(dim=1)
+    assert torch.count_nonzero(residual_mean) > 0
+    centered_residual = raw_residual_signal - residual_mean[:, None]
+    scaled_residual = centered_residual / centered_residual.abs().amax(
+        dim=1,
+        keepdim=True,
+    ).clamp_min(1.0)
+    typed_route = torch.stack(
+        (facts.semantic, facts.appearance, facts.geometry),
+        dim=2,
+    )
+    common_validity = facts.chart_availability.float()[:, :, None, :]
+    expected_common_value = (
+        raw_common_signal + residual_mean
+    )[..., None] * common_validity * typed_route
+    expected_residual_value = (
+        scaled_residual[..., None]
+        * common_validity[:, None]
+        * typed_route[:, None]
+    )
+    torch.testing.assert_close(
+        differential_common_value,
+        expected_common_value,
+        atol=2.0e-6,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        differential_value,
+        expected_residual_value,
+        atol=2.0e-6,
+        rtol=0.0,
+    )
+
+
+def test_s_weak_k_mass_is_not_normalized_into_a_strong_policy_value() -> None:
+    torch.manual_seed(3711)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    interval = torch.randn(1, 4, 32)
+    weak_facts = replace(
+        facts,
+        chart_availability=torch.full_like(facts.chart_availability, 1.0e-4),
+    )
+    double_facts = replace(
+        facts,
+        chart_availability=torch.full_like(facts.chart_availability, 2.0e-4),
+    )
+    weak = top.intent._typed_relevance(
+        interval_condition_innovation=interval,
+        facts=weak_facts,
+    )
+    doubled = top.intent._typed_relevance(
+        interval_condition_innovation=interval,
+        facts=double_facts,
+    )
+    # Both K-mass denominators stay on their clamp-at-one branch.  Doubling
+    # weak observable support therefore doubles, rather than renormalizes away,
+    # each common/residual policy component.
+    for weak_component, doubled_component in zip(
+        weak[4:6],
+        doubled[4:6],
+        strict=True,
+    ):
+        assert torch.count_nonzero(weak_component) > 0
+        torch.testing.assert_close(
+            2.0 * weak_component,
+            doubled_component,
+            atol=2.0e-6,
+            rtol=2.0e-5,
+        )
+
+
+def test_s_final_common_residual_owners_stay_canonical_under_bf16() -> None:
+    torch.manual_seed(3712)
+    top = _object_top().eval()
+    local_facts = _local_facts(cameras=2)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        context, metrics = top.build_online_context(
+            local_facts=local_facts,
+            goal_tokens=torch.randn(1, 6, 12),
+            goal_mask=torch.ones(1, 6, dtype=torch.bool),
+            state_history=torch.randn(1, 3, 7),
+            state=torch.randn(1, 7),
+            executed_history=torch.randn(1, 8, 7),
+            collect_diagnostics=True,
+        )
+    intent = context.intent
+    assert intent.public_common_condition.dtype == torch.float32
+    assert intent.public_interval_residual_condition.dtype == torch.float32
+    torch.testing.assert_close(
+        intent.public_common_condition[:, None]
+        + intent.public_interval_residual_condition,
+        intent.interval_condition_innovation.float(),
+        atol=2.0e-7,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        intent.public_interval_residual_condition.mean(dim=1),
+        torch.zeros_like(intent.public_common_condition),
+        atol=2.0e-7,
+        rtol=0.0,
+    )
+    assert intent.typed_common_policy_components.dtype == torch.float32
+    assert intent.typed_interval_residual_policy_components.dtype == torch.float32
+    torch.testing.assert_close(
+        intent.typed_interval_residual_policy_components.mean(dim=1),
+        torch.zeros_like(intent.typed_common_policy_components),
+        atol=2.0e-7,
+        rtol=0.0,
+    )
+    assert float(metrics["object_intent_public_reconstruction_max_abs"]) <= 2.0e-7
+    assert float(metrics["object_intent_public_residual_mean_max_abs"]) <= 2.0e-7
+    assert float(metrics["object_intent_typed_policy_residual_mean_rms"]) <= 2.0e-7
+    assert float(metrics["object_w_typed_interval_input_mean_rms"]) <= 2.0e-7
 
 
 def test_s_history_is_a_typed_time_union_not_fake_state_action_pairs() -> None:
@@ -2874,14 +3072,45 @@ def test_p2_common_and_residual_keys_do_not_duplicate_typed_policy_context() -> 
     dock = intent.policy_dock()
     torch.testing.assert_close(
         dock.common_key,
-        intent.interval_condition_innovation.mean(dim=1),
+        intent.public_common_condition,
         atol=0.0,
         rtol=0.0,
     )
     torch.testing.assert_close(
         dock.interval_residual_key,
-        intent.interval_condition_innovation
-        - intent.interval_condition_innovation.mean(dim=1, keepdim=True),
+        intent.public_interval_residual_condition,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        dock.common_key[:, None] + dock.interval_residual_key,
+        intent.interval_condition_innovation,
+        atol=2.0e-7,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        dock.interval_residual_key.mean(dim=1),
+        torch.zeros_like(dock.common_key),
+        atol=2.0e-7,
+        rtol=0.0,
+    )
+    factual = intent.factual_dock()
+    torch.testing.assert_close(
+        factual.typed_interval_context,
+        intent.typed_common_policy_components[:, None]
+        + intent.typed_interval_residual_policy_components,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        factual.goal_interval_context,
+        intent.goal_interval_context,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        factual.history_interval_context,
+        intent.history_interval_context,
         atol=0.0,
         rtol=0.0,
     )
@@ -2906,7 +3135,7 @@ def test_p2_common_and_residual_keys_do_not_duplicate_typed_policy_context() -> 
     )
 
 
-def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> None:
+def test_s_typed_owner_relabeling_is_equivariant_through_coarse_action() -> None:
     torch.manual_seed(39)
     top = _object_top().eval()
     relabeled_top = copy.deepcopy(top)
@@ -2918,11 +3147,6 @@ def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> 
     appearance_projection = relabeled_top.intent.object_appearance
     relabeled_top.intent.object_semantic = appearance_projection
     relabeled_top.intent.object_appearance = semantic_projection
-    semantic_projection = relabeled_top.dynamics.object_semantic
-    appearance_projection = relabeled_top.dynamics.object_appearance
-    relabeled_top.dynamics.object_semantic = appearance_projection
-    relabeled_top.dynamics.object_appearance = semantic_projection
-
     facts, _ = top.grounder(_local_facts(cameras=2))
     relabeled_facts = replace(
         facts,
@@ -2968,39 +3192,6 @@ def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> 
     coarse = top.coarse_action(intent.action_dock())
     relabeled_coarse = relabeled_top.coarse_action(relabeled_intent.action_dock())
     torch.testing.assert_close(relabeled_coarse.tokens, coarse.tokens)
-
-    _, w1, _ = top.dynamics.forward_w1(
-        facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
-        collect_diagnostics=False,
-    )
-    dynamics, _ = top.dynamics.forward_w2(
-        facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
-        w1_state=w1,
-        collect_diagnostics=False,
-    )
-    _, relabeled_w1, _ = relabeled_top.dynamics.forward_w1(
-        facts=relabeled_facts,
-        intent=relabeled_intent.world_dock(),
-        action=relabeled_coarse,
-        collect_diagnostics=False,
-    )
-    relabeled_dynamics, _ = relabeled_top.dynamics.forward_w2(
-        facts=relabeled_facts,
-        intent=relabeled_intent.world_dock(),
-        action=relabeled_coarse,
-        w1_state=relabeled_w1,
-        collect_diagnostics=False,
-    )
-    for field in fields(FutureObjectDynamics):
-        torch.testing.assert_close(
-            getattr(relabeled_dynamics, field.name),
-            getattr(dynamics, field.name),
-            msg=field.name,
-        )
 
 
 def test_public_intent_match_cannot_train_optional_typed_relevance() -> None:
@@ -3128,7 +3319,6 @@ def test_neutral_w_preserves_precision_but_zeros_effect_and_temporal() -> None:
     p1_state = CompletedP1PolicyState(
         factual_base=p1_fact,
         policy_query_residual=policy_residual,
-        effect_query=action_query + p1_fact + policy_residual,
     )
     compiled, _ = top.compile_policy(
         deployment,
@@ -3141,14 +3331,27 @@ def test_neutral_w_preserves_precision_but_zeros_effect_and_temporal() -> None:
         p1_state=CompletedP1PolicyState(
             factual_base=p1_fact,
             policy_query_residual=policy_residual,
-            effect_query=other_action_query + p1_fact + policy_residual,
         ),
         action_query=other_action_query,
     )
-    assert torch.count_nonzero(compiled.effect) == 0
+    assert torch.count_nonzero(compiled.consequence.effect_by_type) == 0
     assert not hasattr(compiled.plan, "factual")
     assert torch.count_nonzero(compiled.plan.precision) > 0
-    assert torch.count_nonzero(compiled.plan.temporal) == 0
+    for name in (
+        "effect_semantic",
+        "effect_geometry",
+        "temporal_semantic",
+        "temporal_geometry",
+    ):
+        assert torch.count_nonzero(getattr(compiled.plan, name)) == 0
+    assert compiled.plan.source_names == (
+        "p3_precision",
+        "p3_effect_semantic",
+        "p3_effect_geometry",
+        "p3_temporal_semantic",
+        "p3_temporal_geometry",
+        "p3_state_change",
+    )
     assert torch.count_nonzero(compiled.plan.state_change) > 0
     torch.testing.assert_close(
         compiled.plan.temporal,
@@ -3176,8 +3379,8 @@ def test_neutral_w_preserves_precision_but_zeros_effect_and_temporal() -> None:
     # consumes only the observed interval innovation, so changing identity
     # alone cannot recreate a fixed temporal route prior.
     torch.testing.assert_close(
-        compiled.effect,
-        identity_only_compiled.effect,
+        compiled.consequence.effect_by_type,
+        identity_only_compiled.consequence.effect_by_type,
         atol=0.0,
         rtol=0.0,
     )
@@ -3190,21 +3393,17 @@ def test_neutral_w_preserves_precision_but_zeros_effect_and_temporal() -> None:
 
 
 def test_p2_equal_candidate_evidence_has_no_fixed_half_null_prior() -> None:
-    batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
-    scalar = torch.ones(batch, intervals, objects, 1)
+    batch, intervals, objects, cameras, content, hidden = 1, 4, 4, 3, 6, 8
     dynamics = FutureObjectDynamics(
         current_reference=torch.zeros(batch, objects, content),
         successor_content=torch.zeros(batch, intervals, objects, content),
         semantic_delta=torch.zeros(batch, intervals, objects, content),
-        transport_mean=torch.zeros(batch, intervals, objects, 1, 2),
-        transport_covariance=torch.zeros(batch, intervals, objects, 1, 3),
-        visibility=torch.zeros_like(scalar),
-        persistence=torch.zeros_like(scalar),
+        transport_mean=torch.zeros(batch, intervals, objects, cameras, 2),
+        transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
         chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=scalar,
-        camera_coordinates=torch.zeros(batch, objects, 1, 2),
-        camera_chart_availability=torch.ones(batch, objects, 1, 1),
-        camera_weights=torch.ones(batch, objects, 1, 1),
+        camera_coordinates=torch.zeros(batch, objects, cameras, 2),
+        camera_chart_availability=torch.ones(batch, objects, cameras, 1),
+        camera_weights=torch.ones(batch, objects, cameras, 1),
     )
     intent = PolicyIntentDock(
         common_key=torch.zeros(batch, hidden),
@@ -3225,16 +3424,31 @@ def test_p2_equal_candidate_evidence_has_no_fixed_half_null_prior() -> None:
         intent,
         collect_diagnostics=True,
     )
-    assert torch.count_nonzero(value) == 0
+    assert torch.count_nonzero(value.effect_by_type) == 0
+    semantic_null = torch.tensor(1.0 / float(intervals * objects + 1))
+    geometry_null = torch.tensor(1.0 / float(intervals * objects * cameras + 1))
+    aggregate_null = 0.5 * (semantic_null + geometry_null)
+    torch.testing.assert_close(
+        metrics["object_p2_semantic_residual_null_mass"],
+        semantic_null,
+        atol=1.0e-7,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        metrics["object_p2_geometry_residual_null_mass"],
+        geometry_null,
+        atol=1.0e-7,
+        rtol=0.0,
+    )
     torch.testing.assert_close(
         metrics["object_p2_residual_null_mass"],
-        torch.tensor(1.0 / float(intervals * objects + 1)),
+        aggregate_null,
         atol=1.0e-7,
         rtol=0.0,
     )
     torch.testing.assert_close(
         metrics["object_p2_type_interval_null_mass"],
-        metrics["object_p2_residual_null_mass"],
+        aggregate_null,
         atol=1.0e-7,
         rtol=0.0,
     )
@@ -3247,22 +3461,17 @@ def test_p2_protected_common_survives_when_interval_residual_is_exactly_zero() -
     batch, intervals, objects, content, hidden = 1, 4, 3, 6, 8
     common_semantic = torch.randn(batch, objects, content)
     common_transport = 0.1 * torch.randn(batch, objects, 1, 2)
-    common_status = -0.2 * torch.ones(batch, objects, 1)
     semantic = common_semantic[:, None].expand(-1, intervals, -1, -1).clone()
     transport = common_transport[:, None].expand(
         -1, intervals, -1, -1, -1
     ).clone()
-    status = common_status[:, None].expand(-1, intervals, -1, -1).clone()
     dynamics = FutureObjectDynamics(
         current_reference=torch.zeros(batch, objects, content),
         successor_content=semantic,
         semantic_delta=semantic,
         transport_mean=transport,
         transport_covariance=torch.zeros(batch, intervals, objects, 1, 3),
-        visibility=status,
-        persistence=status,
         chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=torch.ones(batch, intervals, objects, 1),
         camera_coordinates=torch.zeros(batch, objects, 1, 2),
         camera_chart_availability=torch.ones(batch, objects, 1, 1),
         camera_weights=torch.ones(batch, objects, 1, 1),
@@ -3294,8 +3503,7 @@ def test_p2_protected_common_survives_when_interval_residual_is_exactly_zero() -
     dynamics.validate_effect_decomposition()
     assert torch.count_nonzero(dynamics.semantic_interval_residual) == 0
     assert torch.count_nonzero(dynamics.transport_interval_residual) == 0
-    assert torch.count_nonzero(dynamics.visibility_interval_residual) == 0
-    assert torch.count_nonzero(value) > 0
+    assert torch.count_nonzero(value.effect_by_type) > 0
     assert float(metrics["object_p2_protected_common_rms"]) > 0.0
     assert float(metrics["object_p2_optional_residual_rms"]) == 0.0
 
@@ -3308,8 +3516,6 @@ def test_p2_effect_gradient_reaches_w_heads_and_s_typed_queries() -> None:
     with torch.no_grad():
         top.dynamics.delta_head.weight.fill_(0.02)
         top.dynamics.transport_head.weight.fill_(0.02)
-        top.dynamics.visibility_head.weight.fill_(0.02)
-        top.dynamics.persistence_head.weight.fill_(0.02)
     context, _ = top.build_online_context(
         local_facts=_local_facts(),
         goal_tokens=torch.randn(1, 6, 12),
@@ -3324,7 +3530,7 @@ def test_p2_effect_gradient_reaches_w_heads_and_s_typed_queries() -> None:
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    effect.float().square().mean().backward()
+    effect.physical_sum.float().square().mean().backward()
 
     def nonzero(parameter: nn.Parameter) -> bool:
         return parameter.grad is not None and bool(
@@ -3336,14 +3542,13 @@ def test_p2_effect_gradient_reaches_w_heads_and_s_typed_queries() -> None:
     assert nonzero(top.intent.typed_relevance_queries[0].weight)
 
 
-def test_neutral_status_regularizer_reconnects_when_perturbed() -> None:
-    """Zero status is an optimum, not a disconnected trainable branch."""
+def test_appearance_receives_ordinary_semantic_future_gradient() -> None:
+    """Appearance conditions the supervised successor instead of a dead status."""
 
     torch.manual_seed(4061)
     top = _object_top()
     with torch.no_grad():
-        top.dynamics.visibility_head.weight.fill_(0.02)
-        top.dynamics.persistence_head.weight.fill_(0.02)
+        top.dynamics.delta_head.weight.fill_(0.02)
     context, _ = top.build_online_context(
         local_facts=_local_facts(cameras=2),
         goal_tokens=torch.randn(1, 6, 12),
@@ -3358,94 +3563,44 @@ def test_neutral_status_regularizer_reconnects_when_perturbed() -> None:
         target,
         current_loss_support=context.facts.camera_chart_availability,
     )
-    (terms["future_visibility"] + terms["future_persistence"]).backward()
-    for parameter in (
-        top.dynamics.object_appearance.weight,
-        top.dynamics.visibility_head.weight,
-        top.dynamics.persistence_head.weight,
-    ):
-        assert parameter.grad is not None
-        assert torch.count_nonzero(parameter.grad.detach()) > 0
+    terms["future_semantic_delta"].backward()
+    parameter = top.dynamics.object_appearance.weight
+    assert parameter.grad is not None
+    assert torch.count_nonzero(parameter.grad.detach()) > 0
 
 
-def test_p2_neutral_status_is_not_an_action_value_or_route_vote() -> None:
-    batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
-    scalar = torch.zeros(batch, intervals, objects, 1)
-    dynamics = FutureObjectDynamics(
-        current_reference=torch.zeros(batch, objects, content),
-        successor_content=torch.zeros(batch, intervals, objects, content),
-        semantic_delta=torch.zeros(batch, intervals, objects, content),
-        transport_mean=torch.zeros(batch, intervals, objects, 1, 2),
-        transport_covariance=torch.zeros(batch, intervals, objects, 1, 3),
-        visibility=-torch.ones_like(scalar),
-        persistence=-torch.ones_like(scalar),
-        chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=torch.zeros_like(scalar),
-        camera_coordinates=torch.zeros(batch, objects, 1, 2),
-        camera_chart_availability=torch.ones(batch, objects, 1, 1),
-        camera_weights=torch.ones(batch, objects, 1, 1),
+def test_p2_and_future_loss_have_no_unobserved_status_branch() -> None:
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 8, 7),
     )
-    intent = PolicyIntentDock(
-        common_key=torch.zeros(batch, hidden),
-        interval_residual_key=torch.zeros(batch, intervals, hidden),
-        typed_common_object_value=torch.zeros(batch, objects, 3, 4),
-        typed_interval_residual_value=torch.zeros(
-            batch, intervals, objects, 3, 4
-        ),
-        temporal_control=torch.zeros(batch, 24, hidden),
-        state_change_evidence=torch.zeros(batch, hidden),
+    target = FutureObjectDynamics.neutral(context.facts)
+    terms = future_dynamics_terms(
+        context.predicted_dynamics,
+        target,
+        current_loss_support=context.facts.camera_chart_availability,
     )
-    reader = ObjectFutureEffectReader(
-        hidden=hidden,
-        content_dim=content,
-        route_dim=4,
+    assert not any("visibility" in name or "persistence" in name for name in terms)
+    assert "future_selector_validity" not in inspect.getsource(
+        ObjectFutureEffectReader.forward
     )
-    value, metrics = reader(
-        torch.zeros(batch, 24, 2, hidden),
-        dynamics,
-        intent,
-        collect_diagnostics=True,
-    )
-    neutral = replace(
-        dynamics,
-        visibility=torch.zeros_like(dynamics.visibility),
-        persistence=torch.zeros_like(dynamics.persistence),
-        future_selector_validity=torch.ones_like(
-            dynamics.future_selector_validity
-        ),
-    )
-    neutral_value, neutral_metrics = reader(
-        torch.zeros(batch, 24, 2, hidden),
-        neutral,
-        intent,
-        collect_diagnostics=True,
-    )
-    torch.testing.assert_close(value, neutral_value, atol=0.0, rtol=0.0)
-    assert float(metrics["object_p2_status_consumer_active"]) == 0.0
-    for name in (
-        "object_p2_type_interval_null_mass",
-        "object_p2_semantic_residual_null_mass",
-        "object_p2_geometry_residual_null_mass",
-    ):
-        torch.testing.assert_close(
-            metrics[name], neutral_metrics[name], atol=0.0, rtol=0.0
-        )
 
 
 def test_p2_real_camera_mixture_is_camera_permutation_invariant() -> None:
     torch.manual_seed(4041)
     batch, intervals, objects, cameras, content, hidden = 2, 4, 3, 3, 6, 8
-    scalar = torch.zeros(batch, intervals, objects, 1)
     dynamics = FutureObjectDynamics(
         current_reference=torch.randn(batch, objects, content),
         successor_content=torch.randn(batch, intervals, objects, content),
         semantic_delta=torch.randn(batch, intervals, objects, content),
         transport_mean=0.1 * torch.randn(batch, intervals, objects, cameras, 2),
         transport_covariance=torch.zeros(batch, intervals, objects, cameras, 3),
-        visibility=scalar,
-        persistence=scalar,
         chart_availability=torch.ones(batch, objects, 1),
-        future_selector_validity=torch.ones(batch, intervals, objects, 1),
         camera_coordinates=torch.tanh(
             torch.randn(batch, objects, cameras, 2)
         ),
@@ -3485,7 +3640,12 @@ def test_p2_real_camera_mixture_is_camera_permutation_invariant() -> None:
     permuted, permuted_metrics = reader(
         query, relabeled, intent, collect_diagnostics=True
     )
-    torch.testing.assert_close(permuted, baseline, atol=2.0e-6, rtol=1.0e-6)
+    torch.testing.assert_close(
+        permuted.effect_by_type,
+        baseline.effect_by_type,
+        atol=2.0e-6,
+        rtol=1.0e-6,
+    )
     for name in (
         "object_p2_coordinate_score_abs",
         "object_p2_coordinate_score_max_abs",
@@ -3497,9 +3657,44 @@ def test_p2_real_camera_mixture_is_camera_permutation_invariant() -> None:
             permuted_metrics[name], baseline_metrics[name], atol=2.0e-6, rtol=1.0e-6
         )
 
+    # Breaking the paired camera relabeling changes the joint KxC geometry
+    # hypotheses.  Geometry must respond while semantic remains independent of
+    # camera order, proving transport was not averaged before selection.
+    unpaired = replace(
+        dynamics,
+        transport_mean=dynamics.transport_mean[:, :, :, camera_permutation],
+    )
+    unpaired_read, unpaired_metrics = reader(
+        query,
+        unpaired,
+        intent,
+        collect_diagnostics=True,
+    )
+    for suffix in (
+        "common_selected_value_rms",
+        "residual_selected_value_rms",
+        "common_posterior_entropy",
+        "common_posterior_max",
+        "residual_null_mass",
+        "interval_posterior_entropy",
+        "interval_posterior_max",
+        "within_interval_object_posterior_entropy",
+        "within_interval_object_posterior_max",
+    ):
+        torch.testing.assert_close(
+            unpaired_metrics[f"object_p2_semantic_{suffix}"],
+            baseline_metrics[f"object_p2_semantic_{suffix}"],
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert not torch.equal(unpaired_read.geometry, baseline.geometry)
+
     no_camera = replace(
         dynamics,
         camera_weights=torch.zeros_like(dynamics.camera_weights),
+        camera_chart_availability=torch.zeros_like(
+            dynamics.camera_chart_availability
+        ),
     )
     _, no_camera_metrics = reader(
         query, no_camera, intent, collect_diagnostics=True
@@ -3513,7 +3708,6 @@ def test_p2_real_camera_mixture_is_camera_permutation_invariant() -> None:
 
 def test_p2_invalid_objects_have_exactly_zero_common_and_residual_support() -> None:
     batch, intervals, objects, content, hidden = 1, 4, 4, 6, 8
-    scalar = torch.zeros(batch, intervals, objects, 1)
     validity = torch.tensor([[[1.0], [0.0], [0.0], [0.0]]])
     baseline = FutureObjectDynamics(
         current_reference=torch.zeros(batch, objects, content),
@@ -3521,29 +3715,20 @@ def test_p2_invalid_objects_have_exactly_zero_common_and_residual_support() -> N
         semantic_delta=torch.zeros(batch, intervals, objects, content),
         transport_mean=torch.zeros(batch, intervals, objects, 1, 2),
         transport_covariance=torch.zeros(batch, intervals, objects, 1, 3),
-        visibility=scalar,
-        persistence=scalar,
         chart_availability=validity,
-        future_selector_validity=torch.ones_like(scalar),
         camera_coordinates=torch.zeros(batch, objects, 1, 2),
         camera_chart_availability=torch.ones(batch, objects, 1, 1),
         camera_weights=torch.ones(batch, objects, 1, 1),
     )
     semantic = baseline.semantic_delta.clone()
     transport = baseline.transport_mean.clone()
-    visibility = baseline.visibility.clone()
-    persistence = baseline.persistence.clone()
     semantic[:, :, 1:] = 1000.0
     transport[:, :, 1:] = 1000.0
-    visibility[:, :, 1:] = -1.0
-    persistence[:, :, 1:] = -1.0
     invalid_changed = replace(
         baseline,
         successor_content=baseline.current_reference[:, None] + semantic,
         semantic_delta=semantic,
         transport_mean=transport,
-        visibility=visibility,
-        persistence=persistence,
     )
     intent = PolicyIntentDock(
         common_key=torch.zeros(batch, hidden),
@@ -3567,34 +3752,49 @@ def test_p2_invalid_objects_have_exactly_zero_common_and_residual_support() -> N
     changed_value, _ = reader(
         query, invalid_changed, intent, collect_diagnostics=False
     )
-    torch.testing.assert_close(changed_value, baseline_value, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        changed_value.effect_by_type,
+        baseline_value.effect_by_type,
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_p2_complementary_fusion_preserves_single_owner_and_exact_zero() -> None:
     torch.manual_seed(405)
     reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
     selected = torch.randn(2, 3, 2, 2, 16)
-    fused, semantic, geometry = reader._fuse_complementary_values(selected)
-    expected = selected.float().sum(dim=-2)
-    torch.testing.assert_close(fused.float(), expected, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(semantic, selected[..., 0, :].float())
-    torch.testing.assert_close(geometry, selected[..., 1, :].float())
+    read, raw_sum, shared_scale = reader._fuse_complementary_values(selected)
+    expected = selected * shared_scale[..., None, :].to(dtype=selected.dtype)
+    torch.testing.assert_close(read.effect_by_type, expected, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(raw_sum, selected.sum(dim=-2), atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        read.physical_sum,
+        raw_sum * shared_scale.to(dtype=raw_sum.dtype),
+        atol=2.0e-6,
+        rtol=0.0,
+    )
 
     zeros = torch.zeros_like(selected)
-    fused_zero, semantic_zero, geometry_zero = (
+    read_zero, raw_zero, zero_scale = (
         reader._fuse_complementary_values(zeros)
     )
-    assert torch.equal(fused_zero, zeros[..., 0, :])
-    assert torch.equal(semantic_zero, zeros[..., 0, :].float())
-    assert torch.equal(geometry_zero, zeros[..., 1, :].float())
+    assert torch.equal(read_zero.effect_by_type, zeros)
+    assert torch.equal(raw_zero, zeros[..., 0, :])
+    torch.testing.assert_close(zero_scale, torch.ones_like(zero_scale))
 
     semantic_only = selected.clone()
     semantic_only[..., 1, :].zero_()
-    fused_semantic, semantic_value, geometry_value = (
+    semantic_read, _, _ = (
         reader._fuse_complementary_values(semantic_only)
     )
-    torch.testing.assert_close(fused_semantic.float(), semantic_value)
-    assert torch.count_nonzero(geometry_value) == 0
+    torch.testing.assert_close(
+        semantic_read.physical_sum,
+        semantic_read.semantic,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert torch.count_nonzero(semantic_read.geometry) == 0
 
 
 def test_p2_complementary_fusion_starts_near_uniform_without_type_selector() -> None:
@@ -3603,8 +3803,8 @@ def test_p2_complementary_fusion_starts_near_uniform_without_type_selector() -> 
     assert not hasattr(reader, "type_query")
     assert not hasattr(reader, "type_contrast_down")
     selected = torch.randn(2, 24, 2, 2, 32, requires_grad=True)
-    fused, _, _ = reader._fuse_complementary_values(selected)
-    fused.float().sum().backward()
+    read, _, _ = reader._fuse_complementary_values(selected)
+    read.physical_sum.float().sum().backward()
     assert selected.grad is not None
     for type_index in range(2):
         assert torch.count_nonzero(selected.grad[..., type_index, :]) > 0
@@ -3615,30 +3815,35 @@ def test_p2_complementary_fusion_owns_cpu_bf16_boundary() -> None:
     reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
     selected = torch.randn(1, 4, 2, 2, 16, dtype=torch.bfloat16)
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        fused, semantic, geometry = reader._fuse_complementary_values(selected)
-    assert fused.dtype == torch.bfloat16
-    assert semantic.dtype == torch.float32
-    assert geometry.dtype == torch.float32
-    assert torch.isfinite(fused).all()
+        read, raw_sum, shared_scale = reader._fuse_complementary_values(selected)
+    assert read.effect_by_type.dtype == torch.bfloat16
+    assert raw_sum.dtype == torch.bfloat16
+    assert shared_scale.dtype == torch.float32
+    assert torch.isfinite(read.effect_by_type).all()
 
 
 def test_p2_complementary_value_contract_is_one_sided_and_exact_zero() -> None:
     reader = ObjectFutureEffectReader(hidden=16, content_dim=8, route_dim=4)
     limit = reader.COMPLEMENTARY_VALUE_MAX_RMS
 
-    zero = torch.zeros(2, 3, 16)
-    contracted_zero, zero_scale = reader._contract_complementary_value(zero)
-    assert torch.equal(contracted_zero, zero)
+    zero = torch.zeros(2, 3, 1, 2, 16)
+    zero_read, _, zero_scale = reader._fuse_complementary_values(zero)
+    assert torch.equal(zero_read.effect_by_type, zero)
     torch.testing.assert_close(zero_scale, torch.ones_like(zero_scale))
 
-    tiny = torch.full((2, 3, 16), 1.0e-4)
-    contracted_tiny, tiny_scale = reader._contract_complementary_value(tiny)
+    tiny = torch.full((2, 3, 1, 2, 16), 1.0e-4)
+    tiny_read, _, tiny_scale = reader._fuse_complementary_values(tiny)
     assert bool((tiny_scale <= 1.0).all())
-    torch.testing.assert_close(contracted_tiny, tiny, atol=1.0e-7, rtol=1.0e-6)
+    torch.testing.assert_close(
+        tiny_read.effect_by_type,
+        tiny,
+        atol=1.0e-7,
+        rtol=1.0e-6,
+    )
 
-    large = torch.full((2, 3, 16), 100.0)
-    contracted_large, large_scale = reader._contract_complementary_value(large)
-    contracted_rms = contracted_large.float().square().mean(dim=-1).sqrt()
+    large = torch.full((2, 3, 1, 2, 16), 100.0)
+    large_read, _, large_scale = reader._fuse_complementary_values(large)
+    contracted_rms = large_read.physical_sum.float().square().mean(dim=-1).sqrt()
     assert bool((large_scale < 1.0).all())
     assert float(contracted_rms.amax()) <= limit * 1.0001
 
@@ -3799,7 +4004,7 @@ def test_p2_matched_interval_routes_read_typed_s_and_w_object_evidence() -> None
         changed_intent,
         collect_diagnostics=True,
     )
-    assert not torch.equal(changed, baseline)
+    assert not torch.equal(changed.effect_by_type, baseline.effect_by_type)
     for name in (
         "object_p2_type_interval_typed_score_abs",
         "object_p2_type_interval_w_score_abs",
@@ -3943,7 +4148,58 @@ def test_p2_residual_retention_metrics_are_support_aware_and_complementary() -> 
     ) == 0.0
 
 
-def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
+def test_consequence_preserves_typed_effect_and_uses_one_physical_sum() -> None:
+    torch.manual_seed(401)
+    batch, horizon, basis, hidden = 1, 24, 4, 16
+    factual = torch.randn(batch, horizon, basis, hidden)
+    effect_by_type = torch.randn(batch, horizon, basis, 2, hidden)
+    module = ZeroPreservingObjectConsequence(hidden)
+    state, _ = module(
+        factual_base=factual,
+        effect=TypedP2EffectRead(effect_by_type=effect_by_type),
+    )
+    state.validate()
+    torch.testing.assert_close(
+        state.effect,
+        effect_by_type.sum(dim=-2),
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        state.interaction,
+        state.interaction_by_type.sum(dim=-2),
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        state.protected_consequence,
+        factual + state.effect + state.interaction,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+    zero = torch.zeros_like(effect_by_type)
+    neutral, _ = module(
+        factual_base=factual,
+        effect=TypedP2EffectRead(effect_by_type=zero),
+    )
+    assert torch.count_nonzero(neutral.effect_by_type) == 0
+    assert torch.count_nonzero(neutral.interaction_by_type) == 0
+    torch.testing.assert_close(
+        neutral.protected_consequence,
+        factual,
+        atol=0.0,
+        rtol=0.0,
+    )
+    try:
+        module(factual_base=factual, effect=effect_by_type)  # type: ignore[arg-type]
+    except TypeError as error:
+        assert "TypedP2EffectRead" in str(error)
+    else:
+        raise AssertionError("Schema37 consequence must reject an untyped effect")
+
+
+def test_p3_six_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     torch.manual_seed(402)
     batch, horizon, basis, hidden = 1, 24, 4, 16
     compiler = ObjectPolicyPlanCompiler(
@@ -3955,12 +4211,13 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
     common_fact = torch.randn(batch, horizon, 1, hidden).expand(
         -1, -1, basis, -1
     )
-    effect = torch.randn_like(common_fact)
+    effect_by_type = torch.randn(batch, horizon, basis, 2, hidden)
+    interaction_by_type = torch.zeros_like(effect_by_type)
     consequence = ObjectConsequenceState(
         factual_base=common_fact,
-        effect=effect,
-        interaction=torch.zeros_like(effect),
-        protected_consequence=common_fact + effect,
+        effect_by_type=effect_by_type,
+        interaction_by_type=interaction_by_type,
+        protected_consequence=common_fact + effect_by_type.sum(dim=-2),
     )
     zero_intent = PolicyIntentDock(
         common_key=torch.zeros(batch, hidden),
@@ -3977,13 +4234,55 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
         action_query=action_query,
     )
     assert not hasattr(bank, "factual")
+    assert bank.source_names == (
+        "p3_precision",
+        "p3_effect_semantic",
+        "p3_effect_geometry",
+        "p3_temporal_semantic",
+        "p3_temporal_geometry",
+        "p3_state_change",
+    )
+    role = bank.as_policy_role_bank(source_depth=7)
+    assert role.values.shape == (batch, 6, horizon, basis, hidden)
+    assert role.source_names == bank.source_names
+    assert role.source_depths == (7,) * 6
+    for index, name in enumerate(
+        (
+            "precision",
+            "effect_semantic",
+            "effect_geometry",
+            "temporal_semantic",
+            "temporal_geometry",
+            "state_change",
+        )
+    ):
+        torch.testing.assert_close(
+            role.values[:, index],
+            getattr(bank, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+    torch.testing.assert_close(
+        bank.effect,
+        bank.effect_semantic + bank.effect_geometry,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        bank.temporal,
+        bank.temporal_semantic + bank.temporal_geometry,
+        atol=0.0,
+        rtol=0.0,
+    )
     # Precision reads the cached high-resolution P1 innovation directly; it
     # must not disappear merely because the observation is shared across
     # action bases. Temporal requires both S and W effect.
     assert torch.count_nonzero(bank.precision) > 0
-    assert torch.count_nonzero(bank.temporal) == 0
+    assert torch.count_nonzero(bank.temporal_semantic) == 0
+    assert torch.count_nonzero(bank.temporal_geometry) == 0
     assert torch.count_nonzero(bank.state_change) == 0
-    assert torch.count_nonzero(bank.effect) > 0
+    assert torch.count_nonzero(bank.effect_semantic) > 0
+    assert torch.count_nonzero(bank.effect_geometry) > 0
 
     zero_precision, _ = compiler(
         p1_factual_detail=torch.zeros_like(common_fact),
@@ -4009,19 +4308,23 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
         intent=active_intent,
         action_query=action_query,
     )
-    assert torch.count_nonzero(active.temporal) > 0
+    assert torch.count_nonzero(active.temporal_semantic) > 0
+    assert torch.count_nonzero(active.temporal_geometry) > 0
     no_effect, _ = compiler(
         p1_factual_detail=common_fact,
         consequence=replace(
             consequence,
-            effect=torch.zeros_like(consequence.effect),
-            interaction=torch.zeros_like(consequence.interaction),
+            effect_by_type=torch.zeros_like(consequence.effect_by_type),
+            interaction_by_type=torch.zeros_like(consequence.interaction_by_type),
             protected_consequence=consequence.factual_base,
         ),
         intent=active_intent,
         action_query=action_query,
     )
-    assert torch.count_nonzero(no_effect.temporal) == 0
+    assert torch.count_nonzero(no_effect.effect_semantic) == 0
+    assert torch.count_nonzero(no_effect.effect_geometry) == 0
+    assert torch.count_nonzero(no_effect.temporal_semantic) == 0
+    assert torch.count_nonzero(no_effect.temporal_geometry) == 0
     changed_factual_base = common_fact + torch.randn_like(common_fact)
     changed_consequence = replace(
         consequence,
@@ -4036,12 +4339,20 @@ def test_p3_optional_lanes_are_source_exclusive_and_zero_preserving() -> None:
         intent=active_intent,
         action_query=action_query,
     )
-    torch.testing.assert_close(changed.precision, active.precision, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(changed.effect, active.effect, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(changed.temporal, active.temporal, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(
-        changed.state_change, active.state_change, atol=0.0, rtol=0.0
-    )
+    for name in (
+        "precision",
+        "effect_semantic",
+        "effect_geometry",
+        "temporal_semantic",
+        "temporal_geometry",
+        "state_change",
+    ):
+        torch.testing.assert_close(
+            getattr(changed, name),
+            getattr(active, name),
+            atol=0.0,
+            rtol=0.0,
+        )
 
     # The dynamic P1 policy block refines P2's query upstream.  P3 accepts no
     # live P1 residual argument, so precision has exactly one P1-owned value
@@ -4080,8 +4391,8 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    assert torch.count_nonzero(neutral_effect) == 0
-    assert torch.count_nonzero(changed_effect) > 0
+    assert torch.count_nonzero(neutral_effect.effect_by_type) == 0
+    assert torch.count_nonzero(changed_effect.effect_by_type) > 0
 
 
 def test_bottom_optional_values_preserve_zero_and_do_not_expand_near_zero() -> None:

@@ -506,28 +506,6 @@ def future_dynamics_terms(
         scale_floored=False,
     )
     covariance = masked(covariance_error, camera_validity)
-    (
-        visibility_common,
-        visibility_residual,
-        visibility_common_error,
-        visibility_residual_error,
-    ) = decomposed_loss(
-        prediction.visibility,
-        target.visibility,
-        scale_floored=False,
-    )
-    visibility = 0.5 * (visibility_common + visibility_residual)
-    (
-        persistence_common,
-        persistence_residual,
-        persistence_common_error,
-        persistence_residual_error,
-    ) = decomposed_loss(
-        prediction.persistence,
-        target.persistence,
-        scale_floored=False,
-    )
-    persistence = 0.5 * (persistence_common + persistence_residual)
     semantic_transition_prediction = (
         prediction.semantic_interval_residual[:, 1:]
         - prediction.semantic_interval_residual[:, :-1]
@@ -546,12 +524,14 @@ def future_dynamics_terms(
         object_validity[:, :-1],
     )
     transition = masked(transition_error, transition_validity)
+    # Visibility/persistence had exact-neutral targets and no policy consumer.
+    # Their former 0.08/0.07 shares are intentionally retired rather than
+    # redistributed: doing so would silently change the established semantic
+    # or geometry gradient geometry under the same external objective weight.
     total = (
         0.55 * semantic_delta
         + 0.15 * transport
         + 0.05 * covariance
-        + 0.08 * visibility
-        + 0.07 * persistence
     )
     terms = {
         "future_dynamics": total,
@@ -562,22 +542,10 @@ def future_dynamics_terms(
         "future_transport_common": transport_common,
         "future_transport_residual": transport_residual,
         "future_covariance": covariance,
-        "future_visibility": visibility,
-        "future_visibility_common": visibility_common,
-        "future_visibility_residual": visibility_residual,
-        "future_persistence": persistence,
-        "future_persistence_common": persistence_common,
-        "future_persistence_residual": persistence_residual,
         "future_transition": transition,
     }
     if collect_diagnostics:
         terms["future_current_loss_support"] = camera_validity.mean().detach()
-        terms["future_prediction_selector_validity"] = (
-            prediction.future_selector_validity.detach().float().mean()
-        )
-        terms["future_target_selector_validity"] = (
-            target.future_selector_validity.detach().float().mean()
-        )
         terms["future_target_semantic_delta_rms"] = (
             target.semantic_delta.detach().float().square().mean().sqrt()
         )
@@ -590,12 +558,13 @@ def future_dynamics_terms(
         for index in range(prediction.intervals):
             interval_slice = slice(index, index + 1)
             interval_validity = object_validity[:, interval_slice]
+            interval_camera_validity = camera_validity[:, interval_slice]
             terms[f"future_interval_{index}_semantic_delta"] = masked(
                 semantic_residual_error[:, interval_slice], interval_validity
             ).detach()
             terms[f"future_interval_{index}_transport"] = masked(
                 transport_residual_error[:, interval_slice],
-                interval_validity,
+                interval_camera_validity,
             ).detach()
     return terms
 

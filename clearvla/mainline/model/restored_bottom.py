@@ -10,7 +10,8 @@ The translation keeps the repaired ownership boundaries:
 
 * P2's protected consequence is written once through V120's protected-detail
   reader while the historical generic trajectory ingress remains neutral;
-* four non-zero P3 lanes are optional typed innovations;
+* six P3 lanes remain separate optional innovations until their lane-local
+  action-basis readers;
 * all 512 W transition rows reach the evidence bank without pooling;
 * observation banks are never reopened below P1;
 * teacher/future tensors cannot be represented by this online signature.
@@ -309,7 +310,6 @@ class RestoredV120EvidenceBottom(nn.Module):
         state = CompletedP1PolicyState(
             factual_base=protected_detail,
             policy_query_residual=dynamic_delta,
-            effect_query=action_query + protected_detail + dynamic_delta,
         )
         state.validate(
             horizon=self.horizon,
@@ -346,7 +346,7 @@ class RestoredV120EvidenceBottom(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "p1_effect_query_rms": state.effect_query.detach()
+            "p1_p2_query_rms": state.p2_dock(action_query).combined().detach()
             .float()
             .square()
             .mean()
@@ -464,21 +464,10 @@ class RestoredV120EvidenceBottom(nn.Module):
         return torch.cat(rows_out, dim=1)
 
     def _role_bank(self, plan: ObjectPolicyPlanDeltaBank) -> PolicyRoleDeltaBank:
-        plan.validate()
-        return PolicyRoleDeltaBank(
-            values=torch.stack(
-                (
-                    plan.precision,
-                    plan.effect,
-                    plan.temporal,
-                    plan.state_change,
-                ),
-                dim=1,
-            ),
-            source_names=plan.source_names,
-            source_depths=(7, 7, 7, 7),
-            protected_detail=plan.protected_base,
-        )
+        # Keep the compiler as the single owner of the active lane schema.
+        # In particular, do not reconstruct semantic/geometry lanes here or
+        # silently merge them before the bottom selector sees them.
+        return plan.as_policy_role_bank(source_depth=7)
 
     def _layer_contract_canvas(
         self,

@@ -194,7 +194,6 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     p1_state = CompletedP1PolicyState(
         factual_base=dock.protected_detail,
         policy_query_residual=policy_residual,
-        effect_query=action_query + dock.protected_detail + policy_residual,
     )
     captured: dict[str, torch.Tensor] = {}
 
@@ -229,7 +228,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     assert tuple(compiled.plan.protected_base.shape) == (batch, horizon, basis, hidden)
     torch.testing.assert_close(
         captured["p2_query"],
-        p1_state.effect_query,
+        p1_state.p2_dock(action_query).combined(),
         atol=0.0,
         rtol=0.0,
     )

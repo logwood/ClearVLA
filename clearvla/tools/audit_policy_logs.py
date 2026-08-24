@@ -862,6 +862,8 @@ V94_ALIASES.update(
             "geometry_sim_H": "object_intent_interval_geometry_audit_similarity_entropy",
             "interval_var": "object_intent_interval_variation",
             "public_interval_var": "object_intent_public_interval_variation",
+            "public_common": "object_intent_public_common_rms",
+            "public_residual": "object_intent_public_residual_rms",
             "condition_innov": "object_intent_condition_innovation_rms",
             "condition_interval_var": (
                 "object_intent_condition_interval_variation"
@@ -1068,6 +1070,9 @@ V94_ALIASES.update(
             "typed_sidecar": "object_w_typed_sidecar_rms",
             "typed_common": "object_w_typed_common_state_rms",
             "typed_residual": "object_w_typed_interval_residual_state_rms",
+            "typed_interval_innov": (
+                "object_w_typed_interval_innovation_state_rms"
+            ),
             "public_content": "object_w_public_content_rms",
             "object_content_innov": "object_w_object_innovation_rms",
             "object_content_var": "object_w_object_innovation_variation",
@@ -1106,6 +1111,12 @@ V94_ALIASES.update(
             ),
             "prediction_common": "object_w_prediction_common_effect_rms",
             "prediction_residual": "object_w_prediction_interval_residual_rms",
+            "appearance_semantic_common": (
+                "object_w_appearance_semantic_common_modulation_rms"
+            ),
+            "appearance_semantic_interval": (
+                "object_w_appearance_semantic_interval_modulation_rms"
+            ),
             "teacher_visibility": "object_teacher_visibility",
             "teacher_visibility_change": "object_teacher_visibility_change",
             "teacher_persistence_change": "object_teacher_persistence_change",
@@ -1449,6 +1460,17 @@ V94_ALIASES.update(
             ),
             "effect_precontract": "object_p2_effect_precontract_rms",
             "effect": "object_p2_effect_postcontract_rms",
+            "effect_contract_scale": (
+                "object_p2_shared_effect_contract_scale_mean"
+            ),
+            "semantic_postcontract": "object_p2_semantic_postcontract_rms",
+            "geometry_postcontract": "object_p2_geometry_postcontract_rms",
+            "geometry_common_joint_H": (
+                "object_p2_geometry_common_joint_kc_posterior_entropy"
+            ),
+            "geometry_residual_joint_H": (
+                "object_p2_geometry_residual_joint_kc_posterior_entropy"
+            ),
             "contract_min": "object_p2_contract_min",
             "consequence_effect": "object_consequence_effect_rms",
             "interaction": "object_consequence_interaction_rms",
@@ -1484,9 +1506,13 @@ V94_ALIASES.update(
             "p3_precision_input": "object_p3_precision_input_rms",
             "p3_precision": "object_p3_precision_rms",
             "p3_effect": "object_p3_effect_rms",
+            "p3_effect_semantic": "object_p3_effect_semantic_rms",
+            "p3_effect_geometry": "object_p3_effect_geometry_rms",
             "p3_temporal_source": "object_p3_temporal_source_rms",
             "p3_temporal_consequence": "object_p3_temporal_consequence_rms",
             "p3_temporal": "object_p3_temporal_rms",
+            "p3_temporal_semantic": "object_p3_temporal_semantic_rms",
+            "p3_temporal_geometry": "object_p3_temporal_geometry_rms",
             "p3_state_change": "object_p3_state_change_rms",
             "p3_centered_detail": "object_p3_centered_detail_rms",
             "p3_consequence_innov": "object_p3_consequence_innovation_rms",
@@ -1530,6 +1556,165 @@ CORE_BATCH_KEYS = (
     "rollout_milestone_delta_match",
     "event",
 )
+
+SCHEMA37_REQUIRED_STRUCTURE_KEYS = (
+    # G remains the sole producer of grounded K identities consumed by the
+    # Schema37 S/W/P path.  These are presence/finite checks; only the two
+    # pair-cosine rows additionally retain the historical publicization guard.
+    "object_grounding_reconstruction_object_mass_mean",
+    "object_grounding_reconstruction_active_fraction",
+    "object_grounding_reconstruction_conditional_owner_entropy",
+    "object_grounding_canonical_slot_residual_rms",
+    "object_grounding_public_position_rms",
+    "object_grounding_g3_parent_top2_margin",
+    "object_grounding_g3_corrected_top2_margin",
+    "object_grounding_g3_assignment_change_fraction",
+    "object_grounding_g3_residual_to_parent_margin_ratio",
+    "object_grounding_object_content_pair_cosine",
+    "object_grounding_object_innovation_pair_cosine",
+    "object_grounding_prebind_typed_consensus_l1",
+    # S exposes a literal common/residual decomposition and named goal,
+    # history and typed owners at the factual-intent boundary.
+    "object_intent_goal_innovation_rms",
+    "object_intent_history_innovation_rms",
+    "object_intent_object_content_innovation_variation",
+    "object_intent_public_common_rms",
+    "object_intent_public_residual_rms",
+    "object_intent_public_reconstruction_max_abs",
+    "object_intent_public_residual_mean_max_abs",
+    "object_intent_public_condition_centered_interval_variation",
+    "object_intent_typed_common_policy_context_rms",
+    "object_intent_typed_interval_residual_policy_context_rms",
+    "object_intent_typed_policy_residual_mean_rms",
+    # W may retain common and interval innovations, but only the supervised
+    # typed future field leaves the subsystem.
+    "object_w_object_innovation_variation",
+    "object_w_typed_common_state_rms",
+    "object_w_typed_interval_innovation_state_rms",
+    "object_w_typed_interval_input_mean_rms",
+    "object_w_common_base_interaction_rms",
+    "object_w_interval_base_interaction_rms",
+    "object_w_common_base_interaction_denominator_min",
+    "object_w_interval_base_interaction_denominator_min",
+    "object_w_appearance_semantic_common_modulation_rms",
+    "object_w_appearance_semantic_interval_modulation_rms",
+    "object_w1_common_processing_delta_rms",
+    "object_w2_common_processing_delta_rms",
+    "object_w2_near_to_far_innovation_update_rms",
+    "object_w_prediction_common_effect_rms",
+    "object_w_prediction_interval_residual_rms",
+    "object_teacher_dustbin_probability",
+    "object_teacher_effective_support",
+    "object_teacher_common_effect_rms",
+    "object_teacher_interval_residual_rms",
+    "object_teacher_current_loss_support",
+    # Static/dynamic P1 remain separately observable at P2's true consumer.
+    "p1_query_chart_variation",
+    "p1_policy_query_residual_rms",
+    # P2 keeps semantic K and geometry KxC reads separate through the shared
+    # physical contract.  Status is deliberately absent from Schema37.
+    "object_p2_camera_mixture_effective_count",
+    "object_p2_camera_support_fraction",
+    "object_p2_camera_coordinate_variation",
+    "object_p2_semantic_interval_typed_score_abs",
+    "object_p2_geometry_interval_typed_score_abs",
+    "object_p2_semantic_interval_w_score_abs",
+    "object_p2_geometry_interval_w_score_abs",
+    "object_p2_semantic_residual_null_mass",
+    "object_p2_geometry_residual_null_mass",
+    "object_p2_geometry_common_joint_kc_posterior_entropy",
+    "object_p2_geometry_common_joint_kc_posterior_max",
+    "object_p2_geometry_residual_joint_kc_posterior_entropy",
+    "object_p2_geometry_residual_joint_kc_posterior_max",
+    "object_p2_geometry_joint_kc_candidate_count",
+    "object_p2_protected_common_rms",
+    "object_p2_optional_residual_rms",
+    "object_p2_effect_precontract_rms",
+    "object_p2_effect_postcontract_rms",
+    "object_p2_shared_effect_contract_scale_mean",
+    "object_p2_shared_effect_contract_compression",
+    "object_p2_semantic_postcontract_rms",
+    "object_p2_geometry_postcontract_rms",
+    "object_consequence_semantic_effect_rms",
+    "object_consequence_geometry_effect_rms",
+    "object_consequence_semantic_interaction_rms",
+    "object_consequence_geometry_interaction_rms",
+    # P3 and bottom expose six lane-local 4-basis+null reads followed by one
+    # shared optional-update contract.  The removed trajectory_basis simplex
+    # is intentionally not a Schema37 recovery requirement.
+    "object_p3_precision_rms",
+    "object_p3_effect_semantic_rms",
+    "object_p3_effect_geometry_rms",
+    "object_p3_temporal_semantic_rms",
+    "object_p3_temporal_geometry_rms",
+    "object_p3_state_change_rms",
+    "bottom_capacity_mean",
+    "evidence_trajectory_summary_norm",
+    "evidence_policy_delta_attnres_lane_sum_precontract_rms",
+    "evidence_policy_delta_attnres_lane_sum_postcontract_rms",
+    "evidence_policy_delta_attnres_lane_sum_compression",
+    "evidence_policy_delta_attnres_p3_precision_non_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_semantic_non_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_geometry_non_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_semantic_non_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_geometry_non_null_mass",
+    "evidence_policy_delta_attnres_p3_state_change_non_null_mass",
+    "evidence_policy_delta_attnres_p3_precision_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_semantic_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_geometry_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_semantic_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_geometry_null_mass",
+    "evidence_policy_delta_attnres_p3_state_change_null_mass",
+)
+
+SCHEMA37_TENSOR_GRADIENT_KEYS = (
+    "gradient_tensor_s_public_rms",
+    "gradient_tensor_s_typed_common_rms",
+    "gradient_tensor_s_typed_interval_rms",
+    "gradient_tensor_p1_static_fact_rms",
+    "gradient_tensor_p1_dynamic_query_residual_rms",
+    "gradient_tensor_w_semantic_common_rms",
+    "gradient_tensor_w_appearance_common_rms",
+    "gradient_tensor_w_geometry_common_rms",
+    "gradient_tensor_w_semantic_interval_rms",
+    "gradient_tensor_w_appearance_interval_rms",
+    "gradient_tensor_w_geometry_interval_rms",
+    "gradient_tensor_p2_semantic_effect_rms",
+    "gradient_tensor_p2_geometry_effect_rms",
+    "gradient_tensor_p3_precision_rms",
+    "gradient_tensor_p3_effect_semantic_rms",
+    "gradient_tensor_p3_effect_geometry_rms",
+    "gradient_tensor_p3_temporal_semantic_rms",
+    "gradient_tensor_p3_temporal_geometry_rms",
+    "gradient_tensor_p3_state_change_rms",
+)
+
+SCHEMA37_OWNER_GRADIENT_ROLES = (
+    "observation",
+    "grounding",
+    "grounder",
+    "intent",
+    "coarse_action",
+    "intent_supervisor",
+    "history_proposal",
+    "dynamics",
+    "controlled_transition",
+    "p1_factual",
+    "p2_effect_reader",
+    "consequence",
+    "p3_compiler",
+    "v120_canvas_seed",
+    "v120_layer_contracts",
+    "bottom_query",
+    "bottom_evidence_adapter",
+    "bottom_policy_bridge",
+    "bottom_organizer",
+    "bottom_mmdit",
+    "bottom_capacity",
+    "bottom_execution",
+    "bottom_heads",
+)
+
 
 STRUCTURE_KEYS = (
     "evidence_mmd_it_execution_progress",
@@ -1973,6 +2158,9 @@ STRUCTURE_KEYS = (
     "evidence_policy_delta_attnres_source_mass_trajectory_basis1",
     "evidence_policy_delta_attnres_source_mass_trajectory_basis2",
     "evidence_policy_delta_attnres_source_mass_trajectory_basis3",
+    # Exact Schema37 recovery surface.  Historical rows above remain readable
+    # for comparisons, but are never inherited as Schema37 requirements.
+    *SCHEMA37_REQUIRED_STRUCTURE_KEYS,
 )
 
 GRADIENT_KEYS = (
@@ -2018,6 +2206,9 @@ GRADIENT_KEYS = (
     "gradient_postclip_p2_effect_reader_l2",
     "gradient_postclip_consequence_l2",
     "gradient_postclip_p3_compiler_l2",
+    # Schema37 tensor-boundary hooks.  These are diagnostic gradients at the
+    # named carrier, distinct from optimizer-owner norms above.
+    *SCHEMA37_TENSOR_GRADIENT_KEYS,
     "gradient_postclip_v120_canvas_seed_l2",
     "gradient_postclip_v120_layer_contracts_l2",
     "gradient_postclip_bottom_query_l2",
@@ -4707,9 +4898,14 @@ def _recovery_assessment(
 
     structure = candidate.get("structure", {})
     candidate_schema = candidate_manifest.get("architecture_schema")
+    schema_number = (
+        int(candidate_schema)
+        if isinstance(candidate_schema, (int, float))
+        else None
+    )
+    schema37 = schema_number == 37
     schema36 = (
-        isinstance(candidate_schema, (int, float))
-        and int(candidate_schema) >= 36
+        schema_number == 36
     )
     schema34 = (
         isinstance(candidate_schema, (int, float))
@@ -4925,7 +5121,12 @@ def _recovery_assessment(
             "bottom_capacity_mean",
         )
     )
-    if schema36:
+    if schema37:
+        # Schema37 changed the W/P2/P3/bottom ownership ABI.  It must not
+        # inherit Schema36's removed status consumer or its one-simplex
+        # trajectory_basis diagnostics merely because 37 >= 36.
+        required_structure = SCHEMA37_REQUIRED_STRUCTURE_KEYS
+    elif schema36:
         required_structure = (
             *required_structure,
             "object_w2_near_to_far_residual_update_rms",
@@ -5045,19 +5246,23 @@ def _recovery_assessment(
         and int(candidate_schema) >= 24
     ) or any(name.startswith("gradient_raw_") for name in gradients)
     owner_rows = (
-        "grounder",
-        "intent",
-        *(("intent_supervisor",) if schema27 else ()),
-        "dynamics",
-        "p1_factual",
-        "p2_effect_reader",
-        "p3_compiler",
-        "v120_canvas_seed",
-        "v120_layer_contracts",
-        "bottom_evidence_adapter",
-        "bottom_policy_bridge",
-        "bottom_capacity",
-        "bottom_execution",
+        SCHEMA37_OWNER_GRADIENT_ROLES
+        if schema37
+        else (
+            "grounder",
+            "intent",
+            *(("intent_supervisor",) if schema27 else ()),
+            "dynamics",
+            "p1_factual",
+            "p2_effect_reader",
+            "p3_compiler",
+            "v120_canvas_seed",
+            "v120_layer_contracts",
+            "bottom_evidence_adapter",
+            "bottom_policy_bridge",
+            "bottom_capacity",
+            "bottom_execution",
+        )
     )
     required_gradients = (
         tuple(
@@ -5075,6 +5280,24 @@ def _recovery_assessment(
         else:
             status = "pass" if float(value) > 1e-12 else "fail"
         record(f"gradient/{name}", status, candidate_value=value)
+
+    if schema37:
+        for name in SCHEMA37_TENSOR_GRADIENT_KEYS:
+            value = gradients.get(name, {}).get("tail_median")
+            status = (
+                "pass"
+                if isinstance(value, (int, float)) and math.isfinite(float(value))
+                else "incomplete"
+            )
+            record(
+                f"tensor_gradient/{name}",
+                status,
+                candidate_value=value,
+                detail=(
+                    "tensor-boundary gradients are presence/finite diagnostics; "
+                    "an exact zero is evidence and must not be relabelled missing"
+                ),
+            )
 
     if schema24:
         bounded_gradients = (

@@ -66,7 +66,9 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert not any("scripts/current_v" in path for path in paths)
 
 
-def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: Path) -> None:
+def test_checkpoint_identity_roundtrip_and_schema_36_migration_rejection(
+    tmp_path: Path,
+) -> None:
     root = Path(__file__).resolve().parents[1]
     condition = tmp_path / "goal.pt"
     condition.write_bytes(b"t5-condition")
@@ -99,12 +101,13 @@ def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: P
     assert "top" in report.rejected_components
 
     historical_manifest = copy.deepcopy(identity.manifest)
-    # Schema 22 was experimentally rejected.  It remains parseable only for
-    # the explicit unchanged-bottom migration path and can never exact-resume
-    # into the current S-owned typed-relevance recovery.
-    historical_manifest["schema"] = 22
+    # Schema36 remains parseable for an explicit compatibility report, but its
+    # joint bottom route has a different serialized ingress from Schema37's
+    # six lane-local 4+null reads.  It can neither exact-resume nor migrate its
+    # bottom even if a hand-edited manifest reuses the current bottom ABI text.
+    historical_manifest["schema"] = 36
     components = dict(historical_manifest["components"])
-    components["top"] = "object_intent_dynamics_323_schema6"
+    components["top"] = "object_intent_dynamics_323_schema36"
     historical_manifest["components"] = components
     parsed_historical = manifest_from_mapping(
         historical_manifest,
@@ -121,8 +124,9 @@ def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: P
     )
     historical_report = compare_checkpoint_identity(restored_historical, identity)
     assert not historical_report.exact_resume
-    assert historical_report.reusable_components == ("bottom",)
+    assert historical_report.reusable_components == ()
     assert "top" in historical_report.rejected_components
+    assert "bottom" in historical_report.rejected_components
 
 
 def test_artifact_relocation_does_not_change_semantic_identity(tmp_path: Path) -> None:
@@ -437,7 +441,7 @@ def test_exact_resume_rejects_model_dtype_before_live_state_mutation(
         assert torch.equal(value, live_before[name])
 
 
-def test_bottom_migration_accepts_historical_top_with_same_bottom_abi(
+def test_bottom_migration_rejects_schema_36_even_with_same_bottom_abi(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
@@ -479,8 +483,8 @@ def test_bottom_migration_accepts_historical_top_with_same_bottom_abi(
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
     historical_manifest = payload["identity"]["manifest"]
-    historical_manifest["schema"] = int(historical_manifest["schema"]) - 1
-    historical_manifest["components"]["top"] = "object_intent_dynamics_323_schema6"
+    historical_manifest["schema"] = 36
+    historical_manifest["components"]["top"] = "object_intent_dynamics_323_schema36"
     historical_parsed = manifest_from_mapping(
         historical_manifest,
         require_current_schema=False,
@@ -492,10 +496,17 @@ def test_bottom_migration_accepts_historical_top_with_same_bottom_abi(
     with torch.no_grad():
         target.bottom.weight.zero_()
         target.bottom.bias.zero_()
-    report = migrate_bottom_only(path, target, identity=identity)
-    assert report.loaded == ("bottom.bias", "bottom.weight")
-    assert torch.equal(target.bottom.weight, source.bottom.weight)
-    assert torch.equal(target.bottom.bias, source.bottom.bias)
+    before = {
+        name: value.detach().clone() for name, value in target.state_dict().items()
+    }
+    try:
+        migrate_bottom_only(path, target, identity=identity)
+    except ValueError as error:
+        assert str(error) == "bottom migration rejected: manifest identity differs"
+    else:
+        raise AssertionError("Schema36 joint-route bottom must not migrate to Schema37")
+    for name, value in target.state_dict().items():
+        assert torch.equal(value, before[name])
 
 
 def test_bottom_migration_rejects_untyped_shape_only_checkpoint(tmp_path: Path) -> None:

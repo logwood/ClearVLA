@@ -133,7 +133,8 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "object_p2_residual_retained_rms_ratio": 0.61,
             "object_p2_residual_cancelled_rms_fraction": 0.39,
             "object_p2_residual_cancellation_support_fraction": 0.99,
-            "object_p2_status_consumer_active": 0.0,
+            "object_p2_geometry_joint_kc_candidate_count": 8.0,
+            "gradient_tensor_p3_effect_semantic_rms": 0.007,
             "p1_policy_modulation_scale_max_abs": 0.88,
             "p1_completed_fact_rms": 0.4,
             "object_p3_effect_rms": 0.41,
@@ -177,7 +178,8 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "object_p2_residual_retained_rms_ratio=0.61" in joined
     assert "object_p2_residual_cancelled_rms_fraction=0.39" in joined
     assert "object_p2_residual_cancellation_support_fraction=0.99" in joined
-    assert "object_p2_status_consumer_active=0" in joined
+    assert "object_p2_geometry_joint_kc_candidate_count=8" in joined
+    assert "gradient_tensor_p3_effect_semantic_rms=0.007" in joined
     assert "p1_policy_modulation_scale_max_abs=0.88" in joined
     assert "p1_completed_fact_rms=0.4" in joined
     assert "object_p3_effect_rms=0.41" in joined

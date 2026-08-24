@@ -508,30 +508,32 @@ Re-check these against current source rather than assuming they remain true:
     `clearvla/tools/audit_policy_logs.py`.  The `22 GiB` process estimate is a
     dedicated-GPU release check; it is not a model-side memory loss or a
     substitute for recording batch size and hardware conditions.
-69. The active Schema30 graph lives under `clearvla/mainline/`, not the legacy
+69. The active Schema37 graph lives under `clearvla/mainline/`, not the legacy
     `clearvla/policy/object_intent_dynamics_323/` package. Progressive V120
     observation/G is adapted by `model/restored_observation.py`; global-K
     typed pre-binding and the sole current-DINO reconstruction objective live
     in `model/grounding.py`.
-70. Schema30 S and its training-only direct physical decoders live in
-    `model/intent.py`. `DirectIntentFutureSupervisor` has no future-action
-    input and no hidden recognizer coordinate. Online S remains Teacher-free;
-    `model/top.py::build_training_targets` is the only call boundary that
-    combines online S values with detached Teacher/state targets.
-71. W field ownership lives in `model/dynamics.py`: public W1/W2 state may
-    multiplicatively modulate semantic/appearance/geometry sidecars, but a
-    zero typed sidecar cannot produce semantic, transport, visibility or
-    persistence value. Only `FutureObjectDynamics` crosses W->P.
-72. P2 per-type nulls, variance-preserving complementary fusion,
-    zero-preserving consequence and source-exclusive P3 lanes live in
-    `model/compiler.py`. The factual pseudo-row is absent; protected
-    consequence enters the bottom outside optional routes. Precision receives
-    basis-centred P1 innovation, effect receives W effect, and temporal
-    receives S temporal control.
-73. Schema30's finite-check/local/main/controller gradient lifecycle is in
+70. Schema37 S common/residual canonicalization, conditional-K typed reads and
+    factual intent dock live in `model/intent.py`. Online S remains
+    Teacher-free; `model/top.py::build_training_targets` is the only boundary
+    that combines online values with detached future/state targets.
+71. W field ownership lives in `model/dynamics.py`: W1 owns common/near, W2
+    reads near and owns far, appearance is a zero-preserving semantic
+    conditioner, and geometry retains KxC with FP32 PSD covariance. Only the
+    final supervised `FutureObjectDynamics` crosses W->P; a W1 near field is a
+    transient diagnostic, not a working-state carrier.
+72. P2 camera-aware typed reads, shared complementary contract,
+    zero-preserving typed consequence and six P3 lanes live in
+    `model/compiler.py`. Lane-local 4+null bottom ingress and the one shared
+    optional-sum contract live in `model/restored_bottom.py` and extracted
+    `v120_core/time_domain_mmdit.py`. Protected consequence remains outside
+    optional null routing.
+73. Schema37's finite-check/local/main/controller gradient lifecycle is in
     `training/engine.py`; optimizer ownership is in `training/optimizer.py`.
-    `runtime/logging.py` stores raw/postlocal/postglobal role norms, while
-    `tools/audit_policy_logs.py` enforces separate main/controller bounds.
+    `runtime/logging.py` stores raw/postlocal/postglobal owner norms and
+    tensor-boundary hooks, while `tools/audit_policy_logs.py` has an exact
+    Schema37 recovery surface that does not inherit removed Schema36 status or
+    joint trajectory-basis metrics.
 74. The compact active contract is
     `docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`; unresolved behavioral
     risks only are retained in `docs/research/CURRENT_MAINLINE_ISSUES.md`.

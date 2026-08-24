@@ -42,7 +42,6 @@ from .intent import (
     ObservableIntentStateSupervisor,
     StatelessObjectIntentOrganizer,
 )
-from .routing import smooth_rms_contract
 from .teacher import ObjectFutureTeacher
 from .types import (
     CoarseActionIntentState,
@@ -104,6 +103,7 @@ class CompiledPolicyState:
     plan: ObjectPolicyPlanDeltaBank
 
     def validate(self) -> None:
+        self.consequence.validate()
         if tuple(self.effect.shape) != tuple(self.consequence.factual_base.shape):
             raise ValueError("P2 effect and consequence schemas do not align")
         self.plan.validate()
@@ -443,20 +443,17 @@ class ObjectIntentDynamicsTop(nn.Module):
             raise ValueError("completed P1 policy state and action query must align")
         # Preserve V120's post-P1 P2 query exactly while keeping the live
         # policy-block write outside the observation-owned factual base.
-        raw_effect, effect_metrics = self.effect_reader(
-            p1_state.effect_query,
+        p2_query = p1_state.p2_dock(action_query).combined()
+        typed_effect, effect_metrics = self.effect_reader(
+            p2_query,
             context.predicted_dynamics,
             context.intent.policy_dock(),
             collect_diagnostics=collect_diagnostics,
         )
-        # The original object path contracts the P2 write at the caller
-        # boundary before it enters the zero-preserving consequence.  Applying
-        # the bound only inside P3 (or omitting it) changes both the trajectory
-        # seen by P3 and the controlled-transition coefficient geometry.
-        effect, effect_contract = smooth_rms_contract(raw_effect, 0.35)
+        effect = typed_effect.physical_sum
         consequence, consequence_metrics = self.consequence(
             factual_base=p1_state.factual_base,
-            effect=effect,
+            effect=typed_effect,
             collect_diagnostics=collect_diagnostics,
         )
         # The protected consequence carries only the static P1 fact plus W
@@ -482,12 +479,6 @@ class ObjectIntentDynamicsTop(nn.Module):
             **effect_metrics,
             **consequence_metrics,
             **plan_metrics,
-            "object_p2_effect_contract_min": effect_contract.detach().float().amin(),
-            "object_p2_effect_postcontract_rms": effect.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
         }
 
 

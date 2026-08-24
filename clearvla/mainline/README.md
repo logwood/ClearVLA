@@ -23,7 +23,7 @@ config / manifest / typed online and training inputs
   -> per-ODE V120 P1 policy-query residual (static fact stays protected)
   -> P2 matched semantic/geometry consequence reads with camera-specific
      transport/covariance, one public time prior and one physical camera measure
-  -> P3 four active precision/effect/temporal/state-change lanes
+  -> P3 six active precision/typed-effect/typed-temporal/state-change lanes
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
   -> exact completed-G3 anchor source + per-ODE noisy-action controlled transition
@@ -78,19 +78,20 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        36
+schema:        37
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema36 counts are measured rather than copied from an ancestral schema. The
+Schema37 counts are measured rather than copied from an ancestral schema. The
 launcher prints the total/trainable count and compact G/S/W/P/bottom summary,
 then writes the complete per-module inventory into run context.
 
-Schema 35 and older are not exact-resume sources for schema 36. Formal runs
-start fresh unless the complete manifest, model, optimizer, scheduler and RNG
-identity matches. Bottom-only migration is explicit and emits a report.
+Schema 36 and older are neither exact-resume nor bottom-migration sources for
+Schema37 because the bottom ingress changed from one joint simplex to six
+lane-local `4 basis + null` reads. Formal runs start fresh unless the complete
+manifest, model, optimizer, scheduler and RNG identity matches.
 
 ## Runtime contract
 
@@ -124,16 +125,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema36_p1_p2_closure_smoke \
-nohup bash scripts/smoke_mainline.sh > schema36_p1_p2_closure_smoke.log 2>&1 &
+OUT_DIR=runs/schema37_information_conservation_smoke \
+nohup bash scripts/smoke_mainline.sh > schema37_information_conservation_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema36_p1_p2_closure_b8 \
-nohup bash scripts/train_mainline.sh > schema36_p1_p2_closure_b8.log 2>&1 &
+OUT_DIR=runs/schema37_information_conservation_b8 \
+nohup bash scripts/train_mainline.sh > schema37_information_conservation_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -145,9 +146,9 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema36_p1_p2_closure_b8 \
+  runs/schema37_information_conservation_b8 \
   --recovery-baseline v120_long.log \
-  --recovery-parent schema35_causal_ownership_b8.log \
+  --recovery-parent schema36_p1_p2_closure_b8.log \
   --tail 120 --require-recovery --format text
 ```
 

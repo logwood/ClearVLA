@@ -24,7 +24,11 @@ from .evidence import OwnedEvidenceMemoryBank
 from .gauges import deterministic_module_probe, select_centered_candidate
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .refinement import NestedLowRankContractionBank
-from .role_delta_attnres import PolicyRoleDeltaBank, RoleDeltaAttnRes
+from .role_delta_attnres import (
+    PolicyRoleDeltaBank,
+    RoleDeltaAttnRes,
+    smooth_rms_contract,
+)
 
 
 @dataclass
@@ -743,7 +747,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             RoleDeltaAttnRes(
                 h,
                 int(getattr(config, "role_attnres_key_dim", 32)),
-                max_sources=(
+                # The module is shared by every typed plan lane, but each
+                # invocation selects only among that lane's four action bases
+                # plus its own zero-valued null.  Lane identity must never be
+                # flattened into this source competition.
+                max_sources=int(getattr(config, "action_basis_tokens", 1)),
+                initialization_source_rows=(
                     (
                         5
                         if int(
@@ -1044,14 +1053,26 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             device=action_query.device, dtype=action_query.dtype
         )
         batch, sources, horizon, basis, hidden = values.shape
-        candidates = values.permute(0, 2, 1, 3, 4).reshape(
-            int(batch), int(horizon), int(sources) * int(basis), int(hidden)
-        )
-        routed, route_metrics = self.policy_delta_attnres(
-            action_query,
-            candidates,
-            collect_diagnostics=collect_diagnostics,
-        )
+        if int(basis) != int(self.policy_delta_attnres.max_sources):
+            raise ValueError(
+                "policy-delta basis count does not match the lane-local selector"
+            )
+        lane_routed: list[Tensor] = []
+        lane_route_metrics: list[dict[str, Tensor]] = []
+        for source_index in range(int(sources)):
+            # Each semantic lane has its own 4-basis+null probability simplex.
+            # The selector parameters are shared across lanes, while neither
+            # lane identity nor lane amplitude participates in a cross-lane
+            # softmax competition.
+            routed_lane, routed_lane_metrics = self.policy_delta_attnres(
+                action_query,
+                values[:, source_index],
+                collect_diagnostics=collect_diagnostics,
+            )
+            lane_routed.append(routed_lane)
+            lane_route_metrics.append(routed_lane_metrics)
+        routed_sum = torch.stack(lane_routed, dim=0).sum(dim=0)
+        routed, routed_contract_scale = smooth_rms_contract(routed_sum, 0.35)
         scale = routed.new_tensor(
             float(
                 getattr(
@@ -1086,50 +1107,84 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             )
         if not collect_diagnostics:
             return routed_update, protected_update, {}
+
+        def lane_mean(name: str) -> Tensor:
+            return torch.stack(
+                [lane_metrics[name] for lane_metrics in lane_route_metrics]
+            ).mean()
+
+        def lane_min(name: str) -> Tensor:
+            return torch.stack(
+                [lane_metrics[name] for lane_metrics in lane_route_metrics]
+            ).amin()
+
+        def tensor_rms(value: Tensor) -> Tensor:
+            return value.detach().float().square().mean().sqrt()
+
+        routed_rms = tensor_rms(routed)
+        query_rms = tensor_rms(action_query)
         metrics = {
-            "evidence_policy_delta_attnres_entropy": route_metrics["entropy"],
-            "evidence_policy_delta_attnres_max": route_metrics["max"],
-            "evidence_policy_delta_attnres_null_mass": route_metrics["null_mass"],
-            "evidence_policy_delta_attnres_query_rms": route_metrics["query_rms"],
-            "evidence_policy_delta_attnres_value_rms": route_metrics["value_rms"],
-            "evidence_policy_delta_attnres_raw_value_rms": route_metrics[
+            "evidence_policy_delta_attnres_entropy": lane_mean("entropy"),
+            "evidence_policy_delta_attnres_max": lane_mean("max"),
+            "evidence_policy_delta_attnres_null_mass": lane_mean("null_mass"),
+            "evidence_policy_delta_attnres_query_rms": lane_mean("query_rms"),
+            "evidence_policy_delta_attnres_value_rms": lane_mean("value_rms"),
+            "evidence_policy_delta_attnres_raw_value_rms": lane_mean(
                 "raw_value_rms"
-            ],
-            "evidence_policy_delta_attnres_value_compression": route_metrics[
+            ),
+            "evidence_policy_delta_attnres_value_compression": lane_mean(
                 "value_compression"
-            ],
-            "evidence_policy_delta_attnres_value_contract_enabled": route_metrics[
+            ),
+            "evidence_policy_delta_attnres_value_contract_enabled": lane_mean(
                 "value_contract_enabled"
-            ],
-            "evidence_policy_delta_attnres_variance_safe_norm": route_metrics[
+            ),
+            "evidence_policy_delta_attnres_variance_safe_norm": lane_mean(
                 "variance_safe_norm"
-            ],
-            "evidence_policy_delta_attnres_query_norm_denominator_min": (
-                route_metrics["query_norm_denominator_min"]
             ),
-            "evidence_policy_delta_attnres_value_norm_denominator_min": (
-                route_metrics["value_norm_denominator_min"]
+            "evidence_policy_delta_attnres_query_norm_denominator_min": lane_min(
+                "query_norm_denominator_min"
             ),
-            "evidence_policy_delta_attnres_update_rms": route_metrics["update_rms"],
-            "evidence_policy_delta_attnres_carrier_ratio": route_metrics[
-                "carrier_ratio"
-            ],
-            "evidence_policy_delta_attnres_source_mass_max": route_metrics[
-                "source_mass_max"
-            ],
-            "evidence_policy_delta_attnres_source_effective_count": (
-                route_metrics["source_effective_count"]
+            "evidence_policy_delta_attnres_value_norm_denominator_min": lane_min(
+                "value_norm_denominator_min"
             ),
-            "evidence_policy_delta_attnres_candidate_effective_count": (
-                route_metrics["candidate_effective_count"]
+            # This is the actual combined update presented to the fixed 0.25
+            # bridge, not the mean of six unrelated per-lane magnitudes.
+            "evidence_policy_delta_attnres_update_rms": routed_rms,
+            "evidence_policy_delta_attnres_carrier_ratio": (
+                routed_rms / query_rms.clamp_min(1e-8)
             ),
-            "evidence_policy_delta_attnres_sample_route_std": route_metrics[
+            "evidence_policy_delta_attnres_source_mass_max": torch.stack(
+                [
+                    lane_metrics["source_mass_max"]
+                    for lane_metrics in lane_route_metrics
+                ]
+            ).amax(),
+            "evidence_policy_delta_attnres_source_effective_count": lane_mean(
+                "source_effective_count"
+            ),
+            "evidence_policy_delta_attnres_candidate_effective_count": lane_mean(
+                "candidate_effective_count"
+            ),
+            "evidence_policy_delta_attnres_sample_route_std": lane_mean(
                 "sample_route_std"
-            ],
-            "evidence_policy_delta_attnres_horizon_route_std": route_metrics[
+            ),
+            "evidence_policy_delta_attnres_horizon_route_std": lane_mean(
                 "query_axis_1_route_std"
-            ],
+            ),
             "evidence_policy_delta_attnres_fixed_scale": scale.detach().float(),
+            "evidence_policy_delta_attnres_lane_sum_precontract_rms": tensor_rms(
+                routed_sum
+            ),
+            "evidence_policy_delta_attnres_lane_sum_postcontract_rms": routed_rms,
+            "evidence_policy_delta_attnres_lane_sum_contract_scale_mean": (
+                routed_contract_scale.detach().float().mean()
+            ),
+            "evidence_policy_delta_attnres_lane_sum_contract_scale_min": (
+                routed_contract_scale.detach().float().amin()
+            ),
+            "evidence_policy_delta_attnres_lane_sum_compression": (
+                1.0 - routed_contract_scale.detach().float()
+            ).mean(),
             "evidence_policy_delta_attnres_routed_update_norm": (
                 routed_update.detach().float().norm(dim=-1).mean()
             ),
@@ -1200,18 +1255,34 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 metrics[
                     f"evidence_protected_detail_basis_mass_{basis_index}"
                 ] = protected_source_mass[basis_index]
-        source_mass = route_metrics["source_mass"]
-        expanded_names = tuple(
-            f"{name}_basis{basis_index}"
-            for name in bank.source_names
-            for basis_index in range(int(basis))
-        )
-        if int(source_mass.numel()) != len(expanded_names):
-            raise RuntimeError("typed policy-delta route lost source identity")
-        for index, name in enumerate(expanded_names):
+        for name, lane_metrics in zip(
+            bank.source_names, lane_route_metrics, strict=True
+        ):
+            source_mass = lane_metrics["source_mass"]
+            if int(source_mass.numel()) != int(basis):
+                raise RuntimeError(
+                    "lane-local policy-delta route lost action-basis identity"
+                )
             metrics[
-                f"evidence_policy_delta_attnres_source_mass_{name}"
-            ] = source_mass[index]
+                f"evidence_policy_delta_attnres_{name}_entropy"
+            ] = lane_metrics["entropy"]
+            metrics[
+                f"evidence_policy_delta_attnres_{name}_max"
+            ] = lane_metrics["max"]
+            metrics[
+                f"evidence_policy_delta_attnres_{name}_null_mass"
+            ] = lane_metrics["null_mass"]
+            metrics[
+                f"evidence_policy_delta_attnres_{name}_update_rms"
+            ] = lane_metrics["update_rms"]
+            metrics[
+                f"evidence_policy_delta_attnres_{name}_non_null_mass"
+            ] = source_mass.sum()
+            for basis_index in range(int(basis)):
+                metrics[
+                    "evidence_policy_delta_attnres_source_mass_"
+                    f"{name}_basis{basis_index}"
+                ] = source_mass[basis_index]
         return routed_update, protected_update, metrics
 
     @staticmethod
