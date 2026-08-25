@@ -286,7 +286,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert result.metrics["gradient_postglobal_execution_controller_l2"] <= 1.0001
     assert result.metrics["gradient_postglobal_global_l2"] <= math.sqrt(2.0) + 1e-4
     assert "gradient_observation_l2" not in result.metrics
-    assert "gradient_global_preclip_l2" in result.materialize()
+    assert "gradient_batch_preclip_l2" in result.materialize()
     archived = archival_metrics(result.materialize())
     assert "loss_action_flow_v120_comparable" in archived
     assert "loss_action_flow_event_balance_delta" in archived
@@ -412,6 +412,162 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert len(ownership.trainable_names) == len(
         [parameter for parameter in model.parameters() if parameter.requires_grad]
     )
+
+
+def test_schema38_action_only_gradient_closure_after_w_heads_are_live() -> None:
+    """The deployed action objective must own every new Schema38 boundary.
+
+    W's semantic and transport output heads deliberately start at exact zero.
+    At that neutral point P2 selectors cannot receive an action gradient through
+    an all-zero optional value, and covariance can only change such a selector.
+    The first half records that algebraic boundary.  The second half makes only
+    those two W value heads minimally nonzero and verifies that the ordinary
+    physical-velocity objective, without any W/S auxiliary loss, reaches W, S,
+    P2, P3, dynamic P1, transport and covariance.
+    """
+
+    torch.manual_seed(3810)
+    config = _config()
+
+    neutral_model = ClearVLAMainlinePolicy(config).eval()
+    neutral_batch = _batch(config)
+    neutral_cache, _, _ = neutral_model.encode_online(
+        neutral_batch.online,
+        collect_diagnostics=False,
+    )
+    neutral_dynamics = neutral_cache.top.predicted_dynamics
+    assert torch.count_nonzero(neutral_dynamics.semantic_delta) == 0
+    assert torch.count_nonzero(neutral_dynamics.transport_mean) == 0
+    neutral_output = neutral_model.velocity(
+        neutral_cache,
+        noisy_action_field=neutral_model.action_codec.sample_noise(
+            neutral_batch.online.batch,
+            device=neutral_batch.online.device,
+            dtype=torch.float32,
+        ),
+        time=torch.full((neutral_batch.online.batch,), 0.4),
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(neutral_output.compiled.effect) == 0
+    torch.testing.assert_close(
+        neutral_output.compiled.consequence.protected_consequence,
+        neutral_output.compiled.consequence.factual_base,
+        atol=0.0,
+        rtol=0.0,
+    )
+    for lane in (
+        "effect_semantic",
+        "effect_geometry",
+        "temporal_semantic",
+        "temporal_geometry",
+    ):
+        assert torch.count_nonzero(getattr(neutral_output.compiled.plan, lane)) == 0
+    neutral_loss = neutral_output.bottom.physical_velocity.square().mean()
+    neutral_p2_gradients = torch.autograd.grad(
+        neutral_loss,
+        tuple(neutral_model.top.effect_reader.parameters())
+        + (neutral_dynamics.transport_covariance,),
+        allow_unused=True,
+    )
+    assert all(
+        gradient is None or bool(torch.count_nonzero(gradient) == 0)
+        for gradient in neutral_p2_gradients
+    )
+
+    # Rebuild the graph and open only W's two zero-initialized value heads.
+    # A small finite write is sufficient; the test intentionally asserts graph
+    # ownership rather than a fragile exact gradient magnitude.
+    torch.manual_seed(3810)
+    live_model = ClearVLAMainlinePolicy(config).eval()
+    with torch.no_grad():
+        live_model.top.dynamics.delta_head.weight.fill_(1.0e-3)
+        live_model.top.dynamics.transport_head.weight.fill_(1.0e-3)
+    live_batch = _batch(config)
+    live_cache, _, _ = live_model.encode_online(
+        live_batch.online,
+        collect_diagnostics=False,
+    )
+    live_dynamics = live_cache.top.predicted_dynamics
+    assert torch.count_nonzero(live_dynamics.semantic_delta) > 0
+    assert torch.count_nonzero(live_dynamics.transport_mean) > 0
+    live_output = live_model.velocity(
+        live_cache,
+        noisy_action_field=live_model.action_codec.sample_noise(
+            live_batch.online.batch,
+            device=live_batch.online.device,
+            dtype=torch.float32,
+        ),
+        time=torch.full((live_batch.online.batch,), 0.4),
+        collect_diagnostics=False,
+    )
+    action_only_loss = live_output.bottom.physical_velocity.square().mean()
+
+    owner_groups = {
+        "w": tuple(
+            parameter
+            for parameter in live_model.top.dynamics.parameters()
+            if parameter.requires_grad
+        ),
+        "s": tuple(
+            parameter
+            for parameter in live_model.top.intent.parameters()
+            if parameter.requires_grad
+        ),
+        "p2": tuple(
+            parameter
+            for parameter in live_model.top.effect_reader.parameters()
+            if parameter.requires_grad
+        ),
+        "p3": tuple(
+            parameter
+            for parameter in live_model.top.plan_compiler.parameters()
+            if parameter.requires_grad
+        ),
+        "dynamic_p1": tuple(
+            parameter
+            for parameter in (
+                *tuple(live_model.bottom.p1_content_mod.parameters()),
+                live_model.bottom.p1_content_mod_scale,
+                *tuple(live_model.bottom.p1_policy_block.parameters()),
+            )
+            if parameter.requires_grad
+        ),
+    }
+    flat_parameters = tuple(
+        parameter for parameters in owner_groups.values() for parameter in parameters
+    )
+    gradients = torch.autograd.grad(
+        action_only_loss,
+        flat_parameters
+        + (
+            live_dynamics.semantic_delta,
+            live_dynamics.transport_mean,
+            live_dynamics.transport_covariance,
+        ),
+        allow_unused=True,
+    )
+    cursor = 0
+    for owner, parameters in owner_groups.items():
+        owner_gradients = gradients[cursor : cursor + len(parameters)]
+        cursor += len(parameters)
+        assert any(
+            gradient is not None and bool(torch.count_nonzero(gradient) > 0)
+            for gradient in owner_gradients
+        ), owner
+        assert all(
+            gradient is None or bool(torch.isfinite(gradient).all())
+            for gradient in owner_gradients
+        ), owner
+    boundary_gradients = gradients[cursor:]
+    assert len(boundary_gradients) == 3
+    for name, gradient in zip(
+        ("semantic", "transport", "covariance"),
+        boundary_gradients,
+        strict=True,
+    ):
+        assert gradient is not None, name
+        assert torch.isfinite(gradient).all(), name
+        assert torch.count_nonzero(gradient) > 0, name
 
 
 def test_nonfinite_gradient_reports_first_owner_before_any_update() -> None:
@@ -944,7 +1100,7 @@ def test_dynamic_p1_splits_static_fact_from_live_policy_residual() -> None:
     assert torch.count_nonzero(effect_action_gradient) > 0
     assert first_metrics["p1_protected_detail_rms"] > 0
     assert first_metrics["p1_dynamic_delta_rms"] > 0
-    assert first_metrics["p1_completed_fact_rms"] > 0
+    assert first_metrics["p1_policy_updated_trajectory_rms"] > 0
 
 
 def test_dynamic_p1_policy_modulation_is_smoothly_bounded_before_hidden_use() -> None:

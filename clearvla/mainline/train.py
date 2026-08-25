@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from dataclasses import replace
@@ -41,6 +42,10 @@ from .training.engine import (
     MainlineTrainingEngine,
     NonFiniteGradientError,
     validate_finite_training_batch,
+)
+from .training.gradient_audit import (
+    FiniteGradientSpikeReport,
+    GradientPreclipWindowAccumulator,
 )
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
 
@@ -172,6 +177,131 @@ def _cuda_memory_metrics(device: torch.device) -> dict[str, float]:
         "runtime_cuda_non_pytorch_context_estimate_gib": non_pytorch_context,
         "runtime_cuda_peak_process_estimate_gib": peak_reserved + non_pytorch_context,
     }
+
+
+def _write_gradient_spike(
+    logger: JsonlRunLogger,
+    report: FiniteGradientSpikeReport,
+    *,
+    epoch: int,
+    batch: int,
+    step: int,
+) -> None:
+    """Persist a finite raw-gradient spike before any clipping mutation."""
+
+    payload = report.as_dict()
+    logger.write(
+        "gradient_spike",
+        epoch=int(epoch),
+        batch=int(batch),
+        step=int(step),
+        **payload,
+    )
+    print(
+        "[mainline-gradient-spike] "
+        f"epoch={int(epoch):03d} batch={int(batch):04d} step={int(step)} "
+        f"global_preclip={report.gradient_global_preclip_l2:.6g} "
+        f"threshold={report.gradient_spike_audit_threshold:.6g} "
+        f"max_l2_parameter={report.max_l2.parameter_name} "
+        f"max_l2={report.max_l2.l2:.6g} "
+        f"max_abs_parameter={report.max_abs.parameter_name} "
+        f"max_abs={report.max_abs.max_abs:.6g}",
+        flush=True,
+    )
+
+
+def _emit_training_window(
+    *,
+    logger: JsonlRunLogger,
+    config: ExperimentConfig,
+    window_metrics: DeviceMetricAccumulator,
+    gradient_window: GradientPreclipWindowAccumulator,
+    epoch: int,
+    batch: int,
+    step: int,
+    window_seconds: float,
+    window_samples: int,
+    window_batches: int,
+    learning_rate: float,
+    boundary: str,
+) -> dict[str, float]:
+    """Persist one complete periodic or epoch-tail training window.
+
+    The last ``1..log_every-1`` batches of an epoch are real optimization
+    history.  Giving periodic and tail windows one implementation prevents
+    their gradient maxima, LR ownership, or runtime denominator from silently
+    diverging.  ``boundary`` is top-level JSON metadata and never enters metric
+    aggregation or training.
+    """
+
+    if boundary not in {"periodic", "epoch_tail"}:
+        raise ValueError("training-window boundary is invalid")
+    if int(window_batches) <= 0 or int(window_samples) <= 0:
+        raise ValueError("training-window counts must be positive")
+    if not math.isfinite(float(window_seconds)) or float(window_seconds) < 0.0:
+        raise ValueError("training-window duration must be finite and non-negative")
+    values = archival_metrics(window_metrics.materialize())
+    values.update(gradient_window.materialize())
+    values["runtime_window_seconds_per_batch"] = float(window_seconds) / float(
+        window_batches
+    )
+    values["runtime_window_samples_per_second"] = float(window_samples) / max(
+        float(window_seconds), 1e-8
+    )
+    values["learning_rate"] = float(learning_rate)
+    values["learning_rate_history_proposal"] = float(learning_rate) * role_lr_scale(
+        "history_proposal", config
+    )
+    values["learning_rate_bottom_decoder"] = float(learning_rate) * role_lr_scale(
+        "bottom_mmdit", config
+    )
+    values["learning_rate_bottom_capacity"] = float(learning_rate) * role_lr_scale(
+        "bottom_capacity", config
+    )
+    logger.write(
+        "train",
+        epoch=int(epoch),
+        batch=int(batch),
+        step=int(step),
+        window_boundary=boundary,
+        window_batches=int(window_batches),
+        window_samples=int(window_samples),
+        metrics=values,
+    )
+    display_values = active_metrics(values)
+    print(
+        logger.compact_line(
+            "train",
+            epoch=int(epoch),
+            batch=int(batch),
+            step=int(step),
+            metrics=display_values,
+        )
+        + f" window_boundary={boundary}",
+        flush=True,
+    )
+    print(
+        "[mainline-train-gradient-window] "
+        f"epoch={int(epoch):03d} batch={int(batch):04d} step={int(step)} "
+        f"boundary={boundary} "
+        f"mean={values['gradient_window_preclip_l2_mean']:.6g} "
+        f"max={values['gradient_window_preclip_l2_max']:.6g} "
+        f"current={values['gradient_window_preclip_l2_current']:.6g} "
+        "max_batch_offset="
+        f"{int(values['gradient_window_preclip_l2_max_batch_offset'])} "
+        "max_global_step="
+        f"{int(values['gradient_window_preclip_l2_max_global_step'])}",
+        flush=True,
+    )
+    for detail_line in logger.diagnostic_lines(
+        "train",
+        epoch=int(epoch),
+        batch=int(batch),
+        step=int(step),
+        metrics=display_values,
+    ):
+        print(detail_line, flush=True)
+    return values
 
 
 def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
@@ -662,6 +792,12 @@ def main() -> None:
             "action_sha256": identity.dataset.action_normalizer_sha256,
             "state_sha256": identity.dataset.state_normalizer_sha256,
         },
+        "gradient_audit": {
+            "finite_spike_preclip_l2_threshold": (
+                engine.gradient_spike_audit_threshold
+            ),
+            "parameter_scan_policy": "only_after_finite_global_threshold_crossing",
+        },
     }
     total_parameters = sum(int(parameter.numel()) for parameter in model.parameters())
     trainable_parameters = sum(
@@ -745,6 +881,8 @@ def main() -> None:
             torch.cuda.reset_peak_memory_stats(device)
         epoch_metrics = DeviceMetricAccumulator()
         window_metrics = DeviceMetricAccumulator()
+        gradient_window = GradientPreclipWindowAccumulator()
+        last_learning_rate: float | None = None
         for batch_index, raw_batch in enumerate(train_loader, start=1):
             if (
                 config.runtime.max_train_batches > 0
@@ -759,7 +897,19 @@ def main() -> None:
             )
             emit = batch_index % config.runtime.log_every == 0
             try:
-                result = engine.train_step(batch, collect_diagnostics=emit)
+                result = engine.train_step(
+                    batch,
+                    collect_diagnostics=emit,
+                    gradient_spike_handler=lambda report: _write_gradient_spike(
+                        logger,
+                        report,
+                        epoch=epoch,
+                        batch=batch_index,
+                        # A spike record owns the pre-update checkpoint
+                        # boundary, matching gradient_failure semantics.
+                        step=engine.global_step,
+                    ),
+                )
             except NonFiniteGradientError as error:
                 report = error.report.as_dict()
                 logger.write(
@@ -786,60 +936,69 @@ def main() -> None:
             epoch_batches += 1
             window_samples += batch.online.batch
             window_batches += 1
+            last_learning_rate = result.learning_rate
             row = {
                 "loss_total": result.loss,
-                "gradient_global_preclip_l2": result.gradient_norm,
                 **result.metrics,
             }
-            epoch_metrics.update(row, weight=batch.online.batch)
+            epoch_metrics.update(
+                {
+                    **row,
+                    "gradient_epoch_preclip_l2_mean": result.gradient_norm,
+                },
+                weight=batch.online.batch,
+            )
             window_metrics.update(row, weight=batch.online.batch)
+            gradient_window.update(
+                result.gradient_norm_scalar
+                if result.gradient_norm_scalar is not None
+                else float(result.gradient_norm.detach().float().cpu().item()),
+                weight=batch.online.batch,
+                batch_offset=window_batches,
+                # Successful train rows own the post-update global step.
+                global_step=engine.global_step,
+            )
             if emit:
-                values = archival_metrics(window_metrics.materialize())
                 window_seconds = time.perf_counter() - window_started
-                values["runtime_window_seconds_per_batch"] = window_seconds / max(window_batches, 1)
-                values["runtime_window_samples_per_second"] = window_samples / max(
-                    window_seconds, 1e-8
-                )
-                values["learning_rate"] = result.learning_rate
-                values["learning_rate_history_proposal"] = (
-                    result.learning_rate * role_lr_scale("history_proposal", config)
-                )
-                values["learning_rate_bottom_decoder"] = (
-                    result.learning_rate * role_lr_scale("bottom_mmdit", config)
-                )
-                values["learning_rate_bottom_capacity"] = (
-                    result.learning_rate * role_lr_scale("bottom_capacity", config)
-                )
-                logger.write(
-                    "train",
+                _emit_training_window(
+                    logger=logger,
+                    config=config,
+                    window_metrics=window_metrics,
+                    gradient_window=gradient_window,
                     epoch=epoch,
                     batch=batch_index,
                     step=engine.global_step,
-                    metrics=values,
+                    window_seconds=window_seconds,
+                    window_samples=window_samples,
+                    window_batches=window_batches,
+                    learning_rate=result.learning_rate,
+                    boundary="periodic",
                 )
-                display_values = active_metrics(values)
-                print(
-                    logger.compact_line(
-                        "train",
-                        epoch=epoch,
-                        batch=batch_index,
-                        step=engine.global_step,
-                        metrics=display_values,
-                    ),
-                    flush=True,
-                )
-                for detail_line in logger.diagnostic_lines(
-                    "train",
-                    epoch=epoch,
-                    batch=batch_index,
-                    step=engine.global_step,
-                    metrics=display_values,
-                ):
-                    print(detail_line, flush=True)
                 window_metrics = DeviceMetricAccumulator()
+                gradient_window = GradientPreclipWindowAccumulator()
                 window_started = time.perf_counter()
                 window_samples = 0
                 window_batches = 0
+        if window_batches > 0:
+            # The epoch ended between periodic log boundaries.  Flush those
+            # successful updates before validation so their raw-gradient max
+            # and owner step remain recoverable from metrics.jsonl.
+            if last_learning_rate is None:
+                raise RuntimeError("non-empty training window has no learning rate")
+            _emit_training_window(
+                logger=logger,
+                config=config,
+                window_metrics=window_metrics,
+                gradient_window=gradient_window,
+                epoch=epoch,
+                batch=epoch_batches,
+                step=engine.global_step,
+                window_seconds=time.perf_counter() - window_started,
+                window_samples=window_samples,
+                window_batches=window_batches,
+                learning_rate=last_learning_rate,
+                boundary="epoch_tail",
+            )
         train_values = archival_metrics(epoch_metrics.materialize())
         epoch_seconds = time.perf_counter() - epoch_started
         train_values["runtime_epoch_seconds"] = epoch_seconds

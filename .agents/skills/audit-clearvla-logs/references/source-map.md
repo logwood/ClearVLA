@@ -537,3 +537,31 @@ Re-check these against current source rather than assuming they remain true:
 74. The compact active contract is
     `docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`; unresolved behavioral
     risks only are retained in `docs/research/CURRENT_MAINLINE_ISSUES.md`.
+75. The active Schema38 graph remains under `clearvla/mainline/`. P2's complete
+    W-field, S-conditioned-key, geometry-to-semantic address and type-local
+    null algebra live in `model/compiler.py`; `model/top.py` passes the named
+    dynamic P1 residual to both P2 query construction and fact-conditioned P3
+    precision. There is no second common-only W consumer and no independent S
+    interval vote.
+76. Schema38 G3 removes only a softmax-invariant scalar gauge in
+    `model/grounding.py`. `model/dynamics.py` decodes covariance with a bounded
+    PSD parameterization that can approach zero while preserving the previous
+    fresh initialization. P2's metric floor is a separate consumer-side
+    numerical operation and must not be attributed to W or Teacher targets.
+77. Schema38 finite-spike attribution lives in
+    `training/gradient_audit.py`, is called by `training/engine.py`, and is
+    serialized by `train.py`. `runtime/logging.py` projects the window
+    mean/max/current; `tools/audit_policy_logs.py` keeps `gradient_spike`
+    events separate from ordinary train/epoch rows. The parameter scan is
+    read-only and runs only after a finite threshold crossing.
+78. Schema37 exact/optimizer resume is rejected by the current manifest.
+    `checkpoint.py` may report Schema37 bottom-only reuse only for the explicit
+    migration tool and only when the serialized bottom ABI is identical. The
+    formal Schema38 comparison is a fresh run.
+79. Schema38 migration integrity is enforced in
+    `runtime/checkpoints.py::migrate_bottom_only`: complete bottom keys, shapes,
+    dtypes and finite/non-complex tensor values are checked before mutation.
+    `train.py::_emit_training_window` writes both periodic and epoch-tail
+    gradient windows. Schema38 recovery treats the complete-field identity and
+    removed independent-S vote as numerical invariants rather than mere metric
+    presence.

@@ -799,6 +799,18 @@ V94_ALIASES.update(
             "global_k_common_residual": (
                 "object_grounding_global_k_binder_common_residual_rms"
             ),
+            "global_k_bounded_logit": (
+                "object_grounding_global_k_binder_bounded_logit_rms"
+            ),
+            "global_k_bounded_logit_max": (
+                "object_grounding_global_k_binder_bounded_logit_max_abs"
+            ),
+            "global_k_conditional_spread": (
+                "object_grounding_global_k_binder_conditional_logit_spread_rms"
+            ),
+            "global_k_conditional_span": (
+                "object_grounding_global_k_binder_conditional_logit_span_mean"
+            ),
             "g3_null_identity_error": "object_grounding_g3_null_identity_error",
             "parent_k_conditional_H": (
                 "object_grounding_parent_k_conditional_entropy"
@@ -1276,6 +1288,53 @@ V94_ALIASES.update(
             "type_interval_horizon_var": (
                 "object_p2_type_interval_horizon_variation"
             ),
+            # Schema38 retains the historical entries above for old logs but
+            # emits names that describe S as a W-key conditioner and P2 as a
+            # single complete-field route.
+            "s_condition_score": "object_p2_s_condition_only_score_abs",
+            "s_condition_score_max": (
+                "object_p2_s_condition_only_score_max_abs"
+            ),
+            "public_s_condition_only": (
+                "object_p2_public_s_condition_only_score_abs"
+            ),
+            "typed_s_condition_only": (
+                "object_p2_typed_s_condition_only_score_abs"
+            ),
+            "unconditioned_w_interval": (
+                "object_p2_unconditioned_w_interval_score_abs"
+            ),
+            "conditioned_w_interval_max": (
+                "object_p2_conditioned_w_interval_score_max_abs"
+            ),
+            "complete_field_null": "object_p2_complete_field_null_mass",
+            "complete_field_common": (
+                "object_p2_selected_complete_field_common_rms"
+            ),
+            "complete_field_residual": (
+                "object_p2_selected_complete_field_residual_rms"
+            ),
+            "complete_field_identity_error": (
+                "object_p2_complete_field_identity_error"
+            ),
+            "independent_s_interval_vote": (
+                "object_p2_independent_s_interval_vote"
+            ),
+            "s_condition_neutral_l1": (
+                "object_p2_s_condition_neutral_posterior_l1"
+            ),
+            "s_condition_saturation": (
+                "object_p2_s_condition_saturation_fraction"
+            ),
+            "w_key_interval_variation": (
+                "object_p2_w_key_interval_centered_variation_rms"
+            ),
+            "geometry_semantic_correction": (
+                "object_p2_geometry_to_semantic_k_correction_rms"
+            ),
+            "geometry_semantic_neutral_l1": (
+                "object_p2_geometry_condition_neutral_semantic_posterior_l1"
+            ),
             "semantic_interval_public": (
                 "object_p2_semantic_interval_public_score_abs"
             ),
@@ -1503,7 +1562,29 @@ V94_ALIASES.update(
             "p1_policy_ffn_input": "p1_policy_ffn_input_rms",
             "p1_effect_query": "p1_effect_query_rms",
             "p3_factual": "object_p3_factual_rms",
+            # Historical schemas used ``p3_precision_input`` for the raw
+            # factual tensor. Schema38 separates raw fact, projected static
+            # precision and their fact-conditioned combined source.
             "p3_precision_input": "object_p3_precision_input_rms",
+            "p3_precision_factual_input": (
+                "object_p3_precision_factual_input_rms"
+            ),
+            "p3_precision_static_projected": (
+                "object_p3_precision_static_projected_rms"
+            ),
+            "p3_precision_combined_source": (
+                "object_p3_precision_combined_source_rms"
+            ),
+            "p3_precision_dynamic_input": (
+                "object_p3_precision_dynamic_input_rms"
+            ),
+            "p3_precision_dynamic_contracted": (
+                "object_p3_precision_dynamic_contracted_rms"
+            ),
+            "p3_precision_dynamic_interaction": (
+                "object_p3_precision_dynamic_interaction_rms"
+            ),
+            "p3_precision_fact_gate": "object_p3_precision_fact_gate_rms",
             "p3_precision": "object_p3_precision_rms",
             "p3_effect": "object_p3_effect_rms",
             "p3_effect_semantic": "object_p3_effect_semantic_rms",
@@ -1714,6 +1795,147 @@ SCHEMA37_OWNER_GRADIENT_ROLES = (
     "bottom_execution",
     "bottom_heads",
 )
+
+SCHEMA38_REQUIRED_STRUCTURE_KEYS = (
+    # G3 is function/Jacobian equivalent to Schema37 but reports the actual
+    # bounded logits instead of a removed softmax-gauge subtraction.
+    "object_grounding_reconstruction_object_mass_mean",
+    "object_grounding_reconstruction_active_fraction",
+    "object_grounding_reconstruction_conditional_owner_entropy",
+    "object_grounding_canonical_slot_residual_rms",
+    "object_grounding_public_position_rms",
+    "object_grounding_global_k_binder_bounded_logit_rms",
+    "object_grounding_global_k_binder_bounded_logit_max_abs",
+    "object_grounding_global_k_binder_conditional_logit_spread_rms",
+    "object_grounding_global_k_binder_conditional_logit_span_mean",
+    "object_grounding_global_k_binder_correction_l1",
+    "object_grounding_g3_parent_top2_margin",
+    "object_grounding_g3_corrected_top2_margin",
+    "object_grounding_g3_assignment_change_fraction",
+    "object_grounding_object_content_pair_cosine",
+    "object_grounding_object_innovation_pair_cosine",
+    "object_grounding_prebind_typed_consensus_l1",
+    # S and W producers are unchanged; their actual action consumer changed.
+    "object_intent_goal_innovation_rms",
+    "object_intent_history_innovation_rms",
+    "object_intent_object_content_innovation_variation",
+    "object_intent_public_common_rms",
+    "object_intent_public_residual_rms",
+    "object_intent_public_reconstruction_max_abs",
+    "object_intent_public_residual_mean_max_abs",
+    "object_intent_public_condition_centered_interval_variation",
+    "object_intent_typed_common_policy_context_rms",
+    "object_intent_typed_interval_residual_policy_context_rms",
+    "object_intent_typed_policy_residual_mean_rms",
+    "object_w_object_innovation_variation",
+    "object_w_typed_common_state_rms",
+    "object_w_typed_interval_innovation_state_rms",
+    "object_w_typed_interval_input_mean_rms",
+    "object_w_common_base_interaction_rms",
+    "object_w_interval_base_interaction_rms",
+    "object_w_common_base_interaction_denominator_min",
+    "object_w_interval_base_interaction_denominator_min",
+    "object_w_appearance_semantic_common_modulation_rms",
+    "object_w_appearance_semantic_interval_modulation_rms",
+    "object_w1_common_processing_delta_rms",
+    "object_w2_common_processing_delta_rms",
+    "object_w2_near_to_far_innovation_update_rms",
+    "object_w_prediction_common_effect_rms",
+    "object_w_prediction_interval_residual_rms",
+    "object_teacher_dustbin_probability",
+    "object_teacher_effective_support",
+    "object_teacher_common_effect_rms",
+    "object_teacher_interval_residual_rms",
+    "object_teacher_current_loss_support",
+    "p1_query_chart_variation",
+    "p1_factual_base_rms",
+    "p1_policy_query_residual_rms",
+    # P2 owns a single complete-field route per type. S may condition W keys
+    # but cannot add an object/interval vote or a value of its own.
+    "object_p2_camera_mixture_effective_count",
+    "object_p2_camera_support_fraction",
+    "object_p2_camera_coordinate_variation",
+    "object_p2_complete_field_collapsed_object_posterior_entropy",
+    "object_p2_complete_field_joint_posterior_entropy",
+    "object_p2_complete_field_null_mass",
+    "object_p2_type_interval_posterior_entropy",
+    "object_p2_type_interval_posterior_max",
+    "object_p2_type_interval_null_mass",
+    "object_p2_type_interval_horizon_variation",
+    "object_p2_within_interval_object_posterior_entropy",
+    "object_p2_within_interval_object_posterior_max",
+    "object_p2_selected_complete_field_common_rms",
+    "object_p2_selected_complete_field_residual_rms",
+    "object_p2_complete_field_identity_error",
+    "object_p2_independent_s_interval_vote",
+    "object_p2_effect_precontract_rms",
+    "object_p2_effect_postcontract_rms",
+    "object_p2_shared_effect_contract_scale_mean",
+    "object_p2_semantic_postcontract_rms",
+    "object_p2_geometry_postcontract_rms",
+    "object_p2_s_condition_neutral_posterior_l1",
+    "object_p2_s_condition_pre_tanh_rms",
+    "object_p2_s_condition_saturation_fraction",
+    "object_p2_selected_w_key_rms",
+    "object_p2_w_key_interval_centered_variation_rms",
+    "object_p2_public_s_w_key_delta_rms",
+    "object_p2_typed_s_w_key_delta_rms",
+    "object_p2_combined_s_w_key_delta_rms",
+    "object_p2_geometry_to_semantic_k_correction_rms",
+    "object_p2_geometry_condition_neutral_semantic_posterior_l1",
+    "object_p2_geometry_condition_neutral_semantic_output_l1",
+    "object_p2_semantic_complete_field_null_mass",
+    "object_p2_geometry_complete_field_null_mass",
+    "object_consequence_semantic_effect_rms",
+    "object_consequence_geometry_effect_rms",
+    "object_consequence_semantic_interaction_rms",
+    "object_consequence_geometry_interaction_rms",
+    # Dynamic P1 is observable only through fact-conditioned P3 precision.
+    "object_p3_precision_factual_input_rms",
+    "object_p3_precision_static_projected_rms",
+    "object_p3_precision_combined_source_rms",
+    "object_p3_precision_dynamic_input_rms",
+    "object_p3_precision_dynamic_contracted_rms",
+    "object_p3_precision_dynamic_interaction_rms",
+    "object_p3_precision_fact_gate_rms",
+    "object_p3_precision_rms",
+    "object_p3_effect_semantic_rms",
+    "object_p3_effect_geometry_rms",
+    "object_p3_temporal_semantic_rms",
+    "object_p3_temporal_geometry_rms",
+    "object_p3_state_change_rms",
+    # Bottom ABI is exactly Schema37's lane-local protected/optional ingress.
+    "bottom_capacity_mean",
+    "evidence_trajectory_summary_norm",
+    "evidence_policy_delta_attnres_lane_sum_precontract_rms",
+    "evidence_policy_delta_attnres_lane_sum_postcontract_rms",
+    "evidence_policy_delta_attnres_lane_sum_compression",
+    "evidence_policy_delta_attnres_p3_precision_non_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_semantic_non_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_geometry_non_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_semantic_non_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_geometry_non_null_mass",
+    "evidence_policy_delta_attnres_p3_state_change_non_null_mass",
+    "evidence_policy_delta_attnres_p3_precision_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_semantic_null_mass",
+    "evidence_policy_delta_attnres_p3_effect_geometry_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_semantic_null_mass",
+    "evidence_policy_delta_attnres_p3_temporal_geometry_null_mass",
+    "evidence_policy_delta_attnres_p3_state_change_null_mass",
+)
+
+SCHEMA38_TENSOR_GRADIENT_KEYS = SCHEMA37_TENSOR_GRADIENT_KEYS
+SCHEMA38_OWNER_GRADIENT_ROLES = SCHEMA37_OWNER_GRADIENT_ROLES
+
+# These are executable algebraic identities, not health trends.  Merely being
+# present and finite is insufficient: a nonzero value means the logged graph
+# no longer matches the Schema38 consumer contract.  The complete-field error
+# permits only FP reconstruction noise; the removed independent S vote is a
+# literal scalar zero.
+SCHEMA38_ZERO_INVARIANT_TOLERANCES = {
+    "object_p2_complete_field_identity_error": 1.0e-6,
+    "object_p2_independent_s_interval_vote": 0.0,
+}
 
 
 STRUCTURE_KEYS = (
@@ -2161,6 +2383,7 @@ STRUCTURE_KEYS = (
     # Exact Schema37 recovery surface.  Historical rows above remain readable
     # for comparisons, but are never inherited as Schema37 requirements.
     *SCHEMA37_REQUIRED_STRUCTURE_KEYS,
+    *SCHEMA38_REQUIRED_STRUCTURE_KEYS,
 )
 
 GRADIENT_KEYS = (
@@ -2192,6 +2415,14 @@ GRADIENT_KEYS = (
     # Schema-19 optimizer owners.  These are post-clip role norms by design;
     # the global pre-clip norm remains the shared scale/instability sentinel.
     "gradient_global_preclip_l2",
+    # Schema38 preserves the historical per-row sentinel above and adds an
+    # exact pre-clip window summary plus a sample-weighted epoch mean.
+    "gradient_window_preclip_l2_mean",
+    "gradient_window_preclip_l2_max",
+    "gradient_window_preclip_l2_current",
+    "gradient_window_preclip_l2_max_batch_offset",
+    "gradient_window_preclip_l2_max_global_step",
+    "gradient_epoch_preclip_l2_mean",
     "gradient_postclip_observation_l2",
     "gradient_postclip_grounding_host_l2",
     "gradient_postclip_grounder_l2",
@@ -2411,6 +2642,7 @@ class ParsedRun:
     init_counts: dict[str, int] = field(default_factory=dict)
     batch_points: list[BatchPoint] = field(default_factory=list)
     epoch_records: list[dict[str, Any]] = field(default_factory=list)
+    gradient_spike_events: list[dict[str, Any]] = field(default_factory=list)
     runtime_points: list[dict[str, float]] = field(default_factory=list)
     malformed_json: int = 0
     unclosed_json: int = 0
@@ -2889,6 +3121,13 @@ def _ingest_json(run: ParsedRun, payload: Any) -> None:
     if not isinstance(payload, dict):
         return
     kind = payload.get("kind")
+    if kind == "gradient_spike":
+        # A spike is an attributed event, not a batch-average metric row.  In
+        # particular, preserve the complete flat JSON payload (including
+        # parameter names, roles, optimizer groups, shapes and dtypes) rather
+        # than canonicalizing it down to numeric metrics.
+        run.gradient_spike_events.append(dict(payload))
+        return
     if kind == "train" and isinstance(payload.get("metrics"), Mapping):
         run.batch_points.append(
             BatchPoint(
@@ -4213,6 +4452,7 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
                         "decoded_action",
                         "event",
                         "loss_ledger_residual",
+                        "gradient_epoch_preclip_l2_mean",
                     )
                     if key in train
                 },
@@ -4292,6 +4532,7 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
         "trajectories": trajectories,
         "structure": structure,
         "gradients": gradients,
+        "gradient_spike_events": [dict(event) for event in run.gradient_spike_events],
         "performance": _performance_summary(run),
         "metric_index": metric_index,
         "aligned_batch_2200": aligned_batch_2200,
@@ -4411,6 +4652,13 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
         lines.append("gradient tail medians:")
         for key, stats in summary["gradients"].items():
             lines.append(f"  {key}={_format_number(stats['tail_median'], 3)}")
+    spike_events = summary.get("gradient_spike_events", [])
+    if spike_events:
+        lines.append("gradient spike events:")
+        for event in spike_events:
+            # JSON is both lossless for the flat event schema and unambiguous
+            # for list-valued fields such as parameter shapes.
+            lines.append("  " + json.dumps(event, sort_keys=True, ensure_ascii=False))
     obs = summary["observability"]
     lines.append(
         "observability: "
@@ -4903,6 +5151,7 @@ def _recovery_assessment(
         if isinstance(candidate_schema, (int, float))
         else None
     )
+    schema38 = schema_number == 38
     schema37 = schema_number == 37
     schema36 = (
         schema_number == 36
@@ -5121,7 +5370,12 @@ def _recovery_assessment(
             "bottom_capacity_mean",
         )
     )
-    if schema37:
+    if schema38:
+        # Schema38 changes the top consumer ABI while leaving the Schema37
+        # producer and bottom lifecycle intact. Do not inherit removed
+        # forced-common/optional-residual P2 names through a >= comparison.
+        required_structure = SCHEMA38_REQUIRED_STRUCTURE_KEYS
+    elif schema37:
         # Schema37 changed the W/P2/P3/bottom ownership ABI.  It must not
         # inherit Schema36's removed status consumer or its one-simplex
         # trajectory_basis diagnostics merely because 37 >= 36.
@@ -5229,11 +5483,26 @@ def _recovery_assessment(
         if name.endswith("pair_cosine"):
             if status == "pass" and float(value) >= 0.999:
                 status = "fail"
+        zero_tolerance = (
+            SCHEMA38_ZERO_INVARIANT_TOLERANCES.get(name)
+            if schema38
+            else None
+        )
+        if zero_tolerance is not None and status == "pass":
+            status = (
+                "pass"
+                if abs(float(value)) <= float(zero_tolerance)
+                else "fail"
+            )
         record(
             f"structure/{name}",
             status,
             candidate_value=value,
-            detail="cosine checks reject exact object-slot publicization",
+            detail=(
+                f"Schema38 algebraic zero invariant; abs(value) <= {zero_tolerance:g}"
+                if zero_tolerance is not None
+                else "cosine checks reject exact object-slot publicization"
+            ),
         )
 
     gradients = candidate.get("gradients", {})
@@ -5246,7 +5515,9 @@ def _recovery_assessment(
         and int(candidate_schema) >= 24
     ) or any(name.startswith("gradient_raw_") for name in gradients)
     owner_rows = (
-        SCHEMA37_OWNER_GRADIENT_ROLES
+        SCHEMA38_OWNER_GRADIENT_ROLES
+        if schema38
+        else SCHEMA37_OWNER_GRADIENT_ROLES
         if schema37
         else (
             "grounder",
@@ -5281,8 +5552,13 @@ def _recovery_assessment(
             status = "pass" if float(value) > 1e-12 else "fail"
         record(f"gradient/{name}", status, candidate_value=value)
 
-    if schema37:
-        for name in SCHEMA37_TENSOR_GRADIENT_KEYS:
+    if schema38 or schema37:
+        tensor_gradient_keys = (
+            SCHEMA38_TENSOR_GRADIENT_KEYS
+            if schema38
+            else SCHEMA37_TENSOR_GRADIENT_KEYS
+        )
+        for name in tensor_gradient_keys:
             value = gradients.get(name, {}).get("tail_median")
             status = (
                 "pass"
@@ -5297,6 +5573,26 @@ def _recovery_assessment(
                     "tensor-boundary gradients are presence/finite diagnostics; "
                     "an exact zero is evidence and must not be relabelled missing"
                 ),
+            )
+
+    if schema38:
+        for name in (
+            "gradient_window_preclip_l2_mean",
+            "gradient_window_preclip_l2_max",
+            "gradient_window_preclip_l2_current",
+            "gradient_window_preclip_l2_max_batch_offset",
+            "gradient_window_preclip_l2_max_global_step",
+        ):
+            value = gradients.get(name, {}).get("tail_median")
+            status = (
+                "pass"
+                if isinstance(value, (int, float)) and math.isfinite(float(value))
+                else "incomplete"
+            )
+            record(
+                f"gradient_window/{name}",
+                status,
+                candidate_value=value,
             )
 
     if schema24:
@@ -5489,6 +5785,7 @@ def _merge_runs(runs: Sequence[ParsedRun], *, path: Path, label: str) -> ParsedR
         merged.init_counts.update(run.init_counts)
         merged.batch_points.extend(run.batch_points)
         merged.epoch_records.extend(run.epoch_records)
+        merged.gradient_spike_events.extend(run.gradient_spike_events)
         merged.runtime_points.extend(run.runtime_points)
         merged.malformed_json += run.malformed_json
         merged.unclosed_json += run.unclosed_json

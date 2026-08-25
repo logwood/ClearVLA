@@ -306,7 +306,6 @@ class RestoredV120EvidenceBottom(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         dynamic_delta = (updated - canvas).reshape(expected)
-        completed_policy_residual = protected_detail + dynamic_delta
         state = CompletedP1PolicyState(
             factual_base=protected_detail,
             policy_query_residual=dynamic_delta,
@@ -318,6 +317,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         )
         if not collect_diagnostics:
             return state, {}
+        policy_updated_trajectory = protected_detail + dynamic_delta
         metrics = {
             "p1_protected_detail_rms": protected_detail.detach()
             .float()
@@ -329,9 +329,10 @@ class RestoredV120EvidenceBottom(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            # Retain the historical scalar for longitudinal log tooling.  The
-            # tensor it describes is no longer exported as ``factual_base``.
-            "p1_completed_fact_rms": completed_policy_residual.detach()
+            # This is the dynamic P1 block's updated policy trajectory, not a
+            # completed factual value.  Keep the ownership explicit so log
+            # tooling cannot mistake policy bandwidth for protected evidence.
+            "p1_policy_updated_trajectory_rms": policy_updated_trajectory.detach()
             .float()
             .square()
             .mean()

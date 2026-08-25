@@ -306,12 +306,17 @@ class ObjectIntentDynamicsTop(nn.Module):
         action_intent = intent.action_dock()
         world_intent = intent.world_dock()
         coarse = self.coarse_action(action_intent)
-        _, w1_state, w1_metrics = self.dynamics.forward_w1(
+        w1_diagnostic_field, w1_state, w1_metrics = self.dynamics.forward_w1(
             facts=facts,
             intent=world_intent,
             action=coarse,
             collect_diagnostics=collect_diagnostics,
         )
+        # The optional two-interval decode exists only to materialize W1
+        # diagnostics.  Its metrics are detached inside ``forward_w1``; keeping
+        # the field alive across W2 needlessly overlaps a second decoder
+        # autograd graph with the final four-interval decode on logging batches.
+        del w1_diagnostic_field
         predicted, w2_metrics = self.dynamics.forward_w2(
             facts=facts,
             intent=world_intent,
@@ -457,11 +462,12 @@ class ObjectIntentDynamicsTop(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         # The protected consequence carries only the static P1 fact plus W
-        # effect.  The live P1 write has already completed its sole legal
-        # role: refining the P2 effect query.
+        # effect. The live P1 write may refine P2 and P3 precision, but never
+        # becomes a factual/protected value.
         p3_action_query = action_query
         plan, plan_metrics = self.plan_compiler(
             p1_factual_detail=p1_state.factual_base,
+            p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),
             action_query=p3_action_query,

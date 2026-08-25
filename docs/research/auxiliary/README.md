@@ -10,8 +10,15 @@ Use it for:
 - experiment matrices and implementation sketches;
 - unresolved alternatives that have not entered an active schema.
 
-Focused pending designs:
+Focused adopted and pending designs:
 
+- `SCHEMA38_ACTION_CONSUMPTION_CLOSURE_PLAN.md`: the source-backed candidate
+  plan derived from the completed Schema37 run. It was adopted for Schema38
+  and is retained as design ancestry: full-field W/P2 consumption,
+  zero-preserving dynamic-P1 precision, geometry semantic-addressing and
+  deterministic diagnostic cleanup are now described by the active contract.
+  This auxiliary file does not prove that smoke, causal probes or training
+  gates passed.
 - `P2_FACTORIZED_INTERVAL_OBJECT_ROUTING.md`: a conditional, P2-only
   factorized interval/object soft-routing repair. It is activated only if an
   aligned Schema32 run confirms that healthy W interval residuals are still

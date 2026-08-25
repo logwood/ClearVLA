@@ -11,10 +11,15 @@ from clearvla.tools.audit_policy_logs import (
     SCHEMA37_OWNER_GRADIENT_ROLES,
     SCHEMA37_REQUIRED_STRUCTURE_KEYS,
     SCHEMA37_TENSOR_GRADIENT_KEYS,
+    SCHEMA38_OWNER_GRADIENT_ROLES,
+    SCHEMA38_REQUIRED_STRUCTURE_KEYS,
+    SCHEMA38_TENSOR_GRADIENT_KEYS,
+    SCHEMA38_ZERO_INVARIANT_TOLERANCES,
     STRUCTURE_KEYS,
     BatchPoint,
     ParsedRun,
     _recovery_assessment,
+    _render_run_text,
     build_summary,
     parse_log,
     parse_run_input,
@@ -152,6 +157,131 @@ class AuditPolicyLogsTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_legacy_global_preclip_gradient_remains_a_train_metric(self) -> None:
+        path = _write(
+            self.tmp_path / "legacy-gradient.jsonl",
+            json.dumps(
+                {
+                    "kind": "train",
+                    "epoch": 1,
+                    "batch": 20,
+                    "step": 20,
+                    "metrics": {"gradient_global_preclip_l2": 3.25},
+                }
+            ),
+        )
+
+        run = parse_log(path)
+        self.assertEqual(
+            run.batch_points[0].metrics["gradient_global_preclip_l2"],
+            3.25,
+        )
+        self.assertEqual(run.gradient_spike_events, [])
+        summary = build_summary(run)
+        self.assertEqual(
+            summary["gradients"]["gradient_global_preclip_l2"]["tail_median"],
+            3.25,
+        )
+        self.assertIn("gradient_global_preclip_l2", summary["metric_index"])
+
+    def test_schema38_gradient_window_and_epoch_mean_are_projected(self) -> None:
+        window = {
+            "gradient_window_preclip_l2_mean": 2.4,
+            "gradient_window_preclip_l2_max": 4.0,
+            "gradient_window_preclip_l2_current": 2.0,
+            "gradient_window_preclip_l2_max_batch_offset": 2,
+            "gradient_window_preclip_l2_max_global_step": 102,
+        }
+        path = _write(
+            self.tmp_path / "schema38-gradient-window.jsonl",
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "kind": "train",
+                            "epoch": 1,
+                            "batch": 20,
+                            "step": 120,
+                            "metrics": window,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "kind": "epoch",
+                            "epoch": 1,
+                            "step": 120,
+                            "train": {"gradient_epoch_preclip_l2_mean": 2.75},
+                            "validation": {},
+                        }
+                    ),
+                )
+            ),
+        )
+
+        summary = build_summary(parse_log(path))
+        for name, expected in window.items():
+            self.assertEqual(summary["gradients"][name]["tail_median"], expected)
+            self.assertIn(name, summary["metric_index"])
+        self.assertEqual(
+            summary["gradients"]["gradient_epoch_preclip_l2_mean"]["tail_median"],
+            2.75,
+        )
+        self.assertEqual(
+            summary["epochs"][0]["train"]["gradient_epoch_preclip_l2_mean"],
+            2.75,
+        )
+
+    def test_gradient_spike_is_a_lossless_independent_event(self) -> None:
+        train_row = {
+            "kind": "train",
+            "epoch": 3,
+            "batch": 20,
+            "step": 42,
+            "metrics": {"gradient_window_preclip_l2_mean": 2.0},
+        }
+        spike = {
+            "kind": "gradient_spike",
+            "epoch": 3,
+            "batch": 19,
+            "step": 41,
+            "gradient_global_preclip_l2": 10.6301458127,
+            "gradient_spike_audit_threshold": 5.0,
+            "max_l2_parameter_name": "observation.l2_owner",
+            "max_l2_parameter_role": "observation",
+            "max_l2_optimizer_group": "observation/decay",
+            "max_l2_shape": [4],
+            "max_l2_dtype": "float32",
+            "max_l2_l2": 8.0,
+            "max_l2_max_abs": 4.0,
+            "max_abs_parameter_name": "observation.abs_owner",
+            "max_abs_parameter_role": "observation",
+            "max_abs_optimizer_group": "observation/decay",
+            "max_abs_shape": [1],
+            "max_abs_dtype": "float32",
+            "max_abs_l2": 7.0,
+            "max_abs_max_abs": 7.0,
+        }
+        path = _write(
+            self.tmp_path / "schema38-gradient-spike.jsonl",
+            "\n".join((json.dumps(train_row), json.dumps(spike))),
+        )
+
+        run = parse_log(path)
+        self.assertEqual(len(run.batch_points), 1)
+        self.assertEqual(run.batch_points[0].metrics, train_row["metrics"])
+        self.assertEqual(run.gradient_spike_events, [spike])
+
+        summary = build_summary(run)
+        self.assertEqual(summary["gradient_spike_events"], [spike])
+        self.assertNotIn("gradient_global_preclip_l2", summary["metric_index"])
+        rendered = _render_run_text(summary)
+        rendered_event = next(
+            line.strip()
+            for line in rendered.splitlines()
+            if line.strip().startswith('{"batch"')
+        )
+        self.assertEqual(json.loads(rendered_event), spike)
 
     def test_compact_v94_rows_merge_loss_execution_and_gradient_lines(self) -> None:
         epoch_record = {
@@ -2041,6 +2171,98 @@ class AuditPolicyLogsTest(unittest.TestCase):
             missing_checks[f"tensor_gradient/{missing_gradient}"],
             "incomplete",
         )
+
+    def test_schema38_recovery_uses_complete_field_action_surface(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema38"
+        candidate["manifest"]["architecture_schema"] = 38
+        candidate["structure"] = {
+            name: {
+                "tail_median": (
+                    0.5
+                    if name.endswith("pair_cosine")
+                    else 0.0
+                    if name in SCHEMA38_ZERO_INVARIANT_TOLERANCES
+                    else 0.1
+                )
+            }
+            for name in SCHEMA38_REQUIRED_STRUCTURE_KEYS
+        }
+        candidate["gradients"].update(
+            {
+                name: {"tail_median": 0.0}
+                for name in SCHEMA38_TENSOR_GRADIENT_KEYS
+            }
+        )
+        candidate["gradients"].update(
+            {
+                f"gradient_{stage}_{role}_l2": {"tail_median": 0.01}
+                for stage in ("raw", "postlocal", "postglobal")
+                for role in SCHEMA38_OWNER_GRADIENT_ROLES
+            }
+        )
+        candidate["gradients"].update(
+            {
+                name: {"tail_median": 1.0}
+                for name in (
+                    "gradient_window_preclip_l2_mean",
+                    "gradient_window_preclip_l2_max",
+                    "gradient_window_preclip_l2_current",
+                    "gradient_window_preclip_l2_max_batch_offset",
+                    "gradient_window_preclip_l2_max_global_step",
+                )
+            }
+        )
+
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        for name in SCHEMA38_REQUIRED_STRUCTURE_KEYS:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+        for removed in (
+            "object_p2_protected_common_rms",
+            "object_p2_optional_residual_rms",
+            "object_p2_public_interval_score_abs",
+            "object_p2_semantic_interval_w_score_abs",
+        ):
+            self.assertNotIn(f"structure/{removed}", checks)
+
+        missing_name = "object_p2_s_condition_neutral_posterior_l1"
+        candidate["structure"].pop(missing_name)
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[f"structure/{missing_name}"],
+            "incomplete",
+        )
+
+        # A real S-conditioned W posterior change is allowed and remains a
+        # useful diagnostic; it is not the removed independent S vote.
+        candidate["structure"][missing_name] = {"tail_median": 0.25}
+        allowed = _recovery_assessment(baseline, candidate)
+        allowed_checks = {
+            item["name"]: item["status"] for item in allowed["checks"]
+        }
+        self.assertEqual(
+            allowed_checks[f"structure/{missing_name}"],
+            "pass",
+        )
+
+        for invariant_name, tolerance in SCHEMA38_ZERO_INVARIANT_TOLERANCES.items():
+            broken = deepcopy(candidate)
+            broken["structure"][invariant_name] = {
+                "tail_median": max(float(tolerance) * 2.0, 1.0e-4)
+            }
+            failed = _recovery_assessment(baseline, broken)
+            failed_checks = {
+                item["name"]: item["status"] for item in failed["checks"]
+            }
+            self.assertEqual(
+                failed_checks[f"structure/{invariant_name}"],
+                "fail",
+            )
 
     def test_global_k_binder_is_presence_only_across_changed_semantics(self) -> None:
         baseline = _complete_recovery_summary("v120")

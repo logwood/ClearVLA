@@ -219,10 +219,23 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         nn.init.zeros_(self.transport_head.weight)
         nn.init.zeros_(self.covariance_head.weight)
         with torch.no_grad():
-            # Raw order is xx-logit, yy-logit, correlation-logit.
+            # Raw order is xx-logit, yy-logit, correlation-logit. Preserve
+            # the historical fresh-run diagonal variance (~0.12519) while
+            # removing its unreachable positive output floor. P2 owns the
+            # separate half-cell numerical metric floor; the learned physical
+            # covariance must be able to approach a zero-covariance Teacher
+            # target without paying that stabilizer twice.
+            historical_floor = (2.0 / 7.0) ** 2
+            historical_probability = 1.0 / (1.0 + math.exp(3.0))
+            initial_variance = historical_floor + (
+                1.0 - historical_floor
+            ) * historical_probability
+            initial_variance_logit = math.log(
+                initial_variance / (1.0 - initial_variance)
+            )
             self.covariance_head.bias.copy_(
                 torch.tensor(
-                    (-3.0, -3.0, 0.0),
+                    (initial_variance_logit, initial_variance_logit, 0.0),
                     dtype=self.covariance_head.bias.dtype,
                 )
             )
@@ -478,6 +491,32 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
         return base, typed_common, typed_residual, metrics
 
+    @staticmethod
+    def _covariance_from_raw(raw: Tensor) -> Tensor:
+        """Decode bounded PSD covariance without a physical variance floor.
+
+        Teacher moments may be exactly zero for an identity/static match. A
+        strictly positive learned-output floor makes that target unreachable;
+        numerical inversion stability belongs to the P2 metric consumer, not
+        to this physical prediction. Sigmoid keeps each normalized-chart
+        variance in ``(0, 1)`` and the bounded correlation constructs a PSD
+        2x2 matrix for every finite raw value.
+        """
+
+        if int(raw.shape[-1]) != 3:
+            raise ValueError(
+                "camera covariance raw value must end in xx/yy/correlation"
+            )
+        raw_f = raw.float()
+        variance_xx = torch.sigmoid(raw_f[..., 0])
+        variance_yy = torch.sigmoid(raw_f[..., 1])
+        correlation = torch.tanh(raw_f[..., 2])
+        covariance_xy = correlation * torch.sqrt(variance_xx * variance_yy)
+        return torch.stack(
+            (variance_xx, covariance_xy, variance_yy),
+            dim=-1,
+        )
+
     def _field(
         self,
         *,
@@ -537,23 +576,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 + typed_interval_innovation[..., 2, :],
             )
         ).float()
-        # The normalized 8x8 chart spacing is 2/7. Bound each diagonal from
-        # one-cell variance through the maximum coordinate variance on
-        # [-1, 1], then parameterize xy through a bounded correlation.
-        variance_floor = (2.0 / 7.0) ** 2
-        variance_ceiling = 1.0
-        variance_xx = variance_floor + (
-            variance_ceiling - variance_floor
-        ) * torch.sigmoid(covariance_raw[..., 0])
-        variance_yy = variance_floor + (
-            variance_ceiling - variance_floor
-        ) * torch.sigmoid(covariance_raw[..., 1])
-        correlation = torch.tanh(covariance_raw[..., 2])
-        covariance_xy = correlation * torch.sqrt(variance_xx * variance_yy)
-        object_covariance = torch.stack(
-            (variance_xx, covariance_xy, variance_yy),
-            dim=-1,
-        )
+        object_covariance = self._covariance_from_raw(covariance_raw)
         # Keep the complete PSD triple in FP32.  Independently rounding xx,
         # xy and yy to BF16 can turn a valid matrix into a negative-
         # determinant one; casting it back to float in P2 cannot recover the
@@ -757,12 +780,18 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         field: FutureObjectDynamics | None = None
         metrics: dict[str, Tensor] = {}
         if collect_diagnostics:
-            field = self._field(
-                facts=facts,
-                hidden=near,
-                typed_common=w1_common,
-                typed_interval_innovation=near_typed,
-            )
+            # This two-interval decode has no loss or policy consumer.  Its
+            # only products are detached scalar diagnostics, so retaining an
+            # autograd graph here would overlap a second set of decoder
+            # activations with the real W2 four-interval field on every log
+            # batch without changing any gradient owner.
+            with torch.no_grad():
+                field = self._field(
+                    facts=facts,
+                    hidden=near,
+                    typed_common=w1_common,
+                    typed_interval_innovation=near_typed,
+                )
             field.validate(expected_intervals=2)
             metrics.update(self._metrics(field, prefix="object_w1"))
         metrics.update(base_metrics)

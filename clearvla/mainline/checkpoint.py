@@ -419,14 +419,17 @@ def compare_checkpoint_identity(
         require_current_schema=False,
     )
     current_manifest = manifest_from_mapping(current.manifest)
-    # Schema37 changes the serialized bottom ingress from one joint route to
-    # six lane-local 4+null reads, including ``source_key`` shape.  Component
-    # strings alone are therefore insufficient permission to cross a schema
-    # boundary: old bottoms must be rejected even if a hand-edited manifest
-    # happens to reuse the current ABI label.
+    # Exact/optimizer resume is already rejected above by the complete
+    # identity. The explicit bottom-only tool may cross a top-schema boundary
+    # only when the serialized bottom ABI itself is unchanged; this is the
+    # sole meaning of the reusable component report.
+    schema_pair = (int(saved_manifest.schema), int(current_manifest.schema))
     bottom_same = (
-        int(saved_manifest.schema) == int(current_manifest.schema)
-        and saved_manifest.components.bottom == current_manifest.components.bottom
+        saved_manifest.components.bottom == current_manifest.components.bottom
+        and (
+            schema_pair[0] == schema_pair[1]
+            or schema_pair == (37, 38)
+        )
     )
     return CompatibilityReport(
         exact_resume=False,

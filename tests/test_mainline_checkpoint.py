@@ -3,6 +3,7 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import torch
 
 from clearvla.mainline.checkpoint import (
@@ -54,6 +55,7 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert "clearvla/mainline/v120_core/profile.py" in paths
     assert "clearvla/mainline/model/action_contract.py" in paths
     assert "clearvla/mainline/model/observation_contract.py" in paths
+    assert "clearvla/mainline/training/gradient_audit.py" in paths
     # These superseded independent rewrites are retained only as source
     # archaeology.  The formal entry point has no dependency on either one.
     assert "clearvla/mainline/model/bottom.py" not in paths
@@ -102,7 +104,7 @@ def test_checkpoint_identity_roundtrip_and_schema_36_migration_rejection(
 
     historical_manifest = copy.deepcopy(identity.manifest)
     # Schema36 remains parseable for an explicit compatibility report, but its
-    # joint bottom route has a different serialized ingress from Schema37's
+    # joint bottom route has a different serialized ingress from Schema37/38's
     # six lane-local 4+null reads.  It can neither exact-resume nor migrate its
     # bottom even if a hand-edited manifest reuses the current bottom ABI text.
     historical_manifest["schema"] = 36
@@ -504,9 +506,73 @@ def test_bottom_migration_rejects_schema_36_even_with_same_bottom_abi(
     except ValueError as error:
         assert str(error) == "bottom migration rejected: manifest identity differs"
     else:
-        raise AssertionError("Schema36 joint-route bottom must not migrate to Schema37")
+        raise AssertionError("Schema36 joint-route bottom must not migrate to Schema38")
     for name, value in target.state_dict().items():
         assert torch.equal(value, before[name])
+
+
+def test_bottom_migration_explicitly_accepts_schema_37_unchanged_bottom_abi(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal.pt"
+    condition.write_bytes(b"t5-condition")
+    config = ExperimentConfig()
+    identity = build_checkpoint_identity(
+        config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=ArtifactIdentity.from_file("t5_goal", condition),
+        commit="1" * 40,
+    )
+
+    class TinyPolicy(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bottom = torch.nn.Linear(3, 2)
+
+    source = TinyPolicy()
+    optimizer = torch.optim.AdamW(source.parameters(), lr=1e-3)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    path = tmp_path / "schema37-bottom.pt"
+    save_checkpoint(
+        path,
+        model=source,
+        optimizer=optimizer,
+        schedule=schedule,
+        config=config,
+        identity=identity,
+        epoch=0,
+        global_step=0,
+        best_metric=None,
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    historical_manifest = payload["identity"]["manifest"]
+    historical_manifest["schema"] = 37
+    historical_components = historical_manifest["components"]
+    historical_components["observation"] = "schema37_observation"
+    historical_components["top"] = "schema37_top"
+    historical_components["training"] = "schema37_training"
+    historical_parsed = manifest_from_mapping(
+        historical_manifest,
+        require_current_schema=False,
+    )
+    payload["identity"]["manifest_digest"] = historical_parsed.digest()
+    torch.save(payload, path)
+
+    target = TinyPolicy()
+    with torch.no_grad():
+        target.bottom.weight.zero_()
+        target.bottom.bias.zero_()
+    report = migrate_bottom_only(path, target, identity=identity)
+    assert set(report.loaded) == {"bottom.weight", "bottom.bias"}
+    torch.testing.assert_close(target.bottom.weight, source.bottom.weight)
+    torch.testing.assert_close(target.bottom.bias, source.bottom.bias)
 
 
 def test_bottom_migration_rejects_untyped_shape_only_checkpoint(tmp_path: Path) -> None:
@@ -576,4 +642,74 @@ def test_bottom_migration_rejects_incomplete_typed_state_before_mutation(
     else:
         raise AssertionError("an incomplete typed bottom must be rejected")
     for name, value in model.state_dict().items():
+        assert torch.equal(value, before[name])
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_detail"),
+    (
+        ("dtype", "dtype_mismatch=1"),
+        ("nonfinite", "nonfinite_bottom=1"),
+    ),
+)
+def test_bottom_migration_rejects_inexact_tensor_abi_before_mutation(
+    tmp_path: Path,
+    corruption: str,
+    expected_detail: str,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / f"goal-{corruption}.pt"
+    condition.write_bytes(b"t5-condition")
+    config = ExperimentConfig()
+    identity = build_checkpoint_identity(
+        config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=ArtifactIdentity.from_file("t5_goal", condition),
+        commit="1" * 40,
+    )
+
+    class TinyPolicy(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bottom = torch.nn.Linear(3, 2)
+
+    source = TinyPolicy()
+    optimizer = torch.optim.AdamW(source.parameters(), lr=1e-3)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    path = tmp_path / f"invalid-{corruption}-bottom.pt"
+    save_checkpoint(
+        path,
+        model=source,
+        optimizer=optimizer,
+        schedule=schedule,
+        config=config,
+        identity=identity,
+        epoch=0,
+        global_step=0,
+        best_metric=None,
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    weight = payload["model"]["bottom.weight"].detach().clone()
+    if corruption == "dtype":
+        payload["model"]["bottom.weight"] = weight.to(torch.float64)
+    elif corruption == "nonfinite":
+        weight.reshape(-1)[0] = torch.nan
+        payload["model"]["bottom.weight"] = weight
+    else:  # pragma: no cover - parametrization owns the complete set
+        raise AssertionError(corruption)
+    torch.save(payload, path)
+
+    target = TinyPolicy()
+    before = {
+        name: value.detach().clone() for name, value in target.state_dict().items()
+    }
+    with pytest.raises(ValueError, match=expected_detail):
+        migrate_bottom_only(path, target, identity=identity)
+    for name, value in target.state_dict().items():
         assert torch.equal(value, before[name])

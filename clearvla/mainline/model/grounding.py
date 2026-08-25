@@ -394,12 +394,13 @@ class DenseObjectGrounder(nn.Module):
         parent_k_conditional = parent_owner[..., : self.objects] / parent_k_mass.clamp_min(
             1e-8
         )
-        common_residual = (
-            raw_residual * parent_k_conditional
-        ).sum(dim=-1, keepdim=True)
-        residual = raw_residual - common_residual
+        # A candidate-local scalar subtracted from every K logit is exactly a
+        # softmax gauge: it changes neither the corrected posterior nor its
+        # gradient.  The former post-tanh, parent-weighted subtraction only
+        # made the reported residual exceed the declared [-0.5, 0.5] bound.
+        # Keep the actual bounded logits as the sole G3 correction.
         corrected_k_conditional = torch.softmax(
-            parent_k_conditional.clamp_min(1e-8).log() + residual,
+            parent_k_conditional.clamp_min(1e-8).log() + raw_residual,
             dim=-1,
         )
         corrected = torch.cat(
@@ -710,13 +711,17 @@ class DenseObjectGrounder(nn.Module):
         assignment_change_fraction = (
             assignment_changed * binder_support
         ).sum() / binder_support_sum
-        residual_to_parent_margin = (
-            residual.detach().float().square().mean(dim=-1).sqrt()
-            / parent_margin.clamp_min(1.0e-4)
+        bounded_logit = raw_residual.detach().float()
+        conditional_logit = bounded_logit - bounded_logit.mean(
+            dim=-1,
+            keepdim=True,
         )
-        residual_to_parent_margin = (
-            residual_to_parent_margin * binder_support
-        ).sum() / binder_support_sum
+        conditional_logit_spread = conditional_logit.square().mean(
+            dim=-1,
+        ).sqrt()
+        conditional_logit_span = (
+            bounded_logit.amax(dim=-1) - bounded_logit.amin(dim=-1)
+        )
         metrics = {
             "object_grounding_reconstruction_mse": reconstruction_error.detach(),
             "object_grounding_aggregated_content_rms": (
@@ -804,23 +809,21 @@ class DenseObjectGrounder(nn.Module):
             )
             .abs()
             .mean(),
-            "object_grounding_global_k_binder_residual_rms": residual.detach()
-            .float()
+            "object_grounding_global_k_binder_bounded_logit_rms": bounded_logit
             .square()
             .mean()
             .sqrt(),
-            "object_grounding_global_k_binder_raw_residual_rms": raw_residual
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_grounding_global_k_binder_common_residual_rms": common_residual
-            .detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
+            "object_grounding_global_k_binder_bounded_logit_max_abs": (
+                bounded_logit.abs().amax()
+            ),
+            "object_grounding_global_k_binder_conditional_logit_spread_rms": (
+                conditional_logit_spread * binder_support
+            ).sum()
+            / binder_support_sum,
+            "object_grounding_global_k_binder_conditional_logit_span_mean": (
+                conditional_logit_span * binder_support
+            ).sum()
+            / binder_support_sum,
             "object_grounding_parent_k_conditional_entropy": normalized_entropy(
                 parent_k_conditional,
                 dim=-1,
@@ -836,9 +839,6 @@ class DenseObjectGrounder(nn.Module):
             "object_grounding_g3_parent_top2_margin": parent_margin_mean,
             "object_grounding_g3_corrected_top2_margin": corrected_margin_mean,
             "object_grounding_g3_assignment_change_fraction": assignment_change_fraction,
-            "object_grounding_g3_residual_to_parent_margin_ratio": (
-                residual_to_parent_margin
-            ),
             "object_grounding_prebind_typed_consensus_l1": (
                 0.5
                 * (

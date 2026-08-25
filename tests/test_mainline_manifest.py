@@ -43,11 +43,11 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 37
+    assert ARCHITECTURE_MANIFEST.schema == 38
     assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "single_content_k_identity_owner_preserving_stateless_intent_causal_w_unrestricted_far_camera_joint_typed_effect_static_fact_six_lane_p3"
+        == "single_content_k_identity_owner_preserving_stateless_intent_full_interval_w_required_s_conditioned_geometry_address_fact_conditioned_precision_six_lane_p3"
     )
     assert (
         components.bottom
@@ -62,7 +62,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
 
 
-def test_schema_37_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_38_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

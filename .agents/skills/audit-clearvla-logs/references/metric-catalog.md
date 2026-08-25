@@ -1019,6 +1019,70 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   progress correlation reads the algebraic `semantic_delta`, not a BF16
   `successor-current` reconstruction that can round away small effects.
 
+### Schema38 action-consumption closure
+
+- Schema38 is identified only by serialized architecture schema `38` and the
+  `object_intent_dynamics_323` capability. Its source is implemented, but no
+  smoke or training result is implied by the schema number.
+- P2 consumes `common + interval_residual` as one complete W candidate. Read
+  `object_p2_complete_field_identity_error`, complete-field common/residual
+  candidate and selected RMS, and each type's
+  `*_complete_field_null_mass` together. Schema37
+  `protected_common`/`optional_residual` and `residual_null_mass` fields are
+  historical semantics and must not be used as the active Schema38 routing
+  contract.
+- `object_p2_independent_s_interval_vote` must be exact zero. S is observable
+  only as a zero-preserving condition on a selected W key. Read
+  `object_p2_selected_w_key_rms`,
+  `object_p2_w_key_interval_centered_variation_rms`, public/typed S-to-W key
+  delta RMS, `object_p2_s_condition_pre_tanh_rms`, saturation fraction and
+  `object_p2_s_condition_neutral_posterior_l1` as one record. A nonzero S
+  condition with neutral W is not a legal future value.
+- The Schema38 recovery gate treats
+  `object_p2_independent_s_interval_vote == 0` and
+  `object_p2_complete_field_identity_error <= 1e-6` as algebraic invariants,
+  not merely present/finite diagnostics. In contrast,
+  `object_p2_s_condition_neutral_posterior_l1` may legitimately be nonzero: it
+  measures S changing the W-owned interval posterior, not an independent S
+  vote or value.
+- Geometry remains an independent typed effect and also supplies a bounded,
+  valid-K-centred correction to semantic K address within the same interval.
+  Pair `object_p2_geometry_to_semantic_k_correction_rms` with the geometry-
+  neutral semantic posterior/output L1 diagnostics. Missing or K-uniform
+  geometry must produce exact-zero correction; geometry cannot directly vote
+  for an interval or scale semantic value.
+- Dynamic P1 is still outside factual base and protected consequence. Its
+  additional legal Schema38 consumer is P3 precision. Read
+  factual input, `object_p3_precision_static_projected_rms`,
+  `object_p3_precision_combined_source_rms`, dynamic
+  input/contracted/interaction RMS, fact-gate RMS/denominator and final
+  precision RMS together. A large
+  dynamic input is not protected information, and a zero static precision
+  must make the dynamic interaction zero.
+- W semantic/transport values retain exact-zero fresh initialization. At that
+  neutral point, P2/S selector parameters legitimately have zero action-only
+  gradient because every optional value is zero. The existing W future loss
+  must first open a nonzero field; after that, action-only VJP must reach W, S,
+  P2, P3, dynamic P1 and semantic/transport/covariance boundaries. Do not call
+  the neutral-point zero gradient a dead path, and do not claim closure from W
+  auxiliary gradients alone.
+- W covariance is an FP32 PSD output whose variance may approach zero. Do not
+  treat P2's numerical Mahalanobis metric floor as a W output floor or a
+  Teacher target. A zero Teacher covariance is reachable; individual BF16
+  casting of covariance entries remains invalid.
+- G3 diagnostics now describe the actual bounded raw correction:
+  `object_grounding_global_k_binder_bounded_logit_rms/max_abs`, conditional
+  logit spread/span, correction L1 and assignment-change fraction. The former
+  centred-residual RMS and residual/margin ratio were softmax-gauge artefacts
+  and are Schema37-only history.
+- Raw gradient logging is explicitly windowed. Read
+  `gradient_window_preclip_l2_mean/max/current` with the max batch offset and
+  global step. A separate `kind=gradient_spike` JSONL event is emitted only
+  for a finite threshold crossing and carries the maximum-L2 and maximum-abs
+  parameter name, role, optimizer group, shape and dtype. It is an audit event,
+  not a loss, clip or ordinary epoch metric. Absence of an event proves only
+  that the configured threshold was not crossed in the observed run.
+
 ## Gradients and interventions
 
 - Compare gradients by module and phase; do not compare a scalar parameter norm and a large-module norm as if they had identical dimensionality.

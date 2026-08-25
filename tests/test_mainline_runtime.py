@@ -50,12 +50,16 @@ def test_active_logging_suppresses_inactive_exact_zero() -> None:
             "loss_ledger_gap": 0.0,
             "gradient_postglobal_p1_factual_l2": 0.0,
             "object_grounding_mass_conservation_error": 0.0,
+            "object_p2_complete_field_identity_error": 0.0,
+            "object_p2_independent_s_interval_vote": 0.0,
         }
     )
     assert filtered == {
         "loss_ledger_gap": 0.0,
         "gradient_postglobal_p1_factual_l2": 0.0,
         "object_grounding_mass_conservation_error": 0.0,
+        "object_p2_complete_field_identity_error": 0.0,
+        "object_p2_independent_s_interval_vote": 0.0,
     }
 
 
@@ -117,7 +121,7 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "object_w2_interval_0_semantic_delta_rms": 0.321,
             "object_teacher_interval_0_semantic_delta_rms": 0.322,
             "loss_future_interval_0_semantic_delta": 0.323,
-            "object_p2_intent_score_max_abs": 0.33,
+            "object_p2_s_condition_only_score_max_abs": 0.33,
             "object_intent_goal_attention_entropy": 0.81,
             "object_intent_goal_attention_max": 0.19,
             "object_intent_interval_goal_entropy": 0.82,
@@ -128,15 +132,15 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
             "object_intent_interval_object_attention_max": 0.16,
             "object_intent_state_change_attention_entropy": 0.85,
             "object_intent_state_change_attention_max": 0.15,
-            "object_p2_type_interval_typed_score_abs": 0.21,
-            "object_p2_type_interval_w_score_abs": 0.22,
-            "object_p2_residual_retained_rms_ratio": 0.61,
-            "object_p2_residual_cancelled_rms_fraction": 0.39,
-            "object_p2_residual_cancellation_support_fraction": 0.99,
+            "object_p2_typed_s_condition_only_score_abs": 0.21,
+            "object_p2_unconditioned_w_interval_score_abs": 0.22,
+            "object_p2_complete_field_residual_retained_rms_ratio": 0.61,
+            "object_p2_complete_field_residual_cancelled_rms_fraction": 0.39,
+            "object_p2_complete_field_residual_cancellation_support_fraction": 0.99,
             "object_p2_geometry_joint_kc_candidate_count": 8.0,
             "gradient_tensor_p3_effect_semantic_rms": 0.007,
             "p1_policy_modulation_scale_max_abs": 0.88,
-            "p1_completed_fact_rms": 0.4,
+            "p1_policy_updated_trajectory_rms": 0.4,
             "object_p3_effect_rms": 0.41,
             "bottom_capacity_mean": 0.5,
             "bottom_controller_common_ratio": 0.51,
@@ -162,7 +166,7 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "object_w2_interval_0_semantic_delta_rms=0.321" in joined
     assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
     assert "loss_future_interval_0_semantic_delta=0.323" in joined
-    assert "object_p2_intent_score_max_abs=0.33" in joined
+    assert "object_p2_s_condition_only_score_max_abs=0.33" in joined
     assert "object_intent_goal_attention_entropy=0.81" in joined
     assert "object_intent_goal_attention_max=0.19" in joined
     assert "object_intent_interval_goal_entropy=0.82" in joined
@@ -173,15 +177,18 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "object_intent_interval_object_attention_max=0.16" in joined
     assert "object_intent_state_change_attention_entropy=0.85" in joined
     assert "object_intent_state_change_attention_max=0.15" in joined
-    assert "object_p2_type_interval_typed_score_abs=0.21" in joined
-    assert "object_p2_type_interval_w_score_abs=0.22" in joined
-    assert "object_p2_residual_retained_rms_ratio=0.61" in joined
-    assert "object_p2_residual_cancelled_rms_fraction=0.39" in joined
-    assert "object_p2_residual_cancellation_support_fraction=0.99" in joined
+    assert "object_p2_typed_s_condition_only_score_abs=0.21" in joined
+    assert "object_p2_unconditioned_w_interval_score_abs=0.22" in joined
+    assert "object_p2_complete_field_residual_retained_rms_ratio=0.61" in joined
+    assert "object_p2_complete_field_residual_cancelled_rms_fraction=0.39" in joined
+    assert (
+        "object_p2_complete_field_residual_cancellation_support_fraction=0.99"
+        in joined
+    )
     assert "object_p2_geometry_joint_kc_candidate_count=8" in joined
     assert "gradient_tensor_p3_effect_semantic_rms=0.007" in joined
     assert "p1_policy_modulation_scale_max_abs=0.88" in joined
-    assert "p1_completed_fact_rms=0.4" in joined
+    assert "p1_policy_updated_trajectory_rms=0.4" in joined
     assert "object_p3_effect_rms=0.41" in joined
     assert "bottom_capacity_mean=0.5" in joined
     assert "bottom_controller_common_ratio=0.51" in joined

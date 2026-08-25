@@ -437,6 +437,9 @@ def migrate_bottom_only(
     current = model.state_dict()
     selected: dict[str, torch.Tensor] = {}
     shape_mismatch: list[str] = []
+    dtype_mismatch: list[str] = []
+    complex_bottom: list[str] = []
+    nonfinite_bottom: list[str] = []
     rejected: list[str] = []
     invalid_bottom: list[str] = []
     for raw_name, value in state.items():
@@ -448,6 +451,19 @@ def migrate_bottom_only(
             invalid_bottom.append(name)
         elif tuple(value.shape) != tuple(current[name].shape):
             shape_mismatch.append(name)
+        elif value.dtype != current[name].dtype:
+            # ``load_state_dict`` silently casts a source tensor to the live
+            # parameter dtype.  That is useful for generic transfer learning,
+            # but violates this migration's claim that the serialized bottom
+            # ABI is *identical* and can also conceal a malformed checkpoint.
+            dtype_mismatch.append(name)
+        elif value.is_complex() or current[name].is_complex():
+            # The active bottom has no complex-valued state.  Keep this an
+            # explicit boundary rather than allowing a future matching complex
+            # dtype to enter unnoticed.
+            complex_bottom.append(name)
+        elif value.is_floating_point() and not bool(torch.isfinite(value).all()):
+            nonfinite_bottom.append(name)
         else:
             selected[name] = value
     missing = sorted(
@@ -457,12 +473,25 @@ def migrate_bottom_only(
     # silently create a third bottom that is neither fresh nor the source
     # checkpoint, defeating the explicit migration boundary.  Validate the
     # complete state before touching the live model.
-    if missing or shape_mismatch or invalid_bottom:
+    if (
+        missing
+        or shape_mismatch
+        or dtype_mismatch
+        or complex_bottom
+        or nonfinite_bottom
+        or invalid_bottom
+    ):
         details = []
         if missing:
             details.append(f"missing={len(missing)}")
         if shape_mismatch:
             details.append(f"shape_mismatch={len(shape_mismatch)}")
+        if dtype_mismatch:
+            details.append(f"dtype_mismatch={len(dtype_mismatch)}")
+        if complex_bottom:
+            details.append(f"complex_bottom={len(complex_bottom)}")
+        if nonfinite_bottom:
+            details.append(f"nonfinite_bottom={len(nonfinite_bottom)}")
         if invalid_bottom:
             details.append(f"invalid_bottom={len(invalid_bottom)}")
         raise ValueError("bottom migration state is incomplete: " + ", ".join(details))

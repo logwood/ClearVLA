@@ -370,8 +370,8 @@ class P2QueryDock:
     """The only dynamic P1 boundary consumed by P2.
 
     Keeping the three owners separate until the actual P2 consumer makes the
-    dynamic residual a query refinement rather than a second factual or policy
-    value.  ``combined`` intentionally preserves the established numerical sum.
+    dynamic residual a query refinement rather than a second factual value.
+    ``combined`` intentionally preserves the established numerical sum.
     """
 
     action_query: Tensor  # [B,24,Q,H]
@@ -400,9 +400,10 @@ class CompletedP1PolicyState:
 
     ``factual_base`` is the cached, observation-owned P1 detail and therefore
     has no noisy-action dependency. ``policy_query_residual`` is the live V120
-    policy-block write and is owned only by P2's effect query.  It is neither a
-    fact nor a second P3 precision value.  The three values are combined only
-    by :class:`P2QueryDock` at P2's real consumer boundary.
+    policy-block write. It refines P2's effect query and conditionally refines
+    P3 precision, while remaining outside the factual/protected consequence.
+    The three P2 values are combined only by :class:`P2QueryDock` at P2's real
+    consumer boundary.
     """
 
     factual_base: Tensor  # [B,24,Q,H]

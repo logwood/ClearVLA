@@ -21,9 +21,11 @@ config / manifest / typed online and training inputs
   -> typed clean action + causal W1-near/W2-far four-interval object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy-query residual (static fact stays protected)
-  -> P2 matched semantic/geometry consequence reads with camera-specific
-     transport/covariance, one public time prior and one physical camera measure
-  -> P3 six active precision/typed-effect/typed-temporal/state-change lanes
+  -> per-interval action-conditioned semantic K / geometry KxC W reads
+  -> geometry supplies a bounded same-interval semantic-K address correction
+  -> S conditions the selected W key; it does not own an independent time vote
+  -> type-local four-interval+null reads over complete common+residual W fields
+  -> P3 fact-conditioned precision + typed effect/temporal/state-change lanes
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
   -> exact completed-G3 anchor source + per-ODE noisy-action controlled transition
@@ -78,20 +80,25 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        37
+schema:        38
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema37 counts are measured rather than copied from an ancestral schema. The
+Schema38 counts are measured rather than copied from an ancestral schema. The
 launcher prints the total/trainable count and compact G/S/W/P/bottom summary,
 then writes the complete per-module inventory into run context.
 
-Schema 36 and older are neither exact-resume nor bottom-migration sources for
-Schema37 because the bottom ingress changed from one joint simplex to six
-lane-local `4 basis + null` reads. Formal runs start fresh unless the complete
-manifest, model, optimizer, scheduler and RNG identity matches.
+Schema37 is neither an exact-resume nor optimizer-resume source for Schema38
+because the top consumer ABI changed. The serialized bottom body and ingress
+remain unchanged; only the explicit migration tool may report Schema37 bottom
+reuse after exact bottom-ABI comparison. Formal Schema38 comparisons start
+fresh in an absent or empty output directory.
+
+The migration check covers the complete bottom key set, shapes, dtypes and
+finite/non-complex tensor values before it mutates the live model; matching an
+ABI label alone is not sufficient.
 
 ## Runtime contract
 
@@ -108,6 +115,12 @@ manifest, model, optimizer, scheduler and RNG identity matches.
 - Teacher builds once per training batch and zero times in deployment.
 - P1 retains N=49 until each action/object query chooses a candidate; chunks
   are checkpointed rather than materializing the complete backward graph.
+- Raw preclip diagnostics report the logging-window mean, max and current
+  batch separately. A finite norm above the audit threshold emits a read-only
+  parameter-attributed `gradient_spike` event before clipping.
+- An epoch tail shorter than `log_every` is emitted as an explicit
+  `window_boundary=epoch_tail` row, so its maximum gradient and owning step are
+  retained.
 - Batch-eight production process peak must remain at or below 22 GiB.
 
 ## Run
@@ -125,16 +138,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema37_information_conservation_smoke \
-nohup bash scripts/smoke_mainline.sh > schema37_information_conservation_smoke.log 2>&1 &
+OUT_DIR=runs/schema38_action_consumption_smoke \
+nohup bash scripts/smoke_mainline.sh > schema38_action_consumption_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema37_information_conservation_b8 \
-nohup bash scripts/train_mainline.sh > schema37_information_conservation_b8.log 2>&1 &
+OUT_DIR=runs/schema38_action_consumption_b8 \
+nohup bash scripts/train_mainline.sh > schema38_action_consumption_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -146,13 +159,16 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema37_information_conservation_b8 \
+  runs/schema38_action_consumption_b8 \
   --recovery-baseline v120_long.log \
-  --recovery-parent schema36_p1_p2_closure_b8.log \
+  --recovery-parent schema37_information_conservation_b8.log \
   --tail 120 --require-recovery --format text
 ```
 
 ## Release gates
+
+Schema38 source implementation and contract tests do not imply training
+recovery. The following gates still require a fresh run:
 
 - full finite forward/backward and unique optimizer ownership;
 - teacher isolation and five-step deployment call-frequency checks;

@@ -13,6 +13,7 @@ from .routing import (
     register_gradient_axis_rms_metrics,
     register_gradient_rms_metric,
     smooth_rms_contract,
+    variance_floored_centered_norm,
 )
 from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
 
@@ -165,13 +166,13 @@ class ObjectPolicyPlanDeltaBank:
 
 
 class ObjectFutureEffectReader(nn.Module):
-    """Bounded P2 reads with a public time prior and matched typed owners.
+    """Read complete typed W fields through W-anchored interval relations.
 
-    Semantic and geometry are complementary effect values.  They share one
-    protected public-S temporal prior, then each adds only its matching typed-S
-    and supervised-W evidence before selecting an interval/null and an object.
-    Status is deliberately absent: without independent visibility labels it
-    has neither an active target nor a legal action value or route vote.
+    Each semantic/geometry owner has one four-interval-plus-null simplex. S can
+    condition the selected W key, but cannot contribute an independent time
+    logit or nonzero value. Common and interval innovation are routed together
+    as one complete field. Status remains absent because it has no independent
+    observable target or legal action value.
     """
 
     TYPE_NAMES = ("semantic", "geometry")
@@ -197,10 +198,12 @@ class ObjectFutureEffectReader(nn.Module):
                 nn.Linear(2, hidden, bias=False),
             )
         )
-        self.intent_query = nn.ModuleList(
-            nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
-        )
-        self.public_interval_query = nn.Linear(hidden, hidden, bias=False)
+        # Schema37 serialized two independent S-vote queries plus one public
+        # vote query. Schema38 deliberately owns no such parameters. Consume
+        # their historical initialization draws without registering modules so
+        # subsequent live weights retain fresh-run RNG comparability.
+        for _ in range(len(self.TYPE_NAMES) + 1):
+            nn.Linear(hidden, hidden, bias=False)
         self.public_interval_key = nn.Linear(hidden, hidden, bias=False)
         self.common_intent_key = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
@@ -301,9 +304,11 @@ class ObjectFutureEffectReader(nn.Module):
             camera_weight / camera_mass.clamp_min(1.0e-8),
             uniform_camera,
         )
-        # Camera is a physical geometry hypothesis axis, not a preprocessing
-        # nuisance axis.  Keep KxC through the action-conditioned posterior;
-        # only the selected geometry value below may reduce camera.
+        # Schema38 reads one complete W field per interval. Common and
+        # interval innovation remain an exact decomposition for supervision and
+        # diagnostics, but neither component owns an independent action route.
+        # In particular, the common field is no longer written outside the
+        # interval/null competition.
         transport_common = dynamics.transport_common
         transport_residual = dynamics.transport_interval_residual
         common_source_fields = (
@@ -314,18 +319,21 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.semantic_interval_residual,
             transport_residual,
         )
+        full_source_fields = (
+            dynamics.semantic_delta,
+            dynamics.transport_mean,
+        )
         common_projected_values = (
-            self.semantic_value(dynamics.semantic_common),
-            self.transport_value(transport_common),
+            self.semantic_value(common_source_fields[0]),
+            self.transport_value(common_source_fields[1]),
         )
         residual_projected_values = (
-            self.semantic_value(dynamics.semantic_interval_residual),
-            self.transport_value(transport_residual),
+            self.semantic_value(residual_source_fields[0]),
+            self.transport_value(residual_source_fields[1]),
         )
-        # Do not contract typed candidates independently.  P2 owns one shared
-        # physical effect budget after both conditional reads complete.
-        common_source_values = common_projected_values
-        residual_source_values = residual_projected_values
+
+        # Camera is a physical geometry hypothesis axis, not a preprocessing
+        # nuisance axis. Keep KxC through the action-conditioned posterior.
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
         camera_coordinate_mean = (
             normalized_camera_weight[..., None] * camera_coordinate
@@ -340,29 +348,16 @@ class ObjectFutureEffectReader(nn.Module):
         camera_coordinate_variation = (
             camera_coordinate_variation * camera_has_support.float()
         ).mean()
-        common_coordinate = (
-            camera_coordinate
-            + dynamics.transport_common.float()
-        ).clamp(-1.0, 1.0)
         future_coordinate = (
             camera_coordinate[:, None]
             + dynamics.transport_mean.float()
         ).clamp(-1.0, 1.0)
-        common_coordinate_delta = (
-            coordinate_query[:, :, :, None, None]
-            - common_coordinate[:, None, None]
-        )
         coordinate_delta = (
             coordinate_query[:, :, :, None, None, None]
             - future_coordinate[:, None, None]
         )
 
         def covariance_aware_distance(delta: Tensor, covariance: Tensor) -> Tensor:
-            # One half-cell standard deviation in normalized 8x8 coordinates
-            # is the identity metric.  Therefore zero predicted covariance
-            # exactly recovers the former Euclidean squared distance, while a
-            # larger PSD covariance broadens uncertainty without moving its
-            # centre or changing the value path.
             variance_floor = 1.0 / float(7 * 7)
             xx = covariance[..., 0].float().clamp_min(0.0) + variance_floor
             xy = covariance[..., 1].float()
@@ -373,37 +368,13 @@ class ObjectFutureEffectReader(nn.Module):
                 yy * dx.square() - 2.0 * xy * dx * dy + xx * dy.square()
             ) / determinant
 
-        common_coordinate_distance = covariance_aware_distance(
-            common_coordinate_delta,
-            dynamics.transport_covariance.float().mean(dim=1)[:, None, None],
-        )
         coordinate_distance = covariance_aware_distance(
             coordinate_delta,
             dynamics.transport_covariance.float()[:, None, None],
         )
-        # Exact coordinate agreement is positive evidence; the old [-1,0]
-        # term could only punish and therefore could not establish a geometry
-        # owner when semantic scores were diffuse.
-        common_camera_score = (
-            1.0 - 0.5 * common_coordinate_distance
-        ).clamp(-1.0, 1.0)
-        camera_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
-        # These scores stay on KxC.  Camera evidence enters as the physical
-        # posterior measure below, after the noisy action has scored every
-        # joint hypothesis; there is no pre-read log-mixture or value mean.
-        common_coordinate_score = common_camera_score
-        coordinate_score = camera_score
-        # Uniform weights above are a finite arithmetic fallback only.  They
-        # must not turn missing camera evidence into a semantic geometry
-        # prior.  Other P2 fields may still use the valid object; the geometry
-        # contribution itself is exactly neutral without an observed camera.
-        common_coordinate_score = torch.where(
-            camera_availability[:, None, None] > 0.0,
-            common_coordinate_score,
-            torch.zeros_like(common_coordinate_score),
-        )
+        coordinate_score = (1.0 - 0.5 * coordinate_distance).clamp(-1.0, 1.0)
         coordinate_score = torch.where(
-            camera_availability[:, None, None, None] > 0.0,
+            camera_has_support[:, None, None, None, :, None],
             coordinate_score,
             torch.zeros_like(coordinate_score),
         )
@@ -415,257 +386,369 @@ class ObjectFutureEffectReader(nn.Module):
             * normalized_camera_weight
             * camera_has_support[..., None].float()
         )
-        common_validities = (
-            current_validity,
-            geometry_current_validity,
-        )
-        residual_validities = (
+        full_validities = (
             current_validity[:, None].expand(-1, intervals, -1),
             geometry_current_validity[:, None].expand(
                 -1, intervals, -1, -1
             ),
         )
+
         temperature = self._temperatures().to(device=action_query.device)
-        public_interval_query = self._bounded_unit(
-            self.public_interval_query(action_query)
-        )
         public_interval_key = self._bounded_unit(
             self.public_interval_key(intent.interval_residual_key)
         )
-        # This is the one protected temporal prior shared by all active effect
-        # owners.  It contains no typed/W value and therefore cannot let one
-        # owner select another owner's future interval.
-        public_interval_score = torch.einsum(
-            "btqh,bih->btqi",
-            public_interval_query,
-            public_interval_key,
+
+        # Geometry is complementary spatial evidence for semantic object
+        # identity. Marginalize its observable KxC coordinate likelihood to K,
+        # remove the K-common offset, and use the bounded remainder only inside
+        # the semantic K posterior. Missing cameras and uniform geometry produce
+        # exact zero, so the semantic-only reader is an algebraic fallback.
+        # Semantic already consumes ``current_validity`` as its K prior below.
+        # The complementary geometry correction may therefore use K validity
+        # only as a boolean support boundary; multiplying its magnitude into
+        # the camera marginal would vote for the same object support twice.
+        # Within every legal K, use only the conditional camera measure.
+        geometry_k_legal = current_validity > 0.0
+        geometry_camera_support = (
+            geometry_k_legal[..., None]
+            & (camera_weight > 0.0)
+            & camera_has_support[..., None]
         )
-        common_source_scores: list[Tensor] = []
-        residual_source_scores: list[Tensor] = []
+        geometry_support = geometry_camera_support[:, None].expand(
+            -1, intervals, -1, -1
+        )
+        conditional_camera_measure = normalized_camera_weight[:, None].expand(
+            -1, intervals, -1, -1
+        )
+        geometry_measure_log = torch.where(
+            geometry_support,
+            conditional_camera_measure.clamp_min(1.0e-6).log(),
+            torch.zeros_like(conditional_camera_measure),
+        )
+        geometry_coordinate_logit = (
+            temperature[2] * coordinate_score
+            + geometry_measure_log[:, None, None]
+        ).masked_fill(~geometry_support[:, None, None], -torch.inf)
+        geometry_k_support = geometry_support.any(dim=-1)
+        # Never differentiate through logsumexp(all -inf). Unsupported K rows
+        # take a finite bookkeeping branch before reduction and are forced to
+        # exact zero afterwards, so both their value and backward are finite.
+        geometry_coordinate_logit = torch.where(
+            geometry_k_support[:, None, None, :, :, None],
+            geometry_coordinate_logit,
+            torch.zeros_like(geometry_coordinate_logit),
+        )
+        geometry_k_evidence = torch.logsumexp(
+            geometry_coordinate_logit,
+            dim=-1,
+        )
+        geometry_k_evidence = torch.where(
+            geometry_k_support[:, None, None],
+            geometry_k_evidence,
+            torch.zeros_like(geometry_k_evidence),
+        )
+        geometry_k_weight = geometry_k_support[:, None, None].float()
+        geometry_k_common = (
+            geometry_k_evidence * geometry_k_weight
+        ).sum(dim=-1, keepdim=True) / geometry_k_weight.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1.0)
+        semantic_geometry_correction = torch.tanh(
+            geometry_k_evidence - geometry_k_common
+        ) * geometry_k_weight
+
+        full_source_scores: list[Tensor] = []
         common_intent_scores: list[Tensor] = []
         residual_intent_scores: list[Tensor] = []
         interval_public_scores: list[Tensor] = []
         interval_typed_scores: list[Tensor] = []
         interval_w_scores: list[Tensor] = []
-        common_bounded_logits: list[Tensor] = []
-        residual_bounded_logits: list[Tensor] = []
-        common_posteriors: list[Tensor] = []
+        selected_w_key_rms_values: list[Tensor] = []
+        w_key_interval_variation_values: list[Tensor] = []
+        typed_s_key_delta_rms_values: list[Tensor] = []
+        public_s_key_delta_rms_values: list[Tensor] = []
+        combined_s_key_delta_rms_values: list[Tensor] = []
+        s_condition_pre_tanh_rms_values: list[Tensor] = []
+        s_condition_saturation_values: list[Tensor] = []
+        conditioned_interval_scores: list[Tensor] = []
+        full_bounded_logits: list[Tensor] = []
         residual_object_posteriors: list[Tensor] = []
         interval_supports: list[Tensor] = []
-        selected_common_values: list[Tensor] = []
+        selected_common_values_by_interval: list[Tensor] = []
         selected_residual_values_by_interval: list[Tensor] = []
+        selected_full_values_by_interval: list[Tensor] = []
+        semantic_geometry_neutral_posterior_l1 = action_query.new_zeros(
+            (), dtype=torch.float32
+        )
+        semantic_geometry_neutral_output_l1 = action_query.new_zeros(
+            (), dtype=torch.float32
+        )
+
         for type_index in range(len(self.TYPE_NAMES)):
             intent_type_index = self.S_TYPE_INDEX_BY_P2[type_index]
             query = self._bounded_unit(
                 self.source_query[type_index](action_query)
             )
-            common_source_key = self._bounded_unit(
-                self.source_key[type_index](common_source_fields[type_index])
+            full_source_key = self._bounded_unit(
+                self.source_key[type_index](full_source_fields[type_index])
             )
-            residual_source_key = self._bounded_unit(
-                self.source_key[type_index](residual_source_fields[type_index])
-            )
-            if type_index == 0:
-                common_source_score = torch.einsum(
-                    "btqh,bkh->btqk", query, common_source_key
-                )
-                residual_source_score = torch.einsum(
-                    "btqh,bikh->btqik", query, residual_source_key
-                )
-            else:
-                common_source_score = torch.einsum(
-                    "btqh,bkch->btqkc", query, common_source_key
-                )
-                residual_source_score = torch.einsum(
-                    "btqh,bikch->btqikc", query, residual_source_key
-                )
             common_public_key = self.common_intent_key[type_index](
                 intent.common_key
-            )[:, None]
-            common_typed_key = self.typed_intent_key[type_index](
-                typed_common_intent[..., intent_type_index, :]
             )
-            common_intent_key = self._bounded_unit(
-                common_public_key + common_typed_key
+            common_typed_route = typed_common_intent[..., intent_type_index, :]
+            residual_typed_route = typed_residual_intent[
+                ..., intent_type_index, :
+            ]
+            full_typed_route = (
+                common_typed_route[:, None] + residual_typed_route
             )
-            residual_typed_key = self._bounded_unit(
-                self.typed_intent_key[type_index](
-                    typed_residual_intent[..., intent_type_index, :]
+            full_typed_key = self._bounded_unit(
+                self.typed_intent_key[type_index](full_typed_route)
+            )
+            if type_index == 0:
+                full_source_score = torch.einsum(
+                    "btqh,bikh->btqik", query, full_source_key
                 )
-            )
-            intent_query = self._bounded_unit(
-                self.intent_query[type_index](action_query)
-            )
-            common_intent_score = torch.einsum(
-                "btqh,bkh->btqk", intent_query, common_intent_key
-            )
-            residual_intent_score = torch.einsum(
-                "btqh,bikh->btqik", intent_query, residual_typed_key
-            )
-            if type_index == 1:
-                common_intent_score = common_intent_score[..., None].expand_as(
-                    common_source_score
+                candidate_typed_key = full_typed_key
+            else:
+                full_source_score = torch.einsum(
+                    "btqh,bikch->btqikc", query, full_source_key
                 )
-                residual_intent_score = residual_intent_score[..., None].expand_as(
-                    residual_source_score
-                )
-            common_bounded_logit = (
-                temperature[0] * common_source_score
-                + temperature[1] * common_intent_score
-            )
-            residual_bounded_logit = (
-                temperature[0] * residual_source_score
-                + temperature[1] * residual_intent_score
-            )
-            if type_index == 1:
-                common_bounded_logit = (
-                    common_bounded_logit
-                    + temperature[2] * common_coordinate_score
-                )
-                residual_bounded_logit = (
-                    residual_bounded_logit
-                    + temperature[2] * coordinate_score
+                candidate_typed_key = full_typed_key[..., None, :].expand_as(
+                    full_source_key
                 )
 
-            common_validity = common_validities[type_index]
-            residual_validity = residual_validities[type_index]
-            current_support = common_validity > 0.0
-            residual_support = residual_validity > 0.0
-            common_has_support = current_support.flatten(start_dim=1).any(dim=-1)
-            interval_has_support = residual_support.flatten(start_dim=2).any(dim=-1)
-            common_logit = common_bounded_logit + torch.where(
-                current_support,
-                common_validity.clamp_min(1e-6).log(),
-                torch.zeros_like(common_validity),
-            )[:, None, None]
-            common_logit = common_logit.masked_fill(
-                ~current_support[:, None, None],
-                -torch.inf,
-            )
-            # Softmax over an all-invalid row is undefined.  The replacement
-            # logits are bookkeeping only; multiplying by has_support makes
-            # the returned common posterior and value algebraically zero.
-            common_logit = torch.where(
-                common_has_support[:, None, None, None],
-                common_logit.flatten(start_dim=3),
-                torch.zeros_like(common_logit.flatten(start_dim=3)),
-            )
-            common_posterior = torch.softmax(common_logit, dim=-1)
-            common_posterior = common_posterior * common_has_support[
-                :, None, None, None
-            ].to(dtype=common_posterior.dtype)
-            common_source_value = common_source_values[type_index].reshape(
-                batch, -1, self.hidden
-            )
-            common_selected = torch.einsum(
-                "btqn,bnh->btqh",
-                common_posterior.to(dtype=common_source_value.dtype),
-                common_source_value,
-            )
+            # Object/KxC identity is selected by action-conditioned W evidence
+            # only (plus the explicit geometry address correction below). S is
+            # read after this posterior and cannot independently select an
+            # object hypothesis or a future interval.
+            full_bounded_logit = temperature[0] * full_source_score
+            full_bounded_logit_without_geometry = full_bounded_logit
+            if type_index == 0:
+                full_bounded_logit = (
+                    full_bounded_logit + semantic_geometry_correction
+                )
+            else:
+                full_bounded_logit = (
+                    full_bounded_logit + temperature[2] * coordinate_score
+                )
 
-            residual_logit = residual_bounded_logit + torch.where(
-                residual_support,
-                residual_validity.clamp_min(1e-6).log(),
-                torch.zeros_like(residual_validity),
+            full_validity = full_validities[type_index]
+            full_support = full_validity > 0.0
+            interval_has_support = full_support.flatten(start_dim=2).any(dim=-1)
+            full_logit = full_bounded_logit + torch.where(
+                full_support,
+                full_validity.clamp_min(1.0e-6).log(),
+                torch.zeros_like(full_validity),
             )[:, None, None]
-            residual_logit = residual_logit.masked_fill(
-                ~residual_support[:, None, None],
+            full_logit = full_logit.masked_fill(
+                ~full_support[:, None, None],
                 -torch.inf,
-            )
-            residual_logit = residual_logit.reshape(
-                batch, horizon, basis, intervals, -1
-            )
-            # Object ownership is normalized only inside its already chosen
-            # interval. Geometry's candidate is the joint KxC hypothesis, so
-            # camera compression happens only after this action-conditioned
-            # posterior is complete.
-            residual_logit = torch.where(
+            ).reshape(batch, horizon, basis, intervals, -1)
+            full_logit = torch.where(
                 interval_has_support[:, None, None, :, None],
-                residual_logit,
-                torch.zeros_like(residual_logit),
+                full_logit,
+                torch.zeros_like(full_logit),
             )
-            residual_object_posterior = torch.softmax(
-                residual_logit,
-                dim=-1,
-            )
-            residual_object_posterior = (
-                residual_object_posterior
+            object_posterior = torch.softmax(full_logit, dim=-1)
+            object_posterior = (
+                object_posterior
                 * interval_has_support[:, None, None, :, None].to(
-                    dtype=residual_object_posterior.dtype
+                    dtype=object_posterior.dtype
                 )
             )
-            residual_source_value = residual_source_values[type_index].reshape(
+            semantic_geometry_neutral_posterior: Tensor | None = None
+            if collect_diagnostics and type_index == 0:
+                neutral_full_logit = full_bounded_logit_without_geometry + torch.where(
+                    full_support,
+                    full_validity.clamp_min(1.0e-6).log(),
+                    torch.zeros_like(full_validity),
+                )[:, None, None]
+                neutral_full_logit = neutral_full_logit.masked_fill(
+                    ~full_support[:, None, None],
+                    -torch.inf,
+                ).reshape(batch, horizon, basis, intervals, -1)
+                neutral_full_logit = torch.where(
+                    interval_has_support[:, None, None, :, None],
+                    neutral_full_logit,
+                    torch.zeros_like(neutral_full_logit),
+                )
+                semantic_geometry_neutral_posterior = torch.softmax(
+                    neutral_full_logit,
+                    dim=-1,
+                ) * interval_has_support[:, None, None, :, None].to(
+                    dtype=object_posterior.dtype
+                )
+                semantic_geometry_neutral_posterior_l1 = (
+                    object_posterior.float()
+                    - semantic_geometry_neutral_posterior.float()
+                ).abs().mean()
+
+            full_key_flat = full_source_key.reshape(
                 batch, intervals, -1, self.hidden
             )
-            residual_selected_by_interval = torch.einsum(
+            typed_key_flat = candidate_typed_key.reshape(
+                batch, intervals, -1, self.hidden
+            )
+            common_value_flat = common_projected_values[type_index].reshape(
+                batch, -1, self.hidden
+            )[:, None].expand(-1, intervals, -1, -1)
+            residual_value_flat = residual_projected_values[type_index].reshape(
+                batch, intervals, -1, self.hidden
+            )
+            selected_w_key = torch.einsum(
                 "btqin,binh->btqih",
-                residual_object_posterior.to(
-                    dtype=residual_source_value.dtype
-                ),
-                residual_source_value,
+                object_posterior.to(dtype=full_key_flat.dtype),
+                full_key_flat,
             )
-            # The shared temporal owner reads the compatibility of the object
-            # that this type would actually use inside each interval.  This
-            # retains I/K/type evidence until the named temporal consumer while
-            # keeping raw coordinate distance out of the time score.
-            interval_w_score = (
-                residual_object_posterior.float()
-                * residual_source_score.float().reshape(
-                    batch, horizon, basis, intervals, -1
-                )
-            ).sum(dim=-1)
-            interval_typed_score = (
-                residual_object_posterior.float()
-                * residual_intent_score.float().reshape(
-                    batch, horizon, basis, intervals, -1
-                )
-            ).sum(dim=-1)
-            common_source_scores.append(common_source_score)
-            residual_source_scores.append(residual_source_score)
-            common_intent_scores.append(common_intent_score)
-            residual_intent_scores.append(residual_intent_score)
-            interval_public_scores.append(public_interval_score)
-            interval_typed_scores.append(interval_typed_score)
-            interval_w_scores.append(interval_w_score)
-            common_bounded_logits.append(common_bounded_logit)
-            residual_bounded_logits.append(residual_bounded_logit)
-            common_posteriors.append(common_posterior)
-            residual_object_posteriors.append(residual_object_posterior)
-            interval_supports.append(interval_has_support)
-            selected_common_values.append(common_selected)
-            selected_residual_values_by_interval.append(
-                residual_selected_by_interval
+            selected_typed_key = torch.einsum(
+                "btqin,binh->btqih",
+                object_posterior.to(dtype=typed_key_flat.dtype),
+                typed_key_flat,
             )
+            selected_common_by_interval = torch.einsum(
+                "btqin,binh->btqih",
+                object_posterior.to(dtype=common_value_flat.dtype),
+                common_value_flat,
+            )
+            selected_residual_by_interval = torch.einsum(
+                "btqin,binh->btqih",
+                object_posterior.to(dtype=residual_value_flat.dtype),
+                residual_value_flat,
+            )
+            selected_full_by_interval = (
+                selected_common_by_interval + selected_residual_by_interval
+            )
+            if semantic_geometry_neutral_posterior is not None:
+                neutral_common_by_interval = torch.einsum(
+                    "btqin,binh->btqih",
+                    semantic_geometry_neutral_posterior.to(
+                        dtype=common_value_flat.dtype
+                    ),
+                    common_value_flat,
+                )
+                neutral_residual_by_interval = torch.einsum(
+                    "btqin,binh->btqih",
+                    semantic_geometry_neutral_posterior.to(
+                        dtype=residual_value_flat.dtype
+                    ),
+                    residual_value_flat,
+                )
+                semantic_geometry_neutral_output_l1 = (
+                    selected_full_by_interval.float()
+                    - (
+                        neutral_common_by_interval.float()
+                        + neutral_residual_by_interval.float()
+                    )
+                ).abs().mean()
 
-        # Public S is the shared temporal prior.  Each active owner adds only
-        # its matching typed-S and supervised-W likelihood before selecting a
-        # future interval or exact-zero null.  This is a product-of-evidence
-        # factorization, not an outer type competition: semantic cannot choose
-        # geometry's value and a neutral status field has no vote at all.
-        interval_typed_score_by_type = torch.stack(interval_typed_scores, dim=3)
-        interval_w_score_by_type = torch.stack(interval_w_scores, dim=3)
-        type_interval_precontract_score = (
-            public_interval_score[..., None, :]
-            + interval_typed_score_by_type
-            + interval_w_score_by_type
+            # S is selected by the W-owned object posterior and can only
+            # multiplicatively condition that nonzero W key. With neutral W,
+            # the conditioned key and future value remain exactly zero.
+            public_s_context = (
+                common_public_key[:, None, None, None]
+                + public_interval_key[:, None, None]
+            )
+            typed_s_context = selected_typed_key.float()
+            combined_s_context = public_s_context + typed_s_context
+            public_s_condition = torch.tanh(
+                temperature[1] * self._bounded_unit(public_s_context)
+            )
+            typed_s_condition = torch.tanh(
+                temperature[1] * self._bounded_unit(typed_s_context)
+            )
+            s_condition_pre_tanh = (
+                temperature[1] * self._bounded_unit(combined_s_context)
+            )
+            s_condition = torch.tanh(s_condition_pre_tanh)
+            s_key_delta = selected_w_key.float() * s_condition
+            public_s_key_delta = selected_w_key.float() * public_s_condition
+            typed_s_key_delta = selected_w_key.float() * typed_s_condition
+            conditioned_w_key = selected_w_key.float() + s_key_delta
+            conditioned_interval_score = torch.einsum(
+                "btqh,btqih->btqi",
+                query,
+                self._bounded_unit(conditioned_w_key),
+            )
+            if collect_diagnostics:
+                interval_w_score = torch.einsum(
+                    "btqh,btqih->btqi",
+                    query,
+                    self._bounded_unit(selected_w_key),
+                )
+                interval_typed_score = torch.einsum(
+                    "btqh,btqih->btqi",
+                    query,
+                    self._bounded_unit(typed_s_key_delta),
+                )
+                public_interval_score = torch.einsum(
+                    "btqh,btqih->btqi",
+                    query,
+                    self._bounded_unit(public_s_key_delta),
+                )
+                # These diagnostics measure conditional W-key corrections;
+                # neither score is an independent S likelihood.
+                full_source_scores.append(full_source_score)
+                common_intent_scores.append(public_interval_score)
+                residual_intent_scores.append(interval_typed_score)
+                interval_public_scores.append(public_interval_score)
+                interval_typed_scores.append(interval_typed_score)
+                interval_w_scores.append(interval_w_score)
+                selected_w_key_rms_values.append(
+                    selected_w_key.float().square().mean().sqrt()
+                )
+                w_key_interval_variation_values.append(
+                    (
+                        selected_w_key.float()
+                        - selected_w_key.float().mean(dim=3, keepdim=True)
+                    ).square().mean().sqrt()
+                )
+                typed_s_key_delta_rms_values.append(
+                    typed_s_key_delta.square().mean().sqrt()
+                )
+                public_s_key_delta_rms_values.append(
+                    public_s_key_delta.square().mean().sqrt()
+                )
+                combined_s_key_delta_rms_values.append(
+                    s_key_delta.float().square().mean().sqrt()
+                )
+                s_condition_pre_tanh_rms_values.append(
+                    s_condition_pre_tanh.float().square().mean().sqrt()
+                )
+                s_condition_saturation_values.append(
+                    (s_condition.detach().abs() > 0.95).float().mean()
+                )
+            conditioned_interval_scores.append(conditioned_interval_score)
+            if collect_diagnostics:
+                full_bounded_logits.append(full_bounded_logit)
+            residual_object_posteriors.append(object_posterior)
+            interval_supports.append(interval_has_support)
+            selected_common_values_by_interval.append(
+                selected_common_by_interval
+            )
+            selected_residual_values_by_interval.append(
+                selected_residual_by_interval
+            )
+            selected_full_values_by_interval.append(selected_full_by_interval)
+
+        # Each type owns one I+null competition over complete W fields. The
+        # null value is exactly zero; common and interval innovation can no
+        # longer be accepted/rejected through different probability simplices.
+        type_interval_precontract_score = torch.stack(
+            conditioned_interval_scores,
+            dim=3,
         )
-        type_interval_score = torch.tanh(type_interval_precontract_score)
-        type_interval_bounded_logit = temperature[1] * type_interval_score
+        type_interval_score = type_interval_precontract_score
+        type_interval_bounded_logit = temperature[0] * type_interval_score
         type_interval_has_support = torch.stack(interval_supports, dim=1)
         type_interval_logit = type_interval_bounded_logit.masked_fill(
             ~type_interval_has_support[:, None, None],
             -torch.inf,
         )
-        # Each type owns one null competing with I interval measures, each of
-        # which already owns a conditional semantic-K or geometry-KxC
-        # posterior. The type-specific offset preserves the corresponding
-        # neutral 1/(I*N+1) prior without turning candidate count into a time
-        # score.
-        type_candidate_count = type_interval_logit.new_tensor(
-            (float(max(objects, 1)), float(max(objects * camera_count, 1)))
-        )
-        type_null_logit = -type_candidate_count.log()[None, None, None, :, None]
-        type_null_logit = type_null_logit.expand(
+        # One type-local null is an equal fifth candidate, not a reward for
+        # accepting one of K (or KxC) inner hypotheses. Candidate count belongs
+        # only to the conditional object posterior above.
+        type_null_logit = type_interval_logit.new_zeros(
             batch, horizon, basis, len(self.TYPE_NAMES), 1
         )
         type_interval_posterior = torch.softmax(
@@ -674,56 +757,115 @@ class ObjectFutureEffectReader(nn.Module):
         )
         type_interval_mass = type_interval_posterior[..., :-1]
 
+        selected_common_values: list[Tensor] = []
         selected_residual_values: list[Tensor] = []
+        selected_full_values: list[Tensor] = []
         residual_posteriors: list[Tensor] = []
-        for type_index, (
-            residual_selected_by_interval,
-            residual_object_posterior,
-        ) in enumerate(
-            zip(
-                selected_residual_values_by_interval,
-                residual_object_posteriors,
-            )
+        common_posteriors: list[Tensor] = []
+        for type_index, object_posterior in enumerate(
+            residual_object_posteriors
         ):
             interval_mass_for_type = type_interval_mass[..., type_index, :]
+            selected_common_values.append(
+                torch.einsum(
+                    "btqi,btqih->btqh",
+                    interval_mass_for_type.to(
+                        dtype=selected_common_values_by_interval[type_index].dtype
+                    ),
+                    selected_common_values_by_interval[type_index],
+                )
+            )
             selected_residual_values.append(
                 torch.einsum(
                     "btqi,btqih->btqh",
                     interval_mass_for_type.to(
-                        dtype=residual_selected_by_interval.dtype
+                        dtype=selected_residual_values_by_interval[type_index].dtype
                     ),
-                    residual_selected_by_interval,
+                    selected_residual_values_by_interval[type_index],
                 )
             )
-            # Retain the historical flattened posterior shape for diagnostics
-            # and consumers of lossless metrics.  Its factorization is exact:
-            # p_z(i,k)=pi_z(i)*rho_z(k|i), with one typed null at the end.
-            joint_real = (
-                interval_mass_for_type[..., None] * residual_object_posterior
-            ).flatten(-2)
-            residual_posteriors.append(
-                torch.cat(
+            selected_full_values.append(
+                selected_common_values[-1] + selected_residual_values[-1]
+            )
+            if collect_diagnostics:
+                joint_real = (
+                    interval_mass_for_type[..., None] * object_posterior
+                ).flatten(-2)
+                residual_posteriors.append(
+                    torch.cat(
+                        (
+                            joint_real,
+                            type_interval_posterior[..., type_index, -1:],
+                        ),
+                        dim=-1,
+                    )
+                )
+                real_mass = interval_mass_for_type.sum(dim=-1, keepdim=True)
+                common_posteriors.append(
                     (
-                        joint_real,
-                        type_interval_posterior[..., type_index, -1:],
-                    ),
-                    dim=-1,
+                        interval_mass_for_type[..., None] * object_posterior
+                    ).sum(dim=3)
+                    / real_mass.clamp_min(1.0e-8)
                 )
-            )
-        residual_value_by_interval_and_type = torch.stack(
-            selected_residual_values_by_interval,
-            dim=4,
-        )
-        selected_common_type_value = torch.stack(selected_common_values, dim=3)
-        selected_residual_type_value = torch.stack(selected_residual_values, dim=3)
-        selected_type_value = (
-            selected_common_type_value + selected_residual_type_value
-        )
+
+        selected_type_value = torch.stack(selected_full_values, dim=3)
         effect_read, raw_value, shared_effect_scale = (
             self._fuse_complementary_values(selected_type_value)
         )
         if not collect_diagnostics:
             return effect_read, {}
+        residual_value_by_interval_and_type = torch.stack(
+            selected_residual_values_by_interval,
+            dim=4,
+        )
+        selected_common_type_value = torch.stack(selected_common_values, dim=3)
+        selected_residual_type_value = torch.stack(
+            selected_residual_values,
+            dim=3,
+        )
+        public_interval_score_by_type = torch.stack(
+            interval_public_scores,
+            dim=3,
+        )
+        public_interval_score = public_interval_score_by_type.mean(dim=3)
+        interval_typed_score_by_type = torch.stack(
+            interval_typed_scores,
+            dim=3,
+        )
+        interval_w_score_by_type = torch.stack(
+            interval_w_scores,
+            dim=3,
+        )
+        # Counterfactual diagnostic only: remove every S multiplicative
+        # correction while retaining the identical W object posterior, support
+        # and equal fifth null. This quantifies S's actual conditional effect
+        # without creating a second forward route.
+        neutral_interval_logit = (
+            temperature[0] * interval_w_score_by_type
+        ).masked_fill(
+            ~type_interval_has_support[:, None, None],
+            -torch.inf,
+        )
+        neutral_interval_posterior = torch.softmax(
+            torch.cat(
+                (
+                    neutral_interval_logit,
+                    neutral_interval_logit.new_zeros(
+                        batch,
+                        horizon,
+                        basis,
+                        len(self.TYPE_NAMES),
+                        1,
+                    ),
+                ),
+                dim=-1,
+            ),
+            dim=-1,
+        )
+        s_condition_neutral_posterior_l1 = (
+            type_interval_posterior.detach().float()
+            - neutral_interval_posterior.detach().float()
+        ).abs().mean()
         common_value = selected_common_type_value.sum(dim=3)
         residual_value = selected_residual_type_value.sum(dim=3)
         common_semantic_value = selected_common_type_value[..., 0, :]
@@ -788,31 +930,21 @@ class ObjectFutureEffectReader(nn.Module):
             (1.0 - retained_per_supported) * cancellation_support.float()
         ).sum() / cancellation_support_count
         source_score_abs = torch.stack(
-            tuple(score.detach().abs().mean() for score in (
-                *common_source_scores,
-                *residual_source_scores,
-            ))
+            tuple(score.detach().abs().mean() for score in full_source_scores)
         ).mean()
         source_score_max = torch.stack(
-            tuple(score.detach().abs().amax() for score in (
-                *common_source_scores,
-                *residual_source_scores,
-            ))
+            tuple(score.detach().abs().amax() for score in full_source_scores)
         ).amax()
         intent_score_abs = torch.stack(
             tuple(score.detach().abs().mean() for score in (
                 *common_intent_scores,
                 *residual_intent_scores,
-                public_interval_score,
-                type_interval_score,
             ))
         ).mean()
         intent_score_max = torch.stack(
             tuple(score.detach().abs().amax() for score in (
                 *common_intent_scores,
                 *residual_intent_scores,
-                public_interval_score,
-                type_interval_score,
             ))
         ).amax()
         common_posterior_entropy = torch.stack(
@@ -848,16 +980,14 @@ class ObjectFutureEffectReader(nn.Module):
         metrics: dict[str, Tensor] = {
             "object_p2_content_score_abs": source_score_abs,
             "object_p2_content_score_max_abs": source_score_max,
-            "object_p2_intent_score_abs": intent_score_abs,
-            "object_p2_intent_score_max_abs": intent_score_max,
-            "object_p2_coordinate_score_abs": 0.5 * (
-                common_coordinate_score.detach().abs().mean()
-                + coordinate_score.detach().abs().mean()
-            ),
-            "object_p2_coordinate_score_max_abs": torch.maximum(
-                common_coordinate_score.detach().abs().amax(),
-                coordinate_score.detach().abs().amax(),
-            ),
+            "object_p2_s_condition_only_score_abs": intent_score_abs,
+            "object_p2_s_condition_only_score_max_abs": intent_score_max,
+            "object_p2_coordinate_score_abs": coordinate_score.detach()
+            .abs()
+            .mean(),
+            "object_p2_coordinate_score_max_abs": coordinate_score.detach()
+            .abs()
+            .amax(),
             "object_p2_camera_mixture_effective_count": torch.exp(
                 -(
                     normalized_camera_weight.detach().clamp_min(1.0e-8)
@@ -872,23 +1002,28 @@ class ObjectFutureEffectReader(nn.Module):
             ),
             "object_p2_combined_logit_max_abs": torch.stack(
                 tuple(logit.detach().abs().amax() for logit in (
-                    *common_bounded_logits,
-                    *residual_bounded_logits,
+                    *full_bounded_logits,
                     type_interval_bounded_logit,
                 ))
             ).amax(),
             "object_p2_temperature_content": temperature[0].detach(),
             "object_p2_temperature_intent": temperature[1].detach(),
             "object_p2_temperature_coordinate": temperature[2].detach(),
-            "object_p2_common_posterior_entropy": common_posterior_entropy,
-            "object_p2_common_posterior_max": common_posterior_max,
-            "object_p2_residual_posterior_entropy": residual_posterior_entropy,
-            "object_p2_residual_posterior_max": residual_posterior_max,
-            "object_p2_residual_null_mass": residual_null_mass,
-            "object_p2_public_interval_score_abs": public_interval_score.detach()
+            "object_p2_complete_field_collapsed_object_posterior_entropy": (
+                common_posterior_entropy
+            ),
+            "object_p2_complete_field_collapsed_object_posterior_max": (
+                common_posterior_max
+            ),
+            "object_p2_complete_field_joint_posterior_entropy": (
+                residual_posterior_entropy
+            ),
+            "object_p2_complete_field_joint_posterior_max": residual_posterior_max,
+            "object_p2_complete_field_null_mass": residual_null_mass,
+            "object_p2_public_s_condition_only_score_abs": public_interval_score.detach()
             .abs()
             .mean(),
-            "object_p2_public_interval_score_max_abs": public_interval_score.detach()
+            "object_p2_public_s_condition_only_score_max_abs": public_interval_score.detach()
             .abs()
             .amax(),
             "object_p2_type_interval_score_abs": type_interval_score.detach()
@@ -897,13 +1032,65 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_type_interval_score_max_abs": type_interval_score.detach()
             .abs()
             .amax(),
-            "object_p2_type_interval_typed_score_abs": (
+            "object_p2_typed_s_condition_only_score_abs": (
                 interval_typed_score_by_type.detach().abs().mean()
             ),
-            "object_p2_type_interval_w_score_abs": (
+            "object_p2_unconditioned_w_interval_score_abs": (
                 interval_w_score_by_type.detach().abs().mean()
             ),
-            "object_p2_type_interval_precontract_score_max_abs": (
+            "object_p2_w_anchored_interval_score_abs": (
+                type_interval_score.detach().abs().mean()
+            ),
+            "object_p2_w_anchored_interval_score_centered_rms": (
+                type_interval_score.detach().float()
+                - type_interval_score.detach().float().mean(dim=-1, keepdim=True)
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            # Contract flag: public/typed S have no additive interval-logit
+            # term in Schema38. They only modulate a selected W key.
+            "object_p2_independent_s_interval_vote": raw_value.new_zeros(
+                (), dtype=torch.float32
+            ),
+            "object_p2_s_condition_neutral_posterior_l1": (
+                s_condition_neutral_posterior_l1
+            ),
+            "object_p2_s_condition_pre_tanh_rms": torch.stack(
+                s_condition_pre_tanh_rms_values
+            ).mean().detach(),
+            "object_p2_s_condition_saturation_fraction": torch.stack(
+                s_condition_saturation_values
+            ).mean().detach(),
+            "object_p2_selected_w_key_rms": torch.stack(
+                selected_w_key_rms_values
+            ).mean().detach(),
+            "object_p2_w_key_interval_centered_variation_rms": torch.stack(
+                w_key_interval_variation_values
+            ).mean().detach(),
+            "object_p2_typed_s_w_key_delta_rms": torch.stack(
+                typed_s_key_delta_rms_values
+            ).mean().detach(),
+            "object_p2_public_s_w_key_delta_rms": torch.stack(
+                public_s_key_delta_rms_values
+            ).mean().detach(),
+            "object_p2_combined_s_w_key_delta_rms": torch.stack(
+                combined_s_key_delta_rms_values
+            ).mean().detach(),
+            "object_p2_geometry_to_semantic_k_correction_rms": (
+                semantic_geometry_correction.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
+            ),
+            "object_p2_geometry_condition_neutral_semantic_posterior_l1": (
+                semantic_geometry_neutral_posterior_l1.detach()
+            ),
+            "object_p2_geometry_condition_neutral_semantic_output_l1": (
+                semantic_geometry_neutral_output_l1.detach()
+            ),
+            "object_p2_conditioned_w_interval_score_max_abs": (
                 type_interval_precontract_score.detach().abs().amax()
             ),
             "object_p2_type_interval_posterior_entropy": normalized_entropy(
@@ -947,24 +1134,33 @@ class ObjectFutureEffectReader(nn.Module):
                 interval_mass_by_type.detach()
                 - interval_mass.detach()[:, :, :, None, :]
             ).abs().amax(),
-            "object_p2_residual_retained_rms_ratio": residual_retained_rms_ratio,
-            "object_p2_residual_cancelled_rms_fraction": (
+            "object_p2_complete_field_residual_retained_rms_ratio": (
+                residual_retained_rms_ratio
+            ),
+            "object_p2_complete_field_residual_cancelled_rms_fraction": (
                 residual_cancelled_rms_fraction
             ),
-            "object_p2_residual_cancellation_support_fraction": (
+            "object_p2_complete_field_residual_cancellation_support_fraction": (
                 cancellation_support.detach().float().mean()
             ),
-            "object_p2_protected_common_rms": common_value.detach()
+            "object_p2_selected_complete_field_common_rms": common_value.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_optional_residual_rms": residual_value.detach()
+            "object_p2_selected_complete_field_residual_rms": residual_value.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_residual_to_common_rms_ratio": (
+            "object_p2_complete_field_identity_error": (
+                selected_type_value.detach().float()
+                - (
+                    selected_common_type_value.detach().float()
+                    + selected_residual_type_value.detach().float()
+                )
+            ).abs().amax(),
+            "object_p2_selected_complete_field_residual_to_common_rms_ratio": (
                 residual_value.detach().float().square().mean().sqrt()
                 / common_value.detach()
                 .float()
@@ -1002,35 +1198,34 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p2_common_semantic_component_rms": common_semantic_value.detach()
+            "object_p2_selected_complete_field_semantic_common_component_rms": common_semantic_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_common_geometry_component_rms": common_geometry_value.detach()
+            "object_p2_selected_complete_field_geometry_common_component_rms": common_geometry_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_residual_semantic_component_rms": residual_semantic_value.detach()
+            "object_p2_selected_complete_field_semantic_residual_component_rms": residual_semantic_value.detach()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_residual_geometry_component_rms": residual_geometry_value.detach()
+            "object_p2_selected_complete_field_geometry_residual_component_rms": residual_geometry_value.detach()
             .square()
             .mean()
             .sqrt(),
         }
         for type_index, name in enumerate(self.TYPE_NAMES):
-            metrics[f"object_p2_{name}_score_max_abs"] = torch.maximum(
-                common_source_scores[type_index].detach().abs().amax(),
-                residual_source_scores[type_index].detach().abs().amax(),
+            metrics[f"object_p2_{name}_score_max_abs"] = (
+                full_source_scores[type_index].detach().abs().amax()
             )
-            metrics[f"object_p2_{name}_interval_public_score_abs"] = (
+            metrics[f"object_p2_{name}_public_s_condition_only_score_abs"] = (
                 interval_public_scores[type_index].detach().float().abs().mean()
             )
-            metrics[f"object_p2_{name}_interval_typed_score_abs"] = (
+            metrics[f"object_p2_{name}_typed_s_condition_only_score_abs"] = (
                 interval_typed_scores[type_index].detach().float().abs().mean()
             )
-            metrics[f"object_p2_{name}_interval_w_score_abs"] = (
+            metrics[f"object_p2_{name}_unconditioned_w_interval_score_abs"] = (
                 interval_w_scores[type_index].detach().float().abs().mean()
             )
             metrics[f"object_p2_{name}_interval_posterior_entropy"] = (
@@ -1047,7 +1242,7 @@ class ObjectFutureEffectReader(nn.Module):
                 .amax(dim=-1)
                 .mean()
             )
-            metrics[f"object_p2_{name}_residual_null_mass"] = residual_posteriors[
+            metrics[f"object_p2_{name}_complete_field_null_mass"] = residual_posteriors[
                 type_index
             ].detach()[..., -1].mean()
             common_selected_value = selected_common_type_value[
@@ -1056,13 +1251,13 @@ class ObjectFutureEffectReader(nn.Module):
             residual_selected_value = selected_residual_type_value[
                 ..., type_index, :
             ].detach().float()
-            metrics[f"object_p2_{name}_common_selected_value_rms"] = (
+            metrics[f"object_p2_{name}_selected_complete_field_common_rms"] = (
                 common_selected_value.square().mean().sqrt()
             )
-            metrics[f"object_p2_{name}_residual_selected_value_rms"] = (
+            metrics[f"object_p2_{name}_selected_complete_field_residual_rms"] = (
                 residual_selected_value.square().mean().sqrt()
             )
-            metrics[f"object_p2_{name}_common_projected_candidate_value_rms"] = (
+            metrics[f"object_p2_{name}_complete_field_common_candidate_rms"] = (
                 common_projected_values[type_index]
                 .detach()
                 .float()
@@ -1070,7 +1265,7 @@ class ObjectFutureEffectReader(nn.Module):
                 .mean()
                 .sqrt()
             )
-            metrics[f"object_p2_{name}_residual_projected_candidate_value_rms"] = (
+            metrics[f"object_p2_{name}_complete_field_residual_candidate_rms"] = (
                 residual_projected_values[type_index]
                 .detach()
                 .float()
@@ -1078,18 +1273,15 @@ class ObjectFutureEffectReader(nn.Module):
                 .mean()
                 .sqrt()
             )
-            metrics[f"object_p2_{name}_common_value_contract_scale_mean"] = (
+            metrics[f"object_p2_{name}_complete_field_shared_contract_scale_mean"] = (
                 shared_effect_scale.detach().float().mean()
             )
-            metrics[f"object_p2_{name}_residual_value_contract_scale_mean"] = (
-                shared_effect_scale.detach().float().mean()
-            )
-            metrics[f"object_p2_{name}_common_posterior_entropy"] = (
+            metrics[f"object_p2_{name}_complete_field_collapsed_posterior_entropy"] = (
                 normalized_entropy(common_posteriors[type_index], dim=-1)
                 .detach()
                 .mean()
             )
-            metrics[f"object_p2_{name}_common_posterior_max"] = (
+            metrics[f"object_p2_{name}_complete_field_collapsed_posterior_max"] = (
                 common_posteriors[type_index].detach().amax(dim=-1).mean()
             )
             type_support_weight = inner_support_weight[..., type_index, :]
@@ -1110,13 +1302,13 @@ class ObjectFutureEffectReader(nn.Module):
                 ).sum()
                 / type_support_denominator
             )
-        metrics["object_p2_geometry_common_joint_kc_posterior_entropy"] = metrics[
-            "object_p2_geometry_common_posterior_entropy"
+        metrics["object_p2_geometry_complete_field_collapsed_kc_posterior_entropy"] = metrics[
+            "object_p2_geometry_complete_field_collapsed_posterior_entropy"
         ]
-        metrics["object_p2_geometry_common_joint_kc_posterior_max"] = metrics[
-            "object_p2_geometry_common_posterior_max"
+        metrics["object_p2_geometry_complete_field_collapsed_kc_posterior_max"] = metrics[
+            "object_p2_geometry_complete_field_collapsed_posterior_max"
         ]
-        metrics["object_p2_geometry_residual_joint_kc_posterior_entropy"] = (
+        metrics["object_p2_geometry_complete_field_joint_kc_posterior_entropy"] = (
             (
                 inner_entropy[..., 1, :]
                 * inner_support_weight[..., 1, :]
@@ -1125,7 +1317,7 @@ class ObjectFutureEffectReader(nn.Module):
                 inner_support_weight[..., 1, :].sum() * float(horizon * basis)
             ).clamp_min(1.0)
         )
-        metrics["object_p2_geometry_residual_joint_kc_posterior_max"] = (
+        metrics["object_p2_geometry_complete_field_joint_kc_posterior_max"] = (
             (
                 inner_max[..., 1, :]
                 * inner_support_weight[..., 1, :]
@@ -1139,11 +1331,11 @@ class ObjectFutureEffectReader(nn.Module):
             dtype=torch.float32,
         )
         for index in range(intervals):
-            metrics[f"object_p2_residual_interval_{index}_mass"] = (
+            metrics[f"object_p2_complete_field_interval_{index}_mass"] = (
                 interval_mass[..., index].float().mean()
             )
             for type_index, name in enumerate(self.TYPE_NAMES):
-                metrics[f"object_p2_{name}_residual_interval_{index}_mass"] = (
+                metrics[f"object_p2_{name}_complete_field_interval_{index}_mass"] = (
                     interval_mass_by_type[..., type_index, index]
                     .detach()
                     .float()
@@ -1178,7 +1370,7 @@ class ZeroPreservingObjectConsequence(nn.Module):
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectConsequenceState, dict[str, Tensor]]:
         if not isinstance(effect, TypedP2EffectRead):
-            raise TypeError("Schema37 consequence requires TypedP2EffectRead")
+            raise TypeError("Schema38 consequence requires TypedP2EffectRead")
         effect.validate()
         effect_by_type = effect.effect_by_type
         expected_typed = (*factual_base.shape[:-1], 2, factual_base.shape[-1])
@@ -1254,6 +1446,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
+        p1_policy_residual: Tensor,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
@@ -1262,6 +1455,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
             or tuple(p1_factual_detail.shape) != expected
         ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
+        if tuple(p1_policy_residual.shape) != expected:
+            raise ValueError("P3 policy precision residual must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         consequence.validate()
         # The static factual consequence is already the protected base.
@@ -1269,16 +1464,27 @@ class ObjectPolicyPlanCompiler(nn.Module):
         # innovations; neither static detail nor the live policy residual is
         # copied into another protected carrier. Precision is the sole owner
         # of the cached P1 factual signal below.
-        # P3 precision owns the cached high-resolution factual detail.  The
-        # live V120 policy-block residual is a P2 query refinement, not another
-        # precision value.  Feeding it here gave one dynamic tensor two action
-        # exits and let Schema35 drive both the P1 block and this lane to their
-        # amplitude limits while bypassing W.  The action query still provides
-        # the legal time/noisy-action modulation.
+        # V120's live P1 write legitimately conditioned both the P2 query and
+        # P3 precision. Schema37 removed the precision consumer together with
+        # the unsafe protected-fact write. Restore only the legal consumer: a
+        # one-sided contracted dynamic residual can refine an existing factual
+        # precision feature, but cannot synthesize precision when that fact is
+        # zero and never enters the protected consequence.
         static_precision = self.precision_innovation(p1_factual_detail)
+        contracted_policy_residual, precision_residual_scale = smooth_rms_contract(
+            p1_policy_residual,
+            0.35,
+        )
+        precision_fact_gate, precision_fact_denominator = (
+            variance_floored_centered_norm(static_precision, 0.25)
+        )
+        precision_dynamic_interaction = (
+            torch.tanh(precision_fact_gate) * contracted_policy_residual
+        )
+        precision_source = static_precision + precision_dynamic_interaction
         precision = self.precision_lane(
             torch.tanh(self.precision_action(action_query))
-            * static_precision
+            * precision_source
         )
         typed_effect = consequence.typed_effect() + consequence.typed_interaction()
         effect_semantic = self.effect_lane(typed_effect[..., 0, :])
@@ -1339,16 +1545,41 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if not collect_diagnostics:
             return bank, {}
         metrics = {
-            "object_p3_precision_input_rms": p1_factual_detail.detach()
+            "object_p3_precision_factual_input_rms": p1_factual_detail.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p3_precision_static_input_rms": p1_factual_detail.detach()
+            "object_p3_precision_static_projected_rms": static_precision.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
+            "object_p3_precision_combined_source_rms": precision_source.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_precision_dynamic_input_rms": p1_policy_residual.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_precision_dynamic_contracted_rms": (
+                contracted_policy_residual.detach().float().square().mean().sqrt()
+            ),
+            "object_p3_precision_dynamic_interaction_rms": (
+                precision_dynamic_interaction.detach().float().square().mean().sqrt()
+            ),
+            "object_p3_precision_fact_gate_rms": (
+                precision_fact_gate.detach().float().square().mean().sqrt()
+            ),
+            "object_p3_precision_fact_denominator_min": (
+                precision_fact_denominator.detach().float().amin()
+            ),
+            "object_p3_precision_dynamic_contract_min": (
+                precision_residual_scale.detach().float().amin()
+            ),
             "object_p3_precision_rms": lanes[0].detach().float().square().mean().sqrt(),
             "object_p3_effect_rms": bank.effect.detach()
             .float()

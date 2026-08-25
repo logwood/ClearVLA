@@ -203,9 +203,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     def capture_p3(_module, _args, kwargs):
         captured["p3_query"] = kwargs["action_query"].detach().clone()
         captured["p3_static"] = kwargs["p1_factual_detail"].detach().clone()
-        captured["p3_has_dynamic_exit"] = torch.tensor(
-            "p1_policy_residual" in kwargs
-        )
+        captured["p3_dynamic"] = kwargs["p1_policy_residual"].detach().clone()
 
     p2_hook = top.effect_reader.register_forward_pre_hook(
         capture_p2,
@@ -241,7 +239,9 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     torch.testing.assert_close(
         captured["p3_static"], dock.protected_detail, atol=0.0, rtol=0.0
     )
-    assert not bool(captured["p3_has_dynamic_exit"])
+    torch.testing.assert_close(
+        captured["p3_dynamic"], policy_residual, atol=0.0, rtol=0.0
+    )
     torch.testing.assert_close(
         compiled.consequence.factual_base,
         dock.protected_detail,
