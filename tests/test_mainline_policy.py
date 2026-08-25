@@ -27,7 +27,11 @@ from clearvla.mainline.model.restored_observation import (
 from clearvla.mainline.model.routing import smooth_rms_contract
 from clearvla.mainline.runtime.logging import archival_metrics
 from clearvla.mainline.runtime.sampling import sample_action, sample_cached_action
-from clearvla.mainline.train import _optimizer_group_context
+from clearvla.mainline.train import (
+    _format_module_parameter_summary,
+    _module_parameter_context,
+    _optimizer_group_context,
+)
 from clearvla.mainline.training.engine import (
     EncodedTrainingBatch,
     MainlineTrainingEngine,
@@ -706,6 +710,18 @@ def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
     assert history["role_learning_rate_scale"] == 0.625
     assert history["parameter_tensor_count"] > 0
     assert history["parameter_count"] > history["parameter_tensor_count"]
+
+
+def test_startup_module_summary_consumes_the_current_module_registry() -> None:
+    model = ClearVLAMainlinePolicy(_config())
+    module_parameters = _module_parameter_context(model)
+
+    summary = _format_module_parameter_summary(model, module_parameters)
+
+    assert "P2spatial/P3terminal=" in summary
+    assert "P3compiler=" in summary
+    assert "future_effect_p2_spatial_p3_terminal" in module_parameters
+    assert "future_effect_p2" not in module_parameters
 
 
 def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:

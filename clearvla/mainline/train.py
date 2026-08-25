@@ -335,31 +335,42 @@ def _optimizer_group_context(
     return result
 
 
+def _module_parameter_registry(
+    model: ClearVLAMainlinePolicy,
+) -> tuple[tuple[str, str | None, torch.nn.Module], ...]:
+    """Own serialized module keys and optional console labels in one registry."""
+
+    return (
+        ("complete_model", None, model),
+        ("observation", None, model.observation),
+        ("grounding_g1_g2_g3", "G", model.top.grounding_blocks),
+        ("global_object_grounder", "grounder", model.top.grounder),
+        ("stateless_intent", "S", model.top.intent),
+        ("intent_state_supervisor", None, model.top.intent_supervisor),
+        ("coarse_action_intent", None, model.top.coarse_action),
+        ("future_dynamics_w1_w2", "W", model.top.dynamics),
+        ("history_action_proposal", None, model.history_proposal),
+        ("factual_precision_p1", "P1", model.factual_reader),
+        (
+            "future_effect_p2_spatial_p3_terminal",
+            "P2spatial/P3terminal",
+            model.top.effect_reader,
+        ),
+        ("zero_preserving_consequence", None, model.top.consequence),
+        ("policy_compiler_p3", "P3compiler", model.top.plan_compiler),
+        ("controlled_transition", None, model.transition),
+        ("retained_bottom", "bottom", model.bottom),
+        ("retained_bottom_decoder", None, model.bottom.decoder),
+    )
+
+
 def _module_parameter_context(
     model: ClearVLAMainlinePolicy,
 ) -> dict[str, dict[str, int]]:
     """Serialize visible module counts so graph changes cannot be silent."""
 
-    modules = {
-        "complete_model": model,
-        "observation": model.observation,
-        "grounding_g1_g2_g3": model.top.grounding_blocks,
-        "global_object_grounder": model.top.grounder,
-        "stateless_intent": model.top.intent,
-        "intent_state_supervisor": model.top.intent_supervisor,
-        "coarse_action_intent": model.top.coarse_action,
-        "future_dynamics_w1_w2": model.top.dynamics,
-        "history_action_proposal": model.history_proposal,
-        "factual_precision_p1": model.factual_reader,
-        "future_effect_p2_spatial_p3_terminal": model.top.effect_reader,
-        "zero_preserving_consequence": model.top.consequence,
-        "policy_compiler_p3": model.top.plan_compiler,
-        "controlled_transition": model.transition,
-        "retained_bottom": model.bottom,
-        "retained_bottom_decoder": model.bottom.decoder,
-    }
     result: dict[str, dict[str, int]] = {}
-    for name, module in modules.items():
+    for name, _console_label, module in _module_parameter_registry(model):
         parameters = tuple(module.parameters())
         result[name] = {
             "parameter_count": sum(int(parameter.numel()) for parameter in parameters),
@@ -371,6 +382,29 @@ def _module_parameter_context(
             "parameter_tensor_count": len(parameters),
         }
     return result
+
+
+def _format_module_parameter_summary(
+    model: ClearVLAMainlinePolicy,
+    module_parameters: dict[str, dict[str, int]],
+) -> str:
+    """Render the startup graph summary from the serialized module registry."""
+
+    labeled_modules = tuple(
+        (label, name)
+        for name, label, _module in _module_parameter_registry(model)
+        if label is not None
+    )
+    missing = tuple(name for _label, name in labeled_modules if name not in module_parameters)
+    if missing:
+        raise ValueError(
+            "mainline module summary is out of sync with module_parameters: "
+            + ", ".join(missing)
+        )
+    return " ".join(
+        f"{label}={module_parameters[name]['parameter_count']}"
+        for label, name in labeled_modules
+    )
 
 
 def _prepare_output_directory(
@@ -816,22 +850,9 @@ def main() -> None:
         f"parameters={total_parameters} trainable={trainable_parameters}",
         flush=True,
     )
-    module_labels = (
-        ("G", "grounding_g1_g2_g3"),
-        ("grounder", "global_object_grounder"),
-        ("S", "stateless_intent"),
-        ("W", "future_dynamics_w1_w2"),
-        ("P1", "factual_precision_p1"),
-        ("P2", "future_effect_p2"),
-        ("P3", "policy_compiler_p3"),
-        ("bottom", "retained_bottom"),
-    )
     print(
         "[mainline-modules] "
-        + " ".join(
-            f"{label}={module_parameters[name]['parameter_count']}"
-            for label, name in module_labels
-        ),
+        + _format_module_parameter_summary(model, module_parameters),
         flush=True,
     )
     # Preflight uses the deterministic validation sampler and separate RNGs;
