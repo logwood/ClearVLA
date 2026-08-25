@@ -7,13 +7,13 @@ single typed ingress into the retained bottom action model.
 from .action_contract import BottomOutput
 from .compiler import (
     ObjectConsequenceState,
-    ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
     ObjectPolicyPlanDeltaBank,
     TypedP2EffectRead,
     ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler, ObjectW1WorkingState
+from .effect_terminal import ObjectFutureEffectTerminal, SelectedIntervalEvidence
 from .grounding import DenseObjectGrounder
 from .intent import (
     CoarseActionIntent,
@@ -74,11 +74,12 @@ __all__ = [
     "FactualPrecisionDock",
     "ObjectFactSet",
     "ObjectFutureDynamicsCompiler",
-    "ObjectFutureEffectReader",
+    "ObjectFutureEffectTerminal",
     "ObjectIntentState",
     "ObjectIntentDynamicsTop",
     "ObjectPolicyPlanCompiler",
     "ObjectPolicyPlanDeltaBank",
+    "SelectedIntervalEvidence",
     "TypedP2EffectRead",
     "ObjectTopTrainingTargets",
     "P2QueryDock",

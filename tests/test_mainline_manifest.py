@@ -43,15 +43,21 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 38
-    assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
+    assert ARCHITECTURE_MANIFEST.schema == 39
+    assert components.observation == (
+        "restored_v120_three_frame_flow_dino_progressive_g123_"
+        "zero_preserving_variance_bank"
+    )
     assert (
         components.top
-        == "single_content_k_identity_owner_preserving_stateless_intent_full_interval_w_required_s_conditioned_geometry_address_fact_conditioned_precision_six_lane_p3"
+        == "fp32_observable_k_identity_stateless_intent_spatial_p2_"
+        "physical_interval_terminal_protected_dynamic_p1_six_lane_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_query_only_lane_local_basis_null_bounded_optional_sum_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
+        == "restored_v120_shared_seed_protected_dynamic_p1_no_null_"
+        "single_optional_budget_exact_g3_anchor_transition_evidence_mmdit_"
+        "dense512_execution"
     )
     assert (
         components.training
@@ -62,7 +68,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
 
 
-def test_schema_38_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_39_parameter_inventory_is_explained_by_active_modules() -> None:
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
     def counts(module):

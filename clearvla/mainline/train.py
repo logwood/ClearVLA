@@ -351,7 +351,7 @@ def _module_parameter_context(
         "future_dynamics_w1_w2": model.top.dynamics,
         "history_action_proposal": model.history_proposal,
         "factual_precision_p1": model.factual_reader,
-        "future_effect_p2": model.top.effect_reader,
+        "future_effect_p2_spatial_p3_terminal": model.top.effect_reader,
         "zero_preserving_consequence": model.top.consequence,
         "policy_compiler_p3": model.top.plan_compiler,
         "controlled_transition": model.transition,

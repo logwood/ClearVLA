@@ -318,6 +318,17 @@ class RestoredV120ObservationCompiler(nn.Module):
         if state.stage != 3 or grounded is None:
             raise RuntimeError("G1/G2/G3 did not produce a completed fact set")
         grounded.validate()
+        if any(
+            value is None
+            for value in (
+                grounded.semantic_owner_log_probs,
+                grounded.appearance_owner_log_probs,
+                grounded.geometry_owner_log_probs,
+            )
+        ):
+            raise RuntimeError(
+                "Schema39 restored G3 lost its producer-owned FP32 owner logs"
+            )
         target = bank.address_bank.dense_current_dino_content
         if target is None:
             raise RuntimeError("completed G3 lost the current DINO target")
@@ -336,6 +347,9 @@ class RestoredV120ObservationCompiler(nn.Module):
             slot_support=grounded.slot_support,
             slot_validity=grounded.slot_validity,
             slot_transport_prior=grounded.slot_transport_prior,
+            semantic_owner_log_probs=grounded.semantic_owner_log_probs,
+            appearance_owner_log_probs=grounded.appearance_owner_log_probs,
+            geometry_owner_log_probs=grounded.geometry_owner_log_probs,
         )
         evidence = ObservationEvidence(
             grounding=bank,

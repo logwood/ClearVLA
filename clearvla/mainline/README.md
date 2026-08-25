@@ -21,11 +21,14 @@ config / manifest / typed online and training inputs
   -> typed clean action + causal W1-near/W2-far four-interval object dynamics
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy-query residual (static fact stays protected)
-  -> per-interval action-conditioned semantic K / geometry KxC W reads
+  -> P2 action-conditioned semantic-K / geometry-KxC spatial selection while
+     preserving interval and type identity
   -> geometry supplies a bounded same-interval semantic-K address correction
-  -> S conditions the selected W key; it does not own an independent time vote
-  -> type-local four-interval+null reads over complete common+residual W fields
-  -> P3 fact-conditioned precision + typed effect/temporal/state-change lanes
+  -> S conditions selected W keys; it owns no spatial/value/support/time vote
+  -> P3 type-local physical four-interval terminal without learned null;
+     W common and interval innovation are each read exactly once
+  -> P3 protected dynamic-P1 precision + optional static precision,
+     typed effect/temporal and state-change lanes
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
   -> exact completed-G3 anchor source + per-ODE noisy-action controlled transition
@@ -80,21 +83,20 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        38
+schema:        39
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema38 counts are measured rather than copied from an ancestral schema. The
+Schema39 counts are measured rather than copied from an ancestral schema. The
 launcher prints the total/trainable count and compact G/S/W/P/bottom summary,
 then writes the complete per-module inventory into run context.
 
-Schema37 is neither an exact-resume nor optimizer-resume source for Schema38
-because the top consumer ABI changed. The serialized bottom body and ingress
-remain unchanged; only the explicit migration tool may report Schema37 bottom
-reuse after exact bottom-ABI comparison. Formal Schema38 comparisons start
-fresh in an absent or empty output directory.
+Schema38 is not an exact-resume, optimizer-resume or bottom-migration source for
+Schema39 because the observation numerical boundary, P2/P3 terminal,
+transition operand and bottom ingress ownership changed. Formal Schema39
+comparisons start fresh in an absent or empty output directory.
 
 The migration check covers the complete bottom key set, shapes, dtypes and
 finite/non-complex tensor values before it mutates the live model; matching an
@@ -138,16 +140,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema38_action_consumption_smoke \
-nohup bash scripts/smoke_mainline.sh > schema38_action_consumption_smoke.log 2>&1 &
+OUT_DIR=runs/schema39_action_closure_smoke \
+nohup bash scripts/smoke_mainline.sh > schema39_action_closure_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema38_action_consumption_b8 \
-nohup bash scripts/train_mainline.sh > schema38_action_consumption_b8.log 2>&1 &
+OUT_DIR=runs/schema39_action_closure_b8 \
+nohup bash scripts/train_mainline.sh > schema39_action_closure_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -159,15 +161,15 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema38_action_consumption_b8 \
+  runs/schema39_action_closure_b8 \
   --recovery-baseline v120_long.log \
-  --recovery-parent schema37_information_conservation_b8.log \
+  --recovery-parent schema38_action_consumption_b8.log \
   --tail 120 --require-recovery --format text
 ```
 
 ## Release gates
 
-Schema38 source implementation and contract tests do not imply training
+Schema39 source implementation and contract tests do not imply training
 recovery. The following gates still require a fresh run:
 
 - full finite forward/backward and unique optimizer ownership;

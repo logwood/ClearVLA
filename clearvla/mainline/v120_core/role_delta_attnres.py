@@ -201,12 +201,16 @@ class PolicyRoleDeltaBank:
     P2 consequence base (static P1 fact plus the typed W effect/interaction).
     It remains a separate no-null additive lane and therefore cannot lose a
     source-survival softmax competition against optional P3 innovations.
+    ``protected_policy_precision`` is the action-dependent P1 carrier.  It is
+    read without a null candidate, but joins the optional lanes before their
+    single shared ingress contract; it is never added as a second factual base.
     """
 
     values: Tensor
     source_names: tuple[str, ...]
     source_depths: tuple[int, ...]
     protected_detail: Tensor | None = None
+    protected_policy_precision: Tensor | None = None
 
     def validate(self, *, hidden_size: int, horizon: int) -> None:
         if self.values.ndim != 5:
@@ -235,6 +239,17 @@ class PolicyRoleDeltaBank:
             if tuple(self.protected_detail.shape) != expected:
                 raise ValueError(
                     "protected policy detail must be [B,horizon,basis,H]"
+                )
+        if self.protected_policy_precision is not None:
+            expected = (
+                int(self.values.shape[0]),
+                int(horizon),
+                int(self.values.shape[3]),
+                int(hidden_size),
+            )
+            if tuple(self.protected_policy_precision.shape) != expected:
+                raise ValueError(
+                    "protected policy precision must be [B,horizon,basis,H]"
                 )
 
 

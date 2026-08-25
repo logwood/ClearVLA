@@ -182,6 +182,13 @@ class GroundedFactSet:
     # may omit it; new object dynamics never infer motion from arbitrary
     # geometry feature channels.
     slot_transport_prior: Tensor | None = None
+    # Producer-owned FP32 log posteriors.  These are optional only for
+    # historical fixtures outside the active mainline.  Schema39 keeps them
+    # beside the model-dtype probabilities so no downstream consumer takes a
+    # logarithm after BF16 rounding or underflow.
+    semantic_owner_log_probs: Tensor | None = None
+    appearance_owner_log_probs: Tensor | None = None
+    geometry_owner_log_probs: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -232,6 +239,18 @@ class GroundedFactSet:
             self.slot_transport_prior.shape
         ) != (*prefix, 2):
             raise ValueError("G slot transport prior is misaligned")
+        for name in (
+            "semantic_owner_log_probs",
+            "appearance_owner_log_probs",
+            "geometry_owner_log_probs",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if tuple(value.shape) != owner_shape:
+                raise ValueError(f"G {name} must retain the object-slot axis")
+            if value.dtype != torch.float32 or not torch.isfinite(value).all():
+                raise TypeError(f"G {name} must be finite FP32")
         if tuple(self.public_scene_base.shape[:4]) != tuple(prefix[:4]):
             raise ValueError("G public scene base lost camera/spatial identity")
         # Value-domain checks live in the one-shot preflight.  This method is

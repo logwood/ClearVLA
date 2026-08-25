@@ -9,7 +9,6 @@ from clearvla.mainline.model.compiler import (
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
 )
-from clearvla.mainline.model.routing import smooth_rms_contract
 from clearvla.mainline.model.types import FutureObjectDynamics, PolicyIntentDock
 
 
@@ -32,6 +31,16 @@ def _dynamics(
         1.0 if camera_available else 0.0,
     )
     camera_weights = camera_availability.clone()
+    chart_availability = semantic_delta.new_ones(batch, objects, 1)
+    log_camera_weight = torch.where(
+        camera_weights.float() > 0.0,
+        torch.where(
+            camera_weights.float() > 0.0,
+            camera_weights.float(),
+            torch.ones_like(camera_weights.float()),
+        ).log(),
+        torch.zeros_like(camera_weights.float()),
+    )
     return FutureObjectDynamics(
         current_reference=current,
         successor_content=current[:, None] + semantic_delta,
@@ -40,10 +49,14 @@ def _dynamics(
         transport_covariance=torch.zeros(
             batch, intervals, objects, cameras, 3, dtype=torch.float32
         ),
-        chart_availability=semantic_delta.new_ones(batch, objects, 1),
+        chart_availability=chart_availability,
+        log_chart_availability=torch.zeros_like(
+            chart_availability, dtype=torch.float32
+        ),
         camera_coordinates=camera_coordinates,
         camera_chart_availability=camera_availability,
         camera_weights=camera_weights,
+        log_camera_weight=log_camera_weight,
     )
 
 
@@ -364,7 +377,7 @@ def test_schema38_p2_diagnostics_do_not_change_forward_value() -> None:
     assert silent == {}
 
 
-def test_schema38_dynamic_zero_is_static_precision_forward_and_gradient_exact() -> None:
+def test_schema39_dynamic_precision_is_disjoint_from_static_optional_precision() -> None:
     torch.manual_seed(3806)
     batch, horizon, basis, hidden, objects, route = 1, 6, 2, 12, 2, 4
     compiler = ObjectPolicyPlanCompiler(
@@ -397,8 +410,8 @@ def test_schema38_dynamic_zero_is_static_precision_forward_and_gradient_exact() 
         torch.tanh(compiler.precision_action(action))
         * compiler.precision_innovation(fact)
     )
-    manual_precision = smooth_rms_contract(manual_precision, 0.35)[0]
     torch.testing.assert_close(bank.precision, manual_precision, atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(bank.protected_policy_precision) == 0
     bank_grad = torch.autograd.grad(
         bank.precision.square().sum(), (fact, action), retain_graph=True
     )
@@ -418,6 +431,7 @@ def test_schema38_dynamic_zero_is_static_precision_forward_and_gradient_exact() 
         collect_diagnostics=False,
     )
     assert torch.count_nonzero(zero_fact_bank.precision) == 0
+    assert torch.count_nonzero(zero_fact_bank.protected_policy_precision) > 0
 
     dynamic_bank, _ = compiler(
         p1_factual_detail=fact.detach(),
@@ -427,8 +441,13 @@ def test_schema38_dynamic_zero_is_static_precision_forward_and_gradient_exact() 
         action_query=action.detach(),
         collect_diagnostics=False,
     )
-    assert not torch.equal(dynamic_bank.precision, bank.precision.detach())
-    dynamic_bank.precision.square().sum().backward()
+    torch.testing.assert_close(
+        dynamic_bank.precision,
+        bank.precision.detach(),
+        atol=0.0,
+        rtol=0.0,
+    )
+    dynamic_bank.protected_policy_precision.square().sum().backward()
     assert nonzero_dynamic.grad is not None
     assert torch.count_nonzero(nonzero_dynamic.grad) > 0
     torch.testing.assert_close(
@@ -517,7 +536,7 @@ def test_schema38_p2_and_p3_registered_parameters_have_live_gradients() -> None:
             "temporal_geometry",
             "state_change",
         )
-    )
+    ) + plan.protected_policy_precision.square().mean()
     plan_loss.backward()
     for name, parameter in compiler.named_parameters():
         assert parameter.grad is not None, name

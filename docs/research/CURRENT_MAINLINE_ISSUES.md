@@ -1,9 +1,9 @@
 # ClearVLA Current Mainline Issues
 
-This is a pure unresolved-problem ledger for the active Schema38 source. It
-contains no repair ancestry, implementation plan or list of changes. A source
-contract is not an empirical result: keep an item until its remaining
-uncertainty is actually observed or causally attributed.
+This is a pure unresolved-problem ledger for the active Schema39 source. It
+contains no repair ancestry or implementation plan. Source closure is not an
+empirical result; keep an item until the remaining uncertainty is observed or
+causally attributed.
 
 ## IC-07 — grounding reconstruction owns a private spatial nuisance
 
@@ -11,89 +11,85 @@ uncertainty is actually observed or causally attributed.
 exported in `ObjectFactSet`. Grounder loss can therefore improve through
 capacity unavailable to S, Teacher, W or P2.
 
-Keep with-position, position-zero and exported-K-only reconstruction as three
-separate diagnostics. Aggregate reconstruction is not evidence that online K
-facts became more useful, and this nuisance must not be promoted into a second
-public value path without an explicit downstream owner.
+Keep with-position, position-zero and exported-K-only reconstruction separate
+in diagnostics. Aggregate reconstruction is not evidence that online K facts
+became more useful. Do not promote this nuisance into a second public value
+path without an explicit downstream owner.
 
 ## IC-11 — learned flow and Teacher association remain unidentified
 
-The latest completed parent run had Teacher dustbin around `0.46-0.47`,
-reliability around `0.25-0.26`, and the best real match below the dustbin
-background. This can be calibrated ambiguity or an overly attractive fallback;
-there is no independent association label that distinguishes them.
+Completed parent runs had large Teacher dustbin probability and weak
+reliability; they cannot distinguish calibrated ambiguity from an overly
+attractive fallback because there is no independent association label.
+Learned flow remained finite, but its action value is still unidentified.
 
-Learned flow remained finite and did not collapse to zero in that run, but its
-action value is still unidentified. Do not force nonzero flow, impose dustbin
-or route quotas, reinterpret reliability as a loss mask, or change Teacher
-target algebra without matched association/action evidence.
+Do not force nonzero flow, impose dustbin/route quotas, reinterpret reliability
+as a loss mask, or change Teacher target algebra without matched association
+and action evidence.
 
-## IC-12 — Schema38 gripper and precision behavior is unobserved
+## IC-12 — Schema39 gripper, precision and interval value are unobserved
 
-Schema37 ended close to V120 in aggregate physical RMSE but remained worse than
-V25/V26, with the clearest gap in gripper/precision behavior. Schema38 restores
-fact-conditioned dynamic-P1 precision and changes the W/P2 consumer algebra,
-but no fresh run yet shows whether this closes that gap without sacrificing
-arm, first/tail or horizon behavior.
+Schema39 moves dynamic P1 out of the optional-null precision route and gives it
+one protected no-null carrier inside the existing total ingress budget. It also
+makes the physical four-interval terminal the only W time consumer. These are
+source-backed ownership repairs, not evidence that gripper timing, fine action
+bandwidth or W interval differentiation improved.
 
-Decoded gripper events, event head and motion head remain separate objects.
-Another event-positive boost, a precision gain or an external loss change is
-not justified before the complete fresh validation curve is available.
+The fresh run must compare aggregate/arm/gripper, first/tail, all horizon bands,
+decoded events, event head and motion head. Do not add a precision gain, event
+boost, interval entropy target or new external loss before the complete curve
+and matched interventions exist.
 
-## IC-16 — finite observation-side gradient spikes need fresh attribution
+## IC-16 — observation-side spike recurrence needs fresh attribution
 
-Schema37 contained finite preclip spikes above `5`, including a raw global norm
-near `44.67`, concentrated in the broad observation owner group. The former log
-mixed a window mean with final-batch owner diagnostics and could not identify
-the responsible parameter.
+Earlier runs contained finite preclip spikes concentrated in the broad
+observation owner group. Schema39 removes live `sqrt(v)` singular derivatives,
+keeps observable reads/log measures in FP32 and records variance gains, support
+measures and flow-vs-uncertainty output-channel gradient L2.
 
-Schema38 now records window mean/max/current and emits a parameter-level
-`gradient_spike` event only after a finite threshold crossing. This closes the
-observability defect, not the numerical cause. A fresh run must determine
-whether spikes recur and, if so, whether one stable parameter/operation owns
-them. Do not add clipping, gains or observation-network changes speculatively.
+This closes the identified source-level singularity and attribution gaps; it
+does not prove that every spike had that cause. A fresh run must determine
+whether spikes recur and which stable parameter/channel owns them. Do not add
+another local clip or observation gain speculatively. Per-loss VJPs belong in
+an offline deterministic replay only.
 
-## EXP-01 — Schema38 empirical and causal release gates are pending
+## EXP-01 — Schema39 empirical and causal release gates are pending
 
-The source implements complete-field W/P2 consumption, S-conditioned W keys,
-geometry-conditioned semantic address, fact-conditioned dynamic precision,
-reachable covariance and corrected G3/gradient diagnostics. These boundaries
-still require fresh runtime evidence:
+Before release, collect:
 
 - BF16 train forward/backward and five-step deployment;
-- Teacher isolation and cached static-call frequencies;
-- neutral-W, S-neutral, geometry-neutral and dynamic-precision causal checks;
+- Teacher isolation and static/dynamic call counts;
+- W-zero, S-neutral, interval-key, camera-measure and dynamic-precision matched
+  interventions at their immediate boundaries and final action;
 - epoch-one physical/normalized, first/tail, horizon, arm/gripper/event/motion
   safety comparison;
 - batch-eight memory and throughput;
 - complete eight-epoch comparison against V120, V25 and V26, including late
-  rebound and frozen action interventions.
+  rebound and frozen-checkpoint causal probes.
 
-Do not claim performance recovery, healthier W differentiation or useful
-geometry/precision action bandwidth from source tests or nonzero gradients
-alone.
+Do not claim useful W intervals, healthier S conditioning, recovered precision
+or numerical stability from source tests or nonzero gradients alone.
 
-## Explicitly not active diagnoses
+## Source-closed boundaries that need new evidence before reopening
 
-The active source has structural closure for the following former issues; do
-not reopen them without new source or experimental evidence:
-
-- S no longer owns an interval vote independent of W at P2.
-- P2 consumes reconstructed complete W fields; there is no common-only value
-  consumer parallel to an optional residual consumer.
-- Dynamic P1 has a named, fact-conditioned P3 precision consumer while staying
-  outside protected fact and consequence.
-- Geometry conditions semantic K address without becoming an interval vote or
-  scaling semantic value.
-- W covariance can approach a zero target while remaining PSD.
-- G3 no longer logs a softmax-gauge-inflated correction.
-- The bottom lane-local `4 basis + null`, CVAE/workspace, Evidence MMDiT,
-  controlled transition and execution graph were not changed by Schema38.
+- P2 spatial selection preserves interval/type and S cannot alter its
+  K/camera posterior, support or value.
+- The physical interval terminal has four real intervals, no learned null and
+  passes W common exactly once.
+- Semantic/geometry share one contract after their physical sum; neither
+  competes for type probability mass.
+- Dynamic P1 has a disjoint protected no-null carrier, remains outside factual
+  consequence/context and shares the one bottom optional budget.
+- Producer-owned FP32 object/camera logs and support reach P2 without a
+  probability `clamp -> log` reconstruction.
+- Live address standard deviation is zero-preserving with a construction-level
+  finite Jacobian bound.
+- The retained CVAE/workspace, Evidence MMDiT, controlled transition and
+  execution body remain present.
 
 ## Closure rule
 
-An issue is deleted only when all relevant items are source-backed and the
-remaining empirical claim has been observed:
+Delete an issue only after all relevant items are established:
 
 1. producer and retained axes;
 2. every transform, residual/addition point and alternate path;

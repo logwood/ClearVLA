@@ -15,7 +15,7 @@ from ..v120_core.trunk_primitives import (
 )
 from .action_contract import V120SeedContext
 from .compiler import ObjectPolicyPlanDeltaBank
-from .routing import AffineVarianceFlooredCenteredNorm
+from .routing import AffineVarianceFlooredCenteredNorm, smooth_rms_contract
 from .types import (
     ControlledTransitionSource,
     ControlledTransitionState,
@@ -184,12 +184,18 @@ class ControlledTransitionDynamics(nn.Module):
             raise ValueError("controlled transition action query must be [B,T,Q,H]")
         if tuple(plan.protected_base.shape) != expected_action:
             raise ValueError("controlled transition lost the P1+P2 consequence")
+        if tuple(plan.protected_policy_precision.shape) != expected_action:
+            raise ValueError("controlled transition lost protected policy precision")
         # V120 passed the complete 24x4 trajectory after P1/P2 and terminal
         # normalization.  Do not basis-reduce this to 24 rows: doing so changes
         # the action cross-attention denominator and erases the factual/effect
         # residual that the transition was meant to condition on.
+        bounded_policy_precision, precision_contract_scale = smooth_rms_contract(
+            plan.protected_policy_precision,
+            0.35,
+        )
         trajectory, norm_denominator, norm_gain = self.trajectory_norm.forward_with_denominator(
-            action_query + plan.protected_base
+            action_query + plan.protected_base + bounded_policy_precision
         )
         action_tokens = trajectory.flatten(1, 2)
         context = self._context_tokens(seed, plan)
@@ -247,6 +253,12 @@ class ControlledTransitionDynamics(nn.Module):
             ),
             "controlled_transition_trajectory_norm_denominator_min": (
                 norm_denominator.detach().float().amin()
+            ),
+            "controlled_transition_policy_precision_rms": (
+                bounded_policy_precision.detach().float().square().mean().sqrt()
+            ),
+            "controlled_transition_policy_precision_contract_scale_min": (
+                precision_contract_scale.detach().float().amin()
             ),
             "controlled_transition_trajectory_norm_gain": norm_gain.detach().float(),
         }

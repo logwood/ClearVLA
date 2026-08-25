@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Mapping, cast
 
 CAPABILITY_NAME = "object_intent_dynamics_323"
-CAPABILITY_SCHEMA = 38
+CAPABILITY_SCHEMA = 39
 LAYOUT_NAME = "clearvla_mainline"
 LAYOUT_SCHEMA = 1
 TOPOLOGY = (3, 2, 3)
@@ -24,11 +24,9 @@ INTERVALS = ((4, 8), (8, 16), (16, 32), (32, 48))
 class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
-    observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_bank"
-    top: str = "single_content_k_identity_owner_preserving_stateless_intent_full_interval_w_required_s_conditioned_geometry_address_fact_conditioned_precision_six_lane_p3"
-    # Schema38 changes how top/P3 consumes the already-exported dynamic P1
-    # residual; the serialized bottom body and its ingress stay unchanged.
-    bottom: str = "restored_v120_shared_seed_dynamic_p1_query_only_lane_local_basis_null_bounded_optional_sum_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
+    observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_zero_preserving_variance_bank"
+    top: str = "fp32_observable_k_identity_stateless_intent_spatial_p2_physical_interval_terminal_protected_dynamic_p1_six_lane_p3"
+    bottom: str = "restored_v120_shared_seed_protected_dynamic_p1_no_null_single_optional_budget_exact_g3_anchor_transition_evidence_mmdit_dense512_execution"
     training: str = "v120_mirrored_physical_flow_observed_current_grounding_partial_ot_semantic_geometry_future_loss_support_event_boost_v120_decay_three_owner_clip"
     runtime: str = "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_active_ablations_only"
 
@@ -65,11 +63,10 @@ class ArchitectureManifest:
         """Validate the stable graph boundary.
 
         Stored manifests remain parseable for an explicit compatibility
-        report, but parsing is not permission to resume. Schema38 changes the
-        top/P3 consumer ABI while retaining the six lane-local bottom body; a
-        complete previous-schema checkpoint is therefore rejected for exact
-        and optimizer resume. Explicit bottom-only migration remains governed
-        by the serialized bottom ABI and is never an implicit formal-run path.
+        report, but parsing is not permission to resume. Schema39 changes the
+        observation numerical boundary, P2/P3 interval terminal, transition
+        action operand and bottom ingress. A Schema38 checkpoint is therefore
+        rejected for exact, optimizer and bottom-only migration.
         """
 
         if self.capability != CAPABILITY_NAME:

@@ -30,12 +30,12 @@ from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
 from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 from .compiler import (
     ObjectConsequenceState,
-    ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
     ObjectPolicyPlanDeltaBank,
     ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler
+from .effect_terminal import ObjectFutureEffectTerminal
 from .grounding import DenseObjectGrounder
 from .intent import (
     CoarseActionIntent,
@@ -206,7 +206,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             hidden=hidden,
             state_dim=state_dim,
         )
-        self.effect_reader = ObjectFutureEffectReader(
+        self.effect_reader = ObjectFutureEffectTerminal(
             hidden=hidden,
             content_dim=content_dim,
             route_dim=route_dim,

@@ -55,6 +55,7 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert "clearvla/mainline/v120_core/profile.py" in paths
     assert "clearvla/mainline/model/action_contract.py" in paths
     assert "clearvla/mainline/model/observation_contract.py" in paths
+    assert "clearvla/mainline/model/effect_terminal.py" in paths
     assert "clearvla/mainline/training/gradient_audit.py" in paths
     # These superseded independent rewrites are retained only as source
     # archaeology.  The formal entry point has no dependency on either one.
@@ -506,13 +507,15 @@ def test_bottom_migration_rejects_schema_36_even_with_same_bottom_abi(
     except ValueError as error:
         assert str(error) == "bottom migration rejected: manifest identity differs"
     else:
-        raise AssertionError("Schema36 joint-route bottom must not migrate to Schema38")
+        raise AssertionError("Schema36 joint-route bottom must not migrate to Schema39")
     for name, value in target.state_dict().items():
         assert torch.equal(value, before[name])
 
 
-def test_bottom_migration_explicitly_accepts_schema_37_unchanged_bottom_abi(
+@pytest.mark.parametrize("historical_schema", (37, 38))
+def test_bottom_migration_rejects_schema_37_and_38_ingress(
     tmp_path: Path,
+    historical_schema: int,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     condition = tmp_path / "goal.pt"
@@ -539,7 +542,7 @@ def test_bottom_migration_explicitly_accepts_schema_37_unchanged_bottom_abi(
         total_steps=4,
         minimum_ratio=0.1,
     )
-    path = tmp_path / "schema37-bottom.pt"
+    path = tmp_path / f"schema{historical_schema}-bottom.pt"
     save_checkpoint(
         path,
         model=source,
@@ -553,7 +556,7 @@ def test_bottom_migration_explicitly_accepts_schema_37_unchanged_bottom_abi(
     )
     payload = torch.load(path, map_location="cpu", weights_only=False)
     historical_manifest = payload["identity"]["manifest"]
-    historical_manifest["schema"] = 37
+    historical_manifest["schema"] = historical_schema
     historical_components = historical_manifest["components"]
     historical_components["observation"] = "schema37_observation"
     historical_components["top"] = "schema37_top"
@@ -569,10 +572,16 @@ def test_bottom_migration_explicitly_accepts_schema_37_unchanged_bottom_abi(
     with torch.no_grad():
         target.bottom.weight.zero_()
         target.bottom.bias.zero_()
-    report = migrate_bottom_only(path, target, identity=identity)
-    assert set(report.loaded) == {"bottom.weight", "bottom.bias"}
-    torch.testing.assert_close(target.bottom.weight, source.bottom.weight)
-    torch.testing.assert_close(target.bottom.bias, source.bottom.bias)
+    before = {
+        name: value.detach().clone() for name, value in target.state_dict().items()
+    }
+    with pytest.raises(
+        ValueError,
+        match="bottom migration rejected: manifest identity differs",
+    ):
+        migrate_bottom_only(path, target, identity=identity)
+    for name, value in target.state_dict().items():
+        assert torch.equal(value, before[name])
 
 
 def test_bottom_migration_rejects_untyped_shape_only_checkpoint(tmp_path: Path) -> None:

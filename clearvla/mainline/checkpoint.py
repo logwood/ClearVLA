@@ -420,16 +420,13 @@ def compare_checkpoint_identity(
     )
     current_manifest = manifest_from_mapping(current.manifest)
     # Exact/optimizer resume is already rejected above by the complete
-    # identity. The explicit bottom-only tool may cross a top-schema boundary
-    # only when the serialized bottom ABI itself is unchanged; this is the
-    # sole meaning of the reusable component report.
+    # identity. Schema39 changes bottom ingress ownership, so the explicit
+    # bottom-only tool is intentionally limited to the same manifest schema
+    # and the same serialized bottom ABI.
     schema_pair = (int(saved_manifest.schema), int(current_manifest.schema))
     bottom_same = (
         saved_manifest.components.bottom == current_manifest.components.bottom
-        and (
-            schema_pair[0] == schema_pair[1]
-            or schema_pair == (37, 38)
-        )
+        and schema_pair[0] == schema_pair[1]
     )
     return CompatibilityReport(
         exact_resume=False,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -15,9 +16,14 @@ from clearvla.tools.audit_policy_logs import (
     SCHEMA38_REQUIRED_STRUCTURE_KEYS,
     SCHEMA38_TENSOR_GRADIENT_KEYS,
     SCHEMA38_ZERO_INVARIANT_TOLERANCES,
+    SCHEMA39_OWNER_GRADIENT_ROLES,
+    SCHEMA39_REQUIRED_STRUCTURE_KEYS,
+    SCHEMA39_TENSOR_GRADIENT_KEYS,
+    SCHEMA39_ZERO_INVARIANT_TOLERANCES,
     STRUCTURE_KEYS,
     BatchPoint,
     ParsedRun,
+    _identity_summary,
     _recovery_assessment,
     _render_run_text,
     build_summary,
@@ -231,6 +237,53 @@ class AuditPolicyLogsTest(unittest.TestCase):
             summary["epochs"][0]["train"]["gradient_epoch_preclip_l2_mean"],
             2.75,
         )
+
+    def test_mainline_source_identity_is_projected_and_self_checked(self) -> None:
+        components = {
+            name: f"schema39_{name}"
+            for name in ("observation", "top", "bottom", "training", "runtime")
+        }
+        manifest = {
+            "capability": "object_intent_dynamics_323",
+            "schema": 39,
+            "components": components,
+        }
+        manifest_digest = hashlib.sha256(
+            json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        files = [["clearvla/mainline/train.py", "a" * 64]]
+        source_digest = hashlib.sha256(
+            json.dumps(
+                files,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        run = ParsedRun(
+            path=self.tmp_path,
+            label="schema39",
+            context={
+                "identity": {
+                    "manifest": manifest,
+                    "manifest_digest": manifest_digest,
+                    "config_digest": "b" * 64,
+                    "source": {"files": files, "digest": source_digest},
+                    "git_commit": "c" * 40,
+                }
+            },
+        )
+        identity = _identity_summary(run)
+        self.assertTrue(identity["manifest_digest_consistent"])
+        self.assertTrue(identity["source_digest_consistent"])
+        self.assertTrue(identity["source_files_valid"])
+        self.assertEqual(identity["source_file_count"], 1)
+        self.assertEqual(identity["components"], components)
 
     def test_gradient_spike_is_a_lossless_independent_event(self) -> None:
         train_row = {
@@ -2251,6 +2304,151 @@ class AuditPolicyLogsTest(unittest.TestCase):
         )
 
         for invariant_name, tolerance in SCHEMA38_ZERO_INVARIANT_TOLERANCES.items():
+            broken = deepcopy(candidate)
+            broken["structure"][invariant_name] = {
+                "tail_median": max(float(tolerance) * 2.0, 1.0e-4)
+            }
+            failed = _recovery_assessment(baseline, broken)
+            failed_checks = {
+                item["name"]: item["status"] for item in failed["checks"]
+            }
+            self.assertEqual(
+                failed_checks[f"structure/{invariant_name}"],
+                "fail",
+            )
+
+    def test_schema39_recovery_uses_spatial_p2_and_terminal_p3_surface(self) -> None:
+        baseline = _complete_recovery_summary("v120")
+        parent = _complete_recovery_summary("schema38")
+        parent["manifest"]["architecture_schema"] = 38
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema39"
+        candidate["manifest"]["architecture_schema"] = 39
+        manifest_payload = {
+            "capability": "object_intent_dynamics_323",
+            "schema": 39,
+            "components": {
+                name: f"schema39_{name}"
+                for name in ("observation", "top", "bottom", "training", "runtime")
+            },
+        }
+        manifest_digest = hashlib.sha256(
+            json.dumps(
+                manifest_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        source_files = [["clearvla/mainline/train.py", "b" * 64]]
+        source_digest = hashlib.sha256(
+            json.dumps(
+                source_files,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        candidate["source_identity"] = {
+            "manifest_digest": manifest_digest,
+            "manifest_digest_consistent": True,
+            "source_digest": source_digest,
+            "source_digest_consistent": True,
+            "source_files_valid": True,
+            "source_file_count": 1,
+            "config_digest": "c" * 64,
+            "git_commit": "d" * 40,
+            "components": manifest_payload["components"],
+        }
+        candidate["aligned_batch_2200"].update(
+            {
+                name: {"tail_median": 0.0}
+                for name in SCHEMA39_ZERO_INVARIANT_TOLERANCES
+            }
+        )
+        candidate["aligned_batch_2200"]["object_p3_effect_precontract_rms"] = {
+            "tail_median": 0.03
+        }
+        candidate["structure"] = {
+            name: {
+                "tail_median": (
+                    0.5
+                    if name.endswith("pair_cosine")
+                    else 0.0
+                    if name in SCHEMA39_ZERO_INVARIANT_TOLERANCES
+                    else 0.1
+                )
+            }
+            for name in SCHEMA39_REQUIRED_STRUCTURE_KEYS
+        }
+        candidate["gradients"].update(
+            {
+                name: {"tail_median": 0.0}
+                for name in SCHEMA39_TENSOR_GRADIENT_KEYS
+            }
+        )
+        candidate["gradients"].update(
+            {
+                f"gradient_{stage}_{role}_l2": {"tail_median": 0.01}
+                for stage in ("raw", "postlocal", "postglobal")
+                for role in SCHEMA39_OWNER_GRADIENT_ROLES
+            }
+        )
+        candidate["gradients"].update(
+            {
+                name: {"tail_median": 1.0}
+                for name in (
+                    "gradient_window_preclip_l2_mean",
+                    "gradient_window_preclip_l2_max",
+                    "gradient_window_preclip_l2_current",
+                    "gradient_window_preclip_l2_max_batch_offset",
+                    "gradient_window_preclip_l2_max_global_step",
+                )
+            }
+        )
+
+        assessment = _recovery_assessment(baseline, candidate, parent)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        for name in SCHEMA39_REQUIRED_STRUCTURE_KEYS:
+            self.assertEqual(checks[f"structure/{name}"], "pass")
+        for name in (
+            "manifest_digest",
+            "source_digest",
+            "config_digest",
+            "git_commit",
+            "manifest_digest_consistent",
+            "source_digest_consistent",
+            "source_files_valid",
+            "component_abi",
+        ):
+            self.assertEqual(checks[f"identity/{name}"], "pass")
+        self.assertNotIn("early_batch_2200/p2_null_mass", checks)
+        self.assertEqual(
+            checks["early_batch_2200/physical_effect_rms"],
+            "pass",
+        )
+        for removed in (
+            "evidence_trajectory_summary_norm",
+            "object_p2_complete_field_null_mass",
+            "object_p2_selected_complete_field_common_rms",
+            "object_p2_s_condition_neutral_posterior_l1",
+            "object_p3_precision_dynamic_contracted_rms",
+        ):
+            self.assertNotIn(f"structure/{removed}", checks)
+
+        missing_name = "object_p3_interval_innovation_retained_rms_ratio"
+        candidate["structure"].pop(missing_name)
+        missing = _recovery_assessment(baseline, candidate)
+        missing_checks = {
+            item["name"]: item["status"] for item in missing["checks"]
+        }
+        self.assertEqual(
+            missing_checks[f"structure/{missing_name}"],
+            "incomplete",
+        )
+
+        candidate["structure"][missing_name] = {"tail_median": 0.1}
+        for invariant_name, tolerance in SCHEMA39_ZERO_INVARIANT_TOLERANCES.items():
             broken = deepcopy(candidate)
             broken["structure"][invariant_name] = {
                 "tail_median": max(float(tolerance) * 2.0, 1.0e-4)

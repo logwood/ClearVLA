@@ -24,6 +24,7 @@ from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.model.restored_observation import (
     _v120_flow_field,
 )
+from clearvla.mainline.model.routing import smooth_rms_contract
 from clearvla.mainline.runtime.logging import archival_metrics
 from clearvla.mainline.runtime.sampling import sample_action, sample_cached_action
 from clearvla.mainline.train import _optimizer_group_context
@@ -1200,8 +1201,12 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         )
     finally:
         transition_hook.remove()
+    bounded_policy_precision, _ = smooth_rms_contract(
+        compiled.plan.protected_policy_precision,
+        0.35,
+    )
     expected_transition_action = model.transition.trajectory_norm(
-        query + compiled.plan.protected_base
+        query + compiled.plan.protected_base + bounded_policy_precision
     ).flatten(1, 2)
     torch.testing.assert_close(
         captured_transition["action_tokens"],
@@ -1313,7 +1318,48 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         "p3_temporal_geometry",
         "p3_state_change",
     )
+    assert model.bottom.decoder.policy_delta_attnres is not None
+    assert model.bottom.decoder.policy_delta_attnres.include_null
+    assert model.bottom.decoder.protected_detail_basis_attnres is not None
+    assert not model.bottom.decoder.protected_detail_basis_attnres.include_null
+    assert (
+        model.bottom.decoder.policy_delta_attnres
+        is not model.bottom.decoder.protected_detail_basis_attnres
+    )
     assert torch.equal(role_bank.protected_detail, compiled.plan.protected_base)
+    torch.testing.assert_close(
+        role_bank.protected_policy_precision,
+        compiled.plan.protected_policy_precision,
+        atol=0.0,
+        rtol=0.0,
+    )
+    carrier_only_bank = replace(
+        role_bank,
+        values=torch.zeros_like(role_bank.values),
+        protected_detail=None,
+        protected_policy_precision=torch.ones_like(
+            role_bank.protected_policy_precision
+        ),
+    )
+    decoder_action_query = query.mean(dim=2)
+    carrier_update, carrier_fact, _ = model.bottom.decoder._read_policy_delta_bank(
+        decoder_action_query,
+        carrier_only_bank,
+        collect_diagnostics=True,
+    )
+    assert torch.count_nonzero(carrier_update) > 0
+    assert torch.count_nonzero(carrier_fact) == 0
+    zero_carrier_update, _, _ = model.bottom.decoder._read_policy_delta_bank(
+        decoder_action_query,
+        replace(
+            carrier_only_bank,
+            protected_policy_precision=torch.zeros_like(
+                carrier_only_bank.protected_policy_precision
+            ),
+        ),
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(zero_carrier_update) == 0
     state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
         seed_context
     )
@@ -1441,7 +1487,27 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
         model.observation.encoder.raw_flow,
         "forward",
         wraps=model.observation.encoder.raw_flow.forward,
-    ) as raw_flow:
+    ) as raw_flow, mock.patch.object(
+        model.top.intent,
+        "forward",
+        wraps=model.top.intent.forward,
+    ) as intent_forward, mock.patch.object(
+        model.top.dynamics,
+        "forward_w1",
+        wraps=model.top.dynamics.forward_w1,
+    ) as w1_forward, mock.patch.object(
+        model.top.dynamics,
+        "forward_w2",
+        wraps=model.top.dynamics.forward_w2,
+    ) as w2_forward, mock.patch.object(
+        model.top.effect_reader,
+        "forward",
+        wraps=model.top.effect_reader.forward,
+    ) as effect_forward, mock.patch.object(
+        model.top.plan_compiler,
+        "forward",
+        wraps=model.top.plan_compiler.forward,
+    ) as compiler_forward:
         result = sample_action(
             model,
             batch.online,
@@ -1453,9 +1519,14 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert teacher_calls == 0
     assert grounding_block_calls == [1, 1, 1]
     assert history_proposal_calls == 1
+    assert intent_forward.call_count == 1
+    assert w1_forward.call_count == 1
+    assert w2_forward.call_count == 1
     # Five action updates are followed by one complete endpoint forward for
     # event/motion heads.  The endpoint pass must not rebuild static evidence.
     assert p1_host_calls == config.runtime.inference_steps + 1
+    assert effect_forward.call_count == config.runtime.inference_steps + 1
+    assert compiler_forward.call_count == config.runtime.inference_steps + 1
     assert transition_calls == config.runtime.inference_steps + 1
     # Both V120 correspondence scales batch all adjacent pairs/directions in
     # one invocation and are built once outside the five ODE steps.

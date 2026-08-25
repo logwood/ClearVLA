@@ -1071,7 +1071,29 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             )
             lane_routed.append(routed_lane)
             lane_route_metrics.append(routed_lane_metrics)
-        routed_sum = torch.stack(lane_routed, dim=0).sum(dim=0)
+        optional_sum = torch.stack(lane_routed, dim=0).sum(dim=0)
+        protected_precision_route_metrics: dict[str, Tensor] | None = None
+        if bank.protected_policy_precision is None:
+            protected_precision_update = torch.zeros_like(optional_sum)
+        else:
+            if self.protected_detail_basis_attnres is None:
+                raise RuntimeError("protected policy precision has no basis reader")
+            protected_precision_values = bank.protected_policy_precision.to(
+                device=action_query.device,
+                dtype=action_query.dtype,
+            )
+            (
+                protected_precision_update,
+                protected_precision_route_metrics,
+            ) = self.protected_detail_basis_attnres(
+                action_query,
+                protected_precision_values,
+                collect_diagnostics=collect_diagnostics,
+            )
+        # Optional lanes and the no-null dynamic P1 carrier share one and only
+        # one action-ingress budget. The protected consequence remains outside
+        # this budget as the mandatory factual/W base.
+        routed_sum = optional_sum + protected_precision_update
         routed, routed_contract_scale = smooth_rms_contract(routed_sum, 0.35)
         scale = routed.new_tensor(
             float(
@@ -1175,6 +1197,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             "evidence_policy_delta_attnres_lane_sum_precontract_rms": tensor_rms(
                 routed_sum
             ),
+            "evidence_policy_delta_attnres_optional_sum_precontract_rms": tensor_rms(
+                optional_sum
+            ),
+            "evidence_policy_delta_protected_policy_precision_precontract_rms": tensor_rms(
+                protected_precision_update
+            ),
             "evidence_policy_delta_attnres_lane_sum_postcontract_rms": routed_rms,
             "evidence_policy_delta_attnres_lane_sum_contract_scale_mean": (
                 routed_contract_scale.detach().float().mean()
@@ -1192,6 +1220,23 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 protected_update.detach().float().norm(dim=-1).mean()
             ),
         }
+        if protected_precision_route_metrics is not None:
+            metrics.update(
+                {
+                    "evidence_protected_policy_precision_basis_entropy": (
+                        protected_precision_route_metrics["entropy"]
+                    ),
+                    "evidence_protected_policy_precision_basis_max": (
+                        protected_precision_route_metrics["max"]
+                    ),
+                    "evidence_protected_policy_precision_basis_update_rms": (
+                        protected_precision_route_metrics["update_rms"]
+                    ),
+                    "evidence_protected_policy_precision_basis_value_rms": (
+                        protected_precision_route_metrics["value_rms"]
+                    ),
+                }
+            )
         if protected_route_metrics is not None:
             metrics.update(
                 {

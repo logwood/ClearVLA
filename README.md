@@ -4,13 +4,14 @@
 
 The active experiment is the capability-owned implementation under
 `clearvla/mainline/`, selected by the serialized `object_intent_dynamics_323`
-manifest. Its active architecture schema is 38; numeric V-labels and the old
+manifest. Its active architecture schema is 39; numeric V-labels and the old
 monolithic `clearvla/policy/` graph are ancestry, not source-selection
-mechanisms. Schema38 retains G1-G3, four future intervals, the V120 static P1,
+mechanisms. Schema39 retains G1-G3, four future intervals, the V120 static P1,
 the Evidence MMDiT/CVAE/workspace bottom and execution path. P2 consumes four
-complete W fields, S conditions W keys without an independent interval vote,
-dynamic P1 reaches fact-conditioned P3 precision, and geometry can condition
-semantic object address while preserving its independent value. The compact
+W-owned fields while preserving interval/type identity, then P3 performs the
+physical four-interval no-null terminal. S conditions selected W keys without
+an independent spatial/time vote; dynamic P1 travels in a protected no-null
+precision carrier, separate from the factual base. The compact
 executed graph and checkpoint policy are documented in
 `docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
 
@@ -18,18 +19,18 @@ Smoke (batch 1 by default; it executes backward and five-step deployment):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema38_action_consumption_smoke \
+OUT_DIR=runs/schema39_action_closure_smoke \
 nohup bash scripts/smoke_mainline.sh \
-  > schema38_action_consumption_smoke.log 2>&1 &
+  > schema39_action_closure_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema38_action_consumption_b8 \
+OUT_DIR=runs/schema39_action_closure_b8 \
 nohup bash scripts/train_mainline.sh \
-  > schema38_action_consumption_b8.log 2>&1 &
+  > schema39_action_closure_b8.log 2>&1 &
 ```
 
 The raw HDF5 default remains
@@ -37,17 +38,15 @@ The raw HDF5 default remains
 launchers use `/data/senwang/data` only for decoded/DINO caches and
 `/data/senwang/checkpoint` for T5/model weights. `DATA_ROOT`, `CACHE_DIR`,
 `DINO_CACHE_DIR` and `T5_CONDITION_PATH` remain individually overridable.
-Schema37 exact and optimizer resume are rejected; Schema38 formal experiments
-start fresh in an absent or empty output directory. The explicit migration tool
-may report Schema37 bottom-only reuse only when the serialized bottom ABI is
-identical; formal comparisons do not use that path.
+Schema38 exact/optimizer resume and bottom-only migration are rejected;
+Schema39 formal experiments start fresh in an absent or empty output directory.
 
 Do not start the long run unless the batch-eight smoke remains below 22.0 GiB
 total device use and completes backward plus five-step deployment. The
 compact architecture and resource contract is in
 `docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
 
-Schema38 source identity does not imply that smoke, causal diagnostics or
+Schema39 source identity does not imply that smoke, causal diagnostics or
 training recovery passed. Use the fresh run directory and complete eight-epoch
 record before making a performance claim.
 
@@ -82,7 +81,7 @@ bash run_current_policy.sh
 ## Historical V53 Replay Examples
 
 The commands below reproduce archived V53 comparisons only. They are not the
-active mainline and must not be used to start a Schema38 experiment.
+active mainline and must not be used to start a Schema39 experiment.
 
 ### Experiment 1: V53-A + V53-B
 

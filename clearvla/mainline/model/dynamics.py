@@ -591,14 +591,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             transport_mean=object_transport,
             transport_covariance=object_covariance,
             chart_availability=chart_availability,
+            log_chart_availability=facts.log_chart_availability,
             camera_coordinates=facts.camera_coordinates.to(dtype=hidden.dtype),
-            camera_chart_availability=facts.camera_chart_availability.to(
-                dtype=hidden.dtype
-            ),
+            # These are probability measures, not model-width values.  Keep
+            # them in FP32 through P2 so a small but legal camera chart is not
+            # rounded to zero before the producer-owned log measure is read.
+            camera_chart_availability=facts.camera_chart_availability.float(),
             camera_weights=(
                 facts.camera_evidence_mass.float()
                 * facts.camera_chart_availability.float()
-            ).to(dtype=hidden.dtype),
+            ),
+            log_camera_weight=facts.log_camera_weight,
         )
 
     def _camera_geometry_carrier(

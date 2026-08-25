@@ -11,6 +11,7 @@ and observability quality.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -1326,6 +1327,62 @@ V94_ALIASES.update(
             "s_condition_saturation": (
                 "object_p2_s_condition_saturation_fraction"
             ),
+            # Schema39 makes the consumer boundary explicit: P2 owns only
+            # K/type/camera spatial selection; P3 owns the physical no-null
+            # four-interval terminal.  Keep these aliases separate from the
+            # historical fused-P2 fields above.
+            "spatial_common": "object_p2_spatial_selected_common_rms",
+            "spatial_interval_innovation": (
+                "object_p2_spatial_selected_interval_innovation_rms"
+            ),
+            "spatial_identity_error": (
+                "object_p2_spatial_common_innovation_identity_error"
+            ),
+            "spatial_selector_has_null": (
+                "object_p2_spatial_selector_has_null"
+            ),
+            "p3_terminal_has_null": "object_p3_interval_terminal_has_null",
+            "p3_s_condition_neutral_l1": (
+                "object_p3_s_condition_neutral_posterior_l1"
+            ),
+            "p3_interval_retained": (
+                "object_p3_interval_innovation_retained_rms_ratio"
+            ),
+            "p3_interval_cancelled": (
+                "object_p3_interval_innovation_cancelled_rms_fraction"
+            ),
+            "p3_interval_cancellation_support": (
+                "object_p3_interval_innovation_cancellation_support_fraction"
+            ),
+            "p3_terminal_common": "object_p3_selected_common_rms",
+            "p3_terminal_interval_innovation": (
+                "object_p3_selected_interval_innovation_rms"
+            ),
+            "p3_interval_to_common": (
+                "object_p3_interval_innovation_to_common_rms_ratio"
+            ),
+            "p3_terminal_identity_error": (
+                "object_p3_terminal_common_innovation_identity_error"
+            ),
+            "p3_effect_precontract": "object_p3_effect_precontract_rms",
+            "p3_terminal_effect": "object_p3_effect_postcontract_rms",
+            "p3_effect_contract_scale": (
+                "object_p3_shared_effect_contract_scale_mean"
+            ),
+            "p3_semantic_effect": "object_p3_semantic_effect_rms",
+            "p3_geometry_effect": "object_p3_geometry_effect_rms",
+            "p3_interval_H": "object_p3_interval_posterior_entropy",
+            "p3_interval_max": "object_p3_interval_posterior_max",
+            "p3_semantic_interval_H": (
+                "object_p3_semantic_interval_posterior_entropy"
+            ),
+            "p3_geometry_interval_H": (
+                "object_p3_geometry_interval_posterior_entropy"
+            ),
+            "p3_h4_8_mass": "object_p3_interval_0_mass",
+            "p3_h8_16_mass": "object_p3_interval_1_mass",
+            "p3_h16_32_mass": "object_p3_interval_2_mass",
+            "p3_h32_48_mass": "object_p3_interval_3_mass",
             "w_key_interval_variation": (
                 "object_p2_w_key_interval_centered_variation_rms"
             ),
@@ -1937,6 +1994,95 @@ SCHEMA38_ZERO_INVARIANT_TOLERANCES = {
     "object_p2_independent_s_interval_vote": 0.0,
 }
 
+# Schema39 keeps the Schema38 G/S/W producers and bottom body, but replaces
+# the old P2 complete-field interval collapse with a spatial P2 followed by a
+# physical four-interval P3 terminal. Dynamic P1 also owns a protected no-null
+# carrier. Do not inherit any removed Schema38 P2 or contracted-dynamic names.
+SCHEMA39_REQUIRED_STRUCTURE_KEYS = tuple(
+    name
+    for name in SCHEMA38_REQUIRED_STRUCTURE_KEYS
+    if not name.startswith("object_p2_")
+    and name
+    not in {
+        "object_p3_precision_dynamic_contracted_rms",
+        "object_p3_precision_combined_source_rms",
+        "evidence_trajectory_summary_norm",
+    }
+) + (
+    "object_p2_temperature_content",
+    "object_p2_temperature_intent",
+    "object_p2_temperature_coordinate",
+    "object_p2_content_score_abs",
+    "object_p2_coordinate_score_abs",
+    "object_p2_camera_mixture_effective_count",
+    "object_p2_camera_support_fraction",
+    "object_p2_camera_coordinate_variation",
+    "object_p2_geometry_to_semantic_k_correction_rms",
+    "object_p2_spatial_posterior_entropy",
+    "object_p2_spatial_posterior_max",
+    "object_p2_semantic_spatial_posterior_entropy",
+    "object_p2_geometry_spatial_posterior_entropy",
+    "object_p2_selected_w_key_rms",
+    "object_p2_w_key_interval_centered_variation_rms",
+    "object_p2_selected_s_context_rms",
+    "object_p2_spatial_selected_common_rms",
+    "object_p2_spatial_selected_interval_innovation_rms",
+    "object_p2_spatial_common_innovation_identity_error",
+    "object_p2_independent_s_interval_vote",
+    "object_p2_spatial_selector_has_null",
+    "object_p3_interval_action_score_abs",
+    "object_p3_interval_intent_score_abs",
+    "object_p3_interval_posterior_entropy",
+    "object_p3_interval_posterior_max",
+    "object_p3_interval_terminal_has_null",
+    "object_p3_s_condition_neutral_posterior_l1",
+    "object_p3_interval_innovation_retained_rms_ratio",
+    "object_p3_interval_innovation_cancelled_rms_fraction",
+    "object_p3_interval_innovation_cancellation_support_fraction",
+    "object_p3_selected_common_rms",
+    "object_p3_selected_interval_innovation_rms",
+    "object_p3_interval_innovation_to_common_rms_ratio",
+    "object_p3_terminal_common_innovation_identity_error",
+    "object_p3_effect_precontract_rms",
+    "object_p3_effect_postcontract_rms",
+    "object_p3_shared_effect_contract_scale_mean",
+    "object_p3_shared_effect_contract_compression",
+    "object_p3_semantic_effect_rms",
+    "object_p3_geometry_effect_rms",
+    "object_p3_interval_0_mass",
+    "object_p3_interval_1_mass",
+    "object_p3_interval_2_mass",
+    "object_p3_interval_3_mass",
+    "object_p3_semantic_interval_posterior_entropy",
+    "object_p3_geometry_interval_posterior_entropy",
+    "object_p3_protected_policy_precision_rms",
+    "object_p3_precision_dynamic_zero_identity_error",
+    "controlled_transition_policy_precision_rms",
+    "controlled_transition_policy_precision_contract_scale_min",
+    "evidence_policy_delta_attnres_optional_sum_precontract_rms",
+    "evidence_policy_delta_protected_policy_precision_precontract_rms",
+    "evidence_protected_policy_precision_basis_entropy",
+    "evidence_protected_policy_precision_basis_max",
+    "evidence_protected_policy_precision_basis_update_rms",
+    "evidence_protected_policy_precision_basis_value_rms",
+    "evidence_policy_delta_attnres_lane_sum_contract_scale_mean",
+    "evidence_policy_delta_attnres_lane_sum_contract_scale_min",
+)
+
+SCHEMA39_TENSOR_GRADIENT_KEYS = (
+    *SCHEMA38_TENSOR_GRADIENT_KEYS,
+    "gradient_tensor_p1_protected_policy_precision_rms",
+)
+SCHEMA39_OWNER_GRADIENT_ROLES = SCHEMA38_OWNER_GRADIENT_ROLES
+SCHEMA39_ZERO_INVARIANT_TOLERANCES = {
+    "object_p2_spatial_common_innovation_identity_error": 1.0e-6,
+    "object_p2_independent_s_interval_vote": 0.0,
+    "object_p2_spatial_selector_has_null": 0.0,
+    "object_p3_interval_terminal_has_null": 0.0,
+    "object_p3_terminal_common_innovation_identity_error": 1.0e-6,
+    "object_p3_precision_dynamic_zero_identity_error": 0.0,
+}
+
 
 STRUCTURE_KEYS = (
     "evidence_mmd_it_execution_progress",
@@ -2384,6 +2530,7 @@ STRUCTURE_KEYS = (
     # for comparisons, but are never inherited as Schema37 requirements.
     *SCHEMA37_REQUIRED_STRUCTURE_KEYS,
     *SCHEMA38_REQUIRED_STRUCTURE_KEYS,
+    *SCHEMA39_REQUIRED_STRUCTURE_KEYS,
 )
 
 GRADIENT_KEYS = (
@@ -3454,6 +3601,11 @@ def _config_value(run: ParsedRun, *keys: str) -> Any:
     mainline_paths: dict[str, tuple[str, ...]] = {
         "capability": ("identity", "manifest", "capability"),
         "architecture_schema": ("identity", "manifest", "schema"),
+        "manifest_digest": ("identity", "manifest_digest"),
+        "source_digest": ("identity", "source", "digest"),
+        "config_digest": ("identity", "config_digest"),
+        "git_commit": ("identity", "git_commit"),
+        "manifest_components": ("identity", "manifest", "components"),
         "layout": ("identity", "manifest", "layout"),
         "layout_schema": ("identity", "manifest", "layout_schema"),
         "seed": ("config", "data", "seed"),
@@ -3497,6 +3649,77 @@ def _config_value(run: ParsedRun, *keys: str) -> Any:
         if key in run.header_config:
             return run.header_config[key]
     return None
+
+
+def _identity_summary(run: ParsedRun) -> dict[str, Any]:
+    """Validate the serialized graph/source identity without model imports."""
+
+    identity = run.context.get("identity")
+    if not isinstance(identity, Mapping):
+        return {}
+    manifest = identity.get("manifest")
+    source = identity.get("source")
+    manifest_digest = identity.get("manifest_digest")
+    source_digest = source.get("digest") if isinstance(source, Mapping) else None
+    source_files = source.get("files") if isinstance(source, Mapping) else None
+
+    def valid_sha256(value: Any) -> bool:
+        text = str(value)
+        return len(text) == 64 and all(character in "0123456789abcdefABCDEF" for character in text)
+
+    manifest_consistent: bool | None = None
+    if isinstance(manifest, Mapping) and valid_sha256(manifest_digest):
+        payload = json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        manifest_consistent = hashlib.sha256(payload).hexdigest() == str(
+            manifest_digest
+        ).lower()
+
+    source_files_valid = False
+    source_consistent: bool | None = None
+    if isinstance(source_files, list) and source_files:
+        rows: list[tuple[str, str]] = []
+        for row in source_files:
+            if (
+                not isinstance(row, (list, tuple))
+                or len(row) != 2
+                or not isinstance(row[0], str)
+                or not valid_sha256(row[1])
+            ):
+                rows = []
+                break
+            rows.append((row[0], str(row[1]).lower()))
+        paths = [path for path, _digest in rows]
+        source_files_valid = bool(rows) and paths == sorted(paths) and len(paths) == len(
+            set(paths)
+        )
+        if source_files_valid and valid_sha256(source_digest):
+            payload = json.dumps(
+                rows,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+            source_consistent = hashlib.sha256(payload).hexdigest() == str(
+                source_digest
+            ).lower()
+
+    components = manifest.get("components") if isinstance(manifest, Mapping) else None
+    return {
+        "manifest_digest": manifest_digest,
+        "manifest_digest_consistent": manifest_consistent,
+        "source_digest": source_digest,
+        "source_digest_consistent": source_consistent,
+        "source_files_valid": source_files_valid,
+        "source_file_count": len(source_files) if isinstance(source_files, list) else 0,
+        "config_digest": identity.get("config_digest"),
+        "git_commit": identity.get("git_commit"),
+        "components": dict(components) if isinstance(components, Mapping) else {},
+    }
 
 
 def _series(run: ParsedRun, key: str, *, minimum_progress: float | None = None) -> list[float]:
@@ -4523,6 +4746,7 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
             ),
             "z_probe": _config_value(run, "z_probe", "latent_cvae_z_probe"),
         },
+        "source_identity": _identity_summary(run),
         "module_parameters": (
             dict(run.context.get("module_parameters", {}))
             if isinstance(run.context.get("module_parameters"), Mapping)
@@ -4578,6 +4802,16 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
     manifest = {key: value for key, value in summary["manifest"].items() if value is not None}
     if manifest:
         lines.append("manifest: " + " ".join(f"{key}={value}" for key, value in manifest.items()))
+    source_identity = summary.get("source_identity", {})
+    if isinstance(source_identity, Mapping) and source_identity:
+        lines.append(
+            "source identity: "
+            f"manifest={str(source_identity.get('manifest_digest', ''))[:12]} "
+            f"manifest_consistent={source_identity.get('manifest_digest_consistent')} "
+            f"source={str(source_identity.get('source_digest', ''))[:12]} "
+            f"source_consistent={source_identity.get('source_digest_consistent')} "
+            f"files={source_identity.get('source_file_count')}"
+        )
     budget = summary["loss_budget"]
     if budget.get("groups"):
         groups = " ".join(
@@ -4783,6 +5017,14 @@ def _recovery_assessment(
 
     baseline_manifest = baseline.get("manifest", {})
     candidate_manifest = candidate.get("manifest", {})
+    candidate_schema = candidate_manifest.get("architecture_schema")
+    schema_number = (
+        int(candidate_schema)
+        if isinstance(candidate_schema, (int, float))
+        else None
+    )
+    schema39 = schema_number == 39
+    schema38 = schema_number == 38
     identity_keys = (
         "seed",
         "batch_size",
@@ -4833,6 +5075,62 @@ def _recovery_assessment(
             "the separately serialized SHA-256 is not comparable"
         ),
     )
+    if schema39:
+        source_identity = candidate.get("source_identity", {})
+        if not isinstance(source_identity, Mapping):
+            source_identity = {}
+
+        def digest_status(name: str, length: int) -> str:
+            value = source_identity.get(name)
+            text = str(value)
+            return (
+                "pass"
+                if len(text) == length
+                and all(character in "0123456789abcdefABCDEF" for character in text)
+                else "incomplete"
+            )
+
+        for name, length in (
+            ("manifest_digest", 64),
+            ("source_digest", 64),
+            ("config_digest", 64),
+            ("git_commit", 40),
+        ):
+            value = source_identity.get(name)
+            record(
+                f"identity/{name}",
+                digest_status(name, length),
+                candidate_value=value,
+                detail="Schema39 release audit requires serialized graph/source identity",
+            )
+        for name in (
+            "manifest_digest_consistent",
+            "source_digest_consistent",
+            "source_files_valid",
+        ):
+            value = source_identity.get(name)
+            record(
+                f"identity/{name}",
+                "pass" if value is True else "fail" if value is False else "incomplete",
+                candidate_value=value,
+                detail="serialized identity must be internally self-consistent",
+            )
+        components = source_identity.get("components")
+        required_components = ("observation", "top", "bottom", "training", "runtime")
+        components_valid = isinstance(components, Mapping) and all(
+            isinstance(components.get(name), str) and bool(components.get(name))
+            for name in required_components
+        )
+        record(
+            "identity/component_abi",
+            "pass" if components_valid else "incomplete",
+            candidate_value=(
+                {name: components.get(name) for name in required_components}
+                if isinstance(components, Mapping)
+                else None
+            ),
+            detail="all active Schema39 component ABI identifiers must be serialized",
+        )
 
     baseline_coverage = baseline.get("coverage", {})
     candidate_coverage = candidate.get("coverage", {})
@@ -4959,10 +5257,15 @@ def _recovery_assessment(
                 "p1_spatial_var",
             ),
         ),
-        ("p2_null_mass", ("object_p2_null_mass",)),
+        *(
+            ()
+            if schema39
+            else (("p2_null_mass", ("object_p2_null_mass",)),)
+        ),
         (
-            "p2_effect_rms",
+            "physical_effect_rms",
             (
+                "object_p3_effect_precontract_rms",
                 "object_p2_effect_precontract_rms",
                 "object_p2_effect_rms",
                 "object_consequence_effect_rms",
@@ -4998,6 +5301,26 @@ def _recovery_assessment(
         candidate_value=binder_metric,
     )
 
+    if schema39:
+        for name, tolerance in SCHEMA39_ZERO_INVARIANT_TOLERANCES.items():
+            value = first_early_value(candidate_early, (name,))
+            status = (
+                "incomplete"
+                if value is None
+                else "pass"
+                if abs(float(value)) <= float(tolerance)
+                else "fail"
+            )
+            record(
+                f"early_batch_2200/{name}",
+                status,
+                candidate_value=value,
+                detail=(
+                    "Schema39 same-age algebraic invariant; "
+                    f"abs(value) <= {float(tolerance):g}"
+                ),
+            )
+
     for label, names in early_metrics:
         old = first_early_value(baseline_early, names)
         new = first_early_value(candidate_early, names)
@@ -5022,11 +5345,16 @@ def _recovery_assessment(
         record(
             f"early_batch_2200/{label}",
             status,
-            baseline_value={"v120": old, "schema23": parent_value},
-            candidate_value={"schema24": new, "gap_closure": closure},
+            baseline_value={"v120": old, "parent": parent_value},
+            candidate_value={
+                f"schema{schema_number}"
+                if schema_number is not None
+                else "candidate": new,
+                "gap_closure": closure,
+            },
             detail=(
-                "same-age metric; when Schema23 is supplied, Schema24 must "
-                "close at least 50% of its absolute distance to V120"
+                "same-age comparable metric; when a parent is supplied, the "
+                "candidate must close at least 50% of its absolute distance to V120"
             ),
         )
 
@@ -5145,13 +5473,6 @@ def _recovery_assessment(
         )
 
     structure = candidate.get("structure", {})
-    candidate_schema = candidate_manifest.get("architecture_schema")
-    schema_number = (
-        int(candidate_schema)
-        if isinstance(candidate_schema, (int, float))
-        else None
-    )
-    schema38 = schema_number == 38
     schema37 = schema_number == 37
     schema36 = (
         schema_number == 36
@@ -5370,7 +5691,12 @@ def _recovery_assessment(
             "bottom_capacity_mean",
         )
     )
-    if schema38:
+    if schema39:
+        # Schema39 separates spatial selection (P2) from the physical
+        # no-null interval terminal (P3).  Its active metric ABI must not
+        # inherit Schema38's fused-reader aliases.
+        required_structure = SCHEMA39_REQUIRED_STRUCTURE_KEYS
+    elif schema38:
         # Schema38 changes the top consumer ABI while leaving the Schema37
         # producer and bottom lifecycle intact. Do not inherit removed
         # forced-common/optional-residual P2 names through a >= comparison.
@@ -5484,7 +5810,9 @@ def _recovery_assessment(
             if status == "pass" and float(value) >= 0.999:
                 status = "fail"
         zero_tolerance = (
-            SCHEMA38_ZERO_INVARIANT_TOLERANCES.get(name)
+            SCHEMA39_ZERO_INVARIANT_TOLERANCES.get(name)
+            if schema39
+            else SCHEMA38_ZERO_INVARIANT_TOLERANCES.get(name)
             if schema38
             else None
         )
@@ -5499,7 +5827,8 @@ def _recovery_assessment(
             status,
             candidate_value=value,
             detail=(
-                f"Schema38 algebraic zero invariant; abs(value) <= {zero_tolerance:g}"
+                f"Schema{schema_number} algebraic zero invariant; "
+                f"abs(value) <= {zero_tolerance:g}"
                 if zero_tolerance is not None
                 else "cosine checks reject exact object-slot publicization"
             ),
@@ -5515,7 +5844,9 @@ def _recovery_assessment(
         and int(candidate_schema) >= 24
     ) or any(name.startswith("gradient_raw_") for name in gradients)
     owner_rows = (
-        SCHEMA38_OWNER_GRADIENT_ROLES
+        SCHEMA39_OWNER_GRADIENT_ROLES
+        if schema39
+        else SCHEMA38_OWNER_GRADIENT_ROLES
         if schema38
         else SCHEMA37_OWNER_GRADIENT_ROLES
         if schema37
@@ -5552,9 +5883,11 @@ def _recovery_assessment(
             status = "pass" if float(value) > 1e-12 else "fail"
         record(f"gradient/{name}", status, candidate_value=value)
 
-    if schema38 or schema37:
+    if schema39 or schema38 or schema37:
         tensor_gradient_keys = (
-            SCHEMA38_TENSOR_GRADIENT_KEYS
+            SCHEMA39_TENSOR_GRADIENT_KEYS
+            if schema39
+            else SCHEMA38_TENSOR_GRADIENT_KEYS
             if schema38
             else SCHEMA37_TENSOR_GRADIENT_KEYS
         )
@@ -5575,7 +5908,7 @@ def _recovery_assessment(
                 ),
             )
 
-    if schema38:
+    if schema39 or schema38:
         for name in (
             "gradient_window_preclip_l2_mean",
             "gradient_window_preclip_l2_max",
@@ -5860,8 +6193,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--recovery-parent",
         type=Path,
         help=(
-            "rejected Schema23 log/run used only for the aligned batch-2200 "
-            "absolute-gap closure gate"
+            "immediate parent log/run used only for comparable aligned "
+            "batch-2200 absolute-gap closure metrics"
         ),
     )
     parser.add_argument(

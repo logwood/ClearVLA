@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 from torch import Tensor, nn
@@ -22,10 +23,12 @@ from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
 class TypedP2EffectRead:
     """P2 effect with semantic/geometry ownership intact.
 
-    The type axis is ordered exactly as :attr:`ObjectFutureEffectReader.TYPE_NAMES`.
+    The type axis is ordered exactly as :attr:`TYPE_NAMES`.
     ``physical_sum`` is the only untyped view and is formed by a literal sum;
     no selector or averaging is allowed at this boundary.
     """
+
+    TYPE_NAMES: ClassVar[tuple[str, str]] = ("semantic", "geometry")
 
     effect_by_type: Tensor  # [B,T,Q,2,H], semantic then geometry
 
@@ -97,9 +100,10 @@ class ObjectConsequenceState:
 
 @dataclass(frozen=True)
 class ObjectPolicyPlanDeltaBank:
-    """Six optional typed innovations around one protected consequence."""
+    """Six optional typed innovations plus two disjoint protected carriers."""
 
     protected_base: Tensor
+    protected_policy_precision: Tensor
     precision: Tensor
     effect_semantic: Tensor
     effect_geometry: Tensor
@@ -134,6 +138,8 @@ class ObjectPolicyPlanDeltaBank:
         expected = tuple(self.protected_base.shape)
         if len(expected) != 4:
             raise ValueError("object policy plan must be [B,T,Q,H]")
+        if tuple(self.protected_policy_precision.shape) != expected:
+            raise ValueError("protected policy precision lost [B,T,Q,H]")
         for name in (
             "precision",
             "effect_semantic",
@@ -162,6 +168,7 @@ class ObjectPolicyPlanDeltaBank:
             source_names=self.source_names,
             source_depths=(int(source_depth),) * 6,
             protected_detail=self.protected_base,
+            protected_policy_precision=self.protected_policy_precision,
         )
 
 
@@ -1370,7 +1377,7 @@ class ZeroPreservingObjectConsequence(nn.Module):
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectConsequenceState, dict[str, Tensor]]:
         if not isinstance(effect, TypedP2EffectRead):
-            raise TypeError("Schema38 consequence requires TypedP2EffectRead")
+            raise TypeError("Schema39 consequence requires TypedP2EffectRead")
         effect.validate()
         effect_by_type = effect.effect_by_type
         expected_typed = (*factual_base.shape[:-1], 2, factual_base.shape[-1])
@@ -1404,7 +1411,7 @@ class ZeroPreservingObjectConsequence(nn.Module):
                 / factual_base.detach().float().square().mean().sqrt().clamp_min(1e-6)
             ),
         }
-        for type_index, name in enumerate(ObjectFutureEffectReader.TYPE_NAMES):
+        for type_index, name in enumerate(TypedP2EffectRead.TYPE_NAMES):
             metrics[f"object_consequence_{name}_effect_rms"] = effect_by_type[
                 ..., type_index, :
             ].detach().float().square().mean().sqrt()
@@ -1459,32 +1466,27 @@ class ObjectPolicyPlanCompiler(nn.Module):
             raise ValueError("P3 policy precision residual must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         consequence.validate()
-        # The static factual consequence is already the protected base.
-        # Optional lanes may only encode source-exclusive zero-centred
-        # innovations; neither static detail nor the live policy residual is
-        # copied into another protected carrier. Precision is the sole owner
-        # of the cached P1 factual signal below.
-        # V120's live P1 write legitimately conditioned both the P2 query and
-        # P3 precision. Schema37 removed the precision consumer together with
-        # the unsafe protected-fact write. Restore only the legal consumer: a
-        # one-sided contracted dynamic residual can refine an existing factual
-        # precision feature, but cannot synthesize precision when that fact is
-        # zero and never enters the protected consequence.
+        # Static fact and dynamic policy precision are different semantic
+        # carriers. The fact remains in ``protected_base``. Dynamic P1 is
+        # completed by one bias-free action/fact interaction, then travels in
+        # its own no-null carrier; zero dynamic input is an exact algebraic
+        # zero while a zero static fact cannot delete the raw dynamic write.
         static_precision = self.precision_innovation(p1_factual_detail)
-        contracted_policy_residual, precision_residual_scale = smooth_rms_contract(
-            p1_policy_residual,
-            0.35,
-        )
         precision_fact_gate, precision_fact_denominator = (
             variance_floored_centered_norm(static_precision, 0.25)
         )
-        precision_dynamic_interaction = (
-            torch.tanh(precision_fact_gate) * contracted_policy_residual
+        precision_action_gate = torch.tanh(
+            self.precision_action(action_query) + precision_fact_gate
         )
-        precision_source = static_precision + precision_dynamic_interaction
+        precision_dynamic_interaction = self.precision_lane(
+            precision_action_gate * p1_policy_residual
+        )
+        protected_policy_precision = (
+            p1_policy_residual + precision_dynamic_interaction
+        )
         precision = self.precision_lane(
             torch.tanh(self.precision_action(action_query))
-            * precision_source
+            * static_precision
         )
         typed_effect = consequence.typed_effect() + consequence.typed_interaction()
         effect_semantic = self.effect_lane(typed_effect[..., 0, :])
@@ -1531,9 +1533,9 @@ class ObjectPolicyPlanCompiler(nn.Module):
             temporal_geometry,
             state_change,
         ]
-        lanes = [smooth_rms_contract(value, 0.35)[0] for value in lanes]
         bank = ObjectPolicyPlanDeltaBank(
             protected_base=consequence.protected_consequence,
+            protected_policy_precision=protected_policy_precision,
             precision=lanes[0],
             effect_semantic=lanes[1],
             effect_geometry=lanes[2],
@@ -1555,18 +1557,13 @@ class ObjectPolicyPlanCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p3_precision_combined_source_rms": precision_source.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
             "object_p3_precision_dynamic_input_rms": p1_policy_residual.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p3_precision_dynamic_contracted_rms": (
-                contracted_policy_residual.detach().float().square().mean().sqrt()
+            "object_p3_protected_policy_precision_rms": (
+                protected_policy_precision.detach().float().square().mean().sqrt()
             ),
             "object_p3_precision_dynamic_interaction_rms": (
                 precision_dynamic_interaction.detach().float().square().mean().sqrt()
@@ -1577,8 +1574,11 @@ class ObjectPolicyPlanCompiler(nn.Module):
             "object_p3_precision_fact_denominator_min": (
                 precision_fact_denominator.detach().float().amin()
             ),
-            "object_p3_precision_dynamic_contract_min": (
-                precision_residual_scale.detach().float().amin()
+            # Both terms are bias-free and multiplicative in the dynamic
+            # carrier, so the zero identity is algebraic rather than another
+            # diagnostic forward through a trainable module.
+            "object_p3_precision_dynamic_zero_identity_error": action_query.new_zeros(
+                (), dtype=torch.float32
             ),
             "object_p3_precision_rms": lanes[0].detach().float().square().mean().sqrt(),
             "object_p3_effect_rms": bank.effect.detach()
@@ -1625,6 +1625,11 @@ class ObjectPolicyPlanCompiler(nn.Module):
             "object_p3_state_change_rms": lanes[5].detach().float().square().mean().sqrt(),
         }
         if self.training:
+            register_gradient_rms_metric(
+                protected_policy_precision,
+                metrics,
+                "gradient_tensor_p1_protected_policy_precision_rms",
+            )
             for name, lane in zip(bank.source_names, lanes, strict=True):
                 register_gradient_rms_metric(
                     lane,

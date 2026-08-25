@@ -1083,6 +1083,46 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   not a loss, clip or ordinary epoch metric. Absence of an event proves only
   that the configured threshold was not crossed in the observed run.
 
+### Schema39 spatial selection and physical interval terminal
+
+- Schema39 is identified only by serialized architecture schema `39`. It
+  preserves the Schema38 G/S/W producer meaning but moves action consumption
+  to an explicit spatial-P2 / physical-P3 boundary.
+- P2 owns K/type/camera selection and preserves interval identity. Read
+  `object_p2_spatial_selected_common_rms`,
+  `object_p2_spatial_selected_interval_innovation_rms`, spatial posterior
+  entropy/max, camera support/effective count and typed spatial posterior
+  diagnostics together. `object_p2_spatial_selector_has_null` and
+  `object_p2_independent_s_interval_vote` must be exact zero.
+- P3 owns the four-interval physical terminal and has no null. Read
+  `object_p3_interval_posterior_entropy/max`, typed interval entropy/max,
+  `object_p3_interval_0_mass` through `_3_mass`, selected common/innovation,
+  retained/cancelled innovation fractions and pre/post-contract effect RMS.
+  `object_p3_interval_terminal_has_null` and
+  `object_p3_terminal_common_innovation_identity_error` are algebraic
+  invariants, not trend metrics.
+- S may condition the W interval key but cannot cast an independent temporal
+  vote. `object_p3_s_condition_neutral_posterior_l1` is therefore allowed to
+  be nonzero only when W supplies a nonzero key/value; it is not evidence that
+  S itself became a future-effect carrier.
+- Dynamic P1 is not factual base. Pair its input/interaction and protected
+  carrier RMS with `controlled_transition_policy_precision_*`, the protected
+  bottom basis posterior/update, and
+  `gradient_tensor_p1_protected_policy_precision_rms`. The exact-zero dynamic
+  identity diagnostic must remain visible even in copied console logs.
+- The bottom optional lanes retain independent `4 basis + null` posteriors,
+  but their sum receives one shared contract. Protected consequence and
+  protected dynamic P1 use separate no-null readers and are outside optional
+  rejection. Do not infer information loss from one optional lane's null mass
+  without checking both protected carriers.
+- A finite gradient spike's six channel flow/uncertainty split is valid only
+  when `max_l2_parameter_name` is the observation flow `delta_head`. When the
+  owner is a bottom arm/gripper head, no flow channel split should be present.
+- A strict Schema39 recovery audit requires the complete run directory so the
+  serialized manifest/source digests and component ABI can be self-checked.
+  Schema38 may be supplied as a same-age parent, but the early gate compares
+  only semantically comparable metrics and never requires the removed P2 null.
+
 ## Gradients and interventions
 
 - Compare gradients by module and phase; do not compare a scalar parameter norm and a large-module norm as if they had identical dimensionality.

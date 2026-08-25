@@ -48,7 +48,6 @@ from .grounded_intent_effect import (
     GroundedFactSet,
     GroundedWorldEffectCompiler,
     GroundedWorldWorkingState,
-    bounded_owner_update,
     sample_spatial_slots,
 )
 from .grounded_intent_effect import (
@@ -442,6 +441,9 @@ class ProgressiveGroundingAddressState:
     g2_semantic_slot_probability: Tensor | None = None
     g2_appearance_slot_probability: Tensor | None = None
     g2_geometry_slot_probability: Tensor | None = None
+    g2_semantic_slot_log_probability: Tensor | None = None
+    g2_appearance_slot_log_probability: Tensor | None = None
+    g2_geometry_slot_log_probability: Tensor | None = None
     canonical_coarse_bias: Tensor | None = None
     canonical_fine_bias: Tensor | None = None
     canonical_slot_keys: Tensor | None = None
@@ -535,24 +537,29 @@ def _intervene_grounded_fact_slots(
         mean = value.float().mean(dim=resolved_dim, keepdim=True)
         return mean.to(dtype=value.dtype).expand_as(value)
 
+    semantic_owner = changed(facts.semantic_owner_probs, slot_dim=-1)
+    appearance_owner = changed(facts.appearance_owner_probs, slot_dim=-1)
+    geometry_owner = changed(facts.geometry_owner_probs, slot_dim=-1)
+
+    def changed_owner_log(value: Tensor | None) -> Tensor | None:
+        if value is None:
+            return None
+        if normalized == "address_g3_slot_permute":
+            return value.roll(shifts=1, dims=-1)
+        return torch.full_like(
+            value,
+            -math.log(float(max(int(value.shape[-1]), 1))),
+        )
+
     intervened = replace(
         facts,
         content_slots=changed(facts.content_slots, slot_dim=-2),
         semantic_slots=changed(facts.semantic_slots, slot_dim=-2),
         appearance_slots=changed(facts.appearance_slots, slot_dim=-2),
         geometry_slots=changed(facts.geometry_slots, slot_dim=-2),
-        semantic_owner_probs=changed(
-            facts.semantic_owner_probs,
-            slot_dim=-1,
-        ),
-        appearance_owner_probs=changed(
-            facts.appearance_owner_probs,
-            slot_dim=-1,
-        ),
-        geometry_owner_probs=changed(
-            facts.geometry_owner_probs,
-            slot_dim=-1,
-        ),
+        semantic_owner_probs=semantic_owner,
+        appearance_owner_probs=appearance_owner,
+        geometry_owner_probs=geometry_owner,
         slot_coordinates=changed(facts.slot_coordinates, slot_dim=-2),
         slot_support=changed(facts.slot_support, slot_dim=-1),
         slot_validity=changed(facts.slot_validity, slot_dim=-2),
@@ -560,6 +567,15 @@ def _intervene_grounded_fact_slots(
             changed(facts.slot_transport_prior, slot_dim=-2)
             if facts.slot_transport_prior is not None
             else None
+        ),
+        semantic_owner_log_probs=changed_owner_log(
+            facts.semantic_owner_log_probs
+        ),
+        appearance_owner_log_probs=changed_owner_log(
+            facts.appearance_owner_log_probs
+        ),
+        geometry_owner_log_probs=changed_owner_log(
+            facts.geometry_owner_log_probs
         ),
     )
     intervened.validate()
@@ -742,6 +758,31 @@ def _stable_sqrt(value: Tensor, *, epsilon: float = 1e-12) -> Tensor:
     root = torch.sqrt(value_f.clamp_min(epsilon_f))
     linear = value_f / math.sqrt(epsilon_f)
     return torch.where(value_f < epsilon_f, linear, root)
+
+
+def _zero_preserving_variance_std(
+    variance: Tensor,
+    *,
+    epsilon: float,
+) -> Tensor:
+    """Finite-slope ``sqrt(v + eps^2) - eps`` with exact zero value."""
+
+    variance_f = variance.float().clamp_min(0.0)
+    epsilon_f = variance_f.new_tensor(float(epsilon)).clamp_min(1.0e-12)
+    root = torch.sqrt(variance_f + epsilon_f.square())
+    return variance_f / (root + epsilon_f)
+
+
+def _zero_preserving_variance_std_gain(
+    variance: Tensor,
+    *,
+    epsilon: float,
+) -> Tensor:
+    """Analytic Jacobian magnitude of the live variance-to-std map."""
+
+    variance_f = variance.float().clamp_min(0.0)
+    epsilon_f = variance_f.new_tensor(float(epsilon)).clamp_min(1.0e-12)
+    return 0.5 / torch.sqrt(variance_f + epsilon_f.square())
 
 
 def _stable_vector_norm(
@@ -3043,6 +3084,11 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         self.slots = int(config.flow_jepa_address_slots)
         self.route_dim = int(config.flow_jepa_address_route_dim)
         self.radius = int(config.flow_jepa_raw_reader_radius)
+        self.address_variance_epsilon_norm = (
+            2.0
+            / float(max(self.grid - 1, 1))
+            / float(4 * max(self.radius, 1))
+        )
         self.raw_dim = int(raw_dim)
         self.flow_prior_floor = float(
             getattr(config, "flow_jepa_address_flow_prior_floor", 0.0)
@@ -3330,7 +3376,11 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             metadata, target_coordinates
         ).float()
         raw_side = int(bank.dense_target_detail.shape[-1])
-        normalized_std = variance.float().clamp_min(0.0).sqrt()[..., None, :].expand(
+        normalized_std_base = _zero_preserving_variance_std(
+            variance,
+            epsilon=self.address_variance_epsilon_norm,
+        )
+        normalized_std = normalized_std_base[..., None, :].expand(
             -1, -1, -1, -1, -1, int(offsets.shape[0]), -1
         )
         normalized_flow_delta = (
@@ -3389,6 +3439,18 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 "flow_jepa_progressive_g2_dynamic_candidate_valid": valid.detach()
                 .float()
                 .mean(),
+                "flow_jepa_progressive_g2_input_variance_min": (
+                    variance.detach().float().amin()
+                ),
+                "flow_jepa_progressive_g2_input_std_rms": (
+                    normalized_std_base.detach().square().mean().sqrt()
+                ),
+                "flow_jepa_progressive_g2_input_std_gain_max": (
+                    _zero_preserving_variance_std_gain(
+                        variance.detach(),
+                        epsilon=self.address_variance_epsilon_norm,
+                    ).amax()
+                ),
                 "flow_jepa_progressive_g2_dynamic_center_distance": (
                     target_coordinates.detach().float()
                     - bank.fine_coordinates.float()
@@ -3641,12 +3703,20 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             batch, cameras, -1, -1, self.slots, -1
         )
         flow_delta = coarse_centers - flow_center_dino[:, :, :, :, None]
+        coarse_epsilon_dino = (
+            self.address_variance_epsilon_norm
+            * float(max(dino_side - 1, 1))
+            / 2.0
+        )
+        coarse_std_dino = _zero_preserving_variance_std(
+            coarse_variance,
+            epsilon=coarse_epsilon_dino,
+        )
         coarse_geometry = torch.cat(
             (
                 self._normalize_xy(source_coordinates_dino, dino_side),
                 self._normalize_xy(coarse_centers, dino_side),
-                coarse_variance.clamp_min(0.0).sqrt()
-                / float(max(dino_side - 1, 1)),
+                coarse_std_dino / float(max(dino_side - 1, 1)),
                 flow_delta / float(max(dino_side - 1, 1)),
                 confidence_grid[:, :, :, :, None, None].expand(
                     -1, -1, -1, -1, self.slots, -1
@@ -3685,7 +3755,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             / float(max(dino_side - 1, 1))
         )
         coarse_std_high = (
-            coarse_variance.clamp_min(0.0).sqrt()
+            coarse_std_dino
             * float(max(raw_side - 1, 1))
             / float(max(dino_side - 1, 1))
         )
@@ -3980,6 +4050,19 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             "flow_jepa_address_coarse_variance": coarse_variance.float()
             .mean()
             .detach(),
+            "flow_jepa_address_coarse_variance_min": coarse_variance.detach()
+            .float()
+            .amin(),
+            "flow_jepa_address_coarse_std_dino_rms": coarse_std_dino.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "flow_jepa_address_coarse_std_gain_max": (
+                _zero_preserving_variance_std_gain(
+                    coarse_variance.detach(),
+                    epsilon=coarse_epsilon_dino,
+                ).amax()
+            ),
             "flow_jepa_address_slot_pair_distance": slot_distance.detach(),
             "flow_jepa_address_slot_pair_distance_normalized": (
                 slot_distance / chart_diagonal
@@ -4039,6 +4122,12 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
         self.hidden = int(config.hidden_size)
         self.route_dim = int(config.flow_jepa_address_route_dim)
         self.grid = int(config.flow_jepa_grid_size)
+        self.radius = int(config.flow_jepa_raw_reader_radius)
+        self.address_variance_epsilon_norm = (
+            2.0
+            / float(max(self.grid - 1, 1))
+            / float(4 * max(self.radius, 1))
+        )
         self.cameras = int(config.num_cameras)
         self.anchors = int(config.future_anchors)
         self.slots = int(config.flow_jepa_address_slots)
@@ -4881,11 +4970,15 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             assert bank.coarse_uncertainty is not None
             assert bank.coarse_occlusion is not None
             assert bank.coarse_cycle_error is not None
+            aligned_safe_std = _zero_preserving_variance_std(
+                state.aligned_variance,
+                epsilon=self.address_variance_epsilon_norm,
+            )
             geometry = torch.cat(
                 (
                     state.aligned_centers.float()
                     - bank.coarse_flow_centers.float()[:, :, :, :, None],
-                    state.aligned_variance.float().clamp_min(0.0).sqrt(),
+                    aligned_safe_std,
                     bank.coarse_confidence.float()[..., None, None].expand(
                         -1, -1, -1, -1, self.slots, -1
                     ),
@@ -4923,8 +5016,12 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                         dim=-1,
                     )
                 ).float()
-            correction_proposal = 0.25 * torch.tanh(rectifier[..., :2]) * (
-                state.aligned_variance.float().clamp_min(1e-4).sqrt()
+            correction_scale = (
+                aligned_safe_std
+                + self.address_variance_epsilon_norm
+            )
+            correction_proposal = (
+                0.25 * torch.tanh(rectifier[..., :2]) * correction_scale
             )
             original_fine_coordinates = bank.fine_coordinates.float()
             base_center = original_fine_coordinates.mean(dim=-2)
@@ -5009,6 +5106,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             typed_query_rows: dict[str, Tensor] = {}
             typed_key_rows: dict[str, Tensor] = {}
             g2_slot_probability: dict[str, Tensor] = {}
+            g2_slot_log_probability: dict[str, Tensor] = {}
             if self.coordinate_typed_raw_detail:
                 if (
                     self.g2_typed_query is None
@@ -5127,10 +5225,12 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                                 slot_evidence,
                                 torch.zeros_like(slot_evidence),
                             )
-                            g2_slot_probability[name] = torch.softmax(
+                            slot_log_probability = torch.log_softmax(
                                 slot_evidence,
                                 dim=-1,
                             )
+                            g2_slot_log_probability[name] = slot_log_probability
+                            g2_slot_probability[name] = slot_log_probability.exp()
                 else:
                     semantic_probability = fine_probability
                     appearance_probability = fine_probability
@@ -5148,6 +5248,13 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                             name: torch.full_like(
                                 probability,
                                 1.0 / float(max(self.slots, 1)),
+                            )
+                            for name, probability in g2_slot_probability.items()
+                        }
+                        g2_slot_log_probability = {
+                            name: torch.full_like(
+                                probability,
+                                -math.log(float(max(self.slots, 1))),
                             )
                             for name, probability in g2_slot_probability.items()
                         }
@@ -5208,6 +5315,10 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                                 name: probability.roll(shifts=1, dims=-1)
                                 for name, probability in g2_slot_probability.items()
                             }
+                            g2_slot_log_probability = {
+                                name: probability.roll(shifts=1, dims=-1)
+                                for name, probability in g2_slot_log_probability.items()
+                            }
                 rectified_keys = torch.einsum(
                     "bcijmk,bcijmkr->bcijmr",
                     fine_probability,
@@ -5231,6 +5342,18 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     .square()
                     .mean()
                     .sqrt(),
+                    "flow_jepa_progressive_g2_aligned_variance_min": (
+                        state.aligned_variance.detach().float().amin()
+                    ),
+                    "flow_jepa_progressive_g2_correction_scale_min": (
+                        correction_scale.detach().float().amin()
+                    ),
+                    "flow_jepa_progressive_g2_correction_std_gain_max": (
+                        _zero_preserving_variance_std_gain(
+                            state.aligned_variance.detach(),
+                            epsilon=self.address_variance_epsilon_norm,
+                        ).amax()
+                    ),
                     "flow_jepa_progressive_g2_correction_compression": (
                         correction_compression.detach()
                     ),
@@ -5313,14 +5436,35 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                         raise RuntimeError(
                             "grounded G2 did not construct typed slot ownership"
                         )
-                    state.g2_semantic_slot_probability = (
-                        g2_slot_probability["semantic"].to(dtype=rollout.dtype)
+                    if set(g2_slot_log_probability) != {
+                        "semantic",
+                        "appearance",
+                        "geometry",
+                    }:
+                        raise RuntimeError(
+                            "grounded G2 did not retain typed FP32 log ownership"
+                        )
+                    # Keep the probability and its originating log-softmax in
+                    # FP32. G3 consumes the log form directly; converting the
+                    # probability to BF16 here and taking log later was the
+                    # observation-boundary underflow path fixed by Schema39.
+                    state.g2_semantic_slot_probability = g2_slot_probability[
+                        "semantic"
+                    ]
+                    state.g2_appearance_slot_probability = g2_slot_probability[
+                        "appearance"
+                    ]
+                    state.g2_geometry_slot_probability = g2_slot_probability[
+                        "geometry"
+                    ]
+                    state.g2_semantic_slot_log_probability = (
+                        g2_slot_log_probability["semantic"]
                     )
-                    state.g2_appearance_slot_probability = (
-                        g2_slot_probability["appearance"].to(dtype=rollout.dtype)
+                    state.g2_appearance_slot_log_probability = (
+                        g2_slot_log_probability["appearance"]
                     )
-                    state.g2_geometry_slot_probability = (
-                        g2_slot_probability["geometry"].to(dtype=rollout.dtype)
+                    state.g2_geometry_slot_log_probability = (
+                        g2_slot_log_probability["geometry"]
                     )
             state.metrics = metrics
             return state
@@ -5408,33 +5552,41 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     "appearance": state.g2_appearance_slot_probability,
                     "geometry": state.g2_geometry_slot_probability,
                 }
-                if any(value is None for value in parent_owner.values()):
+                parent_log_owner = {
+                    "semantic": state.g2_semantic_slot_log_probability,
+                    "appearance": state.g2_appearance_slot_log_probability,
+                    "geometry": state.g2_geometry_slot_log_probability,
+                }
+                if any(value is None for value in parent_owner.values()) or any(
+                    value is None for value in parent_log_owner.values()
+                ):
                     raise RuntimeError(
-                        "grounded G3 cannot inherit missing G2 slot ownership"
+                        "grounded G3 cannot inherit missing G2 FP32 slot ownership"
                     )
                 updated_owner: dict[str, Tensor] = {}
+                updated_log_owner: dict[str, Tensor] = {}
                 for name, canonical_key in (
                     ("semantic", canonical_semantic),
                     ("appearance", canonical_appearance),
                     ("geometry", canonical_geometry),
                 ):
                     parent = parent_owner[name]
+                    parent_log = parent_log_owner[name]
                     assert parent is not None
+                    assert parent_log is not None
                     residual = self.g3_owner_residual[name](
                         canonical_key
-                    ).squeeze(-1)
-                    updated_owner[name] = bounded_owner_update(
-                        parent,
-                        residual,
-                        maximum_residual=0.50,
-                    ).float()
+                    ).squeeze(-1).float()
+                    bounded_residual = 0.50 * torch.tanh(residual)
+                    updated_log_owner[name] = torch.log_softmax(
+                        parent_log.float() + bounded_residual,
+                        dim=-1,
+                    )
+                    updated_owner[name] = updated_log_owner[name].exp()
                 # Store log probabilities as the score interface so the
                 # downstream softmax recovers the inherited/refined posterior
                 # exactly, rather than training a second independent owner.
-                owner_slot_scores = {
-                    name: probability.clamp_min(1e-8).log()
-                    for name, probability in updated_owner.items()
-                }
+                owner_slot_scores = updated_log_owner
                 slot_score = 0.5 * (
                     owner_slot_scores["semantic"]
                     + owner_slot_scores["geometry"]
@@ -5577,6 +5729,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             summary_by_slot = self.g3_summary_out(summary_input)
         slot_weights = torch.softmax(slot_score, dim=-1).to(dtype=rollout.dtype)
         owner_slot_weights: dict[str, Tensor] = {}
+        owner_slot_log_weights: dict[str, Tensor] = {}
         if self.coordinate_typed_raw_detail:
             # V110 appended all three private summaries to generic visual
             # memory. V111 instead keeps the lower-width canonical typed keys
@@ -5588,9 +5741,10 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     ("appearance", canonical_appearance),
                     ("geometry", canonical_geometry),
                 ):
-                    owner_slot_weights[name] = torch.softmax(
-                        owner_slot_scores[name], dim=-1
-                    ).to(dtype=rollout.dtype)
+                    owner_slot_log_weights[name] = torch.log_softmax(
+                        owner_slot_scores[name].float(), dim=-1
+                    )
+                    owner_slot_weights[name] = owner_slot_log_weights[name].exp()
                     if collect_diagnostics:
                         metrics[
                             f"flow_jepa_progressive_g3_{name}_owner_sidecar_rms"
@@ -5830,6 +5984,9 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     )
                     else torch.zeros_like(state.rectified_centers)
                 ),
+                semantic_owner_log_probs=owner_slot_log_weights["semantic"],
+                appearance_owner_log_probs=owner_slot_log_weights["appearance"],
+                geometry_owner_log_probs=owner_slot_log_weights["geometry"],
             )
             grounded_facts.validate()
             if intervention in _GROUNDED_G3_SLOT_INTERVENTIONS:

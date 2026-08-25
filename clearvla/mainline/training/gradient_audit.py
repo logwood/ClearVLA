@@ -40,6 +40,7 @@ class FiniteGradientSpikeReport:
     gradient_spike_audit_threshold: float
     max_l2: GradientParameterMaximum
     max_abs: GradientParameterMaximum
+    flow_delta_head_channel_l2: tuple[float, ...] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -52,6 +53,15 @@ class FiniteGradientSpikeReport:
             values = asdict(row)
             for name, value in values.items():
                 result[f"{prefix}_{name}"] = value
+        if self.flow_delta_head_channel_l2 is not None:
+            for index, value in enumerate(self.flow_delta_head_channel_l2):
+                result[f"flow_delta_head_channel_{index}_l2"] = float(value)
+            result["flow_delta_head_flow_channels_l2"] = math.sqrt(
+                sum(value * value for value in self.flow_delta_head_channel_l2[:2])
+            )
+            result["flow_delta_head_uncertainty_channels_l2"] = math.sqrt(
+                sum(value * value for value in self.flow_delta_head_channel_l2[2:])
+            )
         return result
 
 
@@ -106,11 +116,41 @@ def build_finite_gradient_spike_report(
             max_abs=float(host_scores[index, 1].item()),
         )
 
+    # A channel split is meaningful only when the spike's actual L2 owner is
+    # the six-channel observation flow head.  Never attach an aggregate of
+    # unrelated ``delta_head`` modules to a bottom/action-head spike.
+    owner_name, _owner_parameter, owner_gradient = rows[max_l2_index]
+    observation_owner = owner_name.startswith("observation.") or (
+        ".observation." in owner_name
+    )
+    owns_flow_channels = (
+        observation_owner
+        and "delta_head" in owner_name
+        and owner_gradient.ndim >= 1
+        and int(owner_gradient.shape[0]) == 6
+    )
+    if owns_flow_channels:
+        channel_l2 = (
+            owner_gradient.detach()
+            .float()
+            .reshape(6, -1)
+            .square()
+            .sum(dim=1)
+            .sqrt()
+            .cpu()
+        )
+        flow_delta_head_channel_l2 = tuple(
+            float(value) for value in channel_l2.tolist()
+        )
+    else:
+        flow_delta_head_channel_l2 = None
+
     return FiniteGradientSpikeReport(
         gradient_global_preclip_l2=float(global_norm),
         gradient_spike_audit_threshold=float(audit_threshold),
         max_l2=describe(max_l2_index),
         max_abs=describe(max_abs_index),
+        flow_delta_head_channel_l2=flow_delta_head_channel_l2,
     )
 
 

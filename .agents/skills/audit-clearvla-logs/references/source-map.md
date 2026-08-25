@@ -565,3 +565,27 @@ Re-check these against current source rather than assuming they remain true:
     gradient windows. Schema38 recovery treats the complete-field identity and
     removed independent-S vote as numerical invariants rather than mere metric
     presence.
+80. Schema39 replaces the fused Schema38 P2 reader with two explicit active
+    boundaries in `model/effect_terminal.py`: P2 selects K/type/camera spatial
+    evidence while preserving all four intervals; P3 performs the physical
+    four-interval no-null terminal. Never interpret Schema38 complete-field or
+    P2 null metrics as active Schema39 semantics.
+81. Schema39 P2 diagnostics use the `object_p2_spatial_*` prefix. The physical
+    interval posterior, selected common/innovation, cancellation, contract and
+    per-interval masses use `object_p3_*`. Both
+    `object_p2_spatial_selector_has_null` and
+    `object_p3_interval_terminal_has_null` are algebraic zero invariants.
+82. Dynamic P1 remains separate from factual base and is completed into a
+    protected no-null policy-precision carrier by `model/compiler.py`. It is
+    consumed by the bounded transition and by a dedicated protected bottom
+    reader; optional six-lane null routing cannot reject it. One shared
+    `.35 x .25` budget still bounds the total optional bottom update.
+83. Schema39 finite-spike flow/uncertainty channel attribution is valid only
+    when the maximum-L2 owner itself is the six-channel observation flow
+    `delta_head`. A bottom/action-head spike must not inherit an aggregate of
+    unrelated modules whose names merely contain `delta_head`.
+84. Schema39 recovery in `tools/audit_policy_logs.py` has its own required
+    structure/gradient surface and validates serialized manifest/source digest
+    self-consistency plus all five component ABI identifiers. A formal release
+    audit therefore requires the run directory with `run_context.json`, not a
+    copied console log alone.

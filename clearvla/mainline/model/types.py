@@ -42,6 +42,13 @@ class LocalFactSet:
     slot_support: Tensor  # [B,C,Y,X,M]
     slot_validity: Tensor  # [B,C,Y,X,M,1]
     slot_transport_prior: Tensor | None = None  # [B,C,Y,X,M,2]
+    # Active restored-G producers export these directly from their FP32
+    # log-softmax islands.  The optional fallback exists only for compact
+    # legacy fixtures; the Schema39 observation compiler always supplies all
+    # three and the grounder never reconstructs them from BF16 probabilities.
+    semantic_owner_log_probs: Tensor | None = None
+    appearance_owner_log_probs: Tensor | None = None
+    geometry_owner_log_probs: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -87,6 +94,18 @@ class LocalFactSet:
                 (*prefix, 2),
                 "local slot transport prior",
             )
+        for name in (
+            "semantic_owner_log_probs",
+            "appearance_owner_log_probs",
+            "geometry_owner_log_probs",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if tuple(value.shape) != prefix:
+                raise ValueError(f"local {name} lost the M hypothesis axis")
+            if value.dtype != torch.float32 or not torch.isfinite(value).all():
+                raise TypeError(f"local {name} must be finite FP32")
         if tuple(self.public_scene_base.shape[:4]) != prefix[:4]:
             raise ValueError("local public scene base lost camera/spatial identity")
         _shape(
@@ -120,9 +139,13 @@ class DenseFactChart:
     candidate_support: Tensor  # [B,C,Y,X,M]
     candidate_validity: Tensor  # [B,C,Y,X,M,1]
     candidate_owner_prior: Tensor  # [B,C,Y,X,M]
+    candidate_owner_log_prior: Tensor  # producer-owned finite FP32
     candidate_semantic_prior: Tensor  # typed conditional local priors
     candidate_appearance_prior: Tensor
     candidate_geometry_prior: Tensor
+    candidate_semantic_log_prior: Tensor  # producer-owned finite FP32
+    candidate_appearance_log_prior: Tensor
+    candidate_geometry_log_prior: Tensor
     candidate_transport_prior: Tensor  # [B,C,Y,X,M,2]
 
     def validate(self) -> None:
@@ -143,6 +166,12 @@ class DenseFactChart:
             raise ValueError("candidate validity is misaligned")
         if tuple(self.candidate_owner_prior.shape) != prefix:
             raise ValueError("candidate owner prior is misaligned")
+        if tuple(self.candidate_owner_log_prior.shape) != prefix:
+            raise ValueError("candidate owner log prior is misaligned")
+        if self.candidate_owner_log_prior.dtype != torch.float32 or not torch.isfinite(
+            self.candidate_owner_log_prior
+        ).all():
+            raise TypeError("candidate owner log prior must be finite FP32")
         for name in (
             "candidate_semantic_prior",
             "candidate_appearance_prior",
@@ -150,6 +179,16 @@ class DenseFactChart:
         ):
             if tuple(getattr(self, name).shape) != prefix:
                 raise ValueError(f"{name} is misaligned")
+        for name in (
+            "candidate_semantic_log_prior",
+            "candidate_appearance_log_prior",
+            "candidate_geometry_log_prior",
+        ):
+            value = getattr(self, name)
+            if tuple(value.shape) != prefix:
+                raise ValueError(f"{name} is misaligned")
+            if value.dtype != torch.float32 or not torch.isfinite(value).all():
+                raise TypeError(f"{name} must be finite FP32")
         if tuple(self.candidate_transport_prior.shape) != (*prefix, 2):
             raise ValueError("candidate transport prior is misaligned")
         chart_prefix = prefix[:4]
@@ -180,12 +219,17 @@ class ObjectFactSet:
     camera_transport_prior: Tensor  # [B,K,C,2]
     camera_support: Tensor  # [B,K,C,1]
     camera_chart_availability: Tensor  # observable camera/chart support [B,K,C,1]
-    # Joint physical assignment mass in each camera, normalized by the
-    # camera's observed candidate mass.  This is evidence strength used for
-    # camera reduction and audit; unlike ``camera_support`` it is not an
-    # object-width statistic, and unlike ``camera_chart_availability`` it is not an
+    # Base assignment allocation across cameras, normalized on the camera
+    # axis before observable validity is applied.  Multiplying this by
+    # ``camera_chart_availability`` recovers the producer-owned joint observed
+    # camera measure used for reduction and P2.  Unlike ``camera_support`` it
+    # is not an object-width statistic, and unlike availability it is not an
     # independent physical loss-support field.
     camera_evidence_mass: Tensor  # [B,K,C,1]
+    # Producer-owned FP32 log measures. Unsupported rows carry finite zero and
+    # are distinguished by the corresponding availability/evidence support;
+    # consumers must never reconstruct these logs from rounded model dtype.
+    log_camera_weight: Tensor  # [B,K,C,1]
     support: Tensor  # [B,K,1]
     # Read-conditioned object-vs-null confidence.  This is deliberately not
     # the fraction of total chart area allocated to an object.
@@ -193,6 +237,7 @@ class ObjectFactSet:
     # Physical support of the object's own read.  Unlike existence this is a
     # legal-source mask, not a learned confidence or allocation prior.
     chart_availability: Tensor  # observable object/chart support [B,K,1]
+    log_chart_availability: Tensor  # FP32 [B,K,1]
     object_to_chart: Tensor  # read posterior [B,K,C,Y,X]
     candidate_assignment: Tensor  # joint local-prior competition mass [B,K,C,Y,X,M]
     # One physical K+null assignment owns object identity.  These three
@@ -224,19 +269,37 @@ class ObjectFactSet:
     def coordinates(self) -> Tensor:
         """V120 object coordinate reduced only over physical camera support."""
 
-        weight = self.camera_evidence_mass.float()
-        return (
-            self.camera_coordinates.float() * weight
-        ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
+        weight = (
+            self.camera_evidence_mass.float()
+            * self.camera_chart_availability.float()
+        )
+        mass = weight.sum(dim=2)
+        support = mass > 0.0
+        numerator = (self.camera_coordinates.float() * weight).sum(dim=2)
+        return torch.where(
+            support,
+            numerator
+            / torch.where(support, mass, torch.ones_like(mass)),
+            torch.zeros_like(numerator),
+        )
 
     @property
     def transport_prior(self) -> Tensor:
         """V120 object transport prior reduced only over valid cameras."""
 
-        weight = self.camera_evidence_mass.float()
-        return (
-            self.camera_transport_prior.float() * weight
-        ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
+        weight = (
+            self.camera_evidence_mass.float()
+            * self.camera_chart_availability.float()
+        )
+        mass = weight.sum(dim=2)
+        support = mass > 0.0
+        numerator = (self.camera_transport_prior.float() * weight).sum(dim=2)
+        return torch.where(
+            support,
+            numerator
+            / torch.where(support, mass, torch.ones_like(mass)),
+            torch.zeros_like(numerator),
+        )
 
     def validate(self) -> None:
         self.dense_chart.validate()
@@ -275,11 +338,30 @@ class ObjectFactSet:
             (batch, objects, cameras, 1),
             "object camera chart availability",
         )
+        if self.camera_chart_availability.dtype != torch.float32 or not torch.isfinite(
+            self.camera_chart_availability
+        ).all():
+            raise TypeError(
+                "object camera chart availability must remain finite FP32"
+            )
         _shape(
             self.camera_evidence_mass,
             (batch, objects, cameras, 1),
             "object camera evidence mass",
         )
+        if self.camera_evidence_mass.dtype != torch.float32 or not torch.isfinite(
+            self.camera_evidence_mass
+        ).all():
+            raise TypeError("object camera evidence mass must remain finite FP32")
+        _shape(
+            self.log_camera_weight,
+            (batch, objects, cameras, 1),
+            "object camera log weight",
+        )
+        if self.log_camera_weight.dtype != torch.float32 or not torch.isfinite(
+            self.log_camera_weight
+        ).all():
+            raise TypeError("object camera log weight must be finite FP32")
         _shape(self.support, (batch, objects, 1), "object support")
         _shape(self.existence, (batch, objects, 1), "object existence")
         _shape(
@@ -287,6 +369,19 @@ class ObjectFactSet:
             (batch, objects, 1),
             "object chart availability",
         )
+        if self.chart_availability.dtype != torch.float32 or not torch.isfinite(
+            self.chart_availability
+        ).all():
+            raise TypeError("object chart availability must remain finite FP32")
+        _shape(
+            self.log_chart_availability,
+            (batch, objects, 1),
+            "object chart log availability",
+        )
+        if self.log_chart_availability.dtype != torch.float32 or not torch.isfinite(
+            self.log_chart_availability
+        ).all():
+            raise TypeError("object chart log availability must be finite FP32")
         chart = self.dense_chart.dino_content
         expected_chart = (batch, objects, *chart.shape[1:4])
         _shape(self.object_to_chart, expected_chart, "object-to-chart posterior")
@@ -329,9 +424,11 @@ class ObjectFactSet:
             camera_support=self.camera_support[:, index],
             camera_chart_availability=self.camera_chart_availability[:, index],
             camera_evidence_mass=self.camera_evidence_mass[:, index],
+            log_camera_weight=self.log_camera_weight[:, index],
             support=self.support[:, index],
             existence=self.existence[:, index],
             chart_availability=self.chart_availability[:, index],
+            log_chart_availability=self.log_chart_availability[:, index],
             object_to_chart=self.object_to_chart[:, index],
             candidate_assignment=self.candidate_assignment[:, index],
             semantic_candidate_assignment=(self.semantic_candidate_assignment[:, index]),
@@ -974,12 +1071,14 @@ class FutureObjectDynamics:
     transport_mean: Tensor  # camera-specific [B,I,K,C,2]
     transport_covariance: Tensor  # PSD xx/xy/yy [B,I,K,C,3]
     chart_availability: Tensor  # observable support [B,K,1]
+    log_chart_availability: Tensor  # producer-owned finite FP32 [B,K,1]
     # Current object geometry remains a real camera mixture.  Reducing these
     # coordinates to one normalized-image mean creates a point that belongs
     # to no camera and silently penalizes multi-view objects in P2.
     camera_coordinates: Tensor  # [B,K,C,2]
-    camera_chart_availability: Tensor  # observable camera/chart support [B,K,C,1]
-    camera_weights: Tensor  # [B,K,C,1]
+    camera_chart_availability: Tensor  # observable FP32 camera support [B,K,C,1]
+    camera_weights: Tensor  # producer-owned FP32 joint camera measure [B,K,C,1]
+    log_camera_weight: Tensor  # producer-owned finite FP32 [B,K,C,1]
 
     @property
     def intervals(self) -> int:
@@ -1066,11 +1165,42 @@ class FutureObjectDynamics:
             raise ValueError(
                 "future transport covariance must retain its FP32 PSD boundary"
             )
+        if not torch.isfinite(self.transport_covariance).all():
+            raise ValueError("future transport covariance must be finite")
+        covariance_xx = self.transport_covariance[..., 0]
+        covariance_xy = self.transport_covariance[..., 1]
+        covariance_yy = self.transport_covariance[..., 2]
+        covariance_determinant = covariance_xx * covariance_yy - covariance_xy.square()
+        covariance_tolerance = 1.0e-6
+        if (
+            (covariance_xx < -covariance_tolerance).any()
+            or (covariance_yy < -covariance_tolerance).any()
+            or (covariance_determinant < -covariance_tolerance).any()
+        ):
+            raise ValueError("future transport covariance must be positive semidefinite")
         _shape(
             self.chart_availability,
             (batch, objects, 1),
             "chart availability",
         )
+        if self.chart_availability.dtype != torch.float32 or not torch.isfinite(
+            self.chart_availability
+        ).all():
+            raise ValueError("future chart availability must remain finite FP32")
+        if (
+            (self.chart_availability < 0.0).any()
+            or (self.chart_availability > 1.0).any()
+        ):
+            raise ValueError("future chart availability must remain in [0,1]")
+        _shape(
+            self.log_chart_availability,
+            (batch, objects, 1),
+            "chart log availability",
+        )
+        if self.log_chart_availability.dtype != torch.float32 or not torch.isfinite(
+            self.log_chart_availability
+        ).all():
+            raise ValueError("future chart log availability must be finite FP32")
         if self.camera_coordinates.ndim != 4 or tuple(
             self.camera_coordinates.shape[:2]
         ) != (batch, objects) or int(self.camera_coordinates.shape[-1]) != 2:
@@ -1080,11 +1210,30 @@ class FutureObjectDynamics:
             (*self.camera_coordinates.shape[:-1], 1),
             "future camera weights",
         )
+        if self.camera_weights.dtype != torch.float32 or not torch.isfinite(
+            self.camera_weights
+        ).all():
+            raise ValueError("future camera weights must remain finite FP32")
+        _shape(
+            self.log_camera_weight,
+            (*self.camera_coordinates.shape[:-1], 1),
+            "future camera log weight",
+        )
+        if self.log_camera_weight.dtype != torch.float32 or not torch.isfinite(
+            self.log_camera_weight
+        ).all():
+            raise ValueError("future camera log weight must be finite FP32")
         _shape(
             self.camera_chart_availability,
             (*self.camera_coordinates.shape[:-1], 1),
             "future camera chart availability",
         )
+        if self.camera_chart_availability.dtype != torch.float32 or not torch.isfinite(
+            self.camera_chart_availability
+        ).all():
+            raise ValueError(
+                "future camera chart availability must remain finite FP32"
+            )
 
     def permute(self, permutation: Tensor) -> "FutureObjectDynamics":
         """Relabel the persistent global-object axis without changing values."""
@@ -1103,9 +1252,11 @@ class FutureObjectDynamics:
             transport_mean=self.transport_mean[:, :, index],
             transport_covariance=self.transport_covariance[:, :, index],
             chart_availability=self.chart_availability[:, index],
+            log_chart_availability=self.log_chart_availability[:, index],
             camera_coordinates=self.camera_coordinates[:, index],
             camera_chart_availability=self.camera_chart_availability[:, index],
             camera_weights=self.camera_weights[:, index],
+            log_camera_weight=self.log_camera_weight[:, index],
         )
 
     @classmethod
@@ -1135,14 +1286,14 @@ class FutureObjectDynamics:
                 dtype=torch.float32,
             ),
             chart_availability=facts.chart_availability,
+            log_chart_availability=facts.log_chart_availability,
             camera_coordinates=facts.camera_coordinates.to(dtype=current.dtype),
-            camera_chart_availability=facts.camera_chart_availability.to(
-                dtype=current.dtype
-            ),
+            camera_chart_availability=facts.camera_chart_availability.float(),
             camera_weights=(
                 facts.camera_evidence_mass.float()
                 * facts.camera_chart_availability.float()
-            ).to(dtype=current.dtype),
+            ),
+            log_camera_weight=facts.log_camera_weight,
         )
 
 
