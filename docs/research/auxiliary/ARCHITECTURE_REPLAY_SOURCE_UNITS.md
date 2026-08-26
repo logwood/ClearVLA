@@ -1,7 +1,7 @@
 # Cross-version replay source units
 
-Status: source-derived working register; G-01, G-02, S-01, S-02, W-01 and W-02
-implemented and statically closed; S-03 guard verified; P1-01 next.
+Status: source-derived working register; G-01, G-02, S-01, S-02, W-01, W-02
+and P1-01 implemented and statically closed; S-03 guard verified; P2-01 next.
 Established on 2026-08-26.
 
 This file records the implementation semantic units recovered across
@@ -427,7 +427,19 @@ Static acceptance:
 - zero dynamic residual leaves factual_base and consequence unchanged;
 - factual_base is invariant to noisy action and Euler time;
 - both legal dynamic consumers receive the same carrier;
-- no optional P3 lane reprojects factual_base or policy_query_residual.
+- no optional P3 lane receives `policy_query_residual`; removal of inherited
+  optional factual/static-precision aliases is owned by P3-01.
+
+Implementation closure: R1e is recorded in
+`R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`. The exact static reader is unchanged
+and still runs once. `CompletedP1PolicyState` keeps its factual base and live
+policy residual disjoint; only `P2QueryDock` forms the exact three-term P2
+query. Consequence starts from the static fact. The same raw residual reaches
+the controlled-transition action operand and the retained bottom optional
+ingress through the existing no-null basis reader, without a new parameter,
+contract, null or scale. Forward/reverse boundary tests and the retained suite
+pass 140/140. R1e has zero parameter, optimizer and state-key delta from R1d;
+P2-01 is the next source unit.
 
 ### P2-01: spatial selection then physical interval terminal
 
@@ -650,6 +662,10 @@ Implementation slices:
 6. spatial and physical terminal: P2-01.
 7. unique P3 and bottom ingress: P3-01 and B-01.
 8. matching numerics and diagnostics: N-01 and D-01.
+
+Slices 1-5 are complete as separate reversible source units. P2-01 is next and
+remains read-only until its active producer/consumer/loss/runtime/checkpoint
+worksheet closes.
 
 There is no training between these slices. Each slice receives only algebraic,
 shape, sentinel, call-count, forward-trace and reverse-VJP verification. The

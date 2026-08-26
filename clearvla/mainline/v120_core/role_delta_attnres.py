@@ -198,8 +198,9 @@ class PolicyRoleDeltaBank:
 
     ``values`` keeps source depth and action basis explicit:
     ``[batch, source, horizon, basis, hidden]``.  ``protected_detail`` is the
-    already world-conditioned high-resolution write made at the W->P boundary;
-    it remains a separate additive lane and therefore cannot lose a
+    already world-conditioned high-resolution write made at the W->P boundary.
+    ``protected_policy_precision`` is the live per-step P1 policy residual.
+    Both remain separate additive lanes and therefore cannot lose a
     source-survival softmax competition against coarser world/policy values.
     """
 
@@ -207,6 +208,7 @@ class PolicyRoleDeltaBank:
     source_names: tuple[str, ...]
     source_depths: tuple[int, ...]
     protected_detail: Tensor | None = None
+    protected_policy_precision: Tensor | None = None
 
     def validate(self, *, hidden_size: int, horizon: int) -> None:
         if self.values.ndim != 5:
@@ -225,17 +227,16 @@ class PolicyRoleDeltaBank:
             raise ValueError("policy role-delta hidden size is invalid")
         if len(self.source_names) <= 0:
             raise ValueError("policy role-delta bank cannot be empty")
-        if self.protected_detail is not None:
-            expected = (
-                int(self.values.shape[0]),
-                int(horizon),
-                int(self.values.shape[3]),
-                int(hidden_size),
-            )
-            if tuple(self.protected_detail.shape) != expected:
-                raise ValueError(
-                    "protected policy detail must be [B,horizon,basis,H]"
-                )
+        expected = (
+            int(self.values.shape[0]),
+            int(horizon),
+            int(self.values.shape[3]),
+            int(hidden_size),
+        )
+        for name in ("protected_detail", "protected_policy_precision"):
+            value = getattr(self, name)
+            if value is not None and tuple(value.shape) != expected:
+                raise ValueError(f"{name} must be [B,horizon,basis,H]")
 
 
 class RoleDeltaAttnRes(nn.Module):

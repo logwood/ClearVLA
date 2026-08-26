@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 assembly; R1a-R1d complete through W-02; 140 retained mainline tests pass; no training run
+release status:         Schema25-R1 assembly; R1a-R1e complete through P1-01; 140 retained mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -28,7 +28,7 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
 > **The executable source is the exact Schema25 replay base plus completed
-> R1a/G-01, R1b/G-02, R1c/S-01,S-02 and R1d/W-01,W-02; it is not yet
+> R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02 and R1e/P1-01; it is not yet
 > behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -40,7 +40,9 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > and expresses the unchanged Schema25 relevance value as exact interval-common
 > plus residual coordinates. R1d gives those coordinates one causal W owner,
 > retains physical camera identity through future geometry, and removes online
-> predicted-status authority. No CUDA smoke, dataset access, checkpoint
+> predicted-status authority. R1e separates cached factual detail from the
+> noisy-action/time-dependent P1 policy residual and restores that raw residual
+> only at its named dynamic consumers. No CUDA smoke, dataset access, checkpoint
 > migration or training run has been performed.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
@@ -73,8 +75,9 @@ Schema25 makes one bounded S ownership change:
 - semantic, appearance and geometry each compare only with a fixed zero null;
 - CoarseAction and W consume S-owned docks and no longer reread/reselect raw
   typed facts through their own learned-null routers;
-- P1, P3, transition and bottom internals are unchanged; R1d makes only the
-  minimum camera-aware adaptation to the inherited P2 reader.
+- the Schema25 base initially leaves P1, P3, transition and bottom internals
+  unchanged; R1d makes only the minimum camera-aware adaptation to the
+  inherited P2 reader, and R1e below repairs only the P1 carrier ownership.
 
 R1a/G-01 makes one additional source-local repair on that base:
 
@@ -138,10 +141,30 @@ R1d/W-01,W-02 replaces the pre-R1d W mechanics and future ABI:
   semantic-versus-geometry type softmax remain explicit P2-01 debt. R1d does
   not claim that later terminal closure.
 
-No block, external loss weight, gain, quota, hard gate, entropy target,
-capacity or P1 learned null was added. R1d removes three W status heads and one
-P2 status projection; pre-R1d checkpoints are intentionally incompatible and
-no migration shim exists.
+R1e/P1-01 separates the static and dynamic P1 owners without changing their
+producers:
+
+- the exact cached `FactualPrecisionDock.protected_detail` remains
+  `CompletedP1PolicyState.factual_base`; the per-ODE
+  `updated_canvas-canvas` write remains
+  `policy_query_residual`, with no eager combined factual alias;
+- P2 alone forms `action_query + factual_base + policy_query_residual` through
+  `P2QueryDock`. Protected consequence starts from `factual_base`, so the
+  dynamic write cannot re-enter the graph under a factual identity;
+- `ObjectPolicyPlanDeltaBank.protected_policy_precision` carries the exact raw
+  dynamic residual. Optional P3 projections receive the static factual and
+  consequence values only; removing their inherited static aliases remains
+  P3-01 debt;
+- the controlled transition adds the raw residual once in its existing
+  terminal-normalized action operand. Bottom reads the same carrier once with
+  its existing no-null basis reader and existing optional-ingress scale;
+- no reader, parameter, buffer, persistent key, RMS contract, LayerScale,
+  learned gain, learned null or second bottom scale was added.
+
+No block, external loss weight, gain, quota, hard gate, entropy target or
+capacity was added. R1d removes three W status heads and one P2 status
+projection; R1e has zero parameter/state delta. Pre-R1d checkpoints are
+intentionally incompatible and no migration shim exists.
 
 The post-epoch-1 source/log closure audit then corrected four remaining
 fidelity defects without changing the G/S/W/P or bottom topology:
@@ -208,13 +231,19 @@ completed progressive chart + S + four clean action bases
 
 current noisy action + flow time + cached protected detail
     -> V120 dynamic P1 policy block at each dynamic forward
-    -> completed live P1 fact
+    -> CompletedP1PolicyState
+       factual_base = cached protected detail
+       policy_query_residual = updated canvas - input canvas
 
-completed P1 fact + FutureObjectDynamics + S + noisy-action query
+action query + factual_base + policy_query_residual
+    -> exact P2QueryDock combined query
+    + FutureObjectDynamics + S
     -> P2 bounded semantic/intent and camera-coordinate/covariance effect read
        using current chart/camera availability as the only physical support
+factual_base + P2 effect
     -> zero-preserving protected consequence
     -> P3 factual/precision/effect/temporal/state-change lanes
+       plus raw protected_policy_precision = policy_query_residual
 
 one shared V120 action/context seed
     -> noisy-action query shared by P2/P3/transition/bottom
@@ -222,12 +251,21 @@ one shared V120 action/context seed
 
 exact completed G3 rollout shared with static P1
     -> static 512-row ControlledTransitionSource, once per observation
-noisy action + V120 learned neutral + plan/history
+noisy action + protected consequence + raw policy residual
+    + V120 learned neutral + plan/history
     -> dynamic 512-row ControlledTransitionState, every dynamic forward
 
-protected consequence + five P3 lanes + transition + shared seed
+transition + shared seed + protected consequence
     -> V120 P1/P2 layer contracts
     -> CVAE/workspace/EvidenceViewAdapter
+protected consequence
+    -> separate no-null protected-detail basis read
+five P3 lanes
+    -> retained optional source read
+raw policy residual
+    -> separate no-null basis read
+    -> join optional source read before the one inherited fixed scale
+all bottom carriers
     -> three Evidence MMDiT blocks
     -> ordered low-rank contraction and execution-value controller
     -> 18-D physical velocity plus event/motion heads
@@ -237,8 +275,9 @@ The history-action proposal remains a supervised auxiliary prediction. Its
 future proposal tokens do not enter G/S/W/P, transition or bottom. The
 separately compressed executed-action history remains an observable condition
 in the shared seed. Generic trajectory/workspace ingress is algebraic neutral;
-protected consequence is written once, while the five P3 lanes are optional
-typed evidence.
+protected consequence is written once through its no-null ingress. The raw
+dynamic P1 residual is read separately without a null and joins the five P3
+lanes only at the retained optional-ingress scale.
 
 Training-only graph:
 
@@ -296,7 +335,10 @@ supports may change targets and losses, never deployment action.
    glimpse types, the complete N=49 posterior and a real 3x3 microgrid.
    Global-K is not a P1 axis. `FactualPrecisionDock` is a parameter-free
    boundary containing only the already-computed protected detail; it is not a
-   replacement reader or an extra bottleneck.
+   replacement reader or an extra bottleneck. `CompletedP1PolicyState` keeps
+   that static fact separate from the noisy-action/time-dependent
+   `policy_query_residual`. Only P2 may materialize their three-term sum with
+   the action query; no eager combined factual alias is stored.
 10. P2 geometry remains camera-specific until its named consumer:
 
     ```text
@@ -317,18 +359,24 @@ supports may change targets and losses, never deployment action.
     ```text
     effect = 0
     interaction = 0
-    protected_consequence = completed P1 fact
+    protected_consequence = factual_base
     ```
 
 12. P3 owns five V120 lanes: factual, precision, effect, temporal and
-    state-change. It cannot reopen vision or consume a free W carrier.
+    state-change. The inherited factual/static-precision/effect aliases remain
+    explicit P3-01 debt, but none may directly reproject the dynamic P1
+    residual. It cannot reopen vision or consume a free W carrier.
 13. Transition static/dynamic frequency is model semantics: its exact final
     G3 rollout source builds once; real-versus-neutral coefficients read
-    current noisy action at every dynamic forward. The source retains the real
-    anchor/camera/xy rows and may not recreate them from a reduced chart.
+    current noisy action, protected consequence and raw P1 policy residual at
+    every dynamic forward. The source retains the real anchor/camera/xy rows
+    and may not recreate them from a reduced chart.
 14. Bottom source count/order/value semantics follow V120. Do not remove CVAE,
     workspace, P1/P2 contracts, Evidence MMDiT, capacity or execution to reduce
-    memory or simplify the mainline.
+    memory or simplify the mainline. Protected consequence and dynamic P1
+    precision use separate no-null basis reads. Dynamic precision joins the
+    optional ingress before its one inherited fixed scale; it owns no second
+    scale or magnitude contract.
 15. Online boundaries use ordinary autograd. No artificial gradient, hard
     gate, entropy/mass quota, scalar progress loss, forced diversity or forced
     nonzero flow is legal.
@@ -381,8 +429,15 @@ ObjectTopTrainingTargets
 FactualPrecisionDock
   protected detail                                       [B,24,4,H]
 
+CompletedP1PolicyState
+  factual base / live policy-query residual              [B,24,4,H]
+
+P2QueryDock
+  action query / factual base / policy-query residual    [B,24,4,H]
+
 ObjectPolicyPlanDeltaBank
-  protected base + factual/precision/effect/temporal/state-change [B,24,4,H]
+  protected base / protected policy precision            [B,24,4,H]
+  factual/precision/effect/temporal/state-change          [B,24,4,H]
 
 V120SeedContext
   state / state history / compressed executed history    [B,1|3|7,H]
@@ -399,12 +454,13 @@ ControlledTransitionSource / State
 | global grounder | completed G3 chart/typed local candidates; detached current DINO and observed mask for its sole reconstruction loss | S, W, noisy action, future Teacher data |
 | S | T5, state/executed history, typed ObjectFactSet | frame progress, phase label, noisy action, Teacher |
 | W | public ObjectFactSet conditions, existing camera transport prior, S-owned typed common/residual through WorldIntentDock, one typed-free clean coarse action intent | raw typed-fact reread, second typed action path, target/noisy action, proposal, Teacher, predicted status/support, free W value |
-| P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, second visual read |
-| P2 | completed P1 fact, supervised semantic/camera W field, current chart/camera support, S, noisy-action query | RGB/DINO reopen, predicted status/support, camera reconstruction after reduction, free W hidden |
-| P3 | P1 fact, consequence, S, noisy-action query | Teacher, RGB/DINO, proposal, free W carrier |
+| static P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, noisy action/time, second visual read |
+| dynamic P1 | action query, Euler time, cached factual base | vision reopen, W, proposal, Teacher, factual relabeling of its live residual |
+| P2 | exact three-term P2 query, supervised semantic/camera W field, current chart/camera support, S | RGB/DINO reopen, predicted status/support, camera reconstruction after reduction, free W hidden |
+| P3 | static P1 fact, consequence, S, noisy-action query; raw dynamic residual only as protected policy precision | Teacher, RGB/DINO, proposal, free W carrier, dynamic residual projection into optional P3 lanes |
 | transition source | exact completed G3 rollout view shared with P1 | W target, proposal, noisy action, Teacher |
-| transition dynamic | source, shared V120 seed, plan | target action, Teacher, future proposal |
-| bottom | consequence, five P3 lanes, transition, seed, layer contracts | RGB/DINO, Teacher, duplicate W/P base |
+| transition dynamic | source, shared V120 seed, protected consequence, raw P1 policy residual, plan | target action, Teacher, future proposal |
+| bottom | consequence, raw P1 policy residual, five P3 lanes, transition, seed, layer contracts | RGB/DINO, Teacher, duplicate W/P base, new dynamic gain/null |
 
 ## Loss and optimizer ownership
 
@@ -471,11 +527,17 @@ ControlledTransitionSource / State
   adds no module or state key. R1d measures `169,976,772` total and
   `153,582,451` trainable parameters. Its exact `-3,075` delta is three W
   status heads (`-1,539`) plus the P2 status projection and third type-query
-  row (`-1,536`). The active model has 1,406 parameter tensors, 1,068
+  row (`-1,536`). R1e is parameter-free and retains the exact R1d inventory
+  and ordered state-key sequence. The active model has 1,406 parameter tensors, 1,068
   trainable/optimizer tensors, 23 optimizer groups and 1,412 state-key names.
   W measures 9,229,827 parameters / 26 tensors; P2 measures 1,575,939 / 9.
   The ordered state-key-name SHA-256 is
   `9af8b806832afd9edae58e0dfd1ec123ea9964e4511499571865b17fc96cc25d`.
+  An independent seed-0 R1d/R1e construction comparison produced identical
+  canonical full-state tensor digest
+  `9793ea81a3b1173c7569300bc74a31f462c2e792744d0f2299d5ccdfd3ec5ba7`
+  and identical post-construction CPU RNG digest
+  `8670db504a2bb9d1e15f1d87977890e5006f320ab4657a52e9963ea674c67250`.
   Relative to the completed Schema24 graph,
   the exact `-12,734,208` trainable delta is fully accounted for: S removes
   three duplicate `_CrossRead`s plus one shared learned-null router and adds
@@ -484,7 +546,8 @@ ControlledTransitionSource / State
   learned-null router (`-6,357,248`); W removes one learned-null router
   (`-65,792`) and three status heads (`-1,539`); P2 removes its status
   projection plus one type-query row (`-1,536`). Bottom and the exact P1 reader
-  are unchanged.
+  parameter inventories are unchanged; R1e changes only parameter-free runtime
+  carriers and existing-consumer wiring.
 - Active manifest identity:
 
   ```text
@@ -522,8 +585,11 @@ absence of CoarseAction/W raw-typed rereads and the S future-owner fence,
 single-call W common ownership, near/far causal write isolation,
 zero-preserving appearance/common conditioning, exact camera-axis W geometry,
 FP32 PSD covariance, per-camera Teacher null-identity moments, absence of
-online status ABI, current-support exact-zero P2 routing, covariance-sensitive
-P2 geometry, same-camera Teacher geometry, neutral effect, P2 bounds, endpoint lifecycle,
+online status ABI, static/dynamic P1 identity separation, exact three-owner P2
+query and reverse VJP, static consequence ownership, raw dynamic transition
+and bottom reachability, exact-zero dynamic bottom ingress, current-support
+exact-zero P2 routing, covariance-sensitive P2 geometry, same-camera Teacher
+geometry, neutral effect, P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 

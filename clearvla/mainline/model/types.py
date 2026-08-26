@@ -331,6 +331,74 @@ class FactualPrecisionDock:
 
 
 @dataclass(frozen=True)
+class P2QueryDock:
+    """The only three-owner dynamic P1 boundary consumed by P2."""
+
+    action_query: Tensor  # [B,24,Q,H]
+    factual_base: Tensor  # [B,24,Q,H]
+    policy_query_residual: Tensor  # [B,24,Q,H]
+
+    def validate(self) -> None:
+        expected = tuple(self.action_query.shape)
+        if len(expected) != 4:
+            raise ValueError("P2 query dock must be [B,T,Q,H]")
+        for name in ("factual_base", "policy_query_residual"):
+            value = getattr(self, name)
+            if tuple(value.shape) != expected:
+                raise ValueError(f"P2 query {name} must align with action_query")
+            if value.device != self.action_query.device:
+                raise ValueError(f"P2 query {name} must share action_query device")
+
+    def combined(self) -> Tensor:
+        """Form the exact post-P1 query only at P2's real consumer."""
+
+        self.validate()
+        return self.action_query + self.factual_base + self.policy_query_residual
+
+
+@dataclass(frozen=True)
+class CompletedP1PolicyState:
+    """Live P1 state with observation fact and policy write kept distinct."""
+
+    factual_base: Tensor  # [B,24,Q,H]
+    policy_query_residual: Tensor  # [B,24,Q,H]
+
+    def p2_dock(self, action_query: Tensor) -> P2QueryDock:
+        dock = P2QueryDock(
+            action_query=action_query,
+            factual_base=self.factual_base,
+            policy_query_residual=self.policy_query_residual,
+        )
+        dock.validate()
+        return dock
+
+    def validate(
+        self,
+        *,
+        horizon: int = 24,
+        basis: int | None = None,
+        hidden: int | None = None,
+    ) -> None:
+        expected = tuple(self.factual_base.shape)
+        if len(expected) != 4:
+            raise ValueError("completed P1 policy state must be [B,T,Q,H]")
+        if int(expected[1]) != int(horizon):
+            raise ValueError("completed P1 policy state lost its horizon axis")
+        if basis is not None and int(expected[2]) != int(basis):
+            raise ValueError("completed P1 policy state lost its action-basis axis")
+        if hidden is not None and int(expected[3]) != int(hidden):
+            raise ValueError("completed P1 policy state has the wrong hidden width")
+        if tuple(self.policy_query_residual.shape) != expected:
+            raise ValueError(
+                "completed P1 policy residual must align with factual_base"
+            )
+        if self.policy_query_residual.device != self.factual_base.device:
+            raise ValueError(
+                "completed P1 policy residual must share factual_base device"
+            )
+
+
+@dataclass(frozen=True)
 class ActionIntentDock:
     """S-owned inputs that the clean coarse-action compiler may consume."""
 

@@ -1061,7 +1061,27 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 )
             )
         )
-        routed_update = scale * routed
+        policy_precision_route_metrics: dict[str, Tensor] | None = None
+        if bank.protected_policy_precision is None:
+            policy_precision_update = torch.zeros_like(routed)
+        else:
+            # The dynamic P1 write is already a policy-space residual. Read
+            # its basis with the existing no-null selector, independently of
+            # the optional P3 source simplex, then apply the inherited policy
+            # ingress scale exactly once with the other optional update.
+            if self.protected_detail_basis_attnres is None:
+                raise RuntimeError("protected policy precision has no basis reader")
+            policy_precision_values = bank.protected_policy_precision.to(
+                device=action_query.device, dtype=action_query.dtype
+            )
+            policy_precision_update, policy_precision_route_metrics = (
+                self.protected_detail_basis_attnres(
+                    action_query,
+                    policy_precision_values,
+                    collect_diagnostics=collect_diagnostics,
+                )
+            )
+        routed_update = scale * (routed + policy_precision_update)
         protected_route_metrics: dict[str, Tensor] | None = None
         if bank.protected_detail is None:
             protected_update = torch.zeros_like(routed_update)
@@ -1133,10 +1153,54 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             "evidence_policy_delta_attnres_routed_update_norm": (
                 routed_update.detach().float().norm(dim=-1).mean()
             ),
+            "evidence_policy_delta_protected_policy_precision_read_norm": (
+                policy_precision_update.detach().float().norm(dim=-1).mean()
+            ),
+            "evidence_policy_delta_protected_policy_precision_scaled_norm": (
+                (scale * policy_precision_update)
+                .detach()
+                .float()
+                .norm(dim=-1)
+                .mean()
+            ),
             "evidence_policy_delta_protected_detail_update_norm": (
                 protected_update.detach().float().norm(dim=-1).mean()
             ),
         }
+        if policy_precision_route_metrics is not None:
+            metrics.update(
+                {
+                    "evidence_policy_precision_basis_entropy": (
+                        policy_precision_route_metrics["entropy"]
+                    ),
+                    "evidence_policy_precision_basis_max": (
+                        policy_precision_route_metrics["max"]
+                    ),
+                    "evidence_policy_precision_basis_query_rms": (
+                        policy_precision_route_metrics["query_rms"]
+                    ),
+                    "evidence_policy_precision_basis_value_rms": (
+                        policy_precision_route_metrics["value_rms"]
+                    ),
+                    "evidence_policy_precision_basis_raw_value_rms": (
+                        policy_precision_route_metrics["raw_value_rms"]
+                    ),
+                    "evidence_policy_precision_basis_update_rms": (
+                        policy_precision_route_metrics["update_rms"]
+                    ),
+                }
+            )
+            policy_precision_source_mass = policy_precision_route_metrics[
+                "source_mass"
+            ]
+            if int(policy_precision_source_mass.numel()) != int(basis):
+                raise RuntimeError(
+                    "protected policy precision reader lost basis identity"
+                )
+            for basis_index in range(int(basis)):
+                metrics[
+                    f"evidence_policy_precision_basis_mass_{basis_index}"
+                ] = policy_precision_source_mass[basis_index]
         if protected_route_metrics is not None:
             metrics.update(
                 {

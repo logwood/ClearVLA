@@ -39,7 +39,11 @@ from ..v120_core.time_domain_mmdit import (
 from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 from .action_contract import ActionQueryEncoder, BottomOutput, V120SeedContext
 from .compiler import ObjectPolicyPlanDeltaBank
-from .types import ControlledTransitionState, ObjectIntentState
+from .types import (
+    CompletedP1PolicyState,
+    ControlledTransitionState,
+    ObjectIntentState,
+)
 
 
 def _build_decoder_config(config: ExperimentConfig):
@@ -251,8 +255,8 @@ class RestoredV120EvidenceBottom(nn.Module):
         protected_detail: Tensor,
         time: Tensor,
         collect_diagnostics: bool = False,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Apply V120's dynamic P1 policy write to one cached detail read.
+    ) -> tuple[CompletedP1PolicyState, dict[str, Tensor]]:
+        """Apply V120's dynamic P1 write without relabeling it as a fact.
 
         In the strict object path the policy block's trajectory queries may
         attend only trajectory keys; visual/context/future rows are masked and
@@ -305,9 +309,18 @@ class RestoredV120EvidenceBottom(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         dynamic_delta = (updated - canvas).reshape(expected)
-        completed = protected_detail + dynamic_delta
+        state = CompletedP1PolicyState(
+            factual_base=protected_detail,
+            policy_query_residual=dynamic_delta,
+        )
+        state.validate(
+            horizon=self.horizon,
+            basis=self.basis,
+            hidden=self.hidden,
+        )
         if not collect_diagnostics:
-            return completed, {}
+            return state, {}
+        completed_policy_trajectory = protected_detail + dynamic_delta
         metrics = {
             "p1_protected_detail_rms": protected_detail.detach()
             .float()
@@ -319,7 +332,19 @@ class RestoredV120EvidenceBottom(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "p1_completed_fact_rms": completed.detach()
+            # Retain the historical scalar name for longitudinal tooling. The
+            # represented sum is no longer exported under a factual identity.
+            "p1_completed_fact_rms": completed_policy_trajectory.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "p1_factual_base_rms": state.factual_base.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "p1_policy_query_residual_rms": state.policy_query_residual.detach()
             .float()
             .square()
             .mean()
@@ -337,7 +362,7 @@ class RestoredV120EvidenceBottom(nn.Module):
             value = block_metrics.get(source)
             if value is not None:
                 metrics[target] = value
-        return completed, metrics
+        return state, metrics
 
     def set_training_step(self, global_step: int) -> float:
         return self.decoder.set_execution_training_step(global_step)
@@ -412,6 +437,7 @@ class RestoredV120EvidenceBottom(nn.Module):
             source_names=plan.source_names,
             source_depths=(7, 7, 7, 7, 7),
             protected_detail=plan.protected_base,
+            protected_policy_precision=plan.protected_policy_precision,
         )
 
     def _layer_contract_canvas(

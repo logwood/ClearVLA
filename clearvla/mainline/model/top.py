@@ -9,11 +9,11 @@ active capability.  It has three calls with non-overlapping authority:
     Training-only no-grad Teacher-G plus recognizer/loss targets.  It cannot
     mutate or replace the online context.
 ``compile_policy``
-    ODE-step-dependent P2/P3 read from the completed dynamic P1 fact.
+    ODE-step-dependent P2/P3 read from the typed P1 policy state.
 
 P1's expensive current-detail read is built exactly once by the independent
-factual reader.  The live policy write is completed at each ODE step before it
-enters this composer; P2/P3 cannot reopen a visual bank.
+factual reader.  Its static fact and per-step policy residual remain distinct
+when they enter this composer; P2/P3 cannot reopen a visual bank.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from .routing import smooth_rms_contract
 from .teacher import ObjectFutureTeacher
 from .types import (
     CoarseActionIntentState,
+    CompletedP1PolicyState,
     FutureObjectDynamics,
     LocalFactSet,
     ObjectFactSet,
@@ -403,20 +404,22 @@ class ObjectIntentDynamicsTop(nn.Module):
         self,
         context: DeploymentTopCache,
         *,
-        p1_fact: Tensor,
+        p1_state: CompletedP1PolicyState,
         action_query: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[CompiledPolicyState, dict[str, Tensor]]:
         """Run dynamic P2/P3; no observation or teacher input is accepted."""
 
         context.validate(hidden=self.hidden, horizon=self.horizon)
-        # V120's P2 query was the live trajectory *after* the P1 factual
-        # write, not the untouched noisy-action seed.  Keeping that residual
-        # order is important: it lets the future-effect reader ask questions
-        # in the factual chart that P1 actually selected.
-        if tuple(p1_fact.shape) != tuple(action_query.shape):
-            raise ValueError("completed P1 fact and action query must align")
-        p1_action_query = action_query + p1_fact
+        p1_state.validate(
+            horizon=self.horizon,
+            basis=self.basis,
+            hidden=self.hidden,
+        )
+        # P2 alone consumes the complete post-P1 query. Keep the three owners
+        # named until this exact read so the live policy write cannot acquire
+        # a false factual identity elsewhere in the graph.
+        p1_action_query = p1_state.p2_dock(action_query).combined()
         raw_effect, effect_metrics = self.effect_reader(
             p1_action_query,
             context.predicted_dynamics,
@@ -429,7 +432,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         # seen by P3 and the controlled-transition coefficient geometry.
         effect, effect_contract = smooth_rms_contract(raw_effect, 0.35)
         consequence, consequence_metrics = self.consequence(
-            factual_base=p1_fact,
+            factual_base=p1_state.factual_base,
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
@@ -439,7 +442,8 @@ class ObjectIntentDynamicsTop(nn.Module):
         # generic canvas.
         p3_action_query = action_query + consequence.protected_consequence
         plan, plan_metrics = self.plan_compiler(
-            p1_fact=p1_fact,
+            p1_factual_detail=p1_state.factual_base,
+            p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),
             action_query=p3_action_query,

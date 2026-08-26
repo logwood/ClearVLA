@@ -22,9 +22,10 @@ class ObjectConsequenceState:
 
 @dataclass(frozen=True)
 class ObjectPolicyPlanDeltaBank:
-    """V120 five typed lanes around one protected consequence."""
+    """V120 lanes around disjoint factual and dynamic P1 carriers."""
 
     protected_base: Tensor
+    protected_policy_precision: Tensor
     factual: Tensor
     precision: Tensor
     effect: Tensor
@@ -45,6 +46,8 @@ class ObjectPolicyPlanDeltaBank:
         expected = tuple(self.protected_base.shape)
         if len(expected) != 4:
             raise ValueError("object policy plan must be [B,T,Q,H]")
+        if tuple(self.protected_policy_precision.shape) != expected:
+            raise ValueError("protected policy precision lost [B,T,Q,H]")
         for name in ("factual", "precision", "effect", "temporal", "state_change"):
             if tuple(getattr(self, name).shape) != expected:
                 raise ValueError(f"object policy {name} lost [B,T,Q,H]")
@@ -65,6 +68,7 @@ class ObjectPolicyPlanDeltaBank:
             source_names=self.source_names,
             source_depths=(int(source_depth),) * 5,
             protected_detail=self.protected_base,
+            protected_policy_precision=self.protected_policy_precision,
         )
 
 
@@ -342,19 +346,24 @@ class ObjectPolicyPlanCompiler(nn.Module):
     def forward(
         self,
         *,
-        p1_fact: Tensor,
+        p1_factual_detail: Tensor,
+        p1_policy_residual: Tensor,
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
-        if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
+        if (
+            tuple(action_query.shape) != expected
+            or tuple(p1_factual_detail.shape) != expected
+            or tuple(p1_policy_residual.shape) != expected
+        ):
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         factual = self.factual_lane(consequence.factual_base)
         precision_condition = (
-            self.precision_fact(p1_fact)
+            self.precision_fact(p1_factual_detail)
             + self.precision_consequence(consequence.protected_consequence)
         ) / math.sqrt(2.0)
         precision = self.precision_lane(
@@ -388,6 +397,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         lanes = [smooth_rms_contract(value, 0.35)[0] for value in lanes]
         bank = ObjectPolicyPlanDeltaBank(
             protected_base=consequence.protected_consequence,
+            protected_policy_precision=p1_policy_residual,
             factual=lanes[0],
             precision=lanes[1],
             effect=lanes[2],
@@ -400,6 +410,11 @@ class ObjectPolicyPlanCompiler(nn.Module):
         return bank, {
             "object_p3_factual_rms": lanes[0].detach().float().square().mean().sqrt(),
             "object_p3_precision_rms": lanes[1].detach().float().square().mean().sqrt(),
+            "object_p3_protected_policy_precision_rms": p1_policy_residual.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_p3_effect_rms": lanes[2].detach().float().square().mean().sqrt(),
             "object_p3_temporal_rms": lanes[3].detach().float().square().mean().sqrt(),
             "object_p3_state_change_rms": lanes[4].detach().float().square().mean().sqrt(),

@@ -184,12 +184,18 @@ class ControlledTransitionDynamics(nn.Module):
             raise ValueError("controlled transition action query must be [B,T,Q,H]")
         if tuple(plan.protected_base.shape) != expected_action:
             raise ValueError("controlled transition lost the P1+P2 consequence")
+        if tuple(plan.protected_policy_precision.shape) != expected_action:
+            raise ValueError("controlled transition lost the dynamic P1 policy residual")
         # V120 passed the complete 24x4 trajectory after P1/P2 and terminal
         # normalization.  Do not basis-reduce this to 24 rows: doing so changes
         # the action cross-attention denominator and erases the factual/effect
         # residual that the transition was meant to condition on.
-        trajectory, norm_denominator, norm_gain = self.trajectory_norm.forward_with_denominator(
-            action_query + plan.protected_base
+        trajectory, norm_denominator, norm_gain = (
+            self.trajectory_norm.forward_with_denominator(
+                action_query
+                + plan.protected_base
+                + plan.protected_policy_precision
+            )
         )
         action_tokens = trajectory.flatten(1, 2)
         context = self._context_tokens(seed, plan)
@@ -249,6 +255,13 @@ class ControlledTransitionDynamics(nn.Module):
                 norm_denominator.detach().float().amin()
             ),
             "controlled_transition_trajectory_norm_gain": norm_gain.detach().float(),
+            "controlled_transition_policy_precision_rms": (
+                plan.protected_policy_precision.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
+            ),
         }
 
 

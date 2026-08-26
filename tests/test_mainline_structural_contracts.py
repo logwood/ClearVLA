@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 import clearvla.mainline.model.grounding as grounding_module
 import clearvla.mainline.model.intent as intent_module
+import clearvla.mainline.model.types as model_types
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.interfaces import CurrentObservation
 from clearvla.mainline.model.bottom import (
@@ -120,6 +121,22 @@ def _object_top() -> ObjectIntentDynamicsTop:
         heads=4,
         teacher_key_dim=8,
         core_config=build_v120_visual_config(config),
+    )
+
+
+def _p1_state(
+    factual_base: torch.Tensor,
+    policy_query_residual: torch.Tensor | None = None,
+):
+    completed_type = getattr(model_types, "CompletedP1PolicyState", None)
+    assert completed_type is not None
+    return completed_type(
+        factual_base=factual_base,
+        policy_query_residual=(
+            torch.zeros_like(factual_base)
+            if policy_query_residual is None
+            else policy_query_residual
+        ),
     )
 
 
@@ -1933,7 +1950,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     action_query = torch.randn(batch, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
         DeploymentTopCache(intent=intent, predicted_dynamics=dynamics),
-        p1_fact=p1_fact,
+        p1_state=_p1_state(p1_fact),
         action_query=action_query,
     )
     relabeled_compiled, _ = top.compile_policy(
@@ -1941,7 +1958,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             intent=relabeled_intent,
             predicted_dynamics=relabeled_dynamics,
         ),
-        p1_fact=p1_fact,
+        p1_state=_p1_state(p1_fact),
         action_query=action_query,
     )
     for name in ("effect",):
@@ -1958,7 +1975,13 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
             atol=2e-5,
             rtol=2e-5,
         ), name
-    for name in ("protected_base", "precision", "temporal", "state_change"):
+    for name in (
+        "protected_base",
+        "protected_policy_precision",
+        "precision",
+        "temporal",
+        "state_change",
+    ):
         assert torch.allclose(
             getattr(relabeled_compiled.plan, name),
             getattr(compiled.plan, name),
@@ -2389,12 +2412,12 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
     action_query = torch.randn(1, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
         deployment,
-        p1_fact=p1_fact,
+        p1_state=_p1_state(p1_fact),
         action_query=action_query,
     )
     neutral_other_query, _ = top.compile_policy(
         deployment,
-        p1_fact=p1_fact,
+        p1_state=_p1_state(p1_fact),
         action_query=torch.randn(1, horizon, basis, hidden),
     )
     assert torch.count_nonzero(compiled.effect) == 0
@@ -2414,7 +2437,7 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
             intent=identity_only_intent,
             predicted_dynamics=deployment.predicted_dynamics,
         ),
-        p1_fact=p1_fact,
+        p1_state=_p1_state(p1_fact),
         action_query=action_query,
     )
     # Cumulative/identity-bearing S queries are addresses internal to S.  P2

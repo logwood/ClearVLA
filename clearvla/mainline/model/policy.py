@@ -440,7 +440,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             action_history_keep=cache.action_history_keep,
             role=cache.role_table,
         )
-        p1_fact, p1_metrics = self.bottom.complete_p1_fact(
+        p1_state, p1_metrics = self.bottom.complete_p1_fact(
             action_query=action_query,
             protected_detail=cache.factual_dock.protected_detail,
             time=time,
@@ -448,7 +448,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
         compiled, top_metrics = self.top.compile_policy(
             cache.top,
-            p1_fact=p1_fact,
+            p1_state=p1_state,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,
         )

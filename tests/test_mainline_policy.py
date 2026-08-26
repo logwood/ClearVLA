@@ -869,10 +869,39 @@ def test_dynamic_p1_completes_cached_detail_at_each_ode_time() -> None:
         protected_detail=cache.factual_dock.protected_detail,
         time=torch.full((1,), 0.75),
     )
-    assert not torch.equal(first, second)
+    assert set(first.__dataclass_fields__) == {
+        "factual_base",
+        "policy_query_residual",
+    }
+    assert first.factual_base is cache.factual_dock.protected_detail
+    assert second.factual_base is cache.factual_dock.protected_detail
+    torch.testing.assert_close(
+        first.factual_base,
+        cache.factual_dock.protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        second.factual_base,
+        cache.factual_dock.protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert not torch.equal(
+        first.policy_query_residual,
+        second.policy_query_residual,
+    )
+    torch.testing.assert_close(
+        first.p2_dock(query).combined(),
+        query + first.factual_base + first.policy_query_residual,
+        atol=0.0,
+        rtol=0.0,
+    )
     assert first_metrics["p1_protected_detail_rms"] > 0
     assert first_metrics["p1_dynamic_delta_rms"] > 0
     assert first_metrics["p1_completed_fact_rms"] > 0
+    assert first_metrics["p1_factual_base_rms"] > 0
+    assert first_metrics["p1_policy_query_residual_rms"] > 0
 
 
 def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() -> None:
@@ -894,13 +923,14 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         executed_memory=cache.executed_memory,
         action_history_keep=cache.action_history_keep,
     )
+    p1_state, _ = model.bottom.complete_p1_fact(
+        action_query=query,
+        protected_detail=cache.factual_dock.protected_detail,
+        time=time,
+    )
     compiled, _ = model.top.compile_policy(
         cache.top,
-        p1_fact=model.bottom.complete_p1_fact(
-            action_query=query,
-            protected_detail=cache.factual_dock.protected_detail,
-            time=time,
-        )[0],
+        p1_state=p1_state,
         action_query=query,
     )
     captured_transition: dict[str, torch.Tensor] = {}
@@ -923,7 +953,9 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     finally:
         transition_hook.remove()
     expected_transition_action = model.transition.trajectory_norm(
-        query + compiled.plan.protected_base
+        query
+        + compiled.plan.protected_base
+        + compiled.plan.protected_policy_precision
     ).flatten(1, 2)
     torch.testing.assert_close(
         captured_transition["action_tokens"],
@@ -931,6 +963,13 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         atol=0.0,
         rtol=0.0,
     )
+    transition_policy_gradient = torch.autograd.grad(
+        transition.value.square().mean(),
+        p1_state.policy_query_residual,
+        retain_graph=True,
+    )[0]
+    assert torch.isfinite(transition_policy_gradient).all()
+    assert torch.count_nonzero(transition_policy_gradient) > 0
     assert transition_metrics["controlled_transition_action_token_rows"] == (
         config.dimensions.action_horizon * config.dimensions.action_basis_tokens
     )
@@ -1025,7 +1064,73 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     role_bank = model.bottom._role_bank(compiled.plan)
     assert role_bank.source_names == compiled.plan.source_names
     assert len(role_bank.source_names) == 5
-    assert torch.equal(role_bank.protected_detail, compiled.plan.protected_base)
+    protected_detail = role_bank.protected_detail
+    protected_policy_precision = role_bank.protected_policy_precision
+    assert protected_detail is not None
+    assert protected_policy_precision is not None
+    assert protected_policy_precision is compiled.plan.protected_policy_precision
+    assert torch.equal(protected_detail, compiled.plan.protected_base)
+    assert torch.equal(
+        protected_policy_precision,
+        p1_state.policy_query_residual,
+    )
+    assert model.bottom.decoder.protected_detail_basis_attnres is not None
+    assert not model.bottom.decoder.protected_detail_basis_attnres.include_null
+    bottom_query = torch.randn(
+        1,
+        config.dimensions.action_horizon,
+        config.dimensions.hidden_size,
+    )
+    isolated_dynamic_bank = replace(
+        role_bank,
+        values=torch.zeros_like(role_bank.values),
+        protected_detail=torch.zeros_like(protected_detail),
+    )
+    dynamic_basis_read, _ = (
+        model.bottom.decoder.protected_detail_basis_attnres(
+            bottom_query,
+            protected_policy_precision,
+            collect_diagnostics=False,
+        )
+    )
+    optional_update, consequence_update, _ = (
+        model.bottom.decoder._read_policy_delta_bank(
+            bottom_query,
+            isolated_dynamic_bank,
+            collect_diagnostics=False,
+        )
+    )
+    expected_optional = (
+        float(model.bottom.core_config.role_attnres_policy_to_mmdit_scale)
+        * dynamic_basis_read
+    )
+    torch.testing.assert_close(
+        optional_update,
+        expected_optional,
+        atol=1e-7,
+        rtol=1e-7,
+    )
+    bottom_policy_gradient = torch.autograd.grad(
+        optional_update.square().mean(),
+        p1_state.policy_query_residual,
+        retain_graph=True,
+    )[0]
+    assert torch.isfinite(bottom_policy_gradient).all()
+    assert torch.count_nonzero(bottom_policy_gradient) > 0
+    assert torch.count_nonzero(consequence_update) == 0
+    zero_dynamic_bank = replace(
+        isolated_dynamic_bank,
+        protected_policy_precision=torch.zeros_like(protected_policy_precision),
+    )
+    zero_optional, zero_consequence, _ = (
+        model.bottom.decoder._read_policy_delta_bank(
+            bottom_query,
+            zero_dynamic_bank,
+            collect_diagnostics=False,
+        )
+    )
+    assert torch.count_nonzero(zero_optional) == 0
+    assert torch.count_nonzero(zero_consequence) == 0
     state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
         seed_context
     )

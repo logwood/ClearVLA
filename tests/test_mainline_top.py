@@ -2,6 +2,7 @@ from dataclasses import fields, replace
 
 import torch
 
+import clearvla.mainline.model.types as model_types
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.model import FactualPrecisionDock, LocalFactSet
 from clearvla.mainline.model.top import ObjectIntentDynamicsTop, OnlineTopContext
@@ -119,14 +120,29 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     dock = FactualPrecisionDock(
         protected_detail=torch.randn(batch, horizon, basis, hidden),
     )
+    policy_query_residual = torch.randn_like(
+        dock.protected_detail,
+        requires_grad=True,
+    )
+    completed_type = getattr(model_types, "CompletedP1PolicyState", None)
+    assert completed_type is not None
+    p1_state = completed_type(
+        factual_base=dock.protected_detail,
+        policy_query_residual=policy_query_residual,
+    )
     action_query = torch.randn(batch, horizon, basis, hidden)
     captured: dict[str, torch.Tensor] = {}
 
     def capture_p2(_module, args, _kwargs):
+        captured["p2_query_live"] = args[0]
         captured["p2_query"] = args[0].detach().clone()
 
     def capture_p3(_module, _args, kwargs):
         captured["p3_query"] = kwargs["action_query"].detach().clone()
+        captured["p3_factual"] = kwargs["p1_factual_detail"].detach().clone()
+        captured["p3_policy_residual"] = kwargs[
+            "p1_policy_residual"
+        ].detach().clone()
 
     p2_hook = top.effect_reader.register_forward_pre_hook(
         capture_p2,
@@ -139,7 +155,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     try:
         compiled, _ = top.compile_policy(
             context.deployment_cache(),
-            p1_fact=dock.protected_detail,
+            p1_state=p1_state,
             action_query=action_query,
         )
     finally:
@@ -149,7 +165,32 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     assert tuple(compiled.plan.protected_base.shape) == (batch, horizon, basis, hidden)
     torch.testing.assert_close(
         captured["p2_query"],
-        action_query + dock.protected_detail,
+        action_query + dock.protected_detail + policy_query_residual,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        compiled.consequence.factual_base,
+        dock.protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        compiled.plan.protected_policy_precision,
+        policy_query_residual,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert compiled.plan.protected_policy_precision is policy_query_residual
+    torch.testing.assert_close(
+        captured["p3_factual"],
+        dock.protected_detail,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        captured["p3_policy_residual"],
+        policy_query_residual,
         atol=0.0,
         rtol=0.0,
     )
@@ -159,3 +200,39 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
         atol=0.0,
         rtol=0.0,
     )
+    p2_gradient = torch.autograd.grad(
+        captured["p2_query_live"].sum(),
+        policy_query_residual,
+        retain_graph=True,
+    )[0]
+    torch.testing.assert_close(
+        p2_gradient,
+        torch.ones_like(policy_query_residual),
+        atol=0.0,
+        rtol=0.0,
+    )
+    protected_gradient = torch.autograd.grad(
+        compiled.plan.protected_policy_precision.square().sum(),
+        policy_query_residual,
+    )[0]
+    torch.testing.assert_close(
+        protected_gradient,
+        2.0 * policy_query_residual,
+        atol=0.0,
+        rtol=0.0,
+    )
+    zero_residual_plan, _ = top.plan_compiler(
+        p1_factual_detail=p1_state.factual_base,
+        p1_policy_residual=torch.zeros_like(policy_query_residual),
+        consequence=compiled.consequence,
+        intent=context.intent.policy_dock(),
+        action_query=action_query + compiled.consequence.protected_consequence,
+        collect_diagnostics=False,
+    )
+    for name in ("factual", "precision", "effect", "temporal", "state_change"):
+        torch.testing.assert_close(
+            getattr(compiled.plan, name),
+            getattr(zero_residual_plan, name),
+            atol=0.0,
+            rtol=0.0,
+        )
