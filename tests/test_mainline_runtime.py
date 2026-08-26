@@ -80,15 +80,18 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
     }
 
 
-def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
+def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None:
     values = {
-        "loss_future_semantic_delta": 0.12,
-        "object_grounding_object_content_pair_cosine": 0.34,
-        "object_intent_public_interval_variation": 0.56,
-        "object_w_typed_common_state_rms": 0.07,
-        "object_w_far_condition_rms": 0.08,
-        "object_w2_interval_adjacent_cosine": 0.78,
-        "loss_action_flow_band_13_24": 0.9,
+        "loss_total": 1.2,
+        "loss_action_flow": 0.8,
+        "loss_action_flow_native": 0.7,
+        "loss_action_flow_first8": 0.6,
+        "loss_action_flow_tail": 0.9,
+        "loss_action_flow_band_13_24": 0.91,
+        "runtime_window_seconds_per_batch": 1.1,
+        # Exact V120-comparable aliases remain archived but should not repeat
+        # the same task quantities on the console.
+        "loss_action_flow_v120_comparable": 0.8,
     }
     line = JsonlRunLogger.compact_line(
         "train",
@@ -97,8 +100,9 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
         step=20,
         metrics=values,
     )
-    for name in values:
+    for name in set(values) - {"loss_action_flow_v120_comparable"}:
         assert f"{name}=" in line
+    assert "loss_action_flow_v120_comparable=" not in line
 
     details = JsonlRunLogger.diagnostic_lines(
         "train",
@@ -106,62 +110,85 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
         batch=20,
         step=20,
         metrics={
-            **values,
-            "loss_action_gripper_event_flow": 1.1,
-            "loss_flow_photometric_warp": 0.2,
-            "loss_flow_photometric_zero_warp": 0.3,
-            "object_grounding_candidate_key_rms": 0.31,
-            "object_w_typed_common_state_rms": 0.32,
-            "object_intent_semantic_route_raw_rms": 0.33,
-            "object_intent_semantic_relevance_mass": 0.34,
-            "object_w_semantic_common_contribution_rms": 0.35,
-            "object_w2_semantic_state_interval_variation": 0.321,
-            "object_teacher_interval_0_semantic_delta_rms": 0.322,
-            "loss_future_interval_0_semantic_delta": 0.323,
-            "object_p2_intent_score_max_abs": 0.33,
-            "p1_completed_fact_rms": 0.4,
+            "loss_group_action": 0.8,
+            "loss_contrib_action_flow": 0.8,
+            "loss_ledger_gap": 0.0,
+            "loss_contribution_gap": 0.0,
+            "object_grounding_object_content_pair_cosine": 0.34,
+            "object_p2_semantic_effect_rms": 0.35,
             "object_p3_protected_policy_precision_rms": 0.41,
-            "gradient_tensor_p3_temporal_rms": 0.42,
-            "bottom_capacity_mean": 0.5,
-            "bottom_controller_common_ratio": 0.51,
+            "flow_jepa_address_coarse_variance_min": 0.01,
+            "object_p2_terminal_has_null": 0.0,
+            "gradient_raw_observation_l2": 0.42,
+            "gradient_raw_global_l2": 0.43,
+            "gradient_tensor_p3_temporal_rms": 0.44,
+            # These remain in metrics.jsonl but are deliberately absent from
+            # the bounded console decision surface.
+            "object_grounding_candidate_key_rms": 0.31,
+            "object_intent_semantic_route_raw_rms": 0.33,
+            "object_w_semantic_common_contribution_rms": 0.35,
             "bottom_block_1_executed_update_rms": 0.52,
-            "object_p3_effect_rms": 9.0,
-            "object_w_typed_contribution_rms": 9.0,
-            "controlled_transition_pool_entropy": 9.0,
-            "validation_sampling_diagnostic_coverage": 0.09,
-            "validation_proposal_ablation_coverage": 0.09,
-            "validation_execution_ablation_coverage": 0.04,
-            "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
-            "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
         },
     )
     joined = "\n".join(details)
-    assert "loss_action_gripper_event_flow=1.1" in joined
-    assert "loss_flow_photometric_warp=0.2" in joined
-    assert "loss_flow_photometric_zero_warp=0.3" in joined
-    assert "object_grounding_candidate_key_rms=0.31" in joined
-    assert "object_w_typed_common_state_rms=0.32" in joined
-    assert "object_intent_semantic_route_raw_rms=0.33" in joined
-    assert "object_intent_semantic_relevance_mass=0.34" in joined
-    assert "object_w_semantic_common_contribution_rms=0.35" in joined
-    assert "object_w2_semantic_state_interval_variation=0.321" in joined
-    assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
-    assert "loss_future_interval_0_semantic_delta=0.323" in joined
-    assert "object_p2_intent_score_max_abs=0.33" in joined
-    assert "p1_completed_fact_rms=0.4" in joined
+    assert len(details) == 5
+    assert "loss_group_action=0.8" in joined
+    assert "loss_contrib_action_flow=0.8" in joined
+    assert "loss_ledger_gap=0" in joined
+    assert "object_grounding_object_content_pair_cosine=0.34" in joined
+    assert "object_p2_semantic_effect_rms=0.35" in joined
     assert "object_p3_protected_policy_precision_rms=0.41" in joined
-    assert "gradient_tensor_p3_temporal_rms=0.42" in joined
-    assert "bottom_capacity_mean=0.5" in joined
-    assert "bottom_controller_common_ratio=0.51" in joined
-    assert "bottom_block_1_executed_update_rms=0.52" in joined
-    assert "validation_sampling_diagnostic_coverage=0.09" in joined
-    assert "validation_proposal_ablation_coverage=0.09" in joined
-    assert "validation_execution_ablation_coverage=0.04" in joined
-    assert "validation_proposal_zero_mse_gain_vs_primary_physical=-0.01" in joined
-    assert "validation_execution_full_capacity_mse_gain_vs_primary_physical=-0.02" in joined
-    assert "object_p3_effect_rms=" not in joined
-    assert "object_w_typed_contribution_rms=" not in joined
-    assert "controlled_transition_pool_entropy=" not in joined
+    assert "flow_jepa_address_coarse_variance_min=0.01" in joined
+    assert "object_p2_terminal_has_null=0" in joined
+    assert "gradient_raw_observation_l2=0.42" in joined
+    assert "gradient_tensor_p3_temporal_rms=0.44" in joined
+    assert "object_grounding_candidate_key_rms=" not in joined
+    assert "object_intent_semantic_route_raw_rms=" not in joined
+    assert "object_w_semantic_common_contribution_rms=" not in joined
+    assert "bottom_block_1_executed_update_rms=" not in joined
+
+    validation = {
+        "validation_action_rmse_physical": 0.1,
+        "validation_first8_rmse_physical": 0.05,
+        "validation_tail_rmse_physical": 0.12,
+        "validation_band_13_24_rmse_physical": 0.13,
+        "validation_action_rmse_normalized": 0.2,
+        "validation_band_13_24_rmse_normalized": 0.23,
+        "validation_decoded_gripper_event_f1": 0.4,
+        "validation_decoded_gripper_events_predicted": 7.0,
+        "validation_decoded_gripper_events_target": 8.0,
+        "validation_event_head_f1": 0.5,
+        "validation_motion_head_f1": 0.6,
+        "validation_proposal_ablation_coverage": 0.1,
+        "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
+        "validation_execution_ablation_coverage": 0.05,
+        "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
+        "object_p2_effect_postcontract_rms": 0.3,
+    }
+    validation_line = JsonlRunLogger.compact_line(
+        "val", epoch=1, batch=None, step=100, metrics=validation
+    )
+    for name in (
+        "validation_action_rmse_physical",
+        "validation_first8_rmse_physical",
+        "validation_tail_rmse_physical",
+        "validation_band_13_24_rmse_physical",
+        "validation_action_rmse_normalized",
+        "validation_band_13_24_rmse_normalized",
+    ):
+        assert f"{name}=" in validation_line
+    validation_details = "\n".join(
+        JsonlRunLogger.diagnostic_lines(
+            "val", epoch=1, batch=None, step=100, metrics=validation
+        )
+    )
+    assert "validation_decoded_gripper_events_predicted=7" in validation_details
+    assert "validation_decoded_gripper_events_target=8" in validation_details
+    assert "validation_event_head_f1=0.5" in validation_details
+    assert "validation_motion_head_f1=0.6" in validation_details
+    assert "validation_proposal_ablation_coverage=0.1" in validation_details
+    assert "validation_execution_ablation_coverage=0.05" in validation_details
+    assert "object_p2_effect_postcontract_rms=0.3" in validation_details
 
 
 def test_gradient_tensor_hooks_observe_backward_without_changing_gradient() -> None:
@@ -291,6 +318,65 @@ def test_epoch_tail_training_window_is_persisted_with_gradient_ownership(tmp_pat
     assert row["window_boundary"] == "epoch_tail"
     assert row["window_batches"] == 1
     assert values["gradient_window_preclip_l2_max"] == 4.0
+
+
+def test_periodic_console_is_sparser_than_lossless_jsonl(tmp_path, capsys) -> None:
+    import json
+
+    from clearvla.mainline.train import _emit_training_window
+    from clearvla.mainline.training.gradient_audit import (
+        GradientPreclipWindowAccumulator,
+    )
+
+    logger = JsonlRunLogger(tmp_path)
+    config = ExperimentConfig()
+
+    def emit(batch: int) -> str:
+        window_metrics = DeviceMetricAccumulator()
+        window_metrics.update(
+            {
+                "loss_total": torch.tensor(2.5),
+                "loss_action_flow": torch.tensor(1.5),
+                "loss_group_action": torch.tensor(1.5),
+                "gradient_raw_global_l2": torch.tensor(2.0),
+            }
+        )
+        gradient_window = GradientPreclipWindowAccumulator()
+        gradient_window.update(
+            2.0,
+            weight=1.0,
+            batch_offset=1,
+            global_step=batch,
+        )
+        _emit_training_window(
+            logger=logger,
+            config=config,
+            window_metrics=window_metrics,
+            gradient_window=gradient_window,
+            epoch=1,
+            batch=batch,
+            step=batch,
+            window_seconds=1.0,
+            window_samples=8,
+            window_batches=config.runtime.log_every,
+            learning_rate=1.0e-4,
+            boundary="periodic",
+        )
+        return capsys.readouterr().out
+
+    assert emit(40) == ""
+    health = emit(100)
+    assert "[mainline-train]" in health
+    assert "[mainline-train-objective]" not in health
+    decision = emit(200)
+    assert "[mainline-train]" in decision
+    assert "[mainline-train-objective]" in decision
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["batch"] for row in rows] == [40, 100, 200]
+    assert all("loss_group_action" in row["metrics"] for row in rows)
 
 
 def test_gripper_event_metric_rejects_the_opposite_event_direction() -> None:

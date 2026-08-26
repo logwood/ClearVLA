@@ -32,7 +32,6 @@ from .runtime.identity import (
 from .runtime.logging import (
     DeviceMetricAccumulator,
     JsonlRunLogger,
-    active_metrics,
     archival_metrics,
     validate_resume_metric_boundary,
 )
@@ -263,39 +262,37 @@ def _emit_training_window(
         window_samples=int(window_samples),
         metrics=values,
     )
-    display_values = active_metrics(values)
-    print(
-        logger.compact_line(
+    first_window = int(batch) <= int(config.runtime.log_every)
+    epoch_tail = boundary == "epoch_tail"
+    health_stride = int(config.runtime.log_every) * 5
+    detail_stride = int(config.runtime.log_every) * 10
+    health_due = first_window or epoch_tail or int(batch) % health_stride == 0
+    detail_due = first_window or epoch_tail or int(batch) % detail_stride == 0
+    # The JSONL cadence remains unchanged.  Console is a decision surface: a
+    # small task/gradient/runtime row every five archival windows and a source
+    # localization panel every ten.  Non-finite gradients and finite spikes
+    # still print synchronously at the exact offending batch.
+    if health_due:
+        print(
+            logger.compact_line(
+                "train",
+                epoch=int(epoch),
+                batch=int(batch),
+                step=int(step),
+                metrics=values,
+            )
+            + f" window_boundary={boundary}",
+            flush=True,
+        )
+    if detail_due:
+        for detail_line in logger.diagnostic_lines(
             "train",
             epoch=int(epoch),
             batch=int(batch),
             step=int(step),
-            metrics=display_values,
-        )
-        + f" window_boundary={boundary}",
-        flush=True,
-    )
-    print(
-        "[mainline-train-gradient-window] "
-        f"epoch={int(epoch):03d} batch={int(batch):04d} step={int(step)} "
-        f"boundary={boundary} "
-        f"mean={values['gradient_window_preclip_l2_mean']:.6g} "
-        f"max={values['gradient_window_preclip_l2_max']:.6g} "
-        f"current={values['gradient_window_preclip_l2_current']:.6g} "
-        "max_batch_offset="
-        f"{int(values['gradient_window_preclip_l2_max_batch_offset'])} "
-        "max_global_step="
-        f"{int(values['gradient_window_preclip_l2_max_global_step'])}",
-        flush=True,
-    )
-    for detail_line in logger.diagnostic_lines(
-        "train",
-        epoch=int(epoch),
-        batch=int(batch),
-        step=int(step),
-        metrics=display_values,
-    ):
-        print(detail_line, flush=True)
+            metrics=values,
+        ):
+            print(detail_line, flush=True)
     return values
 
 
@@ -1062,8 +1059,14 @@ def main() -> None:
             train=train_values,
             validation=validation,
         )
+        runtime_names = (
+            "runtime_seconds_per_batch",
+            "runtime_samples_per_second",
+            "runtime_cuda_peak_reserved_gib",
+            "runtime_cuda_peak_process_estimate_gib",
+        )
         runtime_values = {
-            name: value for name, value in train_values.items() if name.startswith("runtime_")
+            name: train_values[name] for name in runtime_names if name in train_values
         }
         print(
             f"[mainline-runtime] epoch={epoch:03d} step={engine.global_step} "
@@ -1076,7 +1079,7 @@ def main() -> None:
                 epoch=epoch,
                 batch=None,
                 step=engine.global_step,
-                metrics=active_metrics(validation),
+                metrics=validation,
             ),
             flush=True,
         )
@@ -1085,7 +1088,7 @@ def main() -> None:
             epoch=epoch,
             batch=None,
             step=engine.global_step,
-            metrics=active_metrics(validation),
+            metrics=validation,
         ):
             print(detail_line, flush=True)
         metric = validation["validation_action_rmse_normalized"]

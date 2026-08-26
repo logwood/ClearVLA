@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; 155 retained mainline tests pass; no training run
+release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; decision-bounded console with lossless JSONL; 156 retained mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -707,7 +707,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 155/155. Tests cover full
+The retained local suite now passes 156/156. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -735,7 +735,8 @@ same-camera Teacher geometry, neutral effect, P2 bounds, zero-preserving
 variance VJPs, BF16-underflow-resistant producer logs, exact-zero legacy prior
 support, all-invalid finite masked terminals, read-only source-gradient hooks,
 pre-clip finite-spike attribution, partial-window gradient ownership, current
-metric vocabulary, endpoint lifecycle, optimizer ownership, three-stage
+metric vocabulary, a bounded decision-facing console backed by the unchanged
+lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
 gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
