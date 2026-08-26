@@ -51,7 +51,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_lane_local_p3_evidence_mmdit_dense512_execution"
+        == "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution"
     )
     assert (
         components.training

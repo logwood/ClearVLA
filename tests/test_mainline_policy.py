@@ -39,6 +39,7 @@ from clearvla.mainline.training.optimizer import (
     build_optimizer,
     role_lr_scale,
 )
+from clearvla.mainline.v120_core.layer_contracts import LayerContractAdapterHeads
 
 
 def _config() -> ExperimentConfig:
@@ -973,18 +974,19 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert transition_metrics["controlled_transition_action_token_rows"] == (
         config.dimensions.action_horizon * config.dimensions.action_basis_tokens
     )
-    contract_inputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    assert "p1_fact" not in inspect.signature(model.bottom.forward).parameters
+    assert "action_query" not in inspect.signature(
+        model.bottom._layer_contracts
+    ).parameters
+    assert "p1_fact" not in inspect.signature(model.bottom._layer_contracts).parameters
+    assert "plan" not in inspect.signature(model.bottom._layer_contracts).parameters
+    contract_inputs: list[tuple[torch.Tensor, dict[str, slice]]] = []
     contract_outputs: list[dict[str, torch.Tensor]] = []
     captured_event: dict[str, torch.Tensor] = {}
 
     def capture_contract_input(_module, args):
         canvas, slices = args
-        contract_inputs.append(
-            (
-                canvas[:, slices["trajectory"]].detach().clone(),
-                canvas[:, slices["rollout"]].detach().clone(),
-            )
-        )
+        contract_inputs.append((canvas.detach().clone(), dict(slices)))
 
     def capture_contract_output(_module, _args, output):
         contract_outputs.append(output)
@@ -1002,8 +1004,6 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     try:
         evidence = model.bottom.compile_evidence_view(
-            action_query=query,
-            p1_fact=compiled.consequence.factual_base,
             plan=compiled.plan,
             intent=cache.top.intent,
             seed=seed_context,
@@ -1013,27 +1013,37 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         evidence_hook.remove()
         for hook in contract_hooks:
             hook.remove()
-    assert [head.layer_index for head in model.bottom.layer_contract_heads] == [5, 6]
+    contract_heads: list[LayerContractAdapterHeads] = []
+    for module in model.bottom.layer_contract_heads:
+        assert isinstance(module, LayerContractAdapterHeads)
+        contract_heads.append(module)
+    assert [head.layer_index for head in contract_heads] == [5, 6]
     assert len(contract_inputs) == len(contract_outputs) == 2
-    torch.testing.assert_close(
-        contract_inputs[0][0],
-        (query + compiled.consequence.factual_base).flatten(1, 2),
-        atol=0.0,
-        rtol=0.0,
+    retained_contract_keys = (
+        "rollout_tokens",
+        "state_tokens",
+        "state_history_tokens",
+        "event_logits",
     )
-    torch.testing.assert_close(
-        contract_inputs[1][0],
-        (query + compiled.plan.protected_base).flatten(1, 2),
-        atol=0.0,
-        rtol=0.0,
+    removed_trajectory_keys = (
+        "trajectory_tokens",
+        "trajectory_pooled",
+        "pred_physical_velocity",
+        "direct_physical_velocity",
+        "rollout_residual_velocity",
+        "rollout_alpha",
+        "motion_logits",
     )
-    for _, rollout in contract_inputs:
+    for canvas, slices in contract_inputs:
+        assert slices["trajectory"].start == slices["trajectory"].stop
         torch.testing.assert_close(
-            rollout,
+            canvas[:, slices["rollout"]],
             transition.selector,
             atol=0.0,
             rtol=0.0,
         )
+    for output in contract_outputs:
+        assert not set(removed_trajectory_keys).intersection(output)
     torch.testing.assert_close(
         captured_event["value"],
         contract_outputs[-1]["event_logits"],
@@ -1042,14 +1052,74 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     assert all(
         parameter.requires_grad
-        for head in model.bottom.layer_contract_heads
+        for head in contract_heads
         for parameter in head.adapter.parameters()
     )
     assert not any(
         parameter.requires_grad
-        for head in model.bottom.layer_contract_heads
+        for head in contract_heads
         for parameter in head.readout.parameters()
     )
+    for head in contract_heads:
+        assert not hasattr(head.readout, "action_head")
+        assert not hasattr(head.readout, "motion_head")
+    contract_terms = tuple(
+        output[name].square().mean()
+        for output in contract_outputs
+        for name in retained_contract_keys
+    )
+    contract_loss = torch.stack(contract_terms).sum()
+    adapter_parameters = tuple(
+        parameter
+        for head in contract_heads
+        for parameter in head.adapter.parameters()
+    )
+    adapter_gradients = torch.autograd.grad(
+        contract_loss,
+        adapter_parameters,
+        retain_graph=True,
+    )
+    assert len(adapter_gradients) == 12
+    for gradient in adapter_gradients:
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) > 0
+
+    for head, (canvas, slices), reference in zip(
+        contract_heads,
+        contract_inputs,
+        contract_outputs,
+        strict=True,
+    ):
+        insertion = int(slices["trajectory"].start)
+        fake_trajectory = torch.randn(
+            int(canvas.shape[0]),
+            config.dimensions.action_horizon
+            * config.dimensions.action_basis_tokens,
+            int(canvas.shape[-1]),
+            device=canvas.device,
+            dtype=canvas.dtype,
+        )
+        expanded_canvas = torch.cat(
+            (canvas[:, :insertion], fake_trajectory, canvas[:, insertion:]),
+            dim=1,
+        )
+        shift = int(fake_trajectory.shape[1])
+        expanded_slices = dict(slices)
+        expanded_slices["trajectory"] = slice(insertion, insertion + shift)
+        for name in ("rollout", "registers"):
+            current = slices[name]
+            expanded_slices[name] = slice(
+                int(current.start) + shift,
+                int(current.stop) + shift,
+            )
+        intervened = head(expanded_canvas, expanded_slices)
+        for name in retained_contract_keys:
+            torch.testing.assert_close(
+                reference[name],
+                intervened[name],
+                atol=0.0,
+                rtol=0.0,
+            )
     trajectory_start, trajectory_stop = evidence.ranges["trajectory"]
     trajectory_projection = model.bottom.decoder.evidence_adapter.source_proj[
         "trajectory"

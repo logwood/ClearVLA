@@ -103,9 +103,9 @@ class RestoredV120EvidenceBottom(nn.Module):
         if self.physical_action_dim != int(self.core_config.physical_action_dim):
             raise ValueError("typed physical action width does not match V120")
 
-        # This shared V120 query seeds P2/P3, the controlled transition and
-        # the two layer contracts.  The restored decoder still owns its own
-        # native physical-action lift, exactly as V120 did.
+        # This shared V120 query seeds P2/P3 and the controlled transition.
+        # The terminal layer contracts consume rollout/state evidence only;
+        # the restored decoder still owns its native physical-action lift.
         self.query_encoder = ActionQueryEncoder(self.core_config)
         # V120 P1 was not only the static high-resolution reader.  The reader
         # first wrote protected current detail, then the first policy DiT
@@ -141,10 +141,10 @@ class RestoredV120EvidenceBottom(nn.Module):
         policy_start = int(self.core_config.depth) - int(
             self.core_config.flow_jepa_policy_blocks
         )
-        # Strict V120 exposed P1/P2 contracts and replaced P3 with the typed
-        # compiler.  Materialize exactly those two active heads, with their
-        # original depth identities, instead of keeping six frozen ancestry
-        # heads plus a frozen duplicate P3 head.
+        # Strict V120 exposed the last two policy-depth contracts and replaced
+        # P3 with the typed compiler. Materialize those two live adapters with
+        # their original depth identities, without their unread trajectory
+        # probes or six frozen ancestry heads.
         self.layer_contract_heads = nn.ModuleList(
             (
                 LayerContractAdapterHeads(
@@ -440,39 +440,30 @@ class RestoredV120EvidenceBottom(nn.Module):
     def _layer_contract_canvas(
         self,
         *,
-        trajectory: Tensor,
         rollout: Tensor,
         seed: V120SeedContext,
     ) -> tuple[Tensor, dict[str, slice]]:
-        """Build only regions read by the position-wise V120 contract head.
+        """Build the live rows read by the position-wise terminal contract.
 
-        The adapter has no token mixing.  Task/stage/register/proposal rows
-        cannot influence trajectory, rollout or state outputs, so omitted
-        inactive regions are represented by empty slices rather than by a
-        second legacy canvas implementation.
+        The adapter has no token mixing. Task/stage/register/proposal and the
+        two audited trajectory aliases cannot influence rollout/state/event,
+        so inactive regions are represented by empty slices.
         """
 
-        batch = int(trajectory.shape[0])
-        expected_trajectory = (
-            batch,
-            self.horizon * self.basis,
-            self.hidden,
-        )
-        if tuple(trajectory.shape) != expected_trajectory:
-            raise ValueError("V120 layer-contract trajectory has invalid shape")
+        batch = int(rollout.shape[0])
         if tuple(rollout.shape) != (
             batch,
             int(self.core_config.future_token_count),
             self.hidden,
         ):
             raise ValueError("V120 layer-contract rollout has invalid shape")
-        empty = trajectory[:, :0]
+        empty = rollout[:, :0]
         parts = (
             ("state", seed.state),
             ("state_history", seed.state_history),
             ("executed", seed.executed),
             ("proposal", empty),
-            ("trajectory", trajectory),
+            ("trajectory", empty),
             ("rollout", rollout),
             ("registers", empty),
         )
@@ -486,28 +477,12 @@ class RestoredV120EvidenceBottom(nn.Module):
     def _layer_contracts(
         self,
         *,
-        action_query: Tensor,
-        p1_fact: Tensor,
-        plan: ObjectPolicyPlanDeltaBank,
         rollout: Tensor,
         seed: V120SeedContext,
     ) -> list[dict[str, Tensor]]:
-        plan.validate()
-        expected = tuple(plan.protected_base.shape)
-        if tuple(action_query.shape) != expected or tuple(p1_fact.shape) != expected:
-            raise ValueError("P1/P2 layer contracts lost [B,T,Q,H]")
-        trajectories = (
-            action_query + p1_fact,
-            action_query + plan.protected_base,
-        )
         contracts: list[dict[str, Tensor]] = []
-        for head, trajectory in zip(
-            self.layer_contract_heads,
-            trajectories,
-            strict=True,
-        ):
+        for head in self.layer_contract_heads:
             canvas, slices = self._layer_contract_canvas(
-                trajectory=trajectory.flatten(1, 2),
                 rollout=rollout,
                 seed=seed,
             )
@@ -574,8 +549,6 @@ class RestoredV120EvidenceBottom(nn.Module):
     def compile_evidence_view(
         self,
         *,
-        action_query: Tensor,
-        p1_fact: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
         seed: V120SeedContext,
@@ -587,9 +560,6 @@ class RestoredV120EvidenceBottom(nn.Module):
         trajectory = self._neutral_trajectory_memory(plan)
         event_context = self._transition_event_context(transition)
         layer_contracts = self._layer_contracts(
-            action_query=action_query,
-            p1_fact=p1_fact,
-            plan=plan,
             rollout=transition.selector,
             seed=seed,
         )
@@ -612,7 +582,6 @@ class RestoredV120EvidenceBottom(nn.Module):
         noisy_action_field: Tensor,
         time: Tensor,
         action_query: Tensor,
-        p1_fact: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
         seed: V120SeedContext,
@@ -630,8 +599,6 @@ class RestoredV120EvidenceBottom(nn.Module):
         if tuple(action_query.shape) != expected_query:
             raise ValueError("bottom and P2/P3 must share one action query")
         plan.validate()
-        if tuple(p1_fact.shape) != tuple(plan.protected_base.shape):
-            raise ValueError("bottom P1 fact does not align with the P2 consequence")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         transition.validate(hidden=self.hidden)
         state_tokens, state_history_tokens, executed_tokens = self._state_memory(seed)
@@ -640,9 +607,6 @@ class RestoredV120EvidenceBottom(nn.Module):
         trajectory = self._neutral_trajectory_memory(plan)
         event_context = self._transition_event_context(transition)
         layer_contracts = self._layer_contracts(
-            action_query=action_query,
-            p1_fact=p1_fact,
-            plan=plan,
             rollout=transition.selector,
             seed=seed,
         )
@@ -756,7 +720,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         metrics["bottom_generic_trajectory_neutral"] = (
             noisy_action_field.new_ones((), dtype=torch.float32)
         )
-        metrics["bottom_event_from_p2_layer_contract"] = (
+        metrics["bottom_event_from_terminal_layer_contract"] = (
             noisy_action_field.new_ones((), dtype=torch.float32)
         )
         metrics["bottom_terminal_layer_contract_count"] = (

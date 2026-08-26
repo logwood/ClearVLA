@@ -599,7 +599,16 @@ raw reads, then joins a separate no-null precision read before the existing
 fixed optional scale. Consequence remains a separate no-null write outside the
 scale. The manifest names both changed ABIs, retained/downstream seed-0
 initialization remains R1f-identical, and the retained suite passes 145/145.
-N-01/D-01 is next.
+
+LC-01 is the closed deletion-only cleanup recorded in
+`LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`. A complete
+producer-to-consumer and reverse-VJP audit proved that the two inherited
+layer-contract trajectory formulas and their frozen action/motion probes have
+exact-zero effect on every live contract output and active loss. They are now
+absent; both independent terminal rollout/state/event adapters remain. The
+cleanup deletes 23,590 frozen parameters and 16 state keys while preserving
+all retained contract/decoder tensors, the optimizer partition and the seed-0
+construction RNG exactly. N-01/D-01 is next.
 
 ### N-01 and D-01: numerical support and matching diagnostics
 

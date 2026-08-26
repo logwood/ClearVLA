@@ -1,9 +1,9 @@
 """The two active terminal policy layer contracts extracted from V120.
 
 The reference model serialized eight heads for ancestry compatibility, but
-strict 3-2-3 ownership froze G/W heads, skipped P3, and exposed only P1/P2 to
-the final Evidence-MMDiT.  This module keeps the exact adapter/readout math and
-materializes only those two functional heads.
+strict 3-2-3 ownership froze G/W heads, skipped P3, and exposed only the final
+two policy-depth adapters to Evidence-MMDiT. This module keeps their live
+rollout/state/event math without materializing unread trajectory probes.
 """
 
 from __future__ import annotations
@@ -68,18 +68,25 @@ def rollout_tokens_to_action_horizon(
 
 
 class MidcutContractHeads(nn.Module):
-    """Exact weak V120 readout family used behind each layer adapter."""
+    """Live V120 rollout/state/event readouts behind each layer adapter."""
 
     def __init__(self, config: V39PolicyConfig) -> None:
         super().__init__()
         self.config = config
         hidden = int(config.hidden_size)
-        self.action_head = nn.Sequential(
+        # Construct the removed frozen trajectory heads in their historical
+        # positions so every retained readout and downstream module keeps the
+        # R1g fresh-run initialization stream. They are temporary unregistered
+        # objects and own no runtime or checkpoint state.
+        historical_action_head = nn.Sequential(
             nn.LayerNorm(hidden),
             nn.Linear(hidden, int(config.physical_action_dim)),
         )
         self.event_head = nn.Sequential(nn.LayerNorm(hidden), nn.Linear(hidden, 3))
-        self.motion_head = nn.Sequential(nn.LayerNorm(hidden), nn.Linear(hidden, 1))
+        historical_motion_head = nn.Sequential(
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, 1),
+        )
         self.rollout_effect_head = nn.Sequential(
             nn.LayerNorm(hidden), nn.Linear(hidden, hidden)
         )
@@ -92,7 +99,11 @@ class MidcutContractHeads(nn.Module):
         self.future_gain = nn.Parameter(
             torch.tensor(float(config.midcut_future_gain_init), dtype=torch.float32)
         )
-        for module in (self.action_head[-1], self.event_head[-1], self.motion_head[-1]):
+        for module in (
+            historical_action_head[-1],
+            self.event_head[-1],
+            historical_motion_head[-1],
+        ):
             if not isinstance(module, nn.Linear):
                 raise TypeError("V120 contract readout must end in Linear")
             nn.init.normal_(module.weight, mean=0.0, std=1e-3)
@@ -106,15 +117,7 @@ class MidcutContractHeads(nn.Module):
                 raise TypeError("V120 contract readout must end in Linear")
             nn.init.normal_(module.weight, mean=0.0, std=1e-3)
             nn.init.zeros_(module.bias)
-
-    def trajectory_pooled(self, trajectory_tokens: Tensor) -> Tensor:
-        config = self.config
-        return trajectory_tokens.reshape(
-            int(trajectory_tokens.shape[0]),
-            int(config.action_horizon),
-            int(config.action_basis_tokens),
-            int(config.hidden_size),
-        ).mean(dim=2)
+        del historical_action_head, historical_motion_head
 
     def forward(
         self,
@@ -122,10 +125,8 @@ class MidcutContractHeads(nn.Module):
         slices: dict[str, slice],
     ) -> dict[str, Tensor]:
         config = self.config
-        trajectory = canvas[:, slices["trajectory"]]
         rollout = canvas[:, slices["rollout"]]
         registers = canvas[:, slices["registers"]]
-        trajectory_pooled = self.trajectory_pooled(trajectory)
         gain = self.future_gain.to(device=canvas.device, dtype=canvas.dtype)
         effect = self.rollout_effect_head(rollout) * gain
         delta = self.rollout_delta_head(rollout) * gain
@@ -135,35 +136,16 @@ class MidcutContractHeads(nn.Module):
         )
         return {
             "midcut_canvas_tokens": canvas,
-            "midcut_trajectory_tokens": trajectory,
             "midcut_rollout_tokens": rollout,
             "midcut_register_tokens": registers,
             "midcut_state_tokens": canvas[:, slices["state"]],
             "midcut_state_history_tokens": canvas[:, slices["state_history"]],
             "midcut_executed_tokens": canvas[:, slices["executed"]],
             "midcut_proposal_tokens": canvas[:, slices["proposal"]],
-            "midcut_trajectory_pooled": trajectory_pooled,
-            "midcut_pred_physical_velocity": self.action_head(trajectory_pooled),
-            "midcut_direct_physical_velocity": self.action_head(trajectory_pooled),
-            "midcut_rollout_residual_velocity": torch.zeros(
-                int(trajectory_pooled.shape[0]),
-                int(config.action_horizon),
-                int(config.physical_action_dim),
-                device=trajectory_pooled.device,
-                dtype=trajectory_pooled.dtype,
-            ),
-            "midcut_rollout_alpha": torch.zeros(
-                1,
-                int(config.action_horizon),
-                1,
-                device=trajectory_pooled.device,
-                dtype=trajectory_pooled.dtype,
-            ),
             "midcut_rollout_effect_pred": effect,
             "midcut_rollout_delta_pred": delta,
             "midcut_rollout_base_effect_pred": torch.zeros_like(effect),
             "midcut_event_logits": self.event_head(event_context),
-            "midcut_motion_logits": self.motion_head(trajectory_pooled).squeeze(-1),
             "midcut_transition_latent": transition,
             "midcut_rollout_delta_norm": delta.detach().float().norm(dim=-1).mean(),
             "midcut_rollout_effect_norm": effect.detach().float().norm(dim=-1).mean(),

@@ -463,7 +463,6 @@ class ClearVLAMainlinePolicy(nn.Module):
             noisy_action_field=noisy_action_field,
             time=time,
             action_query=action_query,
-            p1_fact=compiled.consequence.factual_base,
             plan=compiled.plan,
             intent=cache.top.intent,
             seed=seed_context,

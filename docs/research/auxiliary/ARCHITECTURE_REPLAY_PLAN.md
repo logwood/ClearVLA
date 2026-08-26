@@ -1,8 +1,8 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01 through R1g/P3-01,B-01 implemented and statically closed;
-R1h/N-01,D-01 next; no training run.
+R1a/G-01 through R1g/P3-01,B-01 plus LC-01 exact-zero cleanup implemented and
+statically closed; R1h/N-01,D-01 next; no training run.
 Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
@@ -253,7 +253,12 @@ physical-I terminals before the raw complementary sum. Its closed worksheet
   separate shared-parameter Q+null bottom decision. Protected consequence and
   dynamic precision keep separate no-null calls. Its closed worksheet is
   `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`; the retained suite is
-  145/145. R1h/N-01,D-01 is next, but its source may not change until the
+  145/145. LC-01 then deletes two source-proven exact-zero terminal-contract
+  trajectory aliases and 23,590 frozen readout parameters without changing a
+  retained contract/decoder tensor, optimizer owner or the construction RNG;
+  its closed worksheet is
+  `LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`. R1h/N-01,D-01 is
+  next, but its source may not change until the
   numerical-support/diagnostic producer/consumer/loss/runtime/checkpoint
   worksheet closes.
 

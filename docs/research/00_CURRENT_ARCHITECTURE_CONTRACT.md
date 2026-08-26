@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 assembly; R1a-R1g complete through P3-01/B-01; 145 retained mainline tests pass; no training run
+release status:         Schema25-R1 assembly; R1a-R1g plus LC-01 exact-zero cleanup complete; 145 retained mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -29,7 +29,7 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 
 > **The executable source is the exact Schema25 replay base plus completed
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
-> R1f/P2-01 and R1g/P3-01,B-01; it is not yet
+> R1f/P2-01, R1g/P3-01,B-01 and LC-01; it is not yet
 > behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -49,6 +49,9 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > R1g removes the three optional aliases of already-protected values and gives
 > the remaining temporal and state-change innovations separate shared-parameter
 > Q+null decisions at bottom.
+> LC-01 then deletes two audited exact-zero layer-contract trajectory aliases
+> and their frozen readouts while preserving every live contract/decoder
+> tensor, optimizer owner and the fresh-run RNG stream.
 > No CUDA smoke, dataset access, checkpoint migration or training run has been
 > performed.
 
@@ -207,11 +210,12 @@ R1g/P3-01,B-01 removes duplicate P3 value owners and cross-lane competition:
   No aggregate lane-sum contract, lane-specific capacity or second bottom
   scale is introduced.
 
-The two retained V120 layer-contract trajectory formulas are bookkeeping-only
-in the active graph: the adapter is position-wise, the evidence adapter ignores
-its trajectory/action/motion readouts, and the separate event input depends on
-rollout delta. They have exact-zero effect on final outputs and active losses;
-P2, controlled transition and bottom are the actual dynamic-P1 consumers.
+LC-01 removes the two V120 layer-contract trajectory formulas after proving
+their exact-zero VJP and exact intervention invariance. The two independent
+terminal depth adapters remain live on rollout/state rows and still supply the
+event input from rollout delta. Their frozen trajectory action/motion readouts
+and trajectory-shaped compatibility outputs are absent. P2, controlled
+transition and bottom remain the actual dynamic-P1 consumers.
 
 No block, external loss weight, gain, quota, hard gate, entropy target or
 capacity was added. R1d removes three W status heads and one P2 status
@@ -317,8 +321,8 @@ noisy action + protected consequence + raw policy residual
     + V120 learned neutral + plan/history
     -> dynamic 512-row ControlledTransitionState, every dynamic forward
 
-transition + shared seed + protected consequence
-    -> V120 P1/P2 layer contracts
+transition + shared seed
+    -> two independent terminal policy-depth layer contracts
     -> CVAE/workspace/EvidenceViewAdapter
 protected consequence
     -> separate no-null protected-detail basis read
@@ -538,7 +542,7 @@ ControlledTransitionSource / State
 | P3 | protected consequence carrier, P2 effect/interaction innovation, S temporal/state-change context, noisy-action query; raw dynamic residual only as protected policy precision | complete factual-consequence reprojection, optional factual/static-precision/effect aliases, Teacher, RGB/DINO, proposal, free W carrier, dynamic residual projection into optional lanes |
 | transition source | exact completed G3 rollout view shared with P1 | W target, proposal, noisy action, Teacher |
 | transition dynamic | source, shared V120 seed, protected consequence, raw P1 policy residual, plan | target action, Teacher, future proposal |
-| bottom | consequence, raw P1 policy residual, two independently selected optional P3 lanes, transition, seed, layer contracts | joint cross-lane simplex, RGB/DINO, Teacher, duplicate W/P base, new dynamic gain/null |
+| bottom | consequence, raw P1 policy residual, two independently selected optional P3 lanes, transition, seed, terminal rollout/state/event layer contracts | joint cross-lane simplex, RGB/DINO, Teacher, duplicate W/P base, layer-contract P1/P2 trajectory aliases, new dynamic gain/null |
 
 ## Loss and optimizer ownership
 
@@ -617,8 +621,12 @@ ControlledTransitionSource / State
   (`-512`). The active R1g model has `168,436,164` total / `152,041,843`
   trainable parameters, 1,402 parameter tensors, 1,064 trainable/optimizer
   tensors, 23 optimizer groups and 1,408 state-key names. P3 measures
-  1,572,864 parameters / 6 tensors. The ordered state-key-name SHA-256 is
-  `14effa3654b11923088be6b57f3086a78db82e11daff1cfc91805f20bf7f3540`.
+  1,572,864 parameters / 6 tensors. LC-01 then removes 23,590 frozen
+  trajectory-only readout parameters and 16 parameter/state tensors. The
+  active model has `168,412,574` total / `152,041,843` trainable parameters,
+  1,386 parameter tensors, 1,064 trainable/optimizer tensors, 23 optimizer
+  groups and 1,392 state-key names. The ordered state-key-name SHA-256 is
+  `be7b4b58a8e2ec25c1e3b5c455f303a0954d20a984201173b5de12d2b1f14a20`.
   An independent seed-0 R1d/R1e construction comparison produced identical
   canonical full-state tensor digest
   `9793ea81a3b1173c7569300bc74a31f462c2e792744d0f2299d5ccdfd3ec5ba7`
@@ -639,19 +647,23 @@ ControlledTransitionSource / State
   fresh-run tensor keeps the R1f stream. Its seed-0 post-construction CPU RNG
   SHA-256 remains
   `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
+  LC-01 uses initialization-only temporary historical readouts, so its 46
+  retained layer-contract state tensors, all 268 decoder state tensors and
+  this RNG digest remain byte-identical while the discarded readouts own no
+  runtime or checkpoint state.
 - Active manifest identity:
 
   ```text
   schema:       25
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
   top:          v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3
-  bottom:       restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_lane_local_p3_evidence_mmdit_dense512_execution
+  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution
   training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip
   runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated
   ```
 
   The canonical manifest SHA-256 is
-  `03ce3702b2253fe04a9109194eb951fe4942ce6f47e41b3ab8b5e9749c9f9051`.
+  `1691f3fc2c6f5be916637ea04388d69bbb023ba4dc7bdd085b45c85f70d45981`.
 
 Storage defaults:
 
@@ -687,7 +699,8 @@ preservation, W-owned S selection, no-null per-type physical terminal,
 independent semantic/geometry survival and legal W/S/action reverse paths,
 unique P3 private operands, absence of factual/effect/static-precision aliases,
 lane-local optional null decisions, protected no-null reads, and legal P3/bottom
-reverse paths,
+reverse paths, absence and intervention invariance of the removed
+layer-contract trajectory branch, retained terminal-adapter reverse paths,
 same-camera Teacher geometry, neutral effect, P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
