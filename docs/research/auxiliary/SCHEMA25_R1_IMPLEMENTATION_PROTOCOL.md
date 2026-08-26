@@ -1,8 +1,8 @@
 # Schema25-R1 implementation protocol
 
 Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
-R1b/G-02 and R1c/S-01,S-02 implemented and statically closed;
-R1d/W-01,W-02 next; no training run.
+through R1d/W-01,W-02 implemented and statically closed;
+R1e/P1-01 next; no training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -111,22 +111,37 @@ new name.
 
 ### 4.3 W one-way ownership
 
-Preferred donor mechanism:
+The donor token sequence was reviewed but is not copied literally:
 
     [common, residual_0, ..., residual_n]
       -> existing causal W block
       -> processed_common, processed_residual_0, ..., processed_residual_n
 
-Common is the first causal token. Residuals may read common; common cannot read
-later residuals. No new projection, learned gain, floor or bilateral isolation
-is introduced merely to enforce ownership.
+Although its mask protects common from later residuals, attention also turns an
+exact-zero residual into a nonzero value by reading common. That violates the
+adopted rule that conditioning cannot manufacture the interval owner. R1d
+therefore resolves the same one-way causality with the parameter-free relation
+`x + x * tanh(c)`: W1 processes common as one singleton interval exactly once;
+near innovations may be conditioned by completed common/generic context, and
+W2 uses completed common/near only as a conditioner of present far
+innovations. A zero innovation remains exact zero. No projection, learned
+gain, floor or bilateral isolation is added.
 
 W1 processes common once and owns near intervals. W2 reads the completed near
 state and writes only far intervals; it cannot process common a second time or
 rewrite near.
 
-If the exact Schema25 block mask cannot establish this directionality, coding
-stops and the mechanism returns to source review.
+The closed W field contains semantic delta/successor plus camera-specific
+transport and FP32 PSD covariance. Appearance conditions semantic state and
+has no independent status value. C comes only from the existing current-camera
+transport prior and remains real through Teacher targets, future losses and
+the P2 geometry consumer. Observable current chart/camera availability is the
+only online support; predicted visibility, persistence, uncertainty,
+reliability and selector validity are absent. Teacher retains the Schema25
+candidate-plus-null row softmax and allocates null identity per camera after
+association. Until P2-01, the minimum P2 adapter may retain its inherited
+flattened `[I,K]+null` and two-type terminal, but it cannot retain status or
+reduce C before covariance/transport consumption.
 
 ### 4.4 S conditioning of the W-owned terminal relation
 
@@ -199,8 +214,9 @@ Execution ledger:
 | R1a / G-01 | `COMPLETE` | `R1A_G01_G3_HANDOFF_WORKSHEET.md`; 123/123 retained tests |
 | R1b / G-02 | `COMPLETE` | `R1B_G02_CONDITIONAL_K_RECONSTRUCTION_WORKSHEET.md`; 129/129 retained tests |
 | R1c / S-01,S-02 | `COMPLETE` | `R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`; 134/134 retained tests |
-| R1d / W-01,W-02 | `NEXT` | complete W common/near/far and online-ABI worksheet before source edits |
-| R1e-R1h | `PENDING` | no source edit authorized yet |
+| R1d / W-01,W-02 | `COMPLETE` | `R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`; 140/140 retained tests |
+| R1e / P1-01 | `NEXT` | close the static/dynamic P1 worksheet before source edits |
+| R1f-R1h | `PENDING` | no source edit authorized yet |
 
 For every slice:
 

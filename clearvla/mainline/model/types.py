@@ -756,19 +756,46 @@ class FutureObjectDynamics:
     current_reference: Tensor  # [B,K,D]
     successor_content: Tensor  # [B,I,K,D]
     semantic_delta: Tensor  # [B,I,K,D]
-    transport_mean: Tensor  # [B,I,K,2]
-    transport_covariance: Tensor  # [B,I,K,3]
-    visibility: Tensor  # zero-centred visibility change [B,I,K,1]
-    persistence: Tensor  # zero-centred track-persistence change [B,I,K,1]
-    uncertainty: Tensor  # [B,I,K,1]
-    reliability: Tensor  # calibration only [B,I,K,1]
-    future_selector_validity: Tensor  # online P2 selector [B,I,K,1]
-    future_address: Tensor  # [B,I,K,C,Y,X]
-    object_coordinates: Tensor  # [B,K,2]
+    transport_mean: Tensor  # camera-specific [B,I,K,C,2]
+    transport_covariance: Tensor  # FP32 PSD xx/xy/yy [B,I,K,C,3]
+    chart_availability: Tensor  # current observable object support [B,K,1]
+    camera_coordinates: Tensor  # current real camera charts [B,K,C,2]
+    camera_chart_availability: Tensor  # current observable support [B,K,C,1]
 
     @property
     def intervals(self) -> int:
         return int(self.semantic_delta.shape[1])
+
+    @staticmethod
+    def _common(value: Tensor) -> Tensor:
+        """Return the one protected effect shared across future intervals."""
+
+        if value.ndim < 3:
+            raise ValueError("future effect must retain an interval axis")
+        return value.float().mean(dim=1)
+
+    @classmethod
+    def _interval_innovation(cls, value: Tensor) -> Tensor:
+        """Return the exact interval coordinate around the protected common."""
+
+        common = cls._common(value)
+        return value.float() - common[:, None]
+
+    @property
+    def semantic_common(self) -> Tensor:
+        return self._common(self.semantic_delta)
+
+    @property
+    def semantic_interval_innovation(self) -> Tensor:
+        return self._interval_innovation(self.semantic_delta)
+
+    @property
+    def transport_common(self) -> Tensor:
+        return self._common(self.transport_mean)
+
+    @property
+    def transport_interval_innovation(self) -> Tensor:
+        return self._interval_innovation(self.transport_mean)
 
     def validate(self, *, expected_intervals: int = 4) -> None:
         if self.current_reference.ndim != 3 or self.semantic_delta.ndim != 4:
@@ -780,33 +807,35 @@ class FutureObjectDynamics:
             )
         _shape(self.current_reference, (batch, objects, width), "current object reference")
         _shape(self.successor_content, (batch, intervals, objects, width), "successor content")
-        if self.future_address.ndim != 6 or tuple(self.future_address.shape[:3]) != (
-            batch,
-            intervals,
-            objects,
-        ):
-            raise ValueError("future address must be [B,I,K,C,Y,X]")
+        if self.camera_coordinates.ndim != 4:
+            raise ValueError("future camera coordinates must be [B,K,C,2]")
+        cameras = int(self.camera_coordinates.shape[2])
+        _shape(
+            self.camera_coordinates,
+            (batch, objects, cameras, 2),
+            "future camera coordinates",
+        )
         _shape(
             self.transport_mean,
-            (batch, intervals, objects, 2),
+            (batch, intervals, objects, cameras, 2),
             "transport mean",
         )
         _shape(
             self.transport_covariance,
-            (batch, intervals, objects, 3),
+            (batch, intervals, objects, cameras, 3),
             "transport covariance",
         )
-        for name in ("visibility", "persistence", "uncertainty", "reliability"):
-            _shape(getattr(self, name), (batch, intervals, objects, 1), name)
+        if self.transport_covariance.dtype != torch.float32:
+            raise TypeError("future transport covariance must remain FP32")
         _shape(
-            self.future_selector_validity,
-            (batch, intervals, objects, 1),
-            "future selector validity",
+            self.chart_availability,
+            (batch, objects, 1),
+            "future chart availability",
         )
         _shape(
-            self.object_coordinates,
-            (batch, objects, 2),
-            "future object coordinates",
+            self.camera_chart_availability,
+            (batch, objects, cameras, 1),
+            "future camera chart availability",
         )
 
     def permute(self, permutation: Tensor) -> "FutureObjectDynamics":
@@ -825,13 +854,9 @@ class FutureObjectDynamics:
             semantic_delta=self.semantic_delta[:, :, index],
             transport_mean=self.transport_mean[:, :, index],
             transport_covariance=self.transport_covariance[:, :, index],
-            visibility=self.visibility[:, :, index],
-            persistence=self.persistence[:, :, index],
-            uncertainty=self.uncertainty[:, :, index],
-            reliability=self.reliability[:, :, index],
-            future_selector_validity=self.future_selector_validity[:, :, index],
-            future_address=self.future_address[:, :, index],
-            object_coordinates=self.object_coordinates[:, index],
+            chart_availability=self.chart_availability[:, index],
+            camera_coordinates=self.camera_coordinates[:, index],
+            camera_chart_availability=self.camera_chart_availability[:, index],
         )
 
     @classmethod
@@ -839,24 +864,25 @@ class FutureObjectDynamics:
         facts.validate()
         current = facts.content
         batch, objects, width = current.shape
+        cameras = int(facts.camera_coordinates.shape[2])
         zeros = current.new_zeros(batch, intervals, objects, width)
-        scalar = current.new_zeros(batch, intervals, objects, 1)
-        address = facts.object_to_chart[:, None].expand(-1, intervals, -1, -1, -1, -1)
         return cls(
             current_reference=current,
             successor_content=current[:, None].expand(-1, intervals, -1, -1),
             semantic_delta=zeros,
-            transport_mean=current.new_zeros(batch, intervals, objects, 2),
-            transport_covariance=current.new_zeros(batch, intervals, objects, 3),
-            visibility=scalar,
-            persistence=scalar,
-            uncertainty=scalar,
-            reliability=scalar,
-            future_selector_validity=facts.validity[:, None].expand(
-                -1, intervals, -1, -1
+            transport_mean=current.new_zeros(batch, intervals, objects, cameras, 2),
+            transport_covariance=torch.zeros(
+                batch,
+                intervals,
+                objects,
+                cameras,
+                3,
+                device=current.device,
+                dtype=torch.float32,
             ),
-            future_address=address,
-            object_coordinates=facts.coordinates.to(dtype=current.dtype),
+            chart_availability=facts.validity.to(dtype=current.dtype),
+            camera_coordinates=facts.camera_coordinates.to(dtype=current.dtype),
+            camera_chart_availability=facts.camera_validity.to(dtype=current.dtype),
         )
 
 

@@ -12,12 +12,13 @@ Schema25 replay worktree.
 | R1A_G01_G3_HANDOFF_WORKSHEET.md | Mandatory end-to-end boundary review and acceptance tests for the first replay slice |
 | R1B_G02_CONDITIONAL_K_RECONSTRUCTION_WORKSHEET.md | Conditional-K, target, unique-content and reconstruction boundary review for the second replay slice |
 | R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md | Single typed W ingress, lossless common/residual coordinates and S-03 guard review for the third replay slice |
+| R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md | One-way common/near/far W ownership, camera-resolved future ABI and minimum P2 adapter review for the fourth replay slice |
 | SCHEMA25_BASE_VERSION_CARD.md | Closed source/behavior audit of the fixed base |
 | ARCHITECTURE_REPLAY_LEDGER.md | Historical donor evidence; not implementation authority |
 | ACTIVE_MAINLINE_HANDOFF.md | Frozen Schema39 diagnostic context; not the active replay graph |
 
-The executable source is the exact Schema25 base plus completed R1a/G-01,
-R1b/G-02 and R1c/S-01,S-02 slices recorded above. R1d/W-01,W-02 is next but
-requires its own closed worksheet before source edits. Historical documents
-and the user-supplied external protocol do not override the active source or
-authorize later slices.
+The executable source is the exact Schema25 base plus completed R1a/G-01
+through R1d/W-01,W-02 slices recorded above. R1e/P1-01 is next but requires its
+own closed static/dynamic P1 worksheet before source edits. Historical
+documents and the user-supplied external protocol do not override the active
+source or authorize later slices.

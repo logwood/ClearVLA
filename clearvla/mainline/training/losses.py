@@ -366,12 +366,13 @@ def future_dynamics_terms(
         raise ValueError("current loss support must retain [B,K,C,1]")
     cameras = int(current_loss_support.shape[2])
     if tuple(current_loss_support.shape) != (batch, objects, cameras, 1):
-        raise ValueError(
-            "current loss support must be [B,K,C,1] and align with future dynamics"
-        )
-    camera_validity = current_loss_support.detach().float()[:, None].expand(
-        -1, intervals, -1, -1, -1
-    ).clamp(0.0, 1.0)
+        raise ValueError("current loss support must be [B,K,C,1] and align with future dynamics")
+    camera_validity = (
+        current_loss_support.detach()
+        .float()[:, None]
+        .expand(-1, intervals, -1, -1, -1)
+        .clamp(0.0, 1.0)
+    )
     object_validity = camera_validity.amax(dim=3)
 
     def masked(error: Tensor, weight: Tensor) -> Tensor:
@@ -397,9 +398,7 @@ def future_dynamics_terms(
         if not scale_floored:
             return raw
         target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
-        scale_floor = (
-            0.25 * target_rms.mean(dim=(0, 2), keepdim=True)
-        ).clamp_min(1e-3)
+        scale_floor = (0.25 * target_rms.mean(dim=(0, 2), keepdim=True)).clamp_min(1e-3)
         scale = torch.sqrt(target_rms.square() + scale_floor.square())
         normalized = F.smooth_l1_loss(
             prediction_f / scale,
@@ -407,72 +406,83 @@ def future_dynamics_terms(
             reduction="none",
         ).mean(dim=-1, keepdim=True)
         prediction_direction = prediction_f / torch.sqrt(
-            prediction_f.square().mean(dim=-1, keepdim=True)
-            + scale_floor.square()
+            prediction_f.square().mean(dim=-1, keepdim=True) + scale_floor.square()
         )
         target_direction = target_f / torch.sqrt(
-            target_f.square().mean(dim=-1, keepdim=True)
-            + scale_floor.square()
+            target_f.square().mean(dim=-1, keepdim=True) + scale_floor.square()
         )
         # The historical cosine-like expression was positive even when the
         # prediction exactly equalled the target because the variance floor
         # makes each smoothed direction shorter than unit length.  Compare the
         # two smoothed directions directly so the supervised optimum is an
         # attainable exact zero while retaining the same bounded denominator.
-        direction = 0.5 * (
-            prediction_direction - target_direction
-        ).square().mean(dim=-1, keepdim=True)
+        direction = 0.5 * (prediction_direction - target_direction).square().mean(
+            dim=-1, keepdim=True
+        )
         return raw + normalized + 0.10 * direction
 
-    successor_error = row_loss(
-        prediction.successor_content,
-        target.successor_content,
-        scale_floored=False,
-    )
-    successor = masked(successor_error, object_validity)
-    semantic_delta_error = row_loss(
+    def decomposed_loss(
+        prediction_value: Tensor,
+        target_value: Tensor,
+        *,
+        weight: Tensor,
+        scale_floored: bool,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        prediction_common = prediction_value.float().mean(dim=1)
+        target_common = target_value.detach().float().mean(dim=1)
+        prediction_innovation = prediction_value.float() - prediction_common[:, None]
+        target_innovation = target_value.detach().float() - target_common[:, None]
+        common_error = row_loss(
+            prediction_common[:, None],
+            target_common[:, None],
+            scale_floored=scale_floored,
+        )
+        innovation_error = row_loss(
+            prediction_innovation,
+            target_innovation,
+            scale_floored=scale_floored,
+        )
+        common = masked(common_error, weight[:, :1])
+        innovation = masked(innovation_error, weight)
+        return common, innovation, common_error, innovation_error
+
+    (
+        semantic_common,
+        semantic_innovation,
+        _semantic_common_error,
+        semantic_innovation_error,
+    ) = decomposed_loss(
         prediction.semantic_delta,
         target.semantic_delta,
+        weight=object_validity,
         scale_floored=True,
     )
-    semantic_delta = masked(semantic_delta_error, object_validity)
-    transport_error = row_loss(
+    semantic_delta = 0.5 * (semantic_common + semantic_innovation)
+    (
+        transport_common,
+        transport_innovation,
+        _transport_common_error,
+        transport_innovation_error,
+    ) = decomposed_loss(
         prediction.transport_mean,
         target.transport_mean,
+        weight=camera_validity,
         scale_floored=False,
     )
-    transport = masked(transport_error, object_validity)
+    transport = 0.5 * (transport_common + transport_innovation)
     covariance_error = row_loss(
         prediction.transport_covariance,
         target.transport_covariance,
         scale_floored=False,
     )
-    covariance = masked(covariance_error, object_validity)
-    visibility_error = row_loss(
-        prediction.visibility,
-        target.visibility,
-        scale_floored=False,
-    )
-    visibility = masked(visibility_error, object_validity)
-    persistence_error = row_loss(
-        prediction.persistence,
-        target.persistence,
-        scale_floored=False,
-    )
-    persistence = masked(persistence_error, object_validity)
-    uncertainty_error = row_loss(
-        prediction.uncertainty,
-        target.uncertainty,
-        scale_floored=False,
-    )
-    uncertainty = masked(uncertainty_error, object_validity)
+    covariance = masked(covariance_error, camera_validity)
     semantic_transition_prediction = (
-        prediction.semantic_delta.float()[:, 1:]
-        - prediction.semantic_delta.float()[:, :-1]
+        prediction.semantic_interval_innovation[:, 1:]
+        - prediction.semantic_interval_innovation[:, :-1]
     )
     semantic_transition_target = (
-        target.semantic_delta.detach().float()[:, 1:]
-        - target.semantic_delta.detach().float()[:, :-1]
+        target.semantic_interval_innovation.detach()[:, 1:]
+        - target.semantic_interval_innovation.detach()[:, :-1]
     )
     transition_error = row_loss(
         semantic_transition_prediction,
@@ -484,46 +494,42 @@ def future_dynamics_terms(
         object_validity[:, :-1],
     )
     transition = masked(transition_error, transition_validity)
-    total = (
-        0.30 * successor
-        + 0.25 * semantic_delta
-        + 0.15 * transport
-        + 0.05 * covariance
-        + 0.08 * visibility
-        + 0.07 * persistence
-        + 0.10 * uncertainty
-    )
+    # The old successor objective was an algebraic duplicate of semantic
+    # delta. Its 0.30 budget joins the surviving 0.25 semantic owner. The
+    # unobserved status budgets are retired rather than reassigned.
+    total = 0.55 * semantic_delta + 0.15 * transport + 0.05 * covariance
     terms = {
         "future_dynamics": total,
-        "future_successor": successor,
         "future_semantic_delta": semantic_delta,
+        "future_semantic_common": semantic_common,
+        "future_semantic_innovation": semantic_innovation,
         "future_transport": transport,
+        "future_transport_common": transport_common,
+        "future_transport_innovation": transport_innovation,
         "future_covariance": covariance,
-        "future_visibility": visibility,
-        "future_persistence": persistence,
-        "future_uncertainty": uncertainty,
         "future_transition": transition,
     }
     if collect_diagnostics:
         terms["future_current_loss_support"] = camera_validity.mean().detach()
-        terms["future_prediction_selector_validity"] = (
-            prediction.future_selector_validity.detach().float().mean()
+        terms["future_target_semantic_delta_rms"] = (
+            target.semantic_delta.detach().float().square().mean().sqrt()
         )
-        terms["future_target_selector_validity"] = (
-            target.future_selector_validity.detach().float().mean()
+        terms["future_target_transport_rms"] = (
+            target.transport_mean.detach().float().square().mean().sqrt()
+        )
+        terms["future_target_covariance_rms"] = (
+            target.transport_covariance.detach().float().square().mean().sqrt()
         )
         for index in range(prediction.intervals):
             interval_slice = slice(index, index + 1)
             interval_validity = object_validity[:, interval_slice]
-            terms[f"future_interval_{index}_successor"] = masked(
-                successor_error[:, interval_slice], interval_validity
-            ).detach()
+            interval_camera_validity = camera_validity[:, interval_slice]
             terms[f"future_interval_{index}_semantic_delta"] = masked(
-                semantic_delta_error[:, interval_slice], interval_validity
+                semantic_innovation_error[:, interval_slice], interval_validity
             ).detach()
             terms[f"future_interval_{index}_transport"] = masked(
-                transport_error[:, interval_slice],
-                interval_validity,
+                transport_innovation_error[:, interval_slice],
+                interval_camera_validity,
             ).detach()
     return terms
 
@@ -725,7 +731,7 @@ def execution_value_terms(
     )
     terminal_denominator = terminal_valid.float().sum().clamp_min(1.0)
     execution_cost = tensors.get("evidence_mmd_it_execution_cost")
-    if not isinstance(execution_cost, Tensor) or execution_cost.ndim != 0:
+    if execution_cost is None or execution_cost.ndim != 0:
         execution_cost = value_loss.new_zeros(())
     return {
         "execution_value": value_loss,

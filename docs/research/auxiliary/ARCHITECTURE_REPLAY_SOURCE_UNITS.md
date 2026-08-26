@@ -1,8 +1,8 @@
 # Cross-version replay source units
 
-Status: source-derived working register; G-01, G-02, S-01 and S-02 implemented
-and statically closed; S-03 guard verified; W-01/W-02 next. Established on
-2026-08-26.
+Status: source-derived working register; G-01, G-02, S-01, S-02, W-01 and W-02
+implemented and statically closed; S-03 guard verified; P1-01 next.
+Established on 2026-08-26.
 
 This file records the implementation semantic units recovered across
 Schema26-39. It is deliberately source-first:
@@ -264,9 +264,10 @@ Implementation closure: R1c is recorded in
 `R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`. The existing
 Schema25 score is decomposed only after it is computed; typed common/residual
 fields enter W through `WorldIntentDock`, ActionIntentDock is typed-free, and
-current W reconstructs its former source once. The S-03 no-future-owner guard
-also passes. The retained suite is 134/134 with no parameter, optimizer or
-state-key addition.
+the R1c W boundary reconstructed its former source once. R1d later supersedes
+that temporary consumer mechanic while preserving the same sole ingress. The
+S-03 no-future-owner guard also passes. The retained suite is 134/134 with no
+parameter, optimizer or state-key addition.
 
 ### S-03: future-owner supervision fence
 
@@ -371,6 +372,20 @@ Static acceptance:
   the online ABI;
 - camera perturbations survive to the geometry consumer without pre-averaging;
 - neutral W heads make the downstream effect exact zero.
+
+Implementation closure: R1d is recorded in
+`R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`. W1 processes the protected common
+once and writes only near innovations; W2 reads completed W1 and writes only
+far innovations. Appearance and generic context are zero-preserving
+conditions, not value owners. The existing camera transport-prior projection
+creates distinct real-camera carriers without a new parameter. Teacher keeps
+the Schema25 row softmax while exporting per-camera null-identity moments;
+future losses and the minimum P2 adapter consume C before reduction. Predicted
+status/support fields, heads, losses and P2 values are absent. The retained
+suite is 140/140. The net inventory delta is -3,075 parameters and -7
+parameter/state keys with all 23 optimizer groups preserved. The inherited
+flattened `[I,K]+null` and semantic/geometry type terminal remain explicit
+P2-01 debt.
 
 ### P1-01: static fact versus dynamic policy residual
 

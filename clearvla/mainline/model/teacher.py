@@ -236,50 +236,41 @@ class ObjectFutureTeacher(nn.Module):
         )
         candidate_flat_probability = candidate_posterior.flatten(3)
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
-        candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(
-            cameras, -1, -1, -1
+        candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
+        current_camera_measure = facts.camera_validity.detach().float()
+        current_camera_measure = torch.where(
+            current_camera_measure.sum(dim=2, keepdim=True) > 1.0e-8,
+            current_camera_measure
+            / current_camera_measure.sum(dim=2, keepdim=True).clamp_min(1.0e-8),
+            torch.zeros_like(current_camera_measure),
         )
         transport_per_support, covariance_per_support = self._relative_geometry_moments(
             candidate_posterior=candidate_posterior,
             candidate_coordinate=candidate_coordinate,
             current_camera_coordinate=facts.camera_coordinates.detach().float(),
+            null_probability=null_probability,
+            null_camera_measure=current_camera_measure,
         )
         entropy = -(posterior.clamp_min(1e-8) * posterior.clamp_min(1e-8).log()).sum(
             dim=-1, keepdim=True
         ) / math.log(float(cameras * rows * columns + 1))
-        visibility_per_support = 1.0 - null_probability
+        association_real_mass_per_support = 1.0 - null_probability
         # A confident null match is still epistemically uncertain about the
         # future object state.  Plain posterior entropy would incorrectly call
         # it certain, so null mass supplies the fallback uncertainty floor.
-        uncertainty_per_support = null_probability + visibility_per_support * entropy
+        uncertainty_per_support = null_probability + association_real_mass_per_support * entropy
         association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
-        reliability_per_support = visibility_per_support * association_confidence
+        reliability_per_support = association_real_mass_per_support * association_confidence
         current_reference = facts.content.detach().float()[:, None]
         # This is the exact V120 physical target algebra.  Null mass already
         # supplies the only identity fallback.  Association confidence remains
         # a calibration diagnostic and must not contract a diffuse-but-visible
         # target toward the current fact a second time.
         successor_per_support = matched + null_probability * current_reference
-        current_address = facts.object_to_chart.detach().float()
-        current_address = current_address / current_address.flatten(2).sum(
-            dim=-1, keepdim=True
-        )[:, :, None, None].clamp_min(1e-6)
-        # ``future_address`` remains diagnostic-only in the active mainline,
-        # but preserve the same single null fallback and unit-mass identity
-        # semantics as content.  Entropy must not rewrite it either.
-        address_per_support = (
-            candidate_posterior
-            + null_probability[..., None, None] * current_address[:, None]
-        )
 
         successor_rows: list[Tensor] = []
         transport_rows: list[Tensor] = []
         covariance_rows: list[Tensor] = []
-        visibility_rows: list[Tensor] = []
-        persistence_rows: list[Tensor] = []
-        uncertainty_rows: list[Tensor] = []
-        reliability_rows: list[Tensor] = []
-        address_rows: list[Tensor] = []
         support_counts: list[Tensor] = []
         for lower, upper in INTERVAL_BOUNDS:
             selected = ((offsets >= lower) & (offsets <= upper)).float()
@@ -295,95 +286,38 @@ class ObjectFutureTeacher(nn.Module):
                 fallback,
             )
             weight = selected / selected.sum(dim=1, keepdim=True).clamp_min(1.0)
-            interval_successor = torch.einsum(
-                "bf,bfkd->bkd", weight, successor_per_support
-            )
+            interval_successor = torch.einsum("bf,bfkd->bkd", weight, successor_per_support)
             successor_rows.append(interval_successor)
-            interval_transport = torch.einsum(
-                "bf,bfkd->bkd", weight, transport_per_support
-            )
+            interval_transport = torch.einsum("bf,bfkcd->bkcd", weight, transport_per_support)
             transport_rows.append(interval_transport)
             covariance_rows.append(
                 torch.einsum(
-                    "bf,bfkd->bkd",
+                    "bf,bfkcd->bkcd",
                     weight,
                     covariance_per_support,
-                )
-            )
-            interval_visibility = torch.einsum("bf,bfkd->bkd", weight, visibility_per_support)
-            visibility_rows.append(interval_visibility)
-            # Mean visibility and track continuity must not collapse into the
-            # same target.  The geometric mean drops when any sampled support
-            # loses the object and therefore measures persistence across the
-            # complete interval rather than average observability.
-            persistence_rows.append(
-                torch.exp(
-                    torch.einsum(
-                        "bf,bfkd->bkd",
-                        weight,
-                        visibility_per_support.clamp_min(1e-6).log(),
-                    )
-                )
-            )
-            uncertainty_rows.append(
-                torch.einsum("bf,bfkd->bkd", weight, uncertainty_per_support)
-                + (
-                    torch.einsum(
-                        "bf,bfkd->bkd",
-                        weight,
-                        (successor_per_support - interval_successor[:, None])
-                        .square()
-                        .mean(dim=-1, keepdim=True),
-                    )
-                ).sqrt()
-            )
-            reliability_rows.append(torch.einsum("bf,bfkd->bkd", weight, reliability_per_support))
-            address_rows.append(
-                torch.einsum(
-                    "bf,bfkcyx->bkcyx",
-                    weight,
-                    address_per_support,
                 )
             )
             support_counts.append(selected.sum(dim=1).float().mean())
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
         covariance = torch.stack(covariance_rows, dim=1)
-        visibility = torch.stack(visibility_rows, dim=1)
-        persistence_probability = torch.stack(persistence_rows, dim=1)
-        uncertainty = torch.stack(uncertainty_rows, dim=1)
-        reliability = torch.stack(reliability_rows, dim=1)
-        future_address = torch.stack(address_rows, dim=1)
-        current_validity = facts.validity.detach().float()[:, None]
-        # Current object facts are visible and persistent by construction.
-        # Export changes around that current state so a neutral/static future
-        # is exactly zero and cannot become a constant P2 value shortcut.
-        visibility_change = visibility - 1.0
-        persistence_change = persistence_probability - 1.0
-        future_selector_validity = current_validity * visibility
         target = FutureObjectDynamics(
             current_reference=facts.content.detach().float(),
             successor_content=successor,
             semantic_delta=(successor - facts.content.detach().float()[:, None]),
             transport_mean=transport,
             transport_covariance=covariance,
-            visibility=visibility_change,
-            persistence=persistence_change,
-            uncertainty=uncertainty,
-            reliability=reliability,
-            future_selector_validity=future_selector_validity,
-            future_address=future_address,
-            object_coordinates=facts.coordinates.detach().float(),
+            chart_availability=facts.validity.detach().float(),
+            camera_coordinates=facts.camera_coordinates.detach().float(),
+            camera_chart_availability=facts.camera_validity.detach().float(),
         )
         target.validate()
         if not collect_diagnostics:
             return target, {}
         metrics = {
-            "object_teacher_visibility": visibility.mean(),
-            "object_teacher_visibility_change": visibility_change.mean(),
-            "object_teacher_persistence_change": persistence_change.mean(),
-            "object_teacher_uncertainty": uncertainty.mean(),
-            "object_teacher_reliability": reliability.mean(),
+            "object_teacher_association_real_mass": (association_real_mass_per_support.mean()),
+            "object_teacher_association_uncertainty": uncertainty_per_support.mean(),
+            "object_teacher_reliability": reliability_per_support.mean(),
             "object_teacher_association_confidence": association_confidence.mean(),
             "object_teacher_interval_variation": target.semantic_delta.float()
             .std(dim=1, unbiased=False)
@@ -391,10 +325,7 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
             "object_teacher_transport_rms": transport.square().mean().sqrt(),
             "object_teacher_covariance_rms": covariance.square().mean().sqrt(),
-            "object_teacher_current_loss_support": facts.camera_validity.detach()
-            .float()
-            .mean(),
-            "object_teacher_future_selector_validity": future_selector_validity.mean(),
+            "object_teacher_current_loss_support": facts.camera_validity.detach().float().mean(),
             "object_teacher_successor_delta_identity_max_abs": (
                 target.semantic_delta
                 - (target.successor_content - target.current_reference[:, None])
@@ -436,10 +367,6 @@ class ObjectFutureTeacher(nn.Module):
                 target.semantic_delta[:, index].square().mean().sqrt()
             )
             metrics[f"{row}_transport_rms"] = transport[:, index].square().mean().sqrt()
-            metrics[f"{row}_visibility_change"] = visibility_change[:, index].mean()
-            metrics[f"{row}_persistence_change"] = persistence_change[:, index].mean()
-            metrics[f"{row}_reliability"] = reliability[:, index].mean()
-            metrics[f"{row}_address_mass"] = future_address[:, index].sum(dim=(-3, -2, -1)).mean()
         return target, metrics
 
     @staticmethod
@@ -448,16 +375,16 @@ class ObjectFutureTeacher(nn.Module):
         candidate_posterior: Tensor,
         candidate_coordinate: Tensor,
         current_camera_coordinate: Tensor,
+        null_probability: Tensor,
+        null_camera_measure: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Form V120 moments from within-camera displacements.
+        """Form camera-specific moments with the row-softmax null identity.
 
         Each camera has its own normalized image chart.  Subtracting one
         separately reduced global current coordinate from a posterior whose
-        camera mass can change creates motion for a static object.  Compute
-        ``future-current`` inside every camera first, then use the exact same
-        candidate posterior for the object-level mean and centered second
-        moment.  Null mass remains the V120 identity fallback because it owns
-        no candidate displacement.
+        camera mass can change creates motion for a static object. Null is the
+        legitimate zero-displacement hypothesis: allocate it over current
+        observable cameras and include it in each camera denominator.
         """
 
         if candidate_posterior.ndim != 6:
@@ -467,30 +394,55 @@ class ObjectFutureTeacher(nn.Module):
             raise ValueError("candidate coordinate chart does not align with cameras")
         if tuple(current_camera_coordinate.shape) != (batch, objects, cameras, 2):
             raise ValueError("current camera coordinates must be [B,K,C,2]")
+        if tuple(null_probability.shape) != tuple(candidate_posterior.shape[:3]) + (1,):
+            raise ValueError("null probability must be [B,F,K,1]")
+        if tuple(null_camera_measure.shape) != (batch, objects, cameras, 1):
+            raise ValueError("null camera measure must be [B,K,C,1]")
+        real_mass = candidate_posterior.float().sum(
+            dim=(-2, -1),
+            keepdim=True,
+        )
+        identity_mass = (
+            null_probability.float()[:, :, :, None, None]
+            * null_camera_measure.float()[:, None, :, :, None]
+        )
+        total_mass = real_mass + identity_mass
+        normalized_real = torch.where(
+            total_mass > 1.0e-8,
+            candidate_posterior.float() / total_mass.clamp_min(1.0e-8),
+            torch.zeros_like(candidate_posterior.float()),
+        )
         displacement = (
             candidate_coordinate[None, None, None].float()
             - current_camera_coordinate[:, None, :, :, None, None].float()
         )
         transport = torch.einsum(
-            "bfkcyx,bfkcyxd->bfkd",
-            candidate_posterior.float(),
+            "bfkcyx,bfkcyxd->bfkcd",
+            normalized_real,
             displacement,
         )
-        centered = displacement - transport[:, :, :, None, None, None]
-        covariance_xx = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
-            candidate_posterior.float(),
-            centered[..., 0].square(),
+        second_xx = torch.einsum(
+            "bfkcyx,bfkcyx->bfkc",
+            normalized_real,
+            displacement[..., 0].square(),
         )
-        covariance_xy = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
-            candidate_posterior.float(),
-            centered[..., 0] * centered[..., 1],
+        second_xy = torch.einsum(
+            "bfkcyx,bfkcyx->bfkc",
+            normalized_real,
+            displacement[..., 0] * displacement[..., 1],
         )
-        covariance_yy = torch.einsum(
-            "bfkcyx,bfkcyx->bfk",
-            candidate_posterior.float(),
-            centered[..., 1].square(),
+        second_yy = torch.einsum(
+            "bfkcyx,bfkcyx->bfkc",
+            normalized_real,
+            displacement[..., 1].square(),
+        )
+        covariance_xx = (second_xx - transport[..., 0].square()).clamp_min(0.0)
+        covariance_xy = second_xy - transport[..., 0] * transport[..., 1]
+        covariance_yy = (second_yy - transport[..., 1].square()).clamp_min(0.0)
+        covariance_xy_limit = torch.sqrt(covariance_xx * covariance_yy)
+        covariance_xy = torch.maximum(
+            torch.minimum(covariance_xy, covariance_xy_limit),
+            -covariance_xy_limit,
         )
         covariance = torch.stack(
             (covariance_xx, covariance_xy, covariance_yy),

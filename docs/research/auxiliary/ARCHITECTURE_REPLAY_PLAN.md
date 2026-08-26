@@ -1,8 +1,8 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01, R1b/G-02 and R1c/S-01,S-02 implemented and statically closed;
-R1d/W-01,W-02 next; no training run.
+R1a/G-01 through R1d/W-01,W-02 implemented and statically closed;
+R1e/P1-01 next; no training run.
 Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
@@ -233,11 +233,15 @@ order:
 7. P3-01/B-01 unique lanes and bottom ingress.
 8. N-01/D-01 matching numerics and diagnostics.
 
-Slices 1-3 are complete as separate reversible commits. R1c preserves the
+Slices 1-4 are complete as separate reversible commits. R1c preserves the
 Schema25 selector exactly, removes the typed ActionIntentDock/CoarseAction
 alias, and gives W lossless common/residual coordinates through its sole typed
-dock. R1d is the next authorized review target, but its source may not change
-until the W producer/consumer/loss/runtime/checkpoint worksheet closes.
+dock. R1d processes common once, gives W2 read-only access to completed W1,
+retains camera-specific geometry through Teacher/loss/P2, and removes online
+status authority. Its closed worksheet is
+`R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`; the retained suite is 140/140.
+R1e/P1-01 is the next review target, but its source may not change until the
+static/dynamic P1 producer/consumer/loss/runtime/checkpoint worksheet closes.
 
 There is no training between these commits. R1 retains the Schema25 Teacher
 association backend, S relevance scoring and base K-binder evidence, so the
