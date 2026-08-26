@@ -4,6 +4,8 @@
 > 放行标准，不再是当前执行真相；实际源码契约、尚未验证的边界分别以
 > `../00_CURRENT_ARCHITECTURE_CONTRACT.md` 和
 > `../CURRENT_MAINLINE_ISSUES.md` 为准。不得从本计划推断测试或训练收益。
+> 在 Schema25 重放中，本文件只提供 donor 证据；任何组成修改的去留由
+> `ARCHITECTURE_REPLAY_PLAN.md` 单独记录。
 
 ## 一、锚点与目标
 

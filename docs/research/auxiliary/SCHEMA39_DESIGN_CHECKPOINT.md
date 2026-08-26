@@ -4,6 +4,10 @@ Status: implemented design checkpoint retained for review ancestry. The active
 source contract is `../00_CURRENT_ARCHITECTURE_CONTRACT.md`; this note does not
 claim experimental success.
 
+For the Schema25 replay, this checkpoint is donor evidence rather than an
+instruction to restore Schema39. Per-change disposition is owned by
+`ARCHITECTURE_REPLAY_PLAN.md`.
+
 ## Locked scope
 
 Keep Schema38 G/S/W producers, four Teacher intervals, K/type/camera spatial

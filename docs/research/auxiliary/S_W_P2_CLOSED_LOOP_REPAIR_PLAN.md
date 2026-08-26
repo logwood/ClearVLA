@@ -2,6 +2,8 @@
 
 状态：已按 Schema31 实现；当前语义已提升到
 `../00_CURRENT_ARCHITECTURE_CONTRACT.md`，本文仅保留实施依据与边界。
+在 Schema25 重放中，本文件只提供历史 donor 证据，不授权整体恢复 Schema31；
+逐项去留由 `ARCHITECTURE_REPLAY_PLAN.md` 记录。
 
 本计划只处理 `CURRENT_MAINLINE_ISSUES.md` 中 O-02～O-06 形成的连续问题：
 

@@ -3,8 +3,11 @@
 Updated: 2026-08-21
 
 Status: recovered prospective research; not implemented, not an active
-mainline issue, and not part of Schema28. Schema28 must complete its current
-fresh CUDA smoke and behavior gates before any MIP source change is considered.
+mainline issue, and not part of the adopted Schema25 replay. The former
+Schema28 smoke/behavior prerequisite is a historical condition, not a current
+activation gate. MIP enters active consideration only after explicit user
+promotion; it must not be mixed into chronological architecture replay by
+default.
 
 ## Research premise
 

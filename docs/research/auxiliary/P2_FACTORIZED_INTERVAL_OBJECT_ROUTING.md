@@ -1,7 +1,9 @@
 # P2 分层区间—对象软路由备选修正
 
-状态：**前瞻性的局部结构修正，尚未进入当前主线。** 代码与 ABI 范围小，
-但训练和动作行为影响为中等，不能作为无感 hotfix 或旧 checkpoint 的续训补丁。
+状态：**Schema32 时期的条件性局部方案，未作为当前 replay 决策采用。** 原始触发
+条件仅作为历史设计依据；是否在 Schema25 重放中恢复其不变量，由
+`ARCHITECTURE_REPLAY_PLAN.md` 的逐修改审查决定。代码与 ABI 范围小，但训练和
+动作行为影响为中等，不能作为无感 hotfix 或旧 checkpoint 的续训补丁。
 
 本文件描述 P2 的核心代数，不规定未来必须“一个微小改动跑一个实验”。ClearVLA 的
 修复单元应是一个职责闭合的模块或连续数据流边界。如果 Schema32 证明 S interval key、
@@ -9,9 +11,9 @@ W residual identifiability 与 P2 factorization 属于同一个根因链，可�
 修正；但每项仍需独立的边界指标、代码所有权和可撤销提交。Teacher dustbin 只有在证据
 证明它直接限制同一 residual target 时才进入该组合，不能仅因同时异常而捆绑。
 
-当前 Schema32 仍由 `../00_CURRENT_ARCHITECTURE_CONTRACT.md` 定义。本方案只有在
-Schema32 的对齐日志证明 W 输出健康、但区间残差继续在 W→P2 边界显著衰减时才进入
-实现；否则保留为归档，不为“可能有用”而改动成熟主路。
+原方案要求 Schema32 的对齐日志证明 W 输出健康、但区间残差继续在 W→P2 边界
+显著衰减后才进入实现。该条件现在只解释方案的历史证据边界，不自动要求补跑实验，
+也不允许越过 replay register 直接进入实现。
 
 ## 1. 触发证据
 
