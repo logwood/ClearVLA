@@ -10,10 +10,11 @@ Schema25 replay worktree.
 | SCHEMA25_R1_IMPLEMENTATION_PROTOCOL.md | Reconciled implementation order, locked mechanisms and release-blocking tests |
 | SCHEMA25_R0_BASELINE_FINGERPRINT.md | Untouched Schema25 source, manifest, parameter and test fingerprint |
 | R1A_G01_G3_HANDOFF_WORKSHEET.md | Mandatory end-to-end boundary review and acceptance tests for the first replay slice |
+| R1B_G02_CONDITIONAL_K_RECONSTRUCTION_WORKSHEET.md | Conditional-K, target, unique-content and reconstruction boundary review for the second replay slice |
 | SCHEMA25_BASE_VERSION_CARD.md | Closed source/behavior audit of the fixed base |
 | ARCHITECTURE_REPLAY_LEDGER.md | Historical donor evidence; not implementation authority |
 | ACTIVE_MAINLINE_HANDOFF.md | Frozen Schema39 diagnostic context; not the active replay graph |
 
-The executable source is the exact Schema25 base plus the completed R1a/G-01
-slice recorded above. Historical documents and the user-supplied external
-protocol do not override the active source or authorize later slices.
+The executable source is the exact Schema25 base plus completed R1a/G-01 and
+R1b/G-02 slices recorded above. Historical documents and the user-supplied
+external protocol do not override the active source or authorize later slices.

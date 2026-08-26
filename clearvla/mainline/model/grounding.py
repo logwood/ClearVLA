@@ -26,19 +26,36 @@ def _coordinate_basis(coordinates: Tensor, width: int) -> Tensor:
     return value[..., : int(width)].to(dtype=coordinates.dtype)
 
 
+def _conditional_k_reconstruction_assignment(
+    conditional_owner: Tensor,
+    candidate_prior: Tensor,
+    candidate_validity: Tensor,
+) -> Tensor:
+    """Apply observable local support outside a conditional-K posterior."""
+
+    if conditional_owner.ndim != 3:
+        raise ValueError("conditional owner must be [B,N,K]")
+    expected_support = (*conditional_owner.shape[:-1], 1)
+    if tuple(candidate_prior.shape) != expected_support:
+        raise ValueError("candidate prior must align as [B,N,1]")
+    if tuple(candidate_validity.shape) != expected_support:
+        raise ValueError("candidate validity must align as [B,N,1]")
+    return (
+        conditional_owner.float().clamp_min(0.0)
+        * candidate_prior.float().clamp_min(0.0)
+        * candidate_validity.float().clamp(0.0, 1.0)
+    )
+
+
 def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
     """Preserve every local hypothesis while exposing a dense DINO target."""
 
     local.validate()
-    # V120's sole G target is the dense mixture already represented by the
-    # completed G3 local facts.  Do not silently replace it with the raw DINO
-    # cache: that would introduce a stronger, behavior-changing objective
-    # under the same external 0.25 weight.
-    validity = local.slot_validity.to(dtype=local.content_slots.dtype)
-    semantic_mass = local.semantic_owner_probs[..., None] * validity
-    dense_content = (
-        local.content_slots * semantic_mass
-    ).sum(dim=-2) / semantic_mass.sum(dim=-2).clamp_min(1e-6)
+    # The observable reconstruction target must not be regenerated from the
+    # online hypotheses being judged.  The active observation producer
+    # supplies the detached current DINO chart and a separate observed mask;
+    # neither becomes a binder input or an online object value.
+    dense_content = local.target_dino_content.detach()
     # This is a conditional mixture over the local M hypotheses.  Candidate
     # validity is a separate Bernoulli support variable and must not be folded
     # into this distribution: doing so turns the complement of a perfectly
@@ -208,16 +225,13 @@ class DenseObjectGrounder(nn.Module):
         ).expand(
             batch, -1, -1
         )
-        parent_owner: Tensor | None = None
-        parent_null: Tensor | None = None
-        read: Tensor | None = None
         for _ in range(self.iterations):
-            parent_owner, _, parent_null, read = self._competition(
+            _, _, _, iteration_read = self._competition(
                 slots, candidates, validity, candidate_prior
             )
             update = torch.einsum(
                 "bkn,bnh->bkh",
-                read.to(dtype=candidates.dtype),
+                iteration_read.to(dtype=candidates.dtype),
                 candidates,
             )
             update, _ = smooth_rms_contract(update, self.maximum_update_rms)
@@ -235,11 +249,9 @@ class DenseObjectGrounder(nn.Module):
         # pre-update posterior here would combine a stale G2 assignment with
         # a new G3 slot state.  Recompute the parent posterior once so the
         # bounded G3 correction is genuinely relative to the final binder.
-        parent_owner, _, parent_null, read = self._competition(
+        parent_owner, _, _, read = self._competition(
             slots, candidates, validity, candidate_prior
         )
-        if parent_owner is None or parent_null is None or read is None:
-            raise RuntimeError("object binding did not execute")
         # G3 is a bounded correction over the actual G2/binder posterior.  Its
         # zero initialization makes the initial graph an exact identity.
         pair = torch.cat(
@@ -250,17 +262,32 @@ class DenseObjectGrounder(nn.Module):
             dim=-1,
         )
         residual = 0.50 * torch.tanh(self.g3_residual(pair).squeeze(-1).float())
-        # Correct the conditional K+null owner posterior.  Local-hypothesis
-        # prior and physical validity remain outside this softmax, so a zero
-        # G3 residual preserves both the parent posterior and its exact mass
-        # semantics.
-        corrected = torch.softmax(
-            parent_owner.clamp_min(1e-8).log()
-            + torch.cat((residual, torch.zeros_like(parent_null[..., None])), dim=-1),
+        # G3 refines only identity inside the parent's real-object event.  The
+        # physical binder remains the sole owner of real-versus-null mass.
+        # Local-hypothesis prior and observable validity remain outside both
+        # softmaxes and therefore retain their existing units.
+        parent_k_mass = parent_owner[..., : self.objects].sum(dim=-1, keepdim=True)
+        parent_k_conditional = parent_owner[..., : self.objects] / parent_k_mass.clamp_min(
+            1e-8
+        )
+        corrected_k_conditional = torch.softmax(
+            parent_k_conditional.clamp_min(1e-8).log() + residual,
+            dim=-1,
+        )
+        corrected = torch.cat(
+            (
+                parent_k_mass * corrected_k_conditional,
+                parent_owner[..., self.objects :],
+            ),
             dim=-1,
         )
         valid = validity.float().clamp(0.0, 1.0)
         prior = candidate_prior.float().clamp_min(0.0)
+        reconstruction_assignment = _conditional_k_reconstruction_assignment(
+            corrected_k_conditional,
+            prior,
+            valid,
+        )
         assignment = corrected[..., : self.objects] * valid * prior
         null_assignment = (
             corrected[..., self.objects] * valid[..., 0] + (1.0 - valid[..., 0])
@@ -292,7 +319,11 @@ class DenseObjectGrounder(nn.Module):
             typed_value = torch.einsum("bkn,bnd->bkd", typed_read.to(dtype=flat.dtype), flat)
             return typed_value, typed_read, typed_joint
 
-        content = aggregate(chart.candidate_content)
+        aggregated_content = aggregate(chart.candidate_content)
+        # Preserve the existing reconstruction bandwidth without retaining a
+        # loss-private object value.  The zero-initialized slot residual is now
+        # part of the one exported content consumed by S, W and Teacher.
+        content = aggregated_content + self.decode_content_residual(slots)
         semantic, semantic_read, semantic_assignment = typed_reweight(
             "semantic", chart.candidate_semantic
         )
@@ -331,6 +362,9 @@ class DenseObjectGrounder(nn.Module):
             batch, self.objects, *candidate_shape
         )
         structured_null = null_assignment.reshape(batch, *candidate_shape)
+        structured_reconstruction_assignment = reconstruction_assignment.transpose(
+            1, 2
+        ).reshape(batch, self.objects, *candidate_shape)
 
         def camera_aggregate(value: Tensor, weight: Tensor) -> Tensor:
             """Aggregate inside each real camera without recreating C later."""
@@ -372,8 +406,6 @@ class DenseObjectGrounder(nn.Module):
         chart_read = chart_assignment / chart_assignment.flatten(2).sum(dim=-1)[
             ..., None, None, None
         ].clamp_min(1e-6)
-        owner_prior_per_cell = chart.candidate_owner_prior.float().sum(dim=-1).clamp_min(1e-6)
-        chart_owner = chart_assignment.float() / owner_prior_per_cell[:, None]
         coordinate_weight = (
             chart.candidate_validity.float() * chart.candidate_owner_prior[..., None].float()
         )
@@ -383,22 +415,31 @@ class DenseObjectGrounder(nn.Module):
         position = _coordinate_basis(
             chart_coordinate.to(dtype=chart.candidate_coordinates.dtype), 16
         )
-        # The exported full-DINO object content is itself the reconstruction
-        # base.  A zero-initialized slot residual may add object-specific
-        # detail, while the shared coordinate decoder accounts for smooth
-        # within-object variation.  This prevents a private hidden slot from
-        # satisfying the loss while the W-visible object content remains weak.
-        decoded_slot = content + self.decode_content_residual(slots)
+        # Conditional K owns reconstruction assignment independently of the
+        # learned association null.  ``content`` is the only K-specific value.
+        # The retained coordinate decoder has no K input; write it explicitly
+        # as a shared spatial term behind summed observable support instead of
+        # hiding it inside K-valued prototypes.
+        reconstruction_owner = structured_reconstruction_assignment.sum(dim=-1)
+        shared_support = reconstruction_owner.sum(dim=1)
         decoded_position = self.decode_position(position)
-        prototype_value = decoded_slot[:, :, None, None, None, :]
-        reconstruction_value = prototype_value + decoded_position[:, None]
         reconstructed = torch.einsum(
-            "bkcyx,bkcyxd->bcyxd",
-            chart_owner.to(dtype=reconstruction_value.dtype),
-            reconstruction_value,
+            "bkcyx,bkd->bcyxd",
+            reconstruction_owner.to(dtype=content.dtype),
+            content,
+        ) + (
+            shared_support.to(dtype=decoded_position.dtype)[..., None]
+            * decoded_position
         )
+        reconstructed = reconstructed.to(dtype=chart.dino_content.dtype)
         target_content = chart.dino_content.detach().float()
-        reconstruction_error = (reconstructed.float() - target_content).square().mean()
+        observed = chart.cell_observed.detach().float()
+        reconstruction_per_cell = (
+            reconstructed.float() - target_content
+        ).square().mean(dim=-1, keepdim=True)
+        reconstruction_error = (
+            reconstruction_per_cell * observed
+        ).sum() / observed.sum().clamp_min(1.0)
         facts = ObjectFactSet(
             dense_chart=chart,
             content=content,
@@ -462,6 +503,14 @@ class DenseObjectGrounder(nn.Module):
             )
             .abs()
             .mean(),
+            "object_grounding_g3_null_identity_error": (
+                corrected[..., self.objects]
+                - parent_owner[..., self.objects]
+            )
+            .detach()
+            .float()
+            .abs()
+            .amax(),
             "object_grounding_object_content_pair_cosine": self._pair_cosine(content),
             "object_grounding_object_chart_pair_overlap": self._pair_overlap(chart_read.flatten(2)),
             "object_grounding_semantic_appearance_posterior_l1": (

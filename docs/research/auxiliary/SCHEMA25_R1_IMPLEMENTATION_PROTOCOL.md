@@ -1,7 +1,8 @@
 # Schema25-R1 implementation protocol
 
 Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
-implemented and statically closed; R1b/G-02 not started; no training run.
+and R1b/G-02 implemented and statically closed; R1c/S-01,S-02 next; no
+training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -88,8 +89,9 @@ G3 may change only conditional K identity:
 
 The reconstruction target is detached current DINO. The only K-specific
 reconstruction value is the same exported object content consumed by S, W and
-Teacher. No private K decoder and no learned-null reconstruction gate are
-allowed.
+Teacher. The existing slot residual may remain only by becoming part of that
+exported value; no loss-private K decoder and no learned-null reconstruction
+gate are allowed.
 
 ### 4.2 S single ingress and decomposition
 
@@ -195,8 +197,9 @@ Execution ledger:
 | Slice | State | Evidence |
 |---|---|---|
 | R1a / G-01 | `COMPLETE` | `R1A_G01_G3_HANDOFF_WORKSHEET.md`; 123/123 retained tests |
-| R1b / G-02 | `NEXT` | boundary worksheet required before source edits |
-| R1c-R1h | `PENDING` | no source edit authorized yet |
+| R1b / G-02 | `COMPLETE` | `R1B_G02_CONDITIONAL_K_RECONSTRUCTION_WORKSHEET.md`; 129/129 retained tests |
+| R1c / S-01,S-02 | `NEXT` | complete S producer/consumer worksheet before source edits |
+| R1d-R1h | `PENDING` | no source edit authorized yet |
 
 For every slice:
 

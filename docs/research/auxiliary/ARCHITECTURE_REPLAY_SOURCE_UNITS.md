@@ -1,6 +1,7 @@
 # Cross-version replay source units
 
-Status: source-derived working register, established on 2026-08-26.
+Status: source-derived working register; G-01 and G-02 implemented and
+statically closed; remaining R1 units pending. Established on 2026-08-26.
 
 This file records the implementation semantic units recovered across
 Schema26-39. It is deliberately source-first:
@@ -146,7 +147,9 @@ Axes and numerics:
 - local-hypothesis prior and observable validity stay outside its softmax;
 - all-invalid candidates produce zero assignment;
 - the target is detached;
-- no learned null appears in the reconstruction value or Jacobian.
+- no separate learned-null value or gate appears; reconstruction assignment
+  and its Jacobian are null-free. The one exported online content remains a
+  legal product of the retained physical K+null binder.
 
 Gradients:
 
@@ -166,8 +169,9 @@ Rejected mechanics:
 
 Static acceptance:
 
-- zeroing exported K content changes reconstruction;
-- zeroing any removed private decoder cannot leave a second K-specific value;
+- intervening on the retained slot residual changes exported K content and
+  reconstruction through that same value;
+- no loss-private second K-specific value remains;
 - changing null logits while holding conditional K fixed leaves the
   reconstruction assignment unchanged;
 - conditional K sums to one on valid real support and stays zero for invalid

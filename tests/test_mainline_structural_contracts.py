@@ -5,9 +5,11 @@ import inspect
 from dataclasses import fields, is_dataclass, replace
 from unittest import mock
 
+import pytest
 import torch
 import torch.nn.functional as F
 
+import clearvla.mainline.model.grounding as grounding_module
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.interfaces import CurrentObservation
 from clearvla.mainline.model.bottom import (
@@ -157,6 +159,270 @@ def test_grounder_owns_only_one_dense_reconstruction_objective() -> None:
     # every K candidate a second time.
     assert public.grad is None
     assert candidates.grad is not None and candidates.grad.abs().sum() > 0
+
+
+def test_grounder_reconstructs_only_the_independent_observed_dino_target() -> None:
+    torch.manual_seed(201)
+    local = _local_facts(content=8, route=4, hidden=16, observed=True)
+    target = local.target_dino_content.detach().clone().requires_grad_(True)
+    local = replace(local, target_dino_content=target)
+    chart = dense_chart_from_local_facts(local)
+    torch.testing.assert_close(
+        chart.dino_content,
+        target.detach(),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert not chart.dino_content.requires_grad
+    self_mixture = (
+        local.content_slots * local.semantic_owner_probs[..., None]
+    ).sum(dim=-2)
+    assert not torch.equal(chart.dino_content, self_mixture)
+
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )
+    observed_facts, _ = grounder(local, collect_diagnostics=False)
+    observed_facts.reconstruction_error.backward()
+    assert target.grad is None
+
+    masked = replace(
+        local,
+        cell_observed=torch.zeros_like(local.cell_observed),
+    )
+    masked_facts, metrics = grounder(masked)
+    assert float(masked_facts.reconstruction_error.detach()) == 0.0
+    assert float(metrics["object_grounding_reconstruction_mse"]) == 0.0
+
+
+def test_conditional_k_reconstruction_assignment_is_fp32_null_free_and_zero_safe() -> None:
+    torch.manual_seed(202)
+    conditional_k = torch.softmax(
+        torch.randn(2, 7, 4, dtype=torch.float32),
+        dim=-1,
+    )
+    local_prior = torch.rand(2, 7, 1, dtype=torch.float16)
+    validity = torch.ones_like(local_prior)
+    validity[:, 3] = 0.0
+    assignment = grounding_module._conditional_k_reconstruction_assignment(
+        conditional_k,
+        local_prior,
+        validity,
+    )
+    assert assignment.dtype == torch.float32
+    torch.testing.assert_close(
+        assignment.sum(dim=-1, keepdim=True),
+        local_prior.float() * validity.float(),
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+    assert torch.equal(assignment[:, 3], torch.zeros_like(assignment[:, 3]))
+
+    high_real_mass = 0.9 * conditional_k.float()
+    low_real_mass = 0.001 * conditional_k.float()
+    high_conditional = high_real_mass / high_real_mass.sum(dim=-1, keepdim=True)
+    low_conditional = low_real_mass / low_real_mass.sum(dim=-1, keepdim=True)
+    high = grounding_module._conditional_k_reconstruction_assignment(
+        high_conditional,
+        local_prior,
+        validity,
+    )
+    low = grounding_module._conditional_k_reconstruction_assignment(
+        low_conditional,
+        local_prior,
+        validity,
+    )
+    torch.testing.assert_close(high, assignment, atol=1.0e-6, rtol=1.0e-6)
+    torch.testing.assert_close(low, assignment, atol=1.0e-6, rtol=1.0e-6)
+
+    with pytest.raises(ValueError, match="conditional owner"):
+        grounding_module._conditional_k_reconstruction_assignment(
+            conditional_k[..., 0],
+            local_prior,
+            validity,
+        )
+    with pytest.raises(ValueError, match="candidate prior"):
+        grounding_module._conditional_k_reconstruction_assignment(
+            conditional_k,
+            local_prior[:, :-1],
+            validity,
+        )
+
+
+def test_g3_changes_only_conditional_k_and_preserves_parent_real_null_mass() -> None:
+    torch.manual_seed(203)
+    local = _local_facts(cameras=2, content=8, route=4, hidden=16)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=2,
+    ).eval()
+    baseline, _ = grounder(local, collect_diagnostics=False)
+
+    def distinct_k_residual(pair: torch.Tensor) -> torch.Tensor:
+        pattern = torch.linspace(
+            -2.0,
+            2.0,
+            grounder.objects,
+            device=pair.device,
+            dtype=pair.dtype,
+        ).reshape(1, 1, grounder.objects, 1)
+        return pattern.expand(pair.shape[0], pair.shape[1], -1, -1)
+
+    with mock.patch.object(
+        grounder.g3_residual,
+        "forward",
+        side_effect=distinct_k_residual,
+    ):
+        changed, _ = grounder(local, collect_diagnostics=False)
+
+    assert not torch.equal(changed.candidate_assignment, baseline.candidate_assignment)
+    torch.testing.assert_close(
+        changed.candidate_assignment.sum(dim=1),
+        baseline.candidate_assignment.sum(dim=1),
+        atol=2.0e-7,
+        rtol=2.0e-7,
+    )
+    torch.testing.assert_close(
+        changed.null_assignment,
+        baseline.null_assignment,
+        atol=2.0e-7,
+        rtol=2.0e-7,
+    )
+
+
+def test_grounder_slot_residual_is_exported_before_reconstruction() -> None:
+    torch.manual_seed(204)
+    local = _local_facts(content=8, route=4, hidden=16, observed=True)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    ).eval()
+    baseline, _ = grounder(local, collect_diagnostics=False)
+    captured: dict[str, torch.Tensor] = {}
+
+    def exported_residual(slots: torch.Tensor) -> torch.Tensor:
+        object_value = torch.linspace(
+            -0.2,
+            0.2,
+            grounder.objects,
+            device=slots.device,
+            dtype=slots.dtype,
+        ).reshape(1, grounder.objects, 1)
+        feature_value = torch.linspace(
+            0.5,
+            1.0,
+            grounder.content_dim,
+            device=slots.device,
+            dtype=slots.dtype,
+        ).reshape(1, 1, grounder.content_dim)
+        value = object_value * feature_value
+        captured["value"] = value.expand(slots.shape[0], -1, -1)
+        return captured["value"]
+
+    with mock.patch.object(
+        grounder.decode_content_residual,
+        "forward",
+        side_effect=exported_residual,
+    ):
+        changed, _ = grounder(local, collect_diagnostics=False)
+
+    residual = captured["value"]
+    torch.testing.assert_close(
+        changed.content - baseline.content,
+        residual,
+        atol=2.0e-6,
+        rtol=2.0e-6,
+    )
+    physical_assignment = changed.candidate_assignment.float()
+    physical_real_mass = physical_assignment.sum(dim=1, keepdim=True)
+    conditional_k = torch.where(
+        physical_real_mass > 1.0e-8,
+        physical_assignment / physical_real_mass.clamp_min(1.0e-8),
+        torch.zeros_like(physical_assignment),
+    )
+    reconstruction_owner = (
+        conditional_k
+        * changed.dense_chart.candidate_owner_prior[:, None].float()
+        * changed.dense_chart.candidate_validity[..., 0][:, None].float()
+    ).sum(dim=-1)
+    expected_delta = torch.einsum(
+        "bkcyx,bkd->bcyxd",
+        reconstruction_owner,
+        residual.float(),
+    )
+    torch.testing.assert_close(
+        changed.reconstructed_dino.float() - baseline.reconstructed_dino.float(),
+        expected_delta,
+        atol=3.0e-6,
+        rtol=3.0e-6,
+    )
+
+
+def test_g02_reconstruction_gradients_reach_unique_content_and_assignment_owners() -> None:
+    torch.manual_seed(205)
+    local = _local_facts(content=8, route=4, hidden=16, observed=True)
+    target = local.target_dino_content.detach().clone().requires_grad_(True)
+    candidates = local.content_slots.detach().clone().requires_grad_(True)
+    local = replace(
+        local,
+        target_dino_content=target,
+        content_slots=candidates,
+    )
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )
+    facts, _ = grounder(local, collect_diagnostics=False)
+    facts.reconstruction_error.backward()
+    assert target.grad is None
+    assert candidates.grad is not None and candidates.grad.abs().sum() > 0
+    assert (
+        grounder.decode_content_residual.weight.grad is not None
+        and grounder.decode_content_residual.weight.grad.abs().sum() > 0
+    )
+    g3_output = grounder.g3_residual[-1]
+    assert isinstance(g3_output, torch.nn.Linear)
+    assert g3_output.weight.grad is not None and g3_output.weight.grad.abs().sum() > 0
+
+
+def test_g02_retains_all_schema25_physical_binder_inputs() -> None:
+    torch.manual_seed(206)
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    )
+    chart = dense_chart_from_local_facts(
+        _local_facts(cameras=2, content=8, route=4, hidden=16)
+    )
+    baseline = grounder._candidate_tokens(chart)
+    perturbations = {
+        "candidate_content": torch.randn_like(chart.candidate_content),
+        "candidate_semantic": torch.randn_like(chart.candidate_semantic),
+        "candidate_appearance": torch.randn_like(chart.candidate_appearance),
+        "candidate_geometry": torch.randn_like(chart.candidate_geometry),
+        "candidate_coordinates": 0.25 * torch.randn_like(chart.candidate_coordinates),
+    }
+    for name, delta in perturbations.items():
+        changed = grounder._candidate_tokens(
+            replace(chart, **{name: getattr(chart, name) + delta})
+        )
+        assert not torch.equal(changed, baseline), name
 
 
 def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:

@@ -1,13 +1,13 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-implementation and training not started. Established on 2026-08-26.
+R1a/G-01 and R1b/G-02 implemented and statically closed; no training run.
+Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
 per-change disposition. It does not by itself change the checked-out source or
-the active architecture contract. Until a replay implementation enters active
-scope, `../00_CURRENT_ARCHITECTURE_CONTRACT.md` remains the source of truth for
-the checked-out Schema39 graph.
+the active architecture contract. `../00_CURRENT_ARCHITECTURE_CONTRACT.md`
+remains the compact source of truth for the checked-out replay graph.
 
 Historical evidence and donor ancestry are owned by
 `ARCHITECTURE_REPLAY_LEDGER.md`. The frozen Schema39 diagnosis is owned by

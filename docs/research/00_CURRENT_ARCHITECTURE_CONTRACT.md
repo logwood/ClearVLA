@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 assembly; R1a/G-01 complete; 123 mainline tests pass; no training run
+release status:         Schema25-R1 assembly; R1a/G-01 and R1b/G-02 complete; 129 mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -28,13 +28,15 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
 > **The executable source is the exact Schema25 replay base plus completed
-> R1a/G-01; it is not yet behavior-released.** The untouched R0 fingerprint,
+> R1a/G-01 and R1b/G-02; it is not yet behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
 > `ARCHITECTURE_REPLAY_SOURCE_UNITS.md` and
-> `SCHEMA25_R1_IMPLEMENTATION_PROTOCOL.md`. R1a repairs only the independently
-> confirmed G3-to-transition handoff. No CUDA smoke, dataset access, checkpoint
-> migration or training run has been performed.
+> `SCHEMA25_R1_IMPLEMENTATION_PROTOCOL.md`. R1a repairs the independently
+> confirmed G3-to-transition handoff. R1b repairs conditional-K and
+> reconstruction ownership without changing the Schema25 binder inputs or
+> parameter inventory. No CUDA smoke, dataset access, checkpoint migration or
+> training run has been performed.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -76,6 +78,19 @@ R1a/G-01 makes one additional source-local repair on that base:
 - the handoff adds no cast, clone, detach, projection, normalization, gain,
   floor or amplitude budget.
 
+R1b/G-02 makes one additional grounder-local ownership repair:
+
+- the detached current DINO chart is the reconstruction target only; the
+  online candidate chart remains the completed G3 local content;
+- the physical Schema25 K+null binder still decides real-versus-null mass,
+  while G3 changes only `P(K | real)`;
+- reconstruction assignment is conditional K times the retained local prior
+  and observable validity, so learned null cannot switch off this objective;
+- the existing zero-initialized slot content residual is folded into the one
+  exported `ObjectFactSet.content` consumed by S, W and detached Teacher;
+- the existing coordinate decoder remains a shared K-independent spatial term.
+  No decoder, gain, floor, content field or loss was added or removed.
+
 No block, external loss weight, gain, quota, hard gate, entropy target,
 capacity or P1 learned null was added. Schema24 and older checkpoints cannot
 exact-resume Schema25.
@@ -114,7 +129,10 @@ current state + V120 visual rollout + one shared sampled role table
     -> G3 DiT -> progressive update stage 3: bounded owner correction
     -> completed camera x 8x8 x local-M GroundedFactSet
     -> competitive global K+null DenseObjectGrounder
+       physical real/null mass + conditional-K-only G3 correction
+       detached observed-current-DINO reconstruction target
     -> ObjectFactSet with reversible K <-> chart correspondence
+       one exported K content value shared by reconstruction/S/W/Teacher
 
 T5 + observable state/executed-action history + ObjectFactSet
     -> StatelessObjectIntentOrganizer S
@@ -201,9 +219,13 @@ supports may change targets and losses, never deployment action.
    action call for that observation. G uses clean endpoint `t_v120=0`; ODE
    time cannot leak into cached facts.
 5. Local M hypotheses are not persistent objects. The dense grounder owns one
-   physical K=4 plus null competition. The public chart remains outside that
-   private candidate competition and is never a second object value. Typed
-   reads can reweight only inside physical K support.
+   physical K=4 plus null competition. G3 preserves the parent's real/null
+   mass and refines only conditional K. Reconstruction assignment is
+   `P(K|real) * local_prior * observable_validity`; its target is detached
+   current DINO over observed cells, and its sole K-specific value is exported
+   `ObjectFactSet.content`. The public chart remains outside private candidate
+   competition and is never a second object value. Typed reads can reweight
+   only inside physical K support.
 6. Learned flow is a continuous source-relative prior, never a nonzero quota.
    Flow warp/cycle/smoothness/uncertainty/refinement keep explicit units.
 7. S reads full T5, observable state/action history and typed G facts. It does
@@ -313,7 +335,7 @@ ControlledTransitionSource / State
 | Module | Legal inputs | Forbidden inputs |
 | --- | --- | --- |
 | G | current DINO/raw history, coordinates, learned flow, current state | T5, action history, proposal, noisy action, Teacher |
-| global grounder | completed G3 chart and typed local candidates | S, W, noisy action, Teacher |
+| global grounder | completed G3 chart/typed local candidates; detached current DINO and observed mask for its sole reconstruction loss | S, W, noisy action, future Teacher data |
 | S | T5, state/executed history, typed ObjectFactSet | frame progress, phase label, noisy action, Teacher |
 | W | public ObjectFactSet content/transport, S-owned typed relevance, one clean coarse action intent | raw semantic/appearance/geometry reread, target/noisy action, proposal, Teacher, free W residual |
 | P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, second visual read |
@@ -326,9 +348,11 @@ ControlledTransitionSource / State
 ## Loss and optimizer ownership
 
 - Physical V120 action flow matching remains dominant.
-- The global grounder owns exactly one dense-mixture reconstruction MSE; the
-  existing intent-structure ledger applies its fixed 0.25 internal coefficient.
-  No prototype, masked-completion or typed-consistency head remains.
+- The global grounder owns exactly one observed-current-DINO reconstruction
+  MSE. Its assignment is conditional-K, local-prior and observable-validity
+  mass; its only K-specific value is exported object content. The existing
+  intent-structure ledger applies its fixed 0.25 internal coefficient. No
+  prototype, masked-completion or typed-consistency head remains.
 - Teacher successor is the uniform interval mean of
   `matched + null_probability * current_reference`; semantic delta is exactly
   successor minus current reference. Transport/covariance are uniform means of
@@ -374,9 +398,10 @@ ControlledTransitionSource / State
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
 - The untouched Schema25 R0 configuration measures `169,981,895` total and
-  `153,587,574` trainable parameters. R1a measures `169,979,847` total and
-  `153,585,526` trainable parameters; the exact `-2,048` delta is the removed
-  trainable `transition.interval_identity` and no replacement parameter.
+  `153,587,574` trainable parameters. R1a and R1b both measure `169,979,847`
+  total and `153,585,526` trainable parameters; the exact `-2,048` delta is the
+  R1a removal of trainable `transition.interval_identity`. R1b retains the
+  grounder's 4,007,936 parameters and 17 optimizer tensors exactly.
   Relative to the completed Schema24 graph,
   the exact `-12,731,133` trainable delta is fully accounted for: S removes
   three duplicate `_CrossRead`s plus one shared learned-null router and adds
@@ -407,12 +432,14 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 123/123. Tests cover full
+The retained local suite now passes 129/129. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
 permutations, per-type S perturbation locality, fixed-zero typed values,
-typed-owner relabeling equivariance, public-target gradient isolation,
+typed-owner relabeling equivariance, independent detached DINO target,
+observed-cell reconstruction, conditional-K real/null conservation, unique
+exported-content reconstruction and its forward/reverse gradient paths,
 absence of CoarseAction/W raw-typed rereads,
 same-camera Teacher geometry, object geometry, neutral effect, P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
