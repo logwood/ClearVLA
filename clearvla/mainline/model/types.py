@@ -337,14 +337,6 @@ class ActionIntentDock:
     public_interval_carrier: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
     public_object_memory: Tensor  # [B,K,H]
-    typed_action_components: Tensor  # [B,I,type,H]
-
-    @property
-    def typed_action_context(self) -> Tensor:
-        # Type identity is formed before this consumer-specific reduction.
-        # The fixed denominator preserves exact zero when every optional type
-        # is absent; normalizing by selected mass would destroy that contract.
-        return self.typed_action_components.sum(dim=2) / (3.0**0.5)
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -359,11 +351,6 @@ class ActionIntentDock:
             self.public_object_memory.shape[0]
         ) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
-        _shape(
-            self.typed_action_components,
-            (batch, 4, 3, hidden),
-            "action-intent typed components",
-        )
 
 
 @dataclass(frozen=True)
@@ -372,8 +359,22 @@ class WorldIntentDock:
 
     protected_goal_memory: Tensor  # [B,G,H]
     public_interval_carrier: Tensor  # [B,I,H]
-    typed_relevance_mass: Tensor  # [B,I,K,type,1]
-    typed_relevance_value: Tensor  # [B,I,K,type,R]
+    typed_common_mass: Tensor  # [B,K,type,1]
+    typed_common_value: Tensor  # [B,K,type,R]
+    typed_interval_residual_mass: Tensor  # [B,I,K,type,1]
+    typed_interval_residual_value: Tensor  # [B,I,K,type,R]
+
+    @property
+    def typed_relevance_mass(self) -> Tensor:
+        """Reconstruct the unchanged Schema25 interval relevance mass."""
+
+        return self.typed_common_mass[:, None] + self.typed_interval_residual_mass
+
+    @property
+    def typed_relevance_value(self) -> Tensor:
+        """Reconstruct the unchanged Schema25 interval relevance value."""
+
+        return self.typed_common_value[:, None] + self.typed_interval_residual_value
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -387,18 +388,28 @@ class WorldIntentDock:
             (batch, 4, hidden),
             "world-intent protected goal memory",
         )
-        if self.typed_relevance_mass.ndim != 5:
-            raise ValueError("typed relevance mass must be [B,I,K,type,1]")
-        if tuple(self.typed_relevance_mass.shape[:2]) != (batch, 4):
-            raise ValueError("typed relevance mass lost its interval axis")
-        if int(self.typed_relevance_mass.shape[3]) != 3 or int(
-            self.typed_relevance_mass.shape[-1]
-        ) != 1:
-            raise ValueError("typed relevance mass lost semantic/appearance/geometry")
-        if self.typed_relevance_value.ndim != 5 or tuple(
-            self.typed_relevance_value.shape[:4]
-        ) != tuple(self.typed_relevance_mass.shape[:4]):
-            raise ValueError("typed relevance value does not align with its mass")
+        if self.typed_common_mass.ndim != 4:
+            raise ValueError("typed common mass must be [B,K,type,1]")
+        if int(self.typed_common_mass.shape[0]) != batch:
+            raise ValueError("typed common mass batch does not align")
+        if tuple(self.typed_common_mass.shape[-2:]) != (3, 1):
+            raise ValueError("typed common mass lost semantic/appearance/geometry")
+        objects = int(self.typed_common_mass.shape[1])
+        _shape(
+            self.typed_interval_residual_mass,
+            (batch, 4, objects, 3, 1),
+            "typed interval residual mass",
+        )
+        if self.typed_common_value.ndim != 4 or tuple(
+            self.typed_common_value.shape[:3]
+        ) != (batch, objects, 3):
+            raise ValueError("typed common value lost object/type identity")
+        route = int(self.typed_common_value.shape[-1])
+        _shape(
+            self.typed_interval_residual_value,
+            (batch, 4, objects, 3, route),
+            "typed interval residual value",
+        )
 
 
 @dataclass(frozen=True)
@@ -455,9 +466,11 @@ class ObjectIntentState:
     policy_interval_context: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
-    typed_relevance_mass: Tensor  # [B,4,K,3,1]
-    typed_relevance_value: Tensor  # [B,4,K,3,R]
-    typed_action_components: Tensor  # [B,4,3,H]
+    typed_common_mass: Tensor  # [B,K,3,1]
+    typed_common_value: Tensor  # [B,K,3,R]
+    typed_interval_residual_mass: Tensor  # [B,4,K,3,1]
+    typed_interval_residual_value: Tensor  # [B,4,K,3,R]
+    typed_policy_components: Tensor  # [B,4,3,H]
     goal_attention: Tensor  # [B,4,Lg]
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
@@ -468,6 +481,18 @@ class ObjectIntentState:
         """Compatibility name for the S-owned consumer-specific context."""
 
         return self.policy_interval_context
+
+    @property
+    def typed_relevance_mass(self) -> Tensor:
+        """Compatibility view of the unchanged Schema25 selector mass."""
+
+        return self.typed_common_mass[:, None] + self.typed_interval_residual_mass
+
+    @property
+    def typed_relevance_value(self) -> Tensor:
+        """Compatibility view of the unchanged Schema25 selected value."""
+
+        return self.typed_common_value[:, None] + self.typed_interval_residual_value
 
     @property
     def interval_semantic_attention(self) -> Tensor:
@@ -486,15 +511,16 @@ class ObjectIntentState:
             public_interval_carrier=self.public_interval_carrier,
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
-            typed_action_components=self.typed_action_components,
         )
 
     def world_dock(self) -> WorldIntentDock:
         return WorldIntentDock(
             protected_goal_memory=self.protected_goal_set,
             public_interval_carrier=self.public_interval_carrier,
-            typed_relevance_mass=self.typed_relevance_mass,
-            typed_relevance_value=self.typed_relevance_value,
+            typed_common_mass=self.typed_common_mass,
+            typed_common_value=self.typed_common_value,
+            typed_interval_residual_mass=self.typed_interval_residual_mass,
+            typed_interval_residual_value=self.typed_interval_residual_value,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -537,18 +563,29 @@ class ObjectIntentState:
             raise ValueError("object intent public tokens must be [B,K,H]")
         objects = int(self.object_tokens.shape[1])
         _shape(
-            self.typed_relevance_mass,
-            (batch, 4, objects, 3, 1),
-            "typed relevance mass",
+            self.typed_common_mass,
+            (batch, objects, 3, 1),
+            "typed common mass",
         )
-        if self.typed_relevance_value.ndim != 5 or tuple(
-            self.typed_relevance_value.shape[:4]
-        ) != (batch, 4, objects, 3):
-            raise ValueError("typed relevance value lost interval/object/type identity")
         _shape(
-            self.typed_action_components,
+            self.typed_interval_residual_mass,
+            (batch, 4, objects, 3, 1),
+            "typed interval residual mass",
+        )
+        if self.typed_common_value.ndim != 4 or tuple(
+            self.typed_common_value.shape[:3]
+        ) != (batch, objects, 3):
+            raise ValueError("typed common value lost object/type identity")
+        route = int(self.typed_common_value.shape[-1])
+        _shape(
+            self.typed_interval_residual_value,
+            (batch, 4, objects, 3, route),
+            "typed interval residual value",
+        )
+        _shape(
+            self.typed_policy_components,
             (batch, 4, 3, hidden),
-            "typed action components",
+            "typed policy components",
         )
         self.action_dock().validate(hidden=hidden)
         self.world_dock().validate(hidden=hidden)
@@ -573,9 +610,15 @@ class ObjectIntentState:
             policy_interval_context=self.policy_interval_context,
             temporal_queries=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
-            typed_relevance_mass=self.typed_relevance_mass[:, :, index],
-            typed_relevance_value=self.typed_relevance_value[:, :, index],
-            typed_action_components=self.typed_action_components,
+            typed_common_mass=self.typed_common_mass[:, index],
+            typed_common_value=self.typed_common_value[:, index],
+            typed_interval_residual_mass=self.typed_interval_residual_mass[
+                :, :, index
+            ],
+            typed_interval_residual_value=self.typed_interval_residual_value[
+                :, :, index
+            ],
+            typed_policy_components=self.typed_policy_components,
             goal_attention=self.goal_attention,
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,

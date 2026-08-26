@@ -1,7 +1,8 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01 and R1b/G-02 implemented and statically closed; no training run.
+R1a/G-01, R1b/G-02 and R1c/S-01,S-02 implemented and statically closed;
+R1d/W-01,W-02 next; no training run.
 Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
@@ -231,6 +232,12 @@ order:
 6. P2-01 spatial selection and physical interval terminal.
 7. P3-01/B-01 unique lanes and bottom ingress.
 8. N-01/D-01 matching numerics and diagnostics.
+
+Slices 1-3 are complete as separate reversible commits. R1c preserves the
+Schema25 selector exactly, removes the typed ActionIntentDock/CoarseAction
+alias, and gives W lossless common/residual coordinates through its sole typed
+dock. R1d is the next authorized review target, but its source may not change
+until the W producer/consumer/loss/runtime/checkpoint worksheet closes.
 
 There is no training between these commits. R1 retains the Schema25 Teacher
 association backend, S relevance scoring and base K-binder evidence, so the

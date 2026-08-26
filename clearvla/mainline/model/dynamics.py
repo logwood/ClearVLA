@@ -141,6 +141,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         collect_diagnostics: bool,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         intent.validate(hidden=self.hidden)
+        # R1c changes only the S/W ownership coordinates.  Reconstruct the
+        # unchanged Schema25 typed source once at the consumer boundary.
+        typed_relevance_mass = intent.typed_relevance_mass
+        typed_relevance_value = intent.typed_relevance_value
         objects = self.object_content(facts.content)
         transport_prior = self.object_transport_prior(
             facts.transport_prior.to(dtype=facts.content.dtype)
@@ -171,7 +175,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             (self.object_semantic, self.object_appearance, self.object_geometry)
         ):
             component, _ = smooth_rms_contract(
-                projection(intent.typed_relevance_value[..., type_index, :]),
+                projection(typed_relevance_value[..., type_index, :]),
                 0.35,
             )
             typed_components.append(component)
@@ -201,10 +205,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         }
         for type_index, name in enumerate(("semantic", "appearance", "geometry")):
             component = typed_components_value[..., type_index, :].detach().float()
-            input_mass = intent.typed_relevance_mass[
+            input_mass = typed_relevance_mass[
                 ..., type_index, 0
             ].detach().float()
-            input_value = intent.typed_relevance_value[
+            input_value = typed_relevance_value[
                 ..., type_index, :
             ].detach().float()
             metrics[f"object_w_{name}_contribution_rms"] = (

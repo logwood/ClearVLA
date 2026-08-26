@@ -1,7 +1,8 @@
 # Cross-version replay source units
 
-Status: source-derived working register; G-01 and G-02 implemented and
-statically closed; remaining R1 units pending. Established on 2026-08-26.
+Status: source-derived working register; G-01, G-02, S-01 and S-02 implemented
+and statically closed; S-03 guard verified; W-01/W-02 next. Established on
+2026-08-26.
 
 This file records the implementation semantic units recovered across
 Schema26-39. It is deliberately source-first:
@@ -258,6 +259,14 @@ Static acceptance:
 - residual sums to zero over the source interval axis;
 - K and type axes remain present;
 - no expand manufactures a missing K or type axis.
+
+Implementation closure: R1c is recorded in
+`R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`. The existing
+Schema25 score is decomposed only after it is computed; typed common/residual
+fields enter W through `WorldIntentDock`, ActionIntentDock is typed-free, and
+current W reconstructs its former source once. The S-03 no-future-owner guard
+also passes. The retained suite is 134/134 with no parameter, optimizer or
+state-key addition.
 
 ### S-03: future-owner supervision fence
 

@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 assembly; R1a/G-01 and R1b/G-02 complete; 129 mainline tests pass; no training run
+release status:         Schema25-R1 assembly; R1a/G-01, R1b/G-02 and R1c/S-01,S-02 complete; 134 mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -28,15 +28,17 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
 > **The executable source is the exact Schema25 replay base plus completed
-> R1a/G-01 and R1b/G-02; it is not yet behavior-released.** The untouched R0 fingerprint,
+> R1a/G-01, R1b/G-02 and R1c/S-01,S-02; it is not yet behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
 > `ARCHITECTURE_REPLAY_SOURCE_UNITS.md` and
 > `SCHEMA25_R1_IMPLEMENTATION_PROTOCOL.md`. R1a repairs the independently
 > confirmed G3-to-transition handoff. R1b repairs conditional-K and
 > reconstruction ownership without changing the Schema25 binder inputs or
-> parameter inventory. No CUDA smoke, dataset access, checkpoint migration or
-> training run has been performed.
+> parameter inventory. R1c removes the duplicate typed CoarseAction-to-W path
+> and expresses the unchanged Schema25 relevance value as exact interval-common
+> plus residual coordinates. No CUDA smoke, dataset access, checkpoint
+> migration or training run has been performed.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -90,6 +92,21 @@ R1b/G-02 makes one additional grounder-local ownership repair:
   exported `ObjectFactSet.content` consumed by S, W and detached Teacher;
 - the existing coordinate decoder remains a shared K-independent spatial term.
   No decoder, gain, floor, content field or loss was added or removed.
+
+R1c/S-01,S-02 makes one S/W-boundary repair without changing the selector:
+
+- the Schema25 bounded-cosine relevance score, temperature, physical K/type
+  axes, zero semantics and typed policy component are numerically unchanged;
+- relevance mass and value are stored as their four-interval mean plus signed
+  zero-sum interval residual, so `common + residual` reconstructs the former
+  tensor without a gain, floor, clamp, detach or new parameter;
+- `ActionIntentDock` and CoarseAction contain only public interval,
+  observable-history and public-object context. Typed evidence therefore
+  reaches W through `WorldIntentDock` once rather than again through action
+  tokens;
+- factual P1 and current P2/P3 retain the existing reduced typed policy
+  context through their own named docks. Current W reconstructs its former
+  full typed source once at `_base`; W mechanics and losses remain unchanged.
 
 No block, external loss weight, gain, quota, hard gate, entropy target,
 capacity or P1 learned null was added. Schema24 and older checkpoints cannot
@@ -232,8 +249,9 @@ supports may change targets and losses, never deployment action.
    not read frame progress, phase labels, noisy action or future Teacher. Its
    public carrier is supervised separately from optional typed relevance.
    Semantic, appearance and geometry retain real K/type axes, each owns a
-   fixed-zero null comparison, and only S-owned docks may deliver these typed
-   values to CoarseAction or W.
+   fixed-zero null comparison, and only `WorldIntentDock` may deliver their
+   common/residual values to W. CoarseAction has no typed field; factual and
+   policy docks retain only their already-reduced named S context.
 8. W1 owns the two near intervals and W2 the two far intervals. The only W
    value below W is directly supervised `FutureObjectDynamics`; no public or
    private free W carrier crosses into P.
@@ -299,12 +317,15 @@ ObjectFactSet
 StatelessIntentBundle (serialized compatibility name: ObjectIntentState)
   protected goal/history/public-object tokens
   public / policy interval carriers                      [B,4,H]
-  typed relevance mass / value                           [B,4,K,3,1|R]
-  typed action components                                [B,4,3,H]
+  typed common mass / value                              [B,K,3,1|R]
+  typed interval-residual mass / value                   [B,4,K,3,1|R]
+  typed policy components                                [B,4,3,H]
   temporal queries / state-change evidence               [B,24,H] / [B,H]
 
 Consumer views
-  ActionIntentDock / WorldIntentDock / FactualIntentDock / PolicyIntentDock
+  ActionIntentDock (typed-free public action context)
+  WorldIntentDock (typed common/residual W ingress)
+  FactualIntentDock / PolicyIntentDock (named reduced S context)
 
 FutureObjectDynamics
   current reference                                      [B,K,D]
@@ -337,7 +358,7 @@ ControlledTransitionSource / State
 | G | current DINO/raw history, coordinates, learned flow, current state | T5, action history, proposal, noisy action, Teacher |
 | global grounder | completed G3 chart/typed local candidates; detached current DINO and observed mask for its sole reconstruction loss | S, W, noisy action, future Teacher data |
 | S | T5, state/executed history, typed ObjectFactSet | frame progress, phase label, noisy action, Teacher |
-| W | public ObjectFactSet content/transport, S-owned typed relevance, one clean coarse action intent | raw semantic/appearance/geometry reread, target/noisy action, proposal, Teacher, free W residual |
+| W | public ObjectFactSet content/transport, S-owned typed common/residual through WorldIntentDock, one typed-free clean coarse action intent | raw semantic/appearance/geometry reread, second typed action path, target/noisy action, proposal, Teacher, free W residual |
 | P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, second visual read |
 | P2 | completed P1 fact, supervised W field, S, noisy-action query | RGB/DINO reopen, camera-expanded W, free W hidden |
 | P3 | P1 fact, consequence, S, noisy-action query | Teacher, RGB/DINO, proposal, free W carrier |
@@ -365,9 +386,9 @@ ControlledTransitionSource / State
 - Action, future, flow geometry, intent scaffold, history proposal and
   execution-value external weights are unchanged from the recovery reference.
 - The whole-segment recognizer supervises only S's public interval carrier.
-  Typed relevance is trained through the existing coarse-action, future W and
-  final action paths; no public future target, entropy or usage loss directly
-  trains its selector.
+  Typed relevance is trained through future W and the factual/P2/P3/final
+  action paths. The typed-free coarse-action loss does not reach its selector;
+  no public future target, entropy or usage loss directly trains it.
 - Every trainable parameter has exactly one optimizer owner. Ordinary bias,
   LayerNorm, top/controller/decoder parameters use AdamW decay 0.01. Only
   explicitly named scale-invariant contraction basis/depth coordinates are
@@ -398,10 +419,12 @@ ControlledTransitionSource / State
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
 - The untouched Schema25 R0 configuration measures `169,981,895` total and
-  `153,587,574` trainable parameters. R1a and R1b both measure `169,979,847`
+  `153,587,574` trainable parameters. R1a, R1b and R1c all measure `169,979,847`
   total and `153,585,526` trainable parameters; the exact `-2,048` delta is the
   R1a removal of trainable `transition.interval_identity`. R1b retains the
-  grounder's 4,007,936 parameters and 17 optimizer tensors exactly.
+  grounder's 4,007,936 parameters and 17 optimizer tensors exactly. R1c adds
+  no module or state key: the model retains 1,413 parameter tensors, 1,075
+  trainable/optimizer tensors and 23 optimizer groups.
   Relative to the completed Schema24 graph,
   the exact `-12,731,133` trainable delta is fully accounted for: S removes
   three duplicate `_CrossRead`s plus one shared learned-null router and adds
@@ -432,7 +455,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 129/129. Tests cover full
+The retained local suite now passes 134/134. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -440,7 +463,9 @@ permutations, per-type S perturbation locality, fixed-zero typed values,
 typed-owner relabeling equivariance, independent detached DINO target,
 observed-cell reconstruction, conditional-K real/null conservation, unique
 exported-content reconstruction and its forward/reverse gradient paths,
-absence of CoarseAction/W raw-typed rereads,
+lossless typed common/residual reconstruction and exact source VJP,
+typed-free CoarseAction invariance, the single WorldIntentDock W ingress,
+absence of CoarseAction/W raw-typed rereads and the S future-owner fence,
 same-camera Teacher geometry, object geometry, neutral effect, P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.

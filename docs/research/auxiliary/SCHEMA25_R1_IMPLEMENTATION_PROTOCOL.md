@@ -1,8 +1,8 @@
 # Schema25-R1 implementation protocol
 
 Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
-and R1b/G-02 implemented and statically closed; R1c/S-01,S-02 next; no
-training run.
+R1b/G-02 and R1c/S-01,S-02 implemented and statically closed;
+R1d/W-01,W-02 next; no training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -198,8 +198,9 @@ Execution ledger:
 |---|---|---|
 | R1a / G-01 | `COMPLETE` | `R1A_G01_G3_HANDOFF_WORKSHEET.md`; 123/123 retained tests |
 | R1b / G-02 | `COMPLETE` | `R1B_G02_CONDITIONAL_K_RECONSTRUCTION_WORKSHEET.md`; 129/129 retained tests |
-| R1c / S-01,S-02 | `NEXT` | complete S producer/consumer worksheet before source edits |
-| R1d-R1h | `PENDING` | no source edit authorized yet |
+| R1c / S-01,S-02 | `COMPLETE` | `R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`; 134/134 retained tests |
+| R1d / W-01,W-02 | `NEXT` | complete W common/near/far and online-ABI worksheet before source edits |
+| R1e-R1h | `PENDING` | no source edit authorized yet |
 
 For every slice:
 

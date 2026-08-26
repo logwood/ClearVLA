@@ -37,6 +37,16 @@ def _interval_slices(length: int) -> tuple[slice, ...]:
     return tuple(rows)
 
 
+def _interval_common_residual(value: Tensor) -> tuple[Tensor, Tensor]:
+    """Express four interval rows as one common value plus exact residuals."""
+
+    if value.ndim < 2 or int(value.shape[1]) != 4:
+        raise ValueError("S decomposition requires four interval rows")
+    common = value.mean(dim=1)
+    residual = value - common[:, None]
+    return common, residual
+
+
 class _CrossRead(nn.Module):
     def __init__(self, hidden: int, heads: int, maximum_rms: float = 0.35) -> None:
         super().__init__()
@@ -314,15 +324,21 @@ class StatelessObjectIntentOrganizer(nn.Module):
         (
             typed_relevance_mass,
             typed_relevance_value,
-            typed_action_components,
+            typed_policy_components,
             typed_relevance_score,
             typed_temperature,
         ) = self._typed_relevance(
             public_interval_carrier=public_intervals,
             facts=facts,
         )
-        typed_action_context = typed_action_components.sum(dim=2) / (3.0**0.5)
-        policy_intervals = public_intervals + typed_action_context
+        typed_common_mass, typed_interval_residual_mass = (
+            _interval_common_residual(typed_relevance_mass)
+        )
+        typed_common_value, typed_interval_residual_value = (
+            _interval_common_residual(typed_relevance_value)
+        )
+        typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
+        policy_intervals = public_intervals + typed_policy_context
         temporal_base = self.temporal_identity.to(
             device=public_intervals.device, dtype=public_intervals.dtype
         ).expand(batch, -1, -1)
@@ -365,9 +381,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             policy_interval_context=policy_intervals,
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
-            typed_relevance_mass=typed_relevance_mass,
-            typed_relevance_value=typed_relevance_value,
-            typed_action_components=typed_action_components,
+            typed_common_mass=typed_common_mass,
+            typed_common_value=typed_common_value,
+            typed_interval_residual_mass=typed_interval_residual_mass,
+            typed_interval_residual_value=typed_interval_residual_value,
+            typed_policy_components=typed_policy_components,
             goal_attention=goal_attention,
             interval_goal_attention=interval_goal_attention,
             interval_history_attention=interval_history_attention,
@@ -401,7 +419,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_typed_action_context_rms": typed_action_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": facts.transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
@@ -415,7 +433,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         for type_index, name in enumerate(TYPED_INTENT_NAMES):
             mass = typed_relevance_mass[..., type_index, 0].detach().float()
             selected = typed_relevance_value[..., type_index, :].detach().float()
-            component = typed_action_components[..., type_index, :].detach().float()
+            component = typed_policy_components[..., type_index, :].detach().float()
             metrics.update(
                 {
                     f"object_intent_{name}_route_raw_rms": raw_routes[type_index]
@@ -594,7 +612,6 @@ class CoarseActionIntent(nn.Module):
             query
             + intent_delta
             + object_delta
-            + intent.typed_action_context
             + history_delta
         )
         action_prediction = self.action_head(token)

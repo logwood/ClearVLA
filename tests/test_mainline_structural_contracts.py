@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 import clearvla.mainline.model.grounding as grounding_module
+import clearvla.mainline.model.intent as intent_module
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.interfaces import CurrentObservation
 from clearvla.mainline.model.bottom import (
@@ -1683,12 +1684,12 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
 
     zero_semantic = organize(replace(facts, semantic=torch.zeros_like(facts.semantic)))
     assert torch.count_nonzero(zero_semantic.typed_relevance_value[..., 0, :]) == 0
-    assert torch.count_nonzero(zero_semantic.typed_action_components[..., 0, :]) == 0
+    assert torch.count_nonzero(zero_semantic.typed_policy_components[..., 0, :]) == 0
 
     invalid_facts = replace(facts, validity=torch.zeros_like(facts.validity))
     invalid_intent = organize(invalid_facts)
     assert torch.count_nonzero(invalid_intent.typed_relevance_value) == 0
-    assert torch.count_nonzero(invalid_intent.typed_action_components) == 0
+    assert torch.count_nonzero(invalid_intent.typed_policy_components) == 0
     torch.testing.assert_close(
         invalid_intent.policy_interval_context,
         invalid_intent.public_interval_carrier,
@@ -1703,6 +1704,203 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
         collect_diagnostics=True,
     )
     assert float(w_metrics["object_w_typed_contribution_rms"]) == 0.0
+
+
+def test_s_interval_common_residual_is_lossless_axis_preserving_and_vjp_exact() -> None:
+    torch.manual_seed(371)
+    source = torch.randn(2, 4, 5, 3, 7, requires_grad=True)
+    common, residual = intent_module._interval_common_residual(source)
+    assert tuple(common.shape) == (2, 5, 3, 7)
+    assert tuple(residual.shape) == tuple(source.shape)
+    reconstructed = common[:, None] + residual
+    torch.testing.assert_close(reconstructed, source, atol=2.0e-7, rtol=2.0e-7)
+    torch.testing.assert_close(
+        residual.sum(dim=1),
+        torch.zeros_like(common),
+        atol=5.0e-7,
+        rtol=0.0,
+    )
+
+    cotangent = torch.randn_like(source)
+    (source_vjp,) = torch.autograd.grad(
+        reconstructed,
+        source,
+        grad_outputs=cotangent,
+    )
+    torch.testing.assert_close(source_vjp, cotangent, atol=0.0, rtol=0.0)
+
+    with pytest.raises(ValueError, match="four interval"):
+        intent_module._interval_common_residual(torch.randn(2, 3, 5))
+
+
+def test_s_integrated_common_residual_reconstructs_unchanged_schema25_scoring() -> None:
+    torch.manual_seed(372)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    raw_mass, raw_value, raw_components, _, _ = top.intent._typed_relevance(
+        public_interval_carrier=intent.public_interval_carrier,
+        facts=facts,
+    )
+    torch.testing.assert_close(
+        intent.typed_common_mass[:, None] + intent.typed_interval_residual_mass,
+        raw_mass,
+        atol=2.0e-7,
+        rtol=2.0e-7,
+    )
+    torch.testing.assert_close(
+        intent.typed_common_value[:, None] + intent.typed_interval_residual_value,
+        raw_value,
+        atol=2.0e-7,
+        rtol=2.0e-7,
+    )
+    torch.testing.assert_close(intent.typed_policy_components, raw_components)
+    torch.testing.assert_close(
+        intent.typed_interval_residual_mass.sum(dim=1),
+        torch.zeros_like(intent.typed_common_mass),
+        atol=5.0e-7,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        intent.typed_interval_residual_value.sum(dim=1),
+        torch.zeros_like(intent.typed_common_value),
+        atol=5.0e-7,
+        rtol=0.0,
+    )
+    assert tuple(intent.typed_common_value.shape[:3]) == (1, 4, 3)
+    assert tuple(intent.typed_interval_residual_value.shape[:4]) == (1, 4, 4, 3)
+
+
+def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
+    torch.manual_seed(373)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    action_field_names = {field.name for field in fields(intent.action_dock())}
+    assert not any("typed" in name for name in action_field_names)
+    assert "typed_" not in inspect.getsource(type(top.coarse_action).forward)
+
+    zero_typed = replace(
+        intent,
+        typed_common_mass=torch.zeros_like(intent.typed_common_mass),
+        typed_common_value=torch.zeros_like(intent.typed_common_value),
+        typed_interval_residual_mass=torch.zeros_like(
+            intent.typed_interval_residual_mass
+        ),
+        typed_interval_residual_value=torch.zeros_like(
+            intent.typed_interval_residual_value
+        ),
+        typed_policy_components=torch.zeros_like(intent.typed_policy_components),
+        policy_interval_context=intent.public_interval_carrier,
+    )
+    coarse = top.coarse_action(intent.action_dock())
+    zero_coarse = top.coarse_action(zero_typed.action_dock())
+    torch.testing.assert_close(coarse.tokens, zero_coarse.tokens, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        coarse.action_prediction,
+        zero_coarse.action_prediction,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+    with_typed, _ = top.dynamics._base(
+        facts,
+        intent.world_dock(),
+        coarse,
+        collect_diagnostics=False,
+    )
+    without_typed, _ = top.dynamics._base(
+        facts,
+        zero_typed.world_dock(),
+        zero_coarse,
+        collect_diagnostics=False,
+    )
+    assert not torch.equal(with_typed, without_typed)
+
+
+def test_s_typed_world_and_coarse_action_gradients_have_distinct_owners() -> None:
+    torch.manual_seed(374)
+    top = _object_top()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    coarse = top.coarse_action(intent.action_dock())
+    coarse_typed_grads = torch.autograd.grad(
+        coarse.tokens.float().square().mean(),
+        (intent.typed_common_value, intent.typed_interval_residual_value),
+        allow_unused=True,
+        retain_graph=True,
+    )
+    assert coarse_typed_grads == (None, None)
+
+    world_dock = intent.world_dock()
+    independent_common = (
+        world_dock.typed_common_value.detach().clone().requires_grad_(True)
+    )
+    independent_residual = (
+        world_dock.typed_interval_residual_value.detach().clone().requires_grad_(True)
+    )
+    independent_world_dock = replace(
+        world_dock,
+        typed_common_value=independent_common,
+        typed_interval_residual_value=independent_residual,
+    )
+    world, _ = top.dynamics._base(
+        facts,
+        independent_world_dock,
+        coarse,
+        collect_diagnostics=False,
+    )
+    common_grad, residual_grad, action_grad = torch.autograd.grad(
+        world.float().square().mean(),
+        (
+            independent_common,
+            independent_residual,
+            coarse.tokens,
+        ),
+        allow_unused=True,
+    )
+    assert common_grad is not None and common_grad.abs().sum() > 0
+    assert residual_grad is not None and residual_grad.abs().sum() > 0
+    assert action_grad is not None and action_grad.abs().sum() > 0
+
+
+def test_s03_keeps_future_owner_supervision_outside_online_intent() -> None:
+    signature = inspect.signature(intent_module.StatelessObjectIntentOrganizer.forward)
+    assert not any(
+        name in signature.parameters
+        for name in ("future_supports", "future_state", "teacher", "future_action")
+    )
+    source = inspect.getsource(intent_module)
+    for forbidden in (
+        "DirectIntentFutureSupervisor",
+        "ObservableIntentStateSupervisor",
+        "IntentFutureSupervision",
+    ):
+        assert forbidden not in source
 
 
 def test_typed_owner_relabeling_is_equivariant_through_coarse_action_and_w() -> None:
