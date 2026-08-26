@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 assembly; R1a-R1g plus LC-01 exact-zero cleanup complete; 145 retained mainline tests pass; no training run
+release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; 155 retained mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -29,7 +29,7 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 
 > **The executable source is the exact Schema25 replay base plus completed
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
-> R1f/P2-01, R1g/P3-01,B-01 and LC-01; it is not yet
+> R1f/P2-01, R1g/P3-01,B-01, LC-01 and R1h/N-01,D-01; it is not yet
 > behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -52,6 +52,10 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > LC-01 then deletes two audited exact-zero layer-contract trajectory aliases
 > and their frozen readouts while preserving every live contract/decoder
 > tensor, optimizer owner and the fresh-run RNG stream.
+> R1h keeps the same measures and owners while making the four active address
+> variance-to-standard-deviation paths zero preserving, retaining producer-owned
+> FP32 probability/log views through G-to-P2, and observing only live source
+> tensors and finite raw-gradient spikes.
 > No CUDA smoke, dataset access, checkpoint migration or training run has been
 > performed.
 
@@ -217,13 +221,33 @@ event input from rollout delta. Their frozen trajectory action/motion readouts
 and trajectory-shaped compatibility outputs are absent. P2, controlled
 transition and bottom remain the actual dynamic-P1 consumers.
 
+R1h/N-01,D-01 changes numerical representation and observation only:
+
+- the four live address variance consumers use
+  `v / (sqrt(v + epsilon^2) + epsilon)`, with the existing grid/radius scale;
+  exact-zero variance stays exact zero and its reverse gain is finite;
+- G2 produces FP32 typed slot log probabilities, G3 applies its bounded
+  residual in log space, and the same probability/log measure passes through
+  Local/Dense/Object/Future boundaries to P2 without a probability floor;
+- unsupported and all-invalid rows remain boolean-authorized exact zero; a
+  legacy fixture without producer logs retains an explicit FP32 fallback and
+  cannot resurrect a zero-prior candidate;
+- backward hooks copy detached source-tensor RMS values and return the incoming
+  gradient unchanged. Finite spike attribution runs only above its observation
+  threshold and before the unchanged local/global clipping lifecycle.
+
+No reliability/status/content carrier, learned scale, route, loss, support
+floor or parameter was imported from Schema38/39 with these support mechanics.
+
 No block, external loss weight, gain, quota, hard gate, entropy target or
 capacity was added. R1d removes three W status heads and one P2 status
 projection; R1e has zero parameter/state delta. R1f removes the P2 type query
 and adds only the missing geometry key plus two type-specific projections of
 existing S route metadata. R1g removes six duplicate P3 projections and sixteen
 inactive optional source-key rows. Exact resume across the R1e/R1f or R1f/R1g
-state ABI is intentionally incompatible and no migration shim exists.
+state ABI is intentionally incompatible and no migration shim exists. R1h has
+zero parameter/state/RNG delta, but its probability/log and runtime component
+ABI changes the manifest, so an older exact checkpoint is also rejected.
 
 The post-epoch-1 source/log closure audit then corrected four remaining
 fidelity defects without changing the G/S/W/P or bottom topology:
@@ -255,11 +279,14 @@ current state + V120 visual rollout + one shared sampled role table
     -> observation-only grounding canvas
        (task/language/history/proposal/noisy-action slices are structurally empty)
     -> G1 DiT -> progressive update stage 1: coarse posterior/center/variance
+       zero-preserving finite-slope variance-to-standard-deviation conversion
     -> G2 DiT -> progressive update stage 2: rematerialize N=49 fine candidates
-    -> G3 DiT -> progressive update stage 3: bounded owner correction
+       FP32 typed local-slot probability + producer log probability
+    -> G3 DiT -> progressive update stage 3: bounded log-space owner correction
     -> completed camera x 8x8 x local-M GroundedFactSet
     -> competitive global K+null DenseObjectGrounder
        physical real/null mass + conditional-K-only G3 correction
+       FP32 observable object/camera probability + producer log probability
        detached observed-current-DINO reconstruction target
     -> ObjectFactSet with reversible K <-> chart correspondence
        one exported K content value shared by reconstruction/S/W/Teacher
@@ -278,6 +305,7 @@ ObjectFactSet public content/transport + S-owned WorldIntentDock
     -> W2: 16-32 and 32-48 far innovations, read-only over completed W1
     -> semantic FutureObjectDynamics [B,4,K,D]
        plus camera transport/covariance [B,4,K,C,2|3], no predicted status
+       copied current observable object/camera probability + log probability
 
 completed progressive chart + S + four clean action bases
     -> exact V120 LateRawDetailPolicyReader
@@ -650,20 +678,22 @@ ControlledTransitionSource / State
   LC-01 uses initialization-only temporary historical readouts, so its 46
   retained layer-contract state tensors, all 268 decoder state tensors and
   this RNG digest remain byte-identical while the discarded readouts own no
-  runtime or checkpoint state.
+  runtime or checkpoint state. R1h registers no parameter, buffer or random
+  draw and retains these counts, the ordered key digest, both retained tensor
+  digests and the construction RNG exactly.
 - Active manifest identity:
 
   ```text
   schema:       25
-  observation:  restored_v120_three_frame_flow_dino_progressive_g123_bank
-  top:          v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3
+  observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
+  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip
-  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip_source_gradient_probes
+  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_finite_spike_matching_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `1691f3fc2c6f5be916637ea04388d69bbb023ba4dc7bdd085b45c85f70d45981`.
+  `964415bd9bbb15d4a8204dcaddedc143ae958f84a0ee211d62fd75aed31c2f93`.
 
 Storage defaults:
 
@@ -677,7 +707,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 145/145. Tests cover full
+The retained local suite now passes 155/155. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -701,12 +731,17 @@ unique P3 private operands, absence of factual/effect/static-precision aliases,
 lane-local optional null decisions, protected no-null reads, and legal P3/bottom
 reverse paths, absence and intervention invariance of the removed
 layer-contract trajectory branch, retained terminal-adapter reverse paths,
-same-camera Teacher geometry, neutral effect, P2 bounds, endpoint lifecycle,
-optimizer ownership, three-stage gradient logging and checkpoint rejection.
+same-camera Teacher geometry, neutral effect, P2 bounds, zero-preserving
+variance VJPs, BF16-underflow-resistant producer logs, exact-zero legacy prior
+support, all-invalid finite masked terminals, read-only source-gradient hooks,
+pre-clip finite-spike attribution, partial-window gradient ownership, current
+metric vocabulary, endpoint lifecycle, optimizer ownership, three-stage
+gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
-Production acceptance is deferred until the complete R1 source graph closes.
-It will then require:
+The complete R1 source graph is now statically closed. That closure does not
+itself authorize an experiment. A formal run still requires a separately
+approved immutable run context and the following production acceptance:
 
 - fresh BF16 smoke and five-step deployment;
 - batch-eight process peak no greater than 22 GiB;

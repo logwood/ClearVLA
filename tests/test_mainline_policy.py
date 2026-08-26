@@ -270,6 +270,22 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert result.metrics["gradient_postglobal_global_l2"] <= 1.0001
     assert "gradient_observation_l2" not in result.metrics
     assert "gradient_global_preclip_l2" in result.materialize()
+    for name in (
+        "gradient_tensor_s_public_interval_carrier_rms",
+        "gradient_tensor_s_typed_common_rms",
+        "gradient_tensor_s_typed_interval_residual_rms",
+        "gradient_tensor_p1_static_fact_rms",
+        "gradient_tensor_p1_dynamic_query_residual_rms",
+        "gradient_tensor_w2_semantic_common_rms",
+        "gradient_tensor_w2_geometry_interval_rms",
+        "gradient_tensor_p2_semantic_effect_rms",
+        "gradient_tensor_p2_geometry_effect_rms",
+        "gradient_tensor_p1_protected_policy_precision_rms",
+        "gradient_tensor_p3_temporal_rms",
+        "gradient_tensor_p3_state_change_rms",
+    ):
+        assert name in result.metrics
+        assert torch.isfinite(result.metrics[name])
     archived = archival_metrics(result.materialize())
     assert "loss_action_flow_v120_comparable" in archived
     assert "loss_action_flow_event_balance_delta" in archived
@@ -495,6 +511,106 @@ def test_nonfinite_gradient_reports_first_owner_before_any_update() -> None:
     assert overflow_report.positive_inf_count == 0
     assert overflow_report.negative_inf_count == 0
     assert overflow_report.global_norm == "+inf"
+
+
+def test_finite_spike_audit_is_preclip_read_only_and_skips_ordinary_scan() -> None:
+    class TinyOwnerModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.observation = torch.nn.Linear(2, 2, bias=False)
+
+        def set_training_step(self, step: int) -> None:
+            del step
+
+    def build_engine(*, threshold: float | None):
+        config = _config()
+        model = TinyOwnerModel()
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": (model.observation.weight,),
+                    "lr": config.optimizer.learning_rate,
+                    "name": "observation/decay",
+                    "parameter_names": ("observation.weight",),
+                }
+            ],
+            lr=config.optimizer.learning_rate,
+        )
+        schedule = WarmupCosineSchedule(
+            optimizer,
+            warmup_steps=2,
+            total_steps=8,
+            minimum_ratio=0.1,
+        )
+        engine = MainlineTrainingEngine(
+            model=model,  # type: ignore[arg-type]
+            config=config,
+            optimizer=optimizer,
+            schedule=schedule,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            gradient_spike_audit_threshold=threshold,
+        )
+        return model, engine
+
+    torch.manual_seed(410)
+    observed_model, observed_engine = build_engine(threshold=0.01)
+    reference_model, reference_engine = build_engine(threshold=None)
+    reference_model.load_state_dict(observed_model.state_dict())
+
+    def ledger(model: TinyOwnerModel) -> LossLedger:
+        loss = model.observation.weight.square().sum()
+        return LossLedger(
+            total=loss,
+            groups={
+                "action": loss,
+                "representation": loss.new_zeros(()),
+                "execution": loss.new_zeros(()),
+            },
+            contributions={"action_flow": loss},
+            terms={"action_flow": loss},
+        )
+
+    reports = []
+    with mock.patch.object(
+        observed_engine,
+        "_forward",
+        side_effect=lambda *args, **kwargs: (ledger(observed_model), {}),
+    ):
+        observed_result = observed_engine.train_step(
+            object(),  # type: ignore[arg-type]
+            gradient_spike_handler=reports.append,
+        )
+    with mock.patch.object(
+        reference_engine,
+        "_forward",
+        side_effect=lambda *args, **kwargs: (ledger(reference_model), {}),
+    ):
+        reference_result = reference_engine.train_step(object())  # type: ignore[arg-type]
+    assert len(reports) == 1
+    assert reports[0].max_l2.parameter_name == "observation.weight"
+    assert reports[0].gradient_global_preclip_l2 == observed_result.gradient_norm_scalar
+    assert observed_result.gradient_norm_scalar == reference_result.gradient_norm_scalar
+    torch.testing.assert_close(
+        observed_model.observation.weight,
+        reference_model.observation.weight,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    ordinary_model, ordinary_engine = build_engine(threshold=1.0e9)
+    with mock.patch.object(
+        ordinary_engine,
+        "_forward",
+        side_effect=lambda *args, **kwargs: (ledger(ordinary_model), {}),
+    ), mock.patch(
+        "clearvla.mainline.training.engine.build_finite_gradient_spike_report"
+    ) as scanner:
+        ordinary_engine.train_step(
+            object(),  # type: ignore[arg-type]
+            gradient_spike_handler=lambda report: None,
+        )
+    scanner.assert_not_called()
 
 
 def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
@@ -741,9 +857,33 @@ def test_progressive_grounding_executes_g1_g2_g3_and_rematerializes_n49_once() -
     progressive = training_state.observation.progressive_state
     assert progressive.stage == 3
     assert progressive.grounded_fact_set is not None
+    grounded = progressive.grounded_fact_set
+    for probability, log_probability in (
+        (grounded.semantic_owner_probs, grounded.semantic_owner_log_probs),
+        (grounded.appearance_owner_probs, grounded.appearance_owner_log_probs),
+        (grounded.geometry_owner_probs, grounded.geometry_owner_log_probs),
+    ):
+        assert probability.dtype == torch.float32
+        assert log_probability is not None
+        assert log_probability.dtype == torch.float32
+        assert torch.isfinite(log_probability).all()
+        torch.testing.assert_close(probability, log_probability.exp())
     assert progressive.dynamic_fine_values is not None
     assert int(progressive.dynamic_fine_values.shape[-2]) == 49
     assert metrics["observation_g1_g2_g3_completed"] == 1
+    for name in (
+        "flow_jepa_address_coarse_variance_min",
+        "flow_jepa_address_coarse_std_dino_rms",
+        "flow_jepa_address_coarse_std_gain_max",
+        "flow_jepa_progressive_g2_input_variance_min",
+        "flow_jepa_progressive_g2_input_std_rms",
+        "flow_jepa_progressive_g2_input_std_gain_max",
+        "flow_jepa_progressive_g2_aligned_variance_min",
+        "flow_jepa_progressive_g2_correction_scale_min",
+        "flow_jepa_progressive_g2_correction_std_gain_max",
+    ):
+        assert name in metrics
+        assert torch.isfinite(metrics[name])
     # The G3 correction is zero-initialized, so the fresh model must inherit
     # its G2 parent posterior exactly instead of silently replacing it.
     assert metrics["observation_g3_parent_semantic_l1"] <= 1e-7

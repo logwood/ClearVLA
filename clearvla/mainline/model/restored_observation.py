@@ -265,6 +265,15 @@ class RestoredV120ObservationCompiler(nn.Module):
             "flow_jepa_raw_address_flow_mass": "observation_raw_address_flow_mass",
             "flow_jepa_raw_address_fallback_mass": "observation_raw_address_fallback_mass",
             "flow_jepa_raw_address_entropy": "observation_raw_address_entropy",
+            "flow_jepa_address_coarse_variance_min": (
+                "flow_jepa_address_coarse_variance_min"
+            ),
+            "flow_jepa_address_coarse_std_dino_rms": (
+                "flow_jepa_address_coarse_std_dino_rms"
+            ),
+            "flow_jepa_address_coarse_std_gain_max": (
+                "flow_jepa_address_coarse_std_gain_max"
+            ),
         }
         semantic_source_metrics = {
             target: source_metrics[source]
@@ -321,6 +330,13 @@ class RestoredV120ObservationCompiler(nn.Module):
         target = bank.address_bank.dense_current_dino_content
         if target is None:
             raise RuntimeError("completed G3 lost the current DINO target")
+        owner_logs = (
+            grounded.semantic_owner_log_probs,
+            grounded.appearance_owner_log_probs,
+            grounded.geometry_owner_log_probs,
+        )
+        if any(value is None for value in owner_logs):
+            raise RuntimeError("completed G3 lost its FP32 owner log probabilities")
         local = LocalFactSet(
             public_scene_base=grounded.public_scene_base,
             target_dino_content=target.detach(),
@@ -332,6 +348,9 @@ class RestoredV120ObservationCompiler(nn.Module):
             semantic_owner_probs=grounded.semantic_owner_probs,
             appearance_owner_probs=grounded.appearance_owner_probs,
             geometry_owner_probs=grounded.geometry_owner_probs,
+            semantic_owner_log_probs=grounded.semantic_owner_log_probs,
+            appearance_owner_log_probs=grounded.appearance_owner_log_probs,
+            geometry_owner_log_probs=grounded.geometry_owner_log_probs,
             slot_coordinates=grounded.slot_coordinates,
             slot_support=grounded.slot_support,
             slot_validity=grounded.slot_validity,
@@ -351,6 +370,12 @@ class RestoredV120ObservationCompiler(nn.Module):
             "flow_jepa_progressive_g2_dynamic_center_distance": "observation_progressive_center_distance",
             "flow_jepa_progressive_current_coordinate_rms": "observation_progressive_coordinate_rms",
             "flow_jepa_progressive_literal_rgb_candidate_rms": "observation_progressive_literal_rgb_rms",
+            "flow_jepa_progressive_g2_input_variance_min": "flow_jepa_progressive_g2_input_variance_min",
+            "flow_jepa_progressive_g2_input_std_rms": "flow_jepa_progressive_g2_input_std_rms",
+            "flow_jepa_progressive_g2_input_std_gain_max": "flow_jepa_progressive_g2_input_std_gain_max",
+            "flow_jepa_progressive_g2_aligned_variance_min": "flow_jepa_progressive_g2_aligned_variance_min",
+            "flow_jepa_progressive_g2_correction_scale_min": "flow_jepa_progressive_g2_correction_scale_min",
+            "flow_jepa_progressive_g2_correction_std_gain_max": "flow_jepa_progressive_g2_correction_std_gain_max",
         }
         metrics = {target_name: source[name] for name, target_name in aliases.items() if name in source}
         metrics.update(

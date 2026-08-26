@@ -308,8 +308,12 @@ class ObjectFutureTeacher(nn.Module):
             transport_mean=transport,
             transport_covariance=covariance,
             chart_availability=facts.validity.detach().float(),
+            log_chart_availability=facts.log_validity.detach().float(),
             camera_coordinates=facts.camera_coordinates.detach().float(),
             camera_chart_availability=facts.camera_validity.detach().float(),
+            log_camera_chart_availability=(
+                facts.log_camera_validity.detach().float()
+            ),
         )
         target.validate()
         if not collect_diagnostics:

@@ -182,6 +182,11 @@ class GroundedFactSet:
     # may omit it; new object dynamics never infer motion from arbitrary
     # geometry feature channels.
     slot_transport_prior: Tensor | None = None
+    # Producer-owned FP32 log posteriors. They are optional only for compact
+    # historical fixtures outside the active restored observation path.
+    semantic_owner_log_probs: Tensor | None = None
+    appearance_owner_log_probs: Tensor | None = None
+    geometry_owner_log_probs: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -222,6 +227,8 @@ class GroundedFactSet:
             value = getattr(self, name)
             if tuple(value.shape) != owner_shape:
                 raise ValueError(f"G {name} must retain the object-slot axis")
+            if value.dtype != torch.float32:
+                raise TypeError(f"G {name} must remain FP32")
         if tuple(self.slot_coordinates.shape) != (*prefix, 2):
             raise ValueError("G slot coordinates are misaligned")
         if tuple(self.slot_support.shape) != prefix:
@@ -232,6 +239,27 @@ class GroundedFactSet:
             self.slot_transport_prior.shape
         ) != (*prefix, 2):
             raise ValueError("G slot transport prior is misaligned")
+        owner_logs = (
+            self.semantic_owner_log_probs,
+            self.appearance_owner_log_probs,
+            self.geometry_owner_log_probs,
+        )
+        if any(value is not None for value in owner_logs) and any(
+            value is None for value in owner_logs
+        ):
+            raise ValueError("G typed owner logs must be supplied together")
+        for name in (
+            "semantic_owner_log_probs",
+            "appearance_owner_log_probs",
+            "geometry_owner_log_probs",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if tuple(value.shape) != owner_shape:
+                raise ValueError(f"G {name} must retain the object-slot axis")
+            if value.dtype != torch.float32 or not bool(torch.isfinite(value).all()):
+                raise TypeError(f"G {name} must be finite FP32")
         if tuple(self.public_scene_base.shape[:4]) != tuple(prefix[:4]):
             raise ValueError("G public scene base lost camera/spatial identity")
         # Value-domain checks live in the one-shot preflight.  This method is

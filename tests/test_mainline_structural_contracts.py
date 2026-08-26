@@ -12,12 +12,14 @@ import torch.nn.functional as F
 import clearvla.mainline.model.grounding as grounding_module
 import clearvla.mainline.model.intent as intent_module
 import clearvla.mainline.model.types as model_types
+import clearvla.mainline.v120_core.flow_dino_evidence as flow_dino_evidence
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.interfaces import CurrentObservation
 from clearvla.mainline.model.bottom import (
     ReadOnlyEvidenceMMDiTBlock,
     TypedEvidenceBank,
 )
+from clearvla.mainline.model.compiler import _safe_masked_softmax
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
 from clearvla.mainline.model.grounding import DenseObjectGrounder, dense_chart_from_local_facts
 from clearvla.mainline.model.intent import FuturePlanRecognizer
@@ -60,6 +62,34 @@ def test_feature_chart_sampling_owns_the_fp16_bf16_boundary() -> None:
     assert sampled.dtype == torch.float32
     assert tuple(sampled.shape) == (1, 2, 2, 2, 4, 8)
     assert bool(valid.all())
+
+
+def test_zero_preserving_variance_std_has_exact_zero_and_finite_vjp() -> None:
+    transform = getattr(flow_dino_evidence, "_zero_preserving_variance_std")
+    epsilon = 1.0 / 56.0
+    variance = torch.tensor([0.0, 1.0e-10, 0.25], requires_grad=True)
+    standard_deviation = transform(variance, epsilon=epsilon)
+    assert standard_deviation.dtype == torch.float32
+    assert standard_deviation[0].item() == 0.0
+    standard_deviation.sum().backward()
+    assert variance.grad is not None
+    assert torch.isfinite(variance.grad).all()
+    assert variance.grad.abs().amax() <= 1.0 / (2.0 * epsilon) + 1.0e-4
+
+
+def test_masked_softmax_all_invalid_is_exact_zero_with_finite_vjp() -> None:
+    logits = torch.randn(2, 4, requires_grad=True)
+    support = torch.tensor(
+        [[False, False, False, False], [True, False, True, False]]
+    )
+    probability = _safe_masked_softmax(logits, support, dim=-1)
+    assert probability.dtype == torch.float32
+    assert torch.equal(probability[0], torch.zeros_like(probability[0]))
+    assert torch.isfinite(probability).all()
+    probability.square().sum().backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert torch.equal(logits.grad[0], torch.zeros_like(logits.grad[0]))
 
 
 def _local_facts(
@@ -179,6 +209,26 @@ def _future_dynamics(
         if camera_chart_availability is None
         else camera_chart_availability
     )
+    object_support = object_support.float()
+    camera_support = camera_support.float()
+    object_log_support = torch.where(
+        object_support > 0.0,
+        torch.where(
+            object_support > 0.0,
+            object_support,
+            torch.ones_like(object_support),
+        ).log(),
+        torch.zeros_like(object_support),
+    )
+    camera_log_support = torch.where(
+        camera_support > 0.0,
+        torch.where(
+            camera_support > 0.0,
+            camera_support,
+            torch.ones_like(camera_support),
+        ).log(),
+        torch.zeros_like(camera_support),
+    )
     return FutureObjectDynamics(
         current_reference=current,
         successor_content=current[:, None] + semantic,
@@ -186,9 +236,92 @@ def _future_dynamics(
         transport_mean=transport,
         transport_covariance=covariance,
         chart_availability=object_support,
+        log_chart_availability=object_log_support,
         camera_coordinates=torch.zeros(batch, objects, cameras, 2),
         camera_chart_availability=camera_support,
+        log_camera_chart_availability=camera_log_support,
     )
+
+
+def test_dense_chart_uses_fp32_producer_logs_after_bf16_probability_underflow() -> None:
+    local = _local_facts(cameras=1, side=1, content=8, route=4, hidden=16)
+    logits = torch.tensor([0.0, -99.0, -98.0, -100.0], dtype=torch.float32)
+    owner_log = torch.log_softmax(logits, dim=-1).reshape(1, 1, 1, 1, 4)
+    rounded_probability = owner_log.exp().to(torch.bfloat16)
+    assert rounded_probability[..., 1].item() == 0.0
+    assert rounded_probability[..., 2].item() == 0.0
+    local = replace(
+        local,
+        semantic_owner_probs=rounded_probability,
+        appearance_owner_probs=rounded_probability,
+        geometry_owner_probs=rounded_probability,
+        semantic_owner_log_probs=owner_log,
+        appearance_owner_log_probs=owner_log,
+        geometry_owner_log_probs=owner_log,
+    )
+    chart = dense_chart_from_local_facts(local)
+    assert chart.candidate_owner_prior.dtype == torch.float32
+    assert chart.candidate_owner_log_prior.dtype == torch.float32
+    assert chart.candidate_owner_prior[..., 1].item() > 0.0
+    assert chart.candidate_owner_prior[..., 2].item() > 0.0
+    torch.testing.assert_close(
+        chart.candidate_owner_log_prior[..., 2]
+        - chart.candidate_owner_log_prior[..., 1],
+        torch.ones_like(chart.candidate_owner_log_prior[..., 1]),
+    )
+
+
+def test_legacy_zero_candidate_prior_cannot_reenter_the_final_binder_read() -> None:
+    torch.manual_seed(211)
+    local = _local_facts(cameras=1, side=1, content=8, route=4, hidden=16)
+    owner = torch.zeros_like(local.semantic_owner_probs)
+    owner[..., 0] = 1.0
+    local = replace(
+        local,
+        semantic_owner_probs=owner,
+        appearance_owner_probs=owner,
+        geometry_owner_probs=owner,
+    )
+    grounder = DenseObjectGrounder(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        objects=4,
+        iterations=1,
+    ).eval()
+    baseline, _ = grounder(local, collect_diagnostics=False)
+    changed_candidates = local.content_slots.clone()
+    changed_candidates[..., 1:, :] += 10.0
+    changed, _ = grounder(
+        replace(local, content_slots=changed_candidates),
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(changed.content, baseline.content, atol=0.0, rtol=0.0)
+
+
+def test_future_observable_measures_and_logs_require_finite_fp32() -> None:
+    dynamics = _future_dynamics(
+        chart_availability=torch.tensor([[[0.0], [0.25]]]),
+        camera_chart_availability=torch.tensor(
+            [[[[0.0], [0.0]], [[0.125], [0.25]]]]
+        ),
+    )
+    dynamics.validate()
+    assert dynamics.chart_availability.dtype == torch.float32
+    assert dynamics.log_chart_availability.dtype == torch.float32
+    assert dynamics.camera_chart_availability.dtype == torch.float32
+    assert dynamics.log_camera_chart_availability.dtype == torch.float32
+    permutation = torch.tensor([1, 0])
+    permuted = dynamics.permute(permutation)
+    assert torch.equal(
+        permuted.log_chart_availability,
+        dynamics.log_chart_availability[:, permutation],
+    )
+    with pytest.raises(TypeError, match="FP32"):
+        replace(
+            dynamics,
+            chart_availability=dynamics.chart_availability.to(torch.bfloat16),
+        ).validate()
 
 
 def test_grounder_owns_only_one_dense_reconstruction_objective() -> None:
@@ -508,8 +641,10 @@ def test_future_recognizer_keeps_four_interval_whole_segment_targets() -> None:
             batch, intervals, objects, cameras, 3, dtype=torch.float32
         ),
         chart_availability=torch.ones(batch, objects, 1),
+        log_chart_availability=torch.zeros(batch, objects, 1),
         camera_coordinates=torch.zeros(batch, objects, cameras, 2),
         camera_chart_availability=torch.ones(batch, objects, cameras, 1),
+        log_camera_chart_availability=torch.zeros(batch, objects, cameras, 1),
     )
     recognizer = FuturePlanRecognizer(
         hidden=16,
@@ -542,8 +677,10 @@ def test_future_recognizer_supervises_neutral_objects_from_current_support() -> 
             batch, intervals, objects, cameras, 3, dtype=torch.float32
         ),
         chart_availability=torch.ones(batch, objects, 1),
+        log_chart_availability=torch.zeros(batch, objects, 1),
         camera_coordinates=torch.zeros(batch, objects, cameras, 2),
         camera_chart_availability=torch.ones(batch, objects, cameras, 1),
+        log_camera_chart_availability=torch.zeros(batch, objects, cameras, 1),
     )
     recognizer = FuturePlanRecognizer(
         hidden=16,
@@ -1031,8 +1168,10 @@ def test_future_dynamics_abi_retains_camera_geometry_and_has_no_status_alias() -
         "transport_mean",
         "transport_covariance",
         "chart_availability",
+        "log_chart_availability",
         "camera_coordinates",
         "camera_chart_availability",
+        "log_camera_chart_availability",
     }
     field.validate()
     assert tuple(field.transport_mean.shape) == (1, 4, 2, 3, 2)

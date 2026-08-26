@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .routing import PolicyRoleDeltaBank, smooth_rms_contract
+from .routing import (
+    PolicyRoleDeltaBank,
+    register_gradient_axis_rms_metrics,
+    register_gradient_rms_metric,
+    smooth_rms_contract,
+)
 from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
 
 
@@ -93,8 +98,13 @@ class SelectedIntervalEvidence:
             raise ValueError("selected P2 common/residual identity failed")
 
 
-def _safe_masked_softmax(logit: Tensor, support: Tensor, *, dim: int) -> Tensor:
-    """Return finite probabilities and exact zero on all-invalid rows."""
+def _safe_masked_log_softmax(
+    logit: Tensor,
+    support: Tensor,
+    *,
+    dim: int,
+) -> tuple[Tensor, Tensor]:
+    """Return FP32 probability/log pairs with exact-zero invalid rows."""
 
     if tuple(logit.shape) != tuple(support.shape):
         raise ValueError("masked softmax logit and support must align")
@@ -102,7 +112,26 @@ def _safe_masked_softmax(logit: Tensor, support: Tensor, *, dim: int) -> Tensor:
     finite_logit = torch.where(support, logit.float(), torch.zeros_like(logit.float()))
     finite_logit = torch.where(has_support, finite_logit, torch.zeros_like(finite_logit))
     masked = finite_logit.masked_fill(~support & has_support, -torch.inf)
-    return torch.softmax(masked, dim=dim) * has_support.to(dtype=torch.float32)
+    log_probability = torch.log_softmax(masked, dim=dim)
+    active = support & has_support
+    log_probability = torch.where(
+        active,
+        log_probability,
+        torch.zeros_like(log_probability),
+    )
+    probability = torch.where(
+        active,
+        log_probability.exp(),
+        torch.zeros_like(log_probability),
+    )
+    return probability, log_probability
+
+
+def _safe_masked_softmax(logit: Tensor, support: Tensor, *, dim: int) -> Tensor:
+    """Return finite probabilities and exact zero on all-invalid rows."""
+
+    probability, _ = _safe_masked_log_softmax(logit, support, dim=dim)
+    return probability
 
 
 class ObjectFutureEffectReader(nn.Module):
@@ -189,7 +218,7 @@ class ObjectFutureEffectReader(nn.Module):
         semantic_support = object_measure > 0.0
         semantic_log_measure = torch.where(
             semantic_support,
-            object_measure.clamp_min(1.0e-30).log(),
+            dynamics.log_chart_availability[..., 0].float(),
             torch.zeros_like(object_measure),
         )
         camera_measure = dynamics.camera_chart_availability[..., 0].float().clamp(
@@ -198,19 +227,18 @@ class ObjectFutureEffectReader(nn.Module):
         camera_support = semantic_support[..., None] & (camera_measure > 0.0)
         camera_log_measure = torch.where(
             camera_support,
-            camera_measure.clamp_min(1.0e-30).log(),
+            dynamics.log_camera_chart_availability[..., 0].float(),
             torch.zeros_like(camera_measure),
         )
-        conditional_camera = _safe_masked_softmax(
+        conditional_camera, conditional_camera_log = _safe_masked_log_softmax(
             camera_log_measure,
             camera_support,
             dim=-1,
         )
-        geometry_measure = object_measure[..., None] * conditional_camera
         geometry_log_measure = torch.where(
             camera_support,
-            geometry_measure.clamp_min(1.0e-30).log(),
-            torch.zeros_like(geometry_measure),
+            semantic_log_measure[..., None] + conditional_camera_log,
+            torch.zeros_like(conditional_camera),
         )
 
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
@@ -439,6 +467,17 @@ class ObjectFutureEffectReader(nn.Module):
             selected.residual_value,
         )
         value_by_type = common_by_type + residual_by_type
+        gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics and self.training:
+            register_gradient_axis_rms_metrics(
+                value_by_type,
+                gradient_metrics,
+                (
+                    "gradient_tensor_p2_semantic_effect_rms",
+                    "gradient_tensor_p2_geometry_effect_rms",
+                ),
+                dim=3,
+            )
         raw_effect = value_by_type.sum(dim=3)
         if not collect_diagnostics:
             return raw_effect, {}
@@ -506,6 +545,7 @@ class ObjectFutureEffectReader(nn.Module):
             .abs()
             .amax(),
         }
+        metrics.update(gradient_metrics)
         interval_mass = posterior.detach().float().mean(dim=4)
         for index in range(intervals):
             metrics[f"object_p2_interval_{index}_mass"] = interval_mass[
@@ -654,7 +694,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         bank.validate()
         if not collect_diagnostics:
             return bank, {}
-        return bank, {
+        metrics = {
             "object_p3_protected_policy_precision_rms": p1_policy_residual.detach()
             .float()
             .square()
@@ -681,6 +721,23 @@ class ObjectPolicyPlanCompiler(nn.Module):
             .float()
             .amin(),
         }
+        if self.training:
+            register_gradient_rms_metric(
+                p1_policy_residual,
+                metrics,
+                "gradient_tensor_p1_protected_policy_precision_rms",
+            )
+            register_gradient_rms_metric(
+                temporal,
+                metrics,
+                "gradient_tensor_p3_temporal_rms",
+            )
+            register_gradient_rms_metric(
+                state_change,
+                metrics,
+                "gradient_tensor_p3_state_change_rms",
+            )
+        return bank, metrics
 
 
 __all__ = [

@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 
+import clearvla.mainline.model.routing as routing_module
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.data.normalizer import ArrayNormalizer
 from clearvla.mainline.interfaces import (
@@ -50,12 +51,16 @@ def test_active_logging_suppresses_inactive_exact_zero() -> None:
             "loss_ledger_gap": 0.0,
             "gradient_postglobal_p1_factual_l2": 0.0,
             "object_grounding_mass_conservation_error": 0.0,
+            "object_p2_terminal_common_residual_identity_error": 0.0,
+            "gradient_tensor_p2_semantic_effect_rms": 0.0,
         }
     )
     assert filtered == {
         "loss_ledger_gap": 0.0,
         "gradient_postglobal_p1_factual_l2": 0.0,
         "object_grounding_mass_conservation_error": 0.0,
+        "object_p2_terminal_common_residual_identity_error": 0.0,
+        "gradient_tensor_p2_semantic_effect_rms": 0.0,
     }
 
 
@@ -77,11 +82,11 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
 
 def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     values = {
-        "loss_future_successor": 0.12,
+        "loss_future_semantic_delta": 0.12,
         "object_grounding_object_content_pair_cosine": 0.34,
         "object_intent_public_interval_variation": 0.56,
-        "object_w_intent_object_interaction_rms": 0.07,
-        "object_w_action_object_interaction_rms": 0.08,
+        "object_w_typed_common_state_rms": 0.07,
+        "object_w_far_condition_rms": 0.08,
         "object_w2_interval_adjacent_cosine": 0.78,
         "loss_action_flow_band_13_24": 0.9,
     }
@@ -103,22 +108,26 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
         metrics={
             **values,
             "loss_action_gripper_event_flow": 1.1,
-            "loss_flow_recent_warp": 0.2,
-            "loss_flow_earlier_warp": 0.3,
+            "loss_flow_photometric_warp": 0.2,
+            "loss_flow_photometric_zero_warp": 0.3,
             "object_grounding_candidate_key_rms": 0.31,
-            "object_w_typed_contribution_rms": 0.32,
+            "object_w_typed_common_state_rms": 0.32,
             "object_intent_semantic_route_raw_rms": 0.33,
             "object_intent_semantic_relevance_mass": 0.34,
-            "object_w_semantic_input_object_variation": 0.35,
-            "object_w2_interval_0_semantic_delta_rms": 0.321,
+            "object_w_semantic_common_contribution_rms": 0.35,
+            "object_w2_semantic_state_interval_variation": 0.321,
             "object_teacher_interval_0_semantic_delta_rms": 0.322,
             "loss_future_interval_0_semantic_delta": 0.323,
             "object_p2_intent_score_max_abs": 0.33,
             "p1_completed_fact_rms": 0.4,
-            "object_p3_effect_rms": 0.41,
+            "object_p3_protected_policy_precision_rms": 0.41,
+            "gradient_tensor_p3_temporal_rms": 0.42,
             "bottom_capacity_mean": 0.5,
             "bottom_controller_common_ratio": 0.51,
             "bottom_block_1_executed_update_rms": 0.52,
+            "object_p3_effect_rms": 9.0,
+            "object_w_typed_contribution_rms": 9.0,
+            "controlled_transition_pool_entropy": 9.0,
             "validation_sampling_diagnostic_coverage": 0.09,
             "validation_proposal_ablation_coverage": 0.09,
             "validation_execution_ablation_coverage": 0.04,
@@ -128,19 +137,20 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     )
     joined = "\n".join(details)
     assert "loss_action_gripper_event_flow=1.1" in joined
-    assert "loss_flow_recent_warp=0.2" in joined
-    assert "loss_flow_earlier_warp=0.3" in joined
+    assert "loss_flow_photometric_warp=0.2" in joined
+    assert "loss_flow_photometric_zero_warp=0.3" in joined
     assert "object_grounding_candidate_key_rms=0.31" in joined
-    assert "object_w_typed_contribution_rms=0.32" in joined
+    assert "object_w_typed_common_state_rms=0.32" in joined
     assert "object_intent_semantic_route_raw_rms=0.33" in joined
     assert "object_intent_semantic_relevance_mass=0.34" in joined
-    assert "object_w_semantic_input_object_variation=0.35" in joined
-    assert "object_w2_interval_0_semantic_delta_rms=0.321" in joined
+    assert "object_w_semantic_common_contribution_rms=0.35" in joined
+    assert "object_w2_semantic_state_interval_variation=0.321" in joined
     assert "object_teacher_interval_0_semantic_delta_rms=0.322" in joined
     assert "loss_future_interval_0_semantic_delta=0.323" in joined
     assert "object_p2_intent_score_max_abs=0.33" in joined
     assert "p1_completed_fact_rms=0.4" in joined
-    assert "object_p3_effect_rms=0.41" in joined
+    assert "object_p3_protected_policy_precision_rms=0.41" in joined
+    assert "gradient_tensor_p3_temporal_rms=0.42" in joined
     assert "bottom_capacity_mean=0.5" in joined
     assert "bottom_controller_common_ratio=0.51" in joined
     assert "bottom_block_1_executed_update_rms=0.52" in joined
@@ -149,6 +159,138 @@ def test_compact_logging_exposes_the_active_failure_boundaries() -> None:
     assert "validation_execution_ablation_coverage=0.04" in joined
     assert "validation_proposal_zero_mse_gain_vs_primary_physical=-0.01" in joined
     assert "validation_execution_full_capacity_mse_gain_vs_primary_physical=-0.02" in joined
+    assert "object_p3_effect_rms=" not in joined
+    assert "object_w_typed_contribution_rms=" not in joined
+    assert "controlled_transition_pool_entropy=" not in joined
+
+
+def test_gradient_tensor_hooks_observe_backward_without_changing_gradient() -> None:
+    register = getattr(routing_module, "register_gradient_rms_metric")
+    register_axis = getattr(routing_module, "register_gradient_axis_rms_metrics")
+    value = torch.randn(2, 3, requires_grad=True)
+    coefficient = torch.tensor([[1.0, -2.0, 3.0], [4.0, -5.0, 6.0]])
+    metrics: dict[str, torch.Tensor] = {}
+    register(value, metrics, "gradient_tensor_value_rms")
+    register_axis(
+        value,
+        metrics,
+        ("gradient_tensor_axis_0_rms", "gradient_tensor_axis_1_rms", "gradient_tensor_axis_2_rms"),
+        dim=-1,
+    )
+    (value * coefficient).sum().backward()
+    torch.testing.assert_close(value.grad, coefficient)
+    torch.testing.assert_close(
+        metrics["gradient_tensor_value_rms"],
+        coefficient.square().mean().sqrt(),
+    )
+    for index in range(3):
+        torch.testing.assert_close(
+            metrics[f"gradient_tensor_axis_{index}_rms"],
+            coefficient[:, index].square().mean().sqrt(),
+        )
+    try:
+        register_axis(value, {}, ("only_one",), dim=-1)
+    except ValueError as error:
+        assert "axis" in str(error)
+    else:
+        raise AssertionError("axis diagnostics must match the producer ABI")
+
+
+def test_finite_spike_attribution_names_exact_owner_and_channel_abi() -> None:
+    from clearvla.mainline.training.gradient_audit import (
+        build_finite_gradient_spike_report,
+    )
+
+    class ObservationOwner(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delta_head = torch.nn.Linear(2, 6, bias=False)
+
+    class Owners(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.observation = ObservationOwner()
+            self.bottom = torch.nn.Linear(2, 2, bias=False)
+
+    owners = Owners()
+    owners.observation.delta_head.weight.grad = torch.arange(1, 13).float().reshape(6, 2)
+    owners.bottom.weight.grad = torch.ones_like(owners.bottom.weight)
+    report = build_finite_gradient_spike_report(
+        owners.named_parameters(),
+        global_norm=30.0,
+        audit_threshold=5.0,
+        optimizer_group_name=lambda name: f"group:{name}",
+    )
+    assert report.max_l2.parameter_name == "observation.delta_head.weight"
+    assert report.max_abs.parameter_name == "observation.delta_head.weight"
+    assert report.flow_delta_head_channel_l2 is not None
+    assert len(report.flow_delta_head_channel_l2) == 6
+
+    owners.bottom.weight.grad = torch.full_like(owners.bottom.weight, 100.0)
+    bottom_report = build_finite_gradient_spike_report(
+        owners.named_parameters(),
+        global_norm=201.0,
+        audit_threshold=5.0,
+        optimizer_group_name=lambda name: f"group:{name}",
+    )
+    assert bottom_report.max_l2.parameter_name == "bottom.weight"
+    assert bottom_report.flow_delta_head_channel_l2 is None
+
+
+def test_gradient_preclip_window_owns_weighted_mean_max_and_current() -> None:
+    from clearvla.mainline.training.gradient_audit import (
+        GradientPreclipWindowAccumulator,
+    )
+
+    window = GradientPreclipWindowAccumulator()
+    window.update(2.0, weight=2.0, batch_offset=1, global_step=10)
+    window.update(5.0, weight=1.0, batch_offset=2, global_step=11)
+    window.update(3.0, weight=3.0, batch_offset=3, global_step=12)
+    values = window.materialize()
+    assert values["gradient_window_preclip_l2_mean"] == 3.0
+    assert values["gradient_window_preclip_l2_max"] == 5.0
+    assert values["gradient_window_preclip_l2_current"] == 3.0
+    assert values["gradient_window_preclip_l2_max_batch_offset"] == 2.0
+    assert values["gradient_window_preclip_l2_max_global_step"] == 11.0
+
+
+def test_epoch_tail_training_window_is_persisted_with_gradient_ownership(tmp_path) -> None:
+    import json
+
+    from clearvla.mainline.train import _emit_training_window
+    from clearvla.mainline.training.gradient_audit import (
+        GradientPreclipWindowAccumulator,
+    )
+
+    logger = JsonlRunLogger(tmp_path)
+    window_metrics = DeviceMetricAccumulator()
+    window_metrics.update({"loss_total": torch.tensor(2.5)}, weight=2.0)
+    gradient_window = GradientPreclipWindowAccumulator()
+    gradient_window.update(
+        4.0,
+        weight=2.0,
+        batch_offset=1,
+        global_step=17,
+    )
+    values = _emit_training_window(
+        logger=logger,
+        config=ExperimentConfig(),
+        window_metrics=window_metrics,
+        gradient_window=gradient_window,
+        epoch=3,
+        batch=7,
+        step=17,
+        window_seconds=2.0,
+        window_samples=2,
+        window_batches=1,
+        learning_rate=1.0e-4,
+        boundary="epoch_tail",
+    )
+    row = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
+    assert row["kind"] == "train"
+    assert row["window_boundary"] == "epoch_tail"
+    assert row["window_batches"] == 1
+    assert values["gradient_window_preclip_l2_max"] == 4.0
 
 
 def test_gripper_event_metric_rejects_the_opposite_event_direction() -> None:

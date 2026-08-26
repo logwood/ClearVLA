@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import smooth_rms_contract
+from .routing import register_gradient_axis_rms_metrics, smooth_rms_contract
 from .types import (
     CoarseActionIntentState,
     FutureObjectDynamics,
@@ -372,9 +372,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             semantic_delta=semantic_delta,
             transport_mean=transport,
             transport_covariance=covariance,
-            chart_availability=facts.validity.to(dtype=semantic_delta.dtype),
+            chart_availability=facts.validity.float(),
+            log_chart_availability=facts.log_validity.float(),
             camera_coordinates=facts.camera_coordinates.to(dtype=semantic_delta.dtype),
-            camera_chart_availability=facts.camera_validity.to(dtype=semantic_delta.dtype),
+            camera_chart_availability=facts.camera_validity.float(),
+            log_camera_chart_availability=facts.log_camera_validity.float(),
         )
 
     @staticmethod
@@ -537,6 +539,28 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             (w1_state.near_interval_innovation, far_typed),
             dim=1,
         )
+        gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            register_gradient_axis_rms_metrics(
+                w1_state.common_typed,
+                gradient_metrics,
+                (
+                    "gradient_tensor_w2_semantic_common_rms",
+                    "gradient_tensor_w2_appearance_common_rms",
+                    "gradient_tensor_w2_geometry_common_rms",
+                ),
+                dim=-2,
+            )
+            register_gradient_axis_rms_metrics(
+                completed_innovation,
+                gradient_metrics,
+                (
+                    "gradient_tensor_w2_semantic_interval_rms",
+                    "gradient_tensor_w2_appearance_interval_rms",
+                    "gradient_tensor_w2_geometry_interval_rms",
+                ),
+                dim=-2,
+            )
         field = self._field(
             facts=facts,
             typed_common=w1_state.common_typed,
@@ -546,6 +570,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         if not collect_diagnostics:
             return field, {}
         metrics = self._metrics(field, prefix="object_w2")
+        metrics.update(gradient_metrics)
         metrics.update(self._typed_state_metrics(completed_innovation, prefix="object_w2"))
         metrics["object_w_far_condition_rms"] = (
             far_condition_modulation.detach().float().square().mean().sqrt()

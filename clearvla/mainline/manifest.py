@@ -24,11 +24,11 @@ INTERVALS = ((4, 8), (8, 16), (16, 32), (32, 48))
 class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
-    observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_bank"
-    top: str = "v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3"
+    observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
+    top: str = "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3"
     bottom: str = "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution"
-    training: str = "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip"
-    runtime: str = "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated"
+    training: str = "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip_source_gradient_probes"
+    runtime: str = "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_finite_spike_matching_metrics"
 
     def validate(self) -> None:
         for name, value in self.as_dict().items():

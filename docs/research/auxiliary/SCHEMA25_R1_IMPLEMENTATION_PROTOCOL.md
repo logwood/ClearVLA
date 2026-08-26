@@ -1,8 +1,9 @@
 # Schema25-R1 implementation protocol
 
 Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
-through R1g/P3-01,B-01 plus LC-01 exact-zero cleanup implemented and
-statically closed; R1h/N-01,D-01 next; no training run.
+through R1h/N-01,D-01 plus LC-01 exact-zero cleanup implemented and statically
+closed; complete R1 source candidate awaits a separately authorized formal-run
+boundary; no training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -219,7 +220,7 @@ Execution ledger:
 | R1f / P2-01 | `COMPLETE` | `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; 144/144 retained tests |
 | R1g / P3-01,B-01 | `COMPLETE` | `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`; 145/145 retained tests |
 | LC-01 exact-zero cleanup | `COMPLETE` | `LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`; retained contract/decoder/RNG exact; 145/145 retained tests |
-| R1h / N-01,D-01 | `NEXT` | close the numerical-support/diagnostic worksheet before source edits |
+| R1h / N-01,D-01 | `COMPLETE` | `R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`; LC-01 inventory/RNG exact; 155/155 retained tests |
 
 For every slice:
 
@@ -271,6 +272,10 @@ required.
 
 This stage is skipped if constructing the input would consume dataset,
 checkpoint or experiment budget not separately authorized.
+
+R1h closure completes the eight source slices. No dataset/checkpoint-backed
+micro-counterfactual or formal run has been performed; the next state-changing
+step is the separately authorized run-context boundary below.
 
 ## 8. Formal-run boundary
 

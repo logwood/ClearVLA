@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from torch import Tensor
@@ -17,6 +18,11 @@ from ..model.policy import (
 )
 from ..runtime.logging import tensor_scalars
 from ..runtime.numerics import resolve_compute_dtype
+from .gradient_audit import (
+    DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
+    FiniteGradientSpikeReport,
+    build_finite_gradient_spike_report,
+)
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
 
@@ -66,6 +72,7 @@ class TrainStepResult:
     gradient_norm: Tensor
     learning_rate: float
     metrics: dict[str, Tensor]
+    gradient_norm_scalar: float | None = None
 
     def materialize(self) -> dict[str, float]:
         """Synchronize scalar metrics only when the logger actually emits."""
@@ -138,6 +145,9 @@ class MainlineTrainingEngine:
         dtype: torch.dtype | None = None,
         train_flow_generator: torch.Generator | None = None,
         train_condition_generator: torch.Generator | None = None,
+        gradient_spike_audit_threshold: float | None = (
+            DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
+        ),
     ) -> None:
         config.validate()
         self.model = model
@@ -148,6 +158,16 @@ class MainlineTrainingEngine:
         self.dtype = resolve_compute_dtype(config, dtype)
         self.train_flow_generator = train_flow_generator
         self.train_condition_generator = train_condition_generator
+        if gradient_spike_audit_threshold is not None and (
+            not math.isfinite(float(gradient_spike_audit_threshold))
+            or float(gradient_spike_audit_threshold) <= 0.0
+        ):
+            raise ValueError("gradient spike audit threshold must be finite and positive")
+        self.gradient_spike_audit_threshold = (
+            None
+            if gradient_spike_audit_threshold is None
+            else float(gradient_spike_audit_threshold)
+        )
         self.global_step = 0
 
     def _optimizer_group_name(self, parameter_name: str) -> str:
@@ -213,8 +233,12 @@ class MainlineTrainingEngine:
         raise RuntimeError("global gradient norm was non-finite without a named owner")
 
     def _gradient_lifecycle(
-        self, *, collect_diagnostics: bool
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+        self,
+        *,
+        collect_diagnostics: bool,
+        gradient_spike_handler: Callable[[FiniteGradientSpikeReport], None]
+        | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor], float]:
         """V120 finite-check -> decoder-local -> global clip lifecycle."""
 
         parameters = [
@@ -242,6 +266,28 @@ class MainlineTrainingEngine:
             raise NonFiniteGradientError(
                 self._first_nonfinite_gradient_report(global_norm=nonfinite_norm)
             ) from error
+        # One host scalar owns both the spike boundary and the training-window
+        # mean/max/current record.  The expensive parameter scan remains
+        # conditional and happens before any clipping or optimizer mutation.
+        gradient_norm_scalar = float(total_norm.detach().float().cpu().item())
+        if (
+            gradient_spike_handler is not None
+            and self.gradient_spike_audit_threshold is not None
+            and gradient_norm_scalar > self.gradient_spike_audit_threshold
+        ):
+            named_parameters = [
+                (name, parameter)
+                for name, parameter in self.model.named_parameters()
+                if parameter.grad is not None
+            ]
+            gradient_spike_handler(
+                build_finite_gradient_spike_report(
+                    named_parameters,
+                    global_norm=gradient_norm_scalar,
+                    audit_threshold=self.gradient_spike_audit_threshold,
+                    optimizer_group_name=self._optimizer_group_name,
+                )
+            )
         metrics = (
             gradient_diagnostics(self.model, stage="raw")
             if collect_diagnostics
@@ -316,12 +362,12 @@ class MainlineTrainingEngine:
                 if decoder_parameters
                 else total_norm.new_zeros((), dtype=torch.float32)
             )
-        return total_norm, metrics
+        return total_norm, metrics, gradient_norm_scalar
 
     def _clip_gradients_with_first_offender(self) -> Tensor:
         """Compatibility wrapper used by the non-finite regression test."""
 
-        total_norm, _ = self._gradient_lifecycle(collect_diagnostics=False)
+        total_norm, _, _ = self._gradient_lifecycle(collect_diagnostics=False)
         return total_norm
 
     @staticmethod
@@ -540,6 +586,8 @@ class MainlineTrainingEngine:
         batch: TrainingBatch,
         *,
         collect_diagnostics: bool = False,
+        gradient_spike_handler: Callable[[FiniteGradientSpikeReport], None]
+        | None = None,
     ) -> TrainStepResult:
         self.model.train()
         # V120 intentionally keeps the execution controller and ordered
@@ -557,8 +605,11 @@ class MainlineTrainingEngine:
                 condition_generator=self.train_condition_generator,
             )
         ledger.total.backward()
-        gradient_norm, gradient_metrics = self._gradient_lifecycle(
-            collect_diagnostics=collect_diagnostics
+        gradient_norm, gradient_metrics, gradient_norm_scalar = (
+            self._gradient_lifecycle(
+                collect_diagnostics=collect_diagnostics,
+                gradient_spike_handler=gradient_spike_handler,
+            )
         )
         metrics.update(gradient_metrics)
         # Record the LR that owns this update.  Advancing the scheduler first
@@ -580,6 +631,7 @@ class MainlineTrainingEngine:
             gradient_norm=gradient_norm.detach().float(),
             learning_rate=learning_rate,
             metrics=self._tensor_metrics(ledger, metrics),
+            gradient_norm_scalar=gradient_norm_scalar,
         )
 
     @torch.no_grad()
@@ -619,6 +671,7 @@ class MainlineTrainingEngine:
                 * self.schedule.ratio(self.schedule.step_index)
             ),
             metrics=self._tensor_metrics(ledger, metrics),
+            gradient_norm_scalar=0.0,
         )
 
 

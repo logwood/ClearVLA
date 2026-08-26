@@ -44,10 +44,12 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
     assert ARCHITECTURE_MANIFEST.schema == 25
-    assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
+    assert components.observation == (
+        "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
+    )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3"
     )
     assert (
         components.bottom
@@ -55,10 +57,10 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip_source_gradient_probes"
     )
     assert components.runtime == (
-        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated"
+        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_finite_spike_matching_metrics"
     )
 
 

@@ -16,6 +16,7 @@ from .observation_contract import ObservationEvidence
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
+from .routing import register_gradient_rms_metric
 from .top import (
     CompiledPolicyState,
     DeploymentTopCache,
@@ -323,6 +324,28 @@ class ClearVLAMainlinePolicy(nn.Module):
             horizon=self.config.dimensions.action_horizon,
             basis=self.config.dimensions.action_basis_tokens,
         )
+        gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            register_gradient_rms_metric(
+                context.intent.public_interval_carrier,
+                gradient_metrics,
+                "gradient_tensor_s_public_interval_carrier_rms",
+            )
+            register_gradient_rms_metric(
+                context.intent.typed_common_value,
+                gradient_metrics,
+                "gradient_tensor_s_typed_common_rms",
+            )
+            register_gradient_rms_metric(
+                context.intent.typed_interval_residual_value,
+                gradient_metrics,
+                "gradient_tensor_s_typed_interval_residual_rms",
+            )
+            register_gradient_rms_metric(
+                factual_dock.protected_detail,
+                gradient_metrics,
+                "gradient_tensor_p1_static_fact_rms",
+            )
         p1_aliases = {
             "flow_jepa_p1_query_rows": "p1_query_rows",
             "flow_jepa_p1_query_chunk": "p1_query_chunk",
@@ -371,6 +394,7 @@ class ClearVLAMainlinePolicy(nn.Module):
                 if source in p1_metrics
             },
             **transition_metrics,
+            **gradient_metrics,
             "condition_goal_keep": goal_keep.detach().float().mean(),
             "condition_action_history_keep": history_keep.detach().float().mean(),
             "condition_proposal_keep": proposal_keep.detach().float().mean(),
@@ -446,6 +470,12 @@ class ClearVLAMainlinePolicy(nn.Module):
             time=time,
             collect_diagnostics=collect_diagnostics,
         )
+        if collect_diagnostics:
+            register_gradient_rms_metric(
+                p1_state.policy_query_residual,
+                p1_metrics,
+                "gradient_tensor_p1_dynamic_query_residual_rms",
+            )
         compiled, top_metrics = self.top.compile_policy(
             cache.top,
             p1_state=p1_state,

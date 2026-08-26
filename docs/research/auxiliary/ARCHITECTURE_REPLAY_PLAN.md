@@ -1,8 +1,9 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01 through R1g/P3-01,B-01 plus LC-01 exact-zero cleanup implemented and
-statically closed; R1h/N-01,D-01 next; no training run.
+R1a/G-01 through R1h/N-01,D-01 plus LC-01 exact-zero cleanup implemented and
+statically closed; formal-run boundary awaits separate authorization; no
+training run.
 Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
@@ -233,7 +234,7 @@ order:
 7. P3-01/B-01 unique lanes and bottom ingress.
 8. N-01/D-01 matching numerics and diagnostics.
 
-Slices 1-7 are complete as separate reversible commits. R1c preserves the
+Slices 1-8 are complete as separate reversible commits. R1c preserves the
 Schema25 selector exactly, removes the typed ActionIntentDock/CoarseAction
 alias, and gives W lossless common/residual coordinates through its sole typed
 dock. R1d processes common once, gives W2 read-only access to completed W1,
@@ -257,10 +258,12 @@ physical-I terminals before the raw complementary sum. Its closed worksheet
   trajectory aliases and 23,590 frozen readout parameters without changing a
   retained contract/decoder tensor, optimizer owner or the construction RNG;
   its closed worksheet is
-  `LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`. R1h/N-01,D-01 is
-  next, but its source may not change until the
-  numerical-support/diagnostic producer/consumer/loss/runtime/checkpoint
-  worksheet closes.
+  `LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`. R1h then keeps
+  observable measures/logs FP32, makes the four active address variance paths
+  exact-zero with finite slope, and adds only matching read-only diagnostics.
+  Its closed worksheet is
+  `R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`; the final retained
+  suite is 155/155 and every LC-01 inventory/RNG sentinel remains exact.
 
 There is no training between these commits. R1 retains the Schema25 Teacher
 association backend, S relevance scoring and base K-binder evidence, so the
@@ -271,7 +274,8 @@ aliases or Schema39's exact S-W score relation.
 
 The run decision comes only after the complete R1 source graph passes
 algebraic reconstruction, axis sentinel, exact-zero, call-count, forward-path
-and reverse-VJP checks.
+and reverse-VJP checks. Those static gates now pass; they do not themselves
+authorize dataset/checkpoint access or a training run.
 
 ## 7. Base-state audit before the first donor
 

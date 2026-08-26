@@ -608,7 +608,7 @@ exact-zero effect on every live contract output and active loss. They are now
 absent; both independent terminal rollout/state/event adapters remain. The
 cleanup deletes 23,590 frozen parameters and 16 state keys while preserving
 all retained contract/decoder tensors, the optimizer partition and the seed-0
-construction RNG exactly. N-01/D-01 is next.
+construction RNG exactly.
 
 ### N-01 and D-01: numerical support and matching diagnostics
 
@@ -628,6 +628,16 @@ These are support units, not representation capacity:
 
 Only diagnostics whose producer still exists in R1 are copied. Historical
 metrics are not recreated merely to preserve a log vocabulary.
+
+Implementation closure: R1h is recorded in
+`R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`. The four active address
+variance consumers now use the finite-slope exact-zero transform. G2/G3 retain
+one FP32 probability/log view of their existing owner measure through the
+grounder, W/Teacher boundary and P2; no support floor or new owner is present.
+Source-gradient hooks are identity VJPs, finite-spike scans are rare-path and
+pre-clip only, and the runtime vocabulary names live R1 producers. The LC-01
+parameter/state/optimizer/tensor/RNG fingerprints remain exact and the retained
+suite passes 155/155.
 
 ## 4. Deferred and rejected donor mechanics
 
@@ -698,15 +708,16 @@ Implementation slices:
 7. unique P3 and bottom ingress: P3-01 and B-01.
 8. matching numerics and diagnostics: N-01 and D-01.
 
-Slices 1-7 are complete as separate reversible source units. P2-01 closure is
+Slices 1-8 are complete as separate reversible source units. P2-01 closure is
 recorded in `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`: K/C disappear
   only at their type-local spatial consumers, I disappears only at independent
   no-null physical terminals, and semantic/geometry add before the single outer
   contract. P3-01/B-01 closure is recorded in
   `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`: protected values have
   no optional aliases, and the two real optional innovations receive disjoint
-  normalization calls. N-01/D-01 is next and remains read-only until its active
-  producer/consumer/loss/runtime/checkpoint worksheet closes.
+  normalization calls. N-01/D-01 closure is recorded in
+  `R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`: numerical support is
+  finite without creating mass, and diagnostics observe the closed graph only.
 
 There is no training between these slices. Each slice receives only algebraic,
 shape, sentinel, call-count, forward-trace and reverse-VJP verification. The
