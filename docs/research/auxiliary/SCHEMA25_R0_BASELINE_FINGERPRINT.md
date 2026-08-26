@@ -1,8 +1,8 @@
 # Schema25 R0 baseline fingerprint
 
 Status: untouched model-source baseline reproduced locally on 2026-08-26.
-Replay documents are untracked documentation additions; no model, config, test
-or runtime source has changed.
+Replay documents were committed separately at `8067dee`; no model, config,
+test or runtime source had changed when this fingerprint was closed.
 
 ## 1. Git and tracked-source identity
 

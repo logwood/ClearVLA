@@ -1,7 +1,7 @@
 # Schema25-R1 implementation protocol
 
-Status: adopted implementation discipline; R0 fingerprint in progress; no R1
-model-source change has started.
+Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
+implemented and statically closed; R1b/G-02 not started; no training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -189,6 +189,14 @@ No training occurs between slices.
 6. R1f / P2-01: spatial selection and physical interval terminal.
 7. R1g / P3-01,B-01: unique lanes and lane-local bottom ingress.
 8. R1h / N-01,D-01: matching finite numerics and diagnostics.
+
+Execution ledger:
+
+| Slice | State | Evidence |
+|---|---|---|
+| R1a / G-01 | `COMPLETE` | `R1A_G01_G3_HANDOFF_WORKSHEET.md`; 123/123 retained tests |
+| R1b / G-02 | `NEXT` | boundary worksheet required before source edits |
+| R1c-R1h | `PENDING` | no source edit authorized yet |
 
 For every slice:
 

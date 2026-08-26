@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-20
+Updated: 2026-08-26
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         source-complete; 122 mainline tests pass; awaiting CUDA smoke and behavior gates
+release status:         Schema25-R1 assembly; R1a/G-01 complete; 123 mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -27,21 +27,19 @@ smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
-> **Schema25 source is implemented, not yet behavior-released.** The S-only
-> object/type ownership repair in
-> [`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md) is now the
-> active source. Local structure, CPU BF16, optimizer, deployment and checkpoint
-> tests pass. A fresh CUDA smoke and complete eight-epoch comparison are still
-> required before claiming action improvement. The independent G3-anchor
-> transmission defect remains deferred in
-> [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md).
+> **The executable source is the exact Schema25 replay base plus completed
+> R1a/G-01; it is not yet behavior-released.** The untouched R0 fingerprint,
+> selected cross-version units and implementation gates live in
+> `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
+> `ARCHITECTURE_REPLAY_SOURCE_UNITS.md` and
+> `SCHEMA25_R1_IMPLEMENTATION_PROTOCOL.md`. R1a repairs only the independently
+> confirmed G3-to-transition handoff. No CUDA smoke, dataset access, checkpoint
+> migration or training run has been performed.
 
-> **Near-term scope lock:** the next several repair iterations are S-focused.
-> They may change S internals and the minimum G/ObjectFactSet -> S and
-> S -> CoarseAction/W/P consumer wiring required to preserve object/type
-> ownership. They must not redesign G, W, P1/P2/P3, transition or bottom
-> internals. Any non-S edit needs a recorded, independently confirmed defect;
-> adjacency to S is not sufficient authorization to expand the repair scope.
+> **Replay scope lock:** R1 is assembled as reversible semantic units in the
+> adopted order. A later unit cannot be implemented until its complete
+> producer/consumer/loss/runtime/checkpoint worksheet closes. Historical
+> schemas are donor coordinates, not phases or whole commits to replay.
 
 The active graph lives in `clearvla/mainline/`. It does not dispatch through
 the V39 trainer/runtime/trunk or a V-numbered capability branch. The manifest
@@ -68,6 +66,15 @@ Schema25 makes one bounded S ownership change:
 - CoarseAction and W consume S-owned docks and no longer reread/reselect raw
   typed facts through their own learned-null routers;
 - P1, P2, P3, transition and bottom internals are unchanged.
+
+R1a/G-01 makes one additional source-local repair on that base:
+
+- P1 and the controlled transition now consume the same exact completed G3
+  rollout view `[B,4*C*8*8,H]`;
+- transition no longer reconstructs four anchors from an anchor-averaged
+  public chart and no longer owns `interval_identity`;
+- the handoff adds no cast, clone, detach, projection, normalization, gain,
+  floor or amplitude budget.
 
 No block, external loss weight, gain, quota, hard gate, entropy target,
 capacity or P1 learned null was added. Schema24 and older checkpoints cannot
@@ -145,7 +152,7 @@ one shared V120 action/context seed
     -> noisy-action query shared by P2/P3/transition/bottom
     -> current state, causal state history, compressed executed history
 
-G3 public chart plus four identity labels (known anchor-axis debt)
+exact completed G3 rollout shared with static P1
     -> static 512-row ControlledTransitionSource, once per observation
 noisy action + V120 learned neutral + plan/history
     -> dynamic 512-row ControlledTransitionState, every dynamic forward
@@ -234,10 +241,10 @@ supports may change targets and losses, never deployment action.
 
 12. P3 owns five V120 lanes: factual, precision, effect, temporal and
     state-change. It cannot reopen vision or consume a free W carrier.
-13. Transition static/dynamic frequency is model semantics: its current static
-    source builds once; real-versus-neutral coefficients read current noisy
-    action at every dynamic forward. Exact G3 anchor ownership is a separately
-    recorded open repair and is not silently assumed here.
+13. Transition static/dynamic frequency is model semantics: its exact final
+    G3 rollout source builds once; real-versus-neutral coefficients read
+    current noisy action at every dynamic forward. The source retains the real
+    anchor/camera/xy rows and may not recreate them from a reduced chart.
 14. Bottom source count/order/value semantics follow V120. Do not remove CVAE,
     workspace, P1/P2 contracts, Evidence MMDiT, capacity or execution to reduce
     memory or simplify the mainline.
@@ -312,7 +319,7 @@ ControlledTransitionSource / State
 | P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, second visual read |
 | P2 | completed P1 fact, supervised W field, S, noisy-action query | RGB/DINO reopen, camera-expanded W, free W hidden |
 | P3 | P1 fact, consequence, S, noisy-action query | Teacher, RGB/DINO, proposal, free W carrier |
-| transition source | G3 public chart | W target, proposal, noisy action, Teacher |
+| transition source | exact completed G3 rollout view shared with P1 | W target, proposal, noisy action, Teacher |
 | transition dynamic | source, shared V120 seed, plan | target action, Teacher, future proposal |
 | bottom | consequence, five P3 lanes, transition, seed, layer contracts | RGB/DINO, Teacher, duplicate W/P base |
 
@@ -366,8 +373,11 @@ ControlledTransitionSource / State
 - Startup writes a per-module parameter inventory. Counts are measured, never
   hard-coded into the contract; any difference from V120 must name the removed
   and restored owners.
-- The Schema25 formal configuration measures `169,981,895` total and
-  `153,587,574` trainable parameters. Relative to the completed Schema24 graph,
+- The untouched Schema25 R0 configuration measures `169,981,895` total and
+  `153,587,574` trainable parameters. R1a measures `169,979,847` total and
+  `153,585,526` trainable parameters; the exact `-2,048` delta is the removed
+  trainable `transition.interval_identity` and no replacement parameter.
+  Relative to the completed Schema24 graph,
   the exact `-12,731,133` trainable delta is fully accounted for: S removes
   three duplicate `_CrossRead`s plus one shared learned-null router and adds
   three route-width relevance projections plus three temperatures
@@ -397,7 +407,8 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-Local tests cover full forward/backward, G1/G2/G3 ordering and N=49
+The retained local suite now passes 123/123. Tests cover full
+forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
 permutations, per-type S perturbation locality, fixed-zero typed values,
@@ -407,7 +418,8 @@ same-camera Teacher geometry, object geometry, neutral effect, P2 bounds, endpoi
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
-Production acceptance still requires:
+Production acceptance is deferred until the complete R1 source graph closes.
+It will then require:
 
 - fresh BF16 smoke and five-step deployment;
 - batch-eight process peak no greater than 22 GiB;

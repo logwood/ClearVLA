@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
@@ -1248,11 +1249,22 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
-    cache, training_state, metrics = model.encode_online(
-        batch.online,
-        geometry_supervision=False,
-        collect_diagnostics=True,
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_p1_g3_rollout(_module, args):
+        captured["g3_rollout"] = args[1]
+
+    handle = model.factual_reader.register_forward_pre_hook(
+        capture_p1_g3_rollout
     )
+    try:
+        cache, training_state, metrics = model.encode_online(
+            batch.online,
+            geometry_supervision=False,
+            collect_diagnostics=True,
+        )
+    finally:
+        handle.remove()
     assert tuple(cache.factual_dock.protected_detail.shape[1:3]) == (
         24,
         config.dimensions.action_basis_tokens,
@@ -1276,10 +1288,90 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
         4 * config.dimensions.num_cameras * 8 * 8,
         config.dimensions.hidden_size,
     )
+    g3_rollout = captured["g3_rollout"]
+    assert cache.transition_source.selector is g3_rollout
+    cotangent = torch.zeros_like(cache.transition_source.selector)
+    sentinel_row = 3 * config.dimensions.num_cameras * 8 * 8 + 67
+    cotangent[:, sentinel_row, 5] = 1.0
+    direct_gradient = torch.autograd.grad(
+        cache.transition_source.selector,
+        g3_rollout,
+        grad_outputs=cotangent,
+        retain_graph=True,
+    )[0]
+    torch.testing.assert_close(
+        direct_gradient,
+        cotangent,
+        atol=0.0,
+        rtol=0.0,
+    )
+    noisy_action = model.action_codec.encode(
+        batch.action_target.normalized,
+        batch.online.history.action_state,
+    )
+    dynamic_output = model.velocity(
+        cache,
+        noisy_action_field=noisy_action,
+        time=torch.full((batch.action_target.batch,), 0.5),
+    )
+    transition_gradient = torch.autograd.grad(
+        dynamic_output.bottom.evidence_tokens.square().sum(),
+        g3_rollout,
+        retain_graph=True,
+        allow_unused=True,
+    )[0]
+    assert transition_gradient is not None
+    assert torch.isfinite(transition_gradient).all()
+    assert torch.count_nonzero(transition_gradient) > 0
     assert metrics["controlled_transition_source_spatial_variation"] >= 0
+    assert metrics["controlled_transition_source_anchor_variation"] >= 0
+    assert not hasattr(model.transition, "interval_identity")
     assert cache.transition_source.selector.shape[1] == (
         4 * config.dimensions.num_cameras * 8 * 8
     )
+
+
+def test_controlled_transition_source_preserves_g3_rows_and_exact_zero() -> None:
+    torch.manual_seed(52)
+    config = _config()
+    transition = ClearVLAMainlinePolicy(config).transition
+    rows = 4 * config.dimensions.num_cameras * 8 * 8
+    hidden = config.dimensions.hidden_size
+    sentinel_row = 2 * config.dimensions.num_cameras * 8 * 8 + 19
+    g3_rollout = torch.zeros(1, rows, hidden)
+    g3_rollout[0, sentinel_row] = torch.arange(hidden, dtype=g3_rollout.dtype)
+    g3_rollout.requires_grad_(True)
+
+    source, metrics = transition.build_source(
+        g3_rollout=g3_rollout,
+        collect_diagnostics=True,
+    )
+
+    assert source.selector is g3_rollout
+    torch.testing.assert_close(
+        source.selector[0, sentinel_row],
+        torch.arange(hidden, dtype=g3_rollout.dtype),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert torch.count_nonzero(source.selector) == hidden - 1
+    assert metrics["controlled_transition_source_anchor_variation"] >= 0
+    parameters = inspect.signature(transition.build_source).parameters
+    assert "g3_rollout" in parameters
+    assert "facts" not in parameters
+
+    zero = torch.zeros_like(g3_rollout, requires_grad=True)
+    zero_source, _ = transition.build_source(g3_rollout=zero)
+    assert zero_source.selector is zero
+    assert torch.count_nonzero(zero_source.selector) == 0
+
+    invalid = torch.zeros(1, rows - 1, hidden)
+    try:
+        transition.build_source(g3_rollout=invalid)
+    except ValueError as error:
+        assert "exact [B,4*C*8*8,H] G3 rollout" in str(error)
+    else:
+        raise AssertionError("transition source must reject a partial G3 chart")
 
 
 def test_sampling_rejects_dtype_that_differs_from_serialized_runtime() -> None:

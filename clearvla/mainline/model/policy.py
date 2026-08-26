@@ -300,9 +300,10 @@ class ClearVLAMainlinePolicy(nn.Module):
             evidence.grounding.late_detail,
             progressive_address=evidence.progressive_state,
         )
+        g3_rollout = grounding_canvas[:, grounding_slices["rollout"]]
         updated_trajectory, p1_metrics = self.factual_reader(
             clean_trajectory,
-            grounding_canvas[:, grounding_slices["rollout"]],
+            g3_rollout,
             p1_detail,
             phase_context=factual_intent.phase_context,
             condition_query_context=factual_intent.condition_query_context,
@@ -337,7 +338,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             ),
         }
         transition_source, transition_metrics = self.transition.build_source(
-            facts=context.facts,
+            g3_rollout=g3_rollout,
             collect_diagnostics=collect_diagnostics,
         )
         cache = OnlinePolicyCache(
