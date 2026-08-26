@@ -170,7 +170,13 @@ transition action operand and the bottom's optional policy ingress.
 There is no P1-specific auxiliary loss. One training batch builds the static
 reader once, samples one flow time/noisy action, and runs one dynamic P1 call.
 Action flow, decoded action, event, motion and execution-value losses reach
-both static and dynamic P1 through P2, transition, layer contracts and bottom.
+dynamic P1 through P2, controlled transition and the bottom no-null precision
+read. The two layer-contract trajectory rows are not active consumers: their
+adapter is position-wise, `EvidenceViewAdapter` ignores every trajectory
+readout, and the separate event input depends only on rollout delta. Their
+trajectory formulas therefore have exact-zero effect on final outputs and
+losses. Static P1 remains reachable through P2/consequence and the protected
+bottom path.
 Future-dynamics, recognizer, coarse-action and reconstruction objectives do
 not directly supervise the dynamic P1 residual.
 

@@ -1,7 +1,8 @@
 # Cross-version replay source units
 
-Status: source-derived working register; G-01, G-02, S-01, S-02, W-01, W-02
-and P1-01 implemented and statically closed; S-03 guard verified; P2-01 next.
+Status: source-derived working register; G-01, G-02, S-01, S-02, W-01, W-02,
+P1-01 and P2-01 implemented and statically closed; S-03 guard verified;
+P3-01/B-01 next.
 Established on 2026-08-26.
 
 This file records the implementation semantic units recovered across
@@ -506,6 +507,17 @@ Static acceptance:
 - complementary fusion uses the existing single outer contract and adds no
   per-type gain.
 
+Implementation closure: R1f is recorded in
+`R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`. Semantic K and geometry K*C
+posteriors are normalized independently for every physical interval and use
+only current observable support. `SelectedIntervalEvidence` preserves I/type
+and the exact common-plus-innovation identity. The same W posterior selects S
+metadata, which conditions only the selected W key through the adopted
+zero-preserving relation. Each type then owns one no-null four-interval
+terminal; their raw latent contributions add before the one inherited caller
+contract. All-invalid rows are finite exact zero. The retained suite passes
+144/144; R1g/P3-01,B-01 is next.
+
 ### P3-01: unique P3 values around protected carriers
 
 Source anchors:
@@ -663,9 +675,12 @@ Implementation slices:
 7. unique P3 and bottom ingress: P3-01 and B-01.
 8. matching numerics and diagnostics: N-01 and D-01.
 
-Slices 1-5 are complete as separate reversible source units. P2-01 is next and
-remains read-only until its active producer/consumer/loss/runtime/checkpoint
-worksheet closes.
+Slices 1-6 are complete as separate reversible source units. P2-01 closure is
+recorded in `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`: K/C disappear
+only at their type-local spatial consumers, I disappears only at independent
+no-null physical terminals, and semantic/geometry add before the single outer
+contract. P3-01/B-01 is next and remains read-only until its active
+producer/consumer/loss/runtime/checkpoint worksheet closes.
 
 There is no training between these slices. Each slice receives only algebraic,
 shape, sentinel, call-count, forward-trace and reverse-VJP verification. The

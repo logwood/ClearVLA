@@ -211,6 +211,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.effect_reader = ObjectFutureEffectReader(
             hidden=hidden,
             content_dim=content_dim,
+            route_dim=route_dim,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(

@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 assembly; R1a-R1e complete through P1-01; 140 retained mainline tests pass; no training run
+release status:         Schema25-R1 assembly; R1a-R1f complete through P2-01; 144 retained mainline tests pass; no training run
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -28,7 +28,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
 > **The executable source is the exact Schema25 replay base plus completed
-> R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02 and R1e/P1-01; it is not yet
+> R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01 and
+> R1f/P2-01; it is not yet
 > behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -42,8 +43,11 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > retains physical camera identity through future geometry, and removes online
 > predicted-status authority. R1e separates cached factual detail from the
 > noisy-action/time-dependent P1 policy residual and restores that raw residual
-> only at its named dynamic consumers. No CUDA smoke, dataset access, checkpoint
-> migration or training run has been performed.
+> only at its named dynamic consumers. R1f performs semantic K and geometry
+> K*C selection independently inside every interval, then removes I through
+> one no-null physical terminal per type before their raw complementary sum.
+> No CUDA smoke, dataset access, checkpoint migration or training run has been
+> performed.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -76,8 +80,8 @@ Schema25 makes one bounded S ownership change:
 - CoarseAction and W consume S-owned docks and no longer reread/reselect raw
   typed facts through their own learned-null routers;
 - the Schema25 base initially leaves P1, P3, transition and bottom internals
-  unchanged; R1d makes only the minimum camera-aware adaptation to the
-  inherited P2 reader, and R1e below repairs only the P1 carrier ownership.
+  unchanged; R1d makes the minimum camera-aware P2 adaptation, R1e repairs P1
+  carrier ownership, and R1f closes the P2 spatial/physical terminal below.
 
 R1a/G-01 makes one additional source-local repair on that base:
 
@@ -112,8 +116,10 @@ R1c/S-01,S-02 makes one S/W-boundary repair without changing the selector:
   observable-history and public-object context. Typed evidence therefore
   reaches W through `WorldIntentDock` once rather than again through action
   tokens;
-- factual P1 and P2/P3 retain the existing reduced typed policy
-  context through their own named docks. At the R1c boundary, pre-R1d W
+- factual P1 and P3 retain their reduced policy context. P2 additionally reads
+  the existing typed common/residual S metadata through `PolicyIntentDock`,
+  but only after a W-owned spatial posterior has selected it. At the R1c
+  boundary, pre-R1d W
   reconstructed its former full typed source once at `_base`; R1d below keeps
   the common/innovation coordinates distinct without adding a second path.
 
@@ -137,9 +143,9 @@ R1d/W-01,W-02 replaces the pre-R1d W mechanics and future ABI:
   post-association displacement moments and null-identity allocation remain
   per camera. P2 consumes camera coordinate, covariance and transport before C
   is reduced and uses only current observable support;
-- P2's inherited flattened `[interval,K]+null` terminal and
-  semantic-versus-geometry type softmax remain explicit P2-01 debt. R1d does
-  not claim that later terminal closure.
+- R1d intentionally leaves the inherited flattened `[interval,K]+null`
+  terminal and semantic-versus-geometry type softmax as P2-01 debt; R1f below
+  closes that debt without changing the W field.
 
 R1e/P1-01 separates the static and dynamic P1 owners without changing their
 producers:
@@ -161,9 +167,35 @@ producers:
 - no reader, parameter, buffer, persistent key, RMS contract, LayerScale,
   learned gain, learned null or second bottom scale was added.
 
+R1f/P2-01 separates spatial selection from the physical interval terminal:
+
+- semantic selection normalizes K independently for every `[B,T,Q,I]` row;
+  geometry consumes transport, FP32 covariance and current camera coordinate
+  while normalizing K*C independently for every interval;
+- `SelectedIntervalEvidence [B,T,Q,I,2,H]` retains interval and type until the
+  terminal and preserves an exact selected common-plus-innovation identity;
+- the same W-owned spatial posterior selects existing typed S metadata. S can
+  condition the selected W key only through
+  `key + key * tanh(bounded(S))`; it cannot create support, value, spatial
+  selection or an independent interval vote;
+- semantic and geometry each own a no-null four-physical-interval posterior.
+  All-invalid observable support is finite exact zero;
+- their raw latent contributions are added without a type softmax, divisor or
+  per-type gain. This `+` is the adopted complementary latent fusion operator,
+  not a physical-units claim. The existing caller-owned P2 RMS contract is
+  still the only outer amplitude boundary.
+
+The two retained V120 layer-contract trajectory formulas are bookkeeping-only
+in the active graph: the adapter is position-wise, the evidence adapter ignores
+its trajectory/action/motion readouts, and the separate event input depends on
+rollout delta. They have exact-zero effect on final outputs and active losses;
+P2, controlled transition and bottom are the actual dynamic-P1 consumers.
+
 No block, external loss weight, gain, quota, hard gate, entropy target or
 capacity was added. R1d removes three W status heads and one P2 status
-projection; R1e has zero parameter/state delta. Pre-R1d checkpoints are
+projection; R1e has zero parameter/state delta. R1f removes the P2 type query
+and adds only the missing geometry key plus two type-specific projections of
+existing S route metadata. Exact resume across the R1e/R1f state ABI is
 intentionally incompatible and no migration shim exists.
 
 The post-epoch-1 source/log closure audit then corrected four remaining
@@ -238,8 +270,12 @@ current noisy action + flow time + cached protected detail
 action query + factual_base + policy_query_residual
     -> exact P2QueryDock combined query
     + FutureObjectDynamics + S
-    -> P2 bounded semantic/intent and camera-coordinate/covariance effect read
+    -> semantic K and geometry K*C selection independently within each I
        using current chart/camera availability as the only physical support
+    -> SelectedIntervalEvidence [B,T,Q,I,semantic|geometry,H]
+    -> S-conditioned W key, one no-null physical-I terminal per type
+    -> raw semantic + geometry latent sum
+    -> one inherited caller-owned P2 RMS contract
 factual_base + P2 effect
     -> zero-preserving protected consequence
     -> P3 factual/precision/effect/temporal/state-change lanes
@@ -322,8 +358,10 @@ supports may change targets and losses, never deployment action.
    public carrier is supervised separately from optional typed relevance.
    Semantic, appearance and geometry retain real K/type axes, each owns a
    fixed-zero null comparison, and only `WorldIntentDock` may deliver their
-   common/residual values to W. CoarseAction has no typed field; factual and
-   policy docks retain only their already-reduced named S context.
+   common/residual values to W. CoarseAction has no typed field. Factual P1
+   retains only reduced S context; `PolicyIntentDock` exposes the existing
+   typed common/residual metadata solely so P2 can select it with W's spatial
+   posterior after K/C selection authority has already been fixed.
 8. W1 owns typed common exactly once and the two near innovations. W2 may read
    completed common/near state but writes only the two far innovations. Every
    public interval is one processed common plus its matching processed
@@ -351,9 +389,13 @@ supports may change targets and losses, never deployment action.
     W obtains C only by conditioning typed geometry on the existing physical
     camera transport prior; it cannot predict once and duplicate a fake camera
     axis. Teacher targets, future losses and P2 preserve C. P2 consumes the
-    covariance metric and transport with the same camera posterior before
-    reducing C. No predicted status or predicted validity controls support.
-    The inherited `[interval,K]+null` and two-type terminal remain P2-01 debt.
+    covariance metric and transport in its geometry K*C posterior before
+    reducing C. Semantic K and geometry K*C selection retain I; the named
+    terminal then normalizes only the four physical intervals independently
+    per type, with no null. The same spatial posterior selects S metadata,
+    which can condition only a nonzero W key. Semantic and geometry add before
+    one outer contract and never compete. No predicted status or predicted
+    validity controls support.
 11. Neutral effect is algebraically neutral:
 
     ```text
@@ -414,7 +456,8 @@ StatelessIntentBundle (serialized compatibility name: ObjectIntentState)
 Consumer views
   ActionIntentDock (typed-free public action context)
   WorldIntentDock (typed common/residual W ingress)
-  FactualIntentDock / PolicyIntentDock (named reduced S context)
+  FactualIntentDock (named reduced factual S context)
+  PolicyIntentDock (reduced P3 context plus existing typed P2 metadata)
 
 FutureObjectDynamics
   current reference                                      [B,K,D]
@@ -434,6 +477,10 @@ CompletedP1PolicyState
 
 P2QueryDock
   action query / factual base / policy-query residual    [B,24,4,H]
+
+SelectedIntervalEvidence
+  key/value/common/innovation/S metadata                 [B,24,4,4,2,H]
+  observable semantic/geometry support                   [B,4,2]
 
 ObjectPolicyPlanDeltaBank
   protected base / protected policy precision            [B,24,4,H]
@@ -456,7 +503,7 @@ ControlledTransitionSource / State
 | W | public ObjectFactSet conditions, existing camera transport prior, S-owned typed common/residual through WorldIntentDock, one typed-free clean coarse action intent | raw typed-fact reread, second typed action path, target/noisy action, proposal, Teacher, predicted status/support, free W value |
 | static P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, noisy action/time, second visual read |
 | dynamic P1 | action query, Euler time, cached factual base | vision reopen, W, proposal, Teacher, factual relabeling of its live residual |
-| P2 | exact three-term P2 query, supervised semantic/camera W field, current chart/camera support, S | RGB/DINO reopen, predicted status/support, camera reconstruction after reduction, free W hidden |
+| P2 | exact three-term query, supervised semantic/camera W field, current chart/camera support; S metadata only after W spatial selection | RGB/DINO reopen, predicted status/support, S-owned K/C/time vote, type competition, free W hidden |
 | P3 | static P1 fact, consequence, S, noisy-action query; raw dynamic residual only as protected policy precision | Teacher, RGB/DINO, proposal, free W carrier, dynamic residual projection into optional P3 lanes |
 | transition source | exact completed G3 rollout view shared with P1 | W target, proposal, noisy action, Teacher |
 | transition dynamic | source, shared V120 seed, protected consequence, raw P1 policy residual, plan | target action, Teacher, future proposal |
@@ -528,11 +575,14 @@ ControlledTransitionSource / State
   `153,582,451` trainable parameters. Its exact `-3,075` delta is three W
   status heads (`-1,539`) plus the P2 status projection and third type-query
   row (`-1,536`). R1e is parameter-free and retains the exact R1d inventory
-  and ordered state-key sequence. The active model has 1,406 parameter tensors, 1,068
-  trainable/optimizer tensors, 23 optimizer groups and 1,412 state-key names.
-  W measures 9,229,827 parameters / 26 tensors; P2 measures 1,575,939 / 9.
+  and ordered state-key sequence. R1f adds a net 32,768 trainable parameters:
+  a geometry source-key projection and two type-specific S route projections
+  replace the removed type-query projection. The active model has 170,009,540
+  total / 153,615,219 trainable parameters, 1,408 parameter tensors, 1,070
+  trainable/optimizer tensors, 23 optimizer groups and 1,414 state-key names.
+  W measures 9,229,827 parameters / 26 tensors; P2 measures 1,608,707 / 11.
   The ordered state-key-name SHA-256 is
-  `9af8b806832afd9edae58e0dfd1ec123ea9964e4511499571865b17fc96cc25d`.
+  `b31e565546456d89eef9add6b1c62df61a64c2282c07ce8fee1a58e9e368afa4`.
   An independent seed-0 R1d/R1e construction comparison produced identical
   canonical full-state tensor digest
   `9793ea81a3b1173c7569300bc74a31f462c2e792744d0f2299d5ccdfd3ec5ba7`
@@ -547,7 +597,9 @@ ControlledTransitionSource / State
   (`-65,792`) and three status heads (`-1,539`); P2 removes its status
   projection plus one type-query row (`-1,536`). Bottom and the exact P1 reader
   parameter inventories are unchanged; R1e changes only parameter-free runtime
-  carriers and existing-consumer wiring.
+  carriers and existing-consumer wiring. R1f intentionally changes P2 state
+  names and fresh-run RNG; its seed-0 post-construction CPU RNG SHA-256 is
+  `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
 - Active manifest identity:
 
   ```text
@@ -571,7 +623,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 140/140. Tests cover full
+The retained local suite now passes 144/144. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -588,8 +640,10 @@ FP32 PSD covariance, per-camera Teacher null-identity moments, absence of
 online status ABI, static/dynamic P1 identity separation, exact three-owner P2
 query and reverse VJP, static consequence ownership, raw dynamic transition
 and bottom reachability, exact-zero dynamic bottom ingress, current-support
-exact-zero P2 routing, covariance-sensitive P2 geometry, same-camera Teacher
-geometry, neutral effect, P2 bounds, endpoint lifecycle,
+exact-zero P2 routing, covariance-sensitive P2 geometry, spatial interval
+preservation, W-owned S selection, no-null per-type physical terminal,
+independent semantic/geometry survival and legal W/S/action reverse paths,
+same-camera Teacher geometry, neutral effect, P2 bounds, endpoint lifecycle,
 optimizer ownership, three-stage gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 

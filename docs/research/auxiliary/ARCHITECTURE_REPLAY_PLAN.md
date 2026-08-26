@@ -1,8 +1,8 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01 through R1e/P1-01 implemented and statically closed;
-R1f/P2-01 next; no training run.
+R1a/G-01 through R1f/P2-01 implemented and statically closed;
+R1g/P3-01,B-01 next; no training run.
 Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
@@ -233,7 +233,7 @@ order:
 7. P3-01/B-01 unique lanes and bottom ingress.
 8. N-01/D-01 matching numerics and diagnostics.
 
-Slices 1-5 are complete as separate reversible commits. R1c preserves the
+Slices 1-6 are complete as separate reversible commits. R1c preserves the
 Schema25 selector exactly, removes the typed ActionIntentDock/CoarseAction
 alias, and gives W lossless common/residual coordinates through its sole typed
 dock. R1d processes common once, gives W2 read-only access to completed W1,
@@ -244,9 +244,13 @@ R1e keeps the cached fact and live P1 policy residual disjoint, materializes
 their full query only at P2, and passes the raw residual to transition and
 bottom without adding a parameter or amplitude contract. Its closed worksheet
 is `R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`; the retained suite remains
-140/140. R1f/P2-01 is next, but its source may not change until the
-spatial-selection/physical-terminal producer/consumer/loss/runtime/checkpoint
-worksheet closes.
+140/140. R1f retains I through semantic K and geometry K*C selection, lets S
+condition only the selected nonzero W key, and uses independent no-null
+physical-I terminals before the raw complementary sum. Its closed worksheet
+is `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; the retained suite is
+144/144. R1g/P3-01,B-01 is next, but its source may not change until the
+unique-lane/bottom-ingress producer/consumer/loss/runtime/checkpoint worksheet
+closes.
 
 There is no training between these commits. R1 retains the Schema25 Teacher
 association backend, S relevance scoring and base K-binder evidence, so the

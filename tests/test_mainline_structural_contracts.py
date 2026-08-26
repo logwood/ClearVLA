@@ -1453,15 +1453,17 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
     broadened = replace(available, transport_covariance=broad_covariance)
     reader = top.effect_reader
     with torch.no_grad():
-        reader.query_key.weight.zero_()
-        reader.effect_key.weight.zero_()
-        reader.intent_query.weight.zero_()
-        reader.intent_key.weight.zero_()
+        for projection in reader.source_query:
+            projection.weight.zero_()
+        for projection in reader.source_key:
+            projection.weight.zero_()
+        reader.public_interval_key.weight.zero_()
+        for projection in reader.typed_intent_key:
+            projection.weight.zero_()
         reader.coordinate_query.weight.zero_()
         reader.semantic_value.weight.zero_()
         reader.transport_value.weight.zero_()
         reader.transport_value.weight[0, 0] = 1.0
-        reader.type_query.weight.zero_()
     action_query = torch.zeros(1, 24, 2, 32)
     ordinary, _ = reader(
         action_query,
@@ -1477,7 +1479,8 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
     )
     assert not torch.equal(broad, ordinary)
     assert not hasattr(reader, "status_value")
-    assert reader.type_query.out_features == 2
+    assert not hasattr(reader, "type_query")
+    assert not any("null" in name for name, _ in reader.named_parameters())
 
     unavailable = replace(
         available,
@@ -1507,6 +1510,233 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
         parameter.grad is None or torch.isfinite(parameter.grad).all()
         for parameter in reader.parameters()
     )
+
+
+def test_p2_policy_dock_exposes_existing_typed_metadata_by_identity() -> None:
+    torch.manual_seed(315)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    dock = context.intent.policy_dock()
+    assert dock.typed_common_value is context.intent.typed_common_value
+    assert (
+        dock.typed_interval_residual_value
+        is context.intent.typed_interval_residual_value
+    )
+
+
+def test_p2_spatial_selection_retains_interval_and_s_cannot_select_w() -> None:
+    torch.manual_seed(316)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    semantic = torch.zeros(1, 4, 4, 16)
+    semantic[:, 2, 0, 0] = 1.0
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=semantic,
+        chart_availability=torch.tensor([[[1.0], [0.0], [0.0], [0.0]]]),
+        camera_chart_availability=torch.zeros(1, 4, 2, 1),
+    )
+    reader = top.effect_reader
+    with torch.no_grad():
+        for projection in reader.source_query:
+            projection.weight.zero_()
+        for projection in reader.source_key:
+            projection.weight.zero_()
+        reader.semantic_value.weight.zero_()
+        reader.semantic_value.weight[0, 0] = 1.0
+        reader.transport_value.weight.zero_()
+        reader.coordinate_query.weight.zero_()
+    action_query = torch.zeros(1, 24, 2, 32)
+    dock = context.intent.policy_dock()
+    selected, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        dock,
+        collect_diagnostics=False,
+    )
+    selected.validate()
+    assert tuple(selected.value.shape) == (1, 24, 2, 4, 2, 32)
+    assert tuple(selected.support.shape) == (1, 4, 2)
+    assert selected.support.dtype == torch.bool
+    torch.testing.assert_close(
+        selected.value[0, 0, 0, :, 0, 0],
+        torch.tensor([0.0, 0.0, 1.0, 0.0]),
+    )
+
+    changed_dock = replace(
+        dock,
+        interval_key=torch.randn_like(dock.interval_key),
+        typed_common_value=torch.randn_like(dock.typed_common_value),
+        typed_interval_residual_value=torch.randn_like(
+            dock.typed_interval_residual_value
+        ),
+    )
+    changed, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        changed_dock,
+        collect_diagnostics=False,
+    )
+    for name in ("key", "value", "common_value", "residual_value", "support"):
+        torch.testing.assert_close(getattr(changed, name), getattr(selected, name))
+    assert not torch.equal(changed.selected_s_context, selected.selected_s_context)
+
+
+def test_p2_physical_terminal_has_no_null_or_type_competition() -> None:
+    torch.manual_seed(317)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    semantic = torch.zeros(1, 4, 4, 16)
+    semantic[..., 0] = 1.0
+    transport = torch.zeros(1, 4, 4, 2, 2)
+    transport[..., 0] = 2.0
+    both = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=semantic,
+        transport_mean=transport,
+    )
+    semantic_only = replace(
+        both,
+        transport_mean=torch.zeros_like(transport),
+        camera_chart_availability=torch.zeros_like(
+            both.camera_chart_availability
+        ),
+    )
+    geometry_only = replace(
+        both,
+        semantic_delta=torch.zeros_like(semantic),
+        successor_content=both.current_reference[:, None].expand(-1, 4, -1, -1),
+    )
+    zero_w = replace(
+        geometry_only,
+        transport_mean=torch.zeros_like(transport),
+    )
+    reader = top.effect_reader
+    with torch.no_grad():
+        for projection in reader.source_query:
+            projection.weight.zero_()
+        for projection in reader.source_key:
+            projection.weight.zero_()
+        reader.public_interval_key.weight.zero_()
+        for projection in reader.typed_intent_key:
+            projection.weight.zero_()
+        reader.coordinate_query.weight.zero_()
+        reader.semantic_value.weight.zero_()
+        reader.semantic_value.weight[0, 0] = 1.0
+        reader.transport_value.weight.zero_()
+        reader.transport_value.weight[0, 0] = 1.0
+    action_query = torch.randn(1, 24, 2, 32)
+    dock = context.intent.policy_dock()
+    semantic_raw, _ = reader(
+        action_query,
+        semantic_only,
+        dock,
+        collect_diagnostics=False,
+    )
+    geometry_raw, _ = reader(
+        action_query,
+        geometry_only,
+        dock,
+        collect_diagnostics=False,
+    )
+    combined_raw, _ = reader(
+        action_query,
+        both,
+        dock,
+        collect_diagnostics=False,
+    )
+    neutral_raw, _ = reader(
+        action_query,
+        zero_w,
+        replace(
+            dock,
+            interval_key=torch.randn_like(dock.interval_key),
+            typed_common_value=torch.randn_like(dock.typed_common_value),
+            typed_interval_residual_value=torch.randn_like(
+                dock.typed_interval_residual_value
+            ),
+        ),
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(semantic_raw[..., 0], torch.ones_like(semantic_raw[..., 0]))
+    torch.testing.assert_close(
+        geometry_raw[..., 0],
+        torch.full_like(geometry_raw[..., 0], 2.0),
+    )
+    torch.testing.assert_close(combined_raw, semantic_raw + geometry_raw)
+    assert torch.count_nonzero(neutral_raw) == 0
+    assert not any(
+        token in name
+        for name, _ in reader.named_parameters()
+        for token in ("null", "type_query", "type_gain")
+    )
+
+
+def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
+    torch.manual_seed(318)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    semantic = torch.randn(1, 4, 4, 16, requires_grad=True)
+    transport = (0.1 * torch.randn(1, 4, 4, 2, 2)).requires_grad_(True)
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=semantic,
+        transport_mean=transport,
+    )
+    dock = context.intent.policy_dock()
+    typed_common = dock.typed_common_value.detach().clone().requires_grad_(True)
+    typed_residual = (
+        dock.typed_interval_residual_value.detach().clone().requires_grad_(True)
+    )
+    action_query = torch.randn(1, 24, 2, 32, requires_grad=True)
+    value, _ = top.effect_reader(
+        action_query,
+        dynamics,
+        replace(
+            dock,
+            typed_common_value=typed_common,
+            typed_interval_residual_value=typed_residual,
+        ),
+        collect_diagnostics=False,
+    )
+    gradients = torch.autograd.grad(
+        value.square().mean(),
+        (semantic, transport, typed_common, typed_residual, action_query),
+    )
+    for gradient in gradients:
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) > 0
 
 
 def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:

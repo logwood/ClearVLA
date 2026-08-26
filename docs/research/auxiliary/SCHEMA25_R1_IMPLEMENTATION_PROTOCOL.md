@@ -1,8 +1,8 @@
 # Schema25-R1 implementation protocol
 
 Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
-through R1e/P1-01 implemented and statically closed;
-R1f/P2-01 next; no training run.
+through R1f/P2-01 implemented and statically closed;
+R1g/P3-01,B-01 next; no training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -139,9 +139,9 @@ the P2 geometry consumer. Observable current chart/camera availability is the
 only online support; predicted visibility, persistence, uncertainty,
 reliability and selector validity are absent. Teacher retains the Schema25
 candidate-plus-null row softmax and allocates null identity per camera after
-association. Until P2-01, the minimum P2 adapter may retain its inherited
-flattened `[I,K]+null` and two-type terminal, but it cannot retain status or
-reduce C before covariance/transport consumption.
+association. R1f/P2-01 now keeps I through semantic K and geometry K*C
+selection, then uses one no-null physical-I terminal per type. It cannot retain
+status or reduce C before covariance/transport consumption.
 
 ### 4.4 S conditioning of the W-owned terminal relation
 
@@ -216,8 +216,9 @@ Execution ledger:
 | R1c / S-01,S-02 | `COMPLETE` | `R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`; 134/134 retained tests |
 | R1d / W-01,W-02 | `COMPLETE` | `R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`; 140/140 retained tests |
 | R1e / P1-01 | `COMPLETE` | `R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`; 140/140 retained tests; zero parameter/state delta |
-| R1f / P2-01 | `NEXT` | close the spatial-selection/physical-terminal worksheet before source edits |
-| R1g-R1h | `PENDING` | no source edit authorized yet |
+| R1f / P2-01 | `COMPLETE` | `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; 144/144 retained tests |
+| R1g / P3-01,B-01 | `NEXT` | close the unique-lane/bottom-ingress worksheet before source edits |
+| R1h / N-01,D-01 | `PENDING` | no source edit authorized yet |
 
 For every slice:
 

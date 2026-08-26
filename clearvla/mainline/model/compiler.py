@@ -72,31 +72,74 @@ class ObjectPolicyPlanDeltaBank:
         )
 
 
-class ObjectFutureEffectReader(nn.Module):
-    """Minimum camera-aware adapter for the inherited Schema25 P2 terminal."""
+@dataclass(frozen=True)
+class SelectedIntervalEvidence:
+    """W evidence after type-local spatial selection and before I removal."""
 
-    def __init__(self, *, hidden: int, content_dim: int) -> None:
+    key: Tensor  # [B,T,Q,I,Z,H]
+    value: Tensor  # [B,T,Q,I,Z,H]
+    common_value: Tensor  # [B,T,Q,I,Z,H]
+    residual_value: Tensor  # [B,T,Q,I,Z,H]
+    selected_s_context: Tensor  # [B,T,Q,I,Z,H]
+    support: Tensor  # bool [B,I,Z]
+
+    def validate(self) -> None:
+        if self.key.ndim != 6 or int(self.key.shape[-2]) != 2:
+            raise ValueError("selected P2 evidence must be [B,T,Q,I,2,H]")
+        expected = tuple(self.key.shape)
+        for name in (
+            "value",
+            "common_value",
+            "residual_value",
+            "selected_s_context",
+        ):
+            if tuple(getattr(self, name).shape) != expected:
+                raise ValueError(f"selected P2 {name} lost an identity axis")
+        if tuple(self.support.shape) != (expected[0], expected[3], expected[4]):
+            raise ValueError("selected P2 support must be [B,I,2]")
+        if self.support.dtype != torch.bool:
+            raise TypeError("selected P2 support must be boolean")
+        if not torch.equal(self.value, self.common_value + self.residual_value):
+            raise ValueError("selected P2 common/residual identity failed")
+
+
+def _safe_masked_softmax(logit: Tensor, support: Tensor, *, dim: int) -> Tensor:
+    """Return finite probabilities and exact zero on all-invalid rows."""
+
+    if tuple(logit.shape) != tuple(support.shape):
+        raise ValueError("masked softmax logit and support must align")
+    has_support = support.any(dim=dim, keepdim=True)
+    finite_logit = torch.where(support, logit.float(), torch.zeros_like(logit.float()))
+    finite_logit = torch.where(has_support, finite_logit, torch.zeros_like(finite_logit))
+    masked = finite_logit.masked_fill(~support & has_support, -torch.inf)
+    return torch.softmax(masked, dim=dim) * has_support.to(dtype=torch.float32)
+
+
+class ObjectFutureEffectReader(nn.Module):
+    """Select W spatial evidence before the no-null physical-I terminal."""
+
+    TYPE_NAMES = ("semantic", "geometry")
+    S_TYPE_INDEX_BY_P2 = (0, 2)
+
+    def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
         super().__init__()
         self.hidden = int(hidden)
-        self.query_key = nn.Linear(hidden, hidden, bias=False)
-        self.effect_key = nn.Linear(content_dim, hidden, bias=False)
-        self.intent_query = nn.Linear(hidden, hidden, bias=False)
-        self.intent_key = nn.Linear(hidden, hidden, bias=False)
+        self.source_query = nn.ModuleList(
+            nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
+        )
+        self.source_key = nn.ModuleList(
+            (
+                nn.Linear(content_dim, hidden, bias=False),
+                nn.Linear(2, hidden, bias=False),
+            )
+        )
+        self.public_interval_key = nn.Linear(hidden, hidden, bias=False)
+        self.typed_intent_key = nn.ModuleList(
+            nn.Linear(route_dim, hidden, bias=False) for _ in self.TYPE_NAMES
+        )
         self.coordinate_query = nn.Linear(hidden, 2, bias=False)
         self.semantic_value = nn.Linear(content_dim, hidden, bias=False)
         self.transport_value = nn.Linear(2, hidden, bias=False)
-        # Preserve downstream seed identity and the two surviving historical
-        # type-query rows while removing the status projection and status row.
-        construction_start = torch.get_rng_state()
-        removed_status_value = nn.Linear(2, hidden, bias=False)
-        historical_type_query = nn.Linear(hidden, 3, bias=False)
-        construction_end = torch.get_rng_state()
-        torch.set_rng_state(construction_start)
-        self.type_query = nn.Linear(hidden, 2, bias=False)
-        with torch.no_grad():
-            self.type_query.weight.copy_(historical_type_query.weight[:2])
-        torch.set_rng_state(construction_end)
-        del removed_status_value, historical_type_query
         self.temperature_logit = nn.Parameter(torch.zeros(3))
 
     def _temperatures(self) -> Tensor:
@@ -104,36 +147,381 @@ class ObjectFutureEffectReader(nn.Module):
 
     @staticmethod
     def _bounded_unit(value: Tensor, *, norm_floor: float = 0.25) -> Tensor:
-        value = value.float()
-        return value / (value.square().sum(dim=-1, keepdim=True) + float(norm_floor) ** 2).sqrt()
+        value_f = value.float()
+        return value_f / (
+            value_f.square().sum(dim=-1, keepdim=True) + float(norm_floor) ** 2
+        ).sqrt()
 
     @staticmethod
-    def _masked_camera_posterior(logit: Tensor, valid: Tensor) -> tuple[Tensor, Tensor]:
-        """Normalize real camera hypotheses and keep all-invalid exact zero."""
+    def _covariance_aware_distance(delta: Tensor, covariance: Tensor) -> Tensor:
+        """Retain the active I+Sigma positive-definite coordinate metric."""
 
-        if tuple(logit.shape) != tuple(valid.shape):
-            raise ValueError("P2 camera logit and support axes do not align")
-        has_support = valid.any(dim=-1, keepdim=True)
-        negative_infinity = torch.full_like(logit, -torch.inf)
-        masked = torch.where(valid, logit, negative_infinity)
-        maximum = torch.where(
-            has_support,
-            masked.amax(dim=-1, keepdim=True),
-            torch.zeros_like(masked[..., :1]),
+        covariance_f = covariance.float()
+        metric_xx = 1.0 + covariance_f[..., 0]
+        metric_xy = covariance_f[..., 1]
+        metric_yy = 1.0 + covariance_f[..., 2]
+        determinant = metric_xx * metric_yy - metric_xy.square()
+        dx, dy = delta[..., 0], delta[..., 1]
+        return (
+            metric_yy * dx.square()
+            - 2.0 * metric_xy * dx * dy
+            + metric_xx * dy.square()
+        ) / determinant
+
+    def spatial_select(
+        self,
+        action_query: Tensor,
+        dynamics: FutureObjectDynamics,
+        intent: PolicyIntentDock,
+        *,
+        collect_diagnostics: bool,
+    ) -> tuple[SelectedIntervalEvidence, dict[str, Tensor]]:
+        dynamics.validate()
+        if action_query.ndim != 4:
+            raise ValueError("P2 action query must be [B,T,Q,H]")
+        batch, horizon, basis, hidden = action_query.shape
+        if hidden != self.hidden:
+            raise ValueError("P2 action query hidden width is invalid")
+        intent.validate(horizon=horizon, hidden=self.hidden)
+        intervals, objects = dynamics.semantic_delta.shape[1:3]
+        if tuple(intent.typed_common_value.shape[:3]) != (batch, objects, 3):
+            raise ValueError("P2 typed common S metadata lost K/type")
+        if tuple(intent.typed_interval_residual_value.shape[:4]) != (
+            batch,
+            intervals,
+            objects,
+            3,
+        ):
+            raise ValueError("P2 typed residual S metadata lost I/K/type")
+
+        temperature = self._temperatures().to(device=action_query.device)
+        object_measure = dynamics.chart_availability[..., 0].float().clamp(0.0, 1.0)
+        semantic_support = object_measure > 0.0
+        semantic_log_measure = torch.where(
+            semantic_support,
+            object_measure.clamp_min(1.0e-30).log(),
+            torch.zeros_like(object_measure),
         )
-        unnormalized = torch.where(
-            valid,
-            torch.exp(masked - maximum),
-            torch.zeros_like(masked),
+        camera_measure = dynamics.camera_chart_availability[..., 0].float().clamp(
+            0.0, 1.0
         )
-        denominator = unnormalized.sum(dim=-1, keepdim=True)
-        posterior = unnormalized / denominator.clamp_min(1.0)
-        evidence = torch.where(
-            has_support,
-            maximum + denominator.clamp_min(1.0).log(),
-            torch.full_like(maximum, -torch.inf),
+        camera_support = semantic_support[..., None] & (camera_measure > 0.0)
+        camera_log_measure = torch.where(
+            camera_support,
+            camera_measure.clamp_min(1.0e-30).log(),
+            torch.zeros_like(camera_measure),
         )
-        return posterior, evidence[..., 0]
+        conditional_camera = _safe_masked_softmax(
+            camera_log_measure,
+            camera_support,
+            dim=-1,
+        )
+        geometry_measure = object_measure[..., None] * conditional_camera
+        geometry_log_measure = torch.where(
+            camera_support,
+            geometry_measure.clamp_min(1.0e-30).log(),
+            torch.zeros_like(geometry_measure),
+        )
+
+        coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
+        future_coordinate = (
+            dynamics.camera_coordinates[:, None].float()
+            + dynamics.transport_mean.float()
+        ).clamp(-1.0, 1.0)
+        coordinate_delta = (
+            coordinate_query[:, :, :, None, None, None]
+            - future_coordinate[:, None, None]
+        )
+        coordinate_distance = self._covariance_aware_distance(
+            coordinate_delta,
+            dynamics.transport_covariance[:, None, None],
+        )
+        coordinate_score = (-0.25 * coordinate_distance).clamp(-1.0, 0.0)
+
+        common_fields = (
+            dynamics.semantic_common,
+            dynamics.transport_common,
+        )
+        residual_fields = (
+            dynamics.semantic_interval_innovation,
+            dynamics.transport_interval_innovation,
+        )
+        full_fields = (dynamics.semantic_delta, dynamics.transport_mean)
+        common_values = (
+            self.semantic_value(common_fields[0]),
+            self.transport_value(common_fields[1]),
+        )
+        residual_values = (
+            self.semantic_value(residual_fields[0]),
+            self.transport_value(residual_fields[1]),
+        )
+        public_interval = self.public_interval_key(intent.interval_key).float()
+
+        selected_keys: list[Tensor] = []
+        selected_common_values: list[Tensor] = []
+        selected_residual_values: list[Tensor] = []
+        selected_s_contexts: list[Tensor] = []
+        interval_supports: list[Tensor] = []
+        spatial_posteriors: list[Tensor] = []
+        source_scores: list[Tensor] = []
+
+        for type_index in range(len(self.TYPE_NAMES)):
+            query = self._bounded_unit(self.source_query[type_index](action_query))
+            source_key = self._bounded_unit(
+                self.source_key[type_index](full_fields[type_index])
+            )
+            typed_route = (
+                intent.typed_common_value[..., self.S_TYPE_INDEX_BY_P2[type_index], :][
+                    :, None
+                ]
+                + intent.typed_interval_residual_value[
+                    ..., self.S_TYPE_INDEX_BY_P2[type_index], :
+                ]
+            )
+            typed_candidate = self.typed_intent_key[type_index](typed_route).float()
+
+            if type_index == 0:
+                source_score = torch.einsum(
+                    "btqh,bikh->btqik",
+                    query,
+                    source_key,
+                )
+                support = semantic_support[:, None].expand(-1, intervals, -1)
+                log_measure = semantic_log_measure[:, None].expand_as(support)
+                candidate_logit = temperature[0] * source_score + log_measure[
+                    :, None, None
+                ]
+                candidate_support = support[:, None, None].expand_as(candidate_logit)
+                candidate_typed = typed_candidate
+            else:
+                source_score = torch.einsum(
+                    "btqh,bikch->btqikc",
+                    query,
+                    source_key,
+                )
+                support = camera_support[:, None].expand(
+                    -1, intervals, -1, -1
+                )
+                log_measure = geometry_log_measure[:, None].expand_as(support)
+                candidate_logit = (
+                    temperature[0] * source_score
+                    + temperature[2] * coordinate_score
+                    + log_measure[:, None, None]
+                )
+                candidate_support = support[:, None, None].expand_as(candidate_logit)
+                candidate_typed = typed_candidate[..., None, :].expand_as(source_key)
+
+            flat_logit = candidate_logit.reshape(batch, horizon, basis, intervals, -1)
+            flat_support = candidate_support.reshape_as(flat_logit)
+            posterior = _safe_masked_softmax(flat_logit, flat_support, dim=-1)
+            interval_support = support.flatten(start_dim=2).any(dim=-1)
+            flat_key = source_key.reshape(batch, intervals, -1, self.hidden)
+            flat_typed = candidate_typed.reshape(batch, intervals, -1, self.hidden)
+            flat_common = common_values[type_index].reshape(
+                batch, -1, self.hidden
+            )[:, None].expand(-1, intervals, -1, -1)
+            flat_residual = residual_values[type_index].reshape(
+                batch,
+                intervals,
+                -1,
+                self.hidden,
+            )
+            posterior_for_key = posterior.to(dtype=flat_key.dtype)
+            selected_keys.append(
+                torch.einsum("btqin,binh->btqih", posterior_for_key, flat_key)
+            )
+            selected_common_values.append(
+                torch.einsum(
+                    "btqin,binh->btqih",
+                    posterior.to(dtype=flat_common.dtype),
+                    flat_common,
+                )
+            )
+            selected_residual_values.append(
+                torch.einsum(
+                    "btqin,binh->btqih",
+                    posterior.to(dtype=flat_residual.dtype),
+                    flat_residual,
+                )
+            )
+            selected_typed = torch.einsum(
+                "btqin,binh->btqih",
+                posterior.to(dtype=flat_typed.dtype),
+                flat_typed,
+            )
+            selected_s_contexts.append(
+                public_interval[:, None, None] + selected_typed.float()
+            )
+            interval_supports.append(interval_support)
+            spatial_posteriors.append(posterior)
+            source_scores.append(source_score)
+
+        common_value = torch.stack(selected_common_values, dim=4)
+        residual_value = torch.stack(selected_residual_values, dim=4)
+        selected = SelectedIntervalEvidence(
+            key=torch.stack(selected_keys, dim=4),
+            value=common_value + residual_value,
+            common_value=common_value,
+            residual_value=residual_value,
+            selected_s_context=torch.stack(selected_s_contexts, dim=4),
+            support=torch.stack(interval_supports, dim=-1),
+        )
+        selected.validate()
+        if not collect_diagnostics:
+            return selected, {}
+        return selected, {
+            "object_p2_content_score_abs": torch.stack(
+                [score.detach().float().abs().mean() for score in source_scores]
+            ).mean(),
+            "object_p2_content_score_max_abs": torch.stack(
+                [score.detach().float().abs().amax() for score in source_scores]
+            ).amax(),
+            "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
+            "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
+            "object_p2_spatial_posterior_entropy": torch.stack(
+                [normalized_entropy(value, dim=-1).detach().mean() for value in spatial_posteriors]
+            ).mean(),
+            "object_p2_spatial_posterior_max": torch.stack(
+                [value.detach().amax(dim=-1).mean() for value in spatial_posteriors]
+            ).mean(),
+            "object_p2_spatial_selector_has_null": action_query.new_zeros(
+                (), dtype=torch.float32
+            ),
+            "object_p2_selected_w_key_rms": selected.key.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_selected_s_context_rms": selected.selected_s_context.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_spatial_common_residual_identity_error": (
+                selected.value.detach().float()
+                - (selected.common_value.detach() + selected.residual_value.detach()).float()
+            )
+            .abs()
+            .amax(),
+        }
+
+    def temporal_terminal(
+        self,
+        action_query: Tensor,
+        selected: SelectedIntervalEvidence,
+        *,
+        collect_diagnostics: bool,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        selected.validate()
+        batch, horizon, basis, intervals, types, hidden = selected.key.shape
+        if tuple(action_query.shape) != (batch, horizon, basis, hidden):
+            raise ValueError("P2 terminal action query lost [B,T,Q,H]")
+        action_by_type = torch.stack(
+            [
+                self._bounded_unit(self.source_query[index](action_query))
+                for index in range(types)
+            ],
+            dim=3,
+        )
+        selected_key = self._bounded_unit(selected.key)
+        s_context = torch.tanh(self._bounded_unit(selected.selected_s_context))
+        conditioned_key = selected_key + selected_key * s_context
+        interval_score = torch.einsum(
+            "btqzh,btqizh->btqiz",
+            action_by_type,
+            conditioned_key,
+        )
+        temperature = self._temperatures().to(device=action_query.device)
+        support = selected.support[:, None, None].expand_as(interval_score)
+        posterior = _safe_masked_softmax(
+            temperature[1] * interval_score,
+            support,
+            dim=3,
+        )
+        common_by_type = torch.einsum(
+            "btqiz,btqizh->btqzh",
+            posterior.to(dtype=selected.common_value.dtype),
+            selected.common_value,
+        )
+        residual_by_type = torch.einsum(
+            "btqiz,btqizh->btqzh",
+            posterior.to(dtype=selected.residual_value.dtype),
+            selected.residual_value,
+        )
+        value_by_type = common_by_type + residual_by_type
+        raw_effect = value_by_type.sum(dim=3)
+        if not collect_diagnostics:
+            return raw_effect, {}
+        neutral_key_score = torch.einsum(
+            "btqzh,btqizh->btqiz",
+            action_by_type,
+            selected_key,
+        )
+        neutral_posterior = _safe_masked_softmax(
+            temperature[1] * neutral_key_score,
+            support,
+            dim=3,
+        )
+        metrics: dict[str, Tensor] = {
+            "object_p2_intent_score_abs": (
+                interval_score.detach() - neutral_key_score.detach()
+            )
+            .abs()
+            .mean(),
+            "object_p2_intent_score_max_abs": (
+                interval_score.detach() - neutral_key_score.detach()
+            )
+            .abs()
+            .amax(),
+            "object_p2_combined_logit_max_abs": interval_score.detach().abs().amax(),
+            "object_p2_temperature_content": temperature[0].detach(),
+            "object_p2_temperature_intent": temperature[1].detach(),
+            "object_p2_temperature_coordinate": temperature[2].detach(),
+            "object_p2_posterior_entropy": normalized_entropy(
+                posterior.movedim(3, -1), dim=-1
+            )
+            .detach()
+            .mean(),
+            "object_p2_posterior_max": posterior.detach().amax(dim=3).mean(),
+            "object_p2_null_mass": action_query.new_zeros((), dtype=torch.float32),
+            "object_p2_terminal_has_null": action_query.new_zeros(
+                (), dtype=torch.float32
+            ),
+            "object_p2_s_condition_posterior_l1": (
+                posterior.detach() - neutral_posterior.detach()
+            )
+            .abs()
+            .mean(),
+            "object_p2_effect_precontract_rms": raw_effect.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_semantic_effect_rms": value_by_type[..., 0, :]
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_geometry_effect_rms": value_by_type[..., 1, :]
+            .detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_terminal_common_residual_identity_error": (
+                value_by_type.detach().float()
+                - (common_by_type.detach() + residual_by_type.detach()).float()
+            )
+            .abs()
+            .amax(),
+        }
+        interval_mass = posterior.detach().float().mean(dim=4)
+        for index in range(intervals):
+            metrics[f"object_p2_interval_{index}_mass"] = interval_mass[
+                ..., index
+            ].mean()
+        return raw_effect, metrics
 
     def forward(
         self,
@@ -143,146 +531,20 @@ class ObjectFutureEffectReader(nn.Module):
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, dict[str, Tensor]]:
-        dynamics.validate()
-        if action_query.ndim != 4:
-            raise ValueError("P2 action query must be [B,T,Q,H]")
-        batch, horizon, basis, hidden = action_query.shape
-        if hidden != self.hidden:
-            raise ValueError("P2 action query hidden width is invalid")
-        intent.validate(horizon=horizon, hidden=self.hidden)
-        intervals, objects = dynamics.semantic_delta.shape[1:3]
-        query = self._bounded_unit(self.query_key(action_query))
-        effect_key = self._bounded_unit(self.effect_key(dynamics.semantic_delta))
-        content_score = torch.einsum("btqh,bikh->btqik", query, effect_key)
-        intent_query = self._bounded_unit(self.intent_query(action_query))
-        intent_key = self._bounded_unit(self.intent_key(intent.interval_key))
-        intent_score = torch.einsum("btqh,bih->btqi", intent_query, intent_key)
-
-        coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
-        future_coordinate = (
-            dynamics.camera_coordinates[:, None].float() + dynamics.transport_mean.float()
-        ).clamp(-1.0, 1.0)
-        coordinate_delta = (
-            coordinate_query[:, :, :, None, None, None] - future_coordinate[:, None, None]
+        selected, spatial_metrics = self.spatial_select(
+            action_query,
+            dynamics,
+            intent,
+            collect_diagnostics=collect_diagnostics,
         )
-        covariance = dynamics.transport_covariance.float()[:, None, None]
-        # I+Sigma is positive definite for every legal PSD covariance. Zero
-        # covariance therefore recovers the inherited Euclidean metric without
-        # a covariance floor or singular inverse branch.
-        metric_xx = 1.0 + covariance[..., 0]
-        metric_xy = covariance[..., 1]
-        metric_yy = 1.0 + covariance[..., 2]
-        determinant = metric_xx * metric_yy - metric_xy.square()
-        dx, dy = coordinate_delta[..., 0], coordinate_delta[..., 1]
-        coordinate_distance = (
-            metric_yy * dx.square() - 2.0 * metric_xy * dx * dy + metric_xx * dy.square()
-        ) / determinant
-        coordinate_score = (-0.25 * coordinate_distance).clamp(-1.0, 0.0)
-
-        camera_availability = dynamics.camera_chart_availability.float()[..., 0].clamp(0.0, 1.0)
-        camera_mass = camera_availability.sum(dim=-1, keepdim=True)
-        normalized_camera = torch.where(
-            camera_mass > 0.0,
-            camera_availability / camera_mass.clamp_min(1.0e-8),
-            torch.zeros_like(camera_availability),
-        )
-        camera_valid = camera_availability > 0.0
-        safe_camera_weight = torch.where(
-            camera_valid,
-            normalized_camera,
-            torch.ones_like(normalized_camera),
-        )
-        camera_log_weight = torch.where(
-            camera_valid,
-            safe_camera_weight.log(),
-            torch.full_like(normalized_camera, -torch.inf),
-        )
-        temperature = self._temperatures().to(device=action_query.device)
-        camera_logit = temperature[2] * coordinate_score + camera_log_weight[:, None, None, None]
-        expanded_camera_valid = camera_valid[:, None, None, None].expand_as(camera_logit)
-        camera_posterior, camera_evidence = self._masked_camera_posterior(
-            camera_logit,
-            expanded_camera_valid,
-        )
-
-        object_availability = dynamics.chart_availability.float()[..., 0].clamp(0.0, 1.0)
-        object_valid = object_availability > 0.0
-        safe_object_support = torch.where(
-            object_valid,
-            object_availability,
-            torch.ones_like(object_availability),
-        )
-        object_log_support = torch.where(
-            object_valid,
-            safe_object_support.log(),
-            torch.full_like(object_availability, -torch.inf),
-        )
-        logit = (
-            temperature[0] * content_score
-            + temperature[1] * intent_score[..., None]
-            + camera_evidence
-            + object_log_support[:, None, None, None]
-        )
-        flat_logit = logit.flatten(-2)
-        posterior = torch.softmax(
-            torch.cat((flat_logit, torch.zeros_like(flat_logit[..., :1])), dim=-1),
-            dim=-1,
-        )
-        real_posterior = posterior[..., :-1].reshape(batch, horizon, basis, intervals, objects)
-        semantic_source = self.semantic_value(dynamics.semantic_delta)
-        camera_transport_source = self.transport_value(dynamics.transport_mean)
-        selected_camera_transport = torch.einsum(
-            "btqikc,bikch->btqikh",
-            camera_posterior.to(dtype=camera_transport_source.dtype),
-            camera_transport_source,
-        )
-        selected_semantic = torch.einsum(
-            "btqik,bikh->btqh",
-            real_posterior.to(dtype=semantic_source.dtype),
-            semantic_source,
-        )
-        selected_geometry = torch.einsum(
-            "btqik,btqikh->btqh",
-            real_posterior.to(dtype=selected_camera_transport.dtype),
-            selected_camera_transport,
-        )
-        selected_type_value = torch.stack(
-            (selected_semantic, selected_geometry),
-            dim=-2,
-        )
-        type_weight = torch.softmax(self.type_query(action_query).float(), dim=-1)
-        value = torch.einsum(
-            "btqs,btqsh->btqh",
-            type_weight.to(dtype=selected_type_value.dtype),
-            selected_type_value,
+        value, terminal_metrics = self.temporal_terminal(
+            action_query,
+            selected,
+            collect_diagnostics=collect_diagnostics,
         )
         if not collect_diagnostics:
             return value, {}
-        finite_logit = torch.where(torch.isfinite(logit), logit, torch.zeros_like(logit))
-        metrics: dict[str, Tensor] = {
-            "object_p2_content_score_abs": content_score.detach().abs().mean(),
-            "object_p2_content_score_max_abs": content_score.detach().abs().amax(),
-            "object_p2_intent_score_abs": intent_score.detach().abs().mean(),
-            "object_p2_intent_score_max_abs": intent_score.detach().abs().amax(),
-            "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
-            "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
-            "object_p2_combined_logit_max_abs": finite_logit.detach().abs().amax(),
-            "object_p2_temperature_content": temperature[0].detach(),
-            "object_p2_temperature_intent": temperature[1].detach(),
-            "object_p2_temperature_coordinate": temperature[2].detach(),
-            "object_p2_posterior_entropy": normalized_entropy(posterior, dim=-1).detach().mean(),
-            "object_p2_posterior_max": posterior.detach().amax(dim=-1).mean(),
-            "object_p2_null_mass": posterior.detach()[..., -1].mean(),
-            "object_p2_effect_precontract_rms": value.detach().float().square().mean().sqrt(),
-            "object_p2_semantic_value_mass": type_weight.detach()[..., 0].mean(),
-            "object_p2_geometry_value_mass": type_weight.detach()[..., 1].mean(),
-        }
-        interval_mass = real_posterior.sum(dim=-1)
-        for index in range(intervals):
-            metrics[f"object_p2_interval_{index}_mass"] = (
-                interval_mass[..., index].detach().float().mean()
-            )
-        return value, metrics
+        return value, {**spatial_metrics, **terminal_metrics}
 
 
 class ZeroPreservingObjectConsequence(nn.Module):
@@ -426,5 +688,6 @@ __all__ = [
     "ObjectFutureEffectReader",
     "ObjectPolicyPlanCompiler",
     "ObjectPolicyPlanDeltaBank",
+    "SelectedIntervalEvidence",
     "ZeroPreservingObjectConsequence",
 ]

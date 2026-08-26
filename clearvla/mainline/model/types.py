@@ -502,11 +502,13 @@ class FactualIntentDock:
 
 @dataclass(frozen=True)
 class PolicyIntentDock:
-    """Read-only S context for the unchanged P2/P3 compilers."""
+    """Read-only reduced and typed S context for P2/P3."""
 
     interval_key: Tensor  # [B,I,H]
     temporal_control: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
+    typed_common_value: Tensor  # [B,K,3,R]
+    typed_interval_residual_value: Tensor  # [B,I,K,3,R]
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         batch = int(self.interval_key.shape[0])
@@ -520,6 +522,19 @@ class PolicyIntentDock:
             self.state_change_evidence,
             (batch, hidden),
             "policy-intent state-change evidence",
+        )
+        if self.typed_common_value.ndim != 4 or tuple(
+            self.typed_common_value.shape[:1]
+        ) != (batch,):
+            raise ValueError("policy-intent typed common value must be [B,K,3,R]")
+        objects = int(self.typed_common_value.shape[1])
+        if int(self.typed_common_value.shape[2]) != 3:
+            raise ValueError("policy-intent typed common value lost type identity")
+        route = int(self.typed_common_value.shape[3])
+        _shape(
+            self.typed_interval_residual_value,
+            (batch, 4, objects, 3, route),
+            "policy-intent typed interval residual value",
         )
 
 
@@ -608,6 +623,8 @@ class ObjectIntentState:
             interval_key=self.policy_interval_context,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            typed_common_value=self.typed_common_value,
+            typed_interval_residual_value=self.typed_interval_residual_value,
         )
 
     def validate(self, *, horizon: int, hidden: int) -> None:
