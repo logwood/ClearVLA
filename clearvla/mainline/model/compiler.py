@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -22,22 +21,16 @@ class ObjectConsequenceState:
 
 @dataclass(frozen=True)
 class ObjectPolicyPlanDeltaBank:
-    """V120 lanes around disjoint factual and dynamic P1 carriers."""
+    """Two optional innovations around two disjoint protected carriers."""
 
     protected_base: Tensor
     protected_policy_precision: Tensor
-    factual: Tensor
-    precision: Tensor
-    effect: Tensor
     temporal: Tensor
     state_change: Tensor
 
     @property
     def source_names(self) -> tuple[str, ...]:
         return (
-            "p3_factual",
-            "p3_precision",
-            "p3_effect",
             "p3_temporal",
             "p3_state_change",
         )
@@ -48,7 +41,7 @@ class ObjectPolicyPlanDeltaBank:
             raise ValueError("object policy plan must be [B,T,Q,H]")
         if tuple(self.protected_policy_precision.shape) != expected:
             raise ValueError("protected policy precision lost [B,T,Q,H]")
-        for name in ("factual", "precision", "effect", "temporal", "state_change"):
+        for name in ("temporal", "state_change"):
             if tuple(getattr(self, name).shape) != expected:
                 raise ValueError(f"object policy {name} lost [B,T,Q,H]")
 
@@ -57,9 +50,6 @@ class ObjectPolicyPlanDeltaBank:
         return PolicyRoleDeltaBank(
             values=torch.stack(
                 (
-                    self.factual,
-                    self.precision,
-                    self.effect,
                     self.temporal,
                     self.state_change,
                 ),
@@ -585,30 +575,31 @@ class ZeroPreservingObjectConsequence(nn.Module):
 
 
 class ObjectPolicyPlanCompiler(nn.Module):
-    """V120 factual/precision/effect/temporal/state-change P3."""
+    """Compile the two P3 innovations without duplicating protected owners."""
 
     def __init__(self, *, hidden: int, horizon: int, basis: int) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.horizon = int(horizon)
         self.basis = int(basis)
-        self.factual_lane = nn.Linear(hidden, hidden, bias=False)
-        self.precision_action = nn.Linear(hidden, hidden, bias=False)
-        self.precision_fact = nn.Linear(hidden, hidden, bias=False)
-        self.precision_consequence = nn.Linear(hidden, hidden, bias=False)
-        self.precision_lane = nn.Linear(hidden, hidden, bias=False)
-        self.effect_lane = nn.Linear(hidden, hidden, bias=False)
+        # Consume the six removed alias projections' historical draws so the
+        # retained P3 weights and every subsequently constructed module keep
+        # their R1f fresh-run initialization stream. These temporary tensors
+        # are never registered, serialized, moved or executed.
+        removed_aliases = tuple(
+            nn.Linear(hidden, hidden, bias=False) for _ in range(6)
+        )
         self.temporal_action = nn.Linear(hidden, hidden, bias=False)
-        self.temporal_consequence = nn.Linear(hidden, hidden, bias=False)
+        self.temporal_effect = nn.Linear(hidden, hidden, bias=False)
         self.temporal_lane = nn.Linear(hidden, hidden, bias=False)
         self.state_change_action = nn.Linear(hidden, hidden, bias=False)
         self.state_change_temporal = nn.Linear(hidden, hidden, bias=False)
         self.state_change_lane = nn.Linear(hidden, hidden, bias=False)
+        del removed_aliases
 
     def forward(
         self,
         *,
-        p1_factual_detail: Tensor,
         p1_policy_residual: Tensor,
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
@@ -616,70 +607,79 @@ class ObjectPolicyPlanCompiler(nn.Module):
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
-        if (
-            tuple(action_query.shape) != expected
-            or tuple(p1_factual_detail.shape) != expected
-            or tuple(p1_policy_residual.shape) != expected
-        ):
+        if tuple(action_query.shape) != expected or tuple(
+            p1_policy_residual.shape
+        ) != expected:
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
+        for name in (
+            "factual_base",
+            "effect",
+            "interaction",
+            "protected_consequence",
+        ):
+            if tuple(getattr(consequence, name).shape) != expected:
+                raise ValueError(f"P3 consequence {name} lost [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
-        factual = self.factual_lane(consequence.factual_base)
-        precision_condition = (
-            self.precision_fact(p1_factual_detail)
-            + self.precision_consequence(consequence.protected_consequence)
-        ) / math.sqrt(2.0)
-        precision = self.precision_lane(
-            torch.tanh(self.precision_action(action_query)) * precision_condition
-        )
-        effect = self.effect_lane(consequence.effect + consequence.interaction)
-        temporal_source = intent.temporal_control[:, :, None].expand(
+        temporal_context = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
-        temporal_condition = (
-            temporal_source
-            + self.temporal_consequence(consequence.protected_consequence)
-        ) / math.sqrt(2.0)
-        temporal = self.temporal_lane(
-            temporal_condition * torch.tanh(self.temporal_action(action_query))
+        consequence_innovation = consequence.effect + consequence.interaction
+        temporal_private = temporal_context + self.temporal_effect(
+            consequence_innovation
+        )
+        temporal_raw = self.temporal_lane(
+            temporal_private * torch.tanh(self.temporal_action(action_query))
         )
         state_change_source = intent.state_change_evidence[:, None, None].expand(
             -1, self.horizon, self.basis, -1
         )
         state_change_modulation = torch.tanh(
-            (
-                self.state_change_action(action_query)
-                + self.state_change_temporal(temporal_source)
-            )
-            / math.sqrt(2.0)
+            self.state_change_action(action_query)
+            + self.state_change_temporal(temporal_context)
         )
-        state_change = 0.05 * self.state_change_lane(
+        state_change_raw = self.state_change_lane(
             state_change_source * state_change_modulation
         )
-        lanes = [factual, precision, effect, temporal, state_change]
-        lanes = [smooth_rms_contract(value, 0.35)[0] for value in lanes]
+        temporal, temporal_scale = smooth_rms_contract(temporal_raw, 0.35)
+        state_change, state_change_scale = smooth_rms_contract(
+            state_change_raw,
+            0.35,
+        )
         bank = ObjectPolicyPlanDeltaBank(
             protected_base=consequence.protected_consequence,
             protected_policy_precision=p1_policy_residual,
-            factual=lanes[0],
-            precision=lanes[1],
-            effect=lanes[2],
-            temporal=lanes[3],
-            state_change=lanes[4],
+            temporal=temporal,
+            state_change=state_change,
         )
         bank.validate()
         if not collect_diagnostics:
             return bank, {}
         return bank, {
-            "object_p3_factual_rms": lanes[0].detach().float().square().mean().sqrt(),
-            "object_p3_precision_rms": lanes[1].detach().float().square().mean().sqrt(),
             "object_p3_protected_policy_precision_rms": p1_policy_residual.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p3_effect_rms": lanes[2].detach().float().square().mean().sqrt(),
-            "object_p3_temporal_rms": lanes[3].detach().float().square().mean().sqrt(),
-            "object_p3_state_change_rms": lanes[4].detach().float().square().mean().sqrt(),
+            "object_p3_consequence_innovation_rms": consequence_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_private_rms": temporal_private.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_temporal_rms": temporal.detach().float().square().mean().sqrt(),
+            "object_p3_temporal_contract_min": temporal_scale.detach().float().amin(),
+            "object_p3_state_change_rms": state_change.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p3_state_change_contract_min": state_change_scale.detach()
+            .float()
+            .amin(),
         }
 
 

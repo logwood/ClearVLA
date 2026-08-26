@@ -47,11 +47,11 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     assert components.observation == "restored_v120_three_frame_flow_dino_progressive_g123_bank"
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_five_lane_p3"
+        == "v120_progressive_g123_dense_grounder_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_evidence_mmdit_dense512_execution"
+        == "restored_v120_shared_seed_dynamic_p1_p1_p2_contracts_lane_local_p3_evidence_mmdit_dense512_execution"
     )
     assert (
         components.training

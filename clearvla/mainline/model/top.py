@@ -443,7 +443,6 @@ class ObjectIntentDynamicsTop(nn.Module):
         # generic canvas.
         p3_action_query = action_query + consequence.protected_consequence
         plan, plan_metrics = self.plan_compiler(
-            p1_factual_detail=p1_state.factual_base,
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),

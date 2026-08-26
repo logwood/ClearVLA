@@ -1,8 +1,8 @@
 # Cross-version replay source units
 
 Status: source-derived working register; G-01, G-02, S-01, S-02, W-01, W-02,
-P1-01 and P2-01 implemented and statically closed; S-03 guard verified;
-P3-01/B-01 next.
+P1-01, P2-01, P3-01 and B-01 implemented and statically closed; S-03 guard
+verified; N-01/D-01 next.
 Established on 2026-08-26.
 
 This file records the implementation semantic units recovered across
@@ -515,8 +515,8 @@ and the exact common-plus-innovation identity. The same W posterior selects S
 metadata, which conditions only the selected W key through the adopted
 zero-preserving relation. Each type then owns one no-null four-interval
 terminal; their raw latent contributions add before the one inherited caller
-contract. All-invalid rows are finite exact zero. The retained suite passes
-144/144; R1g/P3-01,B-01 is next.
+contract. All-invalid rows are finite exact zero. The R1f retained suite passed
+144/144; R1g/P3-01,B-01 closure is recorded below.
 
 ### P3-01: unique P3 values around protected carriers
 
@@ -586,6 +586,20 @@ Static acceptance:
 - protected carriers have no null parameter;
 - the bottom write call count remains one per dynamic node;
 - all retained V120 CVAE/workspace/controller consumers remain reachable.
+
+Implementation closure: R1g is recorded in
+`R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`.
+`ObjectPolicyPlanDeltaBank` now carries only protected consequence, raw dynamic
+precision, temporal and state-change. Temporal uses only S temporal context and
+the consequence innovation under action conditioning; state-change preserves
+its S-private multiplicative zero. The three optional protected-value aliases,
+fixed `0.05` multiplier and `sqrt(2)` attenuation are absent. Bottom invokes
+one shared Q+zero-null reader separately for the two optional lanes, adds their
+raw reads, then joins a separate no-null precision read before the existing
+fixed optional scale. Consequence remains a separate no-null write outside the
+scale. The manifest names both changed ABIs, retained/downstream seed-0
+initialization remains R1f-identical, and the retained suite passes 145/145.
+N-01/D-01 is next.
 
 ### N-01 and D-01: numerical support and matching diagnostics
 
@@ -675,12 +689,15 @@ Implementation slices:
 7. unique P3 and bottom ingress: P3-01 and B-01.
 8. matching numerics and diagnostics: N-01 and D-01.
 
-Slices 1-6 are complete as separate reversible source units. P2-01 closure is
+Slices 1-7 are complete as separate reversible source units. P2-01 closure is
 recorded in `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`: K/C disappear
-only at their type-local spatial consumers, I disappears only at independent
-no-null physical terminals, and semantic/geometry add before the single outer
-contract. P3-01/B-01 is next and remains read-only until its active
-producer/consumer/loss/runtime/checkpoint worksheet closes.
+  only at their type-local spatial consumers, I disappears only at independent
+  no-null physical terminals, and semantic/geometry add before the single outer
+  contract. P3-01/B-01 closure is recorded in
+  `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`: protected values have
+  no optional aliases, and the two real optional innovations receive disjoint
+  normalization calls. N-01/D-01 is next and remains read-only until its active
+  producer/consumer/loss/runtime/checkpoint worksheet closes.
 
 There is no training between these slices. Each slice receives only algebraic,
 shape, sentinel, call-count, forward-trace and reverse-VJP verification. The

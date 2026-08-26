@@ -1,8 +1,8 @@
 # Schema25-R1 implementation protocol
 
 Status: adopted implementation discipline; R0 fingerprint complete; R1a/G-01
-through R1f/P2-01 implemented and statically closed;
-R1g/P3-01,B-01 next; no training run.
+through R1g/P3-01,B-01 implemented and statically closed;
+R1h/N-01,D-01 next; no training run.
 
 This file reconciles the user-supplied
 C:/Users/ASUS/Desktop/ClearVLA_Schema25_Replay_Implementation_Protocol.md
@@ -217,8 +217,8 @@ Execution ledger:
 | R1d / W-01,W-02 | `COMPLETE` | `R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`; 140/140 retained tests |
 | R1e / P1-01 | `COMPLETE` | `R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`; 140/140 retained tests; zero parameter/state delta |
 | R1f / P2-01 | `COMPLETE` | `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; 144/144 retained tests |
-| R1g / P3-01,B-01 | `NEXT` | close the unique-lane/bottom-ingress worksheet before source edits |
-| R1h / N-01,D-01 | `PENDING` | no source edit authorized yet |
+| R1g / P3-01,B-01 | `COMPLETE` | `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`; 145/145 retained tests |
+| R1h / N-01,D-01 | `NEXT` | close the numerical-support/diagnostic worksheet before source edits |
 
 For every slice:
 

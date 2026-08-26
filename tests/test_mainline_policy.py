@@ -1063,7 +1063,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert torch.count_nonzero(evidence.value_tokens[:, rollout_start:rollout_stop]) > 0
     role_bank = model.bottom._role_bank(compiled.plan)
     assert role_bank.source_names == compiled.plan.source_names
-    assert len(role_bank.source_names) == 5
+    assert role_bank.source_names == ("p3_temporal", "p3_state_change")
     protected_detail = role_bank.protected_detail
     protected_policy_precision = role_bank.protected_policy_precision
     assert protected_detail is not None
@@ -1076,6 +1076,14 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     assert model.bottom.decoder.protected_detail_basis_attnres is not None
     assert not model.bottom.decoder.protected_detail_basis_attnres.include_null
+    optional_reader = model.bottom.decoder.policy_delta_attnres
+    assert optional_reader is not None
+    basis = config.dimensions.action_basis_tokens
+    assert optional_reader.max_sources == basis
+    assert tuple(optional_reader.source_key.shape) == (
+        basis,
+        optional_reader.route_dim,
+    )
     bottom_query = torch.randn(
         1,
         config.dimensions.action_horizon,
@@ -1131,6 +1139,60 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     assert torch.count_nonzero(zero_optional) == 0
     assert torch.count_nonzero(zero_consequence) == 0
+
+    lane_bank = replace(
+        role_bank,
+        protected_detail=torch.zeros_like(protected_detail),
+        protected_policy_precision=torch.zeros_like(protected_policy_precision),
+    )
+    lane_update, lane_consequence, lane_metrics = (
+        model.bottom.decoder._read_policy_delta_bank(
+            bottom_query,
+            lane_bank,
+            collect_diagnostics=True,
+        )
+    )
+    temporal_read, _ = optional_reader(
+        bottom_query,
+        lane_bank.values[:, 0],
+        collect_diagnostics=False,
+    )
+    state_change_read, _ = optional_reader(
+        bottom_query,
+        lane_bank.values[:, 1],
+        collect_diagnostics=False,
+    )
+    expected_lane_update = (
+        float(model.bottom.core_config.role_attnres_policy_to_mmdit_scale)
+        * (temporal_read + state_change_read)
+    )
+    torch.testing.assert_close(lane_update, expected_lane_update)
+    assert torch.count_nonzero(lane_consequence) == 0
+    lane_gradient = torch.autograd.grad(
+        lane_update.square().mean(),
+        lane_bank.values,
+        retain_graph=True,
+    )[0]
+    assert torch.isfinite(lane_gradient).all()
+    for lane_index in range(len(lane_bank.source_names)):
+        assert torch.count_nonzero(lane_gradient[:, lane_index]) > 0
+    changed_values = lane_bank.values.clone()
+    changed_values[:, 0] = 1000.0 * torch.randn_like(changed_values[:, 0])
+    _, _, changed_metrics = model.bottom.decoder._read_policy_delta_bank(
+        bottom_query,
+        replace(lane_bank, values=changed_values),
+        collect_diagnostics=True,
+    )
+    torch.testing.assert_close(
+        lane_metrics[
+            "evidence_policy_delta_attnres_null_mass_p3_state_change"
+        ],
+        changed_metrics[
+            "evidence_policy_delta_attnres_null_mass_p3_state_change"
+        ],
+        atol=0.0,
+        rtol=0.0,
+    )
     state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
         seed_context
     )

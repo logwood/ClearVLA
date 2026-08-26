@@ -139,7 +139,7 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
 
     def capture_p3(_module, _args, kwargs):
         captured["p3_query"] = kwargs["action_query"].detach().clone()
-        captured["p3_factual"] = kwargs["p1_factual_detail"].detach().clone()
+        assert "p1_factual_detail" not in kwargs
         captured["p3_policy_residual"] = kwargs[
             "p1_policy_residual"
         ].detach().clone()
@@ -183,12 +183,6 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     )
     assert compiled.plan.protected_policy_precision is policy_query_residual
     torch.testing.assert_close(
-        captured["p3_factual"],
-        dock.protected_detail,
-        atol=0.0,
-        rtol=0.0,
-    )
-    torch.testing.assert_close(
         captured["p3_policy_residual"],
         policy_query_residual,
         atol=0.0,
@@ -222,17 +216,19 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
         rtol=0.0,
     )
     zero_residual_plan, _ = top.plan_compiler(
-        p1_factual_detail=p1_state.factual_base,
         p1_policy_residual=torch.zeros_like(policy_query_residual),
         consequence=compiled.consequence,
         intent=context.intent.policy_dock(),
         action_query=action_query + compiled.consequence.protected_consequence,
         collect_diagnostics=False,
     )
-    for name in ("factual", "precision", "effect", "temporal", "state_change"):
+    for name in ("temporal", "state_change"):
         torch.testing.assert_close(
             getattr(compiled.plan, name),
             getattr(zero_residual_plan, name),
             atol=0.0,
             rtol=0.0,
         )
+    assert compiled.plan.source_names == ("p3_temporal", "p3_state_change")
+    for name in ("factual", "precision", "effect"):
+        assert not hasattr(compiled.plan, name)

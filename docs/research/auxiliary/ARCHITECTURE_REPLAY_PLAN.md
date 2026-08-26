@@ -1,8 +1,8 @@
 # ClearVLA architecture replay plan
 
 Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01 through R1f/P2-01 implemented and statically closed;
-R1g/P3-01,B-01 next; no training run.
+R1a/G-01 through R1g/P3-01,B-01 implemented and statically closed;
+R1h/N-01,D-01 next; no training run.
 Established on 2026-08-26.
 
 This is the only auxiliary document that owns the current replay procedure and
@@ -233,7 +233,7 @@ order:
 7. P3-01/B-01 unique lanes and bottom ingress.
 8. N-01/D-01 matching numerics and diagnostics.
 
-Slices 1-6 are complete as separate reversible commits. R1c preserves the
+Slices 1-7 are complete as separate reversible commits. R1c preserves the
 Schema25 selector exactly, removes the typed ActionIntentDock/CoarseAction
 alias, and gives W lossless common/residual coordinates through its sole typed
 dock. R1d processes common once, gives W2 read-only access to completed W1,
@@ -247,10 +247,15 @@ is `R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`; the retained suite remains
 140/140. R1f retains I through semantic K and geometry K*C selection, lets S
 condition only the selected nonzero W key, and uses independent no-null
 physical-I terminals before the raw complementary sum. Its closed worksheet
-is `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; the retained suite is
-144/144. R1g/P3-01,B-01 is next, but its source may not change until the
-unique-lane/bottom-ingress producer/consumer/loss/runtime/checkpoint worksheet
-closes.
+  is `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; the retained suite is
+  144/144. R1g removes optional factual/static-precision/effect aliases,
+  retains only temporal and state-change innovations, and gives each a
+  separate shared-parameter Q+null bottom decision. Protected consequence and
+  dynamic precision keep separate no-null calls. Its closed worksheet is
+  `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`; the retained suite is
+  145/145. R1h/N-01,D-01 is next, but its source may not change until the
+  numerical-support/diagnostic producer/consumer/loss/runtime/checkpoint
+  worksheet closes.
 
 There is no training between these commits. R1 retains the Schema25 Teacher
 association backend, S relevance scoring and base K-binder evidence, so the

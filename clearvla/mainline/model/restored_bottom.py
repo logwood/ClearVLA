@@ -10,7 +10,7 @@ The translation keeps the repaired ownership boundaries:
 
 * P2's protected consequence is written once through V120's protected-detail
   reader while the historical generic trajectory ingress remains neutral;
-* all five V120 P3 lanes are optional typed innovations;
+* temporal and state-change are the only optional P3 innovations;
 * all 512 W transition rows reach the evidence bank without pooling;
 * observation banks are never reopened below P1;
 * teacher/future tensors cannot be represented by this online signature.
@@ -426,16 +426,13 @@ class RestoredV120EvidenceBottom(nn.Module):
         return PolicyRoleDeltaBank(
             values=torch.stack(
                 (
-                    plan.factual,
-                    plan.precision,
-                    plan.effect,
                     plan.temporal,
                     plan.state_change,
                 ),
                 dim=1,
             ),
             source_names=plan.source_names,
-            source_depths=(7, 7, 7, 7, 7),
+            source_depths=(7, 7),
             protected_detail=plan.protected_base,
             protected_policy_precision=plan.protected_policy_precision,
         )

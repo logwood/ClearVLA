@@ -2208,7 +2208,6 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     for name in (
         "protected_base",
         "protected_policy_precision",
-        "precision",
         "temporal",
         "state_change",
     ):
@@ -2622,7 +2621,7 @@ def test_coarse_action_and_w_have_no_raw_typed_fact_reread() -> None:
     assert "intent.typed_interval_residual_value" in source
 
 
-def test_neutral_w_preserves_current_precision_and_temporal_without_w_interaction() -> None:
+def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None:
     torch.manual_seed(4)
     top = _object_top()
     context, _ = top.build_online_context(
@@ -2651,9 +2650,11 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
         action_query=torch.randn(1, horizon, basis, hidden),
     )
     assert torch.count_nonzero(compiled.effect) == 0
-    assert torch.count_nonzero(compiled.plan.precision) > 0
     assert torch.count_nonzero(compiled.plan.temporal) > 0
     assert torch.count_nonzero(compiled.plan.state_change) > 0
+    assert compiled.plan.source_names == ("p3_temporal", "p3_state_change")
+    for name in ("factual", "precision", "effect"):
+        assert not hasattr(compiled.plan, name)
     # V120 keeps noisy-action modulation in its typed temporal lane.  The
     # protected factual consequence remains available independently.
     assert not torch.equal(compiled.plan.temporal, neutral_other_query.plan.temporal)
@@ -2685,6 +2686,117 @@ def test_neutral_w_preserves_current_precision_and_temporal_without_w_interactio
         atol=0.0,
         rtol=0.0,
     )
+
+
+def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() -> None:
+    torch.manual_seed(39)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    factual = torch.randn(1, 24, 2, 32)
+    zero_effect = torch.zeros_like(factual)
+    consequence, _ = top.consequence(
+        factual_base=factual,
+        effect=zero_effect,
+        collect_diagnostics=False,
+    )
+    dock = context.intent.policy_dock()
+    zero_private = replace(
+        dock,
+        temporal_control=torch.zeros_like(dock.temporal_control),
+        state_change_evidence=torch.zeros_like(dock.state_change_evidence),
+    )
+    policy_residual = torch.randn_like(factual)
+    action_query = torch.randn_like(factual)
+    plan, _ = top.plan_compiler(
+        p1_policy_residual=policy_residual,
+        consequence=consequence,
+        intent=zero_private,
+        action_query=action_query,
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(plan.temporal) == 0
+    assert torch.count_nonzero(plan.state_change) == 0
+    assert plan.protected_base is consequence.protected_consequence
+    assert plan.protected_policy_precision is policy_residual
+
+    nonzero_effect = torch.randn_like(factual)
+    first, _ = top.consequence(
+        factual_base=factual,
+        effect=nonzero_effect,
+        collect_diagnostics=False,
+    )
+    shifted_factual = factual + 100.0 * torch.randn_like(factual)
+    shifted = replace(
+        first,
+        factual_base=shifted_factual,
+        protected_consequence=(
+            shifted_factual + first.effect + first.interaction
+        ),
+    )
+    first_plan, _ = top.plan_compiler(
+        p1_policy_residual=policy_residual,
+        consequence=first,
+        intent=dock,
+        action_query=action_query,
+        collect_diagnostics=False,
+    )
+    shifted_plan, _ = top.plan_compiler(
+        p1_policy_residual=policy_residual,
+        consequence=shifted,
+        intent=dock,
+        action_query=action_query,
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(first_plan.temporal, shifted_plan.temporal)
+    torch.testing.assert_close(first_plan.state_change, shifted_plan.state_change)
+    source = inspect.getsource(type(top.plan_compiler))
+    for forbidden in (
+        "factual_lane",
+        "precision_lane",
+        "effect_lane",
+        "0.05",
+        "math.sqrt",
+    ):
+        assert forbidden not in source
+
+    active_effect = torch.randn_like(factual, requires_grad=True)
+    active_temporal = torch.randn_like(dock.temporal_control, requires_grad=True)
+    active_state_change = torch.randn_like(
+        dock.state_change_evidence,
+        requires_grad=True,
+    )
+    active_action = torch.randn_like(factual, requires_grad=True)
+    active_consequence, _ = top.consequence(
+        factual_base=factual,
+        effect=active_effect,
+        collect_diagnostics=False,
+    )
+    active_plan, _ = top.plan_compiler(
+        p1_policy_residual=policy_residual,
+        consequence=active_consequence,
+        intent=replace(
+            dock,
+            temporal_control=active_temporal,
+            state_change_evidence=active_state_change,
+        ),
+        action_query=active_action,
+        collect_diagnostics=False,
+    )
+    gradients = torch.autograd.grad(
+        active_plan.temporal.square().mean()
+        + active_plan.state_change.square().mean(),
+        (active_effect, active_temporal, active_state_change, active_action),
+    )
+    for gradient in gradients:
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) > 0
 
 
 def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass() -> None:

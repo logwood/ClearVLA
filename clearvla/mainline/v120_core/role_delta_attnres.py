@@ -256,6 +256,7 @@ class RoleDeltaAttnRes(nn.Module):
         route_dim: int,
         *,
         max_sources: int,
+        initialization_source_rows: int | None = None,
         include_null: bool = True,
         max_value_rms: float | None = None,
         normalization_floor: float | None = None,
@@ -266,6 +267,16 @@ class RoleDeltaAttnRes(nn.Module):
         self.hidden_size = int(hidden_size)
         self.route_dim = int(route_dim)
         self.max_sources = int(max_sources)
+        initialization_rows = (
+            self.max_sources
+            if initialization_source_rows is None
+            else int(initialization_source_rows)
+        )
+        if initialization_rows < self.max_sources:
+            raise ValueError(
+                "role-delta initialization rows cannot be smaller than its "
+                "serialized source count"
+            )
         self.include_null = bool(include_null)
         self.max_value_rms = (
             None if max_value_rms is None else float(max_value_rms)
@@ -279,9 +290,11 @@ class RoleDeltaAttnRes(nn.Module):
             raise ValueError("role-delta normalization floor must be positive")
         self.query_proj = nn.Linear(self.hidden_size, self.route_dim, bias=False)
         self.key_proj = nn.Linear(self.hidden_size, self.route_dim, bias=False)
+        initialization = torch.randn(initialization_rows, self.route_dim) * 0.02
         self.source_key = nn.Parameter(
-            torch.randn(self.max_sources, self.route_dim) * 0.02
+            initialization[: self.max_sources].clone()
         )
+        del initialization
         if self.include_null:
             self.null_key = nn.Parameter(torch.zeros(1, self.route_dim))
         else:
