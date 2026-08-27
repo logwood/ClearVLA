@@ -2064,6 +2064,76 @@ def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
         assert torch.count_nonzero(gradient) > 0
 
 
+def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -> None:
+    torch.manual_seed(321)
+    top = _object_top().train()
+    reader = top.effect_reader
+    for spatial, terminal in zip(
+        reader.source_query,
+        reader.terminal_query,
+        strict=True,
+    ):
+        assert isinstance(spatial, torch.nn.Linear)
+        assert isinstance(terminal, torch.nn.Linear)
+        assert spatial.bias is None
+        assert terminal.bias is None
+        assert torch.equal(spatial.weight, terminal.weight)
+
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=torch.randn(1, 4, 4, 16),
+        transport_mean=0.1 * torch.randn(1, 4, 4, 2, 2),
+    )
+    action_query = torch.randn(1, 24, 2, 32, requires_grad=True)
+    selected, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        context.intent.policy_dock(),
+        collect_diagnostics=False,
+    )
+    selected.value.square().mean().backward()
+    for projection in reader.source_query:
+        assert isinstance(projection, torch.nn.Linear)
+        assert projection.weight.grad is not None
+        assert torch.count_nonzero(projection.weight.grad) > 0
+    for projection in reader.terminal_query:
+        assert isinstance(projection, torch.nn.Linear)
+        assert projection.weight.grad is None
+
+    reader.zero_grad(set_to_none=True)
+    detached_selected = SelectedIntervalEvidence(
+        key=selected.key.detach(),
+        value=selected.value.detach(),
+        common_value=selected.common_value.detach(),
+        residual_value=selected.residual_value.detach(),
+        selected_s_context=selected.selected_s_context.detach(),
+        support=selected.support.detach(),
+    )
+    terminal_value, metrics = reader.temporal_terminal(
+        action_query.detach().clone().requires_grad_(True),
+        detached_selected,
+        collect_diagnostics=True,
+    )
+    assert metrics["object_p2_terminal_query_delta_rms"] == 0
+    terminal_value.square().mean().backward()
+    for projection in reader.source_query:
+        assert isinstance(projection, torch.nn.Linear)
+        assert projection.weight.grad is None
+    for projection in reader.terminal_query:
+        assert isinstance(projection, torch.nn.Linear)
+        assert projection.weight.grad is not None
+        assert torch.count_nonzero(projection.weight.grad) > 0
+
+
 def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
 
     torch.manual_seed(30)
@@ -2158,6 +2228,77 @@ def test_future_objectives_use_only_semantic_camera_geometry_and_current_support
         current_loss_support=torch.zeros_like(current_support),
     )
     torch.testing.assert_close(unsupported["future_dynamics"], torch.zeros(()))
+
+
+def test_transport_objective_is_target_scale_covariant_with_raw_audit() -> None:
+    batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
+    interval_scale = torch.tensor((0.002, 0.01, 0.05, 0.20)).view(1, 4, 1, 1, 1)
+    target_transport = interval_scale.expand(batch, intervals, objects, cameras, 2).clone()
+    target = _future_dynamics(
+        batch=batch,
+        intervals=intervals,
+        objects=objects,
+        cameras=cameras,
+        content=content,
+        transport_mean=target_transport,
+    )
+    prediction = replace(
+        target,
+        transport_mean=torch.zeros_like(target_transport, requires_grad=True),
+    )
+    support = torch.ones(batch, objects, cameras, 1)
+
+    terms = future_dynamics_terms(
+        prediction,
+        target,
+        current_loss_support=support,
+    )
+    assert terms["future_transport"] > terms["future_transport_raw_coordinate"] > 0
+    assert terms["future_transport"].requires_grad
+    assert not terms["future_transport_raw_coordinate"].requires_grad
+
+    covariant_by_scale: list[float] = []
+    raw_by_scale: list[float] = []
+    for target_scale in (0.002, 0.01, 0.05, 0.20):
+        scaled_transport = torch.full_like(target_transport, target_scale)
+        scaled_target = replace(target, transport_mean=scaled_transport)
+        scaled_prediction = replace(
+            target,
+            transport_mean=(0.5 * scaled_transport).requires_grad_(True),
+        )
+        scaled_terms = future_dynamics_terms(
+            scaled_prediction,
+            scaled_target,
+            current_loss_support=support,
+        )
+        covariant_by_scale.append(float(scaled_terms["future_transport"].detach()))
+        raw_by_scale.append(
+            float(scaled_terms["future_transport_raw_coordinate"].detach())
+        )
+    assert max(covariant_by_scale) / min(covariant_by_scale) < 1.30
+    assert max(raw_by_scale) / min(raw_by_scale) > 1_000.0
+
+    matched = future_dynamics_terms(
+        target,
+        target,
+        current_loss_support=support,
+    )
+    torch.testing.assert_close(matched["future_transport"], torch.zeros(()))
+    torch.testing.assert_close(
+        matched["future_transport_raw_coordinate"],
+        torch.zeros(()),
+    )
+
+    unsupported = future_dynamics_terms(
+        prediction,
+        target,
+        current_loss_support=torch.zeros_like(support),
+    )
+    torch.testing.assert_close(unsupported["future_transport"], torch.zeros(()))
+    torch.testing.assert_close(
+        unsupported["future_transport_raw_coordinate"],
+        torch.zeros(()),
+    )
 
 
 def test_future_interval_transition_penalizes_temporal_collapse_not_common_offset() -> None:

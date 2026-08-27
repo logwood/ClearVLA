@@ -641,6 +641,118 @@ def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
     assert history["parameter_count"] > history["parameter_tensor_count"]
 
 
+def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> None:
+    torch.manual_seed(43)
+    decoder = ClearVLAMainlinePolicy(_config()).bottom.decoder
+    head = decoder.velocity_head
+    assert head.arm_abs is not None and head.arm_delta is not None
+    assert head.grip_value is not None and head.grip_delta is not None
+    assert head.grip_extra is not None and head.grip_native is None
+    tokens = torch.randn(2, 24, 32)
+    base_read = head.norm(tokens)
+    expected = torch.cat(
+        (
+            head.arm_abs(base_read),
+            head.arm_delta(base_read),
+            head.grip_value(base_read),
+            head.grip_delta(base_read),
+            head.grip_extra(base_read),
+        ),
+        dim=-1,
+    )
+    field, gripper_state, gate = head.forward_with_gripper_state(tokens)
+    assert torch.equal(field, expected)
+    assert torch.equal(gripper_state, tokens)
+    assert torch.count_nonzero(gate) == 0
+
+    with torch.no_grad():
+        head.gripper_gate.weight.copy_(0.25 * torch.eye(32))
+    changed, changed_state, changed_gate = head.forward_with_gripper_state(tokens)
+    assert torch.equal(changed[..., :12], expected[..., :12])
+    assert torch.equal(changed[..., 14:], expected[..., 14:])
+    assert not torch.equal(changed[..., 12:14], expected[..., 12:14])
+    assert not torch.equal(changed_state, tokens)
+    assert float(changed_gate.detach().abs().amax()) < 1.0
+
+    parseval_head = type(head)(
+        replace(decoder.config, gripper_field_mode="parseval_temporal")
+    )
+    assert parseval_head.arm_abs is not None and parseval_head.arm_delta is not None
+    assert parseval_head.grip_native is not None
+    parseval_base = parseval_head.norm(tokens)
+    parseval_expected = torch.cat(
+        (
+            parseval_head.arm_abs(parseval_base),
+            parseval_head.arm_delta(parseval_base),
+            parseval_head.codec.encode_gripper_tangent(
+                parseval_head.grip_native(parseval_base)
+            ),
+        ),
+        dim=-1,
+    )
+    parseval_field, parseval_state, parseval_gate = (
+        parseval_head.forward_with_gripper_state(tokens)
+    )
+    assert torch.equal(parseval_field, parseval_expected)
+    assert torch.equal(parseval_state, tokens)
+    assert torch.count_nonzero(parseval_gate) == 0
+    with torch.no_grad():
+        parseval_head.gripper_gate.weight.copy_(0.25 * torch.eye(32))
+    parseval_changed, _, _ = parseval_head.forward_with_gripper_state(tokens)
+    assert torch.equal(parseval_changed[..., :12], parseval_expected[..., :12])
+    assert not torch.equal(parseval_changed[..., 12:], parseval_expected[..., 12:])
+
+
+def test_supervised_event_and_deployed_gripper_share_only_private_state() -> None:
+    torch.manual_seed(44)
+    decoder = ClearVLAMainlinePolicy(_config()).bottom.decoder.train()
+    action = torch.randn(2, 24, 32, requires_grad=True)
+    event_output = decoder.event_head[-1]
+    assert isinstance(event_output, torch.nn.Linear)
+    with torch.no_grad():
+        event_output.weight.normal_(mean=0.0, std=0.05)
+
+    pred_velocity, event_logits, motion_logits, metrics = decoder._read_output_heads(
+        action,
+        collect_diagnostics=True,
+    )
+    torch.testing.assert_close(event_logits, decoder.event_head(action), atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        motion_logits,
+        decoder.motion_head(action).squeeze(-1),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert metrics["gripper_private_gate_rms"] == 0
+    assert metrics["gripper_private_state_delta_rms"] == 0
+    event_logits.square().mean().backward()
+    gate_gradient = decoder.velocity_head.gripper_gate.weight.grad
+    assert gate_gradient is not None
+    assert torch.count_nonzero(gate_gradient) > 0
+    assert metrics["gradient_tensor_gripper_private_state_rms"] > 0
+
+    for field_slice in (slice(0, 12), slice(14, 18)):
+        decoder.zero_grad(set_to_none=True)
+        action.grad = None
+        pred_velocity, _, _, _ = decoder._read_output_heads(
+            action,
+            collect_diagnostics=False,
+        )
+        pred_velocity[..., field_slice].square().mean().backward()
+        gate_gradient = decoder.velocity_head.gripper_gate.weight.grad
+        assert gate_gradient is None or torch.count_nonzero(gate_gradient) == 0
+
+    decoder.zero_grad(set_to_none=True)
+    action.grad = None
+    _, _, motion_logits, _ = decoder._read_output_heads(
+        action,
+        collect_diagnostics=False,
+    )
+    motion_logits.square().mean().backward()
+    gate_gradient = decoder.velocity_head.gripper_gate.weight.grad
+    assert gate_gradient is None or torch.count_nonzero(gate_gradient) == 0
+
+
 def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
     """Exercise the same autocast/FP32-teacher boundary used by CUDA smoke."""
 

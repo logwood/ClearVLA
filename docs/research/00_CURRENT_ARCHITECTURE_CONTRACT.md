@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-27
+Updated: 2026-08-28
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; R2-D01 observation plus R2-A01 read-only matched P2-value/gripper attribution implemented; 164 retained mainline tests pass; existing-checkpoint A01 validation pending
+release status:         Schema25-R2 WG01/P202/GRIP02 locally closed; 168 retained tests plus a fresh one-batch CPU BF16 smoke and five-step deployment guard pass; no R2 GPU smoke or formal behavior run yet
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -30,7 +30,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 
 > **The executable source is the exact Schema25 replay base plus completed
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
-> R1f/P2-01, R1g/P3-01,B-01, LC-01 and R1h/N-01,D-01; it is not yet
+> R1f/P2-01, R1g/P3-01,B-01, LC-01, R1h/N-01,D-01 and the three
+> R2-WG01/P202/GRIP02 structural units; R2 is not yet
 > behavior-released.** The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -60,7 +61,16 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > R1 has since completed its first formal run. R2-D01 adds observation and
 > R2-A01 adds evaluation-only matched P2 value counterfactuals plus gripper
 > attribution. Neither changes training, checkpoint state, primary deployment
-> behavior or losses; no behavioral R2 repair has been performed.
+> behavior or losses. The completed A01 replay shows that semantic intervals
+> `2/3` are strongly useful to far action, geometry values have near-zero
+> action effect at their learned R1 scale, and both deployed gripper branches
+> fail before their fixed blend. R2 now makes the three source-bounded repairs:
+> target-scale-covariant camera-transport supervision, independent exact-copy
+> spatial/terminal P2 query owners, and one exact-zero continuous
+> gripper-private state shared by deployed value/delta and the supervised final
+> event head. It adds no P3, codec, sampler, checkpoint-selector, time schedule,
+> hard event gate or loss-weight bundle. Local implementation guards pass; no
+> R2 behavior result is implied before the GPU smoke and formal run.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -197,6 +207,12 @@ R1f/P2-01 separates spatial selection from the physical interval terminal:
   per-type gain. This `+` is the adopted complementary latent fusion operator,
   not a physical-units claim. The existing caller-owned P2 RMS contract is
   still the only outer amplitude boundary.
+- R2-P202 retains that exact axis/support/value algebra but assigns spatial
+  K/K*C selection and physical-I termination separate bias-free query
+  projections. `terminal_query` is an exact construction-time copy of
+  `source_query`, consumes no inherited initialization RNG and is used only by
+  the four-interval terminal. No time prior, interval target, null or new gain
+  is introduced.
 
 R1g/P3-01,B-01 removes duplicate P3 value owners and cross-lane competition:
 
@@ -455,10 +471,11 @@ supports may change targets and losses, never deployment action.
     covariance metric and transport in its geometry K*C posterior before
     reducing C. Semantic K and geometry K*C selection retain I; the named
     terminal then normalizes only the four physical intervals independently
-    per type, with no null. The same spatial posterior selects S metadata,
-    which can condition only a nonzero W key. Semantic and geometry add before
-    one outer contract and never compete. No predicted status or predicted
-    validity controls support.
+    per type, with no null. Spatial and terminal queries have independent
+    trainable owners but start as an exact functional identity. The same
+    spatial posterior selects S metadata, which can condition only a nonzero W
+    key. Semantic and geometry add before one outer contract and never compete.
+    No predicted status or predicted validity controls support.
 11. Neutral effect is algebraically neutral:
 
     ```text
@@ -484,7 +501,12 @@ supports may change targets and losses, never deployment action.
     separate invocations of one shared Q+zero-null reader; they never share a
     probability simplex. Their raw reads add before dynamic precision joins the
     one inherited fixed optional scale. Consequence stays outside that scale;
-    no second scale or aggregate magnitude contract exists.
+    no second scale or aggregate magnitude contract exists. At the final output
+    boundary, a bias-free zero-initialized bounded multiplicative owner forms
+    one continuous gripper-private state. Deployed gripper value/delta and the
+    supervised final event head read that state; arm, four auxiliary gripper
+    coordinates and motion retain the base action read. Event logits never gate
+    or otherwise enter the physical field.
 15. Online boundaries use ordinary autograd. No artificial gradient, hard
     gate, entropy/mass quota, scalar progress loss, forced diversity or forced
     nonzero flow is legal.
@@ -557,6 +579,10 @@ V120SeedContext
 
 ControlledTransitionSource / State
   static selector / dynamic selector and value            [B,512,H]
+
+GripperPrivateState
+  action + action * tanh(bias_free_gate(norm(action)))     [B,24,H]
+  consumers: deployed gripper value/delta and final event head
 ```
 
 ## Provenance table
@@ -595,8 +621,12 @@ ControlledTransitionSource / State
   reduction. Online P2 support is the current chart/camera availability carried
   by `FutureObjectDynamics`; there is no predicted-selector validity.
 - Future semantic and camera transport objectives supervise exact interval
-  common/innovation coordinates; covariance is supervised per camera. No
-  successor duplicate or status objective remains.
+  common/innovation coordinates with the existing exact-zero target-scale
+  covariant row loss; covariance remains raw-coordinate and per camera. The
+  detached `loss_future_transport_raw_coordinate` retains the R1 coordinate
+  error for audit and never enters backward. The internal
+  `0.55/0.15/0.05` semantic/transport/covariance coefficients and outer future
+  weight are unchanged. No successor duplicate or status objective remains.
 - Action, future, flow geometry, intent scaffold, history proposal and
   execution-value external weights are unchanged from the recovery reference.
 - The whole-segment recognizer supervises only S's public interval carrier.
@@ -683,20 +713,30 @@ ControlledTransitionSource / State
   this RNG digest remain byte-identical while the discarded readouts own no
   runtime or checkpoint state. R1h registers no parameter, buffer or random
   draw and retains these counts, the ordered key digest, both retained tensor
-  digests and the construction RNG exactly.
+  digests and the construction RNG exactly. R2 adds exactly two
+  `top.effect_reader.terminal_query.*.weight` tensors and one
+  `bottom.decoder.velocity_head.gripper_gate.weight`, all bias-free H-to-H
+  matrices. The measured delta is exactly `+786,432` trainable parameters,
+  `+3` parameter/state tensors and no optimizer-group change. The R2 model has
+  `169,199,006` total / `152,828,275` trainable parameters, 1,389 parameter
+  tensors, 1,067 trainable/optimizer tensors, 23 optimizer groups and 1,395
+  state-key names. Its recorded state-key inventory sentinel is
+  `b02716e66b93045f481d2ec4ec777b794c8eba41562991313c8c3ab9fb2e9f27`.
+  Exact-copy/zero initialization preserves the post-construction CPU RNG
+  SHA-256 `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
 - Active manifest identity:
 
   ```text
   schema:       25
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
-  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3
-  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip_source_gradient_probes
+  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_terminal_protected_plus_two_optional_p3
+  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_state
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_target_scale_transport_event_boost_v120_decay_local_global_clip_source_gradient_probes
   runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_finite_spike_matching_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `964415bd9bbb15d4a8204dcaddedc143ae958f84a0ee211d62fd75aed31c2f93`.
+  `4da8bcf83e9d2cd91e2dfdcc2255b8ffe69c0e760872e96a09350d0be2ab1181`.
 
 Storage defaults:
 
@@ -710,7 +750,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 164/164. Tests cover full
+The retained local suite now passes 168/168. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -748,13 +788,25 @@ lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
 gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
-The complete R1 source graph is statically closed and its first formal run has
-been audited. R2-D01/A01 do not themselves authorize another training
-experiment. A formal behavioral R2 run still requires a separately approved
-immutable run context and the
+R2 additionally guards target-scale transport with a detached raw-coordinate
+audit, exact-copy spatial/terminal P2 query identity and stage-local reverse
+ownership, gripper zero-state identity/locality, shared event/value state,
+arm/auxiliary/motion isolation, production optimizer ownership and the exact
+three-key inventory. Its raw transport audit reuses the row error already
+computed by the active objective; the six new P2/gripper state and VJP scalars
+run only on the existing diagnostic cadence. State/projection scalars use every
+20th formal training batch and the configured 16 validation batches; VJP
+scalars attach only to those training diagnostic batches. They add no tensor
+dump, extra forward/sampling pass or console panel. A fresh local one-batch CPU
+BF16 forward/backward and the retained five-step deployment guard pass. The
+complete source graph is locally closed, but no R2 GPU smoke or behavioral
+experiment has run. On 2026-08-28 the user explicitly authorized the local
+guard as the temporary substitute because a separate remote smoke was not
+available. This does not establish CUDA memory or throughput: the formal run's
+startup and first reporting window must enforce those runtime gates under the
 following production acceptance:
 
-- fresh BF16 smoke and five-step deployment;
+- finite CUDA BF16 preflight and five-step deployment before the first update;
 - batch-eight process peak no greater than 22 GiB;
 - aligned batch-2200 early recovery gate against V120;
 - all eight epochs and final/mean action, native, first/tail, horizon,
@@ -764,16 +816,18 @@ following production acceptance:
 Use new empty output directories:
 
 ```bash
+RUN_TAG=schema25_r2_wg01_p202_grip02_smoke
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema25_s_owned_typed_smoke \
-nohup bash scripts/smoke_mainline.sh > schema25_s_owned_typed_smoke.log 2>&1 &
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
+RUN_TAG=schema25_r2_wg01_p202_grip02_b8
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema25_s_owned_typed_b8 \
-nohup bash scripts/train_mainline.sh > schema25_s_owned_typed_b8.log 2>&1 &
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema25_s_owned_typed_b8 \
+  runs/schema25_r2_wg01_p202_grip02_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

@@ -81,6 +81,8 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
             "object_w_typed_contribution_rms": 0.0,
             "object_p2_effect_precontract_rms": 0.0,
             "observation_flow_rms": 0.0,
+            "gripper_private_gate_rms": 0.0,
+            "gripper_private_state_delta_rms": 0.0,
             "inactive_ancestry_metric": 0.0,
         }
     )
@@ -88,6 +90,8 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
         "object_w_typed_contribution_rms": 0.0,
         "object_p2_effect_precontract_rms": 0.0,
         "observation_flow_rms": 0.0,
+        "gripper_private_gate_rms": 0.0,
+        "gripper_private_state_delta_rms": 0.0,
     }
 
 

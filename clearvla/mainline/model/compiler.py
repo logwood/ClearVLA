@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 
 import torch
@@ -153,6 +154,11 @@ class ObjectFutureEffectReader(nn.Module):
         self.source_query = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
         )
+        # Spatial K/K*C selection and physical-I termination are different
+        # candidate decisions. Start them as the exact R1 function without
+        # consuming initialization RNG, then let their ordinary task gradients
+        # separate the two owners.
+        self.terminal_query = deepcopy(self.source_query)
         self.source_key = nn.ModuleList(
             (
                 nn.Linear(content_dim, hidden, bias=False),
@@ -407,9 +413,23 @@ class ObjectFutureEffectReader(nn.Module):
         interval_supports: list[Tensor] = []
         spatial_posteriors: list[Tensor] = []
         source_scores: list[Tensor] = []
+        spatial_query_by_type = torch.stack(
+            [
+                self._bounded_unit(self.source_query[index](action_query))
+                for index in range(len(self.TYPE_NAMES))
+            ],
+            dim=3,
+        )
+        gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics and self.training:
+            register_gradient_rms_metric(
+                spatial_query_by_type,
+                gradient_metrics,
+                "gradient_tensor_p2_spatial_query_rms",
+            )
 
         for type_index in range(len(self.TYPE_NAMES)):
-            query = self._bounded_unit(self.source_query[type_index](action_query))
+            query = spatial_query_by_type.select(3, type_index)
             source_key = self._bounded_unit(
                 self.source_key[type_index](full_fields[type_index])
             )
@@ -513,6 +533,7 @@ class ObjectFutureEffectReader(nn.Module):
         if not collect_diagnostics:
             return selected, {}
         return selected, {
+            **gradient_metrics,
             "object_p2_content_score_abs": torch.stack(
                 [score.detach().float().abs().mean() for score in source_scores]
             ).mean(),
@@ -561,11 +582,18 @@ class ObjectFutureEffectReader(nn.Module):
             raise ValueError("P2 terminal action query lost [B,T,Q,H]")
         action_by_type = torch.stack(
             [
-                self._bounded_unit(self.source_query[index](action_query))
+                self._bounded_unit(self.terminal_query[index](action_query))
                 for index in range(types)
             ],
             dim=3,
         )
+        terminal_query_gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics and self.training:
+            register_gradient_rms_metric(
+                action_by_type,
+                terminal_query_gradient_metrics,
+                "gradient_tensor_p2_terminal_query_rms",
+            )
         selected_key = self._bounded_unit(selected.key)
         s_context = torch.tanh(self._bounded_unit(selected.selected_s_context))
         conditioned_key = selected_key + selected_key * s_context
@@ -617,6 +645,23 @@ class ObjectFutureEffectReader(nn.Module):
             support,
             dim=3,
         )
+        projection_delta_terms: list[Tensor] = []
+        for spatial, terminal in zip(
+            self.source_query,
+            self.terminal_query,
+            strict=True,
+        ):
+            if not isinstance(spatial, nn.Linear) or not isinstance(
+                terminal,
+                nn.Linear,
+            ):
+                raise TypeError("P2 query projections must remain linear")
+            projection_delta_terms.append(
+                (terminal.weight.detach().float() - spatial.weight.detach().float())
+                .square()
+                .mean()
+            )
+        projection_delta = torch.stack(projection_delta_terms).mean().sqrt()
         metrics: dict[str, Tensor] = {
             "object_p2_intent_score_abs": (
                 interval_score.detach() - neutral_key_score.detach()
@@ -670,7 +715,9 @@ class ObjectFutureEffectReader(nn.Module):
             )
             .abs()
             .amax(),
+            "object_p2_terminal_query_delta_rms": projection_delta,
         }
+        metrics.update(terminal_query_gradient_metrics)
         metrics.update(gradient_metrics)
         # The band matrix is a deployment-path validation diagnostic.  A
         # training flow-time posterior has a different conditioning point and

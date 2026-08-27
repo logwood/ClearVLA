@@ -38,6 +38,7 @@ ACTIVE_PREFIXES = (
     "action_",
     "event_",
     "motion_",
+    "gripper_private_",
     "flow_",
     "sampling_",
     "controlled_transition_",

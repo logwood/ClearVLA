@@ -387,7 +387,7 @@ def future_dynamics_terms(
         target_value: Tensor,
         *,
         scale_floored: bool,
-    ) -> Tensor:
+    ) -> tuple[Tensor, Tensor]:
         prediction_f = prediction_value.float()
         target_f = target_value.detach().float()
         raw = F.smooth_l1_loss(
@@ -396,7 +396,7 @@ def future_dynamics_terms(
             reduction="none",
         ).mean(dim=-1, keepdim=True)
         if not scale_floored:
-            return raw
+            return raw, raw
         target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
         scale_floor = (0.25 * target_rms.mean(dim=(0, 2), keepdim=True)).clamp_min(1e-3)
         scale = torch.sqrt(target_rms.square() + scale_floor.square())
@@ -419,7 +419,7 @@ def future_dynamics_terms(
         direction = 0.5 * (prediction_direction - target_direction).square().mean(
             dim=-1, keepdim=True
         )
-        return raw + normalized + 0.10 * direction
+        return raw + normalized + 0.10 * direction, raw
 
     def decomposed_loss(
         prediction_value: Tensor,
@@ -427,30 +427,39 @@ def future_dynamics_terms(
         *,
         weight: Tensor,
         scale_floored: bool,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         prediction_common = prediction_value.float().mean(dim=1)
         target_common = target_value.detach().float().mean(dim=1)
         prediction_innovation = prediction_value.float() - prediction_common[:, None]
         target_innovation = target_value.detach().float() - target_common[:, None]
-        common_error = row_loss(
+        common_error, common_raw_error = row_loss(
             prediction_common[:, None],
             target_common[:, None],
             scale_floored=scale_floored,
         )
-        innovation_error = row_loss(
+        innovation_error, innovation_raw_error = row_loss(
             prediction_innovation,
             target_innovation,
             scale_floored=scale_floored,
         )
         common = masked(common_error, weight[:, :1])
         innovation = masked(innovation_error, weight)
-        return common, innovation, common_error, innovation_error
+        return (
+            common,
+            innovation,
+            common_error,
+            innovation_error,
+            common_raw_error,
+            innovation_raw_error,
+        )
 
     (
         semantic_common,
         semantic_innovation,
         _semantic_common_error,
         semantic_innovation_error,
+        _semantic_common_raw_error,
+        _semantic_innovation_raw_error,
     ) = decomposed_loss(
         prediction.semantic_delta,
         target.semantic_delta,
@@ -463,14 +472,30 @@ def future_dynamics_terms(
         transport_innovation,
         _transport_common_error,
         transport_innovation_error,
+        transport_common_raw_error,
+        transport_innovation_raw_error,
     ) = decomposed_loss(
         prediction.transport_mean,
         target.transport_mean,
         weight=camera_validity,
-        scale_floored=False,
+        scale_floored=True,
     )
     transport = 0.5 * (transport_common + transport_innovation)
-    covariance_error = row_loss(
+    # The target-scale-covariant objective already computes the raw
+    # coordinate SmoothL1 term. Reuse its detached row errors for the audit
+    # instead of running a second loss kernel on every training batch.
+    transport_raw_common = masked(
+        transport_common_raw_error.detach(),
+        camera_validity[:, :1],
+    )
+    transport_raw_innovation = masked(
+        transport_innovation_raw_error.detach(),
+        camera_validity,
+    )
+    transport_raw_coordinate = 0.5 * (
+        transport_raw_common + transport_raw_innovation
+    )
+    covariance_error, _covariance_raw_error = row_loss(
         prediction.transport_covariance,
         target.transport_covariance,
         scale_floored=False,
@@ -484,7 +509,7 @@ def future_dynamics_terms(
         target.semantic_interval_innovation.detach()[:, 1:]
         - target.semantic_interval_innovation.detach()[:, :-1]
     )
-    transition_error = row_loss(
+    transition_error, _transition_raw_error = row_loss(
         semantic_transition_prediction,
         semantic_transition_target,
         scale_floored=True,
@@ -506,6 +531,7 @@ def future_dynamics_terms(
         "future_transport": transport,
         "future_transport_common": transport_common,
         "future_transport_innovation": transport_innovation,
+        "future_transport_raw_coordinate": transport_raw_coordinate.detach(),
         "future_covariance": covariance,
         "future_transition": transition,
     }

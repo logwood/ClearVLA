@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..model.routing import register_gradient_rms_metric
 from .codec import NativeTimePhysicalActionTokenLift
 from .controller import EvidenceExecutionController
 from .decoder import ActionOnlyPhysicalVelocityHead
@@ -884,6 +885,42 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         for module in (self.event_head[-1], self.motion_head[-1]):
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
+
+    def _read_output_heads(
+        self,
+        action: Tensor,
+        *,
+        collect_diagnostics: bool,
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        """Read one canonical continuous field/event state at the output boundary."""
+
+        pred_velocity, gripper_state, gripper_gate = (
+            self.velocity_head.forward_with_gripper_state(action)
+        )
+        metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            metrics = {
+                "gripper_private_gate_rms": gripper_gate.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt(),
+                "gripper_private_state_delta_rms": (
+                    gripper_state.detach().float() - action.detach().float()
+                )
+                .square()
+                .mean()
+                .sqrt(),
+            }
+            if self.training:
+                register_gradient_rms_metric(
+                    gripper_state,
+                    metrics,
+                    "gradient_tensor_gripper_private_state_rms",
+                )
+        event_logits = self.event_head(gripper_state)
+        motion_logits = self.motion_head(action).squeeze(-1)
+        return pred_velocity, event_logits, motion_logits, metrics
 
     def set_execution_training_step(self, global_step: int) -> float:
         """Open execution controls gradually without changing the host warm-up."""
@@ -2452,9 +2489,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         collect_diagnostics: bool = True,
     ) -> dict[str, Tensor]:
         action = self.action_norm(result["action"])
-        pred_velocity = self.velocity_head(action)
-        event_logits = self.event_head(action)
-        motion_logits = self.motion_head(action).squeeze(-1)
+        pred_velocity, event_logits, motion_logits, gripper_metrics = (
+            self._read_output_heads(
+                action,
+                collect_diagnostics=collect_diagnostics,
+            )
+        )
         if not collect_diagnostics:
             return {
                 "pred_velocity": pred_velocity,
@@ -2467,6 +2507,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             "event_logits": event_logits,
             "motion_logits": motion_logits,
             "evidence_latent": organized["latent"],
+            **gripper_metrics,
             "evidence_semantic_seed_norm": semantic_seed.detach().float().norm(dim=-1).mean(),
             "evidence_mmd_it_action_state_scale": action_state_factor.detach().float().mean(),
             "evidence_mmd_it_evidence_scale": torch.as_tensor(
@@ -3180,9 +3221,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             block_rows.append(committed_metrics)
             prefix_velocity_rows.append(self.velocity_head(self.action_norm(action)))
         action = self.action_norm(action)
-        pred_velocity = self.velocity_head(action)
-        event_logits = self.event_head(action)
-        motion_logits = self.motion_head(action).squeeze(-1)
+        pred_velocity, event_logits, motion_logits, gripper_metrics = (
+            self._read_output_heads(
+                action,
+                collect_diagnostics=collect_diagnostics,
+            )
+        )
         if not collect_diagnostics:
             return {
                 "pred_velocity": pred_velocity,
@@ -3195,6 +3239,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             "event_logits": event_logits,
             "motion_logits": motion_logits,
             "evidence_latent": organized["latent"],
+            **gripper_metrics,
             "evidence_semantic_seed_norm": semantic_seed.detach().float().norm(dim=-1).mean(),
             "evidence_mmd_it_action_state_scale": action_state_factor.detach().float().mean(),
             "evidence_mmd_it_evidence_scale": torch.as_tensor(

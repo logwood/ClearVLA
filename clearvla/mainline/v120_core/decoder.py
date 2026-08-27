@@ -173,6 +173,14 @@ class ActionOnlyPhysicalVelocityHead(nn.Module):
         ad = int(config.arm_dim)
         self.codec = PhysicalActionCodec(config)
         self.norm = nn.LayerNorm(h)
+        host_rng_state = torch.get_rng_state()
+        try:
+            self.gripper_gate = nn.Linear(h, h, bias=False)
+            nn.init.zeros_(self.gripper_gate.weight)
+        finally:
+            # The new exact-zero owner must not perturb any inherited output
+            # initialization or the loader RNG derived after model creation.
+            torch.set_rng_state(host_rng_state)
         self.arm_manifold = str(config.arm_flow_mode) == "manifold_native"
         self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
         if self.arm_manifold:
@@ -207,24 +215,44 @@ class ActionOnlyPhysicalVelocityHead(nn.Module):
             raise RuntimeError("physical velocity head has an incomplete chart")
         return tuple(layer for layer in (*arm_layers, *gripper_layers) if layer is not None)
 
-    def forward(self, tokens: Tensor) -> Tensor:
-        x = self.norm(tokens)
+    def forward_with_gripper_state(
+        self,
+        tokens: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return the physical field and its continuous gripper-private owner."""
+
+        base_read = self.norm(tokens)
+        gate = torch.tanh(self.gripper_gate(base_read))
+        gripper_state = tokens + tokens * gate.to(dtype=tokens.dtype)
+        gripper_read = self.norm(gripper_state)
         if self.arm_native is not None:
-            arm_field = self.codec.encode_arm_tangent(self.arm_native(x))
+            arm_field = self.codec.encode_arm_tangent(self.arm_native(base_read))
         else:
             if self.arm_abs is None or self.arm_delta is None:
                 raise RuntimeError("legacy arm velocity heads are not initialized")
-            arm_field = torch.cat([self.arm_abs(x), self.arm_delta(x)], dim=-1)
+            arm_field = torch.cat(
+                [self.arm_abs(base_read), self.arm_delta(base_read)],
+                dim=-1,
+            )
         if self.grip_native is not None:
-            grip_field = self.codec.encode_gripper_tangent(self.grip_native(x))
+            grip_field = self.codec.encode_gripper_tangent(
+                self.grip_native(gripper_read)
+            )
         else:
             if self.grip_value is None or self.grip_delta is None or self.grip_extra is None:
                 raise RuntimeError("legacy gripper velocity heads are not initialized")
-            grip_parts = [self.grip_value(x), self.grip_delta(x)]
+            grip_parts = [
+                self.grip_value(gripper_read),
+                self.grip_delta(gripper_read),
+            ]
             if int(self.grip_extra.out_features) > 0:
-                grip_parts.append(self.grip_extra(x))
+                grip_parts.append(self.grip_extra(base_read))
             grip_field = torch.cat(grip_parts, dim=-1)
-        return torch.cat([arm_field, grip_field], dim=-1)
+        return torch.cat([arm_field, grip_field], dim=-1), gripper_state, gate
+
+    def forward(self, tokens: Tensor) -> Tensor:
+        field, _, _ = self.forward_with_gripper_state(tokens)
+        return field
 
 
 class OwnedHierarchicalActionBlock(nn.Module):

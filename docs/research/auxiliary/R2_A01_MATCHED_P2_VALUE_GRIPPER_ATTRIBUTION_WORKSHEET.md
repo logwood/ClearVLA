@@ -1,8 +1,8 @@
 # R2-A01 matched P2-value and gripper-attribution worksheet
 
-Status: `IMPLEMENTED AND STATICALLY CLOSED; EXISTING-CHECKPOINT VALIDATION PENDING`;
+Status: `IMPLEMENTED, STATICALLY CLOSED, AND VALIDATED ON THE EXISTING R1 CHECKPOINT`;
 validation-only; no behavioral R2 unit, training run, loss change or checkpoint
-write is authorized here.
+write is authorized by this worksheet itself.
 
 This worksheet is subordinate to
 `../00_CURRENT_ARCHITECTURE_CONTRACT.md` and
@@ -359,6 +359,60 @@ Final pre-commit Git blobs:
 | `tests/test_mainline_runtime.py` | `f86fd9546231346ccd544c56a760c6eb606b3bb5` |
 | `tests/test_mainline_structural_contracts.py` | `34f03697f481691cae7a0f37608fa7489a54db47` |
 
-The five assumptions in section 7 remain deliberately unresolved until the
-same R1 checkpoint is replayed through this implemented validation surface.
-Static closure does not select or authorize a behavioral unit.
+## 10. Existing-checkpoint validation closure
+
+The read-only replay completed on 2026-08-27 from commit
+`3219431a49f82b3984fdc4f31c77e76fdccd2b23`, using checkpoint
+`runs/schema25_r1_b8_20260826_220907/checkpoints/latest.pt`.  The primary pass
+covered all `179` validation batches / `1,432` samples.  Each matched P2
+counterfactual covered the configured `16` batches and reused the primary
+encoded cache and initial physical noise.
+
+Decision-facing results:
+
+```text
+full gripper RMSE near / mid / far                 0.059981 / 0.125307 / 0.195153
+absolute branch near / mid / far                   0.061225 / 0.125126 / 0.192019
+cumulative-delta branch near / mid / far           0.062570 / 0.137393 / 0.224843
+decoded event recall / event ratio                  0.296242 / 0.504053
+P2 semantic / geometry band-pair TV                 0.211087 / 0.017577
+P2 semantic / geometry effect RMS                   0.112451 / 0.014242
+
+matched-subset primary far-gripper RMSE             0.140827
+semantic-far-zero far-gripper RMSE                  0.271796
+semantic-far-zero far-gripper action delta          0.165580
+geometry-far-zero far-gripper RMSE                  0.140556
+geometry-far-zero far-gripper action delta          0.002619
+```
+
+The five assumptions from Section 7 resolve as follows:
+
+1. Geometry is nearly action-inert at the learned R1 magnitude on this matched
+   subset.  Removing its far values changes predicted far gripper by only
+   `0.002619` action-delta RMSE, while task RMSE moves from `0.140827` to
+   `0.140556`.  This does not authorize deleting geometry; the producer is
+   under-supervised and its W2 value is only about one third of Teacher
+   transport magnitude.
+2. Later semantic values are indispensable to far action.  Removing intervals
+   `2/3` raises matched far-gripper RMSE from `0.140827` to `0.271796`, reduces
+   decoded event F1 from about `0.459` to `0.233`, and also changes far arm.
+   Therefore the proposed hard conclusion that P2 simply fails to use far
+   semantic evidence is rejected.
+3. The far gripper rise is not a monotonically accumulating post-event drift.
+   Post-event RMSE falls from `0.376999` at distance `1-2` to `0.180002` at
+   distance `7+`; however the same event/post-event categories become much
+   harder in later absolute action bands.  Event-related rows account for the
+   large majority of gripper squared error in every band.
+4. Both deployed branches fail before fusion.  The cumulative-delta branch is
+   worse in the middle and far bands, while the absolute branch is already
+   poor.  The deployed blend is only modestly worse than the absolute branch,
+   so changing `0.75/0.25` is not the primary repair.
+5. No P2 value removal produces a useful gripper win that is hidden by arm or
+   event behavior.  Semantic removal is strongly harmful; geometry removal is
+   nearly inert at current scale.
+
+This closes A01.  It rejects a hard far-interval schedule and a first codec
+blend edit.  It leaves three distinct source problems for the parent R2 plan:
+weak W geometry supervision/output use, overlapping spatial-versus-temporal
+P2 query ownership, and missing gripper-private closure between supervised
+event semantics and deployed continuous value/delta heads.

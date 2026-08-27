@@ -49,15 +49,15 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_protected_plus_two_optional_p3"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_terminal_protected_plus_two_optional_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution"
+        == "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_state"
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_event_boost_v120_decay_local_global_clip_source_gradient_probes"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_target_scale_transport_event_boost_v120_decay_local_global_clip_source_gradient_probes"
     )
     assert components.runtime == (
         "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_finite_spike_matching_metrics"

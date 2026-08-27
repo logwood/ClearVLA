@@ -1,8 +1,8 @@
 # Schema25 R2 source-derived improvement plan
 
-Status: `R2-D01 AND MATCHED P2-VALUE R2-A01 IMPLEMENTED; EXISTING-CHECKPOINT A01 VALIDATION PENDING; NO BEHAVIORAL R2 EDIT OR TRAINING AUTHORIZED`
+Status: `R2-D01/A01 VALIDATED; WG01/P202/GRIP02 LOCALLY CLOSED; ONE-BATCH CPU BF16 SMOKE PASSED; GPU BEHAVIOR UNRUN`
 
-Implementation checkpoint (2026-08-27): the behavior-preserving diagnostic
+Attribution checkpoint (2026-08-27): the behavior-preserving diagnostic
 surface records P2 `type x action-band x physical-interval` posterior mass,
 expected interval, support and band-pair total variation on the existing
 bounded deployment diagnostics. Full validation records gripper RMSE by action
@@ -12,51 +12,81 @@ implements four evaluation-only, matched-noise P2 value counterfactuals:
 semantic/geometry crossed with near intervals `0/1` or far intervals `2/3`.
 They alter selected common and residual values only after posterior formation;
 the primary path, model state, loss, optimizer, checkpoint ABI and RNG stream
-are unchanged. The retained mainline suite passes `164/164`. A dedicated
+are unchanged. The retained mainline suite passes `164/164`. The completed
+replay covers all `179` validation batches / `1,432` samples and the configured
+`16` matched counterfactual batches. A dedicated
 read-only validation loader accepts only the intentional active-source identity
 difference while requiring identical manifest, semantic config, dataset,
 language artifact and complete model-state ABI.
 `scripts/validate_mainline_checkpoint.sh` loads no optimizer, schedule or
 checkpoint RNG state and writes no checkpoint. The 24-row event histograms,
 P2 posterior intervention, projected event-source intervention and P3
-post-route/intervention diagnostics remain unimplemented and unauthorized by
-this checkpoint.
+post-route/intervention diagnostics remain unimplemented; A01 no longer needs
+them to choose the next source boundary.
 
-This document plans the next version after the completed Schema25 R1 source
-replay and its first formal run.  It is prospective auxiliary research memory,
-not an override of `00_CURRENT_ARCHITECTURE_CONTRACT.md`.  A behavioral R2
-implementation may start only after the diagnostic gate below selects one
-source-backed semantic unit and that unit receives its own producer-to-consumer
-worksheet.
+Implementation checkpoint (2026-08-28): all three authorized behavioral units
+are present in the local worktree. WG01 changes only transport
+common/innovation supervision to the existing target-scale-covariant row loss
+and preserves the R1 raw-coordinate value as a detached audit. P202 gives
+spatial K/K*C selection and physical-I termination separate bias-free query
+owners initialized as exact copies. GRIP02 adds one exact-zero bounded
+gripper-private state shared only by deployed value/delta and the supervised
+final event head. No P3, codec, sampler, checkpoint-selector, config, objective
+coefficient or execution-policy edit was made.
+
+The measured production inventory is `169,199,006` total / `152,828,275`
+trainable parameters, 1,389 parameter tensors, 1,067 trainable tensors, 23
+optimizer groups and 1,395 state keys. Relative to R1 the delta is exactly
+`+786,432` trainable parameters and three state keys; the post-construction RNG
+digest remains
+`d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
+The retained suite passes `168/168`; focused Ruff, compileall and diff checks
+pass. A fresh one-batch CPU BF16 forward/backward (5.97 seconds locally) and
+the retained five-step deployment guard pass. These are implementation
+guards, not CUDA-memory, throughput or formal R2 behavior evidence.
+
+This document records the source derivation and execution contract for the next
+version after the completed Schema25 R1 replay and its first formal run. The
+three source-backed units have passed their producer-to-consumer review and
+local implementation boundaries; the compact adopted facts are also reflected
+in `00_CURRENT_ARCHITECTURE_CONTRACT.md`. Because a separate remote smoke is
+temporarily unavailable, the user explicitly authorized the local guard as its
+substitute. Formal acceptance still requires the complete CUDA run and its
+runtime/memory evidence.
 
 The version is deliberately not defined as "more validation fields."  The
-validation additions are a low-cost attribution layer around one later
-structural change.  Conversely, the plan does not authorize simultaneous P2,
-P3, event, codec, sampler and loss-weight edits merely because each has an open
-question.
+validation additions are a low-cost attribution layer around later structural
+changes. The next training candidate contains three independently reversible
+units--geometry supervision, P2 query ownership and continuous gripper-state
+closure--because each now has a distinct source defect. It does not include a
+P3, codec, sampler, checkpoint-selector or generic loss-weight bundle.
 
 ## 1. Executive decision
 
-The next run should be built in this order:
+The next version is assembled as three independently auditable source units in
+one formal training candidate, following the user's decision to complete the
+three units together:
 
-1. add a bounded validation surface and matched-noise interventions that can
-   be run on the existing R1 checkpoint without training;
-2. decide whether the first behavioral R2 unit belongs to the P2
-   action-time/World-interval terminal, the gripper transition-to-hold path, or
-   one P3 optional lane;
-3. implement exactly one of those behavioral units;
-4. retain the ordinary V120 checkpoint and add one gripper-tail candidate
-   checkpoint, without changing the training objective or inventing one scalar
-   "health score";
-5. spend one formal training run only after the selected unit has a closed
-   forward path, reverse path, zero semantics and paired R1 validation baseline.
+1. **R2-WG01:** make camera-transport supervision covariant to the target's
+   normalized-coordinate scale without changing W forward values, Teacher,
+   coefficients or runtime;
+2. **R2-P202:** separate the action projection used for spatial K/K*C selection
+   from the projection used by the physical-I terminal, with an exact-copy
+   initialization and no time prior;
+3. **R2-GRIP02:** introduce one zero-initialized, bounded, gripper-private
+   continuous state shared by deployed value/delta heads and the supervised
+   event head, while leaving arm, auxiliary gripper coordinates, codec and
+   event logits-as-probe semantics intact;
+4. update only the manifest component identities, source/state inventories,
+   tests and a small JSONL-only health surface required by those units;
+5. spend one formal training run after all three commits independently pass
+   forward, reverse, identity and checkpoint-boundary review.
 
-Current priority is **P2 time allocation first**, not a new gripper module.
-R1 has more W interval variation than the Schema25 base, but its present P2
-marginal assigns substantially less mass to interval 3.  Existing diagnostics
-average over all 24 action rows, four bases and two P2 types, so they cannot say
-whether far action rows actually consume far World evidence.  That missing
-fact must be recovered before altering event supervision or the action codec.
+The three units are not one causal claim. They touch different producers,
+losses and consumers and must remain separately revertible. Combining them in
+one run is an experiment-budget decision. Per-unit health is read from its own
+pre-registered metrics; the final decision remains task behavior, especially
+far/event-context gripper error with arm and near-action guards.
 
 ## 2. Evidence ledger
 
@@ -213,28 +243,45 @@ R1 source slice.
 - R1 therefore improves arm while worsening gripper.  From R1 epoch 6 to 8,
   decoded event F1 rises while gripper RMSE rebounds, so final event F1 is not
   a sufficient proxy for persistent gripper state.
-- Schema25 base reports W interval variation `0.085714` and P2 interval-3
-  marginal mass `0.438278` at epoch 8.
-- R1 reports W/public prediction interval variation about `0.161` at epoch 8,
-  while validation-deployment P2 interval-3 marginal mass is only
-  `0.198-0.245` over epochs 1-7.  P2 entropy remains high (`0.947-0.983`).
+- Across R1 epochs 1-7, W2 geometry-state RMS remains `0.36-0.46` and its
+  interval variation remains `0.24-0.29`; the geometry carrier is not zero or
+  interval-collapsed.  Predicted transport remains only `0.022-0.031` against
+  Teacher `0.087-0.096`.  At epoch 7, geometry common/interval input VJPs are
+  about `40-45x` below semantic despite an active dynamics gradient group.
+- A01 shows semantic allocation does vary by action band: expected interval is
+  `1.144` for rows 1-4 and `1.658` for rows 13-24, with band-pair total
+  variation `0.211`.  Geometry allocation is almost flat (`0.0176`).
+- Removing semantic intervals `2/3` raises matched far-gripper RMSE from
+  `0.140827` to `0.271796`; removing geometry intervals `2/3` changes it only
+  to `0.140556`.  Far semantic evidence is useful, while learned geometry has
+  almost no action authority at its current magnitude.
+- Full validation gripper RMSE is `0.059981 / 0.125307 / 0.195153` over the
+  three bands.  Absolute-only is `0.061225 / 0.125126 / 0.192019` and
+  cumulative-delta-only is `0.062570 / 0.137393 / 0.224843`; both fail before
+  blending and the delta branch is worse at long horizon.
+- Event and post-event rows dominate gripper squared error.  Error is largest
+  around the event and declines with event distance, but each event-context
+  category becomes harder in later absolute action bands.
 - R1 P3 temporal/state-change RMS changes smoothly and does not show a sharp
-  late-epoch explosion.  P3 remains an attribution target, not the first
-  presumed cause.
+  late-epoch explosion.  P3 is not part of this R2 behavioral candidate.
 
 ### 2.3 Current inferences
 
-1. The upstream World stream has not simply collapsed; R1 contains measurable
-   interval structure.
-2. The first missing causal fact is whether R1f sends that structure to the
-   correct action horizon rows.
-3. Local event classification and persistent post-event state are different
-   tasks.  The present validation surface conflates them.
-4. The event semantic split is real, but modifying it before P2 and gripper
-   branch attribution would be speculative.
-5. The legacy six-channel codec is open to measurement but is not presently an
-   authorized repair.  Historical recovery evidence does not support blaming
-   it first.
+1. The upstream World stream has not collapsed, and the specific claim that
+   far semantic P2 values are unused is false.
+2. Geometry is weak after a healthy hidden carrier because raw small-coordinate
+   regression makes its direct supervision and boundary VJP scale far below
+   semantic.  This is a loss-geometry problem, not evidence for a hard output
+   gain or deletion.
+3. P2 already learns useful time allocation, but one `source_query` parameter
+   set simultaneously owns spatial K/K*C selection and physical-I termination.
+   That ownership overlap is independent of whether interval 3 mass is high.
+4. The codec blend is not the primary gripper failure.  Both deployed branches
+   are poor, and the supervised event head has no gripper-private continuous
+   state shared with those branches.
+5. Local event classification and persistent continuous state remain distinct.
+   The repair may let the existing event loss shape a shared gripper state, but
+   event logits remain a probe and never gate the physical field.
 
 ## 3. Complete active dataflow maps
 
@@ -265,6 +312,14 @@ Backward paths:
   selects which W interval;
 - no explicit loss names a correct action-band/World-interval relation.
 
+`top.effect_reader.*` is one checkpointed module and one `p2_effect_reader`
+optimizer role.  Its semantic and geometry spatial choices use independent
+keys/values but the same two type-local action projections are currently reused
+for the later I terminal.  W is cached once per observation; the action-query
+dependent P2 read is repeated by the five sampler updates and the endpoint
+model call.  P1, dynamic precision, P3 and transition evidence are legal
+parallel bottom inputs, so action success does not prove P2 ownership closure.
+
 ### 3.2 Event and persistent gripper path
 
 ```text
@@ -291,17 +346,63 @@ The lower branch is not supervised by the final event target.  The upper final
 event logits are not a deployed control input.  Any R2 event claim must state
 which branch it means.
 
+During a training forward, physical flow, decoded action, smooth-delta and
+physical-delta losses reach the continuous velocity head; event focal loss
+reaches the sibling final event head, and both also reach their shared action
+trunk.  In sampling, the velocity head is additionally called for execution
+candidate/prefix values inside one bottom invocation; only the final physical
+field from each of five ODE updates is integrated.  The endpoint call reports
+event/motion without another physical update.  All action/event/motion heads
+are checkpointed under `bottom.decoder.*` and share optimizer role
+`bottom_heads`; arm heads, four auxiliary gripper heads, the motion head and the
+layer-contract rollout event evidence are legal alternate consumers/bypasses.
+
+### 3.3 Camera-geometry producer and reverse path
+
+```text
+two adjacent learned image flows
+  -> normalized per-cell flow_xy [B,C,Y,X,2]
+  -> geometry-conditioned object read
+  -> camera transport prior [B,K,C,2]
+  -> S geometry common/residual metadata
+  -> W1/W2 typed geometry hidden state [B,I,K,H]
+  -> camera-specific zero-preserving conditioning [B,I,K,C,H]
+  -> shared transport head
+  -> 0.50*tanh(common) + 0.50*tanh(interval innovation)
+  -> transport [B,I,K,C,2]
+       \-> direct future transport loss
+       \-> P2 geometry key/value and coordinate score
+       \-> camera-specific Teacher association prior (detached target path)
+```
+
+Teacher forms same-camera displacement moments in normalized coordinates and
+contributes no deployment value. The direct loss decomposes common and
+interval innovation but currently applies raw-coordinate SmoothL1 only;
+semantic uses raw plus target-scale-normalized and directional terms. Current
+camera support is detached for loss masking. Action losses can also reach W
+through P2, while `future_dynamics` reaches W directly. All W parameters are
+owned by optimizer role `dynamics`; transport has no separate checkpoint
+field, and W is computed once per observation cache while P2 consumes it at
+each of five ODE updates plus the endpoint head call.
+
+Invalid camera support gives exact-zero transport and no P2 geometry value.
+At legal support the transport head is near the origin, so tanh saturation is
+not the observed bottleneck. Alternate action paths--semantic P2, factual P1,
+dynamic precision, P3 state change and transition--remain legal and explain
+why weak geometry need not make the whole policy weak.
+
 ## 4. Structural issue register
 
 | ID | Status | Issue | R2 disposition |
 |---|---|---|---|
-| `R2-P2-01` | highest-priority causal candidate | P2's action-band/World-interval allocation is hidden by a global mean; R1 retains W variation but shifts marginal mass away from interval 3 | add band/type matrix and matched interval interventions first; eligible as the one R2 behavioral unit |
-| `R2-GRIP-01` | confirmed observability defect | aggregate gripper and aggregate horizon metrics cannot localize post-event hold failure | add gripper x horizon, post-event distance and branch metrics over full validation |
-| `R2-EVT-01` | confirmed semantic ownership split; causal role unknown | action-consumed frozen rollout readout and supervised final event head share a name but not meaning | retype names in the eventual source edit; run projected-source intervention before delete/share decisions |
-| `R2-P3-01` | bounded structural risk | independently contracted lanes add without post-route per-lane attribution | add post-route lane/cancellation metrics; intervene only if P2/event gates are inconclusive |
-| `R2-SEL-01` | confirmed artifact-selection mismatch | one-of-seven gripper dimension and far hold cannot select `best.pt` | preserve `best.pt`; add one parallel gripper-tail candidate checkpoint |
+| `R2-WG01` | implemented; local guards pass; behavior unrun | W geometry hidden state remains healthy, but raw small-coordinate transport loss yields a roughly `40-45x` semantic/geometry boundary-VJP gap and prediction stays near one third of Teacher | existing exact-zero target-scale-covariant row loss now owns transport; forward, Teacher and coefficients remain unchanged |
+| `R2-P202` | implemented; local guards pass; behavior unrun | one `source_query` set owned both spatial K/K*C selection and physical-I termination | independent terminal query is an exact parameter copy at construction; no time prior or interval target |
+| `R2-GRIP02` | implemented; local guards pass; behavior unrun | both deployed branches fail, while final event supervision and continuous value/delta shared only the global action trunk and no gripper-private state | one zero-initialized bounded multiplicative state now feeds value, delta and final event head; auxiliary heads, codec and logits-as-probe remain intact |
+| `R2-EVT-01` | semantic split confirmed; not selected | action-consumed frozen rollout readout and supervised final event head share a name but not meaning | leave the rollout source unchanged; do not infer that it is the continuous gripper owner |
+| `R2-P3-01` | deferred | independently contracted lanes add without post-route attribution | no P3 edit in this version |
+| `R2-SEL-01` | deferred | one-of-seven gripper dimension and far hold cannot select `best.pt` | keep `best.pt` and `latest.pt`; do not add a fourth behavioral/source unit now |
 | `R2-DATA-01` | closed for current data | possible row-0 qpos/action mismatch | existing probe shows exact gripper alignment and no h0 event; no source change |
-| `R2-CODEC-01` | open measurement only | fixed `0.75/0.25` decode may hide branch-specific failure | report both branches and disagreement; no codec change in the first R2 run unless the diagnostic gate selects it in a later plan |
+| `R2-CODEC-01` | closed as first cause | both absolute and cumulative-delta branches fail before fusion | retain all six field coordinates and the `0.75/0.25` deployment decode |
 
 ## 5. R2 slice order
 
@@ -341,10 +442,10 @@ Use `SamplingResult.physical_field` to decode:
 - their existing blended deployment prediction;
 - branch disagreement before blending.
 
-Also record target and predicted open/close/any event counts by each of the 24
-row positions.  The 24-row histograms stay JSONL-only.  A compact console line
-may contain only the three physical gripper-band RMSE values, three post-event
-RMSE values and three branch-disagreement values.
+The implemented D01 surface keeps the compact three-band, post-event and branch
+tables plus the exhaustive `action-band x event-context` partition.  The
+originally proposed 24-row event histograms were not required for the A01
+decision and remain unimplemented; they are not carried into R2-B01.
 
 #### Bounded structural metrics
 
@@ -360,7 +461,7 @@ validation_deploy_object_p2_{semantic,geometry}_band_pair_total_variation
 The matrix is descriptive.  No monotonicity target, entropy quota or fixed
 "far rows must choose interval 3" rule is introduced.
 
-For P3, add post-route values before their sum:
+The following P3 post-route surface was also proposed but not implemented:
 
 ```text
 validation_deploy_p3_temporal_routed_rms
@@ -370,34 +471,26 @@ validation_deploy_p3_lane_sum_over_component_rms
 validation_deploy_p3_{temporal,state_change}_band_{1_4,5_12,13_24}_rms
 ```
 
-These metrics must be computed where the routed tensors already exist.  Do not
-reconstruct a lane from an aggregate output.
+It remains deferred with P3 itself.  If reopened later, it must be computed
+where routed tensors already exist rather than reconstructed from an aggregate
+output.
 
 ### R2-A01: existing-checkpoint matched interventions
 
-This is a validation pass, not a training experiment.  Reuse the same R1
-checkpoint, validation rows and initial physical noise for every branch.
-Coverage remains bounded; start with the current 16/179 diagnostic batches and
-increase only if paired confidence is inadequate.
+This was a validation pass, not a training experiment.  It reused the same R1
+checkpoint, validation rows and initial physical noise for every branch.  The
+executed first item covered 16/179 diagnostic batches: selected values from
+intervals `0/1` and `2/3` were zeroed after spatial selection and before the
+interval terminal, separately for semantic and geometry, while keys and
+posteriors were preserved.
 
-Run in priority order:
+The result was decision-complete: far semantic values are strongly useful and
+current geometry values are nearly action-inert.  Therefore the originally
+conditional P2-posterior, projected rollout-event-source and P3-lane
+interventions were not implemented.  They remain separate future probes, not
+implicit parts of R2-B01.
 
-1. **P2 interval value interventions**: zero selected values from intervals
-   `0/1` and `2/3` after spatial selection but before the interval terminal,
-   separately for semantic and geometry.  Preserve keys/posteriors in this
-   first pass so the result measures value contribution rather than a new
-   selector.
-2. **P2 posterior intervention** only if value attribution is ambiguous:
-   replace the learned terminal posterior by its supported uniform
-   counterfactual while keeping selected values fixed.  Label it as a
-   counterfactual, never as a proposed runtime rule.
-3. **Projected rollout-event source**: set the already projected event source
-   token to algebraic zero, and separately batch-shuffle it.  Intervene after
-   `event_proj`; raw zero before affine projection is not a neutral value.
-4. **P3 lanes**, only if the first three results are inconclusive: zero
-   temporal and state-change after each lane's basis read and before their sum.
-
-Every intervention reports paired primary-versus-counterfactual:
+The executed intervention reports paired primary-versus-counterfactual:
 
 - action delta RMSE for arm and gripper in all three action bands;
 - gripper MSE gain/loss in all three bands;
@@ -408,125 +501,218 @@ No intervention result is interpreted from action-delta magnitude alone.
 Large action change with worse error is harmful; near-zero change is evidence
 of non-use, not evidence that the upstream representation is unnecessary.
 
-### R2-G01: select exactly one behavioral structural unit
+### R2-B01: three independent behavioral units
 
-R2-G01 is not chosen by preference.  It is selected by the paired results.
+The local source candidate now contains the following three independently
+revertible semantic units in order. Their forward/reverse audits and focused
+tests are closed; commit boundaries and any push remain pending. They share one
+later training run but no parameter, loss term or semantic claim.
 
-#### Branch A: P2 time-allocation repair
+#### R2-WG01: target-scale-covariant camera transport supervision
 
-Select this branch when all of the following hold:
+Source diagnosis:
 
-1. W retains nontrivial interval variation;
-2. far action bands do not use a meaningfully different interval distribution
-   from near bands, or later-interval values have materially less far-gripper
-   effect than earlier-interval values;
-3. the same paired intervention localizes the deficit to P2 rather than to a
-   downstream gripper branch;
-4. arm improvement cannot explain away the gripper-specific far deficit.
+- W2 geometry hidden state is active and interval-varying;
+- the transport head operates near zero rather than in tanh saturation;
+- transport uses raw small-coordinate SmoothL1 while semantic uses raw,
+  target-scale-normalized and directional error;
+- the learned output remains near one third of Teacher and geometry boundary
+  VJP is roughly `40-45x` below semantic;
+- A01 shows that the resulting small geometry value is almost action-inert.
 
-The later implementation worksheet must preserve R1f spatial ownership:
+Authorized edit:
 
-- K and K*C are still removed separately inside every physical interval;
-- I remains explicit until the action-query terminal;
-- semantic and geometry remain complementary, independently surviving values;
-- no hard row-to-interval mask, forced monotonic schedule, learned null, type
-  competition, entropy target or far-interval gain is allowed;
-- any new time relation must be a soft, reversible residual around the existing
-  terminal and must have an identity/zero initialization path;
-- the repair changes only the action-time/World-interval relation, not W
-  prediction, S relevance, P3 amplitude or the action codec.
+- use the existing exact-zero, target-scale-covariant
+  `row_loss(..., scale_floored=True)` for transport common and interval
+  innovation;
+- keep `0.55/0.15/0.05`, outer `future_dynamics=0.10`, Teacher targets,
+  camera support, W forward algebra, covariance and P2 unchanged;
+- retain an audit-only raw-coordinate transport term so the change of formal
+  loss units is explicit in JSONL rather than hidden by the old metric name.
 
-The exact relation is deliberately not frozen in this plan.  It will be chosen
-from the measured failure (missing horizon differentiation versus wrong value
-ownership), then audited as its own semantic unit.
+This is mathematically an effective rescaling, but it is derived from each
+Teacher target scale with the existing smooth floor; it is not a manually
+chosen geometry gain or a prediction-amplitude target. Prediction equal to
+target still has exact zero loss, including a legal zero target. The edit adds
+no parameter, buffer, runtime call or checkpoint tensor.
 
-#### Branch B: continuous gripper transition-to-hold closure
+Acceptance is relational: transport prediction/Teacher ratio and geometry
+common/interval VJPs should recover from R1 without semantic, covariance or
+task behavior collapsing. No fixed ratio is placed in the objective.
 
-Select this branch only if P2 demonstrates real, correctly localized far
-evidence but post-event state still fails.
+#### R2-P202: stage-private physical-terminal query
 
-The branch diagnosis uses the two existing deployed coordinates:
+Source diagnosis:
 
-- absolute good / cumulative delta bad: do not increase delta authority;
-- cumulative delta good / absolute bad: investigate the fixed decode and
-  absolute-state carrier;
-- both good but blend bad: the fusion itself is the candidate;
-- both bad after events: the shared action representation, not codec blending,
-  is the candidate;
-- event logits improve while neither deployed branch improves: event ownership
-  is not closed.
+- R1f correctly separates spatial selection from physical-I termination in
+  tensor axes, but both stages call the same two `source_query` projections;
+- spatial K/K*C addressing and temporal I removal therefore update one
+  parameter owner despite having different candidate axes and meanings;
+- A01 proves that the current terminal has useful semantic behavior, so its
+  scores, supports, no-null rule and values must not be replaced by a schedule.
 
-Any repair must keep continuous value primary and may not use a hard event
-gate, hard open/closed state, mandatory event quota or direct F1 optimization.
-The final event head may remain a probe, or it may share a gripper-specific
-latent with deployed value/delta heads, but it cannot be called a control owner
-unless the deployed continuous field actually consumes the shared state.
+Authorized edit:
 
-Do not import the historical Parseval gripper field or change the global
-`0.75/0.25` blend in this first branch merely because those donors exist.  A
-codec change requires its own projection, target, decode, loss, optimizer,
-checkpoint and deployment worksheet.
+- retain `source_query` exclusively for spatial semantic K and geometry K*C;
+- add two `terminal_query` bias-free linear projections as a `deepcopy` of the
+  corresponding spatial projections, consuming no new initialization RNG;
+- use `terminal_query` only in `temporal_terminal` and keep selected W key,
+  S's zero-preserving conditioner, bounded temperatures, support, posterior
+  and value contraction byte-for-byte otherwise unchanged.
 
-#### Branch C: one P3 optional-lane repair
+At construction, spatial and terminal projections are exactly equal and the
+complete P2 forward is exactly the R1 function. Training may separate them
+without a hard row-to-interval mask, monotonic prior, entropy quota, learned
+null, type competition or interval gain. The action query still receives both
+reverse paths, while each projection receives only its named stage gradient.
 
-Select this branch only if a matched post-route lane intervention improves
-far/post-event gripper error on the same rows without merely suppressing all
-action, and P2/event diagnostics do not already explain the failure.
+Add JSONL-only output-VJP metrics for the spatial and terminal query tensors
+and a detached projection-delta RMS. Tests must prove initialization identity,
+stage-local parameter VJPs, retained K/K*C/I axes, semantic/geometry
+independence, all-invalid zero and unchanged A01 intervention locality.
 
-The permitted unit is one lane's value or one aggregate-sum boundary.  It may
-not combine:
+#### R2-GRIP02: continuous gripper-private state closure
 
-- lane deletion;
-- a new RMS target;
-- restored `/sqrt(2)` divisors;
-- a restored `0.05` multiplier;
-- a bottom write-scale change.
+Source diagnosis:
 
-Those are separate hypotheses and remain separate versions.
+- value, delta and four auxiliary field heads are independent projections of
+  the same general action token;
+- the supervised final event head is a sibling projection and its logits never
+  enter the physical field;
+- both deployed value and cumulative-delta branches fail before fusion, while
+  event-related rows dominate error;
+- the action-consumed frozen layer-contract event readout is a different
+  rollout evidence object and is not the supervised gripper event owner.
 
-#### No-branch outcome
+Authorized edit inside the active `ActionOnlyPhysicalVelocityHead`:
 
-If none of the three branches meets its gate, R2 training does not start.  The
-correct result is an unresolved attribution report, not a speculative bundle.
+```text
+base_state = action_token
+base_read = existing_velocity_norm(base_state)
+gate = tanh(bias_free_gate(base_read))
+gripper_state = base_state + base_state * gate
+gripper_read = existing_velocity_norm(gripper_state)
+```
 
-### R2-K01: artifact selection without objective hardening
+The new gate weight is exact zero at construction and its constructor must
+leave the existing initialization RNG stream unchanged. The multiplicative
+form bounds each relative coordinate factor to `[0,2]` and cannot create a
+state from an exact-zero token.
 
-Keep the existing `best.pt` criterion and `latest.pt`.  Add one parallel
-`best_gripper_tail.pt`, selected by
-`validation_gripper_band_13_24_rmse_physical`.  It is a candidate artifact, not
-the sole declaration of model quality.
+- arm absolute/delta and the four non-deployed auxiliary gripper heads continue
+  to read `base_read`;
+- deployed gripper value and adjacent-delta heads read `gripper_read`;
+- the supervised final event head reads the exact same raw `gripper_state`
+  through its own existing normalization;
+- the active Schema25 profile is the six-channel `legacy_handcrafted` branch;
+  the shared head's inactive `parseval_temporal` branch must remain valid by
+  routing its sole native gripper read through `gripper_read`, with the same
+  zero-gate identity;
+- the motion head, layer-contract rollout event source, six-channel targets,
+  formal losses, event threshold, five-step sampler and `0.75/0.25` decode stay
+  unchanged.
 
-At run completion compare at least:
+The shared state, not the event logits, is the continuous control owner. At
+zero gate the complete physical field and event logits equal R1 exactly. The
+event loss can subsequently shape a state that is physically consumed by
+value/delta without imposing an event gate or binary gripper state. Candidate
+execution-value calls must pass through the same velocity-head state; the two
+final event-head call sites must consume the state returned by that same head
+rather than recompute an alternate branch.
 
-- ordinary `best.pt`;
-- `best_gripper_tail.pt`;
-- `latest.pt`.
+Add JSONL-only gate RMS, state-delta RMS and state VJP. Tests must prove zero
+initial identity; nonzero gate locality to value/delta/event only; arm,
+auxiliary and motion invariance; decoded continuous reachability; candidate
+execution-path coverage; and finite reverse gradients from flow, decoded,
+delta-consistency and event losses.
 
-Decoded event F1 must not select a checkpoint by itself.  If task rollout
-evaluation is available later, it adjudicates among these candidates; no
-weighted scalar composite is invented in R2.
+#### Combined identity and rollback
 
-## 6. Implementation boundary for the diagnostic phase
+Measured parameter delta is three bias-free `512x512` matrices: two P2 terminal
+queries and one gripper gate, `+786,432` trainable parameters and `+3` state
+keys. Optimizer group count remains `23`; the P2 tensors belong to
+`p2_effect_reader` and the gate to `bottom_heads`.
 
-Expected behavior-preserving files:
+The top, bottom and training component ABI strings and active-source digest
+must change. Exact R1 resume and bottom-only migration are rejected because
+the bottom ABI changes; R2 starts fresh. Capability schema remains the adopted
+Schema25 replay lineage. Each commit remains independently revertible even
+though the formal run uses their ordered combination.
 
-- `clearvla/mainline/runtime/evaluation.py`
-- `clearvla/mainline/runtime/sampling.py` only if the accumulator needs an
-  explicit field/codec view; no sampler math changes
-- `clearvla/mainline/model/compiler.py` for posterior diagnostics and a
-  test-only/eval-only intervention seam
-- `clearvla/mainline/model/restored_bottom.py`
-- `clearvla/mainline/v120_core/time_domain_mmdit.py` for post-route/event-source
-  eval interventions
-- `clearvla/mainline/train.py` for bounded aggregation and the additional
-  candidate checkpoint
-- `clearvla/mainline/runtime/logging.py` for a bounded console panel
-- focused tests for accounting, matched noise, algebraic zero and no-forward
-  guarantees
+### R2-K01: checkpoint selection stays out of the source candidate
 
-No other production module enters R2-D01/A01 without reopening this plan.
-In particular, the data sampler, event threshold, loss weights, physical codec,
-W producer and Teacher target are outside the diagnostic edit boundary.
+Keep the existing `best.pt` criterion and `latest.pt`; do not add
+`best_gripper_tail.pt` in the same source version.  The late-gripper blind spot
+is real, but a new selector would be a fourth decision with its own artifact
+semantics.  During R2 review, evaluate both existing artifacts against the same
+full validation table and task rollout when available.  Decoded event F1, far
+gripper RMSE and the seven-dimensional average are reported separately; no one
+metric and no invented weighted composite declares model quality by itself.
+
+## 6. Behavioral implementation boundary
+
+The authorized production boundary is deliberately narrow and split by unit:
+
+- `clearvla/mainline/training/losses.py`: R2-WG01 changes only the transport
+  common/innovation row-loss geometry and adds a raw-coordinate audit term;
+- `clearvla/mainline/model/compiler.py`: R2-P202 adds the copied terminal query,
+  routes only physical-I termination through it and emits bounded query-stage
+  diagnostics;
+- `clearvla/mainline/v120_core/decoder.py`: R2-GRIP02 owns construction of the
+  exact-zero gate and one canonical field-plus-gripper-state readout;
+- `clearvla/mainline/v120_core/time_domain_mmdit.py`: every candidate velocity
+  call uses that canonical readout, while both final event-head call sites use
+  the returned gripper state; motion continues to read the original action
+  state;
+- `clearvla/mainline/manifest.py`: update only the top, bottom and training
+  component ABI identifiers required by the three changed semantics;
+- `clearvla/mainline/runtime/logging.py` registers only the
+  `gripper_private_` scalar prefix needed to archive the named GRIP02 health
+  fields; the other new keys already use active prefixes and no new console
+  panel is added;
+- focused tests cover exact initialization identity, axes/support, stage-local
+  gradients, alternate call sites, optimizer ownership and checkpoint/state
+  inventory before the retained mainline suite is run.
+
+Explicitly outside the boundary are observation, grounding, S, the W forward
+producer, Teacher association and targets, P1, P3, the layer-contract rollout
+event readout, the physical codec, data sampler, event target/threshold,
+sampler fractions, execution policy, loss coefficients, checkpoint selector
+and configuration surface.  Any need to edit one of those reopens the plan
+instead of being absorbed as a convenience fix.
+
+### 6.1 Test-first closure
+
+The implemented guards and independently checked boundaries are:
+
+| Unit | Test/check location | Closed assertions |
+|---|---|---|
+| R2-WG01 | `tests/test_mainline_structural_contracts.py` | supported matching and unsupported rows remain exact zero; the covariant term owns backward; the R1 raw-coordinate term is detached and explicit |
+| R2-P202 | `tests/test_mainline_structural_contracts.py` | copied spatial/terminal weights are exact; spatial-only loss reaches only `source_query`; terminal-only loss reaches only `terminal_query`; inherited axis/support tests remain green |
+| R2-GRIP02 | `tests/test_mainline_policy.py` | zero-gate full-field identity; forced-gate locality to deployed gripper coordinates; event-to-gate reachability; arm/auxiliary/motion isolation; both active final call sites use the shared state helper |
+| ABI | `tests/test_mainline_manifest.py` | only top, bottom and training component identities change; observation/runtime and capability schema remain unchanged |
+| Combined | production inventory plus retained optimizer/checkpoint tests | exact `+786,432`/three-key delta, 23 optimizer groups, unchanged construction RNG and rejection of incompatible old ABI |
+
+The bounded training keys are implemented as:
+
+```text
+loss_future_transport_raw_coordinate
+gradient_tensor_p2_spatial_query_rms
+gradient_tensor_p2_terminal_query_rms
+object_p2_terminal_query_delta_rms
+gripper_private_gate_rms
+gripper_private_state_delta_rms
+gradient_tensor_gripper_private_state_rms
+```
+
+They are scalar JSONL fields.  They add no target, loss term, stop criterion,
+console matrix or checkpoint buffer.  The raw-coordinate transport scalar
+reuses the raw row error already computed inside the target-scale-covariant
+objective, so it does not launch a duplicate loss calculation.  The remaining
+six state/VJP scalars run only under the existing diagnostic flag: every 20
+formal training batches, with state/projection scalars also retained on the
+configured 16 validation batches; VJP hooks attach only during training.
+They request no extra forward, sampling replay or high-dimensional tensor dump.
 
 ## 7. Verification and acceptance
 
@@ -545,33 +731,46 @@ Release-blocking checks:
   decode at the configured weights;
 - P2 band/type/interval masses sum to one on supported rows and zero on
   unsupported rows;
-- P3 post-route lane sum reconstructs the current aggregate routed value;
 - disabled intervention paths are exact identity;
 - matched interventions reuse the primary initial physical noise;
-- focused tests, retained mainline suite, compileall, Ruff, Pyright and
-  `git diff --check` pass.
+- focused tests, retained mainline suite, touched-file Ruff, compileall and
+  `git diff --check` pass; changed production ranges introduce no new Pyright
+  error. The repository-wide static wrapper remains red on the pre-existing
+  broad Ruff/Pyright baseline and is not repaired by unrelated R2 edits.
 
 ### 7.2 Behavioral R2 run
 
-Before the one formal run, record an R1 checkpoint baseline for every new
-metric on the identical validation rows and noise.  Success is relational:
+Before the one formal run, record the R1 checkpoint value for every metric with
+an R1 analogue on identical rows/noise, and record all zero-initialized R2
+identity metrics before the first update.  Success is relational:
 
-- the selected causal statistic must move in the intended direction;
-- physical gripper RMSE in rows 13-24 and post-event far bins must improve over
-  the paired R1 checkpoint;
-- the improvement cannot be only a higher event F1 or a lower global average;
-- arm RMSE and near-band gripper must remain explicit guards;
-- predicted event count/target ratio and timing must rule out a trivial
-  over-triggering win;
-- the selected structural path must have nonzero paired action effect in the
-  region it claims to repair.
+- physical gripper RMSE in rows 13-24 and the far action-band event-context
+  cells must improve over R1; full gripper RMSE must also improve rather than
+  trading all hold rows for a narrow event win;
+- arm RMSE and rows 1-4 gripper RMSE are explicit guards; the improvement cannot
+  be only a lower global average or a larger decoded-event F1;
+- predicted event count/target ratio, precision/recall and timing must rule out
+  a trivial over-triggering win;
+- R2-WG01 must increase useful transport learning relative to Teacher and its
+  common/interval boundary VJPs without collapsing semantic, covariance,
+  camera support or task behavior; the raw-coordinate audit remains finite;
+- R2-P202 must show gradients in both spatial and terminal query owners, a
+  finite learned projection delta after their exact-copy start, and retained
+  useful far semantic value attribution; no required interval mass is imposed;
+- R2-GRIP02 must show a nonzero but finite bounded gate, a physically consumed
+  state with gradients from continuous and event losses, and improvement in
+  both deployed branch tables before interpreting the fixed blend;
+- all three all-invalid/exact-zero identities, tensor axes and alternate
+  consumer paths must remain closed in validation and checkpoint inventory.
 
 Do not stop a healthy run from one early noisy event-F1 movement.  Hard stops
-remain non-finite values, broken invariants, missing gradients on the selected
-unit, exact identity of a path that was supposed to be active, or a repeated
-paired anti-effect after the pre-registered evaluation gate.  Numerical stop
-thresholds belong in the selected unit's implementation protocol after the R1
-baseline distribution is measured; they are not guessed here.
+remain non-finite values, broken identities, missing gradients after the
+pre-registered initial window, an intended trainable path remaining exact
+identity, or repeated paired anti-effect at two consecutive pre-registered
+validation gates.  A single metric miss identifies a unit for rollback; it
+does not retroactively merge the three causal claims.  Numerical thresholds
+are fixed in the run protocol from the R1 distribution before launch, not
+invented while watching R2.
 
 ## 8. Explicit non-goals and anti-hardening rules
 
@@ -581,53 +780,68 @@ R2 does not authorize:
 - a binary open/closed target replacing continuous gripper state;
 - a required event frequency, entropy target or attention quota;
 - a hard chronological P2 mask or a fixed "far row -> interval 3" schedule;
-- increasing interval-3, state-change, gripper-delta or event loss gain because
-  its current magnitude looks small;
-- changing the six-channel codec before branch diagnostics;
-- changing sampler fractions, event threshold and objective weights in the
-  same run as a structural unit;
+- increasing interval-3, state-change, gripper-delta, event, geometry-output or
+  P2 gains because a current magnitude looks small;
+- changing the six-channel codec, fixed decode, sampler fractions, event
+  threshold or objective coefficients;
+- interpreting R2-WG01's target-scale-covariant error as permission to add a
+  manual geometry gain or an amplitude target;
+- allowing the copied P2 terminal query to acquire a time prior, row schedule,
+  null bypass or shared-gradient shortcut;
+- letting event logits gate the field, or letting the new gripper state leak
+  into arm, auxiliary gripper or motion heads;
 - restoring every historical gripper donor as a bundle;
+- adding a new checkpoint selector in the same source version;
 - using aggregate normalized RMSE or event F1 as the sole success criterion;
 - retaining high-cardinality console rows that already exist in JSONL.
 
-## 9. Unresolved assumptions to close before behavioral implementation
+## 9. Closed implementation assumptions and remaining behavioral uncertainty
 
-1. Does the P2 interval posterior differ by action band and type at deployment?
-2. Which W interval values causally change far gripper versus far arm output?
-3. Is the late gripper error carried by the absolute branch, cumulative-delta
-   branch, or their fixed fusion?
-4. Does post-event error grow with distance from the latest event?
-5. Does the projected layer-contract event source have gripper-specific action
-   effect, generic action effect, or no effect?
-6. Do P3 temporal and state-change reinforce, cancel, or act on different
-   horizons after routing?
-7. Which epoch would the gripper-tail checkpoint select relative to ordinary
-   `best.pt` and `latest.pt`?
+The implementation-local assumptions are closed:
 
-Until these are answered, the only authorized work is R2-D01/A01 planning,
-implementation and validation on the existing checkpoint.  The answer to the
-gate, not the size of the source diff, determines the one behavioral R2 unit.
+1. WG01 reuses the existing smooth target-scale floor, keeps supported
+   exact-match and unsupported rows at exact zero, and exposes the R1 raw loss
+   only as a detached audit.
+2. `terminal_query` is an exact construction-time tensor copy, leaves the
+   inherited RNG stream unchanged and receives only physical-I terminal
+   gradients; `source_query` receives only spatial K/K*C gradients.
+3. The zero gripper gate preserves the inherited field exactly. The canonical
+   velocity helper is used by every final and candidate call; a nonzero gate can
+   affect only deployed gripper value/delta and the final event state.
+4. The final event head receives the same raw gripper-private state whose
+   normalized view reaches value/delta. Arm, four auxiliary gripper coordinates
+   and motion retain the R1 source.
+5. The measured delta is exactly `+786,432`, three state keys and no optimizer
+   group or post-construction RNG change; component ABI and manifest digest are
+   updated accordingly.
+
+One unresolved limitation remains behavioral: the combined formal run cannot
+independently estimate each unit's task-level counterfactual. Separate semantic
+units, per-unit health fields and reversible source identities preserve
+diagnosis, but a later ablation is required only if two units move in opposing
+directions. This is an explicit experiment-budget limitation, not a claim of
+causal separability from the combined run.
 
 ## 10. Immediate execution sequence
 
-1. **Complete:** write the R2-D01 boundary and first observation slice from the
-   exact active source.
-2. **Complete:** implement P2 band/type/I and gripper band/post-event
-   validation with behavior-invariance tests, plus a source-delta-bounded
-   read-only existing-checkpoint validation entry point.
-3. **Complete:** run the first full validation pass on the existing R1
-   checkpoint and establish that the marginal observation is not yet
-   decision-complete.
-4. **Complete in source; validation pending:** close the full A01 boundary,
-   implement only the matched P2 interval-value seam plus codec-branch and
-   `action-band x event-context` attribution, and preserve the same primary
-   physical noise/cache for every counterfactual.
-5. **Next:** rerun one read-only full validation pass on the existing R1
-   checkpoint; no training, then produce a short decision table selecting P2,
-   continuous gripper/event, one
-   P3 lane, or no branch.
-6. Write and review the selected behavioral unit's complete forward/backward
-   worksheet.
-7. Implement that one unit plus `best_gripper_tail.pt`.
-8. Run the retained test matrix, then request authorization for the single R2
-   formal training run.
+1. **Complete:** implement and validate the behavior-preserving D01/A01 surface
+   on the exact R1 checkpoint, including matched P2 values, codec branches and
+   `action-band x event-context` attribution.
+2. **Complete:** map geometry, P2 and gripper independently from producer through
+   every transformation, consumer, loss, optimizer, checkpoint owner,
+   repetition site, reverse path and legal bypass.
+3. **Complete:** translate the implementation assumptions into focused identity,
+   ownership, gradient, axis and inventory guards.
+4. **Complete locally:** implement R2-WG01 and repeat its forward/reverse audit.
+5. **Complete locally:** implement R2-P202 and repeat its forward/reverse audit.
+6. **Complete locally:** implement R2-GRIP02 and inspect every active
+   velocity/event consumer in dynamic and fallback paths.
+7. **Complete:** finish the final touched-file static checks, retained suite,
+   exact diff review and documentation closure.
+8. **Authorized:** create the reversible R2 semantic commit identity and push
+   it to `codex/schema25-r1-replay`.
+9. **Complete local substitute:** run one fresh CPU BF16 training batch plus
+   the retained five-step deployment guard. A separate remote smoke is
+   temporarily unavailable by explicit user decision; therefore the formal
+   run must treat its preflight and first reporting window as the CUDA
+   runtime/memory gate. Do not insert an old-checkpoint experiment before it.
