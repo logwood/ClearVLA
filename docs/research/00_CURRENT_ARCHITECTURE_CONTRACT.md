@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R2 WG01/P202/GRIP02 locally closed; 168 retained tests plus a fresh one-batch CPU BF16 smoke and five-step deployment guard pass; no R2 GPU smoke or formal behavior run yet
+release status:         Schema25-R2 WG01/P202/GRIP02 locally closed; 168 retained tests plus a fresh production-dimension one-batch CPU BF16 smoke and five-step deployment guard pass; no R2 GPU smoke or formal behavior run yet
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -798,13 +798,14 @@ run only on the existing diagnostic cadence. State/projection scalars use every
 20th formal training batch and the configured 16 validation batches; VJP
 scalars attach only to those training diagnostic batches. They add no tensor
 dump, extra forward/sampling pass or console panel. A fresh local one-batch CPU
-BF16 forward/backward and the retained five-step deployment guard pass. The
-complete source graph is locally closed, but no R2 GPU smoke or behavioral
-experiment has run. On 2026-08-28 the user explicitly authorized the local
-guard as the temporary substitute because a separate remote smoke was not
-available. This does not establish CUDA memory or throughput: the formal run's
-startup and first reporting window must enforce those runtime gates under the
-following production acceptance:
+BF16 forward/backward at the complete production dimensions (`H=512`, 256
+patches per camera, 169,199,006 parameters) and the retained five-step
+deployment guard pass. The complete source graph is locally closed, but no R2
+GPU smoke or behavioral experiment has run. On 2026-08-28 the user explicitly
+authorized the local guard as the temporary substitute because a separate
+remote smoke was not available. This does not establish CUDA memory or
+throughput: the formal run's startup and first reporting window must enforce
+those runtime gates under the following production acceptance:
 
 - finite CUDA BF16 preflight and five-step deployment before the first update;
 - batch-eight process peak no greater than 22 GiB;

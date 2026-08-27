@@ -41,9 +41,15 @@ optimizer groups and 1,395 state keys. Relative to R1 the delta is exactly
 digest remains
 `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
 The retained suite passes `168/168`; focused Ruff, compileall and diff checks
-pass. A fresh one-batch CPU BF16 forward/backward (5.97 seconds locally) and
-the retained five-step deployment guard pass. These are implementation
-guards, not CUDA-memory, throughput or formal R2 behavior evidence.
+pass. A fresh one-batch CPU BF16 forward/backward at the complete production
+dimensions (`H=512`, 256 patches/camera, 169,199,006 parameters) completed in
+109.58 seconds locally with finite loss `3.18999` and finite pre-clip gradient
+`4.22802`; all seven new scalar fields were present and finite. The retained
+five-step deployment guard also passes. First-forward spatial/terminal P2 VJPs,
+query delta and gripper gate/state delta were exact zero at the inherited
+zero-value/exact-copy/zero-gate initialization, while the gripper-private state
+VJP was nonzero (`4.94517e-6`). These are implementation guards, not
+CUDA-memory, throughput or formal R2 behavior evidence.
 
 This document records the source derivation and execution contract for the next
 version after the completed Schema25 R1 replay and its first formal run. The
@@ -840,8 +846,9 @@ causal separability from the combined run.
    exact diff review and documentation closure.
 8. **Authorized:** create the reversible R2 semantic commit identity and push
    it to `codex/schema25-r1-replay`.
-9. **Complete local substitute:** run one fresh CPU BF16 training batch plus
-   the retained five-step deployment guard. A separate remote smoke is
-   temporarily unavailable by explicit user decision; therefore the formal
-   run must treat its preflight and first reporting window as the CUDA
-   runtime/memory gate. Do not insert an old-checkpoint experiment before it.
+9. **Complete local substitute:** run one fresh production-dimension CPU BF16
+   training batch plus the retained five-step deployment guard. A separate
+   remote smoke is temporarily unavailable by explicit user decision;
+   therefore the formal run must treat its preflight and first reporting
+   window as the CUDA runtime/memory gate. Do not insert an old-checkpoint
+   experiment before it.
