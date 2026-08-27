@@ -19,12 +19,13 @@ Schema25 replay worktree.
 | LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md | Exact-zero audit and deletion closure for inherited terminal layer-contract trajectory aliases |
 | R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md | FP32 measure/log support, zero-preserving address variance and read-only diagnostics for the final replay slice |
 | SCHEMA25_BASE_VERSION_CARD.md | Closed source/behavior audit of the fixed base |
+| SCHEMA25_R2_SOURCE_DERIVED_IMPROVEMENT_PLAN.md | Source-first next-version gate: bounded validation, matched interventions and exactly one later behavioral repair |
 | ARCHITECTURE_REPLAY_LEDGER.md | Historical donor evidence; not implementation authority |
 | ACTIVE_MAINLINE_HANDOFF.md | Frozen Schema39 diagnostic context; not the active replay graph |
 
 The executable source is the exact Schema25 base plus completed R1a/G-01
 through R1h/N-01,D-01 slices and the LC-01 exact-zero deletion recorded above.
-The R1 source candidate is statically closed; no training run has occurred and
-the formal-run boundary still requires separate authorization. Historical
-documents and the user-supplied external protocol do not override the active
-source or authorize later mechanics.
+The R1 source candidate is statically closed and one formal run has reached
+epoch 8.  Its behavior is observational evidence for the prospective R2 plan;
+it does not authorize later mechanics. Historical documents and the
+user-supplied external protocol do not override the active source.

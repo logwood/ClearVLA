@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
+from .action_codec import ACTION_BAND_ENDS
 from .routing import (
     PolicyRoleDeltaBank,
     register_gradient_axis_rms_metrics,
@@ -170,6 +171,84 @@ class ObjectFutureEffectReader(nn.Module):
         return value_f / (
             value_f.square().sum(dim=-1, keepdim=True) + float(norm_floor) ** 2
         ).sqrt()
+
+    @classmethod
+    def _temporal_posterior_band_metrics(
+        cls,
+        posterior: Tensor,
+        interval_support: Tensor,
+    ) -> dict[str, Tensor]:
+        """Describe the physical-I posterior without removing T or type first.
+
+        ``posterior`` is the already executed terminal measure
+        ``[B,T,Q,I,type]``.  Metrics are conditional on a sample having at
+        least one observable interval for the requested type; the companion
+        support fraction distinguishes an unavailable type from a real
+        interval-0 selection.  No value is fed back into the forward path.
+        """
+
+        if posterior.ndim != 5:
+            raise ValueError("P2 temporal posterior must be [B,T,Q,I,type]")
+        batch, horizon, basis, intervals, types = posterior.shape
+        if horizon != ACTION_BAND_ENDS[-1]:
+            raise ValueError("P2 temporal diagnostics require the 24-row action horizon")
+        if intervals != 4 or types != len(cls.TYPE_NAMES):
+            raise ValueError("P2 temporal diagnostics require four intervals and two types")
+        if tuple(interval_support.shape) != (batch, intervals, types):
+            raise ValueError("P2 temporal support must be [B,I,type]")
+        if interval_support.dtype != torch.bool:
+            raise TypeError("P2 temporal support must be boolean")
+        if batch < 1 or basis < 1:
+            raise ValueError("P2 temporal diagnostics require non-empty batch and basis axes")
+
+        posterior_f = posterior.detach().float()
+        type_support = interval_support.any(dim=1)
+        interval_index = torch.arange(
+            intervals,
+            device=posterior.device,
+            dtype=torch.float32,
+        )
+        metrics: dict[str, Tensor] = {}
+        band_distributions: dict[str, list[Tensor]] = {
+            name: [] for name in cls.TYPE_NAMES
+        }
+        start = 0
+        for end in ACTION_BAND_ENDS:
+            band_name = f"{start + 1}_{end}"
+            band_rows = end - start
+            for type_index, type_name in enumerate(cls.TYPE_NAMES):
+                active = type_support[:, type_index]
+                denominator = active.float().sum() * float(band_rows * basis)
+                mass = posterior_f[
+                    :, start:end, :, :, type_index
+                ].sum(dim=(0, 1, 2)) / denominator.clamp_min(1.0)
+                band_distributions[type_name].append(mass)
+                for interval_index_value in range(intervals):
+                    metrics[
+                        f"object_p2_{type_name}_band_{band_name}_interval_"
+                        f"{interval_index_value}_mass"
+                    ] = mass[interval_index_value]
+                metrics[
+                    f"object_p2_{type_name}_band_{band_name}_expected_interval"
+                ] = (mass * interval_index).sum()
+            start = end
+
+        for type_index, type_name in enumerate(cls.TYPE_NAMES):
+            metrics[f"object_p2_{type_name}_temporal_support_fraction"] = (
+                type_support[:, type_index].detach().float().mean()
+            )
+            distributions = band_distributions[type_name]
+            # One compact differentiation scalar: mean total variation over
+            # the three unordered pairs of action-horizon bands.
+            pairwise_total_variation = [
+                0.5 * (distributions[left] - distributions[right]).abs().sum()
+                for left in range(len(distributions))
+                for right in range(left + 1, len(distributions))
+            ]
+            metrics[
+                f"object_p2_{type_name}_band_pair_total_variation"
+            ] = torch.stack(pairwise_total_variation).mean()
+        return metrics
 
     @staticmethod
     def _covariance_aware_distance(delta: Tensor, covariance: Tensor) -> Tensor:
@@ -546,6 +625,16 @@ class ObjectFutureEffectReader(nn.Module):
             .amax(),
         }
         metrics.update(gradient_metrics)
+        # The band matrix is a deployment-path validation diagnostic.  A
+        # training flow-time posterior has a different conditioning point and
+        # would create a misleading second semantic under the same name.
+        if not self.training:
+            metrics.update(
+                self._temporal_posterior_band_metrics(
+                    posterior,
+                    selected.support,
+                )
+            )
         interval_mass = posterior.detach().float().mean(dim=4)
         for index in range(intervals):
             metrics[f"object_p2_interval_{index}_mass"] = interval_mass[

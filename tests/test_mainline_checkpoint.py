@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,7 +17,9 @@ from clearvla.mainline.checkpoint import (
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.manifest import manifest_from_mapping
 from clearvla.mainline.runtime.checkpoints import (
+    VALIDATION_REPLAY_SOURCE_PATHS,
     load_checkpoint_exact,
+    load_checkpoint_for_validation,
     migrate_bottom_only,
     save_checkpoint,
 )
@@ -255,6 +258,144 @@ def test_exact_resume_restores_owned_generator_states(tmp_path: Path) -> None:
     assert torch.equal(torch.rand(4, generator=shuffle), expected[0])
     assert torch.equal(torch.rand(4, generator=flow), expected[1])
     assert torch.equal(torch.rand(4, generator=condition_generator), expected[2])
+
+
+def test_validation_replay_allows_only_source_identity_drift(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal.pt"
+    condition.write_bytes(b"t5-condition")
+    config = ExperimentConfig()
+    saved_identity = build_checkpoint_identity(
+        config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=ArtifactIdentity.from_file("t5_goal", condition),
+        commit="1" * 40,
+    )
+    rows = list(saved_identity.source.files)
+    allowed_path = "clearvla/mainline/runtime/checkpoints.py"
+    assert allowed_path in VALIDATION_REPLAY_SOURCE_PATHS
+    allowed_index = next(index for index, row in enumerate(rows) if row[0] == allowed_path)
+    rows[allowed_index] = (
+        allowed_path,
+        hashlib.sha256(b"observation-only-edit").hexdigest(),
+    )
+    source_rows = tuple(rows)
+    source_digest = hashlib.sha256(
+        json.dumps(
+            source_rows,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    validation_identity = replace(
+        saved_identity,
+        source=replace(
+            saved_identity.source,
+            files=source_rows,
+            digest=source_digest,
+        ),
+        git_commit="2" * 40,
+    )
+
+    source = torch.nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(source.parameters(), lr=1e-3)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    path = tmp_path / "validation.pt"
+    save_checkpoint(
+        path,
+        model=source,
+        optimizer=optimizer,
+        schedule=schedule,
+        config=config,
+        identity=saved_identity,
+        epoch=8,
+        global_step=0,
+        best_metric=0.2,
+    )
+    expected = {name: value.detach().clone() for name, value in source.state_dict().items()}
+    target = torch.nn.Linear(3, 2)
+    with torch.no_grad():
+        for parameter in target.parameters():
+            parameter.zero_()
+    restored = load_checkpoint_for_validation(
+        path,
+        model=target,
+        config=config,
+        identity=validation_identity,
+    )
+    assert restored.epoch == 8
+    assert restored.global_step == 0
+    assert restored.best_metric == 0.2
+    assert restored.changed_source_files == (allowed_path,)
+    assert restored.saved_source_digest == saved_identity.source.digest
+    assert restored.current_source_digest == validation_identity.source.digest
+    for name, value in target.state_dict().items():
+        assert torch.equal(value, expected[name])
+
+    rejected_identity = replace(
+        validation_identity,
+        dataset=replace(validation_identity.dataset, inventory_sha256="3" * 64),
+    )
+    live_before = {name: value.detach().clone() for name, value in target.state_dict().items()}
+    try:
+        load_checkpoint_for_validation(
+            path,
+            model=target,
+            config=config,
+            identity=rejected_identity,
+        )
+    except ValueError as error:
+        assert "dataset identity differs" in str(error)
+    else:
+        raise AssertionError("validation replay must reject non-source identity drift")
+    for name, value in target.state_dict().items():
+        assert torch.equal(value, live_before[name])
+
+    unexpected_rows = list(saved_identity.source.files)
+    unexpected_path = "configs/mainline/object_intent_dynamics_323.json"
+    unexpected_index = next(
+        index for index, row in enumerate(unexpected_rows) if row[0] == unexpected_path
+    )
+    unexpected_rows[unexpected_index] = (
+        unexpected_path,
+        hashlib.sha256(b"unexpected-source-edit").hexdigest(),
+    )
+    unexpected_source_rows = tuple(unexpected_rows)
+    unexpected_source_digest = hashlib.sha256(
+        json.dumps(
+            unexpected_source_rows,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    unexpected_identity = replace(
+        saved_identity,
+        source=replace(
+            saved_identity.source,
+            files=unexpected_source_rows,
+            digest=unexpected_source_digest,
+        ),
+    )
+    try:
+        load_checkpoint_for_validation(
+            path,
+            model=target,
+            config=config,
+            identity=unexpected_identity,
+        )
+    except ValueError as error:
+        assert "escapes the observation-only boundary" in str(error)
+        assert unexpected_path in str(error)
+    else:
+        raise AssertionError("validation replay must reject source drift outside its allow-list")
 
 
 def test_exact_resume_rejection_does_not_partially_mutate_live_model(tmp_path: Path) -> None:

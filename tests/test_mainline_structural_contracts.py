@@ -19,7 +19,11 @@ from clearvla.mainline.model.bottom import (
     ReadOnlyEvidenceMMDiTBlock,
     TypedEvidenceBank,
 )
-from clearvla.mainline.model.compiler import _safe_masked_softmax
+from clearvla.mainline.model.compiler import (
+    ObjectFutureEffectReader,
+    SelectedIntervalEvidence,
+    _safe_masked_softmax,
+)
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
 from clearvla.mainline.model.grounding import DenseObjectGrounder, dense_chart_from_local_facts
 from clearvla.mainline.model.intent import FuturePlanRecognizer
@@ -1831,6 +1835,116 @@ def test_p2_physical_terminal_has_no_null_or_type_competition() -> None:
         token in name
         for name, _ in reader.named_parameters()
         for token in ("null", "type_query", "type_gain")
+    )
+
+
+def test_p2_temporal_diagnostics_retain_band_type_and_interval_axes() -> None:
+    posterior = torch.zeros(2, 24, 2, 4, 2)
+    support = torch.zeros(2, 4, 2, dtype=torch.bool)
+    support[0, :, 0] = True
+    support[1, :, 1] = True
+    for start, end, semantic_interval, geometry_interval in (
+        (0, 4, 0, 3),
+        (4, 12, 1, 2),
+        (12, 24, 3, 0),
+    ):
+        posterior[0, start:end, :, semantic_interval, 0] = 1.0
+        posterior[1, start:end, :, geometry_interval, 1] = 1.0
+
+    metrics = ObjectFutureEffectReader._temporal_posterior_band_metrics(
+        posterior,
+        support,
+    )
+
+    assert metrics["object_p2_semantic_temporal_support_fraction"] == 0.5
+    assert metrics["object_p2_geometry_temporal_support_fraction"] == 0.5
+    expected = {
+        "semantic": {"1_4": 0, "5_12": 1, "13_24": 3},
+        "geometry": {"1_4": 3, "5_12": 2, "13_24": 0},
+    }
+    for type_name, bands in expected.items():
+        for band_name, selected_interval in bands.items():
+            mass = torch.stack(
+                [
+                    metrics[
+                        f"object_p2_{type_name}_band_{band_name}_interval_{index}_mass"
+                    ]
+                    for index in range(4)
+                ]
+            )
+            torch.testing.assert_close(mass.sum(), torch.ones(()))
+            torch.testing.assert_close(
+                mass,
+                torch.nn.functional.one_hot(
+                    torch.tensor(selected_interval),
+                    num_classes=4,
+                ).float(),
+            )
+            assert (
+                metrics[
+                    f"object_p2_{type_name}_band_{band_name}_expected_interval"
+                ]
+                == float(selected_interval)
+            )
+        assert metrics[f"object_p2_{type_name}_band_pair_total_variation"] == 1.0
+
+    unsupported = ObjectFutureEffectReader._temporal_posterior_band_metrics(
+        torch.zeros(1, 24, 2, 4, 2),
+        torch.zeros(1, 4, 2, dtype=torch.bool),
+    )
+    for type_name in ("semantic", "geometry"):
+        assert unsupported[f"object_p2_{type_name}_temporal_support_fraction"] == 0.0
+        assert unsupported[f"object_p2_{type_name}_band_pair_total_variation"] == 0.0
+        for band_name in ("1_4", "5_12", "13_24"):
+            assert sum(
+                unsupported[
+                    f"object_p2_{type_name}_band_{band_name}_interval_{index}_mass"
+                ]
+                for index in range(4)
+            ) == 0.0
+
+
+def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
+    torch.manual_seed(319)
+    reader = ObjectFutureEffectReader(hidden=4, content_dim=4, route_dim=4).eval()
+    action_query = torch.randn(1, 24, 2, 4)
+    key = torch.randn(1, 24, 2, 4, 2, 4)
+    common = torch.randn_like(key)
+    residual = torch.randn_like(key)
+    selected = SelectedIntervalEvidence(
+        key=key,
+        value=common + residual,
+        common_value=common,
+        residual_value=residual,
+        selected_s_context=torch.randn_like(key),
+        support=torch.ones(1, 4, 2, dtype=torch.bool),
+    )
+    state_names = tuple(reader.state_dict())
+    quiet, quiet_metrics = reader.temporal_terminal(
+        action_query,
+        selected,
+        collect_diagnostics=False,
+    )
+    observed, metrics = reader.temporal_terminal(
+        action_query,
+        selected,
+        collect_diagnostics=True,
+    )
+    assert torch.equal(observed, quiet)
+    assert quiet_metrics == {}
+    assert "object_p2_semantic_band_13_24_interval_3_mass" in metrics
+    assert tuple(reader.state_dict()) == state_names
+
+    reader.train()
+    training_output, training_metrics = reader.temporal_terminal(
+        action_query,
+        selected,
+        collect_diagnostics=True,
+    )
+    assert torch.equal(training_output, quiet)
+    assert not any("_band_" in name for name in training_metrics)
+    assert not any(
+        name.endswith("_temporal_support_fraction") for name in training_metrics
     )
 
 

@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; decision-bounded console with lossless JSONL; 156 retained mainline tests pass; no training run
+release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; R2-D01 first observation slice and read-only replay entry implemented; 161 retained mainline tests pass; existing-checkpoint R2 validation pending
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -24,6 +24,7 @@ formal language:        precomputed 4096-wide T5 .pt required
 bottom:                 V120 seed/transition/CVAE/workspace/Evidence MMDiT/execution
 long launcher:          scripts/train_mainline.sh (batch 8, workers 4)
 smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
+checkpoint validation: scripts/validate_mainline_checkpoint.sh (read-only; no optimizer/schedule/RNG load or checkpoint write)
 resolved config:        configs/mainline/object_intent_dynamics_323.json
 ```
 
@@ -56,7 +57,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > variance-to-standard-deviation paths zero preserving, retaining producer-owned
 > FP32 probability/log views through G-to-P2, and observing only live source
 > tensors and finite raw-gradient spikes.
-> No CUDA smoke, dataset access, checkpoint migration or training run has been
+> R1 has since completed its first formal run. R2-D01 adds observation only;
+> no R2 training, checkpoint-state change or behavioral repair has been
 > performed.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
@@ -707,7 +709,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 156/156. Tests cover full
+The retained local suite now passes 161/161. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -735,14 +737,18 @@ same-camera Teacher geometry, neutral effect, P2 bounds, zero-preserving
 variance VJPs, BF16-underflow-resistant producer logs, exact-zero legacy prior
 support, all-invalid finite masked terminals, read-only source-gradient hooks,
 pre-clip finite-spike attribution, partial-window gradient ownership, current
-metric vocabulary, a bounded decision-facing console backed by the unchanged
+metric vocabulary, P2 action-band/type/interval diagnostic retention,
+diagnostic output/state invariance, gripper horizon bands and target-event-
+relative persistence reset/count accounting, a bounded decision-facing console
+backed by the unchanged
 lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
 gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
-The complete R1 source graph is now statically closed. That closure does not
-itself authorize an experiment. A formal run still requires a separately
-approved immutable run context and the following production acceptance:
+The complete R1 source graph is statically closed and its first formal run has
+been audited. R2-D01 does not itself authorize another experiment. A formal R2
+run still requires a separately approved immutable run context and the
+following production acceptance:
 
 - fresh BF16 smoke and five-step deployment;
 - batch-eight process peak no greater than 22 GiB;

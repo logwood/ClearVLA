@@ -23,6 +23,15 @@ from ..config import ExperimentConfig, config_from_mapping
 from ..training.optimizer import WarmupCosineSchedule
 
 CHECKPOINT_SCHEMA = "clearvla-mainline-checkpoint-v4"
+VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/evaluation.py",
+        "clearvla/mainline/runtime/logging.py",
+        "clearvla/mainline/train.py",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,16 @@ class RestoredTrainingState:
     epoch: int
     global_step: int
     best_metric: float | None
+
+
+@dataclass(frozen=True)
+class ValidationReplayState:
+    epoch: int
+    global_step: int
+    best_metric: float | None
+    saved_source_digest: str
+    current_source_digest: str
+    changed_source_files: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -407,6 +426,107 @@ def load_checkpoint_exact(
     )
 
 
+def load_checkpoint_for_validation(
+    path: str | Path,
+    *,
+    model: nn.Module,
+    config: ExperimentConfig,
+    identity: CheckpointIdentity,
+) -> ValidationReplayState:
+    """Load a complete model for read-only validation after observation edits.
+
+    Exact resume deliberately rejects every active-source change.  A diagnostic
+    replay has a narrower exception: the manifest, resolved semantic config,
+    dataset, language artifact and complete model state ABI must still match,
+    while the active-source digest may differ.  Optimizer, schedule and RNG
+    state are never loaded, so this entry point cannot resume training or
+    mutate the serialized checkpoint.
+    """
+
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    if not isinstance(payload, Mapping) or payload.get("schema") != CHECKPOINT_SCHEMA:
+        raise ValueError(
+            "validation replay requires a v4 mainline checkpoint with complete input identity"
+        )
+    raw_config = payload.get("config")
+    raw_identity = payload.get("identity")
+    if not isinstance(raw_config, Mapping) or not isinstance(raw_identity, Mapping):
+        raise ValueError("validation replay checkpoint has no typed config/identity")
+    saved_config = config_from_mapping(raw_config)
+    saved_identity = checkpoint_identity_from_mapping(
+        raw_identity,
+        require_current_manifest=False,
+    )
+    report = compare_checkpoint_identity(saved_identity, identity)
+    rejected_reasons = tuple(
+        reason for reason in report.reasons if reason != "source identity differs"
+    )
+    if rejected_reasons:
+        raise ValueError("validation replay rejected: " + "; ".join(rejected_reasons))
+    if saved_config.digest(include_paths=False) != config.digest(include_paths=False):
+        raise ValueError("validation replay config differs from the checkpoint graph")
+    saved_sources = dict(saved_identity.source.files)
+    current_sources = dict(identity.source.files)
+    changed_source_files = tuple(
+        sorted(
+            path
+            for path in set(saved_sources).union(current_sources)
+            if saved_sources.get(path) != current_sources.get(path)
+        )
+    )
+    unexpected_source_files = tuple(
+        path
+        for path in changed_source_files
+        if path not in VALIDATION_REPLAY_SOURCE_PATHS
+    )
+    if unexpected_source_files:
+        raise ValueError(
+            "validation replay source drift escapes the observation-only boundary: "
+            + ", ".join(unexpected_source_files)
+        )
+
+    saved_model = payload.get("model")
+    if not isinstance(saved_model, Mapping):
+        raise ValueError("validation replay checkpoint has no model state mapping")
+    current_model = model.state_dict()
+    if set(saved_model) != set(current_model):
+        raise ValueError("validation replay model parameter ownership differs")
+    for name, current_value in current_model.items():
+        saved_value = saved_model[name]
+        if not isinstance(saved_value, torch.Tensor):
+            raise ValueError(f"model state {name!r} is not a tensor")
+        if tuple(saved_value.shape) != tuple(current_value.shape):
+            raise ValueError(f"model state {name!r} has an incompatible shape")
+        if saved_value.dtype != current_value.dtype:
+            raise ValueError(f"model state {name!r} has an incompatible dtype")
+        if (saved_value.is_floating_point() or saved_value.is_complex()) and not bool(
+            torch.isfinite(saved_value).all()
+        ):
+            raise ValueError(f"model state {name!r} is non-finite")
+    try:
+        restored_epoch = int(payload["epoch"])
+        restored_step = int(payload["global_step"])
+        restored_best = (
+            None if payload.get("best_metric") is None else float(payload["best_metric"])
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("validation replay scalar checkpoint state is invalid") from error
+    if restored_epoch < 0 or restored_step < 0:
+        raise ValueError("validation replay epoch/global step must be non-negative")
+    if restored_best is not None and not math.isfinite(restored_best):
+        raise ValueError("validation replay best metric is non-finite")
+
+    model.load_state_dict(saved_model, strict=True)
+    return ValidationReplayState(
+        epoch=restored_epoch,
+        global_step=restored_step,
+        best_metric=restored_best,
+        saved_source_digest=saved_identity.source.digest,
+        current_source_digest=identity.source.digest,
+        changed_source_files=changed_source_files,
+    )
+
+
 def migrate_bottom_only(
     path: str | Path,
     model: nn.Module,
@@ -479,7 +599,10 @@ __all__ = [
     "CHECKPOINT_SCHEMA",
     "MigrationReport",
     "RestoredTrainingState",
+    "VALIDATION_REPLAY_SOURCE_PATHS",
+    "ValidationReplayState",
     "load_checkpoint_exact",
+    "load_checkpoint_for_validation",
     "migrate_bottom_only",
     "save_checkpoint",
 ]

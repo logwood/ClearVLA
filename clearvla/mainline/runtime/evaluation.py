@@ -12,6 +12,7 @@ from ..config import ExperimentConfig
 from ..data.loading import GoalTemplate, to_training_batch
 from ..data.normalizer import ArrayNormalizer
 from ..interfaces import TrainingBatch
+from ..model.action_codec import ACTION_BAND_ENDS
 from ..model.policy import ClearVLAMainlinePolicy
 from .logging import tensor_scalars
 from .sampling import sample_action
@@ -23,6 +24,39 @@ def _gripper_event_class(delta: Tensor, *, threshold: float = 0.05) -> Tensor:
     result = torch.zeros_like(delta, dtype=torch.int8)
     result = torch.where(delta >= threshold, torch.ones_like(result), result)
     return torch.where(delta <= -threshold, -torch.ones_like(result), result)
+
+
+def _action_band_slices(horizon: int) -> tuple[tuple[str, slice], ...]:
+    if int(horizon) != ACTION_BAND_ENDS[-1]:
+        raise ValueError("validation action bands require the 24-row action horizon")
+    rows: list[tuple[str, slice]] = []
+    start = 0
+    for end in ACTION_BAND_ENDS:
+        rows.append((f"{start + 1}_{end}", slice(start, end)))
+        start = end
+    return tuple(rows)
+
+
+def _post_event_distance(target_event: Tensor) -> Tensor:
+    """Return rows since the latest target event, excluding the event row.
+
+    Values are ``-1`` before the first event, ``0`` on an event row, and
+    positive afterwards.  A later event resets the distance, so a persistence
+    bin cannot cross an intervening target transition.
+    """
+
+    if target_event.ndim != 2 or target_event.dtype != torch.bool:
+        raise ValueError("target event mask must be boolean [B,T]")
+    horizon = int(target_event.shape[1])
+    rows = torch.arange(
+        horizon,
+        device=target_event.device,
+        dtype=torch.long,
+    )[None].expand_as(target_event)
+    event_rows = torch.where(target_event, rows, torch.full_like(rows, -1))
+    latest_event = event_rows.cummax(dim=1).values
+    distance = rows - latest_event
+    return torch.where(latest_event >= 0, distance, torch.full_like(distance, -1))
 
 
 def _tolerant_event_match(
@@ -181,6 +215,7 @@ class ValidationAccumulator:
     ) -> None:
         target = batch.action_target.normalized.float()
         error = prediction.float() - target
+        action_bands = _action_band_slices(int(error.shape[1]))
         rows = {
             "normalized_action": error,
             "normalized_first": error[:, :1],
@@ -188,10 +223,12 @@ class ValidationAccumulator:
             "normalized_tail": error[:, 8:],
             "normalized_arm": error[..., :-1],
             "normalized_gripper": error[..., -1:],
-            "normalized_band_1_4": error[:, :4],
-            "normalized_band_5_12": error[:, 4:12],
-            "normalized_band_13_24": error[:, 12:24],
         }
+        for band_name, band_slice in action_bands:
+            rows[f"normalized_band_{band_name}"] = error[:, band_slice]
+            rows[f"normalized_gripper_band_{band_name}"] = error[
+                :, band_slice, -1:
+            ]
         if self.action_scale is not None:
             if self.action_scale.device != error.device:
                 raise ValueError("validation action scale is on the wrong device")
@@ -206,11 +243,13 @@ class ValidationAccumulator:
                     "physical_tail": physical_error[:, 8:],
                     "physical_arm": physical_error[..., :-1],
                     "physical_gripper": physical_error[..., -1:],
-                    "physical_band_1_4": physical_error[:, :4],
-                    "physical_band_5_12": physical_error[:, 4:12],
-                    "physical_band_13_24": physical_error[:, 12:24],
                 }
             )
+            for band_name, band_slice in action_bands:
+                rows[f"physical_band_{band_name}"] = physical_error[:, band_slice]
+                rows[f"physical_gripper_band_{band_name}"] = physical_error[
+                    :, band_slice, -1:
+                ]
         self.samples += int(prediction.shape[0])
         for name, value in rows.items():
             update = value.detach().float().square().sum()
@@ -239,6 +278,25 @@ class ValidationAccumulator:
         )
         target_event = target_class != 0
         pred_event = pred_class != 0
+        if self.action_scale is not None:
+            post_event_distance = _post_event_distance(target_event)
+            physical_gripper_error = raw_prediction[..., -1] - raw_target[..., -1]
+            for bin_name, lower, upper in (
+                ("1_2", 1, 2),
+                ("3_6", 3, 6),
+                ("7_plus", 7, None),
+            ):
+                mask = post_event_distance >= lower
+                if upper is not None:
+                    mask = mask & (post_event_distance <= upper)
+                self._add_scalar(
+                    f"gripper_post_event_{bin_name}_square_error",
+                    physical_gripper_error.square().masked_select(mask).sum(),
+                )
+                self._add_scalar(
+                    f"gripper_post_event_{bin_name}_rows",
+                    mask.detach().float().sum(),
+                )
         decoded_counts: dict[str, tuple[int, int, int, float, int]] = {}
         for direction, name in ((-1, "open"), (1, "close")):
             decoded_counts[name] = _tolerant_event_match(
@@ -468,6 +526,10 @@ class ValidationAccumulator:
             "validation_band_5_12_rmse_normalized": rmse["normalized_band_5_12"],
             "validation_band_13_24_rmse_normalized": rmse["normalized_band_13_24"],
         }
+        for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
+            tensors[f"validation_gripper_band_{band_name}_rmse_normalized"] = rmse[
+                f"normalized_gripper_band_{band_name}"
+            ]
         if "physical_action" in rmse:
             tensors.update(
                 {
@@ -484,6 +546,21 @@ class ValidationAccumulator:
                     "validation_band_13_24_rmse_physical": rmse["physical_band_13_24"],
                 }
             )
+            for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
+                tensors[f"validation_gripper_band_{band_name}_rmse_physical"] = rmse[
+                    f"physical_gripper_band_{band_name}"
+                ]
+            for bin_name in ("1_2", "3_6", "7_plus"):
+                row_count = self.scalar_totals[
+                    f"gripper_post_event_{bin_name}_rows"
+                ]
+                square_error = self.scalar_totals[
+                    f"gripper_post_event_{bin_name}_square_error"
+                ]
+                tensors[
+                    f"validation_gripper_post_event_{bin_name}_rmse_physical"
+                ] = (square_error / row_count.clamp_min(1.0)).sqrt()
+                tensors[f"validation_gripper_post_event_rows_{bin_name}"] = row_count
         return tensor_scalars(tensors)
 
 

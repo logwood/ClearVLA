@@ -22,7 +22,12 @@ from .checkpoint import (
 from .config import ExperimentConfig, load_config
 from .data.loading import MainlineDataBundle, load_mainline_data, to_training_batch
 from .model.policy import ClearVLAMainlinePolicy
-from .runtime.checkpoints import load_checkpoint_exact, migrate_bottom_only, save_checkpoint
+from .runtime.checkpoints import (
+    load_checkpoint_exact,
+    load_checkpoint_for_validation,
+    migrate_bottom_only,
+    save_checkpoint,
+)
 from .runtime.evaluation import ValidationAccumulator
 from .runtime.identity import (
     dataset_identity,
@@ -66,6 +71,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dino-cache", type=Path)
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--validate-checkpoint", type=Path)
     parser.add_argument("--migrate-bottom", type=Path)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
@@ -129,8 +135,15 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
     result.validate()
     if args.allow_null_goal and not args.smoke:
         raise ValueError("--allow-null-goal is restricted to explicit smoke runs")
-    if args.resume is not None and args.migrate_bottom is not None:
-        raise ValueError("exact resume and bottom-only migration are mutually exclusive")
+    checkpoint_modes = (
+        args.resume is not None,
+        args.validate_checkpoint is not None,
+        args.migrate_bottom is not None,
+    )
+    if sum(checkpoint_modes) > 1:
+        raise ValueError(
+            "exact resume, read-only validation and bottom-only migration are mutually exclusive"
+        )
     return result
 
 
@@ -560,10 +573,25 @@ def _validate(
                     encoded.training_state,
                 )
         del encoded
+        # P2 band/type matrices are defined at the last real deployment ODE
+        # update.  The validation-loss forward uses a sampled flow time, so do
+        # not archive that second, non-comparable posterior under an unprefixed
+        # name.  The matched deployment result is collected below.
+        loss_metrics = {
+            name: value
+            for name, value in loss_result.metrics.items()
+            if not (
+                name.startswith(("object_p2_semantic_", "object_p2_geometry_"))
+                and (
+                    "_band_" in name
+                    or name.endswith("_temporal_support_fraction")
+                )
+            )
+        }
         losses.update(
             {
                 "loss_total": loss_result.loss,
-                **loss_result.metrics,
+                **loss_metrics,
             },
             weight=batch.online.batch,
         )
@@ -765,6 +793,8 @@ def _validate(
 
 def main() -> None:
     args = _parser().parse_args()
+    validation_checkpoint = args.validate_checkpoint
+    validation_checkpoint_resolved: str | None = None
     config = _overrides(load_config(args.config), args)
     _seed(config.data.seed)
     device = _device(args.device)
@@ -818,6 +848,7 @@ def main() -> None:
         _validate_resume_output_identity(output_dir, identity)
     start_epoch = 1
     best_metric: float | None = None
+    validation_state = None
     if args.resume is not None:
         restored = load_checkpoint_exact(
             args.resume,
@@ -840,6 +871,15 @@ def main() -> None:
             checkpoint_epoch=restored.epoch,
             checkpoint_step=restored.global_step,
         )
+    elif validation_checkpoint is not None:
+        validation_state = load_checkpoint_for_validation(
+            validation_checkpoint,
+            model=model,
+            config=config,
+            identity=identity,
+        )
+        validation_checkpoint_resolved = str(Path(validation_checkpoint).resolve())
+        engine.global_step = validation_state.global_step
     elif args.migrate_bottom is not None:
         report = migrate_bottom_only(args.migrate_bottom, model, identity=identity)
         print(
@@ -874,7 +914,26 @@ def main() -> None:
                 "only_after_finite_global_threshold_crossing"
             ),
         },
+        "execution_mode": (
+            "validation_only" if validation_state is not None else "training"
+        ),
     }
+    if validation_state is not None:
+        if validation_checkpoint_resolved is None:
+            raise RuntimeError("validation checkpoint provenance was not resolved")
+        context["validation_checkpoint"] = {
+            "path": validation_checkpoint_resolved,
+            "epoch": validation_state.epoch,
+            "global_step": validation_state.global_step,
+            "best_metric": validation_state.best_metric,
+            "saved_source_digest": validation_state.saved_source_digest,
+            "current_source_digest": validation_state.current_source_digest,
+            "changed_source_files": list(validation_state.changed_source_files),
+            "optimizer_loaded": False,
+            "schedule_loaded": False,
+            "rng_loaded": False,
+            "checkpoint_writes_enabled": False,
+        }
     # Preflight uses the deterministic validation sampler and separate RNGs;
     # it must not consume formal training shuffle, condition-dropout or flow
     # randomness.
@@ -906,6 +965,68 @@ def main() -> None:
         encoding="utf-8",
     )
     logger = JsonlRunLogger(output_dir)
+    if validation_state is not None:
+        if validation_checkpoint_resolved is None:
+            raise RuntimeError("validation checkpoint provenance was not resolved")
+        validation_started = time.perf_counter()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        validation = archival_metrics(
+            _validate(
+                engine=engine,
+                loader=val_loader,
+                bundle=bundle,
+                config=config,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        runtime = archival_metrics(
+            {
+                "runtime_validation_seconds": time.perf_counter() - validation_started,
+                **_cuda_memory_metrics(device),
+            }
+        )
+        logger.write(
+            "epoch",
+            epoch=validation_state.epoch,
+            step=validation_state.global_step,
+            mode="validation_only",
+            source_checkpoint=validation_checkpoint_resolved,
+            train={},
+            validation=validation,
+            runtime=runtime,
+        )
+        planned_batches = _limit(len(val_loader), config.runtime.max_val_batches)
+        print(
+            "[mainline-validation-only] "
+            f"checkpoint_epoch={validation_state.epoch:03d} "
+            f"step={validation_state.global_step} batches={planned_batches} "
+            f"source_delta_files={len(validation_state.changed_source_files)} "
+            f"runtime_validation_seconds={runtime['runtime_validation_seconds']:.6g} "
+            "optimizer_load=disabled schedule_load=disabled rng_load=disabled "
+            "checkpoint_write=disabled",
+            flush=True,
+        )
+        print(
+            logger.compact_line(
+                "val",
+                epoch=validation_state.epoch,
+                batch=None,
+                step=validation_state.global_step,
+                metrics=validation,
+            ),
+            flush=True,
+        )
+        for detail_line in logger.diagnostic_lines(
+            "val",
+            epoch=validation_state.epoch,
+            batch=None,
+            step=validation_state.global_step,
+            metrics=validation,
+        ):
+            print(detail_line, flush=True)
+        return
     data_state = _data_state(bundle)
     for epoch in range(start_epoch, config.optimizer.epochs + 1):
         train_batch_sampler = getattr(train_loader, "batch_sampler", None)

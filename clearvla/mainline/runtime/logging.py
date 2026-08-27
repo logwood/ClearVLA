@@ -354,6 +354,20 @@ class JsonlRunLogger:
         elif kind == "val":
             groups = (
                 (
+                    "gripper",
+                    (
+                        "validation_gripper_band_1_4_rmse_physical",
+                        "validation_gripper_band_5_12_rmse_physical",
+                        "validation_gripper_band_13_24_rmse_physical",
+                        "validation_gripper_post_event_1_2_rmse_physical",
+                        "validation_gripper_post_event_3_6_rmse_physical",
+                        "validation_gripper_post_event_7_plus_rmse_physical",
+                        "validation_gripper_post_event_rows_1_2",
+                        "validation_gripper_post_event_rows_3_6",
+                        "validation_gripper_post_event_rows_7_plus",
+                    ),
+                ),
+                (
                     "events",
                     (
                         "validation_decoded_gripper_event_precision",
