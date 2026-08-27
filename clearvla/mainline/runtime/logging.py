@@ -368,6 +368,21 @@ class JsonlRunLogger:
                     ),
                 ),
                 (
+                    "gripper-branch",
+                    (
+                        "validation_gripper_absolute_branch_band_1_4_rmse_physical",
+                        "validation_gripper_absolute_branch_band_5_12_rmse_physical",
+                        "validation_gripper_absolute_branch_band_13_24_rmse_physical",
+                        "validation_gripper_delta_branch_band_1_4_rmse_physical",
+                        "validation_gripper_delta_branch_band_5_12_rmse_physical",
+                        "validation_gripper_delta_branch_band_13_24_rmse_physical",
+                        "validation_gripper_branch_disagreement_band_1_4_rms_physical",
+                        "validation_gripper_branch_disagreement_band_5_12_rms_physical",
+                        "validation_gripper_branch_disagreement_band_13_24_rms_physical",
+                        "validation_gripper_branch_decode_identity_max_abs",
+                    ),
+                ),
+                (
                     "events",
                     (
                         "validation_decoded_gripper_event_precision",
@@ -419,6 +434,7 @@ class JsonlRunLogger:
                     "causal",
                     (
                         "validation_sampling_diagnostic_coverage",
+                        "validation_p2_value_ablation_coverage",
                         "validation_proposal_ablation_coverage",
                         "validation_proposal_primary_rmse_physical",
                         "validation_proposal_zero_rmse_physical",
@@ -434,6 +450,23 @@ class JsonlRunLogger:
                         "validation_execution_full_capacity_action_delta_rmse_physical",
                         "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical",
                         "validation_execution_three_basis_reduction_action_delta_rmse_physical",
+                    ),
+                ),
+                (
+                    "p2-value",
+                    tuple(
+                        name
+                        for mode in (
+                            "semantic_near_zero",
+                            "semantic_far_zero",
+                            "geometry_near_zero",
+                            "geometry_far_zero",
+                        )
+                        for name in (
+                            f"validation_p2_value_{mode}_gripper_band_13_24_mse_gain_vs_primary_physical",
+                            f"validation_p2_value_{mode}_gripper_band_13_24_action_delta_rmse_physical",
+                            f"validation_p2_value_{mode}_post_event_1_2_mse_gain_vs_primary_physical",
+                        )
                     ),
                 ),
             )

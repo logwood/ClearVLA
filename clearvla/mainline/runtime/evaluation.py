@@ -145,6 +145,7 @@ class ValidationAccumulator:
     samples: int = 0
     classification_counts: dict[str, Tensor] = field(default_factory=dict)
     scalar_totals: dict[str, Tensor] = field(default_factory=dict)
+    scalar_maxima: dict[str, Tensor] = field(default_factory=dict)
 
     @classmethod
     def from_action_normalizer(
@@ -204,6 +205,12 @@ class ValidationAccumulator:
             name, value.new_zeros(())
         ) + value
 
+    def _add_maximum(self, name: str, value: Tensor) -> None:
+        previous = self.scalar_maxima.get(name)
+        self.scalar_maxima[name] = value if previous is None else torch.maximum(
+            previous, value
+        )
+
     def update(
         self,
         prediction: Tensor,
@@ -212,6 +219,8 @@ class ValidationAccumulator:
         event_logits: Tensor | None = None,
         motion_logits: Tensor | None = None,
         motion_target: Tensor | None = None,
+        physical_field: Tensor | None = None,
+        gripper_decode_delta_blend: float | None = None,
     ) -> None:
         target = batch.action_target.normalized.float()
         error = prediction.float() - target
@@ -250,6 +259,57 @@ class ValidationAccumulator:
                 rows[f"physical_gripper_band_{band_name}"] = physical_error[
                     :, band_slice, -1:
                 ]
+        if physical_field is not None:
+            if tuple(physical_field.shape[:2]) != tuple(prediction.shape[:2]) or int(
+                physical_field.shape[-1]
+            ) != 18:
+                raise ValueError("validation physical field must be [B,T,18]")
+            if gripper_decode_delta_blend is None:
+                raise ValueError("gripper branch diagnostics require the decode blend")
+            blend = float(gripper_decode_delta_blend)
+            if not 0.0 <= blend <= 1.0:
+                raise ValueError("gripper decode blend must lie in [0,1]")
+            gripper_field = physical_field.detach().float()[..., -6:]
+            absolute_branch = gripper_field[..., :1]
+            cumulative_branch = (
+                batch.online.history.action_state.detach().float()[:, None, -1:]
+                + torch.cumsum(gripper_field[..., 1:2], dim=1)
+            )
+            reconstructed = (1.0 - blend) * absolute_branch + blend * cumulative_branch
+            identity_error = (
+                reconstructed - prediction.detach().float()[..., -1:]
+            ).abs().amax()
+            self._add_maximum("gripper_branch_decode_identity_max_abs", identity_error)
+            for band_name, band_slice in action_bands:
+                absolute_error = absolute_branch[:, band_slice] - target[
+                    :, band_slice, -1:
+                ]
+                cumulative_error = cumulative_branch[:, band_slice] - target[
+                    :, band_slice, -1:
+                ]
+                disagreement = absolute_branch[:, band_slice] - cumulative_branch[
+                    :, band_slice
+                ]
+                rows[f"normalized_gripper_absolute_branch_band_{band_name}"] = (
+                    absolute_error
+                )
+                rows[f"normalized_gripper_delta_branch_band_{band_name}"] = (
+                    cumulative_error
+                )
+                rows[f"normalized_gripper_branch_disagreement_band_{band_name}"] = (
+                    disagreement
+                )
+                if self.action_scale is not None:
+                    gripper_scale = self.action_scale[..., -1:]
+                    rows[f"physical_gripper_absolute_branch_band_{band_name}"] = (
+                        absolute_error / gripper_scale
+                    )
+                    rows[f"physical_gripper_delta_branch_band_{band_name}"] = (
+                        cumulative_error / gripper_scale
+                    )
+                    rows[
+                        f"physical_gripper_branch_disagreement_band_{band_name}"
+                    ] = disagreement / gripper_scale
         self.samples += int(prediction.shape[0])
         for name, value in rows.items():
             update = value.detach().float().square().sum()
@@ -297,6 +357,25 @@ class ValidationAccumulator:
                     f"gripper_post_event_{bin_name}_rows",
                     mask.detach().float().sum(),
                 )
+            context_masks = {
+                "before_any_event": post_event_distance < 0,
+                "event": post_event_distance == 0,
+                "post_1_2": (post_event_distance >= 1) & (post_event_distance <= 2),
+                "post_3_6": (post_event_distance >= 3) & (post_event_distance <= 6),
+                "post_7_plus": post_event_distance >= 7,
+            }
+            for band_name, band_slice in action_bands:
+                for context_name, context_mask in context_masks.items():
+                    mask = context_mask[:, band_slice]
+                    stem = f"gripper_band_{band_name}_{context_name}"
+                    self._add_scalar(
+                        f"{stem}_square_error",
+                        physical_gripper_error[:, band_slice]
+                        .square()
+                        .masked_select(mask)
+                        .sum(),
+                    )
+                    self._add_scalar(f"{stem}_rows", mask.detach().float().sum())
         decoded_counts: dict[str, tuple[int, int, int, float, int]] = {}
         for direction, name in ((-1, "open"), (1, "close")):
             decoded_counts[name] = _tolerant_event_match(
@@ -530,6 +609,21 @@ class ValidationAccumulator:
             tensors[f"validation_gripper_band_{band_name}_rmse_normalized"] = rmse[
                 f"normalized_gripper_band_{band_name}"
             ]
+            for branch_name in (
+                "absolute_branch",
+                "delta_branch",
+                "branch_disagreement",
+            ):
+                key = f"normalized_gripper_{branch_name}_band_{band_name}"
+                if key in rmse:
+                    statistic = "rms" if branch_name == "branch_disagreement" else "rmse"
+                    tensors[
+                        f"validation_gripper_{branch_name}_band_{band_name}_{statistic}_normalized"
+                    ] = rmse[key]
+        if "gripper_branch_decode_identity_max_abs" in self.scalar_maxima:
+            tensors["validation_gripper_branch_decode_identity_max_abs"] = (
+                self.scalar_maxima["gripper_branch_decode_identity_max_abs"]
+            )
         if "physical_action" in rmse:
             tensors.update(
                 {
@@ -550,6 +644,33 @@ class ValidationAccumulator:
                 tensors[f"validation_gripper_band_{band_name}_rmse_physical"] = rmse[
                     f"physical_gripper_band_{band_name}"
                 ]
+                for branch_name in (
+                    "absolute_branch",
+                    "delta_branch",
+                    "branch_disagreement",
+                ):
+                    key = f"physical_gripper_{branch_name}_band_{band_name}"
+                    if key in rmse:
+                        statistic = (
+                            "rms" if branch_name == "branch_disagreement" else "rmse"
+                        )
+                        tensors[
+                            f"validation_gripper_{branch_name}_band_{band_name}_{statistic}_physical"
+                        ] = rmse[key]
+                for context_name in (
+                    "before_any_event",
+                    "event",
+                    "post_1_2",
+                    "post_3_6",
+                    "post_7_plus",
+                ):
+                    stem = f"gripper_band_{band_name}_{context_name}"
+                    row_count = self.scalar_totals[f"{stem}_rows"]
+                    square_error = self.scalar_totals[f"{stem}_square_error"]
+                    tensors[f"validation_{stem}_rmse_physical"] = (
+                        square_error / row_count.clamp_min(1.0)
+                    ).sqrt()
+                    tensors[f"validation_{stem}_rows"] = row_count
             for bin_name in ("1_2", "3_6", "7_plus"):
                 row_count = self.scalar_totals[
                     f"gripper_post_event_{bin_name}_rows"
@@ -562,6 +683,183 @@ class ValidationAccumulator:
                 ] = (square_error / row_count.clamp_min(1.0)).sqrt()
                 tensors[f"validation_gripper_post_event_rows_{bin_name}"] = row_count
         return tensor_scalars(tensors)
+
+
+@dataclass
+class MatchedP2ValueInterventionAccumulator:
+    """Paired action/error accounting for R2-A01 value counterfactuals."""
+
+    action_scale: Tensor
+    action_offset: Tensor
+    gripper_event_threshold: float
+    arm_motion_threshold: float
+    primary: dict[str, ValidationAccumulator] = field(default_factory=dict)
+    counterfactual: dict[str, ValidationAccumulator] = field(default_factory=dict)
+    delta_square_error: dict[str, Tensor] = field(default_factory=dict)
+    delta_element_count: dict[str, int] = field(default_factory=dict)
+    batches: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_action_normalizer(
+        cls,
+        normalizer: ArrayNormalizer,
+        *,
+        device: torch.device,
+        gripper_event_threshold: float,
+        arm_motion_threshold: float,
+    ) -> "MatchedP2ValueInterventionAccumulator":
+        base = ValidationAccumulator.from_action_normalizer(
+            normalizer,
+            device=device,
+            gripper_event_threshold=gripper_event_threshold,
+            arm_motion_threshold=arm_motion_threshold,
+        )
+        if base.action_scale is None or base.action_offset is None:
+            raise RuntimeError("matched P2 accounting requires the physical action chart")
+        return cls(
+            action_scale=base.action_scale,
+            action_offset=base.action_offset,
+            gripper_event_threshold=float(gripper_event_threshold),
+            arm_motion_threshold=float(arm_motion_threshold),
+        )
+
+    def _new_validation_accumulator(self) -> ValidationAccumulator:
+        return ValidationAccumulator(
+            action_scale=self.action_scale,
+            action_offset=self.action_offset,
+            gripper_event_threshold=self.gripper_event_threshold,
+            arm_motion_threshold=self.arm_motion_threshold,
+        )
+
+    def update(
+        self,
+        mode: str,
+        *,
+        primary_action: Tensor,
+        counterfactual_action: Tensor,
+        batch: TrainingBatch,
+        primary_event_logits: Tensor,
+        counterfactual_event_logits: Tensor,
+    ) -> None:
+        if mode not in self.primary:
+            self.primary[mode] = self._new_validation_accumulator()
+            self.counterfactual[mode] = self._new_validation_accumulator()
+        self.primary[mode].update(
+            primary_action,
+            batch,
+            event_logits=primary_event_logits,
+        )
+        self.counterfactual[mode].update(
+            counterfactual_action,
+            batch,
+            event_logits=counterfactual_event_logits,
+        )
+        action_delta = (
+            counterfactual_action.detach().float() - primary_action.detach().float()
+        ) / self.action_scale
+        for band_name, band_slice in _action_band_slices(int(action_delta.shape[1])):
+            for owner_name, value in (
+                ("arm", action_delta[:, band_slice, :-1]),
+                ("gripper", action_delta[:, band_slice, -1:]),
+            ):
+                key = f"{mode}_{owner_name}_band_{band_name}"
+                update = value.square().sum()
+                self.delta_square_error[key] = self.delta_square_error.get(
+                    key, update.new_zeros(())
+                ) + update
+                self.delta_element_count[key] = self.delta_element_count.get(
+                    key, 0
+                ) + int(value.numel())
+        self.batches[mode] = self.batches.get(mode, 0) + 1
+
+    def means(self) -> dict[str, float]:
+        if not self.batches:
+            raise ValueError("matched P2 accounting did not consume any batches")
+        result: dict[str, float] = {}
+        reference_primary: dict[str, float] | None = None
+        for mode in sorted(self.batches):
+            primary = self.primary[mode].means()
+            counterfactual = self.counterfactual[mode].means()
+            if reference_primary is None:
+                reference_primary = primary
+            stem = f"validation_p2_value_{mode}"
+            result[f"{stem}_batches"] = float(self.batches[mode])
+            for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
+                name = f"validation_gripper_band_{band_name}_rmse_physical"
+                primary_rmse = primary[name]
+                counterfactual_rmse = counterfactual[name]
+                result[f"{stem}_primary_gripper_band_{band_name}_rmse_physical"] = (
+                    primary_rmse
+                )
+                result[f"{stem}_gripper_band_{band_name}_rmse_physical"] = (
+                    counterfactual_rmse
+                )
+                result[
+                    f"{stem}_gripper_band_{band_name}_mse_gain_vs_primary_physical"
+                ] = primary_rmse**2 - counterfactual_rmse**2
+                for owner_name in ("arm", "gripper"):
+                    delta_name = f"{mode}_{owner_name}_band_{band_name}"
+                    result[
+                        f"{stem}_{owner_name}_band_{band_name}_action_delta_rmse_physical"
+                    ] = float(
+                        (
+                            self.delta_square_error[delta_name]
+                            / max(self.delta_element_count[delta_name], 1)
+                        )
+                        .sqrt()
+                        .item()
+                    )
+            for bin_name in ("1_2", "3_6", "7_plus"):
+                name = f"validation_gripper_post_event_{bin_name}_rmse_physical"
+                rows_name = f"validation_gripper_post_event_rows_{bin_name}"
+                primary_rmse = primary[name]
+                counterfactual_rmse = counterfactual[name]
+                result[f"{stem}_primary_post_event_{bin_name}_rmse_physical"] = (
+                    primary_rmse
+                )
+                result[f"{stem}_post_event_{bin_name}_rmse_physical"] = (
+                    counterfactual_rmse
+                )
+                result[
+                    f"{stem}_post_event_{bin_name}_mse_gain_vs_primary_physical"
+                ] = primary_rmse**2 - counterfactual_rmse**2
+                result[f"{stem}_post_event_rows_{bin_name}"] = counterfactual[
+                    rows_name
+                ]
+            for suffix in (
+                "event_precision",
+                "event_recall",
+                "event_f1",
+                "event_ratio",
+                "timing_mae_steps",
+            ):
+                source = f"validation_decoded_gripper_{suffix}"
+                result[f"{stem}_decoded_gripper_{suffix}"] = counterfactual[source]
+        if reference_primary is None:
+            raise RuntimeError("matched P2 primary accounting is missing")
+        for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
+            result[
+                f"validation_p2_value_primary_gripper_band_{band_name}_rmse_physical"
+            ] = reference_primary[
+                f"validation_gripper_band_{band_name}_rmse_physical"
+            ]
+        for bin_name in ("1_2", "3_6", "7_plus"):
+            result[
+                f"validation_p2_value_primary_post_event_{bin_name}_rmse_physical"
+            ] = reference_primary[
+                f"validation_gripper_post_event_{bin_name}_rmse_physical"
+            ]
+        for suffix in (
+            "event_precision",
+            "event_recall",
+            "event_f1",
+            "event_ratio",
+            "timing_mae_steps",
+        ):
+            result[
+                f"validation_p2_value_primary_decoded_gripper_{suffix}"
+            ] = reference_primary[f"validation_decoded_gripper_{suffix}"]
+        return result
 
 
 @torch.no_grad()
@@ -618,8 +916,14 @@ def evaluate_loader(
             event_logits=result.event_logits,
             motion_logits=result.motion_logits,
             motion_target=motion_target,
+            physical_field=result.physical_field,
+            gripper_decode_delta_blend=model.action_codec.decode_delta_blend,
         )
     return accumulator.means()
 
 
-__all__ = ["ValidationAccumulator", "evaluate_loader"]
+__all__ = [
+    "MatchedP2ValueInterventionAccumulator",
+    "ValidationAccumulator",
+    "evaluate_loader",
+]

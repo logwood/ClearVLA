@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 import torch
 
@@ -15,6 +17,7 @@ from clearvla.mainline.interfaces import (
     TrainingBatch,
 )
 from clearvla.mainline.runtime.evaluation import (
+    MatchedP2ValueInterventionAccumulator,
     ValidationAccumulator,
     _gripper_event_class,
     _post_event_distance,
@@ -26,7 +29,11 @@ from clearvla.mainline.runtime.logging import (
     archival_metrics,
     validate_resume_metric_boundary,
 )
-from clearvla.mainline.train import _diagnostic_batch_indices, _prepare_output_directory
+from clearvla.mainline.train import (
+    _diagnostic_batch_indices,
+    _prepare_output_directory,
+    _validate,
+)
 
 
 def test_active_logging_keeps_every_current_top_owner() -> None:
@@ -167,12 +174,20 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_gripper_post_event_rows_1_2": 12.0,
         "validation_gripper_post_event_rows_3_6": 18.0,
         "validation_gripper_post_event_rows_7_plus": 24.0,
+        "validation_gripper_absolute_branch_band_13_24_rmse_physical": 0.18,
+        "validation_gripper_delta_branch_band_13_24_rmse_physical": 0.22,
+        "validation_gripper_branch_disagreement_band_13_24_rms_physical": 0.08,
+        "validation_gripper_branch_decode_identity_max_abs": 0.0,
         "validation_decoded_gripper_event_f1": 0.4,
         "validation_decoded_gripper_events_predicted": 7.0,
         "validation_decoded_gripper_events_target": 8.0,
         "validation_event_head_f1": 0.5,
         "validation_motion_head_f1": 0.6,
         "validation_proposal_ablation_coverage": 0.1,
+        "validation_p2_value_ablation_coverage": 0.1,
+        "validation_p2_value_semantic_far_zero_gripper_band_13_24_mse_gain_vs_primary_physical": -0.003,
+        "validation_p2_value_semantic_far_zero_gripper_band_13_24_action_delta_rmse_physical": 0.04,
+        "validation_p2_value_semantic_far_zero_post_event_1_2_mse_gain_vs_primary_physical": -0.01,
         "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
         "validation_execution_ablation_coverage": 0.05,
         "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
@@ -205,6 +220,15 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     assert "validation_gripper_band_13_24_rmse_physical=0.19" in validation_details
     assert "validation_gripper_post_event_7_plus_rmse_physical=0.21" in validation_details
     assert "validation_gripper_post_event_rows_7_plus=24" in validation_details
+    assert (
+        "validation_gripper_absolute_branch_band_13_24_rmse_physical=0.18"
+        in validation_details
+    )
+    assert "validation_p2_value_ablation_coverage=0.1" in validation_details
+    assert (
+        "validation_p2_value_semantic_far_zero_gripper_band_13_24_"
+        "mse_gain_vs_primary_physical=-0.003" in validation_details
+    )
 
 
 def test_gradient_tensor_hooks_observe_backward_without_changing_gradient() -> None:
@@ -705,6 +729,188 @@ def test_validation_reports_gripper_persistence_between_target_events() -> None:
         np.sqrt(76.0 / 7.0),
     )
     assert metrics["validation_gripper_post_event_7_plus_rmse_physical"] == 5.0
+
+
+def test_validation_gripper_branches_and_event_context_reconstruct_band_error() -> None:
+    config = ExperimentConfig()
+    dims = config.dimensions
+    raw_target = torch.zeros(1, dims.action_horizon, dims.action_dim)
+    raw_target[:, 3:10, -1] = 1.0
+    raw_target[:, 10:, -1] = 0.25
+    absolute = torch.linspace(-0.2, 0.7, dims.action_horizon)[None, :, None]
+    cumulative = torch.linspace(0.4, -0.5, dims.action_horizon)[None, :, None]
+    prediction = raw_target.clone()
+    prediction[..., -1:] = 0.75 * absolute + 0.25 * cumulative
+    physical_field = torch.zeros(1, dims.action_horizon, 18)
+    physical_field[..., 12:13] = absolute
+    cumulative_boundary = torch.cat(
+        (torch.zeros(1, 1, 1), cumulative[:, :-1]),
+        dim=1,
+    )
+    physical_field[..., 13:14] = cumulative - cumulative_boundary
+    history = ObservableHistory(
+        state=torch.zeros(1, dims.state_dim),
+        action_state=torch.zeros(1, dims.action_dim),
+        state_history=torch.zeros(1, dims.state_history_length, dims.state_dim),
+        executed_action_history=torch.zeros(
+            1, dims.executed_history_length, dims.action_dim
+        ),
+    )
+    batch = TrainingBatch(
+        online=OnlinePolicyInput(
+            observation=CurrentObservation(
+                dino_history=torch.zeros(
+                    1,
+                    dims.visual_history_length,
+                    dims.num_cameras,
+                    dims.patches_per_camera,
+                    dims.visual_token_dim,
+                ),
+                raw_rgb=torch.zeros(
+                    1,
+                    dims.visual_history_length,
+                    dims.num_cameras,
+                    3,
+                    32,
+                    32,
+                ),
+            ),
+            history=history,
+            goal=GoalCondition(
+                tokens=torch.zeros(1, 1, dims.goal_token_dim),
+                mask=torch.ones(1, 1, dtype=torch.bool),
+            ),
+        ),
+        action_target=ActionSupervision(
+            normalized=raw_target,
+            raw_units=raw_target,
+            current_raw_units=torch.zeros(1, dims.action_dim),
+        ),
+        future=FutureSupervision(
+            dino_supports=torch.zeros(
+                1,
+                dims.future_supports,
+                dims.num_cameras,
+                dims.patches_per_camera,
+                dims.visual_token_dim,
+                dtype=torch.float16,
+            ),
+            action_sequence=torch.zeros(1, 48, dims.action_dim),
+            state_sequence=torch.zeros(1, 48, dims.state_dim),
+            offsets=torch.arange(4, 49, 4)[None],
+        ),
+        audit=AuditMetadata(),
+    )
+    identity = np.ones((1, dims.action_dim), dtype=np.float32)
+    normalizer = ArrayNormalizer(
+        offset=np.zeros_like(identity),
+        scale=identity,
+        mean=np.zeros_like(identity),
+        std=identity,
+        minimum=-identity,
+        maximum=identity,
+        mode="identity",
+    )
+    accumulator = ValidationAccumulator.from_action_normalizer(
+        normalizer,
+        device=torch.device("cpu"),
+    )
+    accumulator.update(
+        prediction,
+        batch,
+        physical_field=physical_field,
+        gripper_decode_delta_blend=0.25,
+    )
+    metrics = accumulator.means()
+    for band_name, band_slice in (
+        ("1_4", slice(0, 4)),
+        ("5_12", slice(4, 12)),
+        ("13_24", slice(12, 24)),
+    ):
+        target = raw_target[:, band_slice, -1:]
+        expected_absolute = (absolute[:, band_slice] - target).square().mean().sqrt()
+        expected_cumulative = (cumulative[:, band_slice] - target).square().mean().sqrt()
+        expected_disagreement = (
+            absolute[:, band_slice] - cumulative[:, band_slice]
+        ).square().mean().sqrt()
+        assert np.isclose(
+            metrics[
+                f"validation_gripper_absolute_branch_band_{band_name}_rmse_physical"
+            ],
+            float(expected_absolute),
+        )
+        assert np.isclose(
+            metrics[
+                f"validation_gripper_delta_branch_band_{band_name}_rmse_physical"
+            ],
+            float(expected_cumulative),
+        )
+        assert np.isclose(
+            metrics[
+                f"validation_gripper_branch_disagreement_band_{band_name}_rms_physical"
+            ],
+            float(expected_disagreement),
+        )
+        total_rows = 0.0
+        total_square_error = 0.0
+        for context_name in (
+            "before_any_event",
+            "event",
+            "post_1_2",
+            "post_3_6",
+            "post_7_plus",
+        ):
+            stem = f"validation_gripper_band_{band_name}_{context_name}"
+            rows = metrics[f"{stem}_rows"]
+            total_rows += rows
+            total_square_error += metrics[f"{stem}_rmse_physical"] ** 2 * rows
+        expected_rows = float(band_slice.stop - band_slice.start)
+        assert total_rows == expected_rows
+        assert np.isclose(
+            total_square_error / expected_rows,
+            metrics[f"validation_gripper_band_{band_name}_rmse_physical"] ** 2,
+        )
+
+    paired = MatchedP2ValueInterventionAccumulator.from_action_normalizer(
+        normalizer,
+        device=torch.device("cpu"),
+        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        arm_motion_threshold=config.objectives.arm_motion_threshold,
+    )
+    event_logits = torch.zeros(1, dims.action_horizon, 3)
+    paired.update(
+        "semantic_far_zero",
+        primary_action=raw_target,
+        counterfactual_action=prediction,
+        batch=batch,
+        primary_event_logits=event_logits,
+        counterfactual_event_logits=event_logits,
+    )
+    paired_metrics = paired.means()
+    assert paired_metrics["validation_p2_value_semantic_far_zero_batches"] == 1.0
+    assert (
+        paired_metrics[
+            "validation_p2_value_semantic_far_zero_gripper_band_13_24_"
+            "mse_gain_vs_primary_physical"
+        ]
+        < 0.0
+    )
+    assert (
+        paired_metrics[
+            "validation_p2_value_semantic_far_zero_gripper_band_13_24_"
+            "action_delta_rmse_physical"
+        ]
+        > 0.0
+    )
+
+
+def test_p2_value_replay_reuses_primary_noise_and_clears_the_eval_seam() -> None:
+    source = inspect.getsource(_validate)
+    assert "initial_physical_noise=prediction.initial_physical_noise" in source
+    assert "for mode in reader.VALUE_INTERVENTION_SPECS" in source
+    assert "finally:" in source
+    assert "reader.clear_eval_value_intervention()" in source
+    assert "counterfactual_event_logits=counterfactual.event_logits" in source
 
 
 def test_validation_keeps_decoded_events_and_auxiliary_heads_semantically_separate() -> None:

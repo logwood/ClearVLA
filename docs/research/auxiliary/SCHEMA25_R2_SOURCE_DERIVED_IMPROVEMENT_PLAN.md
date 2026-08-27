@@ -1,22 +1,26 @@
 # Schema25 R2 source-derived improvement plan
 
-Status: `R2-D01 FIRST OBSERVATION SLICE IMPLEMENTED; NO BEHAVIORAL R2 EDIT OR TRAINING AUTHORIZED`
+Status: `R2-D01 AND MATCHED P2-VALUE R2-A01 IMPLEMENTED; EXISTING-CHECKPOINT A01 VALIDATION PENDING; NO BEHAVIORAL R2 EDIT OR TRAINING AUTHORIZED`
 
-Implementation checkpoint (2026-08-27): the behavior-preserving first slice
-now records P2 `type x action-band x physical-interval` posterior mass,
+Implementation checkpoint (2026-08-27): the behavior-preserving diagnostic
+surface records P2 `type x action-band x physical-interval` posterior mass,
 expected interval, support and band-pair total variation on the existing
-bounded deployment diagnostics. Full validation now records gripper RMSE by
-action band and target-event-relative persistence at distances `1-2`, `3-6`
-and `7+`, including row counts. The metrics add no forward, parameter, loss,
-optimizer state, checkpoint field or action change; the retained mainline
-suite passes `161/161`. A dedicated read-only validation loader accepts only
-the intentional active-source identity difference while requiring identical
-manifest, semantic config, dataset, language artifact and complete model-state
-ABI. `scripts/validate_mainline_checkpoint.sh` loads no optimizer, schedule or
-checkpoint RNG state and writes no checkpoint. Branch-specific codec, 24-row
-event histograms, P3
-post-route diagnostics and every matched intervention remain unimplemented
-and therefore unauthorized by this checkpoint.
+bounded deployment diagnostics. Full validation records gripper RMSE by action
+band, target-event-relative persistence, both deployed codec branches and an
+exhaustive `action-band x event-context` error partition. R2-A01 additionally
+implements four evaluation-only, matched-noise P2 value counterfactuals:
+semantic/geometry crossed with near intervals `0/1` or far intervals `2/3`.
+They alter selected common and residual values only after posterior formation;
+the primary path, model state, loss, optimizer, checkpoint ABI and RNG stream
+are unchanged. The retained mainline suite passes `164/164`. A dedicated
+read-only validation loader accepts only the intentional active-source identity
+difference while requiring identical manifest, semantic config, dataset,
+language artifact and complete model-state ABI.
+`scripts/validate_mainline_checkpoint.sh` loads no optimizer, schedule or
+checkpoint RNG state and writes no checkpoint. The 24-row event histograms,
+P2 posterior intervention, projected event-source intervention and P3
+post-route/intervention diagnostics remain unimplemented and unauthorized by
+this checkpoint.
 
 This document plans the next version after the completed Schema25 R1 source
 replay and its first formal run.  It is prospective auxiliary research memory,
@@ -606,17 +610,21 @@ gate, not the size of the source diff, determines the one behavioral R2 unit.
 
 ## 10. Immediate execution sequence
 
-1. **Complete:** write the R2-D01/A01 boundary worksheet from the exact active
-   source.
-2. **Complete for the first observation slice:** implement P2 band/type/I and
-   gripper band/post-event validation with behavior-invariance tests, plus a
-   source-delta-bounded read-only existing-checkpoint validation entry point.
-3. **Next:** run one bounded/full validation pass on the existing R1
-   checkpoint; no training.
-4. If the observation is not decision-complete, implement only the matched P2
-   interval-value A01 seam and rerun the same rows with the same physical
-   noise.
-5. Produce a short decision table selecting P2, continuous gripper/event, one
+1. **Complete:** write the R2-D01 boundary and first observation slice from the
+   exact active source.
+2. **Complete:** implement P2 band/type/I and gripper band/post-event
+   validation with behavior-invariance tests, plus a source-delta-bounded
+   read-only existing-checkpoint validation entry point.
+3. **Complete:** run the first full validation pass on the existing R1
+   checkpoint and establish that the marginal observation is not yet
+   decision-complete.
+4. **Complete in source; validation pending:** close the full A01 boundary,
+   implement only the matched P2 interval-value seam plus codec-branch and
+   `action-band x event-context` attribution, and preserve the same primary
+   physical noise/cache for every counterfactual.
+5. **Next:** rerun one read-only full validation pass on the existing R1
+   checkpoint; no training, then produce a short decision table selecting P2,
+   continuous gripper/event, one
    P3 lane, or no branch.
 6. Write and review the selected behavioral unit's complete forward/backward
    worksheet.

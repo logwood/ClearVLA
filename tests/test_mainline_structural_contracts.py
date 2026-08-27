@@ -1948,6 +1948,78 @@ def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
     )
 
 
+def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -> None:
+    torch.manual_seed(320)
+    reader = ObjectFutureEffectReader(hidden=4, content_dim=4, route_dim=4).eval()
+    action_query = torch.randn(1, 24, 2, 4)
+    key = torch.zeros(1, 24, 2, 4, 2, 4)
+    common = torch.zeros_like(key)
+    residual = torch.zeros_like(key)
+    for interval in range(4):
+        for type_index in range(2):
+            common[..., interval, type_index, 0] = 0.25 * float(type_index + 1)
+            residual[..., interval, type_index, 0] = float(
+                (interval + 1) * (type_index + 1)
+            )
+    selected = SelectedIntervalEvidence(
+        key=key,
+        value=common + residual,
+        common_value=common,
+        residual_value=residual,
+        selected_s_context=torch.randn_like(key),
+        support=torch.ones(1, 4, 2, dtype=torch.bool),
+    )
+    state_before = {name: value.clone() for name, value in reader.state_dict().items()}
+    primary, primary_metrics = reader.temporal_terminal(
+        action_query,
+        selected,
+        collect_diagnostics=True,
+    )
+
+    intervention_masks = {
+        "semantic_near_zero": (0, (0, 1)),
+        "semantic_far_zero": (0, (2, 3)),
+        "geometry_near_zero": (1, (0, 1)),
+        "geometry_far_zero": (1, (2, 3)),
+    }
+    for mode, (type_index, intervals) in intervention_masks.items():
+        reader.set_eval_value_intervention(mode)
+        counterfactual, metrics = reader.temporal_terminal(
+            action_query,
+            selected,
+            collect_diagnostics=True,
+        )
+        mask = torch.ones_like(selected.value)
+        mask[..., list(intervals), type_index, :] = 0.0
+        expected = ((selected.common_value + selected.residual_value) * mask).mean(
+            dim=3
+        ).sum(dim=3)
+        torch.testing.assert_close(counterfactual, expected)
+        assert not torch.equal(counterfactual, primary)
+        for type_name in ("semantic", "geometry"):
+            for band_name in ("1_4", "5_12", "13_24"):
+                for interval in range(4):
+                    name = (
+                        f"object_p2_{type_name}_band_{band_name}_interval_"
+                        f"{interval}_mass"
+                    )
+                    torch.testing.assert_close(metrics[name], primary_metrics[name])
+        reader.clear_eval_value_intervention()
+        restored, _ = reader.temporal_terminal(
+            action_query,
+            selected,
+            collect_diagnostics=False,
+        )
+        assert torch.equal(restored, primary)
+
+    assert tuple(reader.state_dict()) == tuple(state_before)
+    for name, value in reader.state_dict().items():
+        assert torch.equal(value, state_before[name])
+    reader.train()
+    with pytest.raises(ValueError, match="evaluation-only"):
+        reader.set_eval_value_intervention("semantic_near_zero")
+
+
 def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
     torch.manual_seed(318)
     top = _object_top().eval()

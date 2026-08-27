@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; R2-D01 first observation slice and read-only replay entry implemented; 161 retained mainline tests pass; existing-checkpoint R2 validation pending
+release status:         Schema25-R1 source assembly complete through R1h/N-01,D-01; R2-D01 observation plus R2-A01 read-only matched P2-value/gripper attribution implemented; 164 retained mainline tests pass; existing-checkpoint A01 validation pending
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -57,9 +57,10 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > variance-to-standard-deviation paths zero preserving, retaining producer-owned
 > FP32 probability/log views through G-to-P2, and observing only live source
 > tensors and finite raw-gradient spikes.
-> R1 has since completed its first formal run. R2-D01 adds observation only;
-> no R2 training, checkpoint-state change or behavioral repair has been
-> performed.
+> R1 has since completed its first formal run. R2-D01 adds observation and
+> R2-A01 adds evaluation-only matched P2 value counterfactuals plus gripper
+> attribution. Neither changes training, checkpoint state, primary deployment
+> behavior or losses; no behavioral R2 repair has been performed.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -709,7 +710,7 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 161/161. Tests cover full
+The retained local suite now passes 164/164. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -738,16 +739,19 @@ variance VJPs, BF16-underflow-resistant producer logs, exact-zero legacy prior
 support, all-invalid finite masked terminals, read-only source-gradient hooks,
 pre-clip finite-spike attribution, partial-window gradient ownership, current
 metric vocabulary, P2 action-band/type/interval diagnostic retention,
-diagnostic output/state invariance, gripper horizon bands and target-event-
-relative persistence reset/count accounting, a bounded decision-facing console
+diagnostic output/state invariance, evaluation-only P2 value-intervention
+locality and posterior invariance, exact matched-noise/finally orchestration,
+gripper codec-branch reconstruction, gripper horizon bands and exhaustive
+horizon-by-target-event context accounting, a bounded decision-facing console
 backed by the unchanged
 lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
 gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
 The complete R1 source graph is statically closed and its first formal run has
-been audited. R2-D01 does not itself authorize another experiment. A formal R2
-run still requires a separately approved immutable run context and the
+been audited. R2-D01/A01 do not themselves authorize another training
+experiment. A formal behavioral R2 run still requires a separately approved
+immutable run context and the
 following production acceptance:
 
 - fresh BF16 smoke and five-step deployment;

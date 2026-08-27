@@ -140,6 +140,12 @@ class ObjectFutureEffectReader(nn.Module):
 
     TYPE_NAMES = ("semantic", "geometry")
     S_TYPE_INDEX_BY_P2 = (0, 2)
+    VALUE_INTERVENTION_SPECS = {
+        "semantic_near_zero": (0, (0, 1)),
+        "semantic_far_zero": (0, (2, 3)),
+        "geometry_near_zero": (1, (0, 1)),
+        "geometry_far_zero": (1, (2, 3)),
+    }
 
     def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
         super().__init__()
@@ -161,6 +167,46 @@ class ObjectFutureEffectReader(nn.Module):
         self.semantic_value = nn.Linear(content_dim, hidden, bias=False)
         self.transport_value = nn.Linear(2, hidden, bias=False)
         self.temperature_logit = nn.Parameter(torch.zeros(3))
+        # Plain evaluation state: it is neither a parameter nor a persistent
+        # buffer and therefore cannot alter checkpoint identity.  R2-A01
+        # changes selected values only for a complete matched validation
+        # sample; normal training/deployment keeps the exact neutral string.
+        self._eval_value_intervention = "none"
+
+    def set_eval_value_intervention(self, mode: str) -> None:
+        """Select one R2-A01 value-only counterfactual for evaluation."""
+
+        if self.training:
+            raise ValueError("P2 value interventions are evaluation-only")
+        if mode not in self.VALUE_INTERVENTION_SPECS:
+            raise ValueError(
+                "P2 value intervention must be one of "
+                + ", ".join(self.VALUE_INTERVENTION_SPECS)
+            )
+        self._eval_value_intervention = mode
+
+    def clear_eval_value_intervention(self) -> None:
+        self._eval_value_intervention = "none"
+
+    def _intervened_values(
+        self,
+        selected: SelectedIntervalEvidence,
+    ) -> tuple[Tensor, Tensor]:
+        mode = self._eval_value_intervention
+        if mode == "none":
+            # Preserve the primary path without even an identity multiply.
+            return selected.common_value, selected.residual_value
+        if self.training:
+            raise ValueError("P2 value interventions are evaluation-only")
+        try:
+            type_index, interval_indices = self.VALUE_INTERVENTION_SPECS[mode]
+        except KeyError as error:
+            raise RuntimeError("P2 value intervention state is invalid") from error
+        mask = selected.common_value.new_ones(
+            (1, 1, 1, selected.key.shape[3], selected.key.shape[4], 1)
+        )
+        mask[..., list(interval_indices), type_index, :] = 0.0
+        return selected.common_value * mask, selected.residual_value * mask
 
     def _temperatures(self) -> Tensor:
         return 0.25 + 3.75 * torch.sigmoid(self.temperature_logit.float())
@@ -535,15 +581,16 @@ class ObjectFutureEffectReader(nn.Module):
             support,
             dim=3,
         )
+        common_source, residual_source = self._intervened_values(selected)
         common_by_type = torch.einsum(
             "btqiz,btqizh->btqzh",
-            posterior.to(dtype=selected.common_value.dtype),
-            selected.common_value,
+            posterior.to(dtype=common_source.dtype),
+            common_source,
         )
         residual_by_type = torch.einsum(
             "btqiz,btqizh->btqzh",
-            posterior.to(dtype=selected.residual_value.dtype),
-            selected.residual_value,
+            posterior.to(dtype=residual_source.dtype),
+            residual_source,
         )
         value_by_type = common_by_type + residual_by_type
         gradient_metrics: dict[str, Tensor] = {}
