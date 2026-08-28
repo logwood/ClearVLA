@@ -12,7 +12,8 @@ implements four evaluation-only, matched-noise P2 value counterfactuals:
 semantic/geometry crossed with near intervals `0/1` or far intervals `2/3`.
 They alter selected common and residual values only after posterior formation;
 the primary path, model state, loss, optimizer, checkpoint ABI and RNG stream
-are unchanged. The retained mainline suite passes `164/164`. The completed
+are unchanged. The then-current D01/A01 suite passed `164/164`; the current
+R2 closure result is recorded below. The completed
 replay covers all `179` validation batches / `1,432` samples and the configured
 `16` matched counterfactual batches. A dedicated
 read-only validation loader accepts only the intentional active-source identity
@@ -25,31 +26,37 @@ post-route/intervention diagnostics remain unimplemented; A01 no longer needs
 them to choose the next source boundary.
 
 Implementation checkpoint (2026-08-28): all three authorized behavioral units
-are present in the local worktree. WG01 changes only transport
-common/innovation supervision to the existing target-scale-covariant row loss
-and preserves the R1 raw-coordinate value as a detached audit. P202 gives
-spatial K/K*C selection and physical-I termination separate bias-free query
-owners initialized as exact copies. GRIP02 adds one exact-zero bounded
-gripper-private state shared only by deployed value/delta and the supervised
-final event head. No P3, codec, sampler, checkpoint-selector, config, objective
-coefficient or execution-policy edit was made.
+and their end-to-end ownership closure are present in the local worktree.
+WG01 keeps raw-coordinate SmoothL1 as the sole active transport measure and
+uses detached target scale only for support-normalized mean-one relative row
+weights; normalized and direction terms are audit-only. P202 gives spatial
+K/K*C selection and physical-I termination separate exact-copy queries, keeps
+semantic and physical geometry values typed through their own consequence
+interactions, and fuses them once without a learned type gate. GRIP02 adds one
+exact-zero bounded gripper-private state for deployed value/delta, removes the
+hidden-state event bypass, and supervises events only from codec-decoded
+gripper absolute/delta. No P3, sampler, checkpoint-selector, config, objective
+coefficient, codec formula or execution-policy edit was made.
 
-The measured production inventory is `169,199,006` total / `152,828,275`
-trainable parameters, 1,389 parameter tensors, 1,067 trainable tensors, 23
-optimizer groups and 1,395 state keys. Relative to R1 the delta is exactly
-`+786,432` trainable parameters and three state keys; the post-construction RNG
-digest remains
+The measured production inventory is `169,458,596` total / `153,087,865`
+trainable parameters, 1,388 parameter tensors, 1,066 trainable tensors, 23
+optimizer groups and 1,394 state keys. Relative to R1 the delta is exactly
+`+1,046,022` trainable parameters and two state keys; the ordered state-key
+digest is
+`384bf6aa4f765382f3d7b4251f0b70f53fe233d3a86090f8ea2bdad6d886d174`,
+and the post-construction RNG digest remains
 `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
-The retained suite passes `168/168`; focused Ruff, compileall and diff checks
-pass. A fresh one-batch CPU BF16 forward/backward at the complete production
-dimensions (`H=512`, 256 patches/camera, 169,199,006 parameters) completed in
-109.58 seconds locally with finite loss `3.18999` and finite pre-clip gradient
-`4.22802`; all seven new scalar fields were present and finite. The retained
-five-step deployment guard also passes. First-forward spatial/terminal P2 VJPs,
-query delta and gripper gate/state delta were exact zero at the inherited
-zero-value/exact-copy/zero-gate initialization, while the gripper-private state
-VJP was nonzero (`4.94517e-6`). These are implementation guards, not
-CUDA-memory, throughput or formal R2 behavior evidence.
+The retained suite plus the current closure guards passes `172/172`; focused
+Ruff, compileall and diff checks pass. A fresh current-inventory one-batch CPU
+BF16 forward/backward (`H=512`, 256 patches/camera, 169,458,596 parameters)
+completed in 80.79 seconds with finite loss `3.18261` and finite pre-clip
+gradient `3.93425`. The retained five-step deployment guard also passes.
+First-forward
+spatial/terminal P2 VJPs, query delta and gripper gate/state delta were exact
+zero at the inherited zero-value/exact-copy/zero-gate initialization, while
+the gripper-private state VJP was nonzero (`4.94517e-6`). These are
+implementation guards, not CUDA-memory, throughput or formal R2 behavior
+evidence.
 
 This document records the source derivation and execution contract for the next
 version after the completed Schema25 R1 replay and its first formal run. The
@@ -80,9 +87,10 @@ three units together:
    from the projection used by the physical-I terminal, with an exact-copy
    initialization and no time prior;
 3. **R2-GRIP02:** introduce one zero-initialized, bounded, gripper-private
-   continuous state shared by deployed value/delta heads and the supervised
-   event head, while leaving arm, auxiliary gripper coordinates, codec and
-   event logits-as-probe semantics intact;
+   continuous state for the deployed value/delta heads, then supervise the
+   event classifier only through their codec-decoded absolute/delta boundary,
+   while leaving arm, auxiliary gripper coordinates, codec and event
+   logits-as-probe semantics intact;
 4. update only the manifest component identities, source/state inventories,
    tests and a small JSONL-only health surface required by those units;
 5. spend one formal training run after all three commits independently pass
@@ -156,16 +164,19 @@ Relevant sources:
 - That layer-contract canvas reads state, state history, executed history and
   the transition selector.  It does not read S/W/P, the current noisy action,
   flow time or the final gripper event logits.
-- The supervised final event head reads final action hidden states.  Its loss
-  can shape the shared decoder representation during training, but its logits
-  are a sibling output, not an input to the physical velocity head.
+- The active supervised final event head reads only codec-decoded gripper
+  absolute value and adjacent delta. The former hidden-state event head is
+  absent. Its loss can reach the gripper-private state only through the
+  physically deployed value/delta projections; arm and four auxiliary gripper
+  coordinates are outside this boundary.
 - Deployment performs an endpoint head call at `t=1`; that call reports final
   event/motion logits and deliberately does not modify the integrated physical
   field.
 
-Thus there are two non-equivalent event meanings with different producers,
-gradients and consumers.  This is a confirmed semantic ownership split.  It
-does **not** yet prove that either path causes the gripper regression.
+Thus there are still two non-equivalent event meanings with different
+producers, gradients and consumers: action-consumed rollout evidence and the
+supervised codec-decoded classifier. This is a confirmed semantic ownership
+split. It does **not** make event logits a deployed control input.
 
 Relevant sources:
 
@@ -279,15 +290,17 @@ R1 source slice.
    regression makes its direct supervision and boundary VJP scale far below
    semantic.  This is a loss-geometry problem, not evidence for a hard output
    gain or deletion.
-3. P2 already learns useful time allocation, but one `source_query` parameter
-   set simultaneously owns spatial K/K*C selection and physical-I termination.
-   That ownership overlap is independent of whether interval 3 mass is high.
-4. The codec blend is not the primary gripper failure.  Both deployed branches
-   are poor, and the supervised event head has no gripper-private continuous
-   state shared with those branches.
+3. P2 already learns useful time allocation, but the R1 reader used one
+   `source_query` parameter set for spatial K/K*C selection and physical-I
+   termination. That justified separate call-site owners, not a detach or a
+   prescribed interval schedule.
+4. The codec blend is not the primary gripper failure. Both deployed branches
+   are poor. The continuous repair therefore acts before their fixed blend,
+   while event supervision is closed after the same physical value/delta
+   branches rather than through a parallel hidden-state head.
 5. Local event classification and persistent continuous state remain distinct.
-   The repair may let the existing event loss shape a shared gripper state, but
-   event logits remain a probe and never gate the physical field.
+   Event loss may shape the physically consumed gripper path, but event logits
+   remain a probe and never gate the field.
 
 ## 3. Complete active dataflow maps
 
@@ -300,8 +313,10 @@ current observations
   -> W common + four interval innovations
   -> P2 type-local spatial K / K*C selection, retaining I
   -> P2 action-query terminal removes I independently for semantic/geometry
-  -> complementary raw sum
-  -> one P2 RMS contract
+  -> one type-local physical-value projection after each terminal
+  -> one shared aggregate P2 RMS contract
+  -> semantic/geometry consequence interactions remain typed
+  -> one parameter-free complementary fusion
   -> protected consequence
   -> P3 temporal/state-change optional lanes + protected P1 carriers
   -> bottom evidence/action decoder
@@ -318,13 +333,15 @@ Backward paths:
   selects which W interval;
 - no explicit loss names a correct action-band/World-interval relation.
 
-`top.effect_reader.*` is one checkpointed module and one `p2_effect_reader`
-optimizer role.  Its semantic and geometry spatial choices use independent
-keys/values but the same two type-local action projections are currently reused
-for the later I terminal.  W is cached once per observation; the action-query
-dependent P2 read is repeated by the five sampler updates and the endpoint
-model call.  P1, dynamic precision, P3 and transition evidence are legal
-parallel bottom inputs, so action success does not prove P2 ownership closure.
+`top.effect_reader.*` remains one checkpointed module and one
+`p2_effect_reader` optimizer role, but spatial and terminal projections now
+have distinct state keys. This is call-site ownership, not a gradient stop:
+ordinary terminal losses still propagate through selected W evidence into the
+upstream spatial query, while `terminal_query` is absent from spatial
+selection. W is cached once per observation; the action-query-dependent P2
+read is repeated by the five sampler updates and the endpoint model call. P1,
+dynamic precision, P3 and transition evidence are legal parallel bottom
+inputs, so action success does not prove P2 ownership closure.
 
 ### 3.2 Event and persistent gripper path
 
@@ -332,14 +349,22 @@ parallel bottom inputs, so action success does not prove P2 ownership closure.
 raw gripper action sequence + current qpos
   -> per-row signed delta threshold
   -> three-class final event target
-  -> final event head loss
-  -> shared bottom hidden state
-       \-> event logits (reported only)
-       \-> gripper value/delta/aux physical velocity heads
-             -> five ODE updates
-             -> absolute branch + cumulative-delta branch
-             -> fixed continuous decode
-             -> decoded event metric and gripper RMSE
+  -> final event cross entropy
+
+bottom action token
+  -> zero-initialized bounded gripper-private state
+       \-> deployed value/delta physical heads
+             -> clean physical estimate at the current flow time
+             -> fixed codec decode
+             -> [decoded absolute gripper, adjacent decoded delta]
+             -> final event logits (reported only)
+       \-> no direct hidden-state event head
+  -> base token -> arm / four auxiliary gripper / motion heads
+
+five ODE updates
+  -> absolute branch + cumulative-delta branch
+  -> fixed continuous decode
+  -> decoded event metric and gripper RMSE
 
 transition.selector
   -> trainable layer adapter
@@ -353,15 +378,17 @@ event logits are not a deployed control input.  Any R2 event claim must state
 which branch it means.
 
 During a training forward, physical flow, decoded action, smooth-delta and
-physical-delta losses reach the continuous velocity head; event focal loss
-reaches the sibling final event head, and both also reach their shared action
-trunk.  In sampling, the velocity head is additionally called for execution
+physical-delta losses reach the continuous velocity head. Event focal loss
+reads the codec-decoded physical gripper boundary and can therefore return only
+through deployed value/delta, not through arm or auxiliary coordinates. In
+sampling, the velocity head is additionally called for execution
 candidate/prefix values inside one bottom invocation; only the final physical
-field from each of five ODE updates is integrated.  The endpoint call reports
-event/motion without another physical update.  All action/event/motion heads
-are checkpointed under `bottom.decoder.*` and share optimizer role
-`bottom_heads`; arm heads, four auxiliary gripper heads, the motion head and the
-layer-contract rollout event evidence are legal alternate consumers/bypasses.
+field from each of five ODE updates is integrated. The endpoint call reports
+codec-decoded event/motion without another physical update. Velocity and
+motion parameters remain under `bottom.decoder.*`; the classifier is stored
+under `decoded_gripper_event_head.*`. All share optimizer role `bottom_heads`.
+The layer-contract rollout event evidence remains a legal, semantically
+different action input.
 
 ### 3.3 Camera-geometry producer and reverse path
 
@@ -382,14 +409,17 @@ two adjacent learned image flows
 ```
 
 Teacher forms same-camera displacement moments in normalized coordinates and
-contributes no deployment value. The direct loss decomposes common and
-interval innovation but currently applies raw-coordinate SmoothL1 only;
-semantic uses raw plus target-scale-normalized and directional terms. Current
-camera support is detached for loss masking. Action losses can also reach W
-through P2, while `future_dynamics` reaches W directly. All W parameters are
-owned by optimizer role `dynamics`; transport has no separate checkpoint
-field, and W is computed once per observation cache while P2 consumes it at
-each of five ODE updates plus the endpoint head call.
+contributes no deployment value. The direct transport loss decomposes common
+and interval innovation, keeps raw-coordinate SmoothL1 as its only active
+measure, and uses detached inverse-square target scale only to redistribute
+supported rows after normalizing each objective's support-weighted mean to
+one. Scale-normalized and directional forms are detached audits; semantic
+retains its established composite. Current camera support is detached for loss
+masking. Action losses can also reach W through P2, while `future_dynamics`
+reaches W directly. All W parameters are owned by optimizer role `dynamics`;
+transport has no separate checkpoint field, and W is computed once per
+observation cache while P2 consumes it at each of five ODE updates plus the
+endpoint head call.
 
 Invalid camera support gives exact-zero transport and no P2 geometry value.
 At legal support the transport head is near the origin, so tanh saturation is
@@ -401,9 +431,9 @@ why weak geometry need not make the whole policy weak.
 
 | ID | Status | Issue | R2 disposition |
 |---|---|---|---|
-| `R2-WG01` | implemented; local guards pass; behavior unrun | W geometry hidden state remains healthy, but raw small-coordinate transport loss yields a roughly `40-45x` semantic/geometry boundary-VJP gap and prediction stays near one third of Teacher | existing exact-zero target-scale-covariant row loss now owns transport; forward, Teacher and coefficients remain unchanged |
-| `R2-P202` | implemented; local guards pass; behavior unrun | one `source_query` set owned both spatial K/K*C selection and physical-I termination | independent terminal query is an exact parameter copy at construction; no time prior or interval target |
-| `R2-GRIP02` | implemented; local guards pass; behavior unrun | both deployed branches fail, while final event supervision and continuous value/delta shared only the global action trunk and no gripper-private state | one zero-initialized bounded multiplicative state now feeds value, delta and final event head; auxiliary heads, codec and logits-as-probe remain intact |
+| `R2-WG01` | implemented; local guards pass; behavior unrun | W geometry hidden state remains healthy, but raw small-coordinate transport loss yields a roughly `40-45x` semantic/geometry boundary-VJP gap and prediction stays near one third of Teacher | raw-coordinate SmoothL1 remains sole active measure; detached target-scale weights are support-normalized to mean one, and normalized/direction forms are audit-only |
+| `R2-P202` | implemented; local guards pass; behavior unrun | one `source_query` set owned both spatial K/K*C selection and physical-I termination, while early hidden projection/fusion erased the physical type boundary | independent terminal queries start as exact copies; values stay physical through the terminal and typed through separate exact-copy consequence interactions before one parameter-free fusion |
+| `R2-GRIP02` | implemented; local guards pass; behavior unrun | both deployed branches fail, while hidden event supervision could bypass their continuous physical boundary | one zero-initialized bounded state feeds value/delta; the hidden event head is absent and the final classifier reads only codec-decoded gripper absolute/delta |
 | `R2-EVT-01` | semantic split confirmed; not selected | action-consumed frozen rollout readout and supervised final event head share a name but not meaning | leave the rollout source unchanged; do not infer that it is the continuous gripper owner |
 | `R2-P3-01` | deferred | independently contracted lanes add without post-route attribution | no P3 edit in this version |
 | `R2-SEL-01` | deferred | one-of-seven gripper dimension and far hold cannot select `best.pt` | keep `best.pt` and `latest.pt`; do not add a fourth behavioral/source unit now |
@@ -511,8 +541,9 @@ of non-use, not evidence that the upstream representation is unnecessary.
 
 The local source candidate now contains the following three independently
 revertible semantic units in order. Their forward/reverse audits and focused
-tests are closed; commit boundaries and any push remain pending. They share one
-later training run but no parameter, loss term or semantic claim.
+tests are closed; one combined local rollback commit remains to be created, and
+the current closure has no fresh push authorization. They share one later
+training run but no parameter, loss term or semantic claim.
 
 #### R2-WG01: target-scale-covariant camera transport supervision
 
@@ -528,19 +559,21 @@ Source diagnosis:
 
 Authorized edit:
 
-- use the existing exact-zero, target-scale-covariant
-  `row_loss(..., scale_floored=True)` for transport common and interval
-  innovation;
+- keep raw-coordinate SmoothL1 as the sole active transport common and
+  interval-innovation measure;
+- use the existing smooth target-scale floor only to form detached
+  inverse-square relative row weights, then normalize each support-weighted
+  objective to mean one;
 - keep `0.55/0.15/0.05`, outer `future_dynamics=0.10`, Teacher targets,
-  camera support, W forward algebra, covariance and P2 unchanged;
-- retain an audit-only raw-coordinate transport term so the change of formal
-  loss units is explicit in JSONL rather than hidden by the old metric name.
+  camera support, W forward algebra and covariance unchanged;
+- retain detached scale-normalized, directional and raw-coordinate audit
+  scalars so the formal loss units are explicit in JSONL.
 
-This is mathematically an effective rescaling, but it is derived from each
-Teacher target scale with the existing smooth floor; it is not a manually
-chosen geometry gain or a prediction-amplitude target. Prediction equal to
-target still has exact zero loss, including a legal zero target. The edit adds
-no parameter, buffer, runtime call or checkpoint tensor.
+This is a target-scale-covariant redistribution, not a manually chosen
+geometry gain or a prediction-amplitude target. The support-normalized weights
+prevent the added measure from silently multiplying the future-loss budget;
+prediction equal to target still has exact zero loss, including a legal zero
+target. The edit adds no parameter, buffer, runtime call or checkpoint tensor.
 
 Acceptance is relational: transport prediction/Teacher ratio and geometry
 common/interval VJPs should recover from R1 without semantic, covariance or
@@ -562,15 +595,25 @@ Authorized edit:
 - retain `source_query` exclusively for spatial semantic K and geometry K*C;
 - add two `terminal_query` bias-free linear projections as a `deepcopy` of the
   corresponding spatial projections, consuming no new initialization RNG;
-- use `terminal_query` only in `temporal_terminal` and keep selected W key,
-  S's zero-preserving conditioner, bounded temperatures, support, posterior
-  and value contraction byte-for-byte otherwise unchanged.
+- use `terminal_query` only in `temporal_terminal`; keep selected W key, S's
+  zero-preserving conditioner, bounded temperatures, support and posterior
+  algebra unchanged;
+- keep semantic values in their content width and geometry values in physical
+  2-D until the terminal's existing value projections, then export one typed
+  `ObjectTypedEffect`;
+- give consequence interaction one exact-copy bias-free owner per type and
+  fuse those typed interactions only once, parameter-free, after the
+  zero-preserving interaction.
 
 At construction, spatial and terminal projections are exactly equal and the
-complete P2 forward is exactly the R1 function. Training may separate them
-without a hard row-to-interval mask, monotonic prior, entropy quota, learned
-null, type competition or interval gain. The action query still receives both
-reverse paths, while each projection receives only its named stage gradient.
+complete P2 forward is exactly the R1 function at the inherited zero-value
+boundary. Training may separate them without a hard row-to-interval mask,
+monotonic prior, entropy quota, learned null, type competition or interval
+gain. The action query still receives both reverse paths. The projection split
+is a call-site/optimizer ownership boundary, not an artificial detach: a
+terminal loss may naturally backpropagate through the selected spatial carrier
+to `source_query`, while `terminal_query` is used only by the physical-I
+terminal.
 
 Add JSONL-only output-VJP metrics for the spatial and terminal query tensors
 and a detached projection-delta RMS. Tests must prove initialization identity,
@@ -583,8 +626,8 @@ Source diagnosis:
 
 - value, delta and four auxiliary field heads are independent projections of
   the same general action token;
-- the supervised final event head is a sibling projection and its logits never
-  enter the physical field;
+- before GRIP02, the supervised final event head was a sibling hidden-state
+  projection whose logits never entered the physical field;
 - both deployed value and cumulative-delta branches fail before fusion, while
   event-related rows dominate error;
 - the action-consumed frozen layer-contract event readout is a different
@@ -608,8 +651,9 @@ state from an exact-zero token.
 - arm absolute/delta and the four non-deployed auxiliary gripper heads continue
   to read `base_read`;
 - deployed gripper value and adjacent-delta heads read `gripper_read`;
-- the supervised final event head reads the exact same raw `gripper_state`
-  through its own existing normalization;
+- the hidden-state event head is removed; the supervised final event head reads
+  only the codec-decoded gripper absolute value and adjacent decoded delta
+  produced from the deployed value/delta field;
 - the active Schema25 profile is the six-channel `legacy_handcrafted` branch;
   the shared head's inactive `parseval_temporal` branch must remain valid by
   routing its sole native gripper read through `gripper_read`, with the same
@@ -618,13 +662,14 @@ state from an exact-zero token.
   formal losses, event threshold, five-step sampler and `0.75/0.25` decode stay
   unchanged.
 
-The shared state, not the event logits, is the continuous control owner. At
-zero gate the complete physical field and event logits equal R1 exactly. The
-event loss can subsequently shape a state that is physically consumed by
+The shared private state, not the event logits, is the continuous control
+owner. At zero gate the complete physical field equals R1 exactly and the new
+codec event classifier is exact-zero. Once its classifier weights become
+nonzero, event loss can shape a state that is physically consumed by
 value/delta without imposing an event gate or binary gripper state. Candidate
-execution-value calls must pass through the same velocity-head state; the two
-final event-head call sites must consume the state returned by that same head
-rather than recompute an alternate branch.
+execution-value calls must pass through the same velocity-head state; the
+single active event boundary is computed from the deployed physical field and
+is not an alternate hidden-state branch.
 
 Add JSONL-only gate RMS, state-delta RMS and state VJP. Tests must prove zero
 initial identity; nonzero gate locality to value/delta/event only; arm,
@@ -634,10 +679,16 @@ delta-consistency and event losses.
 
 #### Combined identity and rollback
 
-Measured parameter delta is three bias-free `512x512` matrices: two P2 terminal
-queries and one gripper gate, `+786,432` trainable parameters and `+3` state
-keys. Optimizer group count remains `23`; the P2 tensors belong to
-`p2_effect_reader` and the gate to `bottom_heads`.
+The first R2 structural delta was three bias-free `512x512` matrices: two P2
+terminal queries and one gripper gate (`+786,432` trainable parameters and
+`+3` state keys). The completed typed-consequence/event boundary additionally
+adds one exact-copy bias-free `512x512` geometry interaction matrix, removes
+the hidden event head (`LayerNorm + 512 -> 3`) and adds a zero-initialized
+`2 -> 3` codec event head. The final delta relative to R1 is
+`+1,046,022` trainable parameters, `+2` state keys, two additional parameter
+tensors and no optimizer-group change. The P2 terminal and consequence tensors
+belong to `p2_effect_reader` and `consequence`; the gripper gate and codec
+event head belong to `bottom_heads`.
 
 The top, bottom and training component ABI strings and active-source digest
 must change. Exact R1 resume and bottom-only migration are rejected because
@@ -660,18 +711,27 @@ metric and no invented weighted composite declares model quality by itself.
 The authorized production boundary is deliberately narrow and split by unit:
 
 - `clearvla/mainline/training/losses.py`: R2-WG01 changes only the transport
-  common/innovation row-loss geometry and adds a raw-coordinate audit term;
-- `clearvla/mainline/model/compiler.py`: R2-P202 adds the copied terminal query,
-  routes only physical-I termination through it and emits bounded query-stage
-  diagnostics;
+  common/innovation row-loss geometry and adds detached comparison terms;
+- `clearvla/mainline/model/dynamics.py`: exposes existing W transport-head
+  state/saturation values only on diagnostic batches; W forward algebra is
+  unchanged;
+- `clearvla/mainline/model/compiler.py` and `model/top.py`: R2-P202 add copied
+  terminal queries, retain physical type widths through I termination, keep
+  typed consequence interactions and emit bounded query-stage diagnostics;
 - `clearvla/mainline/v120_core/decoder.py`: R2-GRIP02 owns construction of the
   exact-zero gate and one canonical field-plus-gripper-state readout;
-- `clearvla/mainline/v120_core/time_domain_mmdit.py`: every candidate velocity
-  call uses that canonical readout, while both final event-head call sites use
-  the returned gripper state; motion continues to read the original action
-  state;
-- `clearvla/mainline/manifest.py`: update only the top, bottom and training
-  component ABI identifiers required by the three changed semantics;
+- `clearvla/mainline/v120_core/time_domain_mmdit.py` and
+  `model/restored_bottom.py`: every final/candidate velocity call uses that
+  canonical readout, the historical hidden event head is absent from the active
+  bottom ABI and motion continues to read the original action state;
+- `clearvla/mainline/model/policy.py` and `model/action_contract.py`: close the
+  supervised classifier after the current-flow clean-field estimate is decoded,
+  and expose final event logits only at that typed boundary;
+- `clearvla/mainline/training/optimizer.py` and `training/engine.py`: assign the
+  codec classifier to `bottom_heads` and sample named raw parameter gradients
+  after backward without persistent Parameter hooks;
+- `clearvla/mainline/manifest.py`: update the top, bottom, training and runtime
+  component ABI identifiers required by the changed semantics;
 - `clearvla/mainline/runtime/logging.py` registers only the
   `gripper_private_` scalar prefix needed to archive the named GRIP02 health
   fields; the other new keys already use active prefixes and no new console
@@ -693,32 +753,48 @@ The implemented guards and independently checked boundaries are:
 
 | Unit | Test/check location | Closed assertions |
 |---|---|---|
-| R2-WG01 | `tests/test_mainline_structural_contracts.py` | supported matching and unsupported rows remain exact zero; the covariant term owns backward; the R1 raw-coordinate term is detached and explicit |
-| R2-P202 | `tests/test_mainline_structural_contracts.py` | copied spatial/terminal weights are exact; spatial-only loss reaches only `source_query`; terminal-only loss reaches only `terminal_query`; inherited axis/support tests remain green |
-| R2-GRIP02 | `tests/test_mainline_policy.py` | zero-gate full-field identity; forced-gate locality to deployed gripper coordinates; event-to-gate reachability; arm/auxiliary/motion isolation; both active final call sites use the shared state helper |
-| ABI | `tests/test_mainline_manifest.py` | only top, bottom and training component identities change; observation/runtime and capability schema remain unchanged |
-| Combined | production inventory plus retained optimizer/checkpoint tests | exact `+786,432`/three-key delta, 23 optimizer groups, unchanged construction RNG and rejection of incompatible old ABI |
+| R2-WG01 | `tests/test_mainline_structural_contracts.py` | supported matching and unsupported rows remain exact zero; mean-one weighted raw coordinate error owns backward; normalized/direction/raw comparison terms are detached and explicit |
+| R2-P202 | `tests/test_mainline_structural_contracts.py` | copied spatial/terminal weights are exact; isolated spatial loss reaches only `source_query`; an isolated terminal over a detached carrier reaches only `terminal_query`; the complete terminal loss reaches both through ordinary autograd; inherited axis/support tests remain green |
+| R2-GRIP02 | `tests/test_mainline_policy.py` | zero-gate full-field identity; forced-gate locality to deployed gripper coordinates; codec-event-to-gate reachability; arm/auxiliary/motion isolation; all active velocity call sites use the shared state helper and the hidden event head is absent |
+| ABI | `tests/test_mainline_manifest.py` | top, bottom, training and runtime component identities change; observation and capability schema remain unchanged |
+| Combined | production inventory plus retained optimizer/checkpoint tests | exact final `+1,046,022`/two-key R1 delta, 23 optimizer groups, unchanged construction RNG, no accumulating Parameter hooks and rejection of incompatible old ABI |
 
 The bounded training keys are implemented as:
 
 ```text
 loss_future_transport_raw_coordinate
-gradient_tensor_p2_spatial_query_rms
-gradient_tensor_p2_terminal_query_rms
-object_p2_terminal_query_delta_rms
+loss_future_transport_{normalized_audit,direction_audit}
+loss_future_transport_{common,innovation}_target_weight_mean
+loss_future_transport_target_weight_max
+object_w_transport_head_weight_rms
+object_w{1,2}_transport_{common,innovation}_pre_tanh_rms
+object_w{1,2}_transport_head_saturation_fraction
+gradient_parameter_w_transport_head_weight_rms
+gradient_tensor_p2_{semantic,geometry}_{spatial,terminal}_query_rms
+gradient_parameter_p2_{semantic,geometry}_{spatial,terminal}_query_weight_rms
+gradient_parameter_p2_{semantic,geometry}_value_weight_rms
+gradient_parameter_consequence_{semantic,geometry}_interaction_weight_rms
+object_p2_{semantic,geometry}_terminal_query_delta_rms
 gripper_private_gate_rms
 gripper_private_state_delta_rms
 gradient_tensor_gripper_private_state_rms
+gradient_parameter_gripper_private_gate_weight_rms
+gradient_parameter_decoded_gripper_event_head_weight_rms
+gripper_private_{gate,state_delta,decoded_event_delta}_{hold,event,open,close}_rms
+gradient_tensor_{gripper_private_gate,gripper_private_state,
+                 decoded_gripper_event_features}_{hold,event,open,close}_rms
 ```
 
 They are scalar JSONL fields.  They add no target, loss term, stop criterion,
 console matrix or checkpoint buffer.  The raw-coordinate transport scalar
 reuses the raw row error already computed inside the target-scale-covariant
-objective, so it does not launch a duplicate loss calculation.  The remaining
-six state/VJP scalars run only under the existing diagnostic flag: every 20
-formal training batches, with state/projection scalars also retained on the
-configured 16 validation batches; VJP hooks attach only during training.
-They request no extra forward, sampling replay or high-dimensional tensor dump.
+objective, so it does not launch a duplicate loss calculation. State and
+projection scalars run only under the existing diagnostic flag: every 20
+formal training batches and the configured 16 validation batches. Activation
+VJP hooks attach only to ephemeral training-forward tensors; named parameter
+gradients are read once after backward and before clipping, so no hook survives
+its batch. They request no extra forward, sampling replay or high-dimensional
+tensor dump.
 
 ## 7. Verification and acceptance
 
@@ -806,20 +882,30 @@ R2 does not authorize:
 The implementation-local assumptions are closed:
 
 1. WG01 reuses the existing smooth target-scale floor, keeps supported
-   exact-match and unsupported rows at exact zero, and exposes the R1 raw loss
-   only as a detached audit.
+   exact-match and unsupported rows at exact zero, and exposes the unweighted
+   R1 raw aggregate only as a detached audit; weighted raw coordinate error is
+   the sole active transport measure.
 2. `terminal_query` is an exact construction-time tensor copy, leaves the
-   inherited RNG stream unchanged and receives only physical-I terminal
-   gradients; `source_query` receives only spatial K/K*C gradients.
+   inherited RNG stream unchanged and is called only for physical-I
+   termination. `source_query` is called only for spatial K/K*C selection, but
+   a complete terminal loss naturally traverses the selected carrier back into
+   it; no artificial detach separates the two stages.
 3. The zero gripper gate preserves the inherited field exactly. The canonical
    velocity helper is used by every final and candidate call; a nonzero gate can
-   affect only deployed gripper value/delta and the final event state.
-4. The final event head receives the same raw gripper-private state whose
-   normalized view reaches value/delta. Arm, four auxiliary gripper coordinates
-   and motion retain the R1 source.
-5. The measured delta is exactly `+786,432`, three state keys and no optimizer
-   group or post-construction RNG change; component ABI and manifest digest are
-   updated accordingly.
+   affect only deployed gripper value/delta and, through their codec decode, the
+   final event classifier.
+4. The final event head receives only codec-decoded absolute gripper and
+   adjacent decoded delta. Its reverse path can reach the private state only
+   through the physically consumed value/delta heads. Arm, four auxiliary
+   gripper coordinates and motion retain the R1 source.
+5. The measured final R1 delta is exactly `+1,046,022`, two state keys and no
+   optimizer-group or post-construction RNG change; component ABI and manifest
+   digest are updated accordingly. The earlier `+786,432`/three-key figure
+   names only the first pre-codec-closure R2 candidate.
+6. Parameter-gradient diagnostics are sampled after backward and before local
+   clipping. Only activation VJPs use hooks, and those tensors die with the
+   current graph; diagnostic cadence therefore cannot accumulate hooks across
+   a formal run.
 
 One unresolved limitation remains behavioral: the combined formal run cannot
 independently estimate each unit's task-level counterfactual. Separate semantic
@@ -844,11 +930,11 @@ causal separability from the combined run.
    velocity/event consumer in dynamic and fallback paths.
 7. **Complete:** finish the final touched-file static checks, retained suite,
    exact diff review and documentation closure.
-8. **Authorized:** create the reversible R2 semantic commit identity and push
-   it to `codex/schema25-r1-replay`.
-9. **Complete local substitute:** run one fresh production-dimension CPU BF16
-   training batch plus the retained five-step deployment guard. A separate
-   remote smoke is temporarily unavailable by explicit user decision;
-   therefore the formal run must treat its preflight and first reporting
-   window as the CUDA runtime/memory gate. Do not insert an old-checkpoint
-   experiment before it.
+8. **Next local action:** create one reversible R2 closure commit. Pushing that
+   new commit requires fresh explicit authorization.
+9. **Complete local substitute:** the fresh current-inventory
+   production-dimension CPU BF16 training batch and retained five-step
+   deployment guard pass. A separate remote smoke is temporarily unavailable
+   by explicit user decision; therefore the formal run must treat its preflight
+   and first reporting window as the CUDA runtime/memory gate. Do not insert an
+   old-checkpoint experiment before it.

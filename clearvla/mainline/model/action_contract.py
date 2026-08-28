@@ -410,9 +410,10 @@ class ActionQueryEncoder(nn.Module):
         return self._action_from_role(noisy_action_field, role)
 
 @dataclass(frozen=True)
-class BottomOutput:
+class BottomDecoderOutput:
+    """Active bottom result before the codec-closed event classifier."""
+
     physical_velocity: Tensor
-    event_logits: Tensor
     motion_logits: Tensor
     action_query: Tensor
     block_updates: tuple[Tensor, ...]
@@ -423,16 +424,33 @@ class BottomOutput:
         batch = int(self.physical_velocity.shape[0])
         if tuple(self.physical_velocity.shape) != (batch, horizon, action_dim):
             raise ValueError("bottom physical velocity has an invalid shape")
-        if tuple(self.event_logits.shape) != (batch, horizon, 3):
-            raise ValueError("bottom event logits have an invalid shape")
         if tuple(self.motion_logits.shape) != (batch, horizon):
             raise ValueError("bottom motion logits have an invalid shape")
         if tuple(self.action_query.shape) != (batch, horizon, basis, hidden):
             raise ValueError("bottom action query lost its basis axis")
 
 
+@dataclass(frozen=True)
+class BottomOutput(BottomDecoderOutput):
+    """Final bottom output after the deployed codec event boundary."""
+
+    event_logits: Tensor = field(default_factory=lambda: torch.empty(0))
+
+    def validate(self, *, action_dim: int, horizon: int, basis: int, hidden: int) -> None:
+        super().validate(
+            action_dim=action_dim,
+            horizon=horizon,
+            basis=basis,
+            hidden=hidden,
+        )
+        batch = int(self.physical_velocity.shape[0])
+        if tuple(self.event_logits.shape) != (batch, horizon, 3):
+            raise ValueError("bottom event logits have an invalid shape")
+
+
 __all__ = [
     "ActionQueryEncoder",
+    "BottomDecoderOutput",
     "BottomOutput",
     "V120SeedContext",
     "canonical_state_history",

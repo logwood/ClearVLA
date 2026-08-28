@@ -4,12 +4,13 @@ The final package owns observation preparation, G/S/W/P composition and the
 single typed ingress into the retained bottom action model.
 """
 
-from .action_contract import BottomOutput
+from .action_contract import BottomDecoderOutput, BottomOutput
 from .compiler import (
     ObjectConsequenceState,
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
     ObjectPolicyPlanDeltaBank,
+    ObjectTypedEffect,
     ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler, ObjectW1WorkingState
@@ -51,6 +52,7 @@ from .types import (
 __all__ = [
     "ActionIntentDock",
     "BottomOutput",
+    "BottomDecoderOutput",
     "ClearVLAMainlinePolicy",
     "CoarseActionIntent",
     "CoarseActionIntentState",
@@ -78,6 +80,7 @@ __all__ = [
     "ObjectIntentDynamicsTop",
     "ObjectPolicyPlanCompiler",
     "ObjectPolicyPlanDeltaBank",
+    "ObjectTypedEffect",
     "ObjectTopTrainingTargets",
     "ObjectW1WorkingState",
     "ObservationEvidence",

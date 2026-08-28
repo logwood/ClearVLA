@@ -26,6 +26,53 @@ from .gradient_audit import (
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
 
+_R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
+    (
+        "top.dynamics.transport_head.weight",
+        "gradient_parameter_w_transport_head_weight_rms",
+    ),
+    (
+        "top.effect_reader.source_query.0.weight",
+        "gradient_parameter_p2_semantic_spatial_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.source_query.1.weight",
+        "gradient_parameter_p2_geometry_spatial_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.terminal_query.0.weight",
+        "gradient_parameter_p2_semantic_terminal_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.terminal_query.1.weight",
+        "gradient_parameter_p2_geometry_terminal_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.semantic_value.weight",
+        "gradient_parameter_p2_semantic_value_weight_rms",
+    ),
+    (
+        "top.effect_reader.transport_value.weight",
+        "gradient_parameter_p2_geometry_value_weight_rms",
+    ),
+    (
+        "top.consequence.semantic_interaction.weight",
+        "gradient_parameter_consequence_semantic_interaction_weight_rms",
+    ),
+    (
+        "top.consequence.geometry_interaction.weight",
+        "gradient_parameter_consequence_geometry_interaction_weight_rms",
+    ),
+    (
+        "bottom.decoder.velocity_head.gripper_gate.weight",
+        "gradient_parameter_gripper_private_gate_weight_rms",
+    ),
+    (
+        "decoded_gripper_event_head.weight",
+        "gradient_parameter_decoded_gripper_event_head_weight_rms",
+    ),
+)
+
 
 def _autocast(device: torch.device, dtype: torch.dtype):
     enabled = device.type in {"cuda", "cpu"} and dtype in {
@@ -232,6 +279,33 @@ class MainlineTrainingEngine:
             )
         raise RuntimeError("global gradient norm was non-finite without a named owner")
 
+    def _r2_parameter_gradient_metrics(self) -> dict[str, Tensor]:
+        """Read raw parameter gradients without installing persistent hooks.
+
+        Intermediate activation hooks die with their forward graph. Parameter
+        hooks do not: registering them on each diagnostic batch would retain
+        every old scalar slot and make a long run progressively slower. These
+        named R2 owners are therefore sampled once, after backward and
+        before either clipping stage.
+        """
+
+        parameters = dict(self.model.named_parameters())
+        metrics: dict[str, Tensor] = {}
+        for parameter_name, metric_name in _R2_PARAMETER_GRADIENT_METRICS:
+            try:
+                parameter = parameters[parameter_name]
+            except KeyError as error:
+                raise RuntimeError(
+                    f"R2 gradient diagnostic lost parameter {parameter_name!r}"
+                ) from error
+            gradient = parameter.grad
+            metrics[metric_name] = (
+                parameter.new_zeros((), dtype=torch.float32)
+                if gradient is None
+                else gradient.detach().float().square().mean().sqrt()
+            )
+        return metrics
+
     def _gradient_lifecycle(
         self,
         *,
@@ -293,6 +367,8 @@ class MainlineTrainingEngine:
             if collect_diagnostics
             else {}
         )
+        if collect_diagnostics:
+            metrics.update(self._r2_parameter_gradient_metrics())
         decoder_parameters = [
             parameter
             for name, parameter in self.model.named_parameters()

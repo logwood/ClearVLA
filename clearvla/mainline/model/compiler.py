@@ -19,11 +19,53 @@ from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
 
 
 @dataclass(frozen=True)
+class ObjectTypedEffect:
+    """Semantic and physical-geometry P2 values before parameter-free fusion."""
+
+    semantic: Tensor
+    geometry: Tensor
+
+    def validate(self) -> None:
+        if self.semantic.ndim != 4:
+            raise ValueError("typed P2 effect must be [B,T,Q,H]")
+        if tuple(self.geometry.shape) != tuple(self.semantic.shape):
+            raise ValueError("semantic and geometry P2 effects must align")
+
+    def combined(self) -> Tensor:
+        self.validate()
+        return self.semantic + self.geometry
+
+    def scaled(self, scale: Tensor) -> "ObjectTypedEffect":
+        self.validate()
+        if tuple(scale.shape) != (*self.semantic.shape[:-1], 1):
+            raise ValueError("typed P2 effect scale must be [B,T,Q,1]")
+        return ObjectTypedEffect(
+            semantic=self.semantic * scale.to(dtype=self.semantic.dtype),
+            geometry=self.geometry * scale.to(dtype=self.geometry.dtype),
+        )
+
+
+@dataclass(frozen=True)
 class ObjectConsequenceState:
     factual_base: Tensor
-    effect: Tensor
-    interaction: Tensor
+    effect: ObjectTypedEffect
+    interaction: ObjectTypedEffect
     protected_consequence: Tensor
+
+    def validate(self) -> None:
+        self.effect.validate()
+        self.interaction.validate()
+        expected = tuple(self.factual_base.shape)
+        if tuple(self.effect.semantic.shape) != expected:
+            raise ValueError("typed P2 effect and factual base must align")
+        if tuple(self.interaction.semantic.shape) != expected:
+            raise ValueError("typed consequence interaction and fact must align")
+        if tuple(self.protected_consequence.shape) != expected:
+            raise ValueError("protected consequence lost [B,T,Q,H]")
+
+    def innovation(self) -> Tensor:
+        self.validate()
+        return self.effect.combined() + self.interaction.combined()
 
 
 @dataclass(frozen=True)
@@ -74,9 +116,12 @@ class SelectedIntervalEvidence:
     """W evidence after type-local spatial selection and before I removal."""
 
     key: Tensor  # [B,T,Q,I,Z,H]
-    value: Tensor  # [B,T,Q,I,Z,H]
-    common_value: Tensor  # [B,T,Q,I,Z,H]
-    residual_value: Tensor  # [B,T,Q,I,Z,H]
+    semantic_value: Tensor  # [B,T,Q,I,D]
+    semantic_common_value: Tensor  # [B,T,Q,I,D]
+    semantic_residual_value: Tensor  # [B,T,Q,I,D]
+    geometry_value: Tensor  # [B,T,Q,I,2]
+    geometry_common_value: Tensor  # [B,T,Q,I,2]
+    geometry_residual_value: Tensor  # [B,T,Q,I,2]
     selected_s_context: Tensor  # [B,T,Q,I,Z,H]
     support: Tensor  # bool [B,I,Z]
 
@@ -84,20 +129,39 @@ class SelectedIntervalEvidence:
         if self.key.ndim != 6 or int(self.key.shape[-2]) != 2:
             raise ValueError("selected P2 evidence must be [B,T,Q,I,2,H]")
         expected = tuple(self.key.shape)
-        for name in (
-            "value",
-            "common_value",
-            "residual_value",
-            "selected_s_context",
-        ):
-            if tuple(getattr(self, name).shape) != expected:
-                raise ValueError(f"selected P2 {name} lost an identity axis")
+        if tuple(self.selected_s_context.shape) != expected:
+            raise ValueError("selected P2 S context lost an identity axis")
         if tuple(self.support.shape) != (expected[0], expected[3], expected[4]):
             raise ValueError("selected P2 support must be [B,I,2]")
         if self.support.dtype != torch.bool:
             raise TypeError("selected P2 support must be boolean")
-        if not torch.equal(self.value, self.common_value + self.residual_value):
-            raise ValueError("selected P2 common/residual identity failed")
+        value_prefix = expected[:4]
+        for name in (
+            "semantic_value",
+            "semantic_common_value",
+            "semantic_residual_value",
+        ):
+            value = getattr(self, name)
+            if value.ndim != 5 or tuple(value.shape[:4]) != value_prefix:
+                raise ValueError(f"selected P2 {name} lost [B,T,Q,I]")
+        for name in (
+            "geometry_value",
+            "geometry_common_value",
+            "geometry_residual_value",
+        ):
+            value = getattr(self, name)
+            if tuple(value.shape) != (*value_prefix, 2):
+                raise ValueError(f"selected P2 {name} must retain physical 2D")
+        if not torch.equal(
+            self.semantic_value,
+            self.semantic_common_value + self.semantic_residual_value,
+        ):
+            raise ValueError("selected semantic common/residual identity failed")
+        if not torch.equal(
+            self.geometry_value,
+            self.geometry_common_value + self.geometry_residual_value,
+        ):
+            raise ValueError("selected geometry common/residual identity failed")
 
 
 def _safe_masked_log_softmax(
@@ -197,22 +261,45 @@ class ObjectFutureEffectReader(nn.Module):
     def _intervened_values(
         self,
         selected: SelectedIntervalEvidence,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         mode = self._eval_value_intervention
         if mode == "none":
             # Preserve the primary path without even an identity multiply.
-            return selected.common_value, selected.residual_value
+            return (
+                selected.semantic_common_value,
+                selected.semantic_residual_value,
+                selected.geometry_common_value,
+                selected.geometry_residual_value,
+            )
         if self.training:
             raise ValueError("P2 value interventions are evaluation-only")
         try:
             type_index, interval_indices = self.VALUE_INTERVENTION_SPECS[mode]
         except KeyError as error:
             raise RuntimeError("P2 value intervention state is invalid") from error
-        mask = selected.common_value.new_ones(
-            (1, 1, 1, selected.key.shape[3], selected.key.shape[4], 1)
+        semantic_mask = selected.semantic_common_value.new_ones(
+            (1, 1, 1, selected.key.shape[3], 1)
         )
-        mask[..., list(interval_indices), type_index, :] = 0.0
-        return selected.common_value * mask, selected.residual_value * mask
+        geometry_mask = selected.geometry_common_value.new_ones(
+            (1, 1, 1, selected.key.shape[3], 1)
+        )
+        target_mask = semantic_mask if type_index == 0 else geometry_mask
+        # The intervention is value-only: posterior keys and interval/type
+        # ownership stay untouched, while the selected type's named physical
+        # interval values are replaced by exact zero.  Keep the mask separate
+        # from the other type so a semantic intervention cannot erase the
+        # geometry carrier (and vice versa).
+        target_mask[..., list(interval_indices), :] = 0.0
+        if type_index == 0:
+            semantic_mask = target_mask
+        else:
+            geometry_mask = target_mask
+        return (
+            selected.semantic_common_value * semantic_mask,
+            selected.semantic_residual_value * semantic_mask,
+            selected.geometry_common_value * geometry_mask,
+            selected.geometry_residual_value * geometry_mask,
+        )
 
     def _temperatures(self) -> Tensor:
         return 0.25 + 3.75 * torch.sigmoid(self.temperature_logit.float())
@@ -396,14 +483,6 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.transport_interval_innovation,
         )
         full_fields = (dynamics.semantic_delta, dynamics.transport_mean)
-        common_values = (
-            self.semantic_value(common_fields[0]),
-            self.transport_value(common_fields[1]),
-        )
-        residual_values = (
-            self.semantic_value(residual_fields[0]),
-            self.transport_value(residual_fields[1]),
-        )
         public_interval = self.public_interval_key(intent.interval_key).float()
 
         selected_keys: list[Tensor] = []
@@ -422,10 +501,14 @@ class ObjectFutureEffectReader(nn.Module):
         )
         gradient_metrics: dict[str, Tensor] = {}
         if collect_diagnostics and self.training:
-            register_gradient_rms_metric(
+            register_gradient_axis_rms_metrics(
                 spatial_query_by_type,
                 gradient_metrics,
-                "gradient_tensor_p2_spatial_query_rms",
+                (
+                    "gradient_tensor_p2_semantic_spatial_query_rms",
+                    "gradient_tensor_p2_geometry_spatial_query_rms",
+                ),
+                dim=3,
             )
 
         for type_index in range(len(self.TYPE_NAMES)):
@@ -480,14 +563,15 @@ class ObjectFutureEffectReader(nn.Module):
             interval_support = support.flatten(start_dim=2).any(dim=-1)
             flat_key = source_key.reshape(batch, intervals, -1, self.hidden)
             flat_typed = candidate_typed.reshape(batch, intervals, -1, self.hidden)
-            flat_common = common_values[type_index].reshape(
-                batch, -1, self.hidden
+            value_width = int(full_fields[type_index].shape[-1])
+            flat_common = common_fields[type_index].reshape(
+                batch, -1, value_width
             )[:, None].expand(-1, intervals, -1, -1)
-            flat_residual = residual_values[type_index].reshape(
+            flat_residual = residual_fields[type_index].reshape(
                 batch,
                 intervals,
                 -1,
-                self.hidden,
+                value_width,
             )
             posterior_for_key = posterior.to(dtype=flat_key.dtype)
             selected_keys.append(
@@ -495,14 +579,14 @@ class ObjectFutureEffectReader(nn.Module):
             )
             selected_common_values.append(
                 torch.einsum(
-                    "btqin,binh->btqih",
+                    "btqin,binv->btqiv",
                     posterior.to(dtype=flat_common.dtype),
                     flat_common,
                 )
             )
             selected_residual_values.append(
                 torch.einsum(
-                    "btqin,binh->btqih",
+                    "btqin,binv->btqiv",
                     posterior.to(dtype=flat_residual.dtype),
                     flat_residual,
                 )
@@ -519,13 +603,18 @@ class ObjectFutureEffectReader(nn.Module):
             spatial_posteriors.append(posterior)
             source_scores.append(source_score)
 
-        common_value = torch.stack(selected_common_values, dim=4)
-        residual_value = torch.stack(selected_residual_values, dim=4)
         selected = SelectedIntervalEvidence(
             key=torch.stack(selected_keys, dim=4),
-            value=common_value + residual_value,
-            common_value=common_value,
-            residual_value=residual_value,
+            semantic_value=(
+                selected_common_values[0] + selected_residual_values[0]
+            ),
+            semantic_common_value=selected_common_values[0],
+            semantic_residual_value=selected_residual_values[0],
+            geometry_value=(
+                selected_common_values[1] + selected_residual_values[1]
+            ),
+            geometry_common_value=selected_common_values[1],
+            geometry_residual_value=selected_residual_values[1],
             selected_s_context=torch.stack(selected_s_contexts, dim=4),
             support=torch.stack(interval_supports, dim=-1),
         )
@@ -561,12 +650,36 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p2_spatial_common_residual_identity_error": (
-                selected.value.detach().float()
-                - (selected.common_value.detach() + selected.residual_value.detach()).float()
-            )
-            .abs()
-            .amax(),
+            "object_p2_semantic_selected_candidate_rms": selected.semantic_value.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_geometry_selected_physical_rms": selected.geometry_value.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_spatial_common_residual_identity_error": torch.maximum(
+                (
+                    selected.semantic_value.detach().float()
+                    - (
+                        selected.semantic_common_value.detach()
+                        + selected.semantic_residual_value.detach()
+                    ).float()
+                )
+                .abs()
+                .amax(),
+                (
+                    selected.geometry_value.detach().float()
+                    - (
+                        selected.geometry_common_value.detach()
+                        + selected.geometry_residual_value.detach()
+                    ).float()
+                )
+                .abs()
+                .amax(),
+            ),
         }
 
     def temporal_terminal(
@@ -575,7 +688,7 @@ class ObjectFutureEffectReader(nn.Module):
         selected: SelectedIntervalEvidence,
         *,
         collect_diagnostics: bool,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> tuple[ObjectTypedEffect, dict[str, Tensor]]:
         selected.validate()
         batch, horizon, basis, intervals, types, hidden = selected.key.shape
         if tuple(action_query.shape) != (batch, horizon, basis, hidden):
@@ -589,10 +702,14 @@ class ObjectFutureEffectReader(nn.Module):
         )
         terminal_query_gradient_metrics: dict[str, Tensor] = {}
         if collect_diagnostics and self.training:
-            register_gradient_rms_metric(
+            register_gradient_axis_rms_metrics(
                 action_by_type,
                 terminal_query_gradient_metrics,
-                "gradient_tensor_p2_terminal_query_rms",
+                (
+                    "gradient_tensor_p2_semantic_terminal_query_rms",
+                    "gradient_tensor_p2_geometry_terminal_query_rms",
+                ),
+                dim=3,
             )
         selected_key = self._bounded_unit(selected.key)
         s_context = torch.tanh(self._bounded_unit(selected.selected_s_context))
@@ -609,18 +726,42 @@ class ObjectFutureEffectReader(nn.Module):
             support,
             dim=3,
         )
-        common_source, residual_source = self._intervened_values(selected)
-        common_by_type = torch.einsum(
-            "btqiz,btqizh->btqzh",
-            posterior.to(dtype=common_source.dtype),
-            common_source,
+        (
+            semantic_common_source,
+            semantic_residual_source,
+            geometry_common_source,
+            geometry_residual_source,
+        ) = self._intervened_values(selected)
+        semantic_posterior = posterior[..., 0]
+        geometry_posterior = posterior[..., 1]
+        semantic_common = torch.einsum(
+            "btqi,btqid->btqd",
+            semantic_posterior.to(dtype=semantic_common_source.dtype),
+            semantic_common_source,
         )
-        residual_by_type = torch.einsum(
-            "btqiz,btqizh->btqzh",
-            posterior.to(dtype=residual_source.dtype),
-            residual_source,
+        semantic_residual = torch.einsum(
+            "btqi,btqid->btqd",
+            semantic_posterior.to(dtype=semantic_residual_source.dtype),
+            semantic_residual_source,
         )
-        value_by_type = common_by_type + residual_by_type
+        geometry_common = torch.einsum(
+            "btqi,btqic->btqc",
+            geometry_posterior.to(dtype=geometry_common_source.dtype),
+            geometry_common_source,
+        )
+        geometry_residual = torch.einsum(
+            "btqi,btqic->btqc",
+            geometry_posterior.to(dtype=geometry_residual_source.dtype),
+            geometry_residual_source,
+        )
+        semantic_selected = semantic_common + semantic_residual
+        geometry_selected = geometry_common + geometry_residual
+        effect = ObjectTypedEffect(
+            semantic=self.semantic_value(semantic_selected),
+            geometry=self.transport_value(geometry_selected),
+        )
+        effect.validate()
+        value_by_type = torch.stack((effect.semantic, effect.geometry), dim=3)
         gradient_metrics: dict[str, Tensor] = {}
         if collect_diagnostics and self.training:
             register_gradient_axis_rms_metrics(
@@ -632,9 +773,8 @@ class ObjectFutureEffectReader(nn.Module):
                 ),
                 dim=3,
             )
-        raw_effect = value_by_type.sum(dim=3)
         if not collect_diagnostics:
-            return raw_effect, {}
+            return effect, {}
         neutral_key_score = torch.einsum(
             "btqzh,btqizh->btqiz",
             action_by_type,
@@ -656,12 +796,11 @@ class ObjectFutureEffectReader(nn.Module):
                 nn.Linear,
             ):
                 raise TypeError("P2 query projections must remain linear")
-            projection_delta_terms.append(
-                (terminal.weight.detach().float() - spatial.weight.detach().float())
-                .square()
-                .mean()
-            )
-        projection_delta = torch.stack(projection_delta_terms).mean().sqrt()
+            projection_delta = (
+                terminal.weight.detach().float() - spatial.weight.detach().float()
+            ).square().mean().sqrt()
+            projection_delta_terms.append(projection_delta)
+        raw_effect = effect.combined()
         metrics: dict[str, Tensor] = {
             "object_p2_intent_score_abs": (
                 interval_score.detach() - neutral_key_score.detach()
@@ -709,13 +848,45 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p2_terminal_common_residual_identity_error": (
-                value_by_type.detach().float()
-                - (common_by_type.detach() + residual_by_type.detach()).float()
-            )
-            .abs()
-            .amax(),
-            "object_p2_terminal_query_delta_rms": projection_delta,
+            "object_p2_semantic_terminal_selected_rms": semantic_selected.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_geometry_terminal_physical_rms": geometry_selected.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_semantic_value_weight_rms": self.semantic_value.weight.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_geometry_value_weight_rms": self.transport_value.weight.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_terminal_common_residual_identity_error": torch.maximum(
+                (
+                    semantic_selected.detach().float()
+                    - (semantic_common.detach() + semantic_residual.detach()).float()
+                )
+                .abs()
+                .amax(),
+                (
+                    geometry_selected.detach().float()
+                    - (geometry_common.detach() + geometry_residual.detach()).float()
+                )
+                .abs()
+                .amax(),
+            ),
+            "object_p2_terminal_query_delta_rms": torch.stack(
+                projection_delta_terms
+            ).mean(),
+            "object_p2_semantic_terminal_query_delta_rms": projection_delta_terms[0],
+            "object_p2_geometry_terminal_query_delta_rms": projection_delta_terms[1],
         }
         metrics.update(terminal_query_gradient_metrics)
         metrics.update(gradient_metrics)
@@ -734,7 +905,7 @@ class ObjectFutureEffectReader(nn.Module):
             metrics[f"object_p2_interval_{index}_mass"] = interval_mass[
                 ..., index
             ].mean()
-        return raw_effect, metrics
+        return effect, metrics
 
     def forward(
         self,
@@ -743,7 +914,7 @@ class ObjectFutureEffectReader(nn.Module):
         intent: PolicyIntentDock,
         *,
         collect_diagnostics: bool,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
+    ) -> tuple[ObjectTypedEffect, dict[str, Tensor]]:
         selected, spatial_metrics = self.spatial_select(
             action_query,
             dynamics,
@@ -766,32 +937,71 @@ class ZeroPreservingObjectConsequence(nn.Module):
     def __init__(self, hidden: int) -> None:
         super().__init__()
         self.fact = nn.Linear(hidden, hidden, bias=False)
-        self.interaction = nn.Linear(hidden, hidden, bias=False)
+        interaction = nn.Linear(hidden, hidden, bias=False)
+        self.semantic_interaction = interaction
+        # Preserve the exact old shared interaction at construction, without
+        # consuming another initialization draw.  Ordinary gradients can then
+        # assign independent semantic and geometry responsibilities.
+        self.geometry_interaction = deepcopy(interaction)
 
     def forward(
         self,
         *,
         factual_base: Tensor,
-        effect: Tensor,
+        effect: ObjectTypedEffect,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectConsequenceState, dict[str, Tensor]]:
-        if tuple(factual_base.shape) != tuple(effect.shape):
-            raise ValueError("factual base and effect must align")
-        interaction = self.interaction(torch.tanh(self.fact(factual_base)) * effect)
-        protected = factual_base + effect + interaction
+        effect.validate()
+        if tuple(factual_base.shape) != tuple(effect.semantic.shape):
+            raise ValueError("factual base and typed effect must align")
+        fact_gate = torch.tanh(self.fact(factual_base))
+        interaction = ObjectTypedEffect(
+            semantic=self.semantic_interaction(fact_gate * effect.semantic),
+            geometry=self.geometry_interaction(fact_gate * effect.geometry),
+        )
+        interaction.validate()
+        # This is the sole type-removal point.  Fusion is parameter-free and
+        # happens only after both typed zero-preserving interactions complete.
+        combined_effect = effect.combined()
+        combined_interaction = interaction.combined()
+        protected = factual_base + combined_effect + combined_interaction
         state = ObjectConsequenceState(
             factual_base=factual_base,
             effect=effect,
             interaction=interaction,
             protected_consequence=protected,
         )
+        state.validate()
         if not collect_diagnostics:
             return state, {}
         return state, {
-            "object_consequence_effect_rms": effect.detach().float().square().mean().sqrt(),
-            "object_consequence_interaction_rms": interaction.detach().float().square().mean().sqrt(),
+            "object_consequence_effect_rms": combined_effect.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_consequence_semantic_interaction_rms": interaction.semantic.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_consequence_geometry_interaction_rms": interaction.geometry.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_consequence_interaction_rms": combined_interaction.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_consequence_ratio": (
-                (effect + interaction).detach().float().square().mean().sqrt()
+                (combined_effect + combined_interaction)
+                .detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
                 / factual_base.detach().float().square().mean().sqrt().clamp_min(1e-6)
             ),
         }
@@ -834,19 +1044,15 @@ class ObjectPolicyPlanCompiler(nn.Module):
             p1_policy_residual.shape
         ) != expected:
             raise ValueError("P3 inputs must align as [B,T,Q,H]")
-        for name in (
-            "factual_base",
-            "effect",
-            "interaction",
-            "protected_consequence",
-        ):
+        consequence.validate()
+        for name in ("factual_base", "protected_consequence"):
             if tuple(getattr(consequence, name).shape) != expected:
                 raise ValueError(f"P3 consequence {name} lost [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         temporal_context = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )
-        consequence_innovation = consequence.effect + consequence.interaction
+        consequence_innovation = consequence.innovation()
         temporal_private = temporal_context + self.temporal_effect(
             consequence_innovation
         )
@@ -928,6 +1134,7 @@ __all__ = [
     "ObjectFutureEffectReader",
     "ObjectPolicyPlanCompiler",
     "ObjectPolicyPlanDeltaBank",
+    "ObjectTypedEffect",
     "SelectedIntervalEvidence",
     "ZeroPreservingObjectConsequence",
 ]

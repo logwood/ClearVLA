@@ -37,7 +37,7 @@ from ..v120_core.time_domain_mmdit import (
     EvidenceLatentMMDiTActionDecoder,
 )
 from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
-from .action_contract import ActionQueryEncoder, BottomOutput, V120SeedContext
+from .action_contract import ActionQueryEncoder, BottomDecoderOutput, V120SeedContext
 from .compiler import ObjectPolicyPlanDeltaBank
 from .types import (
     CompletedP1PolicyState,
@@ -161,7 +161,10 @@ class RestoredV120EvidenceBottom(nn.Module):
             # V120 trained only the small residual adapters in active P1/P2;
             # their weak probe/readout weights were fixed selector geometry.
             head.readout.requires_grad_(False)
-        self.decoder = EvidenceLatentMMDiTActionDecoder(self.core_config)
+        self.decoder = EvidenceLatentMMDiTActionDecoder(
+            self.core_config,
+            hidden_event_head=False,
+        )
         # These generic intent aliases are structurally absent from the V120
         # object path (which passes only current state and last execution).
         # Freezing unreachable projections changes no forward value and keeps
@@ -589,7 +592,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         execution_mode: str = "learned",
         require_execution_supervision: bool = False,
         collect_diagnostics: bool = False,
-    ) -> tuple[BottomOutput, dict[str, Tensor]]:
+    ) -> tuple[BottomDecoderOutput, dict[str, Tensor]]:
         expected_query = (
             int(noisy_action_field.shape[0]),
             self.horizon,
@@ -644,6 +647,11 @@ class RestoredV120EvidenceBottom(nn.Module):
                 visual_value_tokens=None,
                 visual_key_bias=None,
                 collect_diagnostics=run_diagnostics,
+                # Execution-value supervision needs the decoder's candidate
+                # tensors on every training batch, but the R2 gripper state/
+                # VJP observation is an outer logging concern.  Keep that
+                # output surface on the existing bounded cadence.
+                collect_gripper_diagnostics=collect_diagnostics,
                 evidence_scale=1.0,
                 noisy_scale=1.0,
             )
@@ -675,9 +683,10 @@ class RestoredV120EvidenceBottom(nn.Module):
             # no-op in V120 (it removes only the owned low-rank subspace), so
             # selecting this row is the only behaviorally exact ablation.
             physical_velocity = prefix[:, 0]
-        output = BottomOutput(
+        if "event_logits" in raw:
+            raise RuntimeError("active bottom cannot expose a hidden-state event bypass")
+        output = BottomDecoderOutput(
             physical_velocity=physical_velocity,
-            event_logits=raw["event_logits"],
             motion_logits=raw["motion_logits"],
             action_query=action_query,
             block_updates=block_updates,

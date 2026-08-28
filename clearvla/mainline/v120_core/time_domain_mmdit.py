@@ -704,7 +704,7 @@ class TimeDomainMMDiTBlock(nn.Module):
 class EvidenceLatentMMDiTActionDecoder(nn.Module):
     """Deterministic latent organizer followed by native-time MMDiT blocks."""
 
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, *, hidden_event_head: bool = True) -> None:
         super().__init__()
         self.config = config
         h = int(config.hidden_size)
@@ -866,9 +866,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         self._execution_progress_value = 0.0
         self.action_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.velocity_head = ActionOnlyPhysicalVelocityHead(config)
-        self.event_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 3))
+        self.event_head: nn.Sequential | None = nn.Sequential(
+            nn.LayerNorm(h), nn.Linear(h, 3)
+        )
         self.motion_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
         self._initialize_outputs(config)
+        if not bool(hidden_event_head):
+            # The active mainline classifies events only after its deployed
+            # physical codec.  Construct and initialize the historical head
+            # first so removing its state does not perturb retained weights or
+            # the post-construction RNG stream.
+            self.event_head = None
 
     def _initialize_outputs(self, config: Any) -> None:
         # Match the early deterministic MMDiT decoder: action readouts start
@@ -882,23 +890,41 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             else:
                 nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
-        for module in (self.event_head[-1], self.motion_head[-1]):
-            nn.init.zeros_(module.weight)
-            nn.init.zeros_(module.bias)
+        if self.event_head is not None:
+            event_output = self.event_head[-1]
+            if not isinstance(event_output, nn.Linear):
+                raise TypeError("event head output must remain a linear layer")
+            nn.init.zeros_(event_output.weight)
+            nn.init.zeros_(event_output.bias)
+        motion_output = self.motion_head[-1]
+        if not isinstance(motion_output, nn.Linear):
+            raise TypeError("motion head output must remain a linear layer")
+        nn.init.zeros_(motion_output.weight)
+        nn.init.zeros_(motion_output.bias)
 
     def _read_output_heads(
         self,
         action: Tensor,
         *,
         collect_diagnostics: bool,
-    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
-        """Read one canonical continuous field/event state at the output boundary."""
+        collect_gripper_diagnostics: bool | None = None,
+    ) -> tuple[Tensor, Tensor | None, Tensor, dict[str, Tensor]]:
+        """Read the field/event state with an independently gated health surface.
 
+        Training execution supervision needs candidate tensors on every batch,
+        while the gripper-private state/VJP scalars are sampled only on the
+        caller's existing diagnostic cadence.  The explicit second flag keeps
+        those concerns from being coupled.
+        """
+
+        if collect_gripper_diagnostics is None:
+            collect_gripper_diagnostics = collect_diagnostics
         pred_velocity, gripper_state, gripper_gate = (
             self.velocity_head.forward_with_gripper_state(action)
         )
         metrics: dict[str, Tensor] = {}
-        if collect_diagnostics:
+        if collect_gripper_diagnostics:
+            gripper_state_delta = gripper_state - action
             metrics = {
                 "gripper_private_gate_rms": gripper_gate.detach()
                 .float()
@@ -906,11 +932,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 .mean()
                 .sqrt(),
                 "gripper_private_state_delta_rms": (
-                    gripper_state.detach().float() - action.detach().float()
+                    gripper_state_delta.detach().float()
                 )
                 .square()
                 .mean()
                 .sqrt(),
+                # These two live tensors remain inside the in-memory bottom
+                # output only on diagnostic batches.  The loss surface reduces
+                # them by target event context; no tensor dump is serialized.
+                "gripper_private_gate_tensor": gripper_gate,
+                "gripper_private_state_tensor": gripper_state,
+                "gripper_private_state_delta_tensor": gripper_state_delta,
             }
             if self.training:
                 register_gradient_rms_metric(
@@ -918,7 +950,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     metrics,
                     "gradient_tensor_gripper_private_state_rms",
                 )
-        event_logits = self.event_head(gripper_state)
+        event_logits = (
+            self.event_head(gripper_state) if self.event_head is not None else None
+        )
         motion_logits = self.motion_head(action).squeeze(-1)
         return pred_velocity, event_logits, motion_logits, metrics
 
@@ -2487,24 +2521,27 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_tokens: Tensor,
         evidence_scale: float | Tensor,
         collect_diagnostics: bool = True,
+        collect_gripper_diagnostics: bool | None = None,
     ) -> dict[str, Tensor]:
         action = self.action_norm(result["action"])
         pred_velocity, event_logits, motion_logits, gripper_metrics = (
             self._read_output_heads(
                 action,
                 collect_diagnostics=collect_diagnostics,
+                collect_gripper_diagnostics=collect_gripper_diagnostics,
             )
         )
         if not collect_diagnostics:
-            return {
+            output = {
                 "pred_velocity": pred_velocity,
-                "event_logits": event_logits,
                 "motion_logits": motion_logits,
                 "evidence_latent": organized["latent"],
             }
+            if event_logits is not None:
+                output["event_logits"] = event_logits
+            return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
-            "event_logits": event_logits,
             "motion_logits": motion_logits,
             "evidence_latent": organized["latent"],
             **gripper_metrics,
@@ -2521,6 +2558,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 float(len(self.blocks)), device=action.device
             ),
         }
+        if event_logits is not None:
+            out["event_logits"] = event_logits
         block_rows = result["block_rows"]
         zero = torch.zeros((), device=action.device, dtype=torch.float32)
         for name in (
@@ -2767,6 +2806,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         visual_value_tokens: Tensor | None = None,
         visual_key_bias: Tensor | None = None,
         collect_diagnostics: bool = True,
+        collect_gripper_diagnostics: bool | None = None,
         evidence_scale: float | Tensor = 1.0,
         noisy_scale: float | Tensor = 1.0,
     ) -> dict[str, Tensor]:
@@ -2967,6 +3007,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_tokens=evidence_tokens,
                 evidence_scale=evidence_scale,
                 collect_diagnostics=collect_diagnostics,
+                collect_gripper_diagnostics=collect_gripper_diagnostics,
             )
             if not collect_diagnostics:
                 return dynamic_output
@@ -3225,18 +3266,20 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             self._read_output_heads(
                 action,
                 collect_diagnostics=collect_diagnostics,
+                collect_gripper_diagnostics=collect_gripper_diagnostics,
             )
         )
         if not collect_diagnostics:
-            return {
+            output = {
                 "pred_velocity": pred_velocity,
-                "event_logits": event_logits,
                 "motion_logits": motion_logits,
                 "evidence_latent": organized["latent"],
             }
+            if event_logits is not None:
+                output["event_logits"] = event_logits
+            return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
-            "event_logits": event_logits,
             "motion_logits": motion_logits,
             "evidence_latent": organized["latent"],
             **gripper_metrics,
@@ -3275,6 +3318,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 dtype=torch.float32,
             ),
         }
+        if event_logits is not None:
+            out["event_logits"] = event_logits
         out.update(policy_delta_metrics)
 
         scalar_metric_names = (

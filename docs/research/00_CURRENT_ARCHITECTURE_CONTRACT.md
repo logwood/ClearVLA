@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        25
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R2 WG01/P202/GRIP02 locally closed; 168 retained tests plus a fresh production-dimension one-batch CPU BF16 smoke and five-step deployment guard pass; no R2 GPU smoke or formal behavior run yet
+release status:         Schema25-R2 WG01/P202/GRIP02 locally closed; 170 retained tests plus two R2 cadence/reachability guards, a fresh production-dimension one-batch CPU BF16 smoke and five-step deployment guard pass; no R2 GPU smoke or formal behavior run yet
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -67,8 +67,11 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > fail before their fixed blend. R2 now makes the three source-bounded repairs:
 > target-scale-covariant camera-transport supervision, independent exact-copy
 > spatial/terminal P2 query owners, and one exact-zero continuous
-> gripper-private state shared by deployed value/delta and the supervised final
-> event head. It adds no P3, codec, sampler, checkpoint-selector, time schedule,
+> gripper-private state for the deployed value/delta heads, followed by a
+> codec-decoded absolute/delta event boundary. Event supervision reaches the
+> private state through the physically consumed value/delta branches; there is
+> no hidden-state event bypass. It adds no P3, sampler, checkpoint-selector,
+> time schedule,
 > hard event gate or loss-weight bundle. Local implementation guards pass; no
 > R2 behavior result is implied before the GPU smoke and formal run.
 
@@ -382,7 +385,7 @@ raw policy residual
 all bottom carriers
     -> three Evidence MMDiT blocks
     -> ordered low-rank contraction and execution-value controller
-    -> 18-D physical velocity plus event/motion heads
+    -> 18-D physical velocity plus codec-decoded event and motion heads
 ```
 
 The history-action proposal remains a supervised auxiliary prediction. Its
@@ -503,10 +506,11 @@ supports may change targets and losses, never deployment action.
     one inherited fixed optional scale. Consequence stays outside that scale;
     no second scale or aggregate magnitude contract exists. At the final output
     boundary, a bias-free zero-initialized bounded multiplicative owner forms
-    one continuous gripper-private state. Deployed gripper value/delta and the
-    supervised final event head read that state; arm, four auxiliary gripper
-    coordinates and motion retain the base action read. Event logits never gate
-    or otherwise enter the physical field.
+    one continuous gripper-private state. Deployed gripper value/delta read
+    that state; the policy then decodes their physical absolute and
+    adjacent-delta coordinates into the supervised event boundary. Arm, four
+    auxiliary gripper coordinates and motion retain the base action read.
+    Event logits never gate or otherwise enter the physical field.
 15. Online boundaries use ordinary autograd. No artificial gradient, hard
     gate, entropy/mass quota, scalar progress loss, forced diversity or forced
     nonzero flow is legal.
@@ -582,7 +586,11 @@ ControlledTransitionSource / State
 
 GripperPrivateState
   action + action * tanh(bias_free_gate(norm(action)))     [B,24,H]
-  consumers: deployed gripper value/delta and final event head
+  consumers: deployed gripper value/delta heads
+
+DecodedGripperEventBoundary
+  codec-decoded gripper absolute + adjacent delta              [B,24,2]
+  consumer: supervised final event head (reverse path via value/delta)
 ```
 
 ## Provenance table
@@ -620,11 +628,12 @@ GripperPrivateState
   camera-covariance losses; only the recognizer receives its detached camera
   reduction. Online P2 support is the current chart/camera availability carried
   by `FutureObjectDynamics`; there is no predicted-selector validity.
-- Future semantic and camera transport objectives supervise exact interval
-  common/innovation coordinates with the existing exact-zero target-scale
-  covariant row loss; covariance remains raw-coordinate and per camera. The
-  detached `loss_future_transport_raw_coordinate` retains the R1 coordinate
-  error for audit and never enters backward. The internal
+- Future semantic objectives retain their exact-zero raw/normalized/direction
+  row loss. Camera transport common/innovation use raw-coordinate SmoothL1 as
+  the sole active measure, redistributed by detached inverse-square target
+  scale weights whose supported mean is one; covariance remains raw-coordinate
+  and per camera. Detached unweighted-raw, normalized and direction transport
+  audits never enter backward. The internal
   `0.55/0.15/0.05` semantic/transport/covariance coefficients and outer future
   weight are unchanged. No successor duplicate or status objective remains.
 - Action, future, flow geometry, intent scaffold, history proposal and
@@ -654,8 +663,8 @@ GripperPrivateState
 - Observation/G/S/W, exact static P1 and transition source build once per
   observation.
 - Dynamic P1/P2/P3, transition, layer contracts and bottom run at action-update
-  times `[0,.2,.4,.6,.8]`, then once at `1.0` for event/motion heads only.
-  The endpoint call cannot change the integrated action.
+  times `[0,.2,.4,.6,.8]`, then once at `1.0` for the codec-decoded event and
+  motion heads only. The endpoint call cannot change the integrated action.
 - Teacher builds once per training batch and zero times in deployment.
 - P1 N=49 queries use the V120 query budget/checkpoint configuration.
   Chunked and unchunked outputs and parameter gradients must be equivalent.
@@ -713,15 +722,22 @@ GripperPrivateState
   this RNG digest remain byte-identical while the discarded readouts own no
   runtime or checkpoint state. R1h registers no parameter, buffer or random
   draw and retains these counts, the ordered key digest, both retained tensor
-  digests and the construction RNG exactly. R2 adds exactly two
-  `top.effect_reader.terminal_query.*.weight` tensors and one
-  `bottom.decoder.velocity_head.gripper_gate.weight`, all bias-free H-to-H
-  matrices. The measured delta is exactly `+786,432` trainable parameters,
-  `+3` parameter/state tensors and no optimizer-group change. The R2 model has
-  `169,199,006` total / `152,828,275` trainable parameters, 1,389 parameter
-  tensors, 1,067 trainable/optimizer tensors, 23 optimizer groups and 1,395
-  state-key names. Its recorded state-key inventory sentinel is
-  `b02716e66b93045f481d2ec4ec777b794c8eba41562991313c8c3ab9fb2e9f27`.
+  digests and the construction RNG exactly. The first R2 structural inventory
+  added exactly two `top.effect_reader.terminal_query.*.weight` tensors and
+  one `bottom.decoder.velocity_head.gripper_gate.weight`, all bias-free H-to-H
+  matrices (`169,199,006` total / `152,828,275` trainable parameters, 1,389
+  parameter tensors, 1,067 trainable/optimizer tensors, 23 optimizer groups
+  and 1,395 state keys). The completed codec-closed/event and
+  typed-consequence boundary then adds one exact-copy
+  `top.consequence.geometry_interaction` matrix, removes the hidden bottom
+  event head and adds a zero-initialized `decoded_gripper_event_head` (`2 -> 3`).
+  Its net delta from that first R2 inventory is `+259,590` parameters, `-1`
+  parameter tensor and `-1` state key, with no optimizer-group change. The
+  current R2 model has `169,458,596` total / `153,087,865` trainable
+  parameters, 1,388 parameter tensors, 1,066 trainable/optimizer tensors, 23
+  optimizer groups and 1,394 state-key names. Its ordered state-key-name
+  SHA-256 is
+  `384bf6aa4f765382f3d7b4251f0b70f53fe233d3a86090f8ea2bdad6d886d174`.
   Exact-copy/zero initialization preserves the post-construction CPU RNG
   SHA-256 `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
 - Active manifest identity:
@@ -729,14 +745,14 @@ GripperPrivateState
   ```text
   schema:       25
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
-  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_terminal_protected_plus_two_optional_p3
-  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_state
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_target_scale_transport_event_boost_v120_decay_local_global_clip_source_gradient_probes
-  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_teacher_isolated_finite_spike_matching_metrics
+  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_physical_value_typed_consequence_plus_two_optional_p3
+  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_codec_closed_event
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_mean_one_transport_codec_closed_event_v120_decay_local_global_clip_source_gradient_probes
+  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_codec_closed_event_teacher_isolated_finite_spike_matching_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `4da8bcf83e9d2cd91e2dfdcc2255b8ffe69c0e760872e96a09350d0be2ab1181`.
+  `c29ca3d120f67880aa4e3577688b0961186e0700d630c244cb67d2a5d88fac28`.
 
 Storage defaults:
 
@@ -750,7 +766,9 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 168/168. Tests cover full
+The retained local suite now passes 170/170, plus two R2 guards for diagnostic
+cadence and decoded-event-to-gate reachability (172/172 in the current
+working tree). Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -770,6 +788,7 @@ and bottom reachability, exact-zero dynamic bottom ingress, current-support
 exact-zero P2 routing, covariance-sensitive P2 geometry, spatial interval
 preservation, W-owned S selection, no-null per-type physical terminal,
 independent semantic/geometry survival and legal W/S/action reverse paths,
+typed consequence interaction ownership and one parameter-free fusion,
 unique P3 private operands, absence of factual/effect/static-precision aliases,
 lane-local optional null decisions, protected no-null reads, and legal P3/bottom
 reverse paths, absence and intervention invariance of the removed
@@ -781,30 +800,37 @@ pre-clip finite-spike attribution, partial-window gradient ownership, current
 metric vocabulary, P2 action-band/type/interval diagnostic retention,
 diagnostic output/state invariance, evaluation-only P2 value-intervention
 locality and posterior invariance, exact matched-noise/finally orchestration,
-gripper codec-branch reconstruction, gripper horizon bands and exhaustive
+gripper codec-branch reconstruction, decoded event-boundary locality,
+gripper horizon bands and exhaustive
 horizon-by-target-event context accounting, a bounded decision-facing console
 backed by the unchanged
 lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
 gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
-R2 additionally guards target-scale transport with a detached raw-coordinate
-audit, exact-copy spatial/terminal P2 query identity and stage-local reverse
-ownership, gripper zero-state identity/locality, shared event/value state,
-arm/auxiliary/motion isolation, production optimizer ownership and the exact
-three-key inventory. Its raw transport audit reuses the row error already
-computed by the active objective; the six new P2/gripper state and VJP scalars
-run only on the existing diagnostic cadence. State/projection scalars use every
-20th formal training batch and the configured 16 validation batches; VJP
-scalars attach only to those training diagnostic batches. They add no tensor
-dump, extra forward/sampling pass or console panel. A fresh local one-batch CPU
-BF16 forward/backward at the complete production dimensions (`H=512`, 256
-patches per camera, 169,199,006 parameters) and the retained five-step
-deployment guard pass. The complete source graph is locally closed, but no R2
-GPU smoke or behavioral experiment has run. On 2026-08-28 the user explicitly
-authorized the local guard as the temporary substitute because a separate
-remote smoke was not available. This does not establish CUDA memory or
-throughput: the formal run's startup and first reporting window must enforce
+R2 additionally guards mean-one target-weighted raw transport with detached
+normalized/direction/unweighted-raw audits, exact-copy spatial/terminal P2
+query identity and reverse ownership,
+typed consequence interaction locality, gripper zero-state identity/locality,
+decoded-event-to-gate reachability, arm/auxiliary/motion isolation, production
+optimizer ownership and the exact current state-key inventory. The transport
+audits reuse rows already computed by the active objective. P2, W and gripper
+state/projection scalars run only on the existing diagnostic cadence: every
+20th formal training batch and the configured 16 validation batches.
+Activation VJP hooks attach only to ephemeral training-forward tensors; named
+parameter gradients are read after backward and before clipping, so no hook
+accumulates across batches. Execution supervision still computes its
+pre-existing candidate tensors on every training batch, but does not retain the
+new gripper tensor surface outside that cadence. These additions require no
+extra forward, sampling pass or console panel. A fresh local one-batch CPU BF16
+forward/backward at the complete production dimensions (`H=512`, 256 patches
+per camera, 169,458,596 parameters) completed in 80.79 seconds with finite loss
+`3.18261` and finite pre-clip gradient `3.93425`; the retained five-step
+deployment guard also passes. The complete source graph is locally closed, but
+no R2 GPU smoke or behavioral experiment has run. On 2026-08-28 the user
+explicitly authorized the local guard as the temporary substitute because a
+separate remote smoke was not available. This does not establish CUDA memory
+or throughput: the formal run's startup and first reporting window must enforce
 those runtime gates under the following production acceptance:
 
 - finite CUDA BF16 preflight and five-step deployment before the first update;

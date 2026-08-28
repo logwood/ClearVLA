@@ -33,6 +33,7 @@ from .compiler import (
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
     ObjectPolicyPlanDeltaBank,
+    ObjectTypedEffect,
     ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler
@@ -99,15 +100,19 @@ class DeploymentTopCache:
 class CompiledPolicyState:
     """Dynamic P2/P3 state consumed by the bottom action model."""
 
-    effect: Tensor
+    effect: ObjectTypedEffect
     consequence: ObjectConsequenceState
     plan: ObjectPolicyPlanDeltaBank
 
     def validate(self) -> None:
-        if tuple(self.effect.shape) != tuple(self.consequence.factual_base.shape):
+        self.effect.validate()
+        self.consequence.validate()
+        if tuple(self.effect.semantic.shape) != tuple(
+            self.consequence.factual_base.shape
+        ):
             raise ValueError("P2 effect and consequence schemas do not align")
         self.plan.validate()
-        if tuple(self.plan.protected_base.shape) != tuple(self.effect.shape):
+        if tuple(self.plan.protected_base.shape) != tuple(self.effect.semantic.shape):
             raise ValueError("P3 plan and P2 effect schemas do not align")
 
 
@@ -431,7 +436,14 @@ class ObjectIntentDynamicsTop(nn.Module):
         # boundary before it enters the zero-preserving consequence.  Applying
         # the bound only inside P3 (or omitting it) changes both the trajectory
         # seen by P3 and the controlled-transition coefficient geometry.
-        effect, effect_contract = smooth_rms_contract(raw_effect, 0.35)
+        contracted_combined, effect_contract = smooth_rms_contract(
+            raw_effect.combined(),
+            0.35,
+        )
+        # Keep semantic/geometry identity through consequence while preserving
+        # the exact caller-owned aggregate RMS boundary.  Both carriers receive
+        # the same parameter-free scale computed from their combined value.
+        effect = raw_effect.scaled(effect_contract)
         consequence, consequence_metrics = self.consequence(
             factual_base=p1_state.factual_base,
             effect=effect,
@@ -462,7 +474,23 @@ class ObjectIntentDynamicsTop(nn.Module):
             **consequence_metrics,
             **plan_metrics,
             "object_p2_effect_contract_min": effect_contract.detach().float().amin(),
-            "object_p2_effect_postcontract_rms": effect.detach()
+            "object_p2_effect_contract_identity_error": (
+                effect.combined().detach().float()
+                - contracted_combined.detach().float()
+            )
+            .abs()
+            .amax(),
+            "object_p2_effect_postcontract_rms": effect.combined().detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_semantic_effect_postcontract_rms": effect.semantic.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_geometry_effect_postcontract_rms": effect.geometry.detach()
             .float()
             .square()
             .mean()

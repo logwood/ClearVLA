@@ -21,7 +21,9 @@ from clearvla.mainline.model.bottom import (
 )
 from clearvla.mainline.model.compiler import (
     ObjectFutureEffectReader,
+    ObjectTypedEffect,
     SelectedIntervalEvidence,
+    ZeroPreservingObjectConsequence,
     _safe_masked_softmax,
 )
 from clearvla.mainline.model.dynamics import ObjectFutureDynamicsCompiler
@@ -1620,7 +1622,8 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    assert not torch.equal(broad, ordinary)
+    assert not torch.equal(broad.geometry, ordinary.geometry)
+    torch.testing.assert_close(broad.semantic, ordinary.semantic)
     assert not hasattr(reader, "status_value")
     assert not hasattr(reader, "type_query")
     assert not any("null" in name for name, _ in reader.named_parameters())
@@ -1636,7 +1639,8 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    assert torch.count_nonzero(zero) == 0
+    assert torch.count_nonzero(zero.semantic) == 0
+    assert torch.count_nonzero(zero.geometry) == 0
 
     reader.zero_grad(set_to_none=True)
     gradient_query = action_query.clone().requires_grad_(True)
@@ -1646,7 +1650,7 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    differentiable_zero.sum().backward()
+    differentiable_zero.combined().sum().backward()
     assert gradient_query.grad is not None
     assert torch.isfinite(gradient_query.grad).all()
     assert all(
@@ -1713,11 +1717,12 @@ def test_p2_spatial_selection_retains_interval_and_s_cannot_select_w() -> None:
         collect_diagnostics=False,
     )
     selected.validate()
-    assert tuple(selected.value.shape) == (1, 24, 2, 4, 2, 32)
+    assert tuple(selected.semantic_value.shape) == (1, 24, 2, 4, 16)
+    assert tuple(selected.geometry_value.shape) == (1, 24, 2, 4, 2)
     assert tuple(selected.support.shape) == (1, 4, 2)
     assert selected.support.dtype == torch.bool
     torch.testing.assert_close(
-        selected.value[0, 0, 0, :, 0, 0],
+        selected.semantic_value[0, 0, 0, :, 0],
         torch.tensor([0.0, 0.0, 1.0, 0.0]),
     )
 
@@ -1735,7 +1740,16 @@ def test_p2_spatial_selection_retains_interval_and_s_cannot_select_w() -> None:
         changed_dock,
         collect_diagnostics=False,
     )
-    for name in ("key", "value", "common_value", "residual_value", "support"):
+    for name in (
+        "key",
+        "semantic_value",
+        "semantic_common_value",
+        "semantic_residual_value",
+        "geometry_value",
+        "geometry_common_value",
+        "geometry_residual_value",
+        "support",
+    ):
         torch.testing.assert_close(getattr(changed, name), getattr(selected, name))
     assert not torch.equal(changed.selected_s_context, selected.selected_s_context)
 
@@ -1824,13 +1838,22 @@ def test_p2_physical_terminal_has_no_null_or_type_competition() -> None:
         ),
         collect_diagnostics=False,
     )
-    torch.testing.assert_close(semantic_raw[..., 0], torch.ones_like(semantic_raw[..., 0]))
     torch.testing.assert_close(
-        geometry_raw[..., 0],
-        torch.full_like(geometry_raw[..., 0], 2.0),
+        semantic_raw.semantic[..., 0],
+        torch.ones_like(semantic_raw.semantic[..., 0]),
     )
-    torch.testing.assert_close(combined_raw, semantic_raw + geometry_raw)
-    assert torch.count_nonzero(neutral_raw) == 0
+    assert torch.count_nonzero(semantic_raw.geometry) == 0
+    torch.testing.assert_close(
+        geometry_raw.geometry[..., 0],
+        torch.full_like(geometry_raw.geometry[..., 0], 2.0),
+    )
+    assert torch.count_nonzero(geometry_raw.semantic) == 0
+    torch.testing.assert_close(
+        combined_raw.combined(),
+        semantic_raw.combined() + geometry_raw.combined(),
+    )
+    assert torch.count_nonzero(neutral_raw.semantic) == 0
+    assert torch.count_nonzero(neutral_raw.geometry) == 0
     assert not any(
         token in name
         for name, _ in reader.named_parameters()
@@ -1913,9 +1936,12 @@ def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
     residual = torch.randn_like(key)
     selected = SelectedIntervalEvidence(
         key=key,
-        value=common + residual,
-        common_value=common,
-        residual_value=residual,
+        semantic_value=common[..., 0, :] + residual[..., 0, :],
+        semantic_common_value=common[..., 0, :],
+        semantic_residual_value=residual[..., 0, :],
+        geometry_value=common[..., 1, :2] + residual[..., 1, :2],
+        geometry_common_value=common[..., 1, :2],
+        geometry_residual_value=residual[..., 1, :2],
         selected_s_context=torch.randn_like(key),
         support=torch.ones(1, 4, 2, dtype=torch.bool),
     )
@@ -1930,7 +1956,8 @@ def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
         selected,
         collect_diagnostics=True,
     )
-    assert torch.equal(observed, quiet)
+    assert torch.equal(observed.semantic, quiet.semantic)
+    assert torch.equal(observed.geometry, quiet.geometry)
     assert quiet_metrics == {}
     assert "object_p2_semantic_band_13_24_interval_3_mass" in metrics
     assert tuple(reader.state_dict()) == state_names
@@ -1941,7 +1968,8 @@ def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
         selected,
         collect_diagnostics=True,
     )
-    assert torch.equal(training_output, quiet)
+    assert torch.equal(training_output.semantic, quiet.semantic)
+    assert torch.equal(training_output.geometry, quiet.geometry)
     assert not any("_band_" in name for name in training_metrics)
     assert not any(
         name.endswith("_temporal_support_fraction") for name in training_metrics
@@ -1953,19 +1981,23 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
     reader = ObjectFutureEffectReader(hidden=4, content_dim=4, route_dim=4).eval()
     action_query = torch.randn(1, 24, 2, 4)
     key = torch.zeros(1, 24, 2, 4, 2, 4)
-    common = torch.zeros_like(key)
-    residual = torch.zeros_like(key)
+    semantic_common = torch.zeros(1, 24, 2, 4, 4)
+    semantic_residual = torch.zeros_like(semantic_common)
+    geometry_common = torch.zeros(1, 24, 2, 4, 2)
+    geometry_residual = torch.zeros_like(geometry_common)
     for interval in range(4):
-        for type_index in range(2):
-            common[..., interval, type_index, 0] = 0.25 * float(type_index + 1)
-            residual[..., interval, type_index, 0] = float(
-                (interval + 1) * (type_index + 1)
-            )
+        semantic_common[..., interval, 0] = 0.25
+        semantic_residual[..., interval, 0] = float(interval + 1)
+        geometry_common[..., interval, 0] = 0.50
+        geometry_residual[..., interval, 0] = float(2 * (interval + 1))
     selected = SelectedIntervalEvidence(
         key=key,
-        value=common + residual,
-        common_value=common,
-        residual_value=residual,
+        semantic_value=semantic_common + semantic_residual,
+        semantic_common_value=semantic_common,
+        semantic_residual_value=semantic_residual,
+        geometry_value=geometry_common + geometry_residual,
+        geometry_common_value=geometry_common,
+        geometry_residual_value=geometry_residual,
         selected_s_context=torch.randn_like(key),
         support=torch.ones(1, 4, 2, dtype=torch.bool),
     )
@@ -1989,13 +2021,21 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
             selected,
             collect_diagnostics=True,
         )
-        mask = torch.ones_like(selected.value)
-        mask[..., list(intervals), type_index, :] = 0.0
-        expected = ((selected.common_value + selected.residual_value) * mask).mean(
-            dim=3
-        ).sum(dim=3)
-        torch.testing.assert_close(counterfactual, expected)
-        assert not torch.equal(counterfactual, primary)
+        semantic_mask = torch.ones_like(selected.semantic_value)
+        geometry_mask = torch.ones_like(selected.geometry_value)
+        if type_index == 0:
+            semantic_mask[..., list(intervals), :] = 0.0
+        else:
+            geometry_mask[..., list(intervals), :] = 0.0
+        expected_semantic = reader.semantic_value(
+            (selected.semantic_value * semantic_mask).mean(dim=3)
+        )
+        expected_geometry = reader.transport_value(
+            (selected.geometry_value * geometry_mask).mean(dim=3)
+        )
+        torch.testing.assert_close(counterfactual.semantic, expected_semantic)
+        torch.testing.assert_close(counterfactual.geometry, expected_geometry)
+        assert not torch.equal(counterfactual.combined(), primary.combined())
         for type_name in ("semantic", "geometry"):
             for band_name in ("1_4", "5_12", "13_24"):
                 for interval in range(4):
@@ -2010,7 +2050,8 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
             selected,
             collect_diagnostics=False,
         )
-        assert torch.equal(restored, primary)
+        assert torch.equal(restored.semantic, primary.semantic)
+        assert torch.equal(restored.geometry, primary.geometry)
 
     assert tuple(reader.state_dict()) == tuple(state_before)
     for name, value in reader.state_dict().items():
@@ -2056,7 +2097,7 @@ def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
         collect_diagnostics=False,
     )
     gradients = torch.autograd.grad(
-        value.square().mean(),
+        value.combined().square().mean(),
         (semantic, transport, typed_common, typed_residual, action_query),
     )
     for gradient in gradients:
@@ -2100,7 +2141,10 @@ def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    selected.value.square().mean().backward()
+    (
+        selected.semantic_value.square().mean()
+        + selected.geometry_value.square().mean()
+    ).backward()
     for projection in reader.source_query:
         assert isinstance(projection, torch.nn.Linear)
         assert projection.weight.grad is not None
@@ -2112,9 +2156,12 @@ def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -
     reader.zero_grad(set_to_none=True)
     detached_selected = SelectedIntervalEvidence(
         key=selected.key.detach(),
-        value=selected.value.detach(),
-        common_value=selected.common_value.detach(),
-        residual_value=selected.residual_value.detach(),
+        semantic_value=selected.semantic_value.detach(),
+        semantic_common_value=selected.semantic_common_value.detach(),
+        semantic_residual_value=selected.semantic_residual_value.detach(),
+        geometry_value=selected.geometry_value.detach(),
+        geometry_common_value=selected.geometry_common_value.detach(),
+        geometry_residual_value=selected.geometry_residual_value.detach(),
         selected_s_context=selected.selected_s_context.detach(),
         support=selected.support.detach(),
     )
@@ -2124,7 +2171,7 @@ def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -
         collect_diagnostics=True,
     )
     assert metrics["object_p2_terminal_query_delta_rms"] == 0
-    terminal_value.square().mean().backward()
+    terminal_value.combined().square().mean().backward()
     for projection in reader.source_query:
         assert isinstance(projection, torch.nn.Linear)
         assert projection.weight.grad is None
@@ -2132,6 +2179,137 @@ def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -
         assert isinstance(projection, torch.nn.Linear)
         assert projection.weight.grad is not None
         assert torch.count_nonzero(projection.weight.grad) > 0
+
+    # Stage-local call ownership is not a gradient barrier. In the complete
+    # graph a terminal loss also traverses the selected carrier back into the
+    # spatial query, while the copied terminal query owns only the I decision.
+    reader.zero_grad(set_to_none=True)
+    complete_value, _ = reader(
+        action_query,
+        dynamics,
+        context.intent.policy_dock(),
+        collect_diagnostics=False,
+    )
+    complete_value.combined().square().mean().backward()
+    for projections in (reader.source_query, reader.terminal_query):
+        for projection in projections:
+            assert isinstance(projection, torch.nn.Linear)
+            assert projection.weight.grad is not None
+            assert torch.count_nonzero(projection.weight.grad) > 0
+
+
+def test_p2_projects_each_type_once_only_after_its_physical_terminal() -> None:
+    torch.manual_seed(322)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=torch.randn(1, 4, 4, 16),
+        transport_mean=0.1 * torch.randn(1, 4, 4, 2, 2),
+    )
+    reader = top.effect_reader
+    semantic_inputs: list[tuple[int, ...]] = []
+    geometry_inputs: list[tuple[int, ...]] = []
+    semantic_handle = reader.semantic_value.register_forward_pre_hook(
+        lambda _module, args: semantic_inputs.append(tuple(args[0].shape))
+    )
+    geometry_handle = reader.transport_value.register_forward_pre_hook(
+        lambda _module, args: geometry_inputs.append(tuple(args[0].shape))
+    )
+    action_query = torch.randn(1, 24, 2, 32)
+    selected, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        context.intent.policy_dock(),
+        collect_diagnostics=False,
+    )
+    assert semantic_inputs == []
+    assert geometry_inputs == []
+    assert tuple(selected.semantic_value.shape) == (1, 24, 2, 4, 16)
+    assert tuple(selected.geometry_value.shape) == (1, 24, 2, 4, 2)
+
+    effect, _ = reader.temporal_terminal(
+        action_query,
+        selected,
+        collect_diagnostics=False,
+    )
+    semantic_handle.remove()
+    geometry_handle.remove()
+    assert semantic_inputs == [(1, 24, 2, 16)]
+    assert geometry_inputs == [(1, 24, 2, 2)]
+    effect.validate()
+
+
+def test_consequence_keeps_typed_interactions_until_one_parameter_free_fusion() -> None:
+    torch.manual_seed(323)
+    hidden = 8
+    consequence = ZeroPreservingObjectConsequence(hidden)
+    assert consequence.semantic_interaction is not consequence.geometry_interaction
+    assert consequence.semantic_interaction.bias is None
+    assert consequence.geometry_interaction.bias is None
+    assert torch.equal(
+        consequence.semantic_interaction.weight,
+        consequence.geometry_interaction.weight,
+    )
+    factual = torch.randn(1, 3, 2, hidden)
+    typed = ObjectTypedEffect(
+        semantic=torch.randn_like(factual),
+        geometry=torch.randn_like(factual),
+    )
+    state, _ = consequence(
+        factual_base=factual,
+        effect=typed,
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(
+        state.protected_consequence,
+        factual + typed.combined() + state.interaction.combined(),
+    )
+
+    zero = torch.zeros_like(factual)
+    neutral, _ = consequence(
+        factual_base=factual,
+        effect=ObjectTypedEffect(semantic=zero, geometry=zero),
+        collect_diagnostics=False,
+    )
+    assert torch.count_nonzero(neutral.interaction.semantic) == 0
+    assert torch.count_nonzero(neutral.interaction.geometry) == 0
+    assert torch.equal(neutral.protected_consequence, factual)
+
+    consequence.zero_grad(set_to_none=True)
+    semantic_only, _ = consequence(
+        factual_base=factual,
+        effect=ObjectTypedEffect(semantic=typed.semantic, geometry=zero),
+        collect_diagnostics=False,
+    )
+    semantic_only.interaction.semantic.square().mean().backward()
+    assert consequence.semantic_interaction.weight.grad is not None
+    assert torch.count_nonzero(consequence.semantic_interaction.weight.grad) > 0
+    assert consequence.geometry_interaction.weight.grad is None
+
+    consequence.zero_grad(set_to_none=True)
+    geometry_only, _ = consequence(
+        factual_base=factual,
+        effect=ObjectTypedEffect(semantic=zero, geometry=typed.geometry),
+        collect_diagnostics=False,
+    )
+    geometry_only.interaction.geometry.square().mean().backward()
+    assert consequence.geometry_interaction.weight.grad is not None
+    assert torch.count_nonzero(consequence.geometry_interaction.weight.grad) > 0
+    assert consequence.semantic_interaction.weight.grad is None
+    assert not any(
+        token in name
+        for name, _ in consequence.named_parameters()
+        for token in ("gain", "quota", "null", "type_gate")
+    )
 
 
 def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
@@ -2230,7 +2408,7 @@ def test_future_objectives_use_only_semantic_camera_geometry_and_current_support
     torch.testing.assert_close(unsupported["future_dynamics"], torch.zeros(()))
 
 
-def test_transport_objective_is_target_scale_covariant_with_raw_audit() -> None:
+def test_transport_objective_uses_mean_one_target_weights_without_budget_growth() -> None:
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     interval_scale = torch.tensor((0.002, 0.01, 0.05, 0.20)).view(1, 4, 1, 1, 1)
     target_transport = interval_scale.expand(batch, intervals, objects, cameras, 2).clone()
@@ -2252,12 +2430,25 @@ def test_transport_objective_is_target_scale_covariant_with_raw_audit() -> None:
         prediction,
         target,
         current_loss_support=support,
+        collect_diagnostics=True,
     )
-    assert terms["future_transport"] > terms["future_transport_raw_coordinate"] > 0
+    assert terms["future_transport"] > 0
+    assert terms["future_transport_raw_coordinate"] > 0
     assert terms["future_transport"].requires_grad
     assert not terms["future_transport_raw_coordinate"].requires_grad
+    assert not terms["future_transport_normalized_audit"].requires_grad
+    assert not terms["future_transport_direction_audit"].requires_grad
+    torch.testing.assert_close(
+        terms["future_transport_common_target_weight_mean"],
+        torch.ones(()),
+    )
+    torch.testing.assert_close(
+        terms["future_transport_innovation_target_weight_mean"],
+        torch.ones(()),
+    )
+    assert terms["future_transport_target_weight_max"] > 1.0
 
-    covariant_by_scale: list[float] = []
+    active_by_scale: list[float] = []
     raw_by_scale: list[float] = []
     for target_scale in (0.002, 0.01, 0.05, 0.20):
         scaled_transport = torch.full_like(target_transport, target_scale)
@@ -2271,11 +2462,17 @@ def test_transport_objective_is_target_scale_covariant_with_raw_audit() -> None:
             scaled_target,
             current_loss_support=support,
         )
-        covariant_by_scale.append(float(scaled_terms["future_transport"].detach()))
+        active_by_scale.append(float(scaled_terms["future_transport"].detach()))
         raw_by_scale.append(
             float(scaled_terms["future_transport_raw_coordinate"].detach())
         )
-    assert max(covariant_by_scale) / min(covariant_by_scale) < 1.30
+        # With no relative target-scale difference between supported rows, the
+        # mean-one weight is exactly identity and cannot inflate the budget.
+        torch.testing.assert_close(
+            scaled_terms["future_transport"],
+            scaled_terms["future_transport_raw_coordinate"],
+        )
+    assert max(active_by_scale) / min(active_by_scale) > 1_000.0
     assert max(raw_by_scale) / min(raw_by_scale) > 1_000.0
 
     matched = future_dynamics_terms(
@@ -2657,20 +2854,28 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
         p1_state=_p1_state(p1_fact),
         action_query=action_query,
     )
-    for name in ("effect",):
+    for name in ("semantic", "geometry"):
         assert torch.allclose(
-            getattr(relabeled_compiled, name),
-            getattr(compiled, name),
+            getattr(relabeled_compiled.effect, name),
+            getattr(compiled.effect, name),
             atol=2e-5,
             rtol=2e-5,
         )
-    for name in ("factual_base", "effect", "interaction", "protected_consequence"):
+    for name in ("factual_base", "protected_consequence"):
         assert torch.allclose(
             getattr(relabeled_compiled.consequence, name),
             getattr(compiled.consequence, name),
             atol=2e-5,
             rtol=2e-5,
         ), name
+    for carrier_name in ("effect", "interaction"):
+        for type_name in ("semantic", "geometry"):
+            assert torch.allclose(
+                getattr(getattr(relabeled_compiled.consequence, carrier_name), type_name),
+                getattr(getattr(compiled.consequence, carrier_name), type_name),
+                atol=2e-5,
+                rtol=2e-5,
+            ), f"{carrier_name}.{type_name}"
     for name in (
         "protected_base",
         "protected_policy_precision",
@@ -3115,7 +3320,8 @@ def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None
         p1_state=_p1_state(p1_fact),
         action_query=torch.randn(1, horizon, basis, hidden),
     )
-    assert torch.count_nonzero(compiled.effect) == 0
+    assert torch.count_nonzero(compiled.effect.semantic) == 0
+    assert torch.count_nonzero(compiled.effect.geometry) == 0
     assert torch.count_nonzero(compiled.plan.temporal) > 0
     assert torch.count_nonzero(compiled.plan.state_change) > 0
     assert compiled.plan.source_names == ("p3_temporal", "p3_state_change")
@@ -3141,8 +3347,14 @@ def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None
     # consumes only the observed interval innovation, so changing identity
     # alone cannot recreate a fixed temporal route prior.
     torch.testing.assert_close(
-        compiled.effect,
-        identity_only_compiled.effect,
+        compiled.effect.semantic,
+        identity_only_compiled.effect.semantic,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        compiled.effect.geometry,
+        identity_only_compiled.effect.geometry,
         atol=0.0,
         rtol=0.0,
     )
@@ -3166,7 +3378,10 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
         executed_history=torch.randn(1, 3, 7),
     )
     factual = torch.randn(1, 24, 2, 32)
-    zero_effect = torch.zeros_like(factual)
+    zero_effect = ObjectTypedEffect(
+        semantic=torch.zeros_like(factual),
+        geometry=torch.zeros_like(factual),
+    )
     consequence, _ = top.consequence(
         factual_base=factual,
         effect=zero_effect,
@@ -3192,7 +3407,10 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
     assert plan.protected_base is consequence.protected_consequence
     assert plan.protected_policy_precision is policy_residual
 
-    nonzero_effect = torch.randn_like(factual)
+    nonzero_effect = ObjectTypedEffect(
+        semantic=torch.randn_like(factual),
+        geometry=torch.randn_like(factual),
+    )
     first, _ = top.consequence(
         factual_base=factual,
         effect=nonzero_effect,
@@ -3203,7 +3421,7 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
         first,
         factual_base=shifted_factual,
         protected_consequence=(
-            shifted_factual + first.effect + first.interaction
+            shifted_factual + first.effect.combined() + first.interaction.combined()
         ),
     )
     first_plan, _ = top.plan_compiler(
@@ -3232,7 +3450,8 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
     ):
         assert forbidden not in source
 
-    active_effect = torch.randn_like(factual, requires_grad=True)
+    active_semantic_effect = torch.randn_like(factual, requires_grad=True)
+    active_geometry_effect = torch.randn_like(factual, requires_grad=True)
     active_temporal = torch.randn_like(dock.temporal_control, requires_grad=True)
     active_state_change = torch.randn_like(
         dock.state_change_evidence,
@@ -3241,7 +3460,10 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
     active_action = torch.randn_like(factual, requires_grad=True)
     active_consequence, _ = top.consequence(
         factual_base=factual,
-        effect=active_effect,
+        effect=ObjectTypedEffect(
+            semantic=active_semantic_effect,
+            geometry=active_geometry_effect,
+        ),
         collect_diagnostics=False,
     )
     active_plan, _ = top.plan_compiler(
@@ -3258,7 +3480,13 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
     gradients = torch.autograd.grad(
         active_plan.temporal.square().mean()
         + active_plan.state_change.square().mean(),
-        (active_effect, active_temporal, active_state_change, active_action),
+        (
+            active_semantic_effect,
+            active_geometry_effect,
+            active_temporal,
+            active_state_change,
+            active_action,
+        ),
     )
     for gradient in gradients:
         assert torch.isfinite(gradient).all()
@@ -3297,8 +3525,9 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    assert torch.count_nonzero(neutral_effect) == 0
-    assert torch.count_nonzero(changed_effect) > 0
+    assert torch.count_nonzero(neutral_effect.semantic) == 0
+    assert torch.count_nonzero(neutral_effect.geometry) == 0
+    assert torch.count_nonzero(changed_effect.semantic) > 0
 
 
 def test_bottom_optional_values_preserve_zero_and_do_not_expand_near_zero() -> None:

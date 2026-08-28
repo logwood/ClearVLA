@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
-from .action_contract import BottomOutput
+from .action_contract import BottomDecoderOutput, BottomOutput
 from .observation_contract import ObservationEvidence
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
@@ -169,6 +169,90 @@ class ClearVLAMainlinePolicy(nn.Module):
             config,
             physical_action_dim=self.action_codec.physical_dim,
         )
+        event_rng_state = torch.get_rng_state()
+        try:
+            self.decoded_gripper_event_head = nn.Linear(2, 3)
+            nn.init.zeros_(self.decoded_gripper_event_head.weight)
+            nn.init.zeros_(self.decoded_gripper_event_head.bias)
+        finally:
+            # The codec-closed classifier is exact-zero initialized and must
+            # not move any retained fresh-run tensor or the loader RNG stream.
+            torch.set_rng_state(event_rng_state)
+
+    def decoded_gripper_event_features(
+        self,
+        physical_field: Tensor,
+        action_state: Tensor,
+    ) -> Tensor:
+        """Return the sole event-classifier boundary: decoded [g_t, delta g_t]."""
+
+        decoded = self.action_codec.decode(
+            physical_field.float(),
+            action_state.float(),
+        )
+        gripper = decoded[..., -1:]
+        boundary = torch.cat(
+            (action_state[:, None, -1:].float(), gripper[:, :-1]),
+            dim=1,
+        )
+        return torch.cat((gripper, gripper - boundary), dim=-1)
+
+    def _close_decoded_event_boundary(
+        self,
+        bottom: BottomDecoderOutput,
+        *,
+        noisy_action_field: Tensor,
+        time: Tensor,
+        action_state: Tensor,
+        collect_diagnostics: bool,
+    ) -> tuple[BottomOutput, dict[str, Tensor]]:
+        remaining = (1.0 - time.float())[:, None, None]
+        clean_physical = (
+            noisy_action_field.float()
+            + remaining * bottom.physical_velocity.float()
+        )
+        event_features = self.decoded_gripper_event_features(
+            clean_physical,
+            action_state,
+        )
+        event_logits = self.decoded_gripper_event_head(event_features)
+        decoder_tensors = bottom.decoder_tensors
+        metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            decoder_tensors = {
+                **decoder_tensors,
+                "decoded_gripper_event_features": event_features,
+            }
+            metrics = {
+                "gripper_private_decoded_event_absolute_rms": event_features[..., 0]
+                .detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt(),
+                "gripper_private_decoded_event_delta_rms": event_features[..., 1]
+                .detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt(),
+            }
+        output = BottomOutput(
+            physical_velocity=bottom.physical_velocity,
+            motion_logits=bottom.motion_logits,
+            action_query=bottom.action_query,
+            block_updates=bottom.block_updates,
+            evidence_tokens=bottom.evidence_tokens,
+            decoder_tensors=decoder_tensors,
+            event_logits=event_logits,
+        )
+        output.validate(
+            action_dim=self.action_codec.physical_dim,
+            horizon=self.config.dimensions.action_horizon,
+            basis=self.config.dimensions.action_basis_tokens,
+            hidden=self.config.dimensions.hidden_size,
+        )
+        return output, metrics
 
     def set_training_step(self, global_step: int) -> float:
         """Advance the serialized V120 execution warm-up/transition schedule."""
@@ -489,7 +573,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             seed=seed_context,
             collect_diagnostics=collect_diagnostics,
         )
-        bottom, bottom_metrics = self.bottom(
+        bottom_core, bottom_metrics = self.bottom(
             noisy_action_field=noisy_action_field,
             time=time,
             action_query=action_query,
@@ -501,6 +585,13 @@ class ClearVLAMainlinePolicy(nn.Module):
             require_execution_supervision=require_execution_supervision,
             collect_diagnostics=collect_diagnostics,
         )
+        bottom, event_metrics = self._close_decoded_event_boundary(
+            bottom_core,
+            noisy_action_field=noisy_action_field,
+            time=time,
+            action_state=cache.history.action_state,
+            collect_diagnostics=collect_diagnostics,
+        )
         return PolicyStepOutput(
             bottom=bottom,
             compiled=compiled,
@@ -509,6 +600,7 @@ class ClearVLAMainlinePolicy(nn.Module):
                 **top_metrics,
                 **transition_metrics,
                 **bottom_metrics,
+                **event_metrics,
             },
         )
 

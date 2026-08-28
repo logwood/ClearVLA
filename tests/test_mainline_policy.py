@@ -37,6 +37,7 @@ from clearvla.mainline.training.losses import LossLedger
 from clearvla.mainline.training.optimizer import (
     WarmupCosineSchedule,
     build_optimizer,
+    parameter_role,
     role_lr_scale,
 )
 from clearvla.mainline.v120_core.layer_contracts import LayerContractAdapterHeads
@@ -283,9 +284,38 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "gradient_tensor_p1_protected_policy_precision_rms",
         "gradient_tensor_p3_temporal_rms",
         "gradient_tensor_p3_state_change_rms",
+        "gradient_parameter_w_transport_head_weight_rms",
+        "gradient_parameter_p2_semantic_spatial_query_weight_rms",
+        "gradient_parameter_p2_geometry_spatial_query_weight_rms",
+        "gradient_parameter_p2_semantic_terminal_query_weight_rms",
+        "gradient_parameter_p2_geometry_terminal_query_weight_rms",
+        "gradient_parameter_p2_semantic_value_weight_rms",
+        "gradient_parameter_p2_geometry_value_weight_rms",
+        "gradient_parameter_consequence_semantic_interaction_weight_rms",
+        "gradient_parameter_consequence_geometry_interaction_weight_rms",
+        "gradient_parameter_gripper_private_gate_weight_rms",
+        "gradient_parameter_decoded_gripper_event_head_weight_rms",
     ):
         assert name in result.metrics
         assert torch.isfinite(result.metrics[name])
+    # Parameter hooks survive their forward graph. R2 parameter-gradient
+    # diagnostics must therefore read .grad in the engine rather than stacking
+    # a new persistent hook on every diagnostic batch.
+    for parameter_name in (
+        "top.dynamics.transport_head.weight",
+        "top.effect_reader.source_query.0.weight",
+        "top.effect_reader.source_query.1.weight",
+        "top.effect_reader.terminal_query.0.weight",
+        "top.effect_reader.terminal_query.1.weight",
+        "top.effect_reader.semantic_value.weight",
+        "top.effect_reader.transport_value.weight",
+        "top.consequence.semantic_interaction.weight",
+        "top.consequence.geometry_interaction.weight",
+        "bottom.decoder.velocity_head.gripper_gate.weight",
+        "decoded_gripper_event_head.weight",
+    ):
+        parameter = dict(model.named_parameters())[parameter_name]
+        assert parameter._backward_hooks is None or not parameter._backward_hooks
     archived = archival_metrics(result.materialize())
     assert "loss_action_flow_v120_comparable" in archived
     assert "loss_action_flow_event_balance_delta" in archived
@@ -703,54 +733,92 @@ def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> No
     assert not torch.equal(parseval_changed[..., 12:], parseval_expected[..., 12:])
 
 
-def test_supervised_event_and_deployed_gripper_share_only_private_state() -> None:
+def test_supervised_event_reads_only_the_deployed_decoded_gripper_boundary() -> None:
     torch.manual_seed(44)
-    decoder = ClearVLAMainlinePolicy(_config()).bottom.decoder.train()
-    action = torch.randn(2, 24, 32, requires_grad=True)
-    event_output = decoder.event_head[-1]
+    model = ClearVLAMainlinePolicy(_config()).train()
+    decoder = model.bottom.decoder
+    assert decoder.event_head is None
+    event_output = model.decoded_gripper_event_head
     assert isinstance(event_output, torch.nn.Linear)
+    assert parameter_role("decoded_gripper_event_head.weight") == "bottom_heads"
     with torch.no_grad():
         event_output.weight.normal_(mean=0.0, std=0.05)
+    batch = 2
+    physical = torch.randn(
+        batch,
+        model.config.dimensions.action_horizon,
+        model.action_codec.physical_dim,
+        requires_grad=True,
+    )
+    action_state = torch.randn(batch, model.config.dimensions.action_dim)
+    features = model.decoded_gripper_event_features(physical, action_state)
+    expected_decoded = model.action_codec.decode(physical, action_state)
+    expected_gripper = expected_decoded[..., -1:]
+    expected_boundary = torch.cat(
+        (action_state[:, None, -1:], expected_gripper[:, :-1]),
+        dim=1,
+    )
+    torch.testing.assert_close(
+        features,
+        torch.cat((expected_gripper, expected_gripper - expected_boundary), dim=-1),
+    )
+    event_logits = event_output(features)
 
-    pred_velocity, event_logits, motion_logits, metrics = decoder._read_output_heads(
+    # Arm plus the four auxiliary gripper coordinates are outside the shared
+    # deployment value/delta codec and therefore outside the event gradient.
+    event_logits.square().mean().backward()
+    assert physical.grad is not None
+    assert torch.count_nonzero(physical.grad[..., :12]) == 0
+    assert torch.count_nonzero(physical.grad[..., 14:]) == 0
+    assert torch.count_nonzero(physical.grad[..., 12:14]) > 0
+
+    shifted_auxiliary = physical.detach().clone()
+    shifted_auxiliary[..., :12] += torch.randn_like(shifted_auxiliary[..., :12])
+    shifted_auxiliary[..., 14:] += torch.randn_like(shifted_auxiliary[..., 14:])
+    torch.testing.assert_close(
+        event_output(model.decoded_gripper_event_features(shifted_auxiliary, action_state)),
+        event_logits.detach(),
+    )
+
+
+def test_gripper_head_diagnostics_are_separate_from_execution_diagnostics() -> None:
+    torch.manual_seed(45)
+    decoder = ClearVLAMainlinePolicy(_config()).bottom.decoder.train()
+    action = torch.randn(2, 24, 32)
+    _, event_logits, _, quiet_metrics = decoder._read_output_heads(
         action,
         collect_diagnostics=True,
+        collect_gripper_diagnostics=False,
     )
-    torch.testing.assert_close(event_logits, decoder.event_head(action), atol=0.0, rtol=0.0)
-    torch.testing.assert_close(
-        motion_logits,
-        decoder.motion_head(action).squeeze(-1),
-        atol=0.0,
-        rtol=0.0,
-    )
-    assert metrics["gripper_private_gate_rms"] == 0
-    assert metrics["gripper_private_state_delta_rms"] == 0
-    event_logits.square().mean().backward()
-    gate_gradient = decoder.velocity_head.gripper_gate.weight.grad
-    assert gate_gradient is not None
-    assert torch.count_nonzero(gate_gradient) > 0
-    assert metrics["gradient_tensor_gripper_private_state_rms"] > 0
-
-    for field_slice in (slice(0, 12), slice(14, 18)):
-        decoder.zero_grad(set_to_none=True)
-        action.grad = None
-        pred_velocity, _, _, _ = decoder._read_output_heads(
-            action,
-            collect_diagnostics=False,
-        )
-        pred_velocity[..., field_slice].square().mean().backward()
-        gate_gradient = decoder.velocity_head.gripper_gate.weight.grad
-        assert gate_gradient is None or torch.count_nonzero(gate_gradient) == 0
-
-    decoder.zero_grad(set_to_none=True)
-    action.grad = None
-    _, _, motion_logits, _ = decoder._read_output_heads(
+    assert event_logits is None
+    assert quiet_metrics == {}
+    _, event_logits, _, captured_metrics = decoder._read_output_heads(
         action,
-        collect_diagnostics=False,
+        collect_diagnostics=True,
+        collect_gripper_diagnostics=True,
     )
-    motion_logits.square().mean().backward()
-    gate_gradient = decoder.velocity_head.gripper_gate.weight.grad
-    assert gate_gradient is None or torch.count_nonzero(gate_gradient) == 0
+    assert event_logits is None
+    assert "gripper_private_gate_tensor" in captured_metrics
+    assert "gripper_private_state_tensor" in captured_metrics
+    assert "gripper_private_state_delta_tensor" in captured_metrics
+    assert "gradient_tensor_gripper_private_state_rms" in captured_metrics
+
+
+def test_decoded_event_loss_can_reach_the_gripper_private_gate() -> None:
+    torch.manual_seed(46)
+    model = ClearVLAMainlinePolicy(_config()).train()
+    head = model.bottom.decoder.velocity_head
+    with torch.no_grad():
+        model.decoded_gripper_event_head.weight.normal_(mean=0.0, std=0.05)
+    tokens = torch.randn(2, 24, 32, requires_grad=True)
+    action_state = torch.randn(2, model.config.dimensions.action_dim)
+    physical, _, _ = head.forward_with_gripper_state(tokens)
+    features = model.decoded_gripper_event_features(physical, action_state)
+    model.decoded_gripper_event_head(features).square().mean().backward()
+    gate_gradient = head.gripper_gate.weight.grad
+    assert gate_gradient is not None
+    assert torch.isfinite(gate_gradient).all()
+    assert torch.count_nonzero(gate_gradient) > 0
 
 
 def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
@@ -1676,6 +1744,14 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     )
     assert tuple(result.action.shape) == tuple(batch.action_target.normalized.shape)
     assert torch.isfinite(result.action).all()
+    endpoint_event_features = model.decoded_gripper_event_features(
+        result.physical_field,
+        batch.online.history.action_state,
+    )
+    torch.testing.assert_close(
+        result.event_logits,
+        model.decoded_gripper_event_head(endpoint_event_features).float(),
+    )
     # The restored learned V120 execution chart may evaluate several
     # block/dwell candidates inside one ODE step.  Those are dynamic bottom
     # operations; the expensive observation/G/S/W/P1-detail sources above

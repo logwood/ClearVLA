@@ -421,6 +421,76 @@ def future_dynamics_terms(
         )
         return raw + normalized + 0.10 * direction, raw
 
+    def transport_row_loss(
+        prediction_value: Tensor,
+        target_value: Tensor,
+        *,
+        support_weight: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Keep raw coordinate error as the sole active transport measure.
+
+        Target scale is allowed to redistribute responsibility between rows,
+        but not to create a second absolute loss budget.  The inverse-square
+        weight is the quadratic-region equivalent of target normalization and
+        is normalized to support-weighted mean one for each independently
+        owned common/innovation objective.
+        """
+
+        prediction_f = prediction_value.float()
+        target_f = target_value.detach().float()
+        raw = F.smooth_l1_loss(
+            prediction_f,
+            target_f,
+            reduction="none",
+        ).mean(dim=-1, keepdim=True)
+        target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
+        scale_floor = (
+            0.25 * target_rms.mean(dim=(0, 2), keepdim=True)
+        ).clamp_min(1e-3)
+        scale = torch.sqrt(target_rms.square() + scale_floor.square())
+
+        expanded_support = support_weight.detach().float()
+        while expanded_support.ndim < raw.ndim:
+            expanded_support = expanded_support.unsqueeze(-1)
+        expanded_support = expanded_support.expand_as(raw)
+        relative_weight = scale.reciprocal().square()
+        support_mass = expanded_support.sum()
+        relative_mean = (
+            (relative_weight * expanded_support).sum()
+            / support_mass.clamp_min(1.0)
+        )
+        mean_one_weight = torch.where(
+            support_mass > 0.0,
+            relative_weight / relative_mean.clamp_min(torch.finfo(torch.float32).tiny),
+            torch.zeros_like(relative_weight),
+        )
+        active = raw * mean_one_weight
+
+        # Retain the former scale-normalized and direction objectives only as
+        # detached audits.  They are computed from the same rows and cannot
+        # reach backward or silently restore the R2 budget amplification.
+        normalized_audit = F.smooth_l1_loss(
+            prediction_f / scale,
+            target_f / scale,
+            reduction="none",
+        ).mean(dim=-1, keepdim=True)
+        prediction_direction = prediction_f / torch.sqrt(
+            prediction_f.square().mean(dim=-1, keepdim=True) + scale_floor.square()
+        )
+        target_direction = target_f / torch.sqrt(
+            target_f.square().mean(dim=-1, keepdim=True) + scale_floor.square()
+        )
+        direction_audit = 0.5 * (
+            prediction_direction - target_direction
+        ).square().mean(dim=-1, keepdim=True)
+        return (
+            active,
+            raw,
+            normalized_audit.detach(),
+            direction_audit.detach(),
+            mean_one_weight.detach(),
+        )
+
     def decomposed_loss(
         prediction_value: Tensor,
         target_value: Tensor,
@@ -453,6 +523,33 @@ def future_dynamics_terms(
             innovation_raw_error,
         )
 
+    def decomposed_transport_loss(
+        prediction_value: Tensor,
+        target_value: Tensor,
+        *,
+        weight: Tensor,
+    ) -> tuple[Tensor, ...]:
+        prediction_common = prediction_value.float().mean(dim=1)
+        target_common = target_value.detach().float().mean(dim=1)
+        prediction_innovation = prediction_value.float() - prediction_common[:, None]
+        target_innovation = target_value.detach().float() - target_common[:, None]
+        common_rows = transport_row_loss(
+            prediction_common[:, None],
+            target_common[:, None],
+            support_weight=weight[:, :1],
+        )
+        innovation_rows = transport_row_loss(
+            prediction_innovation,
+            target_innovation,
+            support_weight=weight,
+        )
+        return (
+            masked(common_rows[0], weight[:, :1]),
+            masked(innovation_rows[0], weight),
+            *common_rows,
+            *innovation_rows,
+        )
+
     (
         semantic_common,
         semantic_innovation,
@@ -471,14 +568,19 @@ def future_dynamics_terms(
         transport_common,
         transport_innovation,
         _transport_common_error,
-        transport_innovation_error,
         transport_common_raw_error,
+        transport_common_normalized_audit,
+        transport_common_direction_audit,
+        transport_common_target_weight,
+        transport_innovation_error,
         transport_innovation_raw_error,
-    ) = decomposed_loss(
+        transport_innovation_normalized_audit,
+        transport_innovation_direction_audit,
+        transport_innovation_target_weight,
+    ) = decomposed_transport_loss(
         prediction.transport_mean,
         target.transport_mean,
         weight=camera_validity,
-        scale_floored=True,
     )
     transport = 0.5 * (transport_common + transport_innovation)
     # The target-scale-covariant objective already computes the raw
@@ -542,6 +644,46 @@ def future_dynamics_terms(
         )
         terms["future_target_transport_rms"] = (
             target.transport_mean.detach().float().square().mean().sqrt()
+        )
+        terms["future_prediction_transport_common_rms"] = (
+            prediction.transport_common.detach().float().square().mean().sqrt()
+        )
+        terms["future_target_transport_common_rms"] = (
+            target.transport_common.detach().float().square().mean().sqrt()
+        )
+        terms["future_prediction_transport_innovation_rms"] = (
+            prediction.transport_interval_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt()
+        )
+        terms["future_target_transport_innovation_rms"] = (
+            target.transport_interval_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt()
+        )
+        terms["future_transport_normalized_audit"] = 0.5 * (
+            masked(transport_common_normalized_audit, camera_validity[:, :1])
+            + masked(transport_innovation_normalized_audit, camera_validity)
+        )
+        terms["future_transport_direction_audit"] = 0.5 * (
+            masked(transport_common_direction_audit, camera_validity[:, :1])
+            + masked(transport_innovation_direction_audit, camera_validity)
+        )
+        terms["future_transport_common_target_weight_mean"] = masked(
+            transport_common_target_weight,
+            camera_validity[:, :1],
+        )
+        terms["future_transport_innovation_target_weight_mean"] = masked(
+            transport_innovation_target_weight,
+            camera_validity,
+        )
+        terms["future_transport_target_weight_max"] = torch.maximum(
+            transport_common_target_weight.amax(),
+            transport_innovation_target_weight.amax(),
         )
         terms["future_target_covariance_rms"] = (
             target.transport_covariance.detach().float().square().mean().sqrt()
@@ -811,6 +953,8 @@ def action_terms(
     target: ActionSupervision,
     history: ObservableHistory,
     flow_state: FlowMatchingState,
+    *,
+    collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     objective = config.objectives
     raw_grip = target.raw_units[..., -1].float()
@@ -993,6 +1137,119 @@ def action_terms(
     motion_recall = motion_true_positive / (
         motion_true_positive + motion_false_negative
     ).clamp_min(1.0)
+    gripper_private_metrics: dict[str, Tensor] = {}
+    if collect_diagnostics:
+        gate = output.bottom.decoder_tensors.get("gripper_private_gate_tensor")
+        private_state = output.bottom.decoder_tensors.get(
+            "gripper_private_state_tensor"
+        )
+        state_delta = output.bottom.decoder_tensors.get(
+            "gripper_private_state_delta_tensor"
+        )
+        event_features = output.bottom.decoder_tensors.get(
+            "decoded_gripper_event_features"
+        )
+        if (
+            not isinstance(gate, Tensor)
+            or not isinstance(private_state, Tensor)
+            or not isinstance(state_delta, Tensor)
+        ):
+            raise RuntimeError("diagnostic batch lost gripper-private tensors")
+        if not isinstance(event_features, Tensor):
+            raise RuntimeError("diagnostic batch lost decoded event features")
+        expected_private = (
+            int(target.batch),
+            config.dimensions.action_horizon,
+        )
+        if (
+            tuple(gate.shape[:2]) != expected_private
+            or tuple(private_state.shape) != tuple(gate.shape)
+            or tuple(state_delta.shape) != tuple(gate.shape)
+        ):
+            raise ValueError("gripper-private diagnostics lost [B,T,H]")
+        if tuple(event_features.shape) != (*expected_private, 2):
+            raise ValueError("decoded event diagnostics must be [B,T,2]")
+
+        context_masks = {
+            "hold": event_target == 0,
+            "event": event_target != 0,
+            "open": event_target == 1,
+            "close": event_target == 2,
+        }
+
+        def conditional_mean(value: Tensor, mask: Tensor) -> Tensor:
+            value_f = value.detach().float()
+            expanded = mask.detach().float()
+            while expanded.ndim < value_f.ndim:
+                expanded = expanded.unsqueeze(-1)
+            expanded = expanded.expand_as(value_f)
+            return (value_f * expanded).sum() / expanded.sum().clamp_min(1.0)
+
+        def conditional_rms(value: Tensor, mask: Tensor) -> Tensor:
+            return conditional_mean(value.detach().float().square(), mask).sqrt()
+
+        def register_conditional_gradient(
+            value: Tensor,
+            mask: Tensor,
+            name: str,
+        ) -> None:
+            slot = value.new_zeros((), dtype=torch.float32)
+            gripper_private_metrics[name] = slot
+            if not value.requires_grad:
+                return
+            mask_f = mask.detach().float()
+
+            def capture(gradient: Tensor) -> Tensor:
+                with torch.no_grad():
+                    expanded = mask_f
+                    while expanded.ndim < gradient.ndim:
+                        expanded = expanded.unsqueeze(-1)
+                    expanded = expanded.expand_as(gradient)
+                    slot.copy_(
+                        (
+                            (gradient.detach().float().square() * expanded).sum()
+                            / expanded.sum().clamp_min(1.0)
+                        ).sqrt()
+                    )
+                return gradient
+
+            value.register_hook(capture)
+
+        gripper_private_metrics.update(
+            {
+                "gripper_private_gate_signed_mean": gate.detach().float().mean(),
+                "gripper_private_gate_saturation_fraction": (
+                    gate.detach().float().abs() >= 0.95
+                )
+                .float()
+                .mean(),
+            }
+        )
+        for context_name, context_mask in context_masks.items():
+            gripper_private_metrics[
+                f"gripper_private_gate_{context_name}_rms"
+            ] = conditional_rms(gate, context_mask)
+            gripper_private_metrics[
+                f"gripper_private_state_delta_{context_name}_rms"
+            ] = conditional_rms(state_delta, context_mask)
+            gripper_private_metrics[
+                f"gripper_private_decoded_event_delta_{context_name}_rms"
+            ] = conditional_rms(event_features[..., 1], context_mask)
+            register_conditional_gradient(
+                gate,
+                context_mask,
+                f"gradient_tensor_gripper_private_gate_{context_name}_rms",
+            )
+            register_conditional_gradient(
+                private_state,
+                context_mask,
+                f"gradient_tensor_gripper_private_state_{context_name}_rms",
+            )
+            register_conditional_gradient(
+                event_features,
+                context_mask,
+                f"gradient_tensor_decoded_gripper_event_features_{context_name}_rms",
+            )
     band_metrics: dict[str, Tensor] = {}
     start = 0
     for end in (4, 12, 24):
@@ -1013,6 +1270,7 @@ def action_terms(
         start = end
     return {
         **band_metrics,
+        **gripper_private_metrics,
         # The formal objective is the exact V120 physical metric.  Event-row
         # balancing remains an audit, not an alternative training geometry.
         "action_flow": flow_v120_comparable,
@@ -1100,7 +1358,15 @@ def compose_losses(
     action_codec: PhysicalActionFieldCodec,
     collect_diagnostics: bool = False,
 ) -> LossLedger:
-    action = action_terms(config, action_codec, policy_output, action_target, history, flow_state)
+    action = action_terms(
+        config,
+        action_codec,
+        policy_output,
+        action_target,
+        history,
+        flow_state,
+        collect_diagnostics=collect_diagnostics,
+    )
     execution = execution_value_terms(
         config,
         action_codec,

@@ -9,7 +9,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import register_gradient_axis_rms_metrics, smooth_rms_contract
+from .routing import (
+    register_gradient_axis_rms_metrics,
+    smooth_rms_contract,
+)
 from .types import (
     CoarseActionIntentState,
     FutureObjectDynamics,
@@ -298,13 +301,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         conditioned, _ = self._zero_preserving_condition(carrier, condition)
         return conditioned * availability.to(dtype=conditioned.dtype)
 
-    def _field(
+    def _field_with_diagnostics(
         self,
         *,
         facts: ObjectFactSet,
         typed_common: Tensor,
         typed_interval_innovation: Tensor,
-    ) -> FutureObjectDynamics:
+        diagnostic_prefix: str | None = None,
+    ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
         if typed_common.ndim != 4 or tuple(typed_common.shape[1:3]) != (
             facts.objects,
             3,
@@ -342,8 +346,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             facts,
             typed_interval_innovation[..., 2, :],
         )
-        transport_common = 0.50 * torch.tanh(self.transport_head(geometry_common).float())
-        transport_innovation = 0.50 * torch.tanh(self.transport_head(geometry_innovation).float())
+        transport_common_pre_tanh = self.transport_head(geometry_common).float()
+        transport_innovation_pre_tanh = self.transport_head(geometry_innovation).float()
+        transport_common = 0.50 * torch.tanh(transport_common_pre_tanh)
+        transport_innovation = 0.50 * torch.tanh(transport_innovation_pre_tanh)
         camera_availability = facts.camera_validity[:, None].float()
         transport = (transport_common[:, None] + transport_innovation) * camera_availability
         transport = transport.to(dtype=typed_interval_innovation.dtype)
@@ -366,7 +372,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
 
         current_reference = facts.content.detach().to(dtype=semantic_delta.dtype)
-        return FutureObjectDynamics(
+        field = FutureObjectDynamics(
             current_reference=current_reference,
             successor_content=current_reference[:, None] + semantic_delta,
             semantic_delta=semantic_delta,
@@ -378,6 +384,49 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             camera_chart_availability=facts.camera_validity.float(),
             log_camera_chart_availability=facts.log_camera_validity.float(),
         )
+        if diagnostic_prefix is None:
+            return field, {}
+        saturation = torch.cat(
+            (
+                transport_common_pre_tanh.detach().reshape(-1),
+                transport_innovation_pre_tanh.detach().reshape(-1),
+            )
+        )
+        return field, {
+            "object_w_transport_head_weight_rms": self.transport_head.weight.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            f"{diagnostic_prefix}_transport_common_pre_tanh_rms": (
+                transport_common_pre_tanh.detach().square().mean().sqrt()
+            ),
+            f"{diagnostic_prefix}_transport_innovation_pre_tanh_rms": (
+                transport_innovation_pre_tanh.detach().square().mean().sqrt()
+            ),
+            f"{diagnostic_prefix}_transport_head_saturation_fraction": (
+                torch.tanh(saturation).abs() >= 0.95
+            )
+            .float()
+            .mean(),
+        }
+
+    def _field(
+        self,
+        *,
+        facts: ObjectFactSet,
+        typed_common: Tensor,
+        typed_interval_innovation: Tensor,
+    ) -> FutureObjectDynamics:
+        """Preserve the original field-only boundary for structural callers."""
+
+        field, _ = self._field_with_diagnostics(
+            facts=facts,
+            typed_common=typed_common,
+            typed_interval_innovation=typed_interval_innovation,
+            diagnostic_prefix=None,
+        )
+        return field
 
     @staticmethod
     def _typed_state_metrics(value: Tensor, *, prefix: str) -> dict[str, Tensor]:
@@ -429,13 +478,15 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         field: FutureObjectDynamics | None = None
         metrics: dict[str, Tensor] = {}
         if collect_diagnostics:
-            field = self._field(
+            field, field_metrics = self._field_with_diagnostics(
                 facts=facts,
                 typed_common=common,
                 typed_interval_innovation=near_typed,
+                diagnostic_prefix="object_w1",
             )
             field.validate(expected_intervals=2)
             metrics.update(self._metrics(field, prefix="object_w1"))
+            metrics.update(field_metrics)
             metrics.update(self._typed_state_metrics(near_typed, prefix="object_w1"))
             metrics.update(
                 {
@@ -561,15 +612,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 ),
                 dim=-2,
             )
-        field = self._field(
+        field, field_metrics = self._field_with_diagnostics(
             facts=facts,
             typed_common=w1_state.common_typed,
             typed_interval_innovation=completed_innovation,
+            diagnostic_prefix="object_w2" if collect_diagnostics else None,
         )
         field.validate()
         if not collect_diagnostics:
             return field, {}
         metrics = self._metrics(field, prefix="object_w2")
+        metrics.update(field_metrics)
         metrics.update(gradient_metrics)
         metrics.update(self._typed_state_metrics(completed_innovation, prefix="object_w2"))
         metrics["object_w_far_condition_rms"] = (
