@@ -205,12 +205,18 @@ class ObjectFutureEffectReader(nn.Module):
 
     TYPE_NAMES = ("semantic", "geometry")
     S_TYPE_INDEX_BY_P2 = (0, 2)
-    VALUE_INTERVENTION_SPECS = {
-        "semantic_near_zero": (0, (0, 1)),
-        "semantic_far_zero": (0, (2, 3)),
-        "geometry_near_zero": (1, (0, 1)),
-        "geometry_far_zero": (1, (2, 3)),
-    }
+    INTERVENTION_MODES = (
+        "semantic_far_zero",
+        "geometry_value_all_zero",
+        "geometry_address_neutral",
+        "geometry_value_and_address_zero",
+    )
+    _GEOMETRY_VALUE_ZERO_MODES = frozenset(
+        ("geometry_value_all_zero", "geometry_value_and_address_zero")
+    )
+    _GEOMETRY_ADDRESS_NEUTRAL_MODES = frozenset(
+        ("geometry_address_neutral", "geometry_value_and_address_zero")
+    )
 
     def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
         super().__init__()
@@ -238,31 +244,31 @@ class ObjectFutureEffectReader(nn.Module):
         self.transport_value = nn.Linear(2, hidden, bias=False)
         self.temperature_logit = nn.Parameter(torch.zeros(3))
         # Plain evaluation state: it is neither a parameter nor a persistent
-        # buffer and therefore cannot alter checkpoint identity.  R2-A01
-        # changes selected values only for a complete matched validation
-        # sample; normal training/deployment keeps the exact neutral string.
-        self._eval_value_intervention = "none"
+        # buffer and therefore cannot alter checkpoint identity. Matched
+        # validation may remove one named value/address seam; ordinary
+        # training and deployment keep the exact neutral string.
+        self._eval_intervention = "none"
 
-    def set_eval_value_intervention(self, mode: str) -> None:
-        """Select one R2-A01 value-only counterfactual for evaluation."""
+    def set_eval_intervention(self, mode: str) -> None:
+        """Select one matched P2 value/address counterfactual for evaluation."""
 
         if self.training:
-            raise ValueError("P2 value interventions are evaluation-only")
-        if mode not in self.VALUE_INTERVENTION_SPECS:
+            raise ValueError("P2 interventions are evaluation-only")
+        if mode not in self.INTERVENTION_MODES:
             raise ValueError(
-                "P2 value intervention must be one of "
-                + ", ".join(self.VALUE_INTERVENTION_SPECS)
+                "P2 intervention must be one of "
+                + ", ".join(self.INTERVENTION_MODES)
             )
-        self._eval_value_intervention = mode
+        self._eval_intervention = mode
 
-    def clear_eval_value_intervention(self) -> None:
-        self._eval_value_intervention = "none"
+    def clear_eval_intervention(self) -> None:
+        self._eval_intervention = "none"
 
     def _intervened_values(
         self,
         selected: SelectedIntervalEvidence,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        mode = self._eval_value_intervention
+        mode = self._eval_intervention
         if mode == "none":
             # Preserve the primary path without even an identity multiply.
             return (
@@ -272,28 +278,22 @@ class ObjectFutureEffectReader(nn.Module):
                 selected.geometry_residual_value,
             )
         if self.training:
-            raise ValueError("P2 value interventions are evaluation-only")
-        try:
-            type_index, interval_indices = self.VALUE_INTERVENTION_SPECS[mode]
-        except KeyError as error:
-            raise RuntimeError("P2 value intervention state is invalid") from error
+            raise ValueError("P2 interventions are evaluation-only")
+        if mode not in self.INTERVENTION_MODES:
+            raise RuntimeError("P2 intervention state is invalid")
         semantic_mask = selected.semantic_common_value.new_ones(
             (1, 1, 1, selected.key.shape[3], 1)
         )
         geometry_mask = selected.geometry_common_value.new_ones(
             (1, 1, 1, selected.key.shape[3], 1)
         )
-        target_mask = semantic_mask if type_index == 0 else geometry_mask
-        # The intervention is value-only: posterior keys and interval/type
-        # ownership stay untouched, while the selected type's named physical
-        # interval values are replaced by exact zero.  Keep the mask separate
-        # from the other type so a semantic intervention cannot erase the
-        # geometry carrier (and vice versa).
-        target_mask[..., list(interval_indices), :] = 0.0
-        if type_index == 0:
-            semantic_mask = target_mask
-        else:
-            geometry_mask = target_mask
+        # Value interventions happen only after both spatial posteriors have
+        # formed. Address-neutral mode is handled at the semantic K logits and
+        # therefore leaves both value masks untouched here.
+        if mode == "semantic_far_zero":
+            semantic_mask[..., (2, 3), :] = 0.0
+        if mode in self._GEOMETRY_VALUE_ZERO_MODES:
+            geometry_mask.zero_()
         return (
             selected.semantic_common_value * semantic_mask,
             selected.semantic_residual_value * semantic_mask,
@@ -460,6 +460,9 @@ class ObjectFutureEffectReader(nn.Module):
         )
 
         coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
+        current_coordinate = dynamics.camera_coordinates[:, None].float().clamp(
+            -1.0, 1.0
+        )
         future_coordinate = (
             dynamics.camera_coordinates[:, None].float()
             + dynamics.transport_mean.float()
@@ -473,6 +476,70 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.transport_covariance[:, None, None],
         )
         coordinate_score = (-0.25 * coordinate_distance).clamp(-1.0, 0.0)
+        current_coordinate_delta = (
+            coordinate_query[:, :, :, None, None, None]
+            - current_coordinate[:, None, None]
+        )
+        current_coordinate_distance = self._covariance_aware_distance(
+            current_coordinate_delta,
+            dynamics.transport_covariance[:, None, None],
+        )
+        current_coordinate_score = (-0.25 * current_coordinate_distance).clamp(
+            -1.0, 0.0
+        )
+
+        # Geometry contributes to semantic K selection only through the
+        # transport-specific change in coordinate compatibility.  Current
+        # position is subtracted under the same covariance, then legal cameras
+        # are aggregated with their producer-owned conditional measure.  A
+        # valid-K-centred correction cannot create support, interval votes or
+        # semantic value amplitude.  Subtracting the first legal K value before
+        # the mean makes a K-uniform row exact zero while preserving ordinary
+        # gradients for non-uniform perturbations at the zero boundary.
+        camera_weight = conditional_camera[:, None, None, None]
+        address_change = (
+            (coordinate_score - current_coordinate_score) * camera_weight
+        ).sum(dim=-1)
+        semantic_interval_support = semantic_support[:, None].expand(
+            -1, intervals, -1
+        )
+        first_legal_k = semantic_interval_support.to(dtype=torch.int64).argmax(
+            dim=-1, keepdim=True
+        )
+        address_reference = address_change.gather(
+            -1,
+            first_legal_k[:, None, None].expand(
+                batch, horizon, basis, intervals, 1
+            ),
+        )
+        address_relative = address_change - address_reference
+        expanded_semantic_support = semantic_interval_support[:, None, None]
+        legal_k_count = expanded_semantic_support.float().sum(
+            dim=-1, keepdim=True
+        )
+        legal_k_mean = (
+            torch.where(
+                expanded_semantic_support,
+                address_relative,
+                torch.zeros_like(address_relative),
+            ).sum(dim=-1, keepdim=True)
+            / legal_k_count.clamp_min(1.0)
+        )
+        geometry_address_centered = torch.where(
+            expanded_semantic_support,
+            address_relative - legal_k_mean,
+            torch.zeros_like(address_relative),
+        )
+        geometry_address_correction_primary = torch.tanh(
+            geometry_address_centered
+        )
+        geometry_address_correction = geometry_address_correction_primary
+        if self._eval_intervention in self._GEOMETRY_ADDRESS_NEUTRAL_MODES:
+            if self.training:
+                raise ValueError("P2 interventions are evaluation-only")
+            geometry_address_correction = torch.zeros_like(
+                geometry_address_correction_primary
+            )
 
         common_fields = (
             dynamics.semantic_common,
@@ -510,6 +577,11 @@ class ObjectFutureEffectReader(nn.Module):
                 ),
                 dim=3,
             )
+            register_gradient_rms_metric(
+                geometry_address_correction,
+                gradient_metrics,
+                "gradient_tensor_p2_geometry_address_correction_rms",
+            )
 
         for type_index in range(len(self.TYPE_NAMES)):
             query = spatial_query_by_type.select(3, type_index)
@@ -536,7 +608,7 @@ class ObjectFutureEffectReader(nn.Module):
                 log_measure = semantic_log_measure[:, None].expand_as(support)
                 candidate_logit = temperature[0] * source_score + log_measure[
                     :, None, None
-                ]
+                ] + geometry_address_correction
                 candidate_support = support[:, None, None].expand_as(candidate_logit)
                 candidate_typed = typed_candidate
             else:
@@ -631,6 +703,25 @@ class ObjectFutureEffectReader(nn.Module):
             ).amax(),
             "object_p2_coordinate_score_abs": coordinate_score.detach().abs().mean(),
             "object_p2_coordinate_score_max_abs": coordinate_score.detach().abs().amax(),
+            "object_p2_geometry_address_correction_rms": (
+                geometry_address_correction_primary.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
+            ),
+            "object_p2_geometry_address_correction_max_abs": (
+                geometry_address_correction_primary.detach().float().abs().amax()
+            ),
+            "object_p2_geometry_address_k_center_error": (
+                (
+                    geometry_address_centered.detach().float()
+                    * expanded_semantic_support.detach().float()
+                ).sum(dim=-1)
+                / legal_k_count.detach().squeeze(-1).clamp_min(1.0)
+            )
+            .abs()
+            .amax(),
             "object_p2_spatial_posterior_entropy": torch.stack(
                 [normalized_entropy(value, dim=-1).detach().mean() for value in spatial_posteriors]
             ).mean(),
@@ -764,14 +855,17 @@ class ObjectFutureEffectReader(nn.Module):
         value_by_type = torch.stack((effect.semantic, effect.geometry), dim=3)
         gradient_metrics: dict[str, Tensor] = {}
         if collect_diagnostics and self.training:
-            register_gradient_axis_rms_metrics(
-                value_by_type,
+            # Observe the exact tensors consumed by consequence.  A temporary
+            # stack has no downstream consumer and would report false zeros.
+            register_gradient_rms_metric(
+                effect.semantic,
                 gradient_metrics,
-                (
-                    "gradient_tensor_p2_semantic_effect_rms",
-                    "gradient_tensor_p2_geometry_effect_rms",
-                ),
-                dim=3,
+                "gradient_tensor_p2_semantic_effect_rms",
+            )
+            register_gradient_rms_metric(
+                effect.geometry,
+                gradient_metrics,
+                "gradient_tensor_p2_geometry_effect_rms",
             )
         if not collect_diagnostics:
             return effect, {}

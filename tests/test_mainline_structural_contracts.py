@@ -1659,6 +1659,127 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
     )
 
 
+def test_p2_transport_conditions_only_semantic_k_address_with_zero_identities() -> None:
+    torch.manual_seed(3141)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=1),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    semantic = torch.zeros(1, 4, 4, 16)
+    semantic[:, :, 0, 0] = 1.0
+    transport = torch.zeros(1, 4, 4, 1, 2)
+    transport[:, :, 0, 0, 0] = 0.50
+    coordinates = torch.tensor((-0.75, -0.25, 0.25, 0.75)).view(1, 4, 1, 1)
+    coordinates = torch.cat((coordinates, torch.zeros_like(coordinates)), dim=-1)
+    dynamics = replace(
+        _future_dynamics(
+            content=16,
+            objects=4,
+            cameras=1,
+            semantic_delta=semantic,
+            transport_mean=transport,
+        ),
+        camera_coordinates=coordinates,
+    )
+    reader = top.effect_reader
+    with torch.no_grad():
+        for projection in reader.source_query:
+            projection.weight.zero_()
+        for projection in reader.source_key:
+            projection.weight.zero_()
+        reader.coordinate_query.weight.zero_()
+    action_query = torch.zeros(1, 24, 2, 32)
+    dock = context.intent.policy_dock()
+
+    primary, metrics = reader.spatial_select(
+        action_query,
+        dynamics,
+        dock,
+        collect_diagnostics=True,
+    )
+    assert metrics["object_p2_geometry_address_correction_rms"] > 0
+    assert metrics["object_p2_geometry_address_k_center_error"] == 0
+    reader.set_eval_intervention("geometry_address_neutral")
+    neutral_address, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        dock,
+        collect_diagnostics=False,
+    )
+    reader.clear_eval_intervention()
+    assert not torch.equal(primary.semantic_value, neutral_address.semantic_value)
+    torch.testing.assert_close(primary.geometry_value, neutral_address.geometry_value)
+
+    zero_transport = replace(
+        dynamics,
+        transport_mean=torch.zeros_like(transport),
+    )
+    zero_selected, zero_metrics = reader.spatial_select(
+        action_query,
+        zero_transport,
+        dock,
+        collect_diagnostics=True,
+    )
+    assert zero_metrics["object_p2_geometry_address_correction_rms"] == 0
+    reader.set_eval_intervention("geometry_address_neutral")
+    zero_neutral, _ = reader.spatial_select(
+        action_query,
+        zero_transport,
+        dock,
+        collect_diagnostics=False,
+    )
+    reader.clear_eval_intervention()
+    assert torch.equal(zero_selected.semantic_value, zero_neutral.semantic_value)
+
+    no_camera = replace(
+        dynamics,
+        camera_chart_availability=torch.zeros_like(
+            dynamics.camera_chart_availability
+        ),
+        log_camera_chart_availability=torch.zeros_like(
+            dynamics.log_camera_chart_availability
+        ),
+    )
+    _, no_camera_metrics = reader.spatial_select(
+        action_query,
+        no_camera,
+        dock,
+        collect_diagnostics=True,
+    )
+    assert no_camera_metrics["object_p2_geometry_address_correction_rms"] == 0
+
+    uniform = replace(
+        dynamics,
+        camera_coordinates=torch.zeros_like(coordinates),
+        transport_mean=torch.full_like(transport, 0.20),
+    )
+    _, uniform_metrics = reader.spatial_select(
+        action_query,
+        uniform,
+        dock,
+        collect_diagnostics=True,
+    )
+    assert uniform_metrics["object_p2_geometry_address_correction_rms"] == 0
+
+    differentiable_transport = torch.zeros_like(transport, requires_grad=True)
+    differentiable = replace(dynamics, transport_mean=differentiable_transport)
+    selected, _ = reader.spatial_select(
+        action_query,
+        differentiable,
+        dock,
+        collect_diagnostics=False,
+    )
+    selected.semantic_value.sum().backward()
+    assert differentiable_transport.grad is not None
+    assert torch.isfinite(differentiable_transport.grad).all()
+    assert torch.count_nonzero(differentiable_transport.grad) > 0
+
+
 def test_p2_policy_dock_exposes_existing_typed_metadata_by_identity() -> None:
     torch.manual_seed(315)
     top = _object_top().eval()
@@ -1976,7 +2097,7 @@ def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
     )
 
 
-def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -> None:
+def test_p2_eval_intervention_preserves_posterior_and_localizes_values() -> None:
     torch.manual_seed(320)
     reader = ObjectFutureEffectReader(hidden=4, content_dim=4, route_dim=4).eval()
     action_query = torch.randn(1, 24, 2, 4)
@@ -2008,14 +2129,8 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
         collect_diagnostics=True,
     )
 
-    intervention_masks = {
-        "semantic_near_zero": (0, (0, 1)),
-        "semantic_far_zero": (0, (2, 3)),
-        "geometry_near_zero": (1, (0, 1)),
-        "geometry_far_zero": (1, (2, 3)),
-    }
-    for mode, (type_index, intervals) in intervention_masks.items():
-        reader.set_eval_value_intervention(mode)
+    for mode in reader.INTERVENTION_MODES:
+        reader.set_eval_intervention(mode)
         counterfactual, metrics = reader.temporal_terminal(
             action_query,
             selected,
@@ -2023,10 +2138,10 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
         )
         semantic_mask = torch.ones_like(selected.semantic_value)
         geometry_mask = torch.ones_like(selected.geometry_value)
-        if type_index == 0:
-            semantic_mask[..., list(intervals), :] = 0.0
-        else:
-            geometry_mask[..., list(intervals), :] = 0.0
+        if mode == "semantic_far_zero":
+            semantic_mask[..., (2, 3), :] = 0.0
+        if mode in reader._GEOMETRY_VALUE_ZERO_MODES:
+            geometry_mask.zero_()
         expected_semantic = reader.semantic_value(
             (selected.semantic_value * semantic_mask).mean(dim=3)
         )
@@ -2035,7 +2150,12 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
         )
         torch.testing.assert_close(counterfactual.semantic, expected_semantic)
         torch.testing.assert_close(counterfactual.geometry, expected_geometry)
-        assert not torch.equal(counterfactual.combined(), primary.combined())
+        if mode == "geometry_address_neutral":
+            # The address intervention lives in spatial selection, so a
+            # terminal-only replay is deliberately an identity.
+            assert torch.equal(counterfactual.combined(), primary.combined())
+        else:
+            assert not torch.equal(counterfactual.combined(), primary.combined())
         for type_name in ("semantic", "geometry"):
             for band_name in ("1_4", "5_12", "13_24"):
                 for interval in range(4):
@@ -2044,7 +2164,7 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
                         f"{interval}_mass"
                     )
                     torch.testing.assert_close(metrics[name], primary_metrics[name])
-        reader.clear_eval_value_intervention()
+        reader.clear_eval_intervention()
         restored, _ = reader.temporal_terminal(
             action_query,
             selected,
@@ -2058,7 +2178,7 @@ def test_p2_eval_value_intervention_preserves_posterior_and_localizes_values() -
         assert torch.equal(value, state_before[name])
     reader.train()
     with pytest.raises(ValueError, match="evaluation-only"):
-        reader.set_eval_value_intervention("semantic_near_zero")
+        reader.set_eval_intervention("semantic_far_zero")
 
 
 def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
