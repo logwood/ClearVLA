@@ -48,13 +48,13 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 26
+    assert ARCHITECTURE_MANIFEST.schema == 27
     assert components.observation == (
         "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
     )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_typed_variance_floor_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3"
     )
     assert (
         components.bottom
@@ -62,14 +62,14 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_gradient_probes"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_w_ingress_gradient_probes"
     )
     assert components.runtime == (
-        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_metrics"
+        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_w_typed_norm_metrics"
     )
 
 
-def test_schema_26_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_27_parameter_inventory_is_explained_by_active_modules() -> None:
     torch.manual_seed(0)
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 

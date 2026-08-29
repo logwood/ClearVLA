@@ -278,6 +278,12 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "gradient_tensor_p1_dynamic_query_residual_rms",
         "gradient_tensor_w2_semantic_common_rms",
         "gradient_tensor_w2_geometry_interval_rms",
+        "gradient_tensor_w_semantic_common_ingress_rms",
+        "gradient_tensor_w_appearance_common_ingress_rms",
+        "gradient_tensor_w_geometry_common_ingress_rms",
+        "gradient_tensor_w_semantic_interval_ingress_rms",
+        "gradient_tensor_w_appearance_interval_ingress_rms",
+        "gradient_tensor_w_geometry_interval_ingress_rms",
         "gradient_tensor_p2_semantic_effect_rms",
         "gradient_tensor_p2_geometry_effect_rms",
         "gradient_tensor_p2_geometry_address_correction_rms",
@@ -297,6 +303,12 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     ):
         assert name in result.metrics
         assert torch.isfinite(result.metrics[name])
+    assert result.metrics["object_w_typed_norm_denominator_min"] >= 0.25
+    assert result.metrics["object_w_typed_norm_gain_max"] <= 4.000001
+    assert (
+        result.metrics["object_w_typed_norm_output_input_rms_ratio_max"]
+        <= 4.000001
+    )
     assert result.metrics["gradient_tensor_p2_semantic_effect_rms"] > 0
     assert result.metrics["gradient_tensor_p2_geometry_effect_rms"] > 0
     # Parameter hooks survive their forward graph. R2 parameter-gradient

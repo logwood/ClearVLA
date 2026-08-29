@@ -37,6 +37,7 @@ from clearvla.mainline.model.observation import (
     _sample_feature_chart,
 )
 from clearvla.mainline.model.policy import OnlinePolicyCache
+from clearvla.mainline.model.routing import smooth_rms_contract
 from clearvla.mainline.model.teacher import ObjectFutureTeacher
 from clearvla.mainline.model.top import DeploymentTopCache, ObjectIntentDynamicsTop
 from clearvla.mainline.model.types import (
@@ -1232,6 +1233,169 @@ def test_grounder_does_not_reinject_public_chart_into_object_candidates() -> Non
     torch.testing.assert_close(first_candidate, second_candidate)
     names = {name for name, _ in grounder.named_parameters()}
     assert not any("public_address_key" in name for name in names)
+
+
+def test_w_typed_norm_is_zero_preserving_scale_continuous_and_bounded() -> None:
+    dynamics = ObjectFutureDynamicsCompiler(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        heads=4,
+        normalization_floor=0.25,
+    )
+    norms = (
+        dynamics.w1.typed_object_norm,
+        dynamics.w1.typed_interval_norm,
+        dynamics.w1.typed_ffn_norm,
+        dynamics.w2.typed_object_norm,
+        dynamics.w2.typed_interval_norm,
+        dynamics.w2.typed_ffn_norm,
+        dynamics.typed_w2_query_norm,
+        dynamics.typed_w1_memory_norm,
+    )
+    zero = torch.zeros(2, 16)
+    constant = torch.full((2, 16), 0.125)
+    small = 1.0e-4 * torch.randn(2, 16)
+    for norm in norms:
+        assert torch.count_nonzero(norm(zero)) == 0
+        assert torch.count_nonzero(norm(constant)) == 0
+        torch.testing.assert_close(
+            norm(2.0 * small),
+            2.0 * norm(small),
+            atol=2.0e-10,
+            rtol=2.0e-6,
+        )
+
+    row = torch.randn(16, dtype=torch.float64, requires_grad=True) * 1.0e-4
+    jacobian = torch.autograd.functional.jacobian(
+        lambda value: dynamics.w1.typed_object_norm(value),
+        row,
+    )
+    assert torch.linalg.matrix_norm(jacobian, ord=2) <= 4.000001
+
+
+def test_w_public_block_retains_the_inherited_layernorm_operator() -> None:
+    torch.manual_seed(24)
+    dynamics = ObjectFutureDynamicsCompiler(
+        hidden=16,
+        content_dim=8,
+        route_dim=4,
+        heads=4,
+    ).eval()
+    block = dynamics.w1
+    value = torch.randn(2, 2, 4, 16)
+
+    object_view = value.reshape(4, 4, 16)
+    normalized = block.object_norm(object_view)
+    # Reconstruct the inherited public operation from its registered modules.
+    # This deliberately never touches any typed-only normalization module.
+    update, _ = block.object_attention(
+        normalized,
+        normalized,
+        normalized,
+        need_weights=False,
+    )
+    update, _ = smooth_rms_contract(update, 0.35)
+    expected = value + update.reshape_as(value)
+    interval_view = expected.transpose(1, 2).reshape(8, 2, 16)
+    normalized = block.interval_norm(interval_view)
+    causal_mask = torch.triu(torch.ones(2, 2, dtype=torch.bool), diagonal=1)
+    update, _ = block.interval_attention(
+        normalized,
+        normalized,
+        normalized,
+        attn_mask=causal_mask,
+        need_weights=False,
+    )
+    update, _ = smooth_rms_contract(update, 0.35)
+    expected = expected + update.reshape(2, 4, 2, 16).transpose(1, 2)
+    ffn, _ = smooth_rms_contract(block.ffn(expected), 0.35)
+    expected = expected + ffn
+
+    actual = block(value, causal_interval=True)
+    assert isinstance(actual, torch.Tensor)
+    torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+    assert isinstance(block.object_norm, torch.nn.LayerNorm)
+    assert isinstance(block.interval_norm, torch.nn.LayerNorm)
+    assert isinstance(dynamics.w2_query_norm, torch.nn.LayerNorm)
+    assert isinstance(dynamics.w1_memory_norm, torch.nn.LayerNorm)
+
+
+def test_w_typed_diagnostics_bound_gain_and_isolate_the_w_ingress_vjp() -> None:
+    torch.manual_seed(241)
+    top = _object_top().eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    typed_common = (
+        intent.typed_common_value.detach().clone().requires_grad_(True)
+    )
+    typed_interval = (
+        intent.typed_interval_residual_value.detach().clone().requires_grad_(True)
+    )
+    world = replace(
+        intent.world_dock(),
+        typed_common_value=typed_common,
+        typed_interval_residual_value=typed_interval,
+    )
+    coarse = top.coarse_action(intent.action_dock())
+    with torch.no_grad():
+        top.dynamics.delta_head.weight.normal_(std=0.1)
+        top.dynamics.transport_head.weight.normal_(std=0.1)
+
+    _, working, w1_metrics = top.dynamics.forward_w1(
+        facts=facts,
+        intent=world,
+        action=coarse,
+        collect_diagnostics=True,
+    )
+    field, w2_metrics = top.dynamics.forward_w2(
+        facts=facts,
+        intent=world,
+        action=coarse,
+        w1_state=working,
+        collect_diagnostics=True,
+    )
+    w_loss = (
+        field.semantic_delta.float().square().mean()
+        + field.transport_mean.float().square().mean()
+        + 0.01 * field.transport_covariance.square().mean()
+    )
+    # The original S value also has a legal non-W consumer.  Its deliberately
+    # large gradient must not leak into the W-only identity-view observer.
+    external_loss = 50.0 * (typed_common.sum() + typed_interval.sum())
+    (w_loss + external_loss).backward()
+
+    for metrics, prefix in (
+        (w1_metrics, "object_w1_typed_norm"),
+        (w2_metrics, "object_w2_typed_norm"),
+    ):
+        assert metrics[f"{prefix}_denominator_min"] >= 0.25
+        assert metrics[f"{prefix}_gain_max"] <= 4.000001
+        assert metrics[f"{prefix}_output_input_rms_ratio_max"] <= 4.000001
+
+    for name in (
+        "gradient_tensor_w_semantic_common_ingress_rms",
+        "gradient_tensor_w_appearance_common_ingress_rms",
+        "gradient_tensor_w_geometry_common_ingress_rms",
+        "gradient_tensor_w_semantic_interval_ingress_rms",
+        "gradient_tensor_w_appearance_interval_ingress_rms",
+        "gradient_tensor_w_geometry_interval_ingress_rms",
+    ):
+        assert torch.isfinite(w1_metrics[name])
+        assert w1_metrics[name] > 0.0
+        assert w1_metrics[name] < 1.0
+    assert typed_common.grad is not None
+    assert typed_interval.grad is not None
+    assert typed_common.grad.float().square().mean().sqrt() > 40.0
+    assert typed_interval.grad.float().square().mean().sqrt() > 40.0
 
 
 def test_w_camera_field_is_psd_and_unavailable_camera_is_exact_zero() -> None:

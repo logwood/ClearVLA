@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        26
+manifest schema:        27
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema26 WG/P2/gripper closure locally closed; full retained suite, production-dimension CPU BF16 batch and five-step deployment pass; fresh formal CUDA behavior run not started
+release status:         Schema26 formal CUDA behavior run observed through epoch 3 plus epoch-4 batch 360; Schema27 typed-only W normalization locally closed with 210/210 mainline/auditor tests, production-dimension CPU BF16 batch and retained five-step deployment; CUDA behavior unrun
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -31,7 +31,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > **The executable source is the exact Schema25 replay base plus completed
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
 > R1f/P2-01, R1g/P3-01,B-01, LC-01, R1h/N-01,D-01 and the three
-> R2-WG01/P202/GRIP02 structural units and the active Schema26 closure below.**
+> R2-WG01/P202/GRIP02 structural units, the Schema26 closure and the active
+> Schema27 typed-W numerical boundary below.**
 > The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -82,8 +83,17 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > classifier, and redirects its unchanged `.03` budget to continuous absolute
 > and cumulative-delta gripper trajectories from each target event onward.
 > It adds no parameter, P3 lane, gain, quota, sampler change or deployment
-> event gate. Schema25 checkpoints are not exact-resume sources for Schema26;
-> the next formal run is fresh.
+> event gate. The partial Schema26 formal run then exposed a separate numerical
+> boundary: ordinary LayerNorm expanded small typed S residuals to confident W
+> directions and allowed a local inverse-standard-deviation gain approaching
+> `316`, while public W did not share this amplitude semantics. Schema27 keeps
+> every public/generic W operation unchanged and applies the existing
+> parameter-free `0.25` variance floor only to typed object/interval/FFN and
+> typed W1-to-W2 query/memory normalization. Its local normalization gain is at
+> most `4`; exact zero/constant stays zero and small typed amplitude remains
+> visible. It adds no parameter, buffer, state key, RNG draw, gain, clip or
+> loss. Schema26 and older checkpoints are not exact-resume sources for
+> Schema27; the next formal run is fresh.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -183,6 +193,24 @@ R1d/W-01,W-02 replaces the pre-R1d W mechanics and future ABI:
 - R1d intentionally leaves the inherited flattened `[interval,K]+null`
   terminal and semantic-versus-geometry type softmax as P2-01 debt; R1f below
   closes that debt without changing the W field.
+
+Schema27 repairs only the typed W numerical chart built on that ownership:
+
+- the public/generic W block and generic W1-to-W2 read retain their inherited
+  ordinary LayerNorm modules and values;
+- typed common/near/far object attention, interval attention and FFN, plus the
+  typed W1-to-W2 query/memory read, use
+  `(x-mean(x))/sqrt(var(x)+0.25^2)` in FP32 and return to the caller dtype;
+- the floor is read from the existing resolved V120 routing-floor config. It
+  adds no affine parameter and cannot synthesize a typed value from zero;
+- diagnostic batches record only three aggregate normalization scalars
+  (minimum denominator, maximum local gain and maximum output/input RMS ratio)
+  plus six type/common-or-interval W-ingress VJPs. The ingress hooks observe a
+  W-only identity view, so they do not absorb the same S tensor's legal P2/P3
+  gradients;
+- W remains cached once per observation. Teacher, losses, optimizer ownership,
+  P2 consumers, deployment call count and checkpoint tensor inventory are
+  unchanged.
 
 R1e/P1-01 separates the static and dynamic P1 owners without changing their
 producers:
@@ -783,20 +811,23 @@ GripperTrajectoryTrainingBoundary
   state-key names. Its ordered state-key-name SHA-256 is
   `eb9b6077e51f9ed6ec65f3462e34e061034913fbfa9d19b745599d4b34afc88d`.
   Removing the exact-zero classifier consumes no RNG, so the construction RNG
-  digest remains unchanged.
+  digest remains unchanged. Schema27 adds only parameter-free normalization
+  modules and ephemeral scalar/VJP observers. It therefore retains all
+  Schema26 parameter counts, optimizer groups, state-key names, the ordered
+  state-key digest and the construction RNG digest exactly.
 - Active manifest identity:
 
   ```text
-  schema:       26
+  schema:       27
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
-  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3
+  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_typed_variance_floor_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_field_no_event_head
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_gradient_probes
-  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_metrics
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_w_ingress_gradient_probes
+  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_w_typed_norm_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `ae5c7c19f8a289678a23dbb7cf5f3de5d8660fa0e21c76bd37e4118736118d3d`.
+  `2aebfa053aaebccf097a27eff3e3c2331ea085f23151a1b0de752099ddc1894f`.
 
 Storage defaults:
 
@@ -810,8 +841,8 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The focused active-mainline/auditor suite passes 175/175. The broad retained
-suite passes 609/609 after excluding only
+The Schema27 active-mainline/auditor suite passes 210/210. The last
+Schema26 broad retained suite passed 609/609 after excluding only
 `tests/test_hierarchical_mmdit_action_decoder.py`, whose collection fails on
 an unrelated legacy V39 `_dwell_value_targets` import before any current
 mainline test runs. Tests cover full
@@ -879,12 +910,38 @@ one-batch CPU BF16 forward/backward at the complete production dimensions
 seconds with finite loss `2.58010149` and finite pre-clip gradient `4.8138814`.
 The retained five-update deployment plus endpoint-head guard completed in
 11.802 seconds with finite action/field values. The complete source graph is
-locally closed, but no Schema26 GPU smoke or behavioral experiment has run. On
-2026-08-28 the user
-explicitly authorized the local guard as the temporary substitute because a
-separate remote smoke was not available. This does not establish CUDA memory
-or throughput: the formal run's startup and first reporting window must enforce
-those runtime gates under the following production acceptance:
+locally closed. The Schema26 formal CUDA run subsequently reached three
+complete validations and epoch-4 batch 360 in the retained snapshot. Its
+median throughput is `1.809 s/batch`, process peak is `12.020 GiB`, and all
+values remain finite. Validation full/arm/gripper physical RMSE is
+`.0921/.0729/.1658`, `.0919/.0702/.1721`, then
+`.0856/.0656/.1593`. Gripper is better than the R2 epoch-3 value `.1759`, but
+arm is already worse than R2's `.0621`; no epoch-4 validation is present.
+
+The same partial run contains 64 finite gradient-spike events versus 15 in R2:
+23 are owned by observation `target_dino_key`, 13 by observation flow
+`delta_head`, 13 by gripper delta, nine by the arm head and six are dispersed.
+The maximum global preclip norm is `435.04`; gripper-owned events remain below
+about `6.54`. These observations motivated the W boundary audit but do not
+prove that W normalization is the sole cause of the observation spikes. A
+same-checkpoint, same-batch per-loss VJP was not available and remains the
+stronger unique-attribution instrument.
+
+Schema27 locally guards exact-zero/constant behavior, continuous small-signal
+scaling, a normalization Jacobian no greater than `4`, public W exact
+operation identity, typed axes/causal ownership, W-only ingress VJPs, unchanged
+state/optimizer inventory and diagnostic forward invariance. The previous
+Schema26 production-dimension result was rerun on Schema27. One fresh CPU BF16
+batch at `H=512` and 256 patches/camera completed in `80.235 s` with finite
+loss `2.70221353` and finite global preclip norm `5.35621786`. It retained
+`169,458,587 / 153,087,856` total/trainable parameters and 1,064 optimizer
+tensors. The typed normalization denominator/gain were exactly `.25 / 4.0`;
+the BF16 output/input RMS audit was `4.00121` from output cast rounding. Fresh
+zero-initialized semantic/transport heads make the first-batch W-ingress VJPs
+exact zero by contract; later trained rows, not the first batch, decide their
+reachability. The retained five-update Teacher-free deployment guard is part
+of the passing suite. These local guards do not establish CUDA behavior.
+Production acceptance remains:
 
 - finite CUDA BF16 preflight and five-step deployment before the first update;
 - batch-eight process peak no greater than 22 GiB;
@@ -896,18 +953,18 @@ those runtime gates under the following production acceptance:
 Use new empty output directories:
 
 ```bash
-RUN_TAG=schema26_wg01_p202_grip02_smoke
+RUN_TAG=schema27_w_typed_norm_smoke
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
-RUN_TAG=schema26_wg01_p202_grip02_b8
+RUN_TAG=schema27_w_typed_norm_b8
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema26_wg01_p202_grip02_b8 \
+  runs/schema27_w_typed_norm_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

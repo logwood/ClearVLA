@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal, overload
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .routing import (
+    VarianceFlooredCenteredNorm,
     register_gradient_axis_rms_metrics,
     smooth_rms_contract,
 )
@@ -33,15 +35,34 @@ class ObjectW1WorkingState:
 
 
 class _ObjectIntervalBlock(nn.Module):
-    def __init__(self, hidden: int, heads: int) -> None:
+    def __init__(
+        self,
+        hidden: int,
+        heads: int,
+        *,
+        typed_normalization_floor: float,
+    ) -> None:
         super().__init__()
+        # The ordinary norms are the inherited public/generic W path.  Typed
+        # S values carry relevance amplitude, so their attention path uses a
+        # separate parameter-free variance floor instead of erasing that
+        # amplitude through unit-variance normalization.
         self.object_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.typed_object_norm = VarianceFlooredCenteredNorm(
+            typed_normalization_floor
+        )
         self.object_attention = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
         self.interval_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.typed_interval_norm = VarianceFlooredCenteredNorm(
+            typed_normalization_floor
+        )
         self.interval_attention = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
+        )
+        self.typed_ffn_norm = VarianceFlooredCenteredNorm(
+            typed_normalization_floor
         )
         self.ffn = nn.Sequential(
             nn.LayerNorm(hidden, elementwise_affine=False),
@@ -50,7 +71,40 @@ class _ObjectIntervalBlock(nn.Module):
             nn.Linear(2 * hidden, hidden, bias=False),
         )
 
-    def forward(self, value: Tensor, *, causal_interval: bool) -> Tensor:
+    @overload
+    def forward(
+        self,
+        value: Tensor,
+        *,
+        causal_interval: bool,
+        typed: Literal[False] = False,
+        collect_diagnostics: bool = False,
+    ) -> Tensor: ...
+
+    @overload
+    def forward(
+        self,
+        value: Tensor,
+        *,
+        causal_interval: bool,
+        typed: Literal[True],
+        collect_diagnostics: bool = False,
+    ) -> tuple[Tensor, dict[str, Tensor]]: ...
+
+    def forward(
+        self,
+        value: Tensor,
+        *,
+        causal_interval: bool,
+        typed: bool = False,
+        collect_diagnostics: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        if typed:
+            return self.forward_typed(
+                value,
+                causal_interval=causal_interval,
+                collect_diagnostics=collect_diagnostics,
+            )
         batch, intervals, objects, hidden = value.shape
         object_view = value.reshape(batch * intervals, objects, hidden)
         normalized = self.object_norm(object_view)
@@ -79,6 +133,129 @@ class _ObjectIntervalBlock(nn.Module):
         ffn, _ = smooth_rms_contract(self.ffn(value), 0.35)
         return value + ffn
 
+    @staticmethod
+    def _normalization_statistics(
+        value: Tensor,
+        normalized: Tensor,
+        denominator: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        input_rms = value.detach().float().square().mean(dim=-1).sqrt()
+        output_rms = normalized.detach().float().square().mean(dim=-1).sqrt()
+        ratio = torch.where(
+            input_rms > 0.0,
+            output_rms / input_rms.clamp_min(1.0e-12),
+            input_rms.new_zeros(input_rms.shape),
+        )
+        denominator_f = denominator.detach().float()
+        return (
+            denominator_f.amin(),
+            denominator_f.reciprocal().amax(),
+            ratio.amax(),
+        )
+
+    @staticmethod
+    def _merge_normalization_statistics(
+        rows: tuple[tuple[Tensor, Tensor, Tensor], ...],
+    ) -> dict[str, Tensor]:
+        if not rows:
+            return {}
+        return {
+            "denominator_min": torch.stack([row[0] for row in rows]).amin(),
+            "gain_max": torch.stack([row[1] for row in rows]).amax(),
+            "output_input_rms_ratio_max": torch.stack(
+                [row[2] for row in rows]
+            ).amax(),
+        }
+
+    def forward_typed(
+        self,
+        value: Tensor,
+        *,
+        causal_interval: bool,
+        collect_diagnostics: bool,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Run one typed W block without changing the generic W operator."""
+
+        batch, intervals, objects, hidden = value.shape
+        statistics: list[tuple[Tensor, Tensor, Tensor]] = []
+
+        object_view = value.reshape(batch * intervals, objects, hidden)
+        normalized, denominator = self.typed_object_norm.forward_with_denominator(
+            object_view
+        )
+        if collect_diagnostics:
+            statistics.append(
+                self._normalization_statistics(
+                    object_view,
+                    normalized,
+                    denominator,
+                )
+            )
+        update, _ = self.object_attention(
+            normalized,
+            normalized,
+            normalized,
+            need_weights=False,
+        )
+        update, _ = smooth_rms_contract(update, 0.35)
+        value = value + update.reshape_as(value)
+
+        interval_view = value.transpose(1, 2).reshape(
+            batch * objects, intervals, hidden
+        )
+        normalized, denominator = self.typed_interval_norm.forward_with_denominator(
+            interval_view
+        )
+        if collect_diagnostics:
+            statistics.append(
+                self._normalization_statistics(
+                    interval_view,
+                    normalized,
+                    denominator,
+                )
+            )
+        mask = (
+            torch.triu(
+                torch.ones(
+                    intervals,
+                    intervals,
+                    device=value.device,
+                    dtype=torch.bool,
+                ),
+                diagonal=1,
+            )
+            if causal_interval
+            else None
+        )
+        update, _ = self.interval_attention(
+            normalized,
+            normalized,
+            normalized,
+            attn_mask=mask,
+            need_weights=False,
+        )
+        update, _ = smooth_rms_contract(update, 0.35)
+        value = value + update.reshape(
+            batch, objects, intervals, hidden
+        ).transpose(1, 2)
+
+        normalized, denominator = self.typed_ffn_norm.forward_with_denominator(
+            value
+        )
+        if collect_diagnostics:
+            statistics.append(
+                self._normalization_statistics(
+                    value,
+                    normalized,
+                    denominator,
+                )
+            )
+        ffn = self.ffn[3](self.ffn[2](self.ffn[1](normalized)))
+        ffn, _ = smooth_rms_contract(ffn, 0.35)
+        return value + ffn, self._merge_normalization_statistics(
+            tuple(statistics)
+        )
+
 
 class ObjectFutureDynamicsCompiler(nn.Module):
     """W1 owns common/near; W2 reads W1 and writes far only."""
@@ -92,10 +269,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         content_dim: int,
         route_dim: int,
         heads: int,
+        normalization_floor: float = 0.25,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.content_dim = int(content_dim)
+        self.normalization_floor = float(normalization_floor)
+        if self.normalization_floor <= 0.0:
+            raise ValueError("W typed normalization floor must be positive")
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
@@ -107,10 +288,24 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
         self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
-        self.w1 = _ObjectIntervalBlock(hidden, heads)
-        self.w2 = _ObjectIntervalBlock(hidden, heads)
+        self.w1 = _ObjectIntervalBlock(
+            hidden,
+            heads,
+            typed_normalization_floor=self.normalization_floor,
+        )
+        self.w2 = _ObjectIntervalBlock(
+            hidden,
+            heads,
+            typed_normalization_floor=self.normalization_floor,
+        )
         self.w2_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.w1_memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.typed_w2_query_norm = VarianceFlooredCenteredNorm(
+            self.normalization_floor
+        )
+        self.typed_w1_memory_norm = VarianceFlooredCenteredNorm(
+            self.normalization_floor
+        )
         self.w1_to_w2 = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
@@ -168,15 +363,66 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         value: Tensor,
         *,
         causal_interval: bool,
-    ) -> Tensor:
+        collect_diagnostics: bool,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
         if value.ndim != 5 or int(value.shape[3]) != 3:
             raise ValueError("typed W state must be [B,I,K,3,H]")
         batch, intervals, objects, types, hidden = value.shape
         typed_batch = value.permute(0, 3, 1, 2, 4).reshape(
             batch * types, intervals, objects, hidden
         )
-        typed_batch = block(typed_batch, causal_interval=causal_interval)
-        return typed_batch.reshape(batch, types, intervals, objects, hidden).permute(0, 2, 3, 1, 4)
+        result = block(
+            typed_batch,
+            causal_interval=causal_interval,
+            typed=True,
+            collect_diagnostics=collect_diagnostics,
+        )
+        if not isinstance(result, tuple):
+            raise RuntimeError("typed W block did not return its diagnostic boundary")
+        typed_batch, metrics = result
+        return (
+            typed_batch.reshape(
+                batch, types, intervals, objects, hidden
+            ).permute(0, 2, 3, 1, 4),
+            metrics,
+        )
+
+    @staticmethod
+    def _merge_normalization_metrics(
+        *rows: dict[str, Tensor],
+        prefix: str,
+    ) -> dict[str, Tensor]:
+        active = tuple(row for row in rows if row)
+        if not active:
+            return {}
+        return {
+            f"{prefix}_denominator_min": torch.stack(
+                [row["denominator_min"] for row in active]
+            ).amin(),
+            f"{prefix}_gain_max": torch.stack(
+                [row["gain_max"] for row in active]
+            ).amax(),
+            f"{prefix}_output_input_rms_ratio_max": torch.stack(
+                [row["output_input_rms_ratio_max"] for row in active]
+            ).amax(),
+        }
+
+    @staticmethod
+    def _normalization_metrics(
+        value: Tensor,
+        normalized: Tensor,
+        denominator: Tensor,
+    ) -> dict[str, Tensor]:
+        rows = _ObjectIntervalBlock._normalization_statistics(
+            value,
+            normalized,
+            denominator,
+        )
+        return {
+            "denominator_min": rows[0],
+            "gain_max": rows[1],
+            "output_input_rms_ratio_max": rows[2],
+        }
 
     def _base(
         self,
@@ -215,17 +461,51 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             + interval[:, :, None]
             + goal_update[:, :, None]
         )
+        # These identity views are consumed only by W.  Their hooks therefore
+        # separate the W ingress VJP from the same S tensors' legal P2/P3
+        # consumers without adding a detach, value operation or persistent
+        # observer.
+        typed_common_source = intent.typed_common_value
+        typed_interval_source = intent.typed_interval_residual_value
+        gradient_metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            typed_common_source = typed_common_source.reshape_as(
+                typed_common_source
+            )
+            typed_interval_source = typed_interval_source.reshape_as(
+                typed_interval_source
+            )
+            register_gradient_axis_rms_metrics(
+                typed_common_source,
+                gradient_metrics,
+                (
+                    "gradient_tensor_w_semantic_common_ingress_rms",
+                    "gradient_tensor_w_appearance_common_ingress_rms",
+                    "gradient_tensor_w_geometry_common_ingress_rms",
+                ),
+                dim=-2,
+            )
+            register_gradient_axis_rms_metrics(
+                typed_interval_source,
+                gradient_metrics,
+                (
+                    "gradient_tensor_w_semantic_interval_ingress_rms",
+                    "gradient_tensor_w_appearance_interval_ingress_rms",
+                    "gradient_tensor_w_geometry_interval_ingress_rms",
+                ),
+                dim=-2,
+            )
         common_components: list[Tensor] = []
         interval_components: list[Tensor] = []
         for type_index, projection in enumerate(
             (self.object_semantic, self.object_appearance, self.object_geometry)
         ):
             common, _ = smooth_rms_contract(
-                projection(intent.typed_common_value[..., type_index, :]),
+                projection(typed_common_source[..., type_index, :]),
                 0.35,
             )
             innovation, _ = smooth_rms_contract(
-                projection(intent.typed_interval_residual_value[..., type_index, :]),
+                projection(typed_interval_source[..., type_index, :]),
                 0.35,
             )
             common_components.append(common)
@@ -241,6 +521,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 intent.protected_goal_memory.shape[1],
             )
         metrics: dict[str, Tensor] = {
+            **gradient_metrics,
             "object_w_goal_attention_entropy": (
                 -(
                     goal_attention.detach().float().clamp_min(1.0e-8)
@@ -456,11 +737,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             facts, intent, action, collect_diagnostics=collect_diagnostics
         )
         near = self.w1(base[:, :2], causal_interval=True)
-        common_before = self._run_typed_block(
+        common_batch, common_norm_metrics = self._run_typed_block(
             self.w1,
             raw_common[:, None],
             causal_interval=False,
-        )[:, 0]
+            collect_diagnostics=collect_diagnostics,
+        )
+        common_before = common_batch[:, 0]
         common, common_modulation = self._zero_preserving_condition(
             common_before,
             near.mean(dim=1)[:, :, None, :].expand_as(common_before),
@@ -470,10 +753,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             raw_interval[:, :2],
             near_context,
         )
-        near_typed = self._run_typed_block(
+        near_typed, near_norm_metrics = self._run_typed_block(
             self.w1,
             near_input,
             causal_interval=True,
+            collect_diagnostics=collect_diagnostics,
         )
         field: FutureObjectDynamics | None = None
         metrics: dict[str, Tensor] = {}
@@ -488,6 +772,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             metrics.update(self._metrics(field, prefix="object_w1"))
             metrics.update(field_metrics)
             metrics.update(self._typed_state_metrics(near_typed, prefix="object_w1"))
+            metrics.update(
+                self._merge_normalization_metrics(
+                    common_norm_metrics,
+                    near_norm_metrics,
+                    prefix="object_w1_typed_norm",
+                )
+            )
             metrics.update(
                 {
                     "object_w1_common_processing_delta_rms": (
@@ -567,9 +858,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .permute(0, 2, 3, 1, 4)
             .reshape(batch * objects * 3, 3, hidden)
         )
-        normalized_memory = self.w1_memory_norm(typed_memory)
+        normalized_typed_query, typed_query_denominator = (
+            self.typed_w2_query_norm.forward_with_denominator(typed_far_query)
+        )
+        normalized_memory, typed_memory_denominator = (
+            self.typed_w1_memory_norm.forward_with_denominator(typed_memory)
+        )
         typed_read, _ = self.w1_to_w2(
-            self.w2_query_norm(typed_far_query),
+            normalized_typed_query,
             normalized_memory,
             normalized_memory,
             need_weights=False,
@@ -581,10 +877,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             w1_state.far_interval_innovation,
             far_context,
         )
-        far_typed = self._run_typed_block(
+        far_typed, far_norm_metrics = self._run_typed_block(
             self.w2,
             far_input,
             causal_interval=True,
+            collect_diagnostics=collect_diagnostics,
         )
         completed_innovation = torch.cat(
             (w1_state.near_interval_innovation, far_typed),
@@ -625,6 +922,22 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         metrics.update(field_metrics)
         metrics.update(gradient_metrics)
         metrics.update(self._typed_state_metrics(completed_innovation, prefix="object_w2"))
+        metrics.update(
+            self._merge_normalization_metrics(
+                self._normalization_metrics(
+                    typed_far_query,
+                    normalized_typed_query,
+                    typed_query_denominator,
+                ),
+                self._normalization_metrics(
+                    typed_memory,
+                    normalized_memory,
+                    typed_memory_denominator,
+                ),
+                far_norm_metrics,
+                prefix="object_w2_typed_norm",
+            )
+        )
         metrics["object_w_far_condition_rms"] = (
             far_condition_modulation.detach().float().square().mean().sqrt()
         )

@@ -312,6 +312,9 @@ class JsonlRunLogger:
                         "object_p2_terminal_common_residual_identity_error",
                         "controlled_transition_trajectory_norm_denominator_min",
                         "controlled_transition_trajectory_norm_gain",
+                        "object_w_typed_norm_denominator_min",
+                        "object_w_typed_norm_gain_max",
+                        "object_w_typed_norm_output_input_rms_ratio_max",
                     ),
                 ),
                 (
@@ -345,6 +348,8 @@ class JsonlRunLogger:
                         "gradient_tensor_p1_dynamic_query_residual_rms",
                         "gradient_tensor_w2_semantic_common_rms",
                         "gradient_tensor_w2_geometry_interval_rms",
+                        "gradient_tensor_w_semantic_common_ingress_rms",
+                        "gradient_tensor_w_geometry_interval_ingress_rms",
                         "gradient_tensor_p2_semantic_effect_rms",
                         "gradient_tensor_p2_geometry_effect_rms",
                         "gradient_tensor_p2_geometry_address_correction_rms",

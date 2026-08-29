@@ -200,6 +200,9 @@ class ObjectIntentDynamicsTop(nn.Module):
             content_dim=content_dim,
             route_dim=route_dim,
             heads=heads,
+            normalization_floor=float(
+                core_config.flow_jepa_routing_norm_floor
+            ),
         )
         self.teacher = ObjectFutureTeacher(
             content_dim=content_dim,
@@ -335,11 +338,27 @@ class ObjectIntentDynamicsTop(nn.Module):
         context.validate(hidden=self.hidden, horizon=self.horizon)
         if not collect_diagnostics:
             return context, {}
+        typed_norm_metrics: dict[str, Tensor] = {}
+        for suffix, reduction in (
+            ("denominator_min", torch.amin),
+            ("gain_max", torch.amax),
+            ("output_input_rms_ratio_max", torch.amax),
+        ):
+            stage_values = torch.stack(
+                (
+                    w1_metrics.pop(f"object_w1_typed_norm_{suffix}"),
+                    w2_metrics.pop(f"object_w2_typed_norm_{suffix}"),
+                )
+            )
+            typed_norm_metrics[f"object_w_typed_norm_{suffix}"] = reduction(
+                stage_values
+            )
         metrics = {
             **ground_metrics,
             **intent_metrics,
             **w1_metrics,
             **w2_metrics,
+            **typed_norm_metrics,
             "object_w_prediction_interval_variation": predicted.semantic_delta.detach()
             .float()
             .std(dim=1, unbiased=False)

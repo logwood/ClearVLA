@@ -72,15 +72,21 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        26
+schema:        27
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 25 and older are not exact-resume sources for schema 26. Formal runs
+Schema 26 and older are not exact-resume sources for schema 27. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
+
+Schema27 changes only the typed S-to-W numerical operator. Public/generic W
+keeps its inherited LayerNorm values, while typed object/interval/FFN and the
+typed W1-to-W2 read use the existing parameter-free `0.25` variance floor.
+This bounds the normalization Jacobian at `4`, preserves exact-zero and small
+relevance amplitude, and adds no parameter, state key, buffer or RNG draw.
 
 ## Runtime contract
 
@@ -116,16 +122,16 @@ Smoke:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema26_w_p2_gripper_smoke \
-nohup bash scripts/smoke_mainline.sh > schema26_w_p2_gripper_smoke.log 2>&1 &
+OUT_DIR=runs/schema27_w_typed_norm_smoke \
+nohup bash scripts/smoke_mainline.sh > schema27_w_typed_norm_smoke.log 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema26_w_p2_gripper_b8 \
-nohup bash scripts/train_mainline.sh > schema26_w_p2_gripper_b8.log 2>&1 &
+OUT_DIR=runs/schema27_w_typed_norm_b8 \
+nohup bash scripts/train_mainline.sh > schema27_w_typed_norm_b8.log 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -137,7 +143,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema26_w_p2_gripper_b8 \
+  runs/schema27_w_typed_norm_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text
