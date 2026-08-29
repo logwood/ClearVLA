@@ -421,54 +421,26 @@ def future_dynamics_terms(
         )
         return raw + normalized + 0.10 * direction, raw
 
-    def transport_row_loss(
+    def transport_row_audits(
         prediction_value: Tensor,
         target_value: Tensor,
-        *,
-        support_weight: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Keep raw coordinate error as the sole active transport measure.
+    ) -> tuple[Tensor, Tensor]:
+        """Return detached relative-coordinate audits for diagnostic batches.
 
-        Target scale is allowed to redistribute responsibility between rows,
-        but not to create a second absolute loss budget.  The inverse-square
-        weight is the quadratic-region equivalent of target normalization and
-        is normalized to support-weighted mean one for each independently
-        owned common/innovation objective.
+        Target magnitude is physically meaningful for camera transport and
+        therefore cannot redistribute backward responsibility.  The former
+        normalized and direction views remain useful observations, but they
+        are computed only when diagnostics are requested and never enter the
+        active raw-coordinate objective.
         """
 
-        prediction_f = prediction_value.float()
+        prediction_f = prediction_value.detach().float()
         target_f = target_value.detach().float()
-        raw = F.smooth_l1_loss(
-            prediction_f,
-            target_f,
-            reduction="none",
-        ).mean(dim=-1, keepdim=True)
         target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
         scale_floor = (
             0.25 * target_rms.mean(dim=(0, 2), keepdim=True)
         ).clamp_min(1e-3)
         scale = torch.sqrt(target_rms.square() + scale_floor.square())
-
-        expanded_support = support_weight.detach().float()
-        while expanded_support.ndim < raw.ndim:
-            expanded_support = expanded_support.unsqueeze(-1)
-        expanded_support = expanded_support.expand_as(raw)
-        relative_weight = scale.reciprocal().square()
-        support_mass = expanded_support.sum()
-        relative_mean = (
-            (relative_weight * expanded_support).sum()
-            / support_mass.clamp_min(1.0)
-        )
-        mean_one_weight = torch.where(
-            support_mass > 0.0,
-            relative_weight / relative_mean.clamp_min(torch.finfo(torch.float32).tiny),
-            torch.zeros_like(relative_weight),
-        )
-        active = raw * mean_one_weight
-
-        # Retain the former scale-normalized and direction objectives only as
-        # detached audits.  They are computed from the same rows and cannot
-        # reach backward or silently restore the R2 budget amplification.
         normalized_audit = F.smooth_l1_loss(
             prediction_f / scale,
             target_f / scale,
@@ -483,13 +455,7 @@ def future_dynamics_terms(
         direction_audit = 0.5 * (
             prediction_direction - target_direction
         ).square().mean(dim=-1, keepdim=True)
-        return (
-            active,
-            raw,
-            normalized_audit.detach(),
-            direction_audit.detach(),
-            mean_one_weight.detach(),
-        )
+        return normalized_audit, direction_audit
 
     def decomposed_loss(
         prediction_value: Tensor,
@@ -523,33 +489,6 @@ def future_dynamics_terms(
             innovation_raw_error,
         )
 
-    def decomposed_transport_loss(
-        prediction_value: Tensor,
-        target_value: Tensor,
-        *,
-        weight: Tensor,
-    ) -> tuple[Tensor, ...]:
-        prediction_common = prediction_value.float().mean(dim=1)
-        target_common = target_value.detach().float().mean(dim=1)
-        prediction_innovation = prediction_value.float() - prediction_common[:, None]
-        target_innovation = target_value.detach().float() - target_common[:, None]
-        common_rows = transport_row_loss(
-            prediction_common[:, None],
-            target_common[:, None],
-            support_weight=weight[:, :1],
-        )
-        innovation_rows = transport_row_loss(
-            prediction_innovation,
-            target_innovation,
-            support_weight=weight,
-        )
-        return (
-            masked(common_rows[0], weight[:, :1]),
-            masked(innovation_rows[0], weight),
-            *common_rows,
-            *innovation_rows,
-        )
-
     (
         semantic_common,
         semantic_innovation,
@@ -568,24 +507,19 @@ def future_dynamics_terms(
         transport_common,
         transport_innovation,
         _transport_common_error,
-        transport_common_raw_error,
-        transport_common_normalized_audit,
-        transport_common_direction_audit,
-        transport_common_target_weight,
         transport_innovation_error,
+        transport_common_raw_error,
         transport_innovation_raw_error,
-        transport_innovation_normalized_audit,
-        transport_innovation_direction_audit,
-        transport_innovation_target_weight,
-    ) = decomposed_transport_loss(
+    ) = decomposed_loss(
         prediction.transport_mean,
         target.transport_mean,
         weight=camera_validity,
+        scale_floored=False,
     )
     transport = 0.5 * (transport_common + transport_innovation)
-    # The target-scale-covariant objective already computes the raw
-    # coordinate SmoothL1 term. Reuse its detached row errors for the audit
-    # instead of running a second loss kernel on every training batch.
+    # Raw coordinate error is both the active measure and the archival audit.
+    # No Teacher-magnitude-dependent weight is allowed to reassign physical
+    # transport responsibility between common, near or far rows.
     transport_raw_common = masked(
         transport_common_raw_error.detach(),
         camera_validity[:, :1],
@@ -665,25 +599,31 @@ def future_dynamics_terms(
             .mean()
             .sqrt()
         )
+        prediction_common = prediction.transport_mean.float().mean(dim=1)
+        target_common = target.transport_mean.detach().float().mean(dim=1)
+        prediction_innovation = (
+            prediction.transport_mean.float() - prediction_common[:, None]
+        )
+        target_innovation = (
+            target.transport_mean.detach().float() - target_common[:, None]
+        )
+        common_normalized_audit, common_direction_audit = transport_row_audits(
+            prediction_common[:, None],
+            target_common[:, None],
+        )
+        innovation_normalized_audit, innovation_direction_audit = (
+            transport_row_audits(
+                prediction_innovation,
+                target_innovation,
+            )
+        )
         terms["future_transport_normalized_audit"] = 0.5 * (
-            masked(transport_common_normalized_audit, camera_validity[:, :1])
-            + masked(transport_innovation_normalized_audit, camera_validity)
+            masked(common_normalized_audit, camera_validity[:, :1])
+            + masked(innovation_normalized_audit, camera_validity)
         )
         terms["future_transport_direction_audit"] = 0.5 * (
-            masked(transport_common_direction_audit, camera_validity[:, :1])
-            + masked(transport_innovation_direction_audit, camera_validity)
-        )
-        terms["future_transport_common_target_weight_mean"] = masked(
-            transport_common_target_weight,
-            camera_validity[:, :1],
-        )
-        terms["future_transport_innovation_target_weight_mean"] = masked(
-            transport_innovation_target_weight,
-            camera_validity,
-        )
-        terms["future_transport_target_weight_max"] = torch.maximum(
-            transport_common_target_weight.amax(),
-            transport_innovation_target_weight.amax(),
+            masked(common_direction_audit, camera_validity[:, :1])
+            + masked(innovation_direction_audit, camera_validity)
         )
         terms["future_target_covariance_rms"] = (
             target.transport_covariance.detach().float().square().mean().sqrt()

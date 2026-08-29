@@ -2408,7 +2408,7 @@ def test_future_objectives_use_only_semantic_camera_geometry_and_current_support
     torch.testing.assert_close(unsupported["future_dynamics"], torch.zeros(()))
 
 
-def test_transport_objective_uses_mean_one_target_weights_without_budget_growth() -> None:
+def test_transport_objective_is_unweighted_raw_coordinate_error() -> None:
     batch, intervals, objects, cameras, content = 1, 4, 2, 1, 8
     interval_scale = torch.tensor((0.002, 0.01, 0.05, 0.20)).view(1, 4, 1, 1, 1)
     target_transport = interval_scale.expand(batch, intervals, objects, cameras, 2).clone()
@@ -2439,14 +2439,16 @@ def test_transport_objective_uses_mean_one_target_weights_without_budget_growth(
     assert not terms["future_transport_normalized_audit"].requires_grad
     assert not terms["future_transport_direction_audit"].requires_grad
     torch.testing.assert_close(
-        terms["future_transport_common_target_weight_mean"],
-        torch.ones(()),
+        terms["future_transport"],
+        terms["future_transport_raw_coordinate"],
     )
-    torch.testing.assert_close(
-        terms["future_transport_innovation_target_weight_mean"],
-        torch.ones(()),
+    assert not any("target_weight" in name for name in terms)
+
+    terms["future_transport"].backward()
+    gradient_by_interval = (
+        prediction.transport_mean.grad.detach().float().abs().mean(dim=(0, 2, 3, 4))
     )
-    assert terms["future_transport_target_weight_max"] > 1.0
+    assert bool((gradient_by_interval[1:] > gradient_by_interval[:-1]).all())
 
     active_by_scale: list[float] = []
     raw_by_scale: list[float] = []
@@ -2466,8 +2468,8 @@ def test_transport_objective_uses_mean_one_target_weights_without_budget_growth(
         raw_by_scale.append(
             float(scaled_terms["future_transport_raw_coordinate"].detach())
         )
-        # With no relative target-scale difference between supported rows, the
-        # mean-one weight is exactly identity and cannot inflate the budget.
+        # The active objective is the archival raw-coordinate error at every
+        # target magnitude, not only when all supported rows share one scale.
         torch.testing.assert_close(
             scaled_terms["future_transport"],
             scaled_terms["future_transport_raw_coordinate"],
