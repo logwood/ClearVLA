@@ -67,10 +67,6 @@ _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
         "bottom.decoder.velocity_head.gripper_gate.weight",
         "gradient_parameter_gripper_private_gate_weight_rms",
     ),
-    (
-        "decoded_gripper_event_head.weight",
-        "gradient_parameter_decoded_gripper_event_head_weight_rms",
-    ),
 )
 
 

@@ -48,28 +48,28 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 25
+    assert ARCHITECTURE_MANIFEST.schema == 26
     assert components.observation == (
         "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
     )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_physical_value_typed_consequence_plus_two_optional_p3"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3"
     )
     assert (
         components.bottom
-        == "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_codec_closed_event"
+        == "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_field_no_event_head"
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_mean_one_transport_codec_closed_event_v120_decay_local_global_clip_source_gradient_probes"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_gradient_probes"
     )
     assert components.runtime == (
-        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_codec_closed_event_teacher_isolated_finite_spike_matching_metrics"
+        "cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_metrics"
     )
 
 
-def test_schema_25_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_26_parameter_inventory_is_explained_by_active_modules() -> None:
     torch.manual_seed(0)
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 
@@ -88,22 +88,20 @@ def test_schema_25_parameter_inventory_is_explained_by_active_modules() -> None:
     assert children["factual_reader"][0] > 2_000_000
     assert counts(model.top.grounding_blocks)[0] > 1_000_000
     assert counts(model.top.grounder)[0] > 1_000_000
-    assert (total, trainable) == (169_458_596, 153_087_865)
+    assert (total, trainable) == (169_458_587, 153_087_856)
     parameters = tuple(model.parameters())
-    assert len(parameters) == 1_388
-    assert sum(parameter.requires_grad for parameter in parameters) == 1_066
+    assert len(parameters) == 1_386
+    assert sum(parameter.requires_grad for parameter in parameters) == 1_064
     state_names = tuple(model.state_dict())
-    assert len(state_names) == 1_394
+    assert len(state_names) == 1_392
     assert hashlib.sha256("\n".join(state_names).encode()).hexdigest() == (
-        "384bf6aa4f765382f3d7b4251f0b70f53fe233d3a86090f8ea2bdad6d886d174"
+        "eb9b6077e51f9ed6ec65f3462e34e061034913fbfa9d19b745599d4b34afc88d"
     )
     assert hashlib.sha256(torch.get_rng_state().cpu().numpy().tobytes()).hexdigest() == (
         "d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21"
     )
     optimizer, ownership = build_optimizer(model, ExperimentConfig())
     assert len(optimizer.param_groups) == 23
-    assert len(ownership.trainable_names) == 1_066
+    assert len(ownership.trainable_names) == 1_064
     assert model.bottom.decoder.event_head is None
-    assert tuple(model.decoded_gripper_event_head.weight.shape) == (3, 2)
-    assert torch.count_nonzero(model.decoded_gripper_event_head.weight) == 0
-    assert torch.count_nonzero(model.decoded_gripper_event_head.bias) == 0
+    assert not hasattr(model, "decoded_gripper_event_head")

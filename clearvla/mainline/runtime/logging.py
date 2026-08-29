@@ -261,7 +261,7 @@ class JsonlRunLogger:
                         "loss_group_execution",
                         "loss_contrib_action_flow",
                         "loss_contrib_decoded_action",
-                        "loss_contrib_event",
+                        "loss_contrib_gripper_trajectory",
                         "loss_contrib_motion",
                         "loss_contrib_future_dynamics",
                         "loss_contrib_future_transition",
@@ -287,6 +287,7 @@ class JsonlRunLogger:
                         "p1_policy_query_residual_rms",
                         "object_p2_semantic_effect_rms",
                         "object_p2_geometry_effect_rms",
+                        "object_p2_geometry_address_correction_rms",
                         "object_p2_effect_precontract_rms",
                         "object_p2_effect_postcontract_rms",
                         "object_p3_protected_policy_precision_rms",
@@ -346,6 +347,7 @@ class JsonlRunLogger:
                         "gradient_tensor_w2_geometry_interval_rms",
                         "gradient_tensor_p2_semantic_effect_rms",
                         "gradient_tensor_p2_geometry_effect_rms",
+                        "gradient_tensor_p2_geometry_address_correction_rms",
                         "gradient_tensor_p1_protected_policy_precision_rms",
                         "gradient_tensor_p3_temporal_rms",
                         "gradient_tensor_p3_state_change_rms",
@@ -393,12 +395,6 @@ class JsonlRunLogger:
                         "validation_decoded_gripper_events_target",
                         "validation_decoded_gripper_event_ratio",
                         "validation_decoded_gripper_timing_mae_steps",
-                        "validation_event_head_precision",
-                        "validation_event_head_recall",
-                        "validation_event_head_f1",
-                        "validation_event_head_events_predicted",
-                        "validation_event_head_events_target",
-                        "validation_event_head_minus_decoded_f1",
                         "validation_motion_head_precision",
                         "validation_motion_head_recall",
                         "validation_motion_head_f1",
@@ -435,7 +431,7 @@ class JsonlRunLogger:
                     "causal",
                     (
                         "validation_sampling_diagnostic_coverage",
-                        "validation_p2_value_ablation_coverage",
+                        "validation_p2_intervention_coverage",
                         "validation_proposal_ablation_coverage",
                         "validation_proposal_primary_rmse_physical",
                         "validation_proposal_zero_rmse_physical",
@@ -454,19 +450,19 @@ class JsonlRunLogger:
                     ),
                 ),
                 (
-                    "p2-value",
+                    "p2-intervention",
                     tuple(
                         name
                         for mode in (
-                            "semantic_near_zero",
                             "semantic_far_zero",
-                            "geometry_near_zero",
-                            "geometry_far_zero",
+                            "geometry_value_all_zero",
+                            "geometry_address_neutral",
+                            "geometry_value_and_address_zero",
                         )
                         for name in (
-                            f"validation_p2_value_{mode}_gripper_band_13_24_mse_gain_vs_primary_physical",
-                            f"validation_p2_value_{mode}_gripper_band_13_24_action_delta_rmse_physical",
-                            f"validation_p2_value_{mode}_post_event_1_2_mse_gain_vs_primary_physical",
+                            f"validation_p2_intervention_{mode}_gripper_band_13_24_mse_gain_vs_primary_physical",
+                            f"validation_p2_intervention_{mode}_gripper_band_13_24_action_delta_rmse_physical",
+                            f"validation_p2_intervention_{mode}_post_event_1_2_mse_gain_vs_primary_physical",
                         )
                     ),
                 ),

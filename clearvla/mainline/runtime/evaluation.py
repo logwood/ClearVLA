@@ -216,7 +216,6 @@ class ValidationAccumulator:
         prediction: Tensor,
         batch: TrainingBatch,
         *,
-        event_logits: Tensor | None = None,
         motion_logits: Tensor | None = None,
         motion_target: Tensor | None = None,
         physical_field: Tensor | None = None,
@@ -409,39 +408,6 @@ class ValidationAccumulator:
             predicted=pred_event.float().sum(),
             target=target_event.float().sum(),
         )
-        if event_logits is None:
-            event_head_class = pred_class
-        else:
-            if tuple(event_logits.shape) != (*target_class.shape, 3):
-                raise ValueError("validation event logits must be [B,T,3]")
-            event_index = event_logits.detach().float().argmax(dim=-1)
-            event_head_class = torch.where(
-                event_index == 1,
-                -torch.ones_like(event_index),
-                torch.where(event_index == 2, torch.ones_like(event_index), event_index),
-            ).to(dtype=target_class.dtype)
-        event_head_predicted = event_head_class != 0
-        self._add_classification(
-            "event_head",
-            true_positive=(target_event & event_head_predicted).float().sum(),
-            predicted=event_head_predicted.float().sum(),
-            target=target_event.float().sum(),
-        )
-        self._add_scalar(
-            "event_head_correct",
-            (event_head_class == target_class).float().sum(),
-        )
-        self._add_scalar("event_head_rows", error.new_tensor(float(target_class.numel())))
-        for direction, name in ((-1, "open"), (1, "close")):
-            predicted_direction = event_head_class == direction
-            target_direction = target_class == direction
-            self._add_classification(
-                f"event_head_{name}",
-                true_positive=(predicted_direction & target_direction).float().sum(),
-                predicted=predicted_direction.float().sum(),
-                target=target_direction.float().sum(),
-            )
-
         decoded_motion_target = target_delta[..., :-1].norm(dim=-1) >= float(
             self.arm_motion_threshold
         )
@@ -490,9 +456,6 @@ class ValidationAccumulator:
                 "decoded_gripper",
                 "decoded_gripper_open",
                 "decoded_gripper_close",
-                "event_head",
-                "event_head_open",
-                "event_head_close",
                 "decoded_motion",
                 "motion_head",
             )
@@ -516,9 +479,6 @@ class ValidationAccumulator:
         precision, recall, f1, event_predicted, event_target = classification(
             "decoded_gripper"
         )
-        head_precision, head_recall, head_f1, head_predicted, head_target = classification(
-            "event_head"
-        )
         motion_precision, motion_recall, motion_f1, motion_predicted, motion_target_count = (
             classification("motion_head")
         )
@@ -531,12 +491,6 @@ class ValidationAccumulator:
         close_precision, close_recall, close_f1, _, _ = classification(
             "decoded_gripper_close"
         )
-        head_open_precision, head_open_recall, head_open_f1, _, _ = classification(
-            "event_head_open"
-        )
-        head_close_precision, head_close_recall, head_close_f1, _, _ = classification(
-            "event_head_close"
-        )
         timing_sum = (
             self.scalar_totals["decoded_gripper_open_timing_sum"]
             + self.scalar_totals["decoded_gripper_close_timing_sum"]
@@ -545,7 +499,6 @@ class ValidationAccumulator:
             self.scalar_totals["decoded_gripper_open_timing_count"]
             + self.scalar_totals["decoded_gripper_close_timing_count"]
         )
-        event_rows = self.scalar_totals["event_head_rows"].clamp_min(1.0)
         motion_rows = self.scalar_totals["motion_head_rows"].clamp_min(1.0)
         tensors = {
             "validation_action_rmse_normalized": rmse["normalized_action"],
@@ -571,20 +524,6 @@ class ValidationAccumulator:
             "validation_decoded_gripper_close_f1": close_f1,
             "validation_decoded_gripper_timing_mae_steps": timing_sum
             / timing_count.clamp_min(1.0),
-            "validation_event_head_precision": head_precision,
-            "validation_event_head_recall": head_recall,
-            "validation_event_head_f1": head_f1,
-            "validation_event_head_events_predicted": head_predicted,
-            "validation_event_head_events_target": head_target,
-            "validation_event_head_accuracy": self.scalar_totals["event_head_correct"]
-            / event_rows,
-            "validation_event_head_open_precision": head_open_precision,
-            "validation_event_head_open_recall": head_open_recall,
-            "validation_event_head_open_f1": head_open_f1,
-            "validation_event_head_close_precision": head_close_precision,
-            "validation_event_head_close_recall": head_close_recall,
-            "validation_event_head_close_f1": head_close_f1,
-            "validation_event_head_minus_decoded_f1": head_f1 - f1,
             "validation_motion_head_precision": motion_precision,
             "validation_motion_head_recall": motion_recall,
             "validation_motion_head_f1": motion_f1,
@@ -686,8 +625,8 @@ class ValidationAccumulator:
 
 
 @dataclass
-class MatchedP2ValueInterventionAccumulator:
-    """Paired action/error accounting for R2-A01 value counterfactuals."""
+class MatchedP2InterventionAccumulator:
+    """Paired action/error accounting for P2 value/address counterfactuals."""
 
     action_scale: Tensor
     action_offset: Tensor
@@ -707,7 +646,7 @@ class MatchedP2ValueInterventionAccumulator:
         device: torch.device,
         gripper_event_threshold: float,
         arm_motion_threshold: float,
-    ) -> "MatchedP2ValueInterventionAccumulator":
+    ) -> "MatchedP2InterventionAccumulator":
         base = ValidationAccumulator.from_action_normalizer(
             normalizer,
             device=device,
@@ -738,8 +677,6 @@ class MatchedP2ValueInterventionAccumulator:
         primary_action: Tensor,
         counterfactual_action: Tensor,
         batch: TrainingBatch,
-        primary_event_logits: Tensor,
-        counterfactual_event_logits: Tensor,
     ) -> None:
         if mode not in self.primary:
             self.primary[mode] = self._new_validation_accumulator()
@@ -747,12 +684,10 @@ class MatchedP2ValueInterventionAccumulator:
         self.primary[mode].update(
             primary_action,
             batch,
-            event_logits=primary_event_logits,
         )
         self.counterfactual[mode].update(
             counterfactual_action,
             batch,
-            event_logits=counterfactual_event_logits,
         )
         action_delta = (
             counterfactual_action.detach().float() - primary_action.detach().float()
@@ -782,7 +717,7 @@ class MatchedP2ValueInterventionAccumulator:
             counterfactual = self.counterfactual[mode].means()
             if reference_primary is None:
                 reference_primary = primary
-            stem = f"validation_p2_value_{mode}"
+            stem = f"validation_p2_intervention_{mode}"
             result[f"{stem}_batches"] = float(self.batches[mode])
             for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
                 name = f"validation_gripper_band_{band_name}_rmse_physical"
@@ -839,13 +774,13 @@ class MatchedP2ValueInterventionAccumulator:
             raise RuntimeError("matched P2 primary accounting is missing")
         for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
             result[
-                f"validation_p2_value_primary_gripper_band_{band_name}_rmse_physical"
+                f"validation_p2_intervention_primary_gripper_band_{band_name}_rmse_physical"
             ] = reference_primary[
                 f"validation_gripper_band_{band_name}_rmse_physical"
             ]
         for bin_name in ("1_2", "3_6", "7_plus"):
             result[
-                f"validation_p2_value_primary_post_event_{bin_name}_rmse_physical"
+                f"validation_p2_intervention_primary_post_event_{bin_name}_rmse_physical"
             ] = reference_primary[
                 f"validation_gripper_post_event_{bin_name}_rmse_physical"
             ]
@@ -857,7 +792,7 @@ class MatchedP2ValueInterventionAccumulator:
             "timing_mae_steps",
         ):
             result[
-                f"validation_p2_value_primary_decoded_gripper_{suffix}"
+                f"validation_p2_intervention_primary_decoded_gripper_{suffix}"
             ] = reference_primary[f"validation_decoded_gripper_{suffix}"]
         return result
 
@@ -913,7 +848,6 @@ def evaluate_loader(
         accumulator.update(
             result.action,
             batch,
-            event_logits=result.event_logits,
             motion_logits=result.motion_logits,
             motion_target=motion_target,
             physical_field=result.physical_field,
@@ -923,7 +857,7 @@ def evaluate_loader(
 
 
 __all__ = [
-    "MatchedP2ValueInterventionAccumulator",
+    "MatchedP2InterventionAccumulator",
     "ValidationAccumulator",
     "evaluate_loader",
 ]

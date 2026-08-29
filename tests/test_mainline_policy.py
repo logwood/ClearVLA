@@ -37,7 +37,6 @@ from clearvla.mainline.training.losses import LossLedger
 from clearvla.mainline.training.optimizer import (
     WarmupCosineSchedule,
     build_optimizer,
-    parameter_role,
     role_lr_scale,
 )
 from clearvla.mainline.v120_core.layer_contracts import LayerContractAdapterHeads
@@ -281,6 +280,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "gradient_tensor_w2_geometry_interval_rms",
         "gradient_tensor_p2_semantic_effect_rms",
         "gradient_tensor_p2_geometry_effect_rms",
+        "gradient_tensor_p2_geometry_address_correction_rms",
         "gradient_tensor_p1_protected_policy_precision_rms",
         "gradient_tensor_p3_temporal_rms",
         "gradient_tensor_p3_state_change_rms",
@@ -294,10 +294,11 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "gradient_parameter_consequence_semantic_interaction_weight_rms",
         "gradient_parameter_consequence_geometry_interaction_weight_rms",
         "gradient_parameter_gripper_private_gate_weight_rms",
-        "gradient_parameter_decoded_gripper_event_head_weight_rms",
     ):
         assert name in result.metrics
         assert torch.isfinite(result.metrics[name])
+    assert result.metrics["gradient_tensor_p2_semantic_effect_rms"] > 0
+    assert result.metrics["gradient_tensor_p2_geometry_effect_rms"] > 0
     # Parameter hooks survive their forward graph. R2 parameter-gradient
     # diagnostics must therefore read .grad in the engine rather than stacking
     # a new persistent hook on every diagnostic batch.
@@ -312,7 +313,6 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "top.consequence.semantic_interaction.weight",
         "top.consequence.geometry_interaction.weight",
         "bottom.decoder.velocity_head.gripper_gate.weight",
-        "decoded_gripper_event_head.weight",
     ):
         parameter = dict(model.named_parameters())[parameter_name]
         assert parameter._backward_hooks is None or not parameter._backward_hooks
@@ -733,16 +733,12 @@ def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> No
     assert not torch.equal(parseval_changed[..., 12:], parseval_expected[..., 12:])
 
 
-def test_supervised_event_reads_only_the_deployed_decoded_gripper_boundary() -> None:
+def test_continuous_gripper_trajectory_reads_only_value_and_delta_channels() -> None:
     torch.manual_seed(44)
     model = ClearVLAMainlinePolicy(_config()).train()
     decoder = model.bottom.decoder
     assert decoder.event_head is None
-    event_output = model.decoded_gripper_event_head
-    assert isinstance(event_output, torch.nn.Linear)
-    assert parameter_role("decoded_gripper_event_head.weight") == "bottom_heads"
-    with torch.no_grad():
-        event_output.weight.normal_(mean=0.0, std=0.05)
+    assert not hasattr(model, "decoded_gripper_event_head")
     batch = 2
     physical = torch.randn(
         batch,
@@ -751,34 +747,26 @@ def test_supervised_event_reads_only_the_deployed_decoded_gripper_boundary() -> 
         requires_grad=True,
     )
     action_state = torch.randn(batch, model.config.dimensions.action_dim)
-    features = model.decoded_gripper_event_features(physical, action_state)
-    expected_decoded = model.action_codec.decode(physical, action_state)
-    expected_gripper = expected_decoded[..., -1:]
-    expected_boundary = torch.cat(
-        (action_state[:, None, -1:], expected_gripper[:, :-1]),
-        dim=1,
+    parts = model.action_codec.split(physical)
+    absolute = parts.gripper_field[..., :1]
+    cumulative = (
+        action_state[:, None, -1:]
+        + torch.cumsum(parts.gripper_field[..., 1:2], dim=1)
     )
-    torch.testing.assert_close(
-        features,
-        torch.cat((expected_gripper, expected_gripper - expected_boundary), dim=-1),
+    target = torch.randn_like(absolute)
+    loss = 0.5 * (
+        torch.nn.functional.smooth_l1_loss(absolute, target)
+        + torch.nn.functional.smooth_l1_loss(cumulative, target)
     )
-    event_logits = event_output(features)
 
-    # Arm plus the four auxiliary gripper coordinates are outside the shared
-    # deployment value/delta codec and therefore outside the event gradient.
-    event_logits.square().mean().backward()
+    # Arm plus the four auxiliary gripper coordinates are outside the two
+    # continuous deployed gripper trajectories.
+    loss.backward()
     assert physical.grad is not None
     assert torch.count_nonzero(physical.grad[..., :12]) == 0
     assert torch.count_nonzero(physical.grad[..., 14:]) == 0
     assert torch.count_nonzero(physical.grad[..., 12:14]) > 0
 
-    shifted_auxiliary = physical.detach().clone()
-    shifted_auxiliary[..., :12] += torch.randn_like(shifted_auxiliary[..., :12])
-    shifted_auxiliary[..., 14:] += torch.randn_like(shifted_auxiliary[..., 14:])
-    torch.testing.assert_close(
-        event_output(model.decoded_gripper_event_features(shifted_auxiliary, action_state)),
-        event_logits.detach(),
-    )
 
 
 def test_gripper_head_diagnostics_are_separate_from_execution_diagnostics() -> None:
@@ -804,17 +792,26 @@ def test_gripper_head_diagnostics_are_separate_from_execution_diagnostics() -> N
     assert "gradient_tensor_gripper_private_state_rms" in captured_metrics
 
 
-def test_decoded_event_loss_can_reach_the_gripper_private_gate() -> None:
+def test_continuous_gripper_trajectory_loss_reaches_the_private_gate() -> None:
     torch.manual_seed(46)
     model = ClearVLAMainlinePolicy(_config()).train()
     head = model.bottom.decoder.velocity_head
-    with torch.no_grad():
-        model.decoded_gripper_event_head.weight.normal_(mean=0.0, std=0.05)
     tokens = torch.randn(2, 24, 32, requires_grad=True)
     action_state = torch.randn(2, model.config.dimensions.action_dim)
     physical, _, _ = head.forward_with_gripper_state(tokens)
-    features = model.decoded_gripper_event_features(physical, action_state)
-    model.decoded_gripper_event_head(features).square().mean().backward()
+    parts = model.action_codec.split(physical)
+    absolute = parts.gripper_field[..., :1]
+    cumulative = action_state[:, None, -1:] + torch.cumsum(
+        parts.gripper_field[..., 1:2], dim=1
+    )
+    target = torch.randn_like(absolute)
+    (
+        0.5
+        * (
+            torch.nn.functional.smooth_l1_loss(absolute, target)
+            + torch.nn.functional.smooth_l1_loss(cumulative, target)
+        )
+    ).backward()
     gate_gradient = head.gripper_gate.weight.grad
     assert gate_gradient is not None
     assert torch.isfinite(gate_gradient).all()
@@ -1722,8 +1719,8 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert teacher_calls == 0
     assert grounding_block_calls == [1, 1, 1]
     assert history_proposal_calls == 1
-    # Five action updates are followed by one complete endpoint forward for
-    # event/motion heads.  The endpoint pass must not rebuild static evidence.
+    # Five action updates are followed by one endpoint motion-head forward.
+    # The endpoint pass must not rebuild static evidence.
     assert p1_host_calls == config.runtime.inference_steps + 1
     assert transition_calls == config.runtime.inference_steps + 1
     # Both V120 correspondence scales batch all adjacent pairs/directions in
@@ -1744,14 +1741,8 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     )
     assert tuple(result.action.shape) == tuple(batch.action_target.normalized.shape)
     assert torch.isfinite(result.action).all()
-    endpoint_event_features = model.decoded_gripper_event_features(
-        result.physical_field,
-        batch.online.history.action_state,
-    )
-    torch.testing.assert_close(
-        result.event_logits,
-        model.decoded_gripper_event_head(endpoint_event_features).float(),
-    )
+    assert not hasattr(result, "event_logits")
+    assert tuple(result.motion_logits.shape) == (1, 24)
     # The restored learned V120 execution chart may evaluate several
     # block/dwell candidates inside one ODE step.  Those are dynamic bottom
     # operations; the expensive observation/G/S/W/P1-detail sources above

@@ -83,7 +83,6 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "bottom.decoder.action_norm.",
             "bottom.decoder.velocity_head.",
             "bottom.decoder.motion_head.",
-            "decoded_gripper_event_head.",
         ),
     ),
 )

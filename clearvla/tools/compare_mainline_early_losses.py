@@ -30,7 +30,6 @@ _COMMON_METRICS: dict[str, tuple[str, str]] = {
     "action_flow": ("flow_loss", "loss_action_flow"),
     "native_action_flow": ("native_velocity_mse", "loss_action_flow_native"),
     "decoded_action": ("decode_loss", "loss_decoded_action"),
-    "event": ("event_loss", "loss_event"),
     "motion": ("motion_loss", "loss_motion"),
     "history_proposal": ("proposal_loss", "loss_history_action_proposal"),
     "flow_first8": ("flow_first8", "loss_action_flow_first8"),
@@ -358,7 +357,6 @@ _CONFIG_FIELDS: dict[str, tuple[str, str]] = {
         "objectives.intent_structure",
     ),
     "proposal_weight": ("trainer.proposal_loss_weight", "objectives.proposal"),
-    "event_weight": ("trainer.event_loss_weight", "objectives.event"),
     "motion_weight": ("trainer.arm_motion_loss_weight", "objectives.motion"),
     "decoded_action_weight": (
         "trainer.decoded_action_loss_weight",

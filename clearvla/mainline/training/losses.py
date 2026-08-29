@@ -67,12 +67,12 @@ def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Te
     return torch.where(both_classes, balanced, torch.ones_like(balanced))
 
 
-def event_positive_class_weights(event_target: Tensor, *, positive_boost: float) -> Tensor:
-    """Return the V120 additive event boost (hold=1, positive=1+boost)."""
+def causal_event_trajectory_mask(event_mask: Tensor) -> Tensor:
+    """Select each continuous event row and every later trajectory row."""
 
-    if float(positive_boost) < 0.0:
-        raise ValueError("event positive boost must be non-negative")
-    return 1.0 + (event_target != 0).to(dtype=torch.float32) * float(positive_boost)
+    if event_mask.ndim != 2:
+        raise ValueError("gripper trajectory event mask must be [B,T]")
+    return event_mask.to(dtype=torch.float32).cumsum(dim=1).clamp(max=1.0)
 
 
 def sample_flow_matching(
@@ -1011,21 +1011,35 @@ def action_terms(
         decoded,
     )
     physical_delta_consistency = (physical_delta_rows * step_weight).mean()
-
-    event_logits = output.bottom.event_logits.float().reshape(-1, 3)
-    flat_event = event_target.reshape(-1)
-    event_ce = F.cross_entropy(event_logits, flat_event, reduction="none")
-    event_pt = torch.exp(-event_ce.detach()).clamp(min=1e-6, max=1.0)
-    event_ce = (1.0 - event_pt).pow(float(objective.event_focal_gamma)) * event_ce
-    event_positive = event_positive_class_weights(
-        flat_event,
-        positive_boost=objective.event_positive_boost,
-    ).to(dtype=event_ce.dtype)
-    event = (
-        event_ce
-        * event_positive
-        * step_weight.expand(int(target.batch), -1).reshape(-1)
-    ).mean()
+    clean_parts = codec.split(clean_physical)
+    clean_gripper_absolute = clean_parts.gripper_field[..., :1]
+    clean_gripper_cumulative = (
+        history.action_state[:, None, -1:].float()
+        + torch.cumsum(clean_parts.gripper_field[..., 1:2], dim=1)
+    )
+    continuous_gripper_target = target.normalized[..., -1:].float()
+    event_and_after_mask = causal_event_trajectory_mask(event_mask)
+    trajectory_weight = event_and_after_mask * step_weight
+    trajectory_denominator = trajectory_weight.sum().clamp_min(1.0)
+    gripper_trajectory_absolute_rows = F.smooth_l1_loss(
+        clean_gripper_absolute,
+        continuous_gripper_target,
+        reduction="none",
+    )[..., 0]
+    gripper_trajectory_delta_rows = F.smooth_l1_loss(
+        clean_gripper_cumulative,
+        continuous_gripper_target,
+        reduction="none",
+    )[..., 0]
+    gripper_trajectory_absolute = (
+        gripper_trajectory_absolute_rows * trajectory_weight
+    ).sum() / trajectory_denominator
+    gripper_trajectory_delta = (
+        gripper_trajectory_delta_rows * trajectory_weight
+    ).sum() / trajectory_denominator
+    gripper_trajectory = 0.5 * (
+        gripper_trajectory_absolute + gripper_trajectory_delta
+    )
     target_parts = codec.split(flow_state.target_physical.detach())
     motion_target = (
         target_parts.arm_delta.float().norm(dim=-1)
@@ -1055,17 +1069,6 @@ def action_terms(
     hold_count = hold_mask.sum()
     event_row_weight_mean = (event_row_weight * event_mask).sum() / event_count.clamp_min(1.0)
     hold_row_weight_mean = (event_row_weight * hold_mask).sum() / hold_count.clamp_min(1.0)
-    predicted_event = output.bottom.event_logits.detach().argmax(dim=-1)
-    event_positive_target = event_target != 0
-    event_positive_prediction = predicted_event != 0
-    true_positive = (event_positive_target & event_positive_prediction).float().sum()
-    false_positive = ((~event_positive_target) & event_positive_prediction).float().sum()
-    false_negative = (event_positive_target & (~event_positive_prediction)).float().sum()
-    event_precision = true_positive / (true_positive + false_positive).clamp_min(1.0)
-    event_recall = true_positive / (true_positive + false_negative).clamp_min(1.0)
-    event_f1 = 2.0 * event_precision * event_recall / (
-        event_precision + event_recall
-    ).clamp_min(1e-8)
     predicted_motion = torch.sigmoid(output.bottom.motion_logits.detach().float()) >= 0.5
     target_motion = motion_target >= 0.5
     motion_true_positive = (predicted_motion & target_motion).float().sum()
@@ -1086,17 +1089,12 @@ def action_terms(
         state_delta = output.bottom.decoder_tensors.get(
             "gripper_private_state_delta_tensor"
         )
-        event_features = output.bottom.decoder_tensors.get(
-            "decoded_gripper_event_features"
-        )
         if (
             not isinstance(gate, Tensor)
             or not isinstance(private_state, Tensor)
             or not isinstance(state_delta, Tensor)
         ):
             raise RuntimeError("diagnostic batch lost gripper-private tensors")
-        if not isinstance(event_features, Tensor):
-            raise RuntimeError("diagnostic batch lost decoded event features")
         expected_private = (
             int(target.batch),
             config.dimensions.action_horizon,
@@ -1107,8 +1105,10 @@ def action_terms(
             or tuple(state_delta.shape) != tuple(gate.shape)
         ):
             raise ValueError("gripper-private diagnostics lost [B,T,H]")
-        if tuple(event_features.shape) != (*expected_private, 2):
-            raise ValueError("decoded event diagnostics must be [B,T,2]")
+        if tuple(clean_gripper_absolute.shape) != (*expected_private, 1):
+            raise ValueError("absolute gripper trajectory must be [B,T,1]")
+        if tuple(clean_gripper_cumulative.shape) != (*expected_private, 1):
+            raise ValueError("cumulative gripper trajectory must be [B,T,1]")
 
         context_masks = {
             "hold": event_target == 0,
@@ -1163,6 +1163,20 @@ def action_terms(
                 )
                 .float()
                 .mean(),
+                "gripper_trajectory_mask_fraction": event_and_after_mask.detach()
+                .float()
+                .mean(),
+                "gripper_trajectory_absolute_loss": (
+                    gripper_trajectory_absolute.detach()
+                ),
+                "gripper_trajectory_delta_loss": gripper_trajectory_delta.detach(),
+                "gripper_trajectory_branch_disagreement_rms": (
+                    clean_gripper_absolute.detach().float()
+                    - clean_gripper_cumulative.detach().float()
+                )
+                .square()
+                .mean()
+                .sqrt(),
             }
         )
         for context_name, context_mask in context_masks.items():
@@ -1173,8 +1187,11 @@ def action_terms(
                 f"gripper_private_state_delta_{context_name}_rms"
             ] = conditional_rms(state_delta, context_mask)
             gripper_private_metrics[
-                f"gripper_private_decoded_event_delta_{context_name}_rms"
-            ] = conditional_rms(event_features[..., 1], context_mask)
+                f"gripper_trajectory_absolute_{context_name}_rms"
+            ] = conditional_rms(clean_gripper_absolute, context_mask)
+            gripper_private_metrics[
+                f"gripper_trajectory_delta_{context_name}_rms"
+            ] = conditional_rms(clean_gripper_cumulative, context_mask)
             register_conditional_gradient(
                 gate,
                 context_mask,
@@ -1186,9 +1203,14 @@ def action_terms(
                 f"gradient_tensor_gripper_private_state_{context_name}_rms",
             )
             register_conditional_gradient(
-                event_features,
+                clean_gripper_absolute,
                 context_mask,
-                f"gradient_tensor_decoded_gripper_event_features_{context_name}_rms",
+                f"gradient_tensor_gripper_trajectory_absolute_{context_name}_rms",
+            )
+            register_conditional_gradient(
+                clean_gripper_cumulative,
+                context_mask,
+                f"gradient_tensor_gripper_trajectory_delta_{context_name}_rms",
             )
     band_metrics: dict[str, Tensor] = {}
     start = 0
@@ -1246,11 +1268,11 @@ def action_terms(
         "decoded_action_event_balanced_audit": decoded_action,
         "smooth_delta": smooth_delta,
         "physical_delta_consistency": physical_delta_consistency,
-        "event": event,
+        "gripper_trajectory": gripper_trajectory,
+        "gripper_trajectory_absolute": gripper_trajectory_absolute.detach(),
+        "gripper_trajectory_delta": gripper_trajectory_delta.detach(),
+        "gripper_trajectory_mask_fraction": event_and_after_mask.detach().mean(),
         "motion": motion,
-        "event_precision": event_precision,
-        "event_recall": event_recall,
-        "event_f1": event_f1,
         "motion_precision": motion_precision,
         "motion_recall": motion_recall,
         "action_horizon_weight_first": horizon_weight[0],
@@ -1326,7 +1348,7 @@ def compose_losses(
     action_group = (
         action["action_flow"]
         + objective.decoded_action * action["decoded_action"]
-        + objective.event * action["event"]
+        + objective.gripper_trajectory * action["gripper_trajectory"]
         + objective.motion * action["motion"]
         + objective.smooth_delta * action["smooth_delta"]
         + objective.physical_delta_consistency * action["physical_delta_consistency"]
@@ -1364,7 +1386,9 @@ def compose_losses(
     contributions = {
         "action_flow": action["action_flow"],
         "decoded_action": objective.decoded_action * action["decoded_action"],
-        "event": objective.event * action["event"],
+        "gripper_trajectory": (
+            objective.gripper_trajectory * action["gripper_trajectory"]
+        ),
         "motion": objective.motion * action["motion"],
         "smooth_delta": objective.smooth_delta * action["smooth_delta"],
         "physical_delta_consistency": (
@@ -1441,9 +1465,9 @@ __all__ = [
     "LossLedger",
     "action_terms",
     "balanced_event_row_weights",
+    "causal_event_trajectory_mask",
     "compose_losses",
     "execution_value_terms",
-    "event_positive_class_weights",
     "flow_geometry_terms",
     "future_dynamics_terms",
     "sample_flow_matching",

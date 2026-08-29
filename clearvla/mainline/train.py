@@ -28,10 +28,7 @@ from .runtime.checkpoints import (
     migrate_bottom_only,
     save_checkpoint,
 )
-from .runtime.evaluation import (
-    MatchedP2ValueInterventionAccumulator,
-    ValidationAccumulator,
-)
+from .runtime.evaluation import MatchedP2InterventionAccumulator, ValidationAccumulator
 from .runtime.identity import (
     dataset_identity,
     language_identity,
@@ -509,7 +506,7 @@ def _validate(
         arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
     losses = DeviceMetricAccumulator()
-    p2_value_ablations = MatchedP2ValueInterventionAccumulator.from_action_normalizer(
+    p2_interventions = MatchedP2InterventionAccumulator.from_action_normalizer(
         bundle.action_normalizer,
         device=device,
         gripper_event_threshold=config.objectives.gripper_event_threshold,
@@ -520,7 +517,7 @@ def _validate(
     maximum = config.runtime.max_val_batches
     completed_batches = 0
     sampling_diagnostic_batches = 0
-    p2_value_ablation_batches = 0
+    p2_intervention_batches = 0
     proposal_ablation_batches = 0
     execution_ablation_batches = 0
     action_scale = torch.as_tensor(
@@ -627,7 +624,6 @@ def _validate(
         deployment.update(
             prediction.action,
             batch,
-            event_logits=prediction.event_logits,
             motion_logits=prediction.motion_logits,
             motion_target=motion_target,
             physical_field=prediction.physical_field,
@@ -644,10 +640,10 @@ def _validate(
                 },
                 weight=batch.online.batch,
             )
-            p2_value_ablation_batches += 1
+            p2_intervention_batches += 1
             reader = engine.model.top.effect_reader
-            for mode in reader.VALUE_INTERVENTION_SPECS:
-                reader.set_eval_value_intervention(mode)
+            for mode in reader.INTERVENTION_MODES:
+                reader.set_eval_intervention(mode)
                 try:
                     counterfactual = sample_cached_action(
                         engine.model,
@@ -658,14 +654,12 @@ def _validate(
                         dtype=dtype,
                     )
                 finally:
-                    reader.clear_eval_value_intervention()
-                p2_value_ablations.update(
+                    reader.clear_eval_intervention()
+                p2_interventions.update(
                     mode,
                     primary_action=prediction.action,
                     counterfactual_action=counterfactual.action,
                     batch=batch,
-                    primary_event_logits=prediction.event_logits,
-                    counterfactual_event_logits=counterfactual.event_logits,
                 )
                 del counterfactual
         if run_proposal_ablation or run_execution_ablation:
@@ -749,19 +743,19 @@ def _validate(
                 weight=batch.online.batch,
             )
     result = {**losses.materialize(), **deployment.means()}
-    if p2_value_ablation_batches:
-        result.update(p2_value_ablations.means())
+    if p2_intervention_batches:
+        result.update(p2_interventions.means())
     result["validation_sampling_diagnostic_batches"] = float(
         sampling_diagnostic_batches
     )
     result["validation_sampling_diagnostic_coverage"] = float(
         sampling_diagnostic_batches / max(completed_batches, 1)
     )
-    result["validation_p2_value_ablation_batches"] = float(
-        p2_value_ablation_batches
+    result["validation_p2_intervention_batches"] = float(
+        p2_intervention_batches
     )
-    result["validation_p2_value_ablation_coverage"] = float(
-        p2_value_ablation_batches / max(completed_batches, 1)
+    result["validation_p2_intervention_coverage"] = float(
+        p2_intervention_batches / max(completed_batches, 1)
     )
     result["validation_proposal_ablation_batches"] = float(
         proposal_ablation_batches

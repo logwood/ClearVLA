@@ -17,7 +17,7 @@ from clearvla.mainline.interfaces import (
     TrainingBatch,
 )
 from clearvla.mainline.runtime.evaluation import (
-    MatchedP2ValueInterventionAccumulator,
+    MatchedP2InterventionAccumulator,
     ValidationAccumulator,
     _gripper_event_class,
     _post_event_distance,
@@ -185,13 +185,12 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_decoded_gripper_event_f1": 0.4,
         "validation_decoded_gripper_events_predicted": 7.0,
         "validation_decoded_gripper_events_target": 8.0,
-        "validation_event_head_f1": 0.5,
         "validation_motion_head_f1": 0.6,
         "validation_proposal_ablation_coverage": 0.1,
-        "validation_p2_value_ablation_coverage": 0.1,
-        "validation_p2_value_semantic_far_zero_gripper_band_13_24_mse_gain_vs_primary_physical": -0.003,
-        "validation_p2_value_semantic_far_zero_gripper_band_13_24_action_delta_rmse_physical": 0.04,
-        "validation_p2_value_semantic_far_zero_post_event_1_2_mse_gain_vs_primary_physical": -0.01,
+        "validation_p2_intervention_coverage": 0.1,
+        "validation_p2_intervention_semantic_far_zero_gripper_band_13_24_mse_gain_vs_primary_physical": -0.003,
+        "validation_p2_intervention_semantic_far_zero_gripper_band_13_24_action_delta_rmse_physical": 0.04,
+        "validation_p2_intervention_semantic_far_zero_post_event_1_2_mse_gain_vs_primary_physical": -0.01,
         "validation_proposal_zero_mse_gain_vs_primary_physical": -0.01,
         "validation_execution_ablation_coverage": 0.05,
         "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
@@ -216,7 +215,6 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     )
     assert "validation_decoded_gripper_events_predicted=7" in validation_details
     assert "validation_decoded_gripper_events_target=8" in validation_details
-    assert "validation_event_head_f1=0.5" in validation_details
     assert "validation_motion_head_f1=0.6" in validation_details
     assert "validation_proposal_ablation_coverage=0.1" in validation_details
     assert "validation_execution_ablation_coverage=0.05" in validation_details
@@ -228,9 +226,9 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_gripper_absolute_branch_band_13_24_rmse_physical=0.18"
         in validation_details
     )
-    assert "validation_p2_value_ablation_coverage=0.1" in validation_details
+    assert "validation_p2_intervention_coverage=0.1" in validation_details
     assert (
-        "validation_p2_value_semantic_far_zero_gripper_band_13_24_"
+        "validation_p2_intervention_semantic_far_zero_gripper_band_13_24_"
         "mse_gain_vs_primary_physical=-0.003" in validation_details
     )
 
@@ -875,49 +873,45 @@ def test_validation_gripper_branches_and_event_context_reconstruct_band_error() 
             metrics[f"validation_gripper_band_{band_name}_rmse_physical"] ** 2,
         )
 
-    paired = MatchedP2ValueInterventionAccumulator.from_action_normalizer(
+    paired = MatchedP2InterventionAccumulator.from_action_normalizer(
         normalizer,
         device=torch.device("cpu"),
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
-    event_logits = torch.zeros(1, dims.action_horizon, 3)
     paired.update(
         "semantic_far_zero",
         primary_action=raw_target,
         counterfactual_action=prediction,
         batch=batch,
-        primary_event_logits=event_logits,
-        counterfactual_event_logits=event_logits,
     )
     paired_metrics = paired.means()
-    assert paired_metrics["validation_p2_value_semantic_far_zero_batches"] == 1.0
+    assert paired_metrics["validation_p2_intervention_semantic_far_zero_batches"] == 1.0
     assert (
         paired_metrics[
-            "validation_p2_value_semantic_far_zero_gripper_band_13_24_"
+            "validation_p2_intervention_semantic_far_zero_gripper_band_13_24_"
             "mse_gain_vs_primary_physical"
         ]
         < 0.0
     )
     assert (
         paired_metrics[
-            "validation_p2_value_semantic_far_zero_gripper_band_13_24_"
+            "validation_p2_intervention_semantic_far_zero_gripper_band_13_24_"
             "action_delta_rmse_physical"
         ]
         > 0.0
     )
 
 
-def test_p2_value_replay_reuses_primary_noise_and_clears_the_eval_seam() -> None:
+def test_p2_replay_reuses_primary_noise_and_clears_the_eval_seam() -> None:
     source = inspect.getsource(_validate)
     assert "initial_physical_noise=prediction.initial_physical_noise" in source
-    assert "for mode in reader.VALUE_INTERVENTION_SPECS" in source
+    assert "for mode in reader.INTERVENTION_MODES" in source
     assert "finally:" in source
-    assert "reader.clear_eval_value_intervention()" in source
-    assert "counterfactual_event_logits=counterfactual.event_logits" in source
+    assert "reader.clear_eval_intervention()" in source
 
 
-def test_validation_keeps_decoded_events_and_auxiliary_heads_semantically_separate() -> None:
+def test_validation_keeps_decoded_events_and_motion_head_semantically_separate() -> None:
     config = ExperimentConfig()
     dims = config.dimensions
     normalized = torch.zeros(1, dims.action_horizon, dims.action_dim)
@@ -992,9 +986,6 @@ def test_validation_keeps_decoded_events_and_auxiliary_heads_semantically_separa
         normalizer,
         device=torch.device("cpu"),
     )
-    event_logits = torch.zeros(1, dims.action_horizon, 3)
-    event_logits[..., 0] = 5.0
-    event_logits[:, 0, 2] = 10.0
     motion_logits = torch.full((1, dims.action_horizon), -10.0)
     motion_logits[:, 0] = 10.0
     motion_target = torch.zeros(1, dims.action_horizon, dtype=torch.bool)
@@ -1002,13 +993,11 @@ def test_validation_keeps_decoded_events_and_auxiliary_heads_semantically_separa
     accumulator.update(
         torch.zeros_like(normalized),
         training_batch,
-        event_logits=event_logits,
         motion_logits=motion_logits,
         motion_target=motion_target,
     )
     metrics = accumulator.means()
     assert metrics["validation_decoded_gripper_event_f1"] == 0.0
-    assert metrics["validation_event_head_f1"] == 1.0
-    assert metrics["validation_event_head_close_f1"] == 1.0
+    assert not any("event_head" in name for name in metrics)
     assert metrics["validation_motion_head_f1"] == 1.0
     assert metrics["validation_decoded_motion_f1"] == 0.0

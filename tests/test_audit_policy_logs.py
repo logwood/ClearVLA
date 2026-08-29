@@ -1379,6 +1379,46 @@ class AuditPolicyLogsTest(unittest.TestCase):
         }
         self.assertIn("performance/cuda_peak_process_gib", incomplete)
 
+    def test_schema26_recovery_uses_continuous_gripper_and_p2_intervention_surface(
+        self,
+    ) -> None:
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema26"
+        candidate["manifest"]["architecture_schema"] = 26
+        candidate["trajectories"]["gripper_trajectory"] = {
+            "count": 100,
+            "tail_median": 0.12,
+        }
+        for record in candidate["epochs"]:
+            record["val"].pop("event_head_f1")
+        latest = candidate["epochs"][-1]["val"]
+        latest.update(
+            {
+                "validation_sampling_diagnostic_coverage": 0.1,
+                "validation_p2_intervention_coverage": 0.1,
+                "validation_proposal_ablation_coverage": 0.1,
+                "validation_execution_ablation_coverage": 0.1,
+                "validation_proposal_primary_rmse_physical": 0.08,
+                "validation_proposal_zero_mse_gain_vs_primary_physical": 0.0,
+                "validation_execution_primary_rmse_physical": 0.08,
+                "validation_execution_hard_mse_gain_vs_primary_physical": 0.0,
+                "validation_execution_neutral_mse_gain_vs_primary_physical": 0.0,
+                "validation_execution_full_capacity_mse_gain_vs_primary_physical": 0.0,
+                "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical": 0.0,
+            }
+        )
+
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+
+        self.assertNotIn("validation/event_head_f1", checks)
+        self.assertEqual(checks["objective/gripper_trajectory_observed"], "pass")
+        self.assertEqual(
+            checks["causal_ablation/p2_intervention_coverage"],
+            "pass",
+        )
+
     def test_v120_recovery_assessment_reports_missing_epochs_without_index_error(self) -> None:
         baseline = _complete_recovery_summary("v120")
         candidate = deepcopy(baseline)

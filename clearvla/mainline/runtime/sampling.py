@@ -17,7 +17,6 @@ from .numerics import resolve_compute_dtype
 class SamplingResult:
     action: Tensor
     physical_field: Tensor
-    event_logits: Tensor
     motion_logits: Tensor
     initial_physical_noise: Tensor
     step_times: Tensor
@@ -83,7 +82,7 @@ def _integrate_cache(
         value = value + dt * output.bottom.physical_velocity.to(dtype=value.dtype)
         if collect_diagnostics and index == steps - 1:
             dynamic_metrics = output.metrics
-    # V120 evaluates event/motion heads once more at the final clean endpoint.
+    # V120 evaluates the retained motion head once more at the clean endpoint.
     # This is a head-producing dynamic forward, not a sixth integration step:
     # the resulting physical field is deliberately left unchanged.
     endpoint_time = torch.ones(batch, device=device, dtype=torch.float32)
@@ -102,7 +101,6 @@ def _integrate_cache(
     return SamplingResult(
         action=model.action_codec.decode(value, cache.history.action_state).float(),
         physical_field=value,
-        event_logits=endpoint_output.bottom.event_logits.float(),
         motion_logits=endpoint_output.bottom.motion_logits.float(),
         initial_physical_noise=noise,
         step_times=times,

@@ -411,7 +411,7 @@ class ActionQueryEncoder(nn.Module):
 
 @dataclass(frozen=True)
 class BottomDecoderOutput:
-    """Active bottom result before the codec-closed event classifier."""
+    """Active bottom result before the deployed continuous codec boundary."""
 
     physical_velocity: Tensor
     motion_logits: Tensor
@@ -432,9 +432,7 @@ class BottomDecoderOutput:
 
 @dataclass(frozen=True)
 class BottomOutput(BottomDecoderOutput):
-    """Final bottom output after the deployed codec event boundary."""
-
-    event_logits: Tensor = field(default_factory=lambda: torch.empty(0))
+    """Final bottom output consumed by flow training and deployment."""
 
     def validate(self, *, action_dim: int, horizon: int, basis: int, hidden: int) -> None:
         super().validate(
@@ -443,9 +441,6 @@ class BottomOutput(BottomDecoderOutput):
             basis=basis,
             hidden=hidden,
         )
-        batch = int(self.physical_velocity.shape[0])
-        if tuple(self.event_logits.shape) != (batch, horizon, 3):
-            raise ValueError("bottom event logits have an invalid shape")
 
 
 __all__ = [

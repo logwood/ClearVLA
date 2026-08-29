@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-28
+Updated: 2026-08-29
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        25
+manifest schema:        26
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema25-R2 WG01/P202/GRIP02 locally closed; 170 retained tests plus two R2 cadence/reachability guards, a fresh production-dimension one-batch CPU BF16 smoke and five-step deployment guard pass; no R2 GPU smoke or formal behavior run yet
+release status:         Schema26 WG/P2/gripper closure locally closed; full retained suite, production-dimension CPU BF16 batch and five-step deployment pass; fresh formal CUDA behavior run not started
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -31,8 +31,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > **The executable source is the exact Schema25 replay base plus completed
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
 > R1f/P2-01, R1g/P3-01,B-01, LC-01, R1h/N-01,D-01 and the three
-> R2-WG01/P202/GRIP02 structural units; R2 is not yet
-> behavior-released.** The untouched R0 fingerprint,
+> R2-WG01/P202/GRIP02 structural units and the active Schema26 closure below.**
+> The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
 > `ARCHITECTURE_REPLAY_SOURCE_UNITS.md` and
@@ -64,16 +64,26 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > behavior or losses. The completed A01 replay shows that semantic intervals
 > `2/3` are strongly useful to far action, geometry values have near-zero
 > action effect at their learned R1 scale, and both deployed gripper branches
-> fail before their fixed blend. R2 now makes the three source-bounded repairs:
+> fail before their fixed blend. R2 made three source-bounded repairs:
 > target-scale-covariant camera-transport supervision, independent exact-copy
 > spatial/terminal P2 query owners, and one exact-zero continuous
 > gripper-private state for the deployed value/delta heads, followed by a
 > codec-decoded absolute/delta event boundary. Event supervision reaches the
 > private state through the physically consumed value/delta branches; there is
-> no hidden-state event bypass. It adds no P3, sampler, checkpoint-selector,
-> time schedule,
-> hard event gate or loss-weight bundle. Local implementation guards pass; no
-> R2 behavior result is implied before the GPU smoke and formal run.
+> no hidden-state event bypass. It added no P3, sampler, checkpoint-selector,
+> time schedule, hard event gate or loss-weight bundle. The completed R2
+> behavior run then exposed three remaining closure failures:
+> inverse-square Teacher-scale weighting reduced responsibility for large/far
+> transport, geometry value had no address-level action closure, and the
+> categorical gripper head consumed objective budget without entering deployed
+> action. Schema26 removes the transport reweighting, adds a zero-preserving
+> transport-to-semantic-K address correction inside each physical interval,
+> fixes the effect VJP observers at the consumed tensors, removes the
+> classifier, and redirects its unchanged `.03` budget to continuous absolute
+> and cumulative-delta gripper trajectories from each target event onward.
+> It adds no parameter, P3 lane, gain, quota, sampler change or deployment
+> event gate. Schema25 checkpoints are not exact-resume sources for Schema26;
+> the next formal run is fresh.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -216,6 +226,15 @@ R1f/P2-01 separates spatial selection from the physical interval terminal:
   `source_query`, consumes no inherited initialization RNG and is used only by
   the four-interval terminal. No time prior, interval target, null or new gain
   is introduced.
+- Schema26 gives geometry one second, non-value responsibility at the spatial
+  boundary. For every physical interval it evaluates the same covariance-aware
+  coordinate score at `current + transport` and at `current`, subtracts them,
+  aggregates legal cameras with the producer-owned conditional camera measure,
+  centres over legal K and applies `tanh`. This bounded correction is added
+  only to the semantic K logits in that same interval. It does not alter
+  geometry K*C selection, interval termination, semantic value amplitude or
+  support. Transport zero, absent camera support and K-uniform correction are
+  exact-zero identities. No parameter, gain, type gate or time vote is added.
 
 R1g/P3-01,B-01 removes duplicate P3 value owners and cross-lane competition:
 
@@ -347,7 +366,10 @@ current noisy action + flow time + cached protected detail
 action query + factual_base + policy_query_residual
     -> exact P2QueryDock combined query
     + FutureObjectDynamics + S
-    -> semantic K and geometry K*C selection independently within each I
+    -> covariance-aware (score(current + transport) - score(current))
+       -> legal-camera aggregation -> legal-K-centred bounded correction
+    -> semantic K selection with that address-only correction and independent
+       geometry K*C selection within each I
        using current chart/camera availability as the only physical support
     -> SelectedIntervalEvidence [B,T,Q,I,semantic|geometry,H]
     -> S-conditioned W key, one no-null physical-I terminal per type
@@ -385,7 +407,8 @@ raw policy residual
 all bottom carriers
     -> three Evidence MMDiT blocks
     -> ordered low-rank contraction and execution-value controller
-    -> 18-D physical velocity plus codec-decoded event and motion heads
+    -> 18-D physical velocity plus the retained motion head
+    -> decoded gripper events are evaluation-only behavior of the physical field
 ```
 
 The history-action proposal remains a supervised auxiliary prediction. Its
@@ -507,10 +530,13 @@ supports may change targets and losses, never deployment action.
     no second scale or aggregate magnitude contract exists. At the final output
     boundary, a bias-free zero-initialized bounded multiplicative owner forms
     one continuous gripper-private state. Deployed gripper value/delta read
-    that state; the policy then decodes their physical absolute and
-    adjacent-delta coordinates into the supervised event boundary. Arm, four
-    auxiliary gripper coordinates and motion retain the base action read.
-    Event logits never gate or otherwise enter the physical field.
+    that state. Arm, four auxiliary gripper coordinates and motion retain the
+    base action read. There is no final event classifier or event logit in the
+    deployed output. The raw target event threshold is used only to start a
+    continuous training mask; from the first target event onward, the absolute
+    gripper branch and cumulative-delta branch are each regressed against the
+    continuous normalized gripper target. Decoded event precision/recall/F1
+    remains an evaluation of deployed action, never a runtime gate.
 15. Online boundaries use ordinary autograd. No artificial gradient, hard
     gate, entropy/mass quota, scalar progress loss, forced diversity or forced
     nonzero flow is legal.
@@ -588,9 +614,11 @@ GripperPrivateState
   action + action * tanh(bias_free_gate(norm(action)))     [B,24,H]
   consumers: deployed gripper value/delta heads
 
-DecodedGripperEventBoundary
-  codec-decoded gripper absolute + adjacent delta              [B,24,2]
-  consumer: supervised final event head (reverse path via value/delta)
+GripperTrajectoryTrainingBoundary
+  clean absolute branch / cumulative-delta branch          [B,24,1] each
+  target-event-and-after mask                              [B,24]
+  continuous target                                       [B,24,1]
+  consumer: `.03` continuous training loss only; absent at deployment
 ```
 
 ## Provenance table
@@ -630,14 +658,20 @@ DecodedGripperEventBoundary
   by `FutureObjectDynamics`; there is no predicted-selector validity.
 - Future semantic objectives retain their exact-zero raw/normalized/direction
   row loss. Camera transport common/innovation use raw-coordinate SmoothL1 as
-  the sole active measure, redistributed by detached inverse-square target
-  scale weights whose supported mean is one; covariance remains raw-coordinate
-  and per camera. Detached unweighted-raw, normalized and direction transport
-  audits never enter backward. The internal
+  the sole active measure with ordinary current-camera support masking;
+  Teacher magnitude never redistributes row responsibility. Covariance remains
+  raw-coordinate and per camera. Detached normalized and direction transport
+  audits are computed only on diagnostic batches and never enter backward. The internal
   `0.55/0.15/0.05` semantic/transport/covariance coefficients and outer future
   weight are unchanged. No successor duplicate or status objective remains.
-- Action, future, flow geometry, intent scaffold, history proposal and
-  execution-value external weights are unchanged from the recovery reference.
+- The former `.03` categorical event budget is renamed
+  `gripper_trajectory`. Its exact objective is the average of continuous
+  SmoothL1 on the clean absolute and cumulative-delta gripper branches, masked
+  from each sample's first raw-unit target event through row 24. The threshold
+  selects rows only; it does not binarize the target. No event classifier,
+  class boost or focal term remains. All other action, future, flow geometry,
+  intent scaffold, history proposal and execution-value external weights are
+  unchanged from the recovery reference.
 - The whole-segment recognizer supervises only S's public interval carrier.
   Typed relevance is trained through future W and the factual/P2/P3/final
   action paths. The typed-free coarse-action loss does not reach its selector;
@@ -663,8 +697,9 @@ DecodedGripperEventBoundary
 - Observation/G/S/W, exact static P1 and transition source build once per
   observation.
 - Dynamic P1/P2/P3, transition, layer contracts and bottom run at action-update
-  times `[0,.2,.4,.6,.8]`, then once at `1.0` for the codec-decoded event and
-  motion heads only. The endpoint call cannot change the integrated action.
+  times `[0,.2,.4,.6,.8]`, then once at `1.0` for the retained motion head.
+  The endpoint call cannot change the integrated action. Decoded gripper events
+  are derived directly from the integrated action during evaluation.
 - Teacher builds once per training batch and zero times in deployment.
 - P1 N=49 queries use the V120 query budget/checkpoint configuration.
   Chunked and unchunked outputs and parameter gradients must be equivalent.
@@ -733,26 +768,35 @@ DecodedGripperEventBoundary
   event head and adds a zero-initialized `decoded_gripper_event_head` (`2 -> 3`).
   Its net delta from that first R2 inventory is `+259,590` parameters, `-1`
   parameter tensor and `-1` state key, with no optimizer-group change. The
-  current R2 model has `169,458,596` total / `153,087,865` trainable
+  completed R2 model has `169,458,596` total / `153,087,865` trainable
   parameters, 1,388 parameter tensors, 1,066 trainable/optimizer tensors, 23
   optimizer groups and 1,394 state-key names. Its ordered state-key-name
   SHA-256 is
   `384bf6aa4f765382f3d7b4251f0b70f53fe233d3a86090f8ea2bdad6d886d174`.
   Exact-copy/zero initialization preserves the post-construction CPU RNG
   SHA-256 `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
+  Schema26 removes that final `2 -> 3` classifier (`-9` trainable parameters,
+  `-2` parameter tensors and `-2` state keys). Raw transport supervision and
+  the P2 address correction are parameter-free. The active model therefore has
+  `169,458,587` total / `153,087,856` trainable parameters, 1,386 parameter
+  tensors, 1,064 trainable/optimizer tensors, 23 optimizer groups and 1,392
+  state-key names. Its ordered state-key-name SHA-256 is
+  `eb9b6077e51f9ed6ec65f3462e34e061034913fbfa9d19b745599d4b34afc88d`.
+  Removing the exact-zero classifier consumes no RNG, so the construction RNG
+  digest remains unchanged.
 - Active manifest identity:
 
   ```text
-  schema:       25
+  schema:       26
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
-  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_physical_value_typed_consequence_plus_two_optional_p3
-  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_codec_closed_event
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_mean_one_transport_codec_closed_event_v120_decay_local_global_clip_source_gradient_probes
-  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_codec_closed_event_teacher_isolated_finite_spike_matching_metrics
+  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3
+  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_field_no_event_head
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_gradient_probes
+  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `c29ca3d120f67880aa4e3577688b0961186e0700d630c244cb67d2a5d88fac28`.
+  `ae5c7c19f8a289678a23dbb7cf5f3de5d8660fa0e21c76bd37e4118736118d3d`.
 
 Storage defaults:
 
@@ -766,9 +810,11 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The retained local suite now passes 170/170, plus two R2 guards for diagnostic
-cadence and decoded-event-to-gate reachability (172/172 in the current
-working tree). Tests cover full
+The focused active-mainline/auditor suite passes 175/175. The broad retained
+suite passes 609/609 after excluding only
+`tests/test_hierarchical_mmdit_action_decoder.py`, whose collection fails on
+an unrelated legacy V39 `_dwell_value_targets` import before any current
+mainline test runs. Tests cover full
 forward/backward, G1/G2/G3 ordering and N=49
 rematerialization, forbidden G conditions, exact P1 axes/microgrid,
 chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
@@ -798,9 +844,9 @@ variance VJPs, BF16-underflow-resistant producer logs, exact-zero legacy prior
 support, all-invalid finite masked terminals, read-only source-gradient hooks,
 pre-clip finite-spike attribution, partial-window gradient ownership, current
 metric vocabulary, P2 action-band/type/interval diagnostic retention,
-diagnostic output/state invariance, evaluation-only P2 value-intervention
-locality and posterior invariance, exact matched-noise/finally orchestration,
-gripper codec-branch reconstruction, decoded event-boundary locality,
+diagnostic output/state invariance, evaluation-only P2 value/address
+intervention locality, exact matched-noise/finally orchestration,
+gripper codec-branch reconstruction and continuous trajectory locality,
 gripper horizon bands and exhaustive
 horizon-by-target-event context accounting, a bounded decision-facing console
 backed by the unchanged
@@ -808,13 +854,15 @@ lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
 gradient logging and checkpoint rejection.
 CPU BF16 validates dtype boundaries, not CUDA memory.
 
-R2 additionally guards mean-one target-weighted raw transport with detached
-normalized/direction/unweighted-raw audits, exact-copy spatial/terminal P2
-query identity and reverse ownership,
-typed consequence interaction locality, gripper zero-state identity/locality,
-decoded-event-to-gate reachability, arm/auxiliary/motion isolation, production
-optimizer ownership and the exact current state-key inventory. The transport
-audits reuse rows already computed by the active objective. P2, W and gripper
+Schema26 additionally guards exact equality of active transport and unweighted
+raw-coordinate loss, detached diagnostic-only normalized/direction audits,
+increasing raw responsibility for larger errors, exact-copy spatial/terminal
+P2 query identity and reverse ownership, zero/no-camera/K-uniform geometry
+address identities, transport-to-semantic-address VJP, true consumed semantic
+and geometry effect VJPs, typed consequence interaction locality, gripper
+zero-state identity/locality, continuous value/delta trajectory-to-gate
+reachability, classifier absence, arm/auxiliary/motion isolation, production
+optimizer ownership and the exact current state-key inventory. P2, W and gripper
 state/projection scalars run only on the existing diagnostic cadence: every
 20th formal training batch and the configured 16 validation batches.
 Activation VJP hooks attach only to ephemeral training-forward tensors; named
@@ -822,12 +870,17 @@ parameter gradients are read after backward and before clipping, so no hook
 accumulates across batches. Execution supervision still computes its
 pre-existing candidate tensors on every training batch, but does not retain the
 new gripper tensor surface outside that cadence. These additions require no
-extra forward, sampling pass or console panel. A fresh local one-batch CPU BF16
-forward/backward at the complete production dimensions (`H=512`, 256 patches
-per camera, 169,458,596 parameters) completed in 80.79 seconds with finite loss
-`3.18261` and finite pre-clip gradient `3.93425`; the retained five-step
-deployment guard also passes. The complete source graph is locally closed, but
-no R2 GPU smoke or behavioral experiment has run. On 2026-08-28 the user
+extra forward, sampling pass or console panel. The offline recovery auditor
+does not require the removed categorical event-head F1 for Schema26; it
+instead requires the continuous gripper objective to be observed and the
+matched P2 intervention surface to have nonzero coverage. A fresh local
+one-batch CPU BF16 forward/backward at the complete production dimensions
+(`H=512`, 256 patches per camera, 169,458,587 parameters) completed in 76.714
+seconds with finite loss `2.58010149` and finite pre-clip gradient `4.8138814`.
+The retained five-update deployment plus endpoint-head guard completed in
+11.802 seconds with finite action/field values. The complete source graph is
+locally closed, but no Schema26 GPU smoke or behavioral experiment has run. On
+2026-08-28 the user
 explicitly authorized the local guard as the temporary substitute because a
 separate remote smoke was not available. This does not establish CUDA memory
 or throughput: the formal run's startup and first reporting window must enforce
@@ -843,18 +896,18 @@ those runtime gates under the following production acceptance:
 Use new empty output directories:
 
 ```bash
-RUN_TAG=schema25_r2_wg01_p202_grip02_smoke
+RUN_TAG=schema26_wg01_p202_grip02_smoke
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
-RUN_TAG=schema25_r2_wg01_p202_grip02_b8
+RUN_TAG=schema26_wg01_p202_grip02_b8
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema25_r2_wg01_p202_grip02_b8 \
+  runs/schema26_wg01_p202_grip02_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

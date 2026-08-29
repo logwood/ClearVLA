@@ -8,7 +8,7 @@ from clearvla.mainline.model.action_codec import (
 )
 from clearvla.mainline.training.losses import (
     balanced_event_row_weights,
-    event_positive_class_weights,
+    causal_event_trajectory_mask,
     sample_flow_matching,
 )
 
@@ -135,9 +135,20 @@ def test_event_row_balance_reaches_real_gripper_rows_without_changing_budget() -
     assert torch.equal(no_event, torch.ones_like(no_event))
 
 
-def test_v120_event_positive_boost_is_five_to_one_over_hold() -> None:
-    weight = event_positive_class_weights(
-        torch.tensor((0, 1, 2)),
-        positive_boost=4.0,
+def test_continuous_gripper_mask_starts_at_first_event_and_never_reopens() -> None:
+    event = torch.zeros(3, 8)
+    event[0, 2] = 1.0
+    event[0, 6] = 1.0
+    event[1, 0] = 1.0
+    mask = causal_event_trajectory_mask(event)
+    torch.testing.assert_close(
+        mask,
+        torch.tensor(
+            (
+                (0, 0, 1, 1, 1, 1, 1, 1),
+                (1, 1, 1, 1, 1, 1, 1, 1),
+                (0, 0, 0, 0, 0, 0, 0, 0),
+            ),
+            dtype=torch.float32,
+        ),
     )
-    torch.testing.assert_close(weight, torch.tensor((1.0, 5.0, 5.0)))

@@ -1007,6 +1007,7 @@ CORE_BATCH_KEYS = (
     "tail_physical_flow",
     "rollout_dynamics",
     "rollout_milestone_delta_match",
+    "gripper_trajectory",
     "event",
 )
 
@@ -1156,6 +1157,8 @@ STRUCTURE_KEYS = (
     "object_p2_geometry_posterior_entropy",
     "object_p2_semantic_value_mass",
     "object_p2_geometry_value_mass",
+    "object_p2_geometry_address_correction_rms",
+    "object_p2_geometry_address_k_center_error",
     "object_p2_successor_innovation_rms",
     "object_consequence_effect_rms",
     "object_consequence_interaction_rms",
@@ -1172,6 +1175,12 @@ STRUCTURE_KEYS = (
     "bottom_controller_private_ratio",
     "bottom_protected_update_rms",
     "bottom_controlled_transition_value_rms",
+    "gripper_private_gate_rms",
+    "gripper_private_state_delta_rms",
+    "gripper_trajectory_mask_fraction",
+    "gripper_trajectory_absolute_loss",
+    "gripper_trajectory_delta_loss",
+    "gripper_trajectory_branch_disagreement_rms",
 )
 
 GRADIENT_KEYS = (
@@ -1267,6 +1276,10 @@ GRADIENT_KEYS = (
     "gradient_raw_bottom_decoder_l2",
     "gradient_postlocal_bottom_decoder_l2",
     "gradient_postglobal_bottom_decoder_l2",
+    "gradient_tensor_p2_semantic_effect_rms",
+    "gradient_tensor_p2_geometry_effect_rms",
+    "gradient_tensor_p2_geometry_address_correction_rms",
+    "gradient_parameter_gripper_private_gate_weight_rms",
 )
 
 VALIDATION_KEYS = (
@@ -1676,6 +1689,7 @@ _MAINLINE_ALIASES: dict[str, str] = {
     "loss_decoded_action": "decoded_action",
     "loss_decoded_action_v120_comparable": "decoded_action",
     "loss_decoded_action_event_balanced_audit": "decoded_action_event_balanced",
+    "loss_gripper_trajectory": "gripper_trajectory",
     "loss_future_successor": "flow_jepa_future_prediction",
     "loss_future_semantic_delta": "flow_jepa_future_change",
     "loss_flow_warp": "flow_jepa_warp_loss",
@@ -2237,6 +2251,11 @@ def _config_value(run: ParsedRun, *keys: str) -> Any:
         "groups": ("config", "bottom", "operator_groups"),
         "depth_logit_init": ("config", "bottom", "operator_depth_logit_init"),
         "warmup": ("config", "optimizer", "warmup_steps"),
+        "gripper_trajectory_weight": (
+            "config",
+            "objectives",
+            "gripper_trajectory",
+        ),
     }
     for key in normalized:
         path = mainline_paths.get(key)
@@ -2337,6 +2356,14 @@ def _window_stats_through_batch(
 LOSS_COMPONENTS: tuple[tuple[str, str, str | None, str], ...] = (
     ("flow", "physical_flow", None, "action"),
     ("proposal", "proposal", "proposal_loss_weight", "action"),
+    # Schema26 replaces the categorical head with continuous event-and-after
+    # trajectory closure. Keep it distinct from historical event objectives.
+    (
+        "gripper_trajectory",
+        "gripper_trajectory",
+        "gripper_trajectory_weight",
+        "action",
+    ),
     ("event", "event", "event_loss_weight", "action"),
     ("motion", "motion", "arm_motion_loss_weight", "action"),
     ("gripper_transition", "transition_l1", "gripper_transition_l1_weight", "action"),
@@ -3202,6 +3229,7 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
                         "physical_flow_native",
                         "rollout_dynamics",
                         "decoded_action",
+                        "gripper_trajectory",
                         "event",
                         "loss_ledger_residual",
                     )
@@ -3756,6 +3784,11 @@ def _recovery_assessment(
             ),
         )
 
+    candidate_schema = candidate_manifest.get("architecture_schema")
+    schema26 = (
+        isinstance(candidate_schema, (int, float))
+        and int(candidate_schema) >= 26
+    )
     validation_metrics: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
         ("action_rmse", ("full_rmse",), ("full_rmse",), "lower"),
         ("first_rmse", ("first_rmse",), ("first_rmse",), "lower"),
@@ -3787,9 +3820,12 @@ def _recovery_assessment(
             ("gripper_event_f1", "gripper_f1"),
             "higher",
         ),
-        ("event_head_f1", ("event_head_f1",), ("event_head_f1",), "higher"),
         ("motion_head_f1", ("motion_head_f1",), ("motion_head_f1",), "higher"),
     )
+    if not schema26:
+        validation_metrics += (
+            ("event_head_f1", ("event_head_f1",), ("event_head_f1",), "higher"),
+        )
     for label, old_names, new_names, direction in validation_metrics:
         old_values = _epoch_metric_series(baseline, old_names)
         new_values = _epoch_metric_series(candidate, new_names)
@@ -3846,6 +3882,32 @@ def _recovery_assessment(
             baseline_value=old_error,
             candidate_value=new_error,
             detail="mean absolute distance from the target event ratio 1.0",
+        )
+
+    if schema26:
+        trajectory = candidate.get("trajectories", {}).get(
+            "gripper_trajectory", {}
+        )
+        trajectory_count = trajectory.get("count")
+        trajectory_tail = trajectory.get("tail_median")
+        record(
+            "objective/gripper_trajectory_observed",
+            (
+                "pass"
+                if isinstance(trajectory_count, (int, float))
+                and int(trajectory_count) > 0
+                and isinstance(trajectory_tail, (int, float))
+                and math.isfinite(float(trajectory_tail))
+                else "incomplete"
+            ),
+            candidate_value={
+                "count": trajectory_count,
+                "tail_median": trajectory_tail,
+            },
+            detail=(
+                "Schema26 replaces the categorical event head with the active "
+                "continuous post-event gripper trajectory objective"
+            ),
         )
 
     train_metrics = (
@@ -3908,7 +3970,6 @@ def _recovery_assessment(
         )
 
     gradients = candidate.get("gradients", {})
-    candidate_schema = candidate_manifest.get("architecture_schema")
     schema24 = (
         isinstance(candidate_schema, (int, float))
         and int(candidate_schema) >= 24
@@ -3971,7 +4032,14 @@ def _recovery_assessment(
     )
     exact_v120_ablations = "validation_execution_ablation_coverage" in latest_val
     if exact_v120_ablations:
-        for stem in ("sampling_diagnostic", "proposal_ablation", "execution_ablation"):
+        coverage_stems = [
+            "sampling_diagnostic",
+            "proposal_ablation",
+            "execution_ablation",
+        ]
+        if schema26:
+            coverage_stems.append("p2_intervention")
+        for stem in coverage_stems:
             coverage = latest_val.get(f"validation_{stem}_coverage")
             record(
                 f"causal_ablation/{stem}_coverage",
