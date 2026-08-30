@@ -6,9 +6,12 @@ from clearvla.mainline.model.action_codec import (
     PhysicalActionFieldCodec,
     anchor_horizon_weights,
 )
+from clearvla.mainline.model.types import PhysicalActionCondition
 from clearvla.mainline.training.losses import (
+    anchored_gripper_persistence,
     balanced_event_row_weights,
     causal_event_trajectory_mask,
+    event_transition_persistence_masks,
     sample_flow_matching,
 )
 
@@ -152,3 +155,96 @@ def test_continuous_gripper_mask_starts_at_first_event_and_never_reopens() -> No
             dtype=torch.float32,
         ),
     )
+
+
+def test_gripper_transition_and_persistence_masks_are_disjoint_and_complete() -> None:
+    event = torch.zeros(3, 8)
+    event[0, 2] = 1.0
+    event[0, 6] = 1.0
+    event[1, 0] = 1.0
+    transition, persistence = event_transition_persistence_masks(event)
+    assert torch.count_nonzero(transition * persistence) == 0
+    torch.testing.assert_close(
+        transition + persistence,
+        causal_event_trajectory_mask(event),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert torch.count_nonzero(transition[2]) == 0
+    assert torch.count_nonzero(persistence[2]) == 0
+
+
+def test_gripper_persistence_reanchors_at_every_open_or_close_event() -> None:
+    absolute = torch.tensor(
+        [[[10.0], [11.0], [12.0], [13.0], [14.0], [20.0], [21.0]]]
+    )
+    local_delta = torch.tensor(
+        [[[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]]]
+    )
+    event = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]])
+    reconstructed = anchored_gripper_persistence(
+        absolute,
+        local_delta,
+        event,
+    )
+    torch.testing.assert_close(
+        reconstructed[..., 0],
+        torch.tensor([[0.0, 0.0, 12.0, 16.0, 21.0, 20.0, 27.0]]),
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+def test_gripper_persistence_has_exact_zero_pre_event_delta_vjp() -> None:
+    absolute = torch.randn(1, 8, 1, requires_grad=True)
+    local_delta = torch.randn(1, 8, 1, requires_grad=True)
+    event = torch.zeros(1, 8)
+    event[:, 3] = 1.0
+    _, persistence = event_transition_persistence_masks(event)
+    reconstructed = anchored_gripper_persistence(
+        absolute,
+        local_delta,
+        event,
+    )
+    (reconstructed[..., 0] * persistence).sum().backward()
+    assert local_delta.grad is not None
+    assert absolute.grad is not None
+    assert torch.count_nonzero(local_delta.grad[:, :4]) == 0
+    assert torch.count_nonzero(local_delta.grad[:, 4:]) > 0
+    assert torch.count_nonzero(absolute.grad[:, :3]) == 0
+    assert torch.count_nonzero(absolute.grad[:, 3]) > 0
+    assert torch.count_nonzero(absolute.grad[:, 4:]) == 0
+
+
+def test_no_event_gripper_persistence_is_exact_zero() -> None:
+    absolute = torch.randn(2, 8, 1)
+    local_delta = torch.randn(2, 8, 1)
+    event = torch.zeros(2, 8)
+    transition, persistence = event_transition_persistence_masks(event)
+    reconstructed = anchored_gripper_persistence(
+        absolute,
+        local_delta,
+        event,
+    )
+    assert torch.count_nonzero(transition) == 0
+    assert torch.count_nonzero(persistence) == 0
+    assert torch.count_nonzero(reconstructed) == 0
+
+
+def test_horizon_action_condition_uses_deterministic_four_interval_projection() -> None:
+    action = torch.arange(2 * 24 * 3, dtype=torch.float32).reshape(2, 24, 3)
+    current = torch.tensor([[100.0, 101.0, 102.0], [200.0, 201.0, 202.0]])
+    condition = PhysicalActionCondition.from_horizon_action(action, current)
+    expected = torch.stack(
+        (
+            action[:, 3:8].mean(dim=1),
+            action[:, 7:16].mean(dim=1),
+            action[:, 15:24].mean(dim=1),
+            action[:, 23:24].mean(dim=1),
+        ),
+        dim=1,
+    )
+    torch.testing.assert_close(condition.interval_action, expected)
+    condition.assert_exact_reconstruction()
+    assert condition.action_dim == 3
+    assert condition.fingerprint.shape == (2, 4, 6)

@@ -41,7 +41,11 @@ from .runtime.logging import (
     validate_resume_metric_boundary,
 )
 from .runtime.numerics import resolve_compute_dtype
-from .runtime.sampling import sample_cached_action
+from .runtime.sampling import (
+    sample_cached_action,
+    sample_refined_cached_action,
+    sample_refined_cached_action_with_cache,
+)
 from .training.engine import (
     MainlineTrainingEngine,
     NonFiniteGradientError,
@@ -454,7 +458,7 @@ def _preflight(
     )
     cache = encoded.cache
     del encoded
-    sample = sample_cached_action(
+    sample = sample_refined_cached_action(
         engine.model,
         cache,
         config,
@@ -602,7 +606,7 @@ def _validate(
             },
             weight=batch.online.batch,
         )
-        prediction = sample_cached_action(
+        prediction, refined_cache = sample_refined_cached_action_with_cache(
             engine.model,
             cache,
             config,
@@ -647,7 +651,7 @@ def _validate(
                 try:
                     counterfactual = sample_cached_action(
                         engine.model,
-                        cache,
+                        refined_cache,
                         config,
                         initial_physical_noise=prediction.initial_physical_noise,
                         collect_diagnostics=False,
@@ -675,7 +679,12 @@ def _validate(
             if proposal_ablation_cache is None:
                 raise RuntimeError("proposal ablation cache was not constructed")
             proposal_ablation_batches += 1
-            proposal_zero = sample_cached_action(
+            # The recovered proposal ablation is an intentional no-op, but it
+            # must still execute the same proposal -> W -> refined-action
+            # schedule as primary.  A single-pass counterfactual here would
+            # measure removal of Schema28's outer refinement instead of the
+            # proposal boundary named by this diagnostic.
+            proposal_zero = sample_refined_cached_action(
                 engine.model,
                 proposal_ablation_cache,
                 config,
@@ -719,7 +728,7 @@ def _validate(
             ):
                 execution = sample_cached_action(
                     engine.model,
-                    cache,
+                    refined_cache,
                     config,
                     execution_mode=mode,
                     **common_sampling,

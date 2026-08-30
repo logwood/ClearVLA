@@ -517,6 +517,19 @@ class EvidenceExecutionController(nn.Module):
         ) + self.control_position_unit.to(device=reference.device, dtype=reference.dtype)
         return self._center_slots(state).expand(int(reference.shape[0]), -1, -1)
 
+    def _capacity_ratios(self, control_context: Tensor) -> Tensor:
+        """Evaluate the existing capacity head without a BF16 exact-one cast."""
+
+        with torch.autocast(device_type=control_context.device.type, enabled=False):
+            logits = F.linear(
+                control_context.float(),
+                self.capacity_head.weight.float(),
+                None
+                if self.capacity_head.bias is None
+                else self.capacity_head.bias.float(),
+            )
+            return torch.sigmoid(logits).squeeze(-1)
+
     @staticmethod
     def _center_slots(state: Tensor) -> Tensor:
         """Keep shared execution context outside the private slot state.
@@ -716,7 +729,12 @@ class EvidenceExecutionController(nn.Module):
             ],
             dim=-1,
         )
-        capacity_ratios = torch.sigmoid(self.capacity_head(control_context)).squeeze(-1)
+        # Capacity is a near-identity control. Under CUDA BF16 autocast the
+        # sigmoid output rounded to exactly one for most of the transition,
+        # erasing both the non-identity update and the contraction-bank VJP.
+        # Keep the head, schedule and optimizer ownership unchanged, but form
+        # this scalar control in FP32 before it reaches the ordered operator.
+        capacity_ratios = self._capacity_ratios(control_context)
         if isinstance(block_index, Tensor):
             if tuple(block_index.shape) != (batch,):
                 raise ValueError("controller block_index must be an int or [B]")

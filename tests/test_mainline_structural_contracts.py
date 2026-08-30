@@ -41,8 +41,10 @@ from clearvla.mainline.model.routing import smooth_rms_contract
 from clearvla.mainline.model.teacher import ObjectFutureTeacher
 from clearvla.mainline.model.top import DeploymentTopCache, ObjectIntentDynamicsTop
 from clearvla.mainline.model.types import (
+    CandidateWorld,
     FutureObjectDynamics,
     LocalFactSet,
+    PhysicalActionCondition,
 )
 from clearvla.mainline.training.losses import flow_geometry_terms, future_dynamics_terms
 from clearvla.mainline.v120_core.profile import build_v120_visual_config
@@ -159,6 +161,73 @@ def _object_top() -> ObjectIntentDynamicsTop:
         teacher_key_dim=8,
         core_config=build_v120_visual_config(config),
     )
+
+
+def _physical_action_condition(
+    interval_action: torch.Tensor,
+    current_action: torch.Tensor | None = None,
+) -> PhysicalActionCondition:
+    if current_action is None:
+        current_action = torch.zeros(
+            int(interval_action.shape[0]),
+            int(interval_action.shape[-1]),
+            device=interval_action.device,
+            dtype=interval_action.dtype,
+        )
+    return PhysicalActionCondition.from_interval_action(
+        interval_action,
+        current_action,
+    )
+
+
+def test_physical_action_condition_is_lossless_and_adjacent() -> None:
+    current = torch.tensor([[1.0, 2.0, 3.0]])
+    interval = torch.tensor(
+        [[[2.0, 4.0, 6.0], [5.0, 8.0, 9.0], [9.0, 9.0, 12.0], [10.0, 7.0, 18.0]]]
+    )
+    condition = PhysicalActionCondition.from_interval_action(interval, current)
+    expected_delta = torch.tensor(
+        [[[1.0, 2.0, 3.0], [3.0, 4.0, 3.0], [4.0, 1.0, 3.0], [1.0, -2.0, 6.0]]]
+    )
+    torch.testing.assert_close(
+        condition.interval_delta,
+        expected_delta,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        current[:, None] + condition.interval_delta.cumsum(dim=1),
+        interval,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        condition.fingerprint,
+        torch.cat((interval, expected_delta), dim=-1),
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+def test_candidate_world_rejects_retagged_action_condition() -> None:
+    torch.manual_seed(302)
+    top = _object_top().eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    copied = replace(
+        context.action_condition,
+        interval_action=context.action_condition.interval_action.clone(),
+    )
+    stale = replace(context.candidate_world, action_condition=copied)
+    with pytest.raises(ValueError, match="fingerprint"):
+        stale.assert_action_identity(context.action_condition)
 
 
 def _p1_state(
@@ -1334,32 +1403,30 @@ def test_w_typed_diagnostics_bound_gain_and_isolate_the_w_ingress_vjp() -> None:
         facts=facts,
         collect_diagnostics=False,
     )
-    typed_common = (
-        intent.typed_common_value.detach().clone().requires_grad_(True)
-    )
-    typed_interval = (
-        intent.typed_interval_residual_value.detach().clone().requires_grad_(True)
-    )
-    world = replace(
-        intent.world_dock(),
-        typed_common_value=typed_common,
-        typed_interval_residual_value=typed_interval,
+    semantic = facts.semantic.detach().clone().requires_grad_(True)
+    appearance = facts.appearance.detach().clone().requires_grad_(True)
+    geometry = facts.geometry.detach().clone().requires_grad_(True)
+    facts = replace(
+        facts,
+        semantic=semantic,
+        appearance=appearance,
+        geometry=geometry,
     )
     coarse = top.coarse_action(intent.action_dock())
+    action = _physical_action_condition(
+        coarse.action_prediction.detach().clone().requires_grad_(True)
+    )
     with torch.no_grad():
         top.dynamics.delta_head.weight.normal_(std=0.1)
         top.dynamics.transport_head.weight.normal_(std=0.1)
 
     _, working, w1_metrics = top.dynamics.forward_w1(
         facts=facts,
-        intent=world,
-        action=coarse,
+        action=action,
         collect_diagnostics=True,
     )
     field, w2_metrics = top.dynamics.forward_w2(
         facts=facts,
-        intent=world,
-        action=coarse,
         w1_state=working,
         collect_diagnostics=True,
     )
@@ -1370,7 +1437,7 @@ def test_w_typed_diagnostics_bound_gain_and_isolate_the_w_ingress_vjp() -> None:
     )
     # The original S value also has a legal non-W consumer.  Its deliberately
     # large gradient must not leak into the W-only identity-view observer.
-    external_loss = 50.0 * (typed_common.sum() + typed_interval.sum())
+    external_loss = 50.0 * (semantic.sum() + appearance.sum() + geometry.sum())
     (w_loss + external_loss).backward()
 
     for metrics, prefix in (
@@ -1382,20 +1449,18 @@ def test_w_typed_diagnostics_bound_gain_and_isolate_the_w_ingress_vjp() -> None:
         assert metrics[f"{prefix}_output_input_rms_ratio_max"] <= 4.000001
 
     for name in (
-        "gradient_tensor_w_semantic_common_ingress_rms",
-        "gradient_tensor_w_appearance_common_ingress_rms",
-        "gradient_tensor_w_geometry_common_ingress_rms",
-        "gradient_tensor_w_semantic_interval_ingress_rms",
-        "gradient_tensor_w_appearance_interval_ingress_rms",
-        "gradient_tensor_w_geometry_interval_ingress_rms",
+        "gradient_tensor_w_semantic_fact_ingress_rms",
+        "gradient_tensor_w_appearance_fact_ingress_rms",
+        "gradient_tensor_w_geometry_fact_ingress_rms",
+        "gradient_tensor_w_physical_action_condition_rms",
     ):
         assert torch.isfinite(w1_metrics[name])
         assert w1_metrics[name] > 0.0
         assert w1_metrics[name] < 1.0
-    assert typed_common.grad is not None
-    assert typed_interval.grad is not None
-    assert typed_common.grad.float().square().mean().sqrt() > 40.0
-    assert typed_interval.grad.float().square().mean().sqrt() > 40.0
+    for value in (semantic, appearance, geometry):
+        assert value.grad is not None
+        assert value.grad.float().square().mean().sqrt() > 40.0
+    assert action.interval_action.grad is not None
 
 
 def test_w_camera_field_is_psd_and_unavailable_camera_is_exact_zero() -> None:
@@ -1464,8 +1529,7 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
     assert facts.content.grad is None or torch.count_nonzero(facts.content.grad) == 0
 
 
-def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> None:
-
+def test_w_reads_only_the_explicit_physical_action_condition() -> None:
     torch.manual_seed(31)
     top = _object_top()
     facts, _ = top.grounder(_local_facts(cameras=2))
@@ -1478,38 +1542,82 @@ def test_w_receives_completed_intent_and_coarse_action_as_distinct_inputs() -> N
         facts=facts,
         collect_diagnostics=False,
     )
-    blank_intent = replace(
-        intent.world_dock(),
-        public_interval_carrier=torch.zeros_like(intent.public_interval_carrier),
-    )
-    signal_intent = replace(
-        blank_intent,
-        public_interval_carrier=torch.randn_like(intent.public_interval_carrier),
-    )
     coarse = top.coarse_action(intent.action_dock())
-    zero_action = replace(coarse, tokens=torch.zeros_like(coarse.tokens))
-    signal_action = replace(coarse, tokens=torch.randn_like(coarse.tokens))
+    zero_action = _physical_action_condition(
+        torch.zeros_like(coarse.action_prediction)
+    )
+    signal_action = _physical_action_condition(
+        torch.randn_like(coarse.action_prediction)
+    )
 
-    signal_zero, _, _, _ = top.dynamics._base(
+    zero_base, _, _, _ = top.dynamics._base(
         facts,
-        signal_intent,
         zero_action,
         collect_diagnostics=False,
     )
-    blank_zero, _, _, _ = top.dynamics._base(
+    signal_base, _, _, _ = top.dynamics._base(
         facts,
-        blank_intent,
-        zero_action,
-        collect_diagnostics=False,
-    )
-    blank_action, _, _, _ = top.dynamics._base(
-        facts,
-        blank_intent,
         signal_action,
         collect_diagnostics=False,
     )
-    assert not torch.equal(signal_zero, blank_zero)
-    assert not torch.equal(blank_action, blank_zero)
+    assert not torch.equal(signal_base, zero_base)
+    signature = inspect.signature(top.dynamics._base)
+    assert set(signature.parameters) == {
+        "facts",
+        "action",
+        "collect_diagnostics",
+    }
+    source = inspect.getsource(type(top.dynamics)._base)
+    assert "protected_goal" not in source
+    assert "public_interval_carrier" not in source
+    assert ".tokens" not in source
+
+
+def test_w_is_goal_and_s_invariant_when_physical_action_is_fixed() -> None:
+    torch.manual_seed(311)
+    top = _object_top().eval()
+    local = _local_facts(cameras=2)
+    facts, _ = top.grounder(local)
+    intent, _ = top.intent(
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+        facts=facts,
+        collect_diagnostics=False,
+    )
+    fixed_coarse = top.coarse_action(intent.action_dock())
+    fixed_action_state = torch.randn(1, 7)
+    with mock.patch.object(
+        top.grounder,
+        "forward",
+        return_value=(facts, {}),
+    ), mock.patch.object(
+        top.coarse_action,
+        "forward",
+        return_value=fixed_coarse,
+    ):
+        first, _ = top.build_online_context(
+            local_facts=local,
+            goal_tokens=torch.randn(1, 6, 12),
+            goal_mask=torch.ones(1, 6, dtype=torch.bool),
+            state_history=torch.randn(1, 3, 7),
+            state=torch.randn(1, 7),
+            action_state=fixed_action_state,
+            executed_history=torch.randn(1, 3, 7),
+        )
+        second, _ = top.build_online_context(
+            local_facts=local,
+            goal_tokens=20.0 * torch.randn(1, 6, 12),
+            goal_mask=torch.ones(1, 6, dtype=torch.bool),
+            state_history=20.0 * torch.randn(1, 3, 7),
+            state=20.0 * torch.randn(1, 7),
+            action_state=fixed_action_state,
+            executed_history=20.0 * torch.randn(1, 3, 7),
+        )
+    _assert_same_typed_value(first.action_condition, second.action_condition)
+    _assert_same_typed_value(first.predicted_dynamics, second.predicted_dynamics)
 
 
 def test_w_common_is_written_once_and_zero_innovation_returns_common() -> None:
@@ -1526,10 +1634,14 @@ def test_w_common_is_written_once_and_zero_innovation_returns_common() -> None:
         collect_diagnostics=False,
     )
     coarse = top.coarse_action(intent.action_dock())
-    world = replace(
-        intent.world_dock(),
-        typed_common_value=torch.randn_like(intent.typed_common_value),
-        typed_interval_residual_value=torch.zeros_like(intent.typed_interval_residual_value),
+    action = _physical_action_condition(
+        torch.zeros_like(coarse.action_prediction)
+    )
+    facts = replace(
+        facts,
+        semantic=torch.randn_like(facts.semantic),
+        appearance=torch.randn_like(facts.appearance),
+        geometry=torch.randn_like(facts.geometry),
     )
     with torch.no_grad():
         top.dynamics.delta_head.weight.normal_(std=0.1)
@@ -1544,14 +1656,11 @@ def test_w_common_is_written_once_and_zero_innovation_returns_common() -> None:
     try:
         _, working, _ = top.dynamics.forward_w1(
             facts=facts,
-            intent=world,
-            action=coarse,
+            action=action,
             collect_diagnostics=False,
         )
         field, _ = top.dynamics.forward_w2(
             facts=facts,
-            intent=world,
-            action=coarse,
             w1_state=working,
             collect_diagnostics=False,
         )
@@ -1570,20 +1679,19 @@ def test_w_common_is_written_once_and_zero_innovation_returns_common() -> None:
             field.transport_mean[:, 0],
         )
 
-    zero_world = replace(
-        world,
-        typed_common_value=torch.zeros_like(world.typed_common_value),
+    zero_facts = replace(
+        facts,
+        semantic=torch.zeros_like(facts.semantic),
+        appearance=torch.zeros_like(facts.appearance),
+        geometry=torch.zeros_like(facts.geometry),
     )
     _, zero_working, _ = top.dynamics.forward_w1(
-        facts=facts,
-        intent=zero_world,
-        action=coarse,
+        facts=zero_facts,
+        action=action,
         collect_diagnostics=False,
     )
     zero_field, _ = top.dynamics.forward_w2(
-        facts=facts,
-        intent=zero_world,
-        action=coarse,
+        facts=zero_facts,
         w1_state=zero_working,
         collect_diagnostics=False,
     )
@@ -1606,37 +1714,31 @@ def test_w2_far_reads_w1_but_cannot_rewrite_common_or_near() -> None:
         collect_diagnostics=False,
     )
     coarse = top.coarse_action(intent.action_dock())
+    action = _physical_action_condition(coarse.action_prediction)
     with torch.no_grad():
         top.dynamics.delta_head.weight.normal_(std=0.1)
         top.dynamics.transport_head.weight.normal_(std=0.1)
-    world = intent.world_dock()
     _, baseline_w1, _ = top.dynamics.forward_w1(
         facts=facts,
-        intent=world,
-        action=coarse,
+        action=action,
         collect_diagnostics=False,
     )
     baseline, _ = top.dynamics.forward_w2(
         facts=facts,
-        intent=world,
-        action=coarse,
         w1_state=baseline_w1,
         collect_diagnostics=False,
     )
 
-    far_value = world.typed_interval_residual_value.clone()
+    far_value = action.interval_action.clone()
     far_value[:, 2:] += torch.randn_like(far_value[:, 2:])
-    far_world = replace(world, typed_interval_residual_value=far_value)
+    far_action = _physical_action_condition(far_value)
     _, changed_w1, _ = top.dynamics.forward_w1(
         facts=facts,
-        intent=far_world,
-        action=coarse,
+        action=far_action,
         collect_diagnostics=False,
     )
     changed, _ = top.dynamics.forward_w2(
         facts=facts,
-        intent=far_world,
-        action=coarse,
         w1_state=changed_w1,
         collect_diagnostics=False,
     )
@@ -1648,19 +1750,16 @@ def test_w2_far_reads_w1_but_cannot_rewrite_common_or_near() -> None:
     torch.testing.assert_close(changed.semantic_delta[:, :2], baseline.semantic_delta[:, :2])
     assert not torch.equal(changed.semantic_delta[:, 2:], baseline.semantic_delta[:, 2:])
 
-    near_value = world.typed_interval_residual_value.clone()
+    near_value = action.interval_action.clone()
     near_value[:, :2] += torch.randn_like(near_value[:, :2])
-    near_world = replace(world, typed_interval_residual_value=near_value)
+    near_action = _physical_action_condition(near_value)
     _, near_w1, _ = top.dynamics.forward_w1(
         facts=facts,
-        intent=near_world,
-        action=coarse,
+        action=near_action,
         collect_diagnostics=False,
     )
     near_changed, _ = top.dynamics.forward_w2(
         facts=facts,
-        intent=near_world,
-        action=coarse,
         w1_state=near_w1,
         collect_diagnostics=False,
     )
@@ -1741,6 +1840,7 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     neutral = FutureObjectDynamics.neutral(context.facts)
@@ -1832,6 +1932,7 @@ def test_p2_transport_conditions_only_semantic_k_address_with_zero_identities() 
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     semantic = torch.zeros(1, 4, 4, 16)
@@ -1953,6 +2054,7 @@ def test_p2_policy_dock_exposes_existing_typed_metadata_by_identity() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     dock = context.intent.policy_dock()
@@ -1972,6 +2074,7 @@ def test_p2_spatial_selection_retains_interval_and_s_cannot_select_w() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     semantic = torch.zeros(1, 4, 4, 16)
@@ -2048,6 +2151,7 @@ def test_p2_physical_terminal_has_no_null_or_type_competition() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     semantic = torch.zeros(1, 4, 4, 16)
@@ -2354,6 +2458,7 @@ def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     semantic = torch.randn(1, 4, 4, 16, requires_grad=True)
@@ -2410,6 +2515,7 @@ def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     dynamics = _future_dynamics(
@@ -2491,6 +2597,7 @@ def test_p2_projects_each_type_once_only_after_its_physical_terminal() -> None:
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     dynamics = _future_dynamics(
@@ -3088,30 +3195,28 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
         atol=2e-5,
         rtol=2e-5,
     )
+    action = _physical_action_condition(coarse.action_prediction)
+    relabeled_action = _physical_action_condition(
+        relabeled_coarse.action_prediction
+    )
 
     _, w1, _ = top.dynamics.forward_w1(
         facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
+        action=action,
         collect_diagnostics=False,
     )
     dynamics, _ = top.dynamics.forward_w2(
         facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
         w1_state=w1,
         collect_diagnostics=False,
     )
     _, relabeled_w1, _ = top.dynamics.forward_w1(
         facts=relabeled_facts,
-        intent=relabeled_intent.world_dock(),
-        action=relabeled_coarse,
+        action=relabeled_action,
         collect_diagnostics=False,
     )
     relabeled_dynamics, _ = top.dynamics.forward_w2(
         facts=relabeled_facts,
-        intent=relabeled_intent.world_dock(),
-        action=relabeled_coarse,
         w1_state=relabeled_w1,
         collect_diagnostics=False,
     )
@@ -3128,14 +3233,22 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     p1_fact = torch.randn(batch, horizon, basis, hidden)
     action_query = torch.randn(batch, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
-        DeploymentTopCache(intent=intent, predicted_dynamics=dynamics),
+        DeploymentTopCache(
+            belief=facts.world_belief(),
+            intent=intent,
+            candidate_world=CandidateWorld(action_condition=action, dynamics=dynamics),
+        ),
         p1_state=_p1_state(p1_fact),
         action_query=action_query,
     )
     relabeled_compiled, _ = top.compile_policy(
         DeploymentTopCache(
+            belief=relabeled_facts.world_belief(),
             intent=relabeled_intent,
-            predicted_dynamics=relabeled_dynamics,
+            candidate_world=CandidateWorld(
+                action_condition=relabeled_action,
+                dynamics=relabeled_dynamics,
+            ),
         ),
         p1_state=_p1_state(p1_fact),
         action_query=action_query,
@@ -3239,10 +3352,10 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
         rtol=0.0,
     )
     coarse = top.coarse_action(invalid_intent.action_dock())
+    action = _physical_action_condition(coarse.action_prediction)
     _, common, residual, _ = top.dynamics._base(
         invalid_facts,
-        invalid_intent.world_dock(),
-        coarse,
+        action,
         collect_diagnostics=True,
     )
     assert torch.count_nonzero(common) == 0
@@ -3322,7 +3435,7 @@ def test_s_integrated_common_residual_reconstructs_unchanged_schema25_scoring() 
     assert tuple(intent.typed_interval_residual_value.shape[:4]) == (1, 4, 4, 3)
 
 
-def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
+def test_coarse_hidden_and_s_typed_values_cannot_bypass_physical_w_ingress() -> None:
     torch.manual_seed(373)
     top = _object_top().eval()
     facts, _ = top.grounder(_local_facts(cameras=2))
@@ -3360,22 +3473,30 @@ def test_coarse_action_cannot_duplicate_the_typed_world_ingress() -> None:
 
     with_typed_base, with_common, with_residual, _ = top.dynamics._base(
         facts,
-        intent.world_dock(),
-        coarse,
+        _physical_action_condition(coarse.action_prediction),
         collect_diagnostics=False,
     )
     without_typed_base, without_common, without_residual, _ = top.dynamics._base(
         facts,
-        zero_typed.world_dock(),
-        zero_coarse,
+        _physical_action_condition(zero_coarse.action_prediction),
         collect_diagnostics=False,
     )
     torch.testing.assert_close(with_typed_base, without_typed_base)
-    assert not torch.equal(with_common, without_common)
-    assert not torch.equal(with_residual, without_residual)
+    torch.testing.assert_close(with_common, without_common)
+    torch.testing.assert_close(with_residual, without_residual)
+
+    hidden_perturbed = replace(coarse, tokens=torch.randn_like(coarse.tokens))
+    hidden_base, hidden_common, hidden_residual, _ = top.dynamics._base(
+        facts,
+        _physical_action_condition(hidden_perturbed.action_prediction),
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(hidden_base, with_typed_base)
+    torch.testing.assert_close(hidden_common, with_common)
+    torch.testing.assert_close(hidden_residual, with_residual)
 
 
-def test_s_typed_world_and_coarse_action_gradients_have_distinct_owners() -> None:
+def test_w_gradients_reach_facts_and_physical_head_but_not_s_typed_values() -> None:
     torch.manual_seed(374)
     top = _object_top()
     facts, _ = top.grounder(_local_facts(cameras=2))
@@ -3397,38 +3518,37 @@ def test_s_typed_world_and_coarse_action_gradients_have_distinct_owners() -> Non
     )
     assert coarse_typed_grads == (None, None)
 
-    world_dock = intent.world_dock()
-    independent_common = world_dock.typed_common_value.detach().clone().requires_grad_(True)
-    independent_residual = (
-        world_dock.typed_interval_residual_value.detach().clone().requires_grad_(True)
-    )
-    independent_world_dock = replace(
-        world_dock,
-        typed_common_value=independent_common,
-        typed_interval_residual_value=independent_residual,
-    )
-    generic, common, residual, _ = top.dynamics._base(
+    independent_semantic = facts.semantic.detach().clone().requires_grad_(True)
+    independent_facts = replace(
         facts,
-        independent_world_dock,
-        coarse,
+        semantic=independent_semantic,
+    )
+    physical = _physical_action_condition(coarse.action_prediction)
+    generic, common, residual, _ = top.dynamics._base(
+        independent_facts,
+        physical,
         collect_diagnostics=False,
     )
-    common_grad, residual_grad, action_grad = torch.autograd.grad(
+    semantic_grad, action_prediction_grad, s_common_grad, s_residual_grad = (
+        torch.autograd.grad(
         (
             generic.float().square().mean()
             + common.float().square().mean()
             + residual.float().square().mean()
         ),
         (
-            independent_common,
-            independent_residual,
-            coarse.tokens,
+            independent_semantic,
+            coarse.action_prediction,
+            intent.typed_common_value,
+            intent.typed_interval_residual_value,
         ),
         allow_unused=True,
+        )
     )
-    assert common_grad is not None and common_grad.abs().sum() > 0
-    assert residual_grad is not None and residual_grad.abs().sum() > 0
-    assert action_grad is not None and action_grad.abs().sum() > 0
+    assert semantic_grad is not None and semantic_grad.abs().sum() > 0
+    assert action_prediction_grad is not None and action_prediction_grad.abs().sum() > 0
+    assert s_common_grad is None
+    assert s_residual_grad is None
 
 
 def test_s03_keeps_future_owner_supervision_outside_online_intent() -> None:
@@ -3507,27 +3627,21 @@ def test_w_semantic_and_appearance_have_fixed_nonalias_roles() -> None:
 
     _, w1, _ = top.dynamics.forward_w1(
         facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
+        action=_physical_action_condition(coarse.action_prediction),
         collect_diagnostics=False,
     )
     dynamics, _ = top.dynamics.forward_w2(
         facts=facts,
-        intent=intent.world_dock(),
-        action=coarse,
         w1_state=w1,
         collect_diagnostics=False,
     )
     _, relabeled_w1, _ = relabeled_top.dynamics.forward_w1(
         facts=relabeled_facts,
-        intent=relabeled_intent.world_dock(),
-        action=relabeled_coarse,
+        action=_physical_action_condition(relabeled_coarse.action_prediction),
         collect_diagnostics=False,
     )
     relabeled_dynamics, _ = relabeled_top.dynamics.forward_w2(
         facts=relabeled_facts,
-        intent=relabeled_intent.world_dock(),
-        action=relabeled_coarse,
         w1_state=relabeled_w1,
         collect_diagnostics=False,
     )
@@ -3561,7 +3675,7 @@ def test_public_intent_match_cannot_train_optional_typed_relevance() -> None:
     assert top.intent.typed_temperature_logit.grad is None
 
 
-def test_coarse_action_and_w_have_no_raw_typed_fact_reread() -> None:
+def test_w_has_no_goal_s_or_coarse_hidden_reread() -> None:
     top = _object_top()
     for name in (
         "semantic_read",
@@ -3572,10 +3686,21 @@ def test_coarse_action_and_w_have_no_raw_typed_fact_reread() -> None:
         assert not hasattr(top.coarse_action, name)
     assert not hasattr(top.dynamics, "typed_router")
     source = inspect.getsource(type(top.dynamics)._base)
-    for forbidden in ("facts.semantic", "facts.appearance", "facts.geometry"):
+    for forbidden in (
+        "protected_goal",
+        "public_interval_carrier",
+        "typed_common_value",
+        "typed_interval_residual_value",
+        "action.tokens",
+    ):
         assert forbidden not in source
-    assert "intent.typed_common_value" in source
-    assert "intent.typed_interval_residual_value" in source
+    for required in (
+        "facts.semantic",
+        "facts.appearance",
+        "facts.geometry",
+        "action.fingerprint",
+    ):
+        assert required in source
 
 
 def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None:
@@ -3587,13 +3712,18 @@ def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     horizon, basis, hidden = 24, 2, 32
     p1_fact = torch.randn(1, horizon, basis, hidden)
     deployment = DeploymentTopCache(
+        belief=context.facts.world_belief(),
         intent=context.intent,
-        predicted_dynamics=FutureObjectDynamics.neutral(context.facts),
+        candidate_world=CandidateWorld(
+            action_condition=context.action_condition,
+            dynamics=FutureObjectDynamics.neutral(context.facts),
+        ),
     )
     action_query = torch.randn(1, horizon, basis, hidden)
     compiled, _ = top.compile_policy(
@@ -3623,8 +3753,9 @@ def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None
     )
     identity_only_compiled, _ = top.compile_policy(
         DeploymentTopCache(
+            belief=context.facts.world_belief(),
             intent=identity_only_intent,
-            predicted_dynamics=deployment.predicted_dynamics,
+            candidate_world=deployment.candidate_world,
         ),
         p1_state=_p1_state(p1_fact),
         action_query=action_query,
@@ -3661,6 +3792,7 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     factual = torch.randn(1, 24, 2, 32)
@@ -3788,6 +3920,7 @@ def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass(
         goal_mask=torch.ones(1, 6, dtype=torch.bool),
         state_history=torch.randn(1, 3, 7),
         state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
         executed_history=torch.randn(1, 3, 7),
     )
     horizon, basis, hidden = 24, 2, 32
@@ -3965,6 +4098,7 @@ def test_deployment_cache_has_no_source_or_training_charts() -> None:
         "role_table",
     }
     assert {field.name for field in fields(DeploymentTopCache)} == {
+        "belief",
         "intent",
-        "predicted_dynamics",
+        "candidate_world",
     }

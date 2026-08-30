@@ -75,6 +75,68 @@ def causal_event_trajectory_mask(event_mask: Tensor) -> Tensor:
     return event_mask.to(dtype=torch.float32).cumsum(dim=1).clamp(max=1.0)
 
 
+def event_transition_persistence_masks(
+    event_mask: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Split event transitions from non-event persistence rows.
+
+    An event row owns the local state change. Rows after the latest event own
+    persistence until another event resets the segment. The two masks are
+    disjoint, and a no-event trajectory is algebraically zero in both owners.
+    """
+
+    if event_mask.ndim != 2:
+        raise ValueError("gripper trajectory event mask must be [B,T]")
+    event = (event_mask > 0).to(dtype=torch.float32)
+    after_or_event = torch.cummax(event, dim=1).values
+    persistence = (after_or_event - event).clamp(0.0, 1.0)
+    return event, persistence
+
+
+def anchored_gripper_persistence(
+    absolute: Tensor,
+    local_delta: Tensor,
+    event_mask: Tensor,
+) -> Tensor:
+    """Reconstruct post-event segments without pre-event delta leakage.
+
+    The latest event's absolute prediction is the segment anchor. Only deltas
+    strictly after that event are accumulated, so persistence supervision can
+    never send a gradient into a pre-event delta row. A later event resets the
+    anchor and gives repeated open/close transitions independent ownership.
+    """
+
+    if absolute.ndim != 3 or int(absolute.shape[-1]) != 1:
+        raise ValueError("gripper absolute trajectory must be [B,T,1]")
+    if tuple(local_delta.shape) != tuple(absolute.shape):
+        raise ValueError("gripper local delta must align with absolute trajectory")
+    if tuple(event_mask.shape) != tuple(absolute.shape[:2]):
+        raise ValueError("gripper event mask must align with trajectory rows")
+    batch, horizon = event_mask.shape
+    row = torch.arange(horizon, device=event_mask.device, dtype=torch.long)[None]
+    latest = torch.where(
+        event_mask > 0,
+        row.expand(batch, -1),
+        torch.full(
+            (batch, horizon),
+            -1,
+            device=event_mask.device,
+            dtype=torch.long,
+        ),
+    )
+    latest = torch.cummax(latest, dim=1).values
+    gather = latest.clamp_min(0)[..., None]
+    anchor = absolute.gather(1, gather)
+    prefix = torch.cumsum(local_delta, dim=1)
+    prefix_at_event = prefix.gather(1, gather)
+    reconstructed = anchor + prefix - prefix_at_event
+    return torch.where(
+        (latest >= 0)[..., None],
+        reconstructed,
+        torch.zeros_like(reconstructed),
+    )
+
+
 def sample_flow_matching(
     target: Tensor,
     *,
@@ -1013,30 +1075,68 @@ def action_terms(
     physical_delta_consistency = (physical_delta_rows * step_weight).mean()
     clean_parts = codec.split(clean_physical)
     clean_gripper_absolute = clean_parts.gripper_field[..., :1]
-    clean_gripper_cumulative = (
-        history.action_state[:, None, -1:].float()
-        + torch.cumsum(clean_parts.gripper_field[..., 1:2], dim=1)
+    clean_gripper_local_delta = clean_parts.gripper_field[..., 1:2]
+    clean_gripper_cumulative = anchored_gripper_persistence(
+        clean_gripper_absolute,
+        clean_gripper_local_delta,
+        event_mask,
     )
     continuous_gripper_target = target.normalized[..., -1:].float()
+    continuous_gripper_target_delta = delta[..., -1:].detach().float()
+    transition_mask, persistence_mask = event_transition_persistence_masks(
+        event_mask
+    )
     event_and_after_mask = causal_event_trajectory_mask(event_mask)
-    trajectory_weight = event_and_after_mask * step_weight
-    trajectory_denominator = trajectory_weight.sum().clamp_min(1.0)
-    gripper_trajectory_absolute_rows = F.smooth_l1_loss(
+    transition_weight = transition_mask * step_weight
+    persistence_weight = persistence_mask * step_weight
+
+    def owned_trajectory_mean(rows: Tensor, weight: Tensor) -> Tensor:
+        numerator = (rows * weight).sum()
+        denominator = weight.sum()
+        return torch.where(
+            denominator > 0.0,
+            numerator / denominator.clamp_min(1.0),
+            numerator * 0.0,
+        )
+
+    transition_absolute_rows = F.smooth_l1_loss(
         clean_gripper_absolute,
         continuous_gripper_target,
         reduction="none",
     )[..., 0]
-    gripper_trajectory_delta_rows = F.smooth_l1_loss(
+    transition_delta_rows = F.smooth_l1_loss(
+        clean_gripper_local_delta,
+        continuous_gripper_target_delta,
+        reduction="none",
+    )[..., 0]
+    persistence_absolute_rows = transition_absolute_rows
+    persistence_delta_rows = F.smooth_l1_loss(
         clean_gripper_cumulative,
         continuous_gripper_target,
         reduction="none",
     )[..., 0]
-    gripper_trajectory_absolute = (
-        gripper_trajectory_absolute_rows * trajectory_weight
-    ).sum() / trajectory_denominator
-    gripper_trajectory_delta = (
-        gripper_trajectory_delta_rows * trajectory_weight
-    ).sum() / trajectory_denominator
+    gripper_transition_absolute = owned_trajectory_mean(
+        transition_absolute_rows,
+        transition_weight,
+    )
+    gripper_transition_delta = owned_trajectory_mean(
+        transition_delta_rows,
+        transition_weight,
+    )
+    gripper_persistence_absolute = owned_trajectory_mean(
+        persistence_absolute_rows,
+        persistence_weight,
+    )
+    gripper_persistence_delta = owned_trajectory_mean(
+        persistence_delta_rows,
+        persistence_weight,
+    )
+    gripper_trajectory_absolute = 0.5 * (
+        gripper_transition_absolute + gripper_persistence_absolute
+    )
+    gripper_trajectory_delta = 0.5 * (
+        gripper_transition_delta + gripper_persistence_delta
+    )
     gripper_trajectory = 0.5 * (
         gripper_trajectory_absolute + gripper_trajectory_delta
     )
@@ -1166,10 +1266,28 @@ def action_terms(
                 "gripper_trajectory_mask_fraction": event_and_after_mask.detach()
                 .float()
                 .mean(),
+                "gripper_trajectory_transition_mask_fraction": transition_mask.detach()
+                .float()
+                .mean(),
+                "gripper_trajectory_persistence_mask_fraction": persistence_mask.detach()
+                .float()
+                .mean(),
                 "gripper_trajectory_absolute_loss": (
                     gripper_trajectory_absolute.detach()
                 ),
                 "gripper_trajectory_delta_loss": gripper_trajectory_delta.detach(),
+                "gripper_trajectory_transition_absolute_loss": (
+                    gripper_transition_absolute.detach()
+                ),
+                "gripper_trajectory_transition_delta_loss": (
+                    gripper_transition_delta.detach()
+                ),
+                "gripper_trajectory_persistence_absolute_loss": (
+                    gripper_persistence_absolute.detach()
+                ),
+                "gripper_trajectory_persistence_delta_loss": (
+                    gripper_persistence_delta.detach()
+                ),
                 "gripper_trajectory_branch_disagreement_rms": (
                     clean_gripper_absolute.detach().float()
                     - clean_gripper_cumulative.detach().float()
@@ -1272,6 +1390,14 @@ def action_terms(
         "gripper_trajectory_absolute": gripper_trajectory_absolute.detach(),
         "gripper_trajectory_delta": gripper_trajectory_delta.detach(),
         "gripper_trajectory_mask_fraction": event_and_after_mask.detach().mean(),
+        "gripper_trajectory_transition": (
+            0.5 * (gripper_transition_absolute + gripper_transition_delta)
+        ).detach(),
+        "gripper_trajectory_persistence": (
+            0.5 * (gripper_persistence_absolute + gripper_persistence_delta)
+        ).detach(),
+        "gripper_trajectory_transition_mask_fraction": transition_mask.detach().mean(),
+        "gripper_trajectory_persistence_mask_fraction": persistence_mask.detach().mean(),
         "motion": motion,
         "motion_precision": motion_precision,
         "motion_recall": motion_recall,
@@ -1464,9 +1590,11 @@ __all__ = [
     "FlowMatchingState",
     "LossLedger",
     "action_terms",
+    "anchored_gripper_persistence",
     "balanced_event_row_weights",
     "causal_event_trajectory_mask",
     "compose_losses",
+    "event_transition_persistence_masks",
     "execution_value_terms",
     "flow_geometry_terms",
     "future_dynamics_terms",

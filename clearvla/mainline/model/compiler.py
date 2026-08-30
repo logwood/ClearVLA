@@ -15,7 +15,13 @@ from .routing import (
     register_gradient_rms_metric,
     smooth_rms_contract,
 )
-from .types import FutureObjectDynamics, PolicyIntentDock, normalized_entropy
+from .types import (
+    CandidateWorld,
+    FutureObjectDynamics,
+    PhysicalActionCondition,
+    PolicyIntentDock,
+    normalized_entropy,
+)
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1029,44 @@ class ObjectFutureEffectReader(nn.Module):
         if not collect_diagnostics:
             return value, {}
         return value, {**spatial_metrics, **terminal_metrics}
+
+    def forward_candidate(
+        self,
+        action_query: Tensor,
+        candidate_world: CandidateWorld,
+        intent: PolicyIntentDock,
+        *,
+        action_condition: PhysicalActionCondition,
+        collect_diagnostics: bool,
+    ) -> tuple[ObjectTypedEffect, dict[str, Tensor]]:
+        """Consume an explicitly action-tagged world at the P2 boundary."""
+
+        if action_condition is not candidate_world.action_condition:
+            raise ValueError(
+                "P2 refused a candidate world with a stale action fingerprint"
+            )
+        candidate_world.validate(action_dim=action_condition.action_dim)
+        candidate_world.assert_action_identity(action_condition)
+        # Route through ``__call__`` so ordinary module hooks continue to see
+        # the exact P2 query used by the live consumer.  Calling ``forward``
+        # directly would bypass the source-backed ingress probe.
+        effect, metrics = self(
+            action_query,
+            candidate_world.dynamics,
+            intent,
+            collect_diagnostics=collect_diagnostics,
+        )
+        if collect_diagnostics:
+            metrics = {
+                **metrics,
+                "object_p2_candidate_world_action_identity_error": action_query.new_zeros(
+                    (), dtype=torch.float32
+                ),
+                "object_p2_candidate_world_tagged": action_query.new_ones(
+                    (), dtype=torch.float32
+                ),
+            }
+        return effect, metrics
 
 
 class ZeroPreservingObjectConsequence(nn.Module):

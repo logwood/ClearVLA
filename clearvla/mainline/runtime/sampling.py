@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from torch import Tensor
@@ -10,6 +10,7 @@ from torch import Tensor
 from ..config import ExperimentConfig
 from ..interfaces import OnlinePolicyInput
 from ..model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
+from ..model.types import PhysicalActionCondition
 from .numerics import resolve_compute_dtype
 
 
@@ -116,6 +117,175 @@ def _integrate_cache(
     )
 
 
+def refine_cached_world(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    proposal_action: Tensor,
+    config: ExperimentConfig,
+    *,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+) -> tuple[OnlinePolicyCache, dict[str, Tensor]]:
+    """Re-materialize W once for the decoded outer proposal.
+
+    The first deployment pass produces a concrete 24-row native proposal.
+    This helper converts that proposal to the canonical four-interval action
+    ABI and rebuilds only W from the cached compact belief.  G, S, P1 and all
+    dense source charts remain untouched.  Callers can then run a second
+    integration with the same initial noise, making the refinement explicit
+    without rerunning W at every ODE node.
+    """
+
+    config.validate()
+    cache.validate(config)
+    if proposal_action.ndim != 3 or tuple(proposal_action.shape[1:]) != (
+        config.dimensions.action_horizon,
+        config.dimensions.action_dim,
+    ):
+        raise ValueError("outer proposal action must be [B,24,7]")
+    if int(proposal_action.shape[0]) != cache.history.batch:
+        raise ValueError("outer proposal action batch does not align with cache")
+    runtime_dtype = resolve_compute_dtype(config, dtype)
+    action_condition = PhysicalActionCondition.from_horizon_action(
+        proposal_action.to(device=cache.history.action_state.device),
+        cache.history.action_state,
+    )
+    device = cache.history.state.device
+    autocast_enabled = device.type in {"cuda", "cpu"} and runtime_dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    with torch.autocast(
+        device_type=device.type,
+        dtype=runtime_dtype,
+        enabled=autocast_enabled,
+    ):
+        refined_top, metrics = model.top.refine_deployment_world(
+            cache.top,
+            action_condition=action_condition,
+            collect_diagnostics=collect_diagnostics,
+        )
+    refined_cache = replace(cache, top=refined_top)
+    refined_cache.validate(config)
+    return refined_cache, metrics
+
+
+@torch.no_grad()
+def sample_refined_cached_action_with_cache(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None = None,
+    initial_physical_noise: Tensor | None = None,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+) -> tuple[SamplingResult, OnlinePolicyCache]:
+    """Run one proposal pass, one W rerun, and one refined pass.
+
+    This is the Schema28 deployment surface.  ``sample_cached_action`` remains
+    the single-pass primitive so matched ablations can hold the world cache
+    fixed; normal deployment and validation use this explicit outer closure.
+    """
+
+    config.validate()
+    runtime_dtype = resolve_compute_dtype(config, dtype)
+    model.eval()
+    proposal = _integrate_cache(
+        model,
+        cache,
+        config,
+        generator=generator,
+        initial_physical_noise=initial_physical_noise,
+        collect_diagnostics=False,
+        dtype=runtime_dtype,
+    )
+    refined_cache, refinement_metrics = refine_cached_world(
+        model,
+        cache,
+        proposal.action,
+        config,
+        collect_diagnostics=collect_diagnostics,
+        dtype=runtime_dtype,
+    )
+    refined = _integrate_cache(
+        model,
+        refined_cache,
+        config,
+        generator=None,
+        initial_physical_noise=proposal.initial_physical_noise,
+        collect_diagnostics=collect_diagnostics,
+        dtype=runtime_dtype,
+    )
+    proposal_action = proposal.action.detach().float()
+    refined_action = refined.action.detach().float()
+    # The second ODE pass is intentionally bounded to one outer refinement.
+    # Its final decoded action can therefore move away from the action that
+    # conditioned the cached W.  Project the final 24-row action through the
+    # same deterministic four-interval ABI and expose that residual instead
+    # of silently claiming fixed-point closure.
+    final_world_condition = PhysicalActionCondition.from_horizon_action(
+        refined_action,
+        cache.history.action_state,
+    )
+    refined_world_condition = refined_cache.top.action_condition
+    final_interval = final_world_condition.interval_action.detach().float()
+    final_delta = final_world_condition.interval_delta.detach().float()
+    refined_interval = refined_world_condition.interval_action.detach().float()
+    refined_delta = refined_world_condition.interval_delta.detach().float()
+    outer_metrics = {
+        **refinement_metrics,
+        "sampling_outer_world_refinement": refined.action.new_ones(
+            (), dtype=torch.float32
+        ),
+        "sampling_outer_proposal_action_rms": proposal_action.square().mean().sqrt(),
+        "sampling_outer_refined_action_rms": refined_action.square().mean().sqrt(),
+        "sampling_outer_refined_action_delta_rms": (
+            refined_action - proposal_action
+        ).square().mean().sqrt(),
+        "sampling_outer_final_world_action_interval_rms": final_interval.square()
+        .mean()
+        .sqrt(),
+        "sampling_outer_final_world_action_delta_rms": final_delta.square().mean().sqrt(),
+        "sampling_outer_final_world_action_interval_mismatch_rms": (
+            final_interval - refined_interval
+        ).square()
+        .mean()
+        .sqrt(),
+        "sampling_outer_final_world_action_delta_mismatch_rms": (
+            final_delta - refined_delta
+        ).square()
+        .mean()
+        .sqrt(),
+    }
+    return replace(refined, metrics={**refined.metrics, **outer_metrics}), refined_cache
+
+
+@torch.no_grad()
+def sample_refined_cached_action(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None = None,
+    initial_physical_noise: Tensor | None = None,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+) -> SamplingResult:
+    """Run the bounded outer closure and return only its final sample."""
+
+    result, _ = sample_refined_cached_action_with_cache(
+        model,
+        cache,
+        config,
+        generator=generator,
+        initial_physical_noise=initial_physical_noise,
+        collect_diagnostics=collect_diagnostics,
+        dtype=dtype,
+    )
+    return result
+
+
 @torch.no_grad()
 def sample_action(
     model: ClearVLAMainlinePolicy,
@@ -150,7 +320,9 @@ def sample_action(
     # High-resolution source charts are required only while G and P1 are
     # materialized.  They are deliberately not retained across ODE steps.
     del training_state
-    return _integrate_cache(
+    # Keep the static encoding metrics on the final result while performing
+    # the bounded outer proposal -> W -> correction closure.
+    result = sample_refined_cached_action(
         model,
         cache,
         config,
@@ -158,9 +330,8 @@ def sample_action(
         initial_physical_noise=initial_physical_noise,
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
-        static_metrics=static_metrics,
-        execution_mode="learned",
     )
+    return replace(result, metrics={**static_metrics, **result.metrics})
 
 
 @torch.no_grad()
@@ -228,6 +399,9 @@ def deployment_cache(
 __all__ = [
     "SamplingResult",
     "deployment_cache",
+    "refine_cached_world",
     "sample_action",
     "sample_cached_action",
+    "sample_refined_cached_action",
+    "sample_refined_cached_action_with_cache",
 ]

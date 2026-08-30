@@ -30,6 +30,7 @@ from .top import CompiledPolicyState, ObjectIntentDynamicsTop, OnlineTopContext
 from .transition import ControlledTransitionDynamics
 from .types import (
     ActionIntentDock,
+    CandidateWorld,
     CoarseActionIntentState,
     CompletedP1PolicyState,
     ControlledTransitionState,
@@ -43,14 +44,16 @@ from .types import (
     ObjectFactSet,
     ObjectIntentState,
     ObjectTopTrainingTargets,
+    ObjectWorldBelief,
     P2QueryDock,
+    PhysicalActionCondition,
     PolicyIntentDock,
     StatelessIntentBundle,
-    WorldIntentDock,
 )
 
 __all__ = [
     "ActionIntentDock",
+    "CandidateWorld",
     "BottomOutput",
     "BottomDecoderOutput",
     "ClearVLAMainlinePolicy",
@@ -74,6 +77,7 @@ __all__ = [
     "ObjectConsequenceState",
     "FactualPrecisionDock",
     "ObjectFactSet",
+    "ObjectWorldBelief",
     "ObjectFutureDynamicsCompiler",
     "ObjectFutureEffectReader",
     "ObjectIntentState",
@@ -83,6 +87,7 @@ __all__ = [
     "ObjectTypedEffect",
     "ObjectTopTrainingTargets",
     "ObjectW1WorkingState",
+    "PhysicalActionCondition",
     "ObservationEvidence",
     "OnlinePolicyCache",
     "OnlineTopContext",
@@ -91,7 +96,6 @@ __all__ = [
     "PolicyStepOutput",
     "PolicyIntentDock",
     "StatelessIntentBundle",
-    "WorldIntentDock",
     "ObjectFutureTeacher",
     "StatelessObjectIntentOrganizer",
     "ZeroPreservingObjectConsequence",

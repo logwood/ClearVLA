@@ -195,6 +195,16 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_execution_ablation_coverage": 0.05,
         "validation_execution_full_capacity_mse_gain_vs_primary_physical": -0.02,
         "object_p2_effect_postcontract_rms": 0.3,
+        "validation_deploy_sampling_outer_world_refinement": 1.0,
+        "validation_deploy_sampling_outer_proposal_action_rms": 0.31,
+        "validation_deploy_sampling_outer_refined_action_rms": 0.32,
+        "validation_deploy_sampling_outer_refined_action_delta_rms": 0.04,
+        "validation_deploy_object_action_world_refinement_count": 1.0,
+        "validation_deploy_object_action_world_refinement_action_interval_delta_rms": 0.05,
+        "validation_deploy_object_action_world_refinement_semantic_delta_change_rms": 0.06,
+        "validation_deploy_object_action_world_refinement_transport_change_rms": 0.07,
+        "validation_deploy_sampling_outer_final_world_action_interval_mismatch_rms": 0.08,
+        "validation_deploy_sampling_outer_final_world_action_delta_mismatch_rms": 0.09,
     }
     validation_line = JsonlRunLogger.compact_line(
         "val", epoch=1, batch=None, step=100, metrics=validation
@@ -219,6 +229,15 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     assert "validation_proposal_ablation_coverage=0.1" in validation_details
     assert "validation_execution_ablation_coverage=0.05" in validation_details
     assert "object_p2_effect_postcontract_rms=0.3" in validation_details
+    assert "[mainline-val-closure]" in validation_details
+    assert (
+        "validation_deploy_sampling_outer_final_world_action_interval_mismatch_rms=0.08"
+        in validation_details
+    )
+    assert (
+        "validation_deploy_sampling_outer_final_world_action_delta_mismatch_rms=0.09"
+        in validation_details
+    )
     assert "validation_gripper_band_13_24_rmse_physical=0.19" in validation_details
     assert "validation_gripper_post_event_7_plus_rmse_physical=0.21" in validation_details
     assert "validation_gripper_post_event_rows_7_plus=24" in validation_details

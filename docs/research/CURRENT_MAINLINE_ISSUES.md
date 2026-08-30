@@ -1,88 +1,118 @@
 # ClearVLA 当前纯问题账本
 
-更新：2026-08-29
+更新：2026-08-31
 
-本文件只保留当前仍未由行为证据关闭的问题。已采用的图和数值边界见
-[`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)；
-来源、反向路径和实现假设见
-[`auxiliary/SCHEMA25_R2_SOURCE_DERIVED_IMPROVEMENT_PLAN.md`](auxiliary/SCHEMA25_R2_SOURCE_DERIVED_IMPROVEMENT_PLAN.md)。
-B-spline 与 MIP 仍是互相独立的 auxiliary 候选，不属于本轮问题修复。
+本文件只保留 Schema28 尚未由行为证据关闭的问题。已采用的图、动作 ABI、
+运行频率和检查点身份见
+[`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)。
+实现来源与回滚边界保留在相应 auxiliary 审计中，不在这里复制历史方案。
 
 ## 当前证据边界
 
-- 行为参考：V120 `long`，提交
+- 行为参考仍是 V120 `long`，提交
   `0b92d359a2889a0a1b1eba256007c00ccbc54f3c`。
-- 当前行为样本：Schema26，提交
-  `33708a4ef3dfbf15ffd0ae9483527fa6c30d0ea9`；日志包含 447 个训练窗口、
-  64 个 finite spike、三个完整 epoch 和 epoch-4 batch 360，没有 epoch-4
-  validation。
-- 当前源码：Schema27。它只修复 typed W 的归一化边界；public/generic W、
-  参数、state key、optimizer、RNG、loss 与运行频率不变。focused source/
-  identity/gradient tests 210/210 已通过；production-dimension CPU BF16 单
-  batch 与 retained five-step deployment 已通过，CUDA behavior 尚未运行。
-- 因而 Schema26 日志可以判定问题与方向，不能证明 Schema27 已改善任务性能
-  或 spike。
+- 最新完整度较高的行为样本仍是 Schema26：三个完整 validation 加
+  epoch-4 batch 360；它不能证明 Schema27 或 Schema28 的行为。
+- Schema27 只完成了本地 source/CPU BF16 验证，没有 CUDA behavior run。
+- 当前源码为 Schema28。它实现的是一次有界
+  `proposal -> W(proposal) -> refined action`，不是 fixed point、跨控制周期
+  belief loop 或机器人环境闭环。
 
-## P0：finite gradient spike 明显增多，但尚未唯一判因
+## P0：一次 outer refinement 是否真正产生有用而非陈旧的后果修正
 
-Schema26 有 64 次 spike，最大 global preclip `435.04`；R2 为 15 次、最大
-`16.10`。owner 分布为 observation `target_dino_key` 23 次、observation flow
-`delta_head` 13 次、gripper delta 13 次、arm head 9 次，其余 6 次。
+Schema28 已经从结构上关闭以下旧缺口：W 只读显式物理动作条件，goal/S/coarse
+hidden 不再进入 W；CandidateWorld 与动作条件原子绑定；validation/deployment
+使用同一初始噪声跑 proposal 和 refined 两遍 ODE。
 
-源码确认 typed W 的普通 LayerNorm 会把低至 `4.55e-4` 的 interval 输入扩成
-约 `.3` 量级状态，并允许接近 `316` 的局部归一化增益。这是一个独立成立的
-结构错误，Schema27 已把 typed-only gain 限为 `4`；但 R2 也拥有旧算子且 spike
-更少，所以不能宣称它解释全部 observation spike。
+仍未知的是行为必要性。第二遍最终动作可以再次偏离用于 W 重算的 proposal，
+因此 `final_world_action_*_mismatch_rms` 是必须观察的 residual，而不是应被强制
+归零的 loss。
 
 ### 关闭条件
 
-- Schema27 fresh smoke 与正式训练保持 finite；
-- normalization denominator 不低于 `.25`、logged gain 不高于 `4`；
-- observation spike 次数/幅度显著回到 R2/Schema26 可接受区间，或通过相同
-  checkpoint、相同 batch 的 per-loss VJP 找到另一条明确来源；
-- 不以新增 clip、loss quota 或降低学习率掩盖来源。
+- CUDA smoke 中 refinement count、tag identity、pre/post action、semantic、
+  transport 和 final mismatch 全部存在且 finite；
+- 后果敏感样本上，正确 CandidateWorld 优于 wrong-action/wrong-world 对照；
+- refined action 相对 proposal 的变化不只是公共偏移，并且不能靠 aggregate
+  RMSE 掩盖 arm、gripper 或 tail 退化；
+- 若 final mismatch 持续与 proposal-to-refined change 同量级，本版只能判为
+  一次 correction，不能声称自洽闭环。
 
-## P1：Schema26 的 gripper 改善伴随 arm 落后
+## P0：W 与 ControlledTransition 仍是两个未统一的动力学责任
 
-Schema26 epoch 1/2/3 的 full/arm/gripper physical RMSE 为：
+W 现在拥有 `ObjectWorldBelief + PhysicalActionCondition -> CandidateWorld`，但
+`ControlledTransition` 仍在每个 ODE 节点读取 noisy action、consequence 和 P1
+residual，并直接进入 Bottom。Schema28 没有把它映射到 W 的对象 future，也没有
+增加一致性目标。
 
-```text
-.0921 / .0729 / .1658
-.0919 / .0702 / .1721
-.0856 / .0656 / .1593
-```
+### 关闭条件
 
-相对 R2 epoch 3，gripper 从 `.1759` 改善到 `.1593`，arm 则从 `.0621` 退到
-`.0656`。tail/first 从 `2.39` 增到 `4.49`，仍有明显长程误差。当前日志不含
-epoch 4 validation，不能判断这是暂时平台还是后续反弹。
+- matched W/P2/ControlledTransition 干预明确各自的动作责任；
+- 仅保留 ControlledTransition 不能在后果敏感切片上解释全部行为；
+- 后续实现必须先给出 object/time 轴上的同义映射，不能靠额外 gain、loss quota
+  或强行删除 P1 来制造依赖。
 
-### 当前处理
+## P1：gripper transition/persistence 修正不能以 arm 或 tail 为代价
 
-- 不回滚连续 gripper trajectory，也不新增 event gate；
-- 下一次对照必须同时看 arm、三个 horizon band、两条 gripper branch、
-  post-event bins 与 decoded-event ratio；
-- 只有完整八轮才能判断 Schema27 是否保留 gripper 收益而恢复 arm。
+Schema26 的 gripper physical RMSE 到 epoch 3 改善为 `.1593`，但 arm 为 `.0656`，
+落后于 R2 epoch 3 的 `.0621`；tail/first 仍高。Schema28 将事件行 transition 与
+事件间 persistence 分离，并在每次事件重新锚定，修复了旧累计 delta 可跨事件和
+前事件泄漏的问题，但尚无 CUDA 行为证据。
 
-## P2：geometry 仍弱，需先经过新的 W 数值边界再判
+### 关闭条件
 
-Schema26 epoch 1/2/3 的 W2 transport/Teacher 约为
-`.0196/.0792`、`.0187/.0761`、`.0217/.0822`；P2 geometry/semantic effect 约为
-`.00985/.0829`、`.00897/.1077`、`.00780/.1160`。geometry address correction
-确实到达 action，但作用仍接近零。
+- 同时报告 absolute/delta branch、transition/persistence loss、post-event
+  `1-2 / 3-6 / 7+`、decoded event ratio/F1；
+- gripper 改善不能伴随 arm、first、tail 或远端 band 明显回退；
+- 不用 event gate、类别头或新权重掩盖连续物理场问题。
 
-当前源码审计没有发现 P2 metric floor、covariance `I+covariance`、transport
-value projection 或 spatial-to-terminal 中的第二个 inverse-small normalization。
-因此先修 W typed amplitude semantics。若 Schema27 中 W transport 与 geometry
-effect 仍弱，才重新打开 transport head/objective 责任边界；在此之前不加 gain、
-quota、hard interval mask 或 geometry loss 权重。
+## P1：capacity 的 BF16 exact-one 死区需要运行时证据
 
-## 当前放行阻塞
+Schema28 保留原控制器与 schedule，只让 capacity head 和插值在 FP32 到达
+contraction。源码和单测能证明 near-one 差异不被 BF16 直接舍入，但不能证明
+训练后 controller/capacity 对任务有用。
 
-Schema27 只有完成以下项目后才能视为主线候选：
+### 关闭条件
 
-1. fresh CUDA BF16 smoke，batch-eight process peak 不超过 22 GiB；
-2. 完整八个 epoch，与 R2、Schema26 和 V120 比较，而不是只选 best epoch；
-3. typed norm denominator/gain/RMS ratio 与 W-only ingress VJP 全程 finite；
-4. spike、arm、gripper、近/中/远程没有通过相互牺牲制造 aggregate 改善；
-5. geometry 是否继续处理，只由 Schema27 的 W/Teacher、P2 causal effect 和任务
-   指标共同决定。
+- CUDA 中 capacity 不长期精确等于 1，non-expansive violation 保持零；
+- capacity/operator-basis 梯度在 execution warmup 后 finite 且非长期零；
+- matched `full_capacity` 和 `three_basis_reduction` action delta 有覆盖，解释时
+  与 execution policy、有效 basis mass 和任务误差一起看。
+
+## P1：spike 来源、geometry 与远端 W 仍未由 Schema28 关闭
+
+Schema26 的 64 次 finite spike 显著多于 R2 的 15 次，最大 global preclip 为
+`435.04`。Schema27 修复了 typed normalization 的一个确定性放大边界，但没有
+CUDA 结果。Schema28 又改变了 W 输入责任，因此旧日志只能给风险先验。
+
+geometry value/action effect 与 W2 transport 是否恢复，也必须在新的显式动作条件
+下重测；不能把 Schema26 的弱幅度直接外推到 Schema28。
+
+### 关闭条件
+
+- 完整记录 spike owner、parameter、L2/max-abs、batch offset 与 global preclip；
+- W physical-action VJP、G typed fact VJP、W2/Teacher transport、P2 semantic/
+  geometry effect 和 matched intervention 同时存在；
+- 若 spike 或 geometry 仍异常，再用同 checkpoint/same batch 的 per-loss VJP
+  判因，不先调 gain、clip、LR 或 objective weight。
+
+## P2：null/confidence、时间因果、persistent belief 和新观测反馈尚未实现
+
+Schema28 没有引入 P2 对象/interval null、future confidence、可重建 48-step
+动作时间结构、跨控制周期 track identity、birth/death/occlusion、执行前缀或
+Observation(t+1) belief update。当前 K=4 仍是单次 observation 内的全局对象槽。
+
+这些是后续主线问题，但不应被伪造为本轮已完成字段，也不应在没有真实 consumer
+时先加入 checkpoint 状态或日志占位。
+
+## 当前放行门槛
+
+1. 本地完整 mainline/auditor suite、py_compile、ruff、diff check、生产维度 CPU
+   BF16 单 batch 与双遍部署均通过；
+2. fresh CUDA BF16 smoke 验证双遍 ODE、一次 W 重算、same-noise、finite residual、
+   capacity 与显存；
+3. smoke 审计通过后才启动 fresh batch-eight 正式训练；
+4. batch-2200 做第一次同数据/normalizer/seed 合同的健康比较；
+5. 完整八轮同时比较 V120、R2、Schema26、Schema27，不挑 best epoch；
+6. 任何“闭环完成”结论都必须明确限定为一次 action-world correction，直到
+   ControlledTransition、persistent belief 和新观测反馈真正关闭。

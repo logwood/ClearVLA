@@ -16,11 +16,13 @@ config / manifest / typed online and training inputs
   -> G1/G2/G3 progressive local grounding with an N=49 rematerialization
   -> one dense global K+null grounding objective
   -> S public interval carrier + per-type [interval,K,type] relevance
-  -> W1/W2 four-interval future object dynamics
+  -> typed-free coarse physical proposal [B,4,7]
+  -> goal-invariant W(ObjectWorldBelief, PhysicalActionCondition)
+  -> action-tagged four-interval CandidateWorld
   -> P1 one cached protected-detail read over all progressive candidates
   -> per-ODE V120 P1 policy block
   -> P2 bounded consequence read
-  -> P3 five V120 typed lanes
+  -> P3 temporal/state-change optional lanes plus protected carriers
   -> shared V120 action/context canvas seed
   -> true P1/P2 terminal layer contracts
   -> per-ODE noisy-action controlled transition
@@ -72,36 +74,46 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        27
+schema:        28
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 26 and older are not exact-resume sources for schema 27. Formal runs
+Schema 27 and older are not exact-resume sources for schema 28. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
-Schema27 changes only the typed S-to-W numerical operator. Public/generic W
-keeps its inherited LayerNorm values, while typed object/interval/FFN and the
-typed W1-to-W2 read use the existing parameter-free `0.25` variance floor.
-This bounds the normalization Jacobian at `4`, preserves exact-zero and small
-relevance amplitude, and adds no parameter, state key, buffer or RNG draw.
+Schema28 keeps Schema27's bounded typed W normalization but changes W's
+ownership. W reads only a compact current object belief plus the normalized
+physical action interval means and their adjacent deltas. Goal, S values and
+coarse hidden tokens are absent from its API. P2 consumes an atomic
+CandidateWorld whose action-condition identity must match the current cache.
+
+Deployment and validation use one bounded outer correction: a complete ODE
+proposal pass, one W rebuild from the decoded 24-row proposal, then a second
+complete ODE pass from identical initial noise. The final action may differ
+from the action that conditioned W, so interval/delta mismatch is logged as a
+residual and is not labeled a fixed point. Training still builds W once.
+
+The same schema reanchors continuous gripper persistence after every target
+event and keeps near-one capacity control in FP32 through contraction. It adds
+no event gate, capacity quota, new loss weight or extra clipping stage.
 
 ## Runtime contract
 
-- Observation/G/S/W, P1's N=49 detail read and the 512-row transition source
-  build once per observation.
-- The shared action/context seed, compact P1 policy block, P2/P3, two terminal
-  layer contracts, the action-conditioned transition and bottom run on every
-  ODE step.
-- Five action updates use times `[0,.2,.4,.6,.8]`. One additional full dynamic
-  forward at `t=1` supplies the retained motion head and cannot update the
-  action. Decoded gripper events are evaluation-only behavior of the integrated
-  physical action; there is no event classifier in runtime.
+- Observation/G/S, P1's N=49 detail read and the 512-row transition source
+  build once per observation. Initial W builds once and only W is rebuilt once
+  between the two deployment passes.
+- In each pass the shared seed, dynamic P1, P2/P3, terminal contracts,
+  ControlledTransition and bottom run at `[0,.2,.4,.6,.8]`; `t=1` supplies the
+  retained motion head and cannot update action.
+- Both passes share exact initial physical noise. Decoded gripper events are
+  evaluation-only behavior of the second integrated physical action; there is
+  no event classifier in runtime.
 - Execution candidate/value charts are mandatory for every train/eval loss
   forward, even after the optional diagnostic-batch budget is exhausted; they
-  stay disabled during ordinary five-step deployment sampling.
+  stay disabled during both ordinary deployment ODE passes.
 - Teacher builds once per training batch and zero times in deployment.
 - P1 retains N=49 until each action/object query chooses a candidate; chunks
   are checkpointed rather than materializing the complete backward graph.
@@ -121,17 +133,19 @@ T5:            /data/senwang/checkpoint/grasp_pen_embed.pt
 Smoke:
 
 ```bash
+RUN_TAG=schema28_action_world_smoke_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema27_w_typed_norm_smoke \
-nohup bash scripts/smoke_mainline.sh > schema27_w_typed_norm_smoke.log 2>&1 &
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 ```
 
 Formal batch-eight run:
 
 ```bash
+RUN_TAG=schema28_action_world_b8_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/schema27_w_typed_norm_b8 \
-nohup bash scripts/train_mainline.sh > schema27_w_typed_norm_b8.log 2>&1 &
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -143,7 +157,7 @@ Audit the complete result rather than a best checkpoint:
 
 ```bash
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema27_w_typed_norm_b8 \
+  runs/schema28_action_world_b8 \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text
@@ -152,7 +166,8 @@ uv run python -m clearvla.tools.audit_policy_logs \
 ## Release gates
 
 - full finite forward/backward and unique optimizer ownership;
-- teacher isolation and five-step deployment call-frequency checks;
+- teacher isolation, two matched ODE passes and one W-rebuild frequency checks;
+- physical-action/goal invariance, stale-world rejection and final-residual checks;
 - typed axis, object permutation, P2 bounds and neutral consequence checks;
 - fresh CUDA BF16 smoke and batch-eight memory measurement;
 - complete eight-epoch comparison against V120, including action/native,

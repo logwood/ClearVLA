@@ -1,5 +1,6 @@
 from dataclasses import fields, replace
 
+import pytest
 import torch
 
 import clearvla.mainline.model.types as model_types
@@ -68,6 +69,7 @@ def _context(top: ObjectIntentDynamicsTop, batch: int = 2) -> OnlineTopContext:
         goal_mask=torch.ones(batch, 6, dtype=torch.bool),
         state_history=torch.randn(batch, 3, 7),
         state=torch.randn(batch, 7),
+        action_state=torch.randn(batch, 7),
         executed_history=torch.randn(batch, 3, 7),
     )
     return context
@@ -75,8 +77,46 @@ def _context(top: ObjectIntentDynamicsTop, batch: int = 2) -> OnlineTopContext:
 
 def test_online_context_has_prediction_but_no_teacher_or_future_target() -> None:
     names = {field.name for field in fields(OnlineTopContext)}
-    assert names == {"facts", "intent", "coarse_action", "predicted_dynamics"}
+    assert names == {
+        "facts",
+        "intent",
+        "coarse_action",
+        "candidate_world",
+    }
     assert not names & {"teacher", "teacher_dynamics", "future_supports", "future_target"}
+
+
+def test_action_condition_and_candidate_world_remain_one_cache_pair() -> None:
+    top = _top()
+    context = _context(top)
+    deployment = context.deployment_cache()
+    assert deployment.action_condition is context.action_condition
+    assert deployment.predicted_dynamics is context.predicted_dynamics
+    assert deployment.candidate_world is context.candidate_world
+    assert context.action_condition.interval_action is context.coarse_action.action_prediction
+
+    copied_condition = replace(
+        context.action_condition,
+        interval_action=context.action_condition.interval_action.clone(),
+    )
+    copied_world = replace(
+        context.candidate_world,
+        action_condition=copied_condition,
+    )
+    copied = replace(context, candidate_world=copied_world)
+    with pytest.raises(ValueError, match="exact proposal tensor"):
+        copied.validate(hidden=top.hidden, horizon=top.horizon)
+
+    # The deployment cache has one atomic world field; callers cannot retag a
+    # separately stored action while retaining the old dynamics.
+    with pytest.raises(TypeError):
+        replace(deployment, action_condition=copied_condition)
+
+
+def test_retired_world_intent_dock_cannot_reconnect_s_or_goal_to_w() -> None:
+    context = _context(_top())
+    assert not hasattr(model_types, "WorldIntentDock")
+    assert not hasattr(context.intent, "world_dock")
 
 
 def test_teacher_replacement_cannot_change_online_context() -> None:
@@ -109,6 +149,48 @@ def test_teacher_replacement_cannot_change_online_context() -> None:
     assert not torch.equal(
         target_a.teacher_dynamics.successor_content,
         target_b.teacher_dynamics.successor_content,
+    )
+
+
+def test_coarse_training_target_matches_runtime_24_row_action_projection() -> None:
+    torch.manual_seed(9)
+    top = _top()
+    context = _context(top)
+    supports = torch.randn(2, 12, 2, 2, 2, 16)
+    offsets = torch.tensor(
+        [4, 6, 8, 10, 12, 16, 20, 24, 32, 38, 44, 48]
+    )[None].expand(2, -1)
+    future_action = torch.arange(2 * 48 * 7, dtype=torch.float32).reshape(2, 48, 7)
+    future_state = torch.randn(2, 48, 7)
+    captured: dict[str, model_types.CoarseActionIntentState] = {}
+
+    def capture_supervised(_module, _args, output):
+        if output.target is not None:
+            captured["coarse"] = output
+
+    handle = top.coarse_action.register_forward_hook(capture_supervised)
+    try:
+        top.build_training_targets(
+            context,
+            future_supports=supports,
+            future_offsets=offsets,
+            future_action=future_action,
+            future_state=future_state,
+        )
+    finally:
+        handle.remove()
+
+    supervised = captured["coarse"]
+    assert supervised.target is not None
+    runtime_condition = model_types.PhysicalActionCondition.from_horizon_action(
+        future_action[:, : top.horizon],
+        context.action_condition.current_action,
+    )
+    torch.testing.assert_close(
+        supervised.target,
+        runtime_condition.interval_action,
+        atol=0.0,
+        rtol=0.0,
     )
 
 

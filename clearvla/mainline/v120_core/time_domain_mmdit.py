@@ -990,13 +990,20 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
     def _execution_capacity(self, learned: Tensor | None) -> Tensor:
         if learned is None:
             return torch.ones((), device=self.execution_progress.device, dtype=torch.float32)
+        learned_fp32 = learned.float()
         if not self.training and self._execution_capacity_override is not None:
             return torch.full_like(
-                learned,
+                learned_fp32,
                 float(self._execution_capacity_override),
             ).clamp(0.0, 1.0)
-        progress = self.execution_progress.to(device=learned.device, dtype=learned.dtype)
-        return 1.0 - progress * (1.0 - learned.clamp(0.0, 1.0))
+        progress = self.execution_progress.to(
+            device=learned.device,
+            dtype=torch.float32,
+        )
+        # Preserve 1-capacity in FP32 until the contraction constructs its
+        # non-identity update. Casting this interpolation back to BF16 would
+        # recreate the exact-one dead zone even though the head itself is FP32.
+        return 1.0 - progress * (1.0 - learned_fp32.clamp(0.0, 1.0))
 
     def set_execution_eval_ablation(
         self,
@@ -1438,13 +1445,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             owned_input = action.index_select(0, rows)
             if self.operator_capacity_enabled:
                 capacity = (
-                    torch.ones(int(rows.numel()), device=action.device, dtype=action.dtype)
+                    torch.ones(
+                        int(rows.numel()),
+                        device=action.device,
+                        dtype=torch.float32,
+                    )
                     if capacity_ratios is None
                     else (
                         capacity_ratios.index_select(0, rows)
                         if capacity_ratios.ndim == 1
                         else capacity_ratios.index_select(0, rows)[:, owner]
-                    ).to(dtype=action.dtype)
+                    ).float()
                 )
             else:
                 capacity = None

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -13,13 +12,14 @@ from torch import Tensor, nn
 from .routing import (
     VarianceFlooredCenteredNorm,
     register_gradient_axis_rms_metrics,
+    register_gradient_rms_metric,
     smooth_rms_contract,
 )
 from .types import (
-    CoarseActionIntentState,
     FutureObjectDynamics,
     ObjectFactSet,
-    WorldIntentDock,
+    ObjectWorldBelief,
+    PhysicalActionCondition,
 )
 
 
@@ -268,6 +268,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         hidden: int,
         content_dim: int,
         route_dim: int,
+        action_dim: int = 7,
         heads: int,
         normalization_floor: float = 0.25,
     ) -> None:
@@ -282,11 +283,34 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
         self.object_transport_prior = nn.Linear(2, hidden, bias=False)
-        self.goal_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.goal_memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.goal_read = nn.MultiheadAttention(
-            hidden, heads, bias=False, dropout=0.0, batch_first=True
+        # Retire the old goal attention without shifting any retained W/P2/
+        # bottom initialization.  The replacement physical projection uses a
+        # seed-derived sidecar stream, while the main construction stream
+        # advances exactly as it did through the historical MHA.
+        removed_goal_read = nn.MultiheadAttention(
+            hidden,
+            heads,
+            bias=False,
+            dropout=0.0,
+            batch_first=True,
         )
+        del removed_goal_read
+        retained_rng_state = torch.get_rng_state()
+        sidecar_generator = torch.Generator(device="cpu")
+        sidecar_generator.manual_seed(
+            (int(torch.initial_seed()) ^ 0x5343483238) % (2**63 - 1)
+        )
+        # This is the sole W action ingress.  Its input is the lossless
+        # [absolute, adjacent-delta] view of the normalized seven-dimensional
+        # physical proposal; no coarse hidden coordinate or goal/S carrier is
+        # accepted by the compiler API.
+        try:
+            torch.set_rng_state(sidecar_generator.get_state())
+            self.physical_action_condition = nn.Linear(
+                2 * int(action_dim), hidden, bias=False
+            )
+        finally:
+            torch.set_rng_state(retained_rng_state)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
         self.w1 = _ObjectIntervalBlock(
             hidden,
@@ -426,86 +450,76 @@ class ObjectFutureDynamicsCompiler(nn.Module):
 
     def _base(
         self,
-        facts: ObjectFactSet,
-        intent: WorldIntentDock,
-        action: CoarseActionIntentState,
+        facts: ObjectFactSet | ObjectWorldBelief,
+        action: PhysicalActionCondition,
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
-        """Build typed-free conditions and the two typed owner coordinates."""
+        """Build a goal-invariant object transition from one physical action."""
 
-        intent.validate(hidden=self.hidden)
+        facts.validate()
+        action.validate(action_dim=int(self.physical_action_condition.in_features // 2))
         objects = self.object_content(facts.content)
         transport_prior = self.object_transport_prior(
             facts.transport_prior.to(dtype=facts.content.dtype)
         )
-        interval = (
-            intent.public_interval_carrier
-            + action.tokens
-            + self.interval_identity.to(
-                device=objects.device,
-                dtype=objects.dtype,
-            )[:, :, 0]
-        )
-        normalized_goal = self.goal_memory_norm(intent.protected_goal_memory)
-        goal_update, goal_attention = self.goal_read(
-            self.goal_query_norm(interval),
-            normalized_goal,
-            normalized_goal,
-            need_weights=collect_diagnostics,
-            average_attn_weights=True,
-        )
-        base = (
-            objects[:, None]
-            + transport_prior[:, None]
-            + interval[:, :, None]
-            + goal_update[:, :, None]
-        )
-        # These identity views are consumed only by W.  Their hooks therefore
-        # separate the W ingress VJP from the same S tensors' legal P2/P3
-        # consumers without adding a detach, value operation or persistent
-        # observer.
-        typed_common_source = intent.typed_common_value
-        typed_interval_source = intent.typed_interval_residual_value
+        action_source = action.fingerprint.to(dtype=objects.dtype)
         gradient_metrics: dict[str, Tensor] = {}
         if collect_diagnostics:
-            typed_common_source = typed_common_source.reshape_as(
-                typed_common_source
-            )
-            typed_interval_source = typed_interval_source.reshape_as(
-                typed_interval_source
-            )
-            register_gradient_axis_rms_metrics(
-                typed_common_source,
+            action_source = action_source.reshape_as(action_source)
+            register_gradient_rms_metric(
+                action_source,
                 gradient_metrics,
-                (
-                    "gradient_tensor_w_semantic_common_ingress_rms",
-                    "gradient_tensor_w_appearance_common_ingress_rms",
-                    "gradient_tensor_w_geometry_common_ingress_rms",
-                ),
-                dim=-2,
+                "gradient_tensor_w_physical_action_condition_rms",
             )
-            register_gradient_axis_rms_metrics(
-                typed_interval_source,
-                gradient_metrics,
-                (
-                    "gradient_tensor_w_semantic_interval_ingress_rms",
-                    "gradient_tensor_w_appearance_interval_ingress_rms",
-                    "gradient_tensor_w_geometry_interval_ingress_rms",
-                ),
-                dim=-2,
-            )
+        action_carrier, _ = smooth_rms_contract(
+            self.physical_action_condition(action_source),
+            0.35,
+        )
+        interval = action_carrier + self.interval_identity.to(
+            device=objects.device,
+            dtype=objects.dtype,
+        )[:, :, 0]
+        base = objects[:, None] + transport_prior[:, None] + interval[:, :, None]
+
+        # W owns physical evolution for every current object.  Goal relevance
+        # belongs to P2's evaluator, so typed W owners come directly from G's
+        # goal-free facts.  The interval coordinate is a zero-mean,
+        # zero-preserving modulation of the same physical owner; it cannot
+        # create a typed value from a missing fact.
+        typed_sources = (
+            facts.semantic * facts.validity.to(dtype=facts.semantic.dtype),
+            facts.appearance * facts.validity.to(dtype=facts.appearance.dtype),
+            facts.geometry * facts.validity.to(dtype=facts.geometry.dtype),
+        )
+        typed_source_views: list[Tensor] = []
+        if collect_diagnostics:
+            for source, name in zip(typed_sources, self.TYPE_NAMES, strict=True):
+                view = source.reshape_as(source)
+                register_gradient_rms_metric(
+                    view,
+                    gradient_metrics,
+                    f"gradient_tensor_w_{name}_fact_ingress_rms",
+                )
+                typed_source_views.append(view)
+        else:
+            typed_source_views.extend(typed_sources)
         common_components: list[Tensor] = []
         interval_components: list[Tensor] = []
-        for type_index, projection in enumerate(
-            (self.object_semantic, self.object_appearance, self.object_geometry)
+        for source, projection in zip(
+            typed_source_views,
+            (self.object_semantic, self.object_appearance, self.object_geometry),
+            strict=True,
         ):
             common, _ = smooth_rms_contract(
-                projection(typed_common_source[..., type_index, :]),
+                projection(source),
                 0.35,
             )
+            interval_raw = common[:, None] * torch.tanh(
+                action_carrier[:, :, None]
+            )
             innovation, _ = smooth_rms_contract(
-                projection(typed_interval_source[..., type_index, :]),
+                interval_raw,
                 0.35,
             )
             common_components.append(common)
@@ -514,22 +528,31 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         typed_interval = torch.stack(interval_components, dim=3)
         if not collect_diagnostics:
             return base, typed_common, typed_interval, {}
-        if goal_attention is None:
-            goal_attention = interval.new_zeros(
-                interval.shape[0],
-                interval.shape[1],
-                intent.protected_goal_memory.shape[1],
-            )
         metrics: dict[str, Tensor] = {
             **gradient_metrics,
-            "object_w_goal_attention_entropy": (
-                -(
-                    goal_attention.detach().float().clamp_min(1.0e-8)
-                    * goal_attention.detach().float().clamp_min(1.0e-8).log()
-                ).sum(dim=-1)
-                / math.log(float(max(int(goal_attention.shape[-1]), 2)))
-            ).mean(),
-            "object_w_goal_innovation_rms": goal_update.detach().float().square().mean().sqrt(),
+            "object_w_goal_direct_ingress": interval.new_zeros((), dtype=torch.float32),
+            "object_w_coarse_hidden_direct_ingress": interval.new_zeros(
+                (), dtype=torch.float32
+            ),
+            "object_w_physical_action_condition_rms": action.interval_action.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_physical_action_delta_rms": action.interval_delta.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_physical_action_interval_variation": action.interval_action.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_w_physical_action_carrier_rms": action_carrier.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_w_typed_common_input_rms": typed_common.detach().float().square().mean().sqrt(),
             "object_w_typed_interval_input_rms": typed_interval.detach()
             .float()
@@ -544,17 +567,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             metrics[f"object_w_{name}_interval_contribution_rms"] = (
                 innovation.square().mean().sqrt()
             )
-            metrics[f"object_w_{name}_common_input_relevance_mass"] = (
-                intent.typed_common_mass[..., type_index, 0].detach().float().mean()
-            )
-            metrics[f"object_w_{name}_interval_input_relevance_mass"] = (
-                intent.typed_interval_residual_mass[..., type_index, 0].detach().float().mean()
-            )
+            metrics[f"object_w_{name}_fact_input_rms"] = typed_source_views[
+                type_index
+            ].detach().float().square().mean().sqrt()
         return base, typed_common, typed_interval, metrics
 
     def _camera_geometry_carrier(
         self,
-        facts: ObjectFactSet,
+        facts: ObjectFactSet | ObjectWorldBelief,
         typed_geometry: Tensor,
     ) -> Tensor:
         """Condition geometry independently on each observed camera motion."""
@@ -585,7 +605,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _field_with_diagnostics(
         self,
         *,
-        facts: ObjectFactSet,
+        facts: ObjectFactSet | ObjectWorldBelief,
         typed_common: Tensor,
         typed_interval_innovation: Tensor,
         diagnostic_prefix: str | None = None,
@@ -695,7 +715,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _field(
         self,
         *,
-        facts: ObjectFactSet,
+        facts: ObjectFactSet | ObjectWorldBelief,
         typed_common: Tensor,
         typed_interval_innovation: Tensor,
     ) -> FutureObjectDynamics:
@@ -728,13 +748,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def forward_w1(
         self,
         *,
-        facts: ObjectFactSet,
-        intent: WorldIntentDock,
-        action: CoarseActionIntentState,
+        facts: ObjectFactSet | ObjectWorldBelief,
+        action: PhysicalActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
         base, raw_common, raw_interval, base_metrics = self._base(
-            facts, intent, action, collect_diagnostics=collect_diagnostics
+            facts, action, collect_diagnostics=collect_diagnostics
         )
         near = self.w1(base[:, :2], causal_interval=True)
         common_batch, common_norm_metrics = self._run_typed_block(
@@ -815,13 +834,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def forward_w2(
         self,
         *,
-        facts: ObjectFactSet,
-        intent: WorldIntentDock,
-        action: CoarseActionIntentState,
+        facts: ObjectFactSet | ObjectWorldBelief,
         w1_state: ObjectW1WorkingState,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
-        del intent, action
         if tuple(w1_state.near.shape[1:3]) != (2, facts.objects) or tuple(
             w1_state.far_base.shape[1:3]
         ) != (2, facts.objects):

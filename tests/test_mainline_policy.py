@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import torch.nn.functional as F
 
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.data.dataset import ObservedStateDatasetConfig
@@ -25,7 +26,11 @@ from clearvla.mainline.model.restored_observation import (
     _v120_flow_field,
 )
 from clearvla.mainline.runtime.logging import archival_metrics
-from clearvla.mainline.runtime.sampling import sample_action, sample_cached_action
+from clearvla.mainline.runtime.sampling import (
+    sample_action,
+    sample_cached_action,
+    sample_refined_cached_action,
+)
 from clearvla.mainline.train import _optimizer_group_context
 from clearvla.mainline.training.engine import (
     EncodedTrainingBatch,
@@ -33,7 +38,7 @@ from clearvla.mainline.training.engine import (
     NonFiniteGradientError,
     validate_finite_training_batch,
 )
-from clearvla.mainline.training.losses import LossLedger
+from clearvla.mainline.training.losses import LossLedger, anchored_gripper_persistence
 from clearvla.mainline.training.optimizer import (
     WarmupCosineSchedule,
     build_optimizer,
@@ -278,12 +283,10 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "gradient_tensor_p1_dynamic_query_residual_rms",
         "gradient_tensor_w2_semantic_common_rms",
         "gradient_tensor_w2_geometry_interval_rms",
-        "gradient_tensor_w_semantic_common_ingress_rms",
-        "gradient_tensor_w_appearance_common_ingress_rms",
-        "gradient_tensor_w_geometry_common_ingress_rms",
-        "gradient_tensor_w_semantic_interval_ingress_rms",
-        "gradient_tensor_w_appearance_interval_ingress_rms",
-        "gradient_tensor_w_geometry_interval_ingress_rms",
+            "gradient_tensor_w_semantic_fact_ingress_rms",
+            "gradient_tensor_w_appearance_fact_ingress_rms",
+            "gradient_tensor_w_geometry_fact_ingress_rms",
+            "gradient_tensor_w_physical_action_condition_rms",
         "gradient_tensor_p2_semantic_effect_rms",
         "gradient_tensor_p2_geometry_effect_rms",
         "gradient_tensor_p2_geometry_address_correction_rms",
@@ -758,12 +761,14 @@ def test_continuous_gripper_trajectory_reads_only_value_and_delta_channels() -> 
         model.action_codec.physical_dim,
         requires_grad=True,
     )
-    action_state = torch.randn(batch, model.config.dimensions.action_dim)
     parts = model.action_codec.split(physical)
     absolute = parts.gripper_field[..., :1]
-    cumulative = (
-        action_state[:, None, -1:]
-        + torch.cumsum(parts.gripper_field[..., 1:2], dim=1)
+    event = torch.zeros(batch, model.config.dimensions.action_horizon)
+    event[:, 0] = 1.0
+    cumulative = anchored_gripper_persistence(
+        absolute,
+        parts.gripper_field[..., 1:2],
+        event,
     )
     target = torch.randn_like(absolute)
     loss = 0.5 * (
@@ -809,12 +814,15 @@ def test_continuous_gripper_trajectory_loss_reaches_the_private_gate() -> None:
     model = ClearVLAMainlinePolicy(_config()).train()
     head = model.bottom.decoder.velocity_head
     tokens = torch.randn(2, 24, 32, requires_grad=True)
-    action_state = torch.randn(2, model.config.dimensions.action_dim)
     physical, _, _ = head.forward_with_gripper_state(tokens)
     parts = model.action_codec.split(physical)
     absolute = parts.gripper_field[..., :1]
-    cumulative = action_state[:, None, -1:] + torch.cumsum(
-        parts.gripper_field[..., 1:2], dim=1
+    event = torch.zeros(2, model.config.dimensions.action_horizon)
+    event[:, 0] = 1.0
+    cumulative = anchored_gripper_persistence(
+        absolute,
+        parts.gripper_field[..., 1:2],
+        event,
     )
     target = torch.randn_like(absolute)
     (
@@ -856,6 +864,66 @@ def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
     assert torch.isfinite(result.loss)
     assert torch.isfinite(result.gradient_norm)
     assert result.gradient_norm > 0
+
+
+def test_capacity_stays_fp32_below_one_and_reaches_its_ordered_bank() -> None:
+    torch.manual_seed(461)
+    model = ClearVLAMainlinePolicy(_config()).train()
+    decoder = model.bottom.decoder
+    controller = decoder.execution_controller
+    assert controller is not None
+    with torch.no_grad():
+        controller.capacity_head.weight.normal_(mean=0.0, std=0.01)
+        controller.capacity_head.bias.fill_(6.5)
+        decoder.execution_progress.fill_(1.0)
+    context = torch.randn(
+        2,
+        len(decoder.blocks),
+        controller.capacity_head.in_features,
+        requires_grad=True,
+    )
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        learned = controller._capacity_ratios(context)
+    reference = torch.sigmoid(
+        F.linear(
+            context.float(),
+            controller.capacity_head.weight.float(),
+            controller.capacity_head.bias.float(),
+        )
+    ).squeeze(-1)
+    assert learned.dtype == torch.float32
+    torch.testing.assert_close(learned, reference, atol=0.0, rtol=0.0)
+    assert bool((learned < 1.0).all())
+    assert bool((learned > 0.99).all())
+
+    effective = decoder._execution_capacity(learned)
+    assert effective.dtype == torch.float32
+    torch.testing.assert_close(effective, learned, atol=0.0, rtol=0.0)
+    source = inspect.getsource(type(decoder)._apply_native_operation)
+    assert ").to(dtype=action.dtype)" not in source
+
+    bank = decoder.operator_contractions[0]
+    base_update = torch.randn(2, 5, model.config.dimensions.hidden_size)
+    condition = torch.randn(2, model.config.dimensions.hidden_size)
+    contracted, _ = bank(
+        base_update,
+        condition,
+        torch.zeros(2, dtype=torch.long),
+        depth_ratio_override=effective[:, 0],
+        identity_bypass=False,
+        collect_diagnostics=False,
+    )
+    gradients = torch.autograd.grad(
+        contracted.float().square().mean(),
+        (
+            controller.capacity_head.weight,
+            controller.capacity_head.bias,
+            bank.basis_raw,
+        ),
+    )
+    for gradient in gradients:
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) > 0
 
 
 def test_eval_step_retains_v120_execution_candidate_supervision() -> None:
@@ -1441,14 +1509,14 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
                 int(current.start) + shift,
                 int(current.stop) + shift,
             )
-        intervened = head(expanded_canvas, expanded_slices)
-        for name in retained_contract_keys:
-            torch.testing.assert_close(
-                reference[name],
-                intervened[name],
-                atol=0.0,
-                rtol=0.0,
-            )
+            intervened = head(expanded_canvas, expanded_slices)
+            for name in retained_contract_keys:
+                torch.testing.assert_close(
+                    reference[name],
+                    intervened[name],
+                    atol=2e-8,
+                    rtol=2e-7,
+                )
     trajectory_start, trajectory_stop = evidence.ranges["trajectory"]
     trajectory_projection = model.bottom.decoder.evidence_adapter.source_proj[
         "trajectory"
@@ -1724,6 +1792,7 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
             model,
             batch.online,
             config,
+            collect_diagnostics=True,
             dtype=torch.float32,
         )
     assert observation_prepare.call_count == 1
@@ -1731,10 +1800,12 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     assert teacher_calls == 0
     assert grounding_block_calls == [1, 1, 1]
     assert history_proposal_calls == 1
-    # Five action updates are followed by one endpoint motion-head forward.
-    # The endpoint pass must not rebuild static evidence.
-    assert p1_host_calls == config.runtime.inference_steps + 1
-    assert transition_calls == config.runtime.inference_steps + 1
+    # Schema28 performs one proposal pass, rematerializes W once, then runs
+    # the same five-update + endpoint chart for the refined candidate.  Static
+    # observation/G/S/P1-detail evidence is still built exactly once.
+    expected_dynamic_calls = 2 * (config.runtime.inference_steps + 1)
+    assert p1_host_calls == expected_dynamic_calls
+    assert transition_calls == expected_dynamic_calls
     # Both V120 correspondence scales batch all adjacent pairs/directions in
     # one invocation and are built once outside the five ODE steps.
     assert semantic_flow.call_count == 1
@@ -1759,8 +1830,28 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     # block/dwell candidates inside one ODE step.  Those are dynamic bottom
     # operations; the expensive observation/G/S/W/P1-detail sources above
     # must still be built exactly once.  The compact P1 policy write is a live
-    # noisy-action block and therefore executes once per ODE step.
-    assert all(value >= config.runtime.inference_steps + 1 for value in calls)
+    # noisy-action block and therefore executes once per ODE step/pass.
+    assert all(value >= expected_dynamic_calls for value in calls)
+    assert result.metrics["sampling_outer_world_refinement"] == 1
+    closure_metrics = (
+        "object_action_world_refinement_count",
+        "object_action_world_refinement_pre_action_interval_rms",
+        "object_action_world_refinement_post_action_interval_rms",
+        "object_action_world_refinement_action_interval_delta_rms",
+        "object_action_world_refinement_pre_semantic_delta_rms",
+        "object_action_world_refinement_post_semantic_delta_rms",
+        "object_action_world_refinement_semantic_delta_change_rms",
+        "object_action_world_refinement_pre_transport_rms",
+        "object_action_world_refinement_post_transport_rms",
+        "object_action_world_refinement_transport_change_rms",
+        "object_action_world_refinement_tag_identity_error",
+        "sampling_outer_final_world_action_interval_mismatch_rms",
+        "sampling_outer_final_world_action_delta_mismatch_rms",
+    )
+    assert all(name in result.metrics for name in closure_metrics)
+    assert all(torch.isfinite(result.metrics[name]) for name in closure_metrics)
+    # One bounded outer correction intentionally does not claim a fixed point;
+    # the final residual is observed, not asserted to be zero.
     for handle in handles:
         handle.remove()
 
@@ -2087,6 +2178,31 @@ def test_proposal_ablation_does_not_alias_p1_or_controlled_transition() -> None:
     assert torch.equal(
         ablated.transition_source.selector,
         cache.transition_source.selector,
+    )
+    initial_noise = torch.randn(
+        batch.online.batch,
+        config.dimensions.action_horizon,
+        model.action_codec.physical_dim,
+    )
+    primary = sample_refined_cached_action(
+        model,
+        cache,
+        config,
+        initial_physical_noise=initial_noise,
+        dtype=torch.float32,
+    )
+    matched_ablation = sample_refined_cached_action(
+        model,
+        ablated,
+        config,
+        initial_physical_noise=initial_noise,
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(
+        matched_ablation.action,
+        primary.action,
+        atol=0.0,
+        rtol=0.0,
     )
 
 

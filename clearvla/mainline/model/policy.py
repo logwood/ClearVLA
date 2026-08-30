@@ -282,6 +282,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             goal_mask=conditioned_policy_input.goal.mask,
             state_history=conditioned_policy_input.history.state_history,
             state=conditioned_policy_input.history.state,
+            action_state=conditioned_policy_input.history.action_state,
             executed_history=conditioned_policy_input.history.executed_action_history,
             collect_diagnostics=collect_diagnostics,
         )

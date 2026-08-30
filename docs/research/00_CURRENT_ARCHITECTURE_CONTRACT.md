@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-29
+Updated: 2026-08-31
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        27
+manifest schema:        28
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema26 formal CUDA behavior run observed through epoch 3 plus epoch-4 batch 360; Schema27 typed-only W normalization locally closed with 210/210 mainline/auditor tests, production-dimension CPU BF16 batch and retained five-step deployment; CUDA behavior unrun
+release status:         Schema28 source and local contract implementation complete; 247/247 relevant tests, static checks and production-dimension CPU BF16 train/deployment verification pass; CUDA smoke and behavior unrun
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -32,7 +32,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
 > R1f/P2-01, R1g/P3-01,B-01, LC-01, R1h/N-01,D-01 and the three
 > R2-WG01/P202/GRIP02 structural units, the Schema26 closure and the active
-> Schema27 typed-W numerical boundary below.**
+> Schema27 typed-W numerical boundary and the active Schema28 bounded
+> action-world closure below.**
 > The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -93,7 +94,9 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > most `4`; exact zero/constant stays zero and small typed amplitude remains
 > visible. It adds no parameter, buffer, state key, RNG draw, gain, clip or
 > loss. Schema26 and older checkpoints are not exact-resume sources for
-> Schema27; the next formal run is fresh.
+> Schema27. Schema28 changes the top/bottom/training/runtime ABIs again; all
+> earlier schemas are rejected for exact resume and the next formal run is
+> fresh.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -208,9 +211,55 @@ Schema27 repairs only the typed W numerical chart built on that ownership:
   plus six type/common-or-interval W-ingress VJPs. The ingress hooks observe a
   W-only identity view, so they do not absorb the same S tensor's legal P2/P3
   gradients;
-- W remains cached once per observation. Teacher, losses, optimizer ownership,
-  P2 consumers, deployment call count and checkpoint tensor inventory are
-  unchanged.
+- under Schema27, W remained cached once per observation. Teacher, losses,
+  optimizer ownership, P2 consumers, deployment call count and checkpoint
+  tensor inventory were unchanged.
+
+Schema28 closes the first bounded action-world loop without claiming an
+environment or fixed-point closure:
+
+- `PhysicalActionCondition` is W's only action ABI. It contains normalized
+  physical interval means `[B,4,7]`, the four adjacent deltas anchored at the
+  observed current action, and no proposal hidden coordinate. Both initial
+  training supervision and deployment refinement use the same deterministic
+  projection of a deployable 24-row action prefix: rows `3:8`, `7:16`,
+  `15:24`, and `23:24` in zero-based slice notation;
+- W is now the goal-invariant map
+  `T(ObjectWorldBelief, PhysicalActionCondition)`. It cannot accept goal, an
+  S carrier or `CoarseActionIntent.tokens`. Its typed values come from the
+  compact current G belief; S remains available only to the later P2/P3 goal
+  evaluator;
+- `CandidateWorld` stores the W prediction and the exact action-condition
+  object atomically. P2 rejects any different condition object. This is a
+  Python lineage-identity guard, not a numerical hash and not a promise that
+  separately reconstructed equal tensors share identity;
+- ordinary deployment and validation run one complete proposal ODE pass,
+  rebuild W from that decoded 24-step proposal, then run one complete refined
+  ODE pass from the exact same initial physical noise. G, S, cached factual P1
+  detail and transition source are built once. Training still materializes W
+  once and does not backpropagate through a second deployment sampler;
+- the second pass may move away from the action that conditioned its W.
+  Validation therefore records final interval/delta mismatch as a residual.
+  No zero assertion, convergence claim or fixed-point label is legal;
+- the former S-to-W `WorldIntentDock` and goal-attention reader are absent.
+  The replacement bias-free physical projection is the only new W parameter.
+  Removed initialization draws are consumed and the replacement uses a
+  deterministic side stream so retained/downstream fresh initialization and
+  the post-construction RNG digest remain unchanged;
+- continuous gripper supervision now separates event-row transition from
+  between-event persistence. Every event reanchors the absolute branch and
+  only strictly later local deltas accumulate; pre-event deltas cannot own a
+  later segment. The existing `.03` budget, physical decoder and runtime
+  action field remain unchanged;
+- execution capacity logits and the near-one schedule interpolation remain
+  FP32 through the contraction boundary. This prevents CUDA BF16 from rounding
+  a live capacity to exact one; it changes no schedule, controller ownership,
+  basis count, loss weight or clipping rule.
+
+Schema28 does **not** unify `ControlledTransition` with W, add persistent object
+identity, propagate future null/confidence through P2, execute a robot action,
+read a new observation, update belief, reconstruct all 18 flow coordinates or
+form a fixed point. Those remain explicit later-stage work.
 
 R1e/P1-01 separates the static and dynamic P1 owners without changing their
 producers:
@@ -368,13 +417,27 @@ T5 + observable state/executed-action history + ObjectFactSet
        consumer-specific policy interval context
        24 temporal queries and state-change evidence
 
-ObjectFactSet public content/transport + S-owned WorldIntentDock
-    + causal clean CoarseActionIntent from ActionIntentDock
-    -> W1: typed common once, then 4-8 and 8-16 near innovations
+ActionIntentDock public S context
+    -> causal clean CoarseActionIntent
+    -> normalized physical proposal [B,4,7]
+    -> PhysicalActionCondition
+       absolute interval means + current-anchored adjacent deltas [B,4,14]
+
+compact ObjectWorldBelief from current G + PhysicalActionCondition only
+    -> W1: current typed facts once, then 4-8 and 8-16 near innovations
     -> W2: 16-32 and 32-48 far innovations, read-only over completed W1
     -> semantic FutureObjectDynamics [B,4,K,D]
        plus camera transport/covariance [B,4,K,C,2|3], no predicted status
        copied current observable object/camera probability + log probability
+    -> CandidateWorld(action-condition identity + dynamics)
+
+deployment/validation bounded outer closure
+    -> first complete five-update ODE + endpoint from initial CandidateWorld
+    -> decoded proposal [B,24,7]
+    -> same deterministic 24-to-4 PhysicalActionCondition projection
+    -> rebuild W once from cached ObjectWorldBelief
+    -> second complete five-update ODE + endpoint from identical initial noise
+    -> final action plus explicit world/action interval and delta residuals
 
 completed progressive chart + S + four clean action bases
     -> exact V120 LateRawDetailPolicyReader
@@ -446,7 +509,8 @@ in the shared seed. Generic trajectory/workspace ingress is algebraic neutral;
 protected consequence is written once through its no-null ingress. The raw
 dynamic P1 residual is read separately without a null and joins the two
 independently selected P3 innovations only at the retained optional-ingress
-scale.
+scale. CoarseAction's hidden tokens also do not enter W; only its supervised
+physical `[B,4,7]` head does.
 
 Training-only graph:
 
@@ -456,6 +520,9 @@ future DINO supports
     -> four semantic and camera-resolved FutureObjectDynamics targets
 future action/state + current_loss_support + teacher targets
     -> whole-segment recognizer and auxiliary losses only
+first 24 rows of future action
+    -> same deterministic 24-to-4 projection used by deployment
+    -> CoarseAction physical-head supervision only
 ```
 
 Future evidence is absent from every online/deployment API. Replacing future
@@ -490,18 +557,19 @@ supports may change targets and losses, never deployment action.
    not read frame progress, phase labels, noisy action or future Teacher. Its
    public carrier is supervised separately from optional typed relevance.
    Semantic, appearance and geometry retain real K/type axes, each owns a
-   fixed-zero null comparison, and only `WorldIntentDock` may deliver their
-   common/residual values to W. CoarseAction has no typed field. Factual P1
-   retains only reduced S context; `PolicyIntentDock` exposes the existing
-   typed common/residual metadata solely so P2 can select it with W's spatial
-   posterior after K/C selection authority has already been fixed.
-8. W1 owns typed common exactly once and the two near innovations. W2 may read
+   fixed-zero null comparison. No S or goal value may enter W. CoarseAction
+   has no typed field and only its normalized physical head crosses the W
+   action boundary. Factual P1 retains reduced S context; `PolicyIntentDock`
+   exposes existing typed common/residual metadata solely to P2, after W owns
+   the predicted future values and K/C spatial authority remains explicit.
+8. W accepts only `ObjectWorldBelief + PhysicalActionCondition`. W1 owns
+   current typed common exactly once and the two near innovations. W2 may read
    completed common/near state but writes only the two far innovations. Every
-   public interval is one processed common plus its matching processed
-   innovation. All generic/action/goal/appearance/camera conditions are
-   zero-preserving and cannot synthesize a W value. The only W value below W
-   is directly supervised `FutureObjectDynamics`; no public or private free W
-   carrier crosses into P.
+   interval is one processed current owner plus its matching action-conditioned
+   innovation. Goal, S, proposal hidden, Teacher and noisy ODE action are
+   structurally absent from the W API. The only W value below W is directly
+   supervised `FutureObjectDynamics`; no public or private free W carrier
+   crosses into P.
 9. P1 owns 24 factual queries before action-basis organization, four factual
    glimpse types, the complete N=49 posterior and a real 3x3 microgrid.
    Global-K is not a P1 axis. `FactualPrecisionDock` is a parameter-free
@@ -561,19 +629,29 @@ supports may change targets and losses, never deployment action.
     that state. Arm, four auxiliary gripper coordinates and motion retain the
     base action read. There is no final event classifier or event logit in the
     deployed output. The raw target event threshold is used only to start a
-    continuous training mask; from the first target event onward, the absolute
-    gripper branch and cumulative-delta branch are each regressed against the
-    continuous normalized gripper target. Decoded event precision/recall/F1
-    remains an evaluation of deployed action, never a runtime gate.
+    continuous training mask. Each event row owns continuous absolute and
+    local-delta transition error; rows strictly after that event own
+    persistence until the next event reanchors the segment. No-event samples
+    are exact zero for both owners and pre-event deltas cannot leak into a
+    later segment. Decoded event precision/recall/F1 remains an evaluation of
+    deployed action, never a runtime gate. Capacity logits and the
+    near-identity interpolation remain FP32 until the contraction forms its
+    update; the capacity remains continuous and non-expansive, not hardware
+    rank reduction.
 15. Online boundaries use ordinary autograd. No artificial gradient, hard
     gate, entropy/mass quota, scalar progress loss, forced diversity or forced
     nonzero flow is legal.
 16. Formal training fails without the configured T5 file. Only explicit
     null-goal smoke may omit it.
 17. Fresh runs require an empty output directory. Exact resume verifies
-    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
-    schemas are rejected; explicit compatible bottom-only migration is the
-    only migration path.
+   manifest, source/data/language, model/optimizer/scheduler and RNG. Older
+   schemas are rejected; explicit compatible bottom-only migration is the
+   only migration path.
+18. A `CandidateWorld` and its `PhysicalActionCondition` are one atomic lineage
+    object. P2 may not consume a retagged or stale W. Normal deployment uses
+    exactly one outer W rebuild and identical initial noise across both ODE
+    passes. The final action/world mismatch must be finite and logged; it is
+    not required to be zero and cannot be called a fixed point.
 
 ## Typed boundaries
 
@@ -591,6 +669,10 @@ ObjectFactSet
   typed assignments                                     [B,K,C,8,8,M]
   observed camera coordinates/support/validity           [B,K,C,*]
 
+ObjectWorldBelief
+  compact current content / typed facts / camera geometry [B,K,(C),*]
+  excludes goal, S values, dense chart and training targets
+
 StatelessIntentBundle (serialized compatibility name: ObjectIntentState)
   protected goal/history/public-object tokens
   public / policy interval carriers                      [B,4,H]
@@ -601,9 +683,15 @@ StatelessIntentBundle (serialized compatibility name: ObjectIntentState)
 
 Consumer views
   ActionIntentDock (typed-free public action context)
-  WorldIntentDock (typed common/residual W ingress)
   FactualIntentDock (named reduced factual S context)
   PolicyIntentDock (reduced P3 context plus existing typed P2 metadata)
+
+PhysicalActionCondition
+  normalized physical interval action / adjacent delta   [B,4,7] each
+  observed current action anchor                          [B,7]
+
+CandidateWorld
+  atomic PhysicalActionCondition lineage + FutureObjectDynamics
 
 FutureObjectDynamics
   current reference                                      [B,K,D]
@@ -643,8 +731,8 @@ GripperPrivateState
   consumers: deployed gripper value/delta heads
 
 GripperTrajectoryTrainingBoundary
-  clean absolute branch / cumulative-delta branch          [B,24,1] each
-  target-event-and-after mask                              [B,24]
+  clean absolute / local-delta / reanchored persistence    [B,24,1] each
+  disjoint event-transition / between-event masks          [B,24]
   continuous target                                       [B,24,1]
   consumer: `.03` continuous training loss only; absent at deployment
 ```
@@ -656,10 +744,10 @@ GripperTrajectoryTrainingBoundary
 | G | current DINO/raw history, coordinates, learned flow, current state | T5, action history, proposal, noisy action, Teacher |
 | global grounder | completed G3 chart/typed local candidates; detached current DINO and observed mask for its sole reconstruction loss | S, W, noisy action, future Teacher data |
 | S | T5, state/executed history, typed ObjectFactSet | frame progress, phase label, noisy action, Teacher |
-| W | public ObjectFactSet conditions, existing camera transport prior, S-owned typed common/residual through WorldIntentDock, one typed-free clean coarse action intent | raw typed-fact reread, second typed action path, target/noisy action, proposal, Teacher, predicted status/support, free W value |
+| W | compact current `ObjectWorldBelief`, normalized `PhysicalActionCondition` absolute/delta | goal, any S value, CoarseAction hidden, target/noisy ODE action, Teacher, predicted status/support, free W value |
 | static P1 | completed progressive chart, S, clean action bases | global-K value, W, proposal, Teacher, noisy action/time, second visual read |
 | dynamic P1 | action query, Euler time, cached factual base | vision reopen, W, proposal, Teacher, factual relabeling of its live residual |
-| P2 | exact three-term query, supervised semantic/camera W field, current chart/camera support; S metadata only after W spatial selection | RGB/DINO reopen, predicted status/support, S-owned K/C/time vote, type competition, free W hidden |
+| P2 | exact three-term query, action-tagged `CandidateWorld`, current chart/camera support; S metadata only as evaluator context after W spatial selection | untagged/stale W, RGB/DINO reopen, predicted status/support, S-owned K/C/time value, type competition, free W hidden |
 | P3 | protected consequence carrier, P2 effect/interaction innovation, S temporal/state-change context, noisy-action query; raw dynamic residual only as protected policy precision | complete factual-consequence reprojection, optional factual/static-precision/effect aliases, Teacher, RGB/DINO, proposal, free W carrier, dynamic residual projection into optional lanes |
 | transition source | exact completed G3 rollout view shared with P1 | W target, proposal, noisy action, Teacher |
 | transition dynamic | source, shared V120 seed, protected consequence, raw P1 policy residual, plan | target action, Teacher, future proposal |
@@ -693,17 +781,20 @@ GripperTrajectoryTrainingBoundary
   `0.55/0.15/0.05` semantic/transport/covariance coefficients and outer future
   weight are unchanged. No successor duplicate or status objective remains.
 - The former `.03` categorical event budget is renamed
-  `gripper_trajectory`. Its exact objective is the average of continuous
-  SmoothL1 on the clean absolute and cumulative-delta gripper branches, masked
-  from each sample's first raw-unit target event through row 24. The threshold
-  selects rows only; it does not binarize the target. No event classifier,
-  class boost or focal term remains. All other action, future, flow geometry,
-  intent scaffold, history proposal and execution-value external weights are
-  unchanged from the recovery reference.
+  `gripper_trajectory`. Schema28 keeps that budget but separates two disjoint
+  owners: event rows regress clean absolute and local delta transition, while
+  later rows regress absolute and event-reanchored cumulative-delta
+  persistence until the next event. The threshold selects rows only; it does
+  not binarize the target. No event classifier, class boost or focal term
+  remains. All other action, future, flow geometry, intent scaffold, history
+  proposal and execution-value external weights are unchanged from the
+  recovery reference.
 - The whole-segment recognizer supervises only S's public interval carrier.
-  Typed relevance is trained through future W and the factual/P2/P3/final
-  action paths. The typed-free coarse-action loss does not reach its selector;
-  no public future target, entropy or usage loss directly trains it.
+  S typed relevance is trained through factual/P2/P3/final action paths and no
+  longer supplies W values. The typed-free coarse-action physical head is
+  supervised from the first 24 future rows through the exact deployment
+  24-to-4 projection; its hidden tokens are not a W input. No public future
+  target, entropy or usage loss directly trains S relevance.
 - Every trainable parameter has exactly one optimizer owner. Ordinary bias,
   LayerNorm, top/controller/decoder parameters use AdamW decay 0.01. Only
   explicitly named scale-invariant contraction basis/depth coordinates are
@@ -722,12 +813,17 @@ GripperTrajectoryTrainingBoundary
 
 ## Runtime, identity and inventory
 
-- Observation/G/S/W, exact static P1 and transition source build once per
-  observation.
-- Dynamic P1/P2/P3, transition, layer contracts and bottom run at action-update
-  times `[0,.2,.4,.6,.8]`, then once at `1.0` for the retained motion head.
-  The endpoint call cannot change the integrated action. Decoded gripper events
-  are derived directly from the integrated action during evaluation.
+- Observation/G/S, exact static P1 and transition source build once per
+  observation. Initial W builds once from the clean physical proposal;
+  deployment/validation rebuild only W once from the first decoded proposal.
+- Each of the proposal and refined passes runs dynamic P1/P2/P3, transition,
+  layer contracts and bottom at action-update times `[0,.2,.4,.6,.8]`, then
+  once at `1.0` for the retained motion head. Both passes use identical initial
+  physical noise. The endpoint call cannot change the integrated action.
+  Decoded gripper events come directly from the second integrated action.
+- The ordinary training loss forward materializes W once and runs no outer
+  deployment sampler. A diagnostic validation batch records refinement
+  pre/post/action/world changes plus the nonzero-allowed final mismatch.
 - Teacher builds once per training batch and zero times in deployment.
 - P1 N=49 queries use the V120 query budget/checkpoint configuration.
   Chunked and unchunked outputs and parameter gradients must be equivalent.
@@ -815,19 +911,31 @@ GripperTrajectoryTrainingBoundary
   modules and ephemeral scalar/VJP observers. It therefore retains all
   Schema26 parameter counts, optimizer groups, state-key names, the ordered
   state-key digest and the construction RNG digest exactly.
+  Schema28 removes the bias-free H-wide W goal attention (`in_proj_weight` and
+  `out_proj.weight`, `-1,048,576` parameters at H=512) and adds one bias-free
+  `14 -> H` physical action-condition projection (`+7,168`). The exact net is
+  `-1,041,408` trainable parameters and `-1` parameter/state tensor. Gripper
+  reanchoring and FP32 capacity execution are parameter-free. The active model
+  has `168,417,179` total / `152,046,448` trainable parameters, 1,385 parameter
+  tensors, 1,063 trainable/optimizer tensors, 23 optimizer groups and 1,391
+  state-key names. The ordered state-key-name SHA-256 is
+  `70a8a5be21de40c460de6cff899942d5331837700db289350a0b1920c133b053`.
+  Initialization-only retirement plus the deterministic replacement side
+  stream preserves the post-construction CPU RNG SHA-256
+  `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
 - Active manifest identity:
 
   ```text
-  schema:       27
+  schema:       28
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
-  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_k_typed_relevance_four_interval_w_stage_private_typed_variance_floor_p2_transport_conditioned_semantic_address_physical_value_typed_consequence_plus_two_optional_p3
-  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_gripper_private_continuous_field_no_event_head
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_continuous_post_event_gripper_trajectory_v120_decay_local_global_clip_source_w_ingress_gradient_probes
-  runtime:      cached_observation_progressive_gsw_exact_p1_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_w_typed_norm_metrics
+  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3
+  bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_fp32_capacity_gripper_private_continuous_field_no_event_head
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_physical_w_ingress_gradient_probes
+  runtime:      cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `2aebfa053aaebccf097a27eff3e3c2331ea085f23151a1b0de752099ddc1894f`.
+  `d26bf48ea1391f691662640c63ba17a23e56fd50cff7fab433d36e0af4930528`.
 
 Storage defaults:
 
@@ -841,130 +949,65 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-The Schema27 active-mainline/auditor suite passes 210/210. The last
-Schema26 broad retained suite passed 609/609 after excluding only
-`tests/test_hierarchical_mmdit_action_decoder.py`, whose collection fails on
-an unrelated legacy V39 `_dwell_value_targets` import before any current
-mainline test runs. Tests cover full
-forward/backward, G1/G2/G3 ordering and N=49
-rematerialization, forbidden G conditions, exact P1 axes/microgrid,
-chunked/unchunked P1 output and gradients, Teacher isolation, object/camera
-permutations, per-type S perturbation locality, fixed-zero typed values,
-typed-owner relabeling equivariance, independent detached DINO target,
-observed-cell reconstruction, conditional-K real/null conservation, unique
-exported-content reconstruction and its forward/reverse gradient paths,
-lossless typed common/residual reconstruction and exact source VJP,
-typed-free CoarseAction invariance, the single WorldIntentDock W ingress,
-absence of CoarseAction/W raw-typed rereads and the S future-owner fence,
-single-call W common ownership, near/far causal write isolation,
-zero-preserving appearance/common conditioning, exact camera-axis W geometry,
-FP32 PSD covariance, per-camera Teacher null-identity moments, absence of
-online status ABI, static/dynamic P1 identity separation, exact three-owner P2
-query and reverse VJP, static consequence ownership, raw dynamic transition
-and bottom reachability, exact-zero dynamic bottom ingress, current-support
-exact-zero P2 routing, covariance-sensitive P2 geometry, spatial interval
-preservation, W-owned S selection, no-null per-type physical terminal,
-independent semantic/geometry survival and legal W/S/action reverse paths,
-typed consequence interaction ownership and one parameter-free fusion,
-unique P3 private operands, absence of factual/effect/static-precision aliases,
-lane-local optional null decisions, protected no-null reads, and legal P3/bottom
-reverse paths, absence and intervention invariance of the removed
-layer-contract trajectory branch, retained terminal-adapter reverse paths,
-same-camera Teacher geometry, neutral effect, P2 bounds, zero-preserving
-variance VJPs, BF16-underflow-resistant producer logs, exact-zero legacy prior
-support, all-invalid finite masked terminals, read-only source-gradient hooks,
-pre-clip finite-spike attribution, partial-window gradient ownership, current
-metric vocabulary, P2 action-band/type/interval diagnostic retention,
-diagnostic output/state invariance, evaluation-only P2 value/address
-intervention locality, exact matched-noise/finally orchestration,
-gripper codec-branch reconstruction and continuous trajectory locality,
-gripper horizon bands and exhaustive
-horizon-by-target-event context accounting, a bounded decision-facing console
-backed by the unchanged
-lossless JSONL cadence, endpoint lifecycle, optimizer ownership, three-stage
-gradient logging and checkpoint rejection.
-CPU BF16 validates dtype boundaries, not CUDA memory.
+Historical behavior evidence is still Schema26: three complete validations
+plus epoch-4 batch 360, median `1.809 s/batch`, `12.020 GiB` process peak and
+64 finite spike events. Schema27 passed its local source suite and one
+production-dimension CPU BF16 batch, but never produced CUDA behavior evidence.
+Neither result proves Schema28.
 
-Schema26 additionally guards exact equality of active transport and unweighted
-raw-coordinate loss, detached diagnostic-only normalized/direction audits,
-increasing raw responsibility for larger errors, exact-copy spatial/terminal
-P2 query identity and reverse ownership, zero/no-camera/K-uniform geometry
-address identities, transport-to-semantic-address VJP, true consumed semantic
-and geometry effect VJPs, typed consequence interaction locality, gripper
-zero-state identity/locality, continuous value/delta trajectory-to-gate
-reachability, classifier absence, arm/auxiliary/motion isolation, production
-optimizer ownership and the exact current state-key inventory. P2, W and gripper
-state/projection scalars run only on the existing diagnostic cadence: every
-20th formal training batch and the configured 16 validation batches.
-Activation VJP hooks attach only to ephemeral training-forward tensors; named
-parameter gradients are read after backward and before clipping, so no hook
-accumulates across batches. Execution supervision still computes its
-pre-existing candidate tensors on every training batch, but does not retain the
-new gripper tensor surface outside that cadence. These additions require no
-extra forward, sampling pass or console panel. The offline recovery auditor
-does not require the removed categorical event-head F1 for Schema26; it
-instead requires the continuous gripper objective to be observed and the
-matched P2 intervention surface to have nonzero coverage. A fresh local
-one-batch CPU BF16 forward/backward at the complete production dimensions
-(`H=512`, 256 patches per camera, 169,458,587 parameters) completed in 76.714
-seconds with finite loss `2.58010149` and finite pre-clip gradient `4.8138814`.
-The retained five-update deployment plus endpoint-head guard completed in
-11.802 seconds with finite action/field values. The complete source graph is
-locally closed. The Schema26 formal CUDA run subsequently reached three
-complete validations and epoch-4 batch 360 in the retained snapshot. Its
-median throughput is `1.809 s/batch`, process peak is `12.020 GiB`, and all
-values remain finite. Validation full/arm/gripper physical RMSE is
-`.0921/.0729/.1658`, `.0919/.0702/.1721`, then
-`.0856/.0656/.1593`. Gripper is better than the R2 epoch-3 value `.1759`, but
-arm is already worse than R2's `.0621`; no epoch-4 validation is present.
+Schema28's complete relevant mainline/runtime/auditor selection passes
+`247/247`, with touched-file Ruff, py_compile and diff checks also passing.
+They add explicit checks for:
 
-The same partial run contains 64 finite gradient-spike events versus 15 in R2:
-23 are owned by observation `target_dino_key`, 13 by observation flow
-`delta_head`, 13 by gripper delta, nine by the arm head and six are dispersed.
-The maximum global preclip norm is `435.04`; gripper-owned events remain below
-about `6.54`. These observations motivated the W boundary audit but do not
-prove that W normalization is the sole cause of the observation spikes. A
-same-checkpoint, same-batch per-loss VJP was not available and remains the
-stronger unique-attribution instrument.
+- identical training/runtime 24-to-4 physical action projection;
+- W invariance to goal, S typed values and coarse hidden coordinates;
+- gradients through current G facts and the physical action head only;
+- atomic CandidateWorld action lineage and stale-world rejection at P2;
+- exactly one outer W rebuild, identical initial noise and finite pre/post
+  semantic/transport/action diagnostics;
+- finite final action/world mismatch without asserting a fixed point;
+- event-local gripper transition, reanchored persistence and no pre-event
+  delta leakage;
+- FP32 near-one capacity and retained contraction VJP;
+- matched proposal, P2 and execution validation counterfactual schedules;
+- current manifest/state/optimizer/RNG inventories and checkpoint rejection.
 
-Schema27 locally guards exact-zero/constant behavior, continuous small-signal
-scaling, a normalization Jacobian no greater than `4`, public W exact
-operation identity, typed axes/causal ownership, W-only ingress VJPs, unchanged
-state/optimizer inventory and diagnostic forward invariance. The previous
-Schema26 production-dimension result was rerun on Schema27. One fresh CPU BF16
-batch at `H=512` and 256 patches/camera completed in `80.235 s` with finite
-loss `2.70221353` and finite global preclip norm `5.35621786`. It retained
-`169,458,587 / 153,087,856` total/trainable parameters and 1,064 optimizer
-tensors. The typed normalization denominator/gain were exactly `.25 / 4.0`;
-the BF16 output/input RMS audit was `4.00121` from output cast rounding. Fresh
-zero-initialized semantic/transport heads make the first-batch W-ingress VJPs
-exact zero by contract; later trained rows, not the first batch, decide their
-reachability. The retained five-update Teacher-free deployment guard is part
-of the passing suite. These local guards do not establish CUDA behavior.
+One fresh production-dimension CPU BF16 batch (`H=512`, 256 patches per
+camera) completed in `95.829 s` with finite loss `2.51860929` and finite raw
+pre-clip gradient `3.20619488`. The bounded deployment probe completed in
+`20.383 s`, observed exactly 12 dynamic calls (two copies of five updates plus
+their endpoint heads), two W materializations and one outer W refinement, and
+kept action, physical field and final interval/delta mismatch finite. Capacity
+was exactly one at this first warmup step by schedule; the separate near-one
+FP32 contraction/VJP test covers the post-warmup numerical boundary.
+
+CPU BF16 validates dtype and backward boundaries, not CUDA memory or behavior.
 Production acceptance remains:
 
-- finite CUDA BF16 preflight and five-step deployment before the first update;
+- fresh CUDA BF16 smoke with both ODE passes, one W rebuild and no Teacher in
+  deployment;
+- finite closure residuals, capacity, action, W/P2 and gradient metrics;
 - batch-eight process peak no greater than 22 GiB;
-- aligned batch-2200 early recovery gate against V120;
+- aligned batch-2200 early comparison against V120, R2, Schema26 and Schema27;
 - all eight epochs and final/mean action, native, first/tail, horizon,
-  arm/gripper, event/motion, G/S/W/P and gradient comparisons;
+  arm/gripper, event/motion, G/S/W/P, capacity and gradient comparisons;
 - no late rebound hidden by a best checkpoint.
 
 Use new empty output directories:
 
 ```bash
-RUN_TAG=schema27_w_typed_norm_smoke
+RUN_TAG=schema28_action_world_smoke_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
-RUN_TAG=schema27_w_typed_norm_b8
+RUN_TAG=schema28_action_world_b8_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema27_w_typed_norm_b8 \
+  runs/schema28_action_world_b8_TIMESTAMP \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

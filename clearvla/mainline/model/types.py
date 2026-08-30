@@ -373,6 +373,121 @@ class ObjectFactSet:
             reconstruction_error=self.reconstruction_error,
         )
 
+    def world_belief(self) -> "ObjectWorldBelief":
+        """Export only the current object evidence needed by a W rerun.
+
+        Deployment may perform one outer action-world refinement.  Retaining
+        the complete dense chart in that cache would silently turn a static
+        object belief into a second training/source graph, so this boundary
+        deliberately exports the compact G result consumed by W only.
+        """
+
+        self.validate()
+        return ObjectWorldBelief(
+            content=self.content,
+            semantic=self.semantic,
+            appearance=self.appearance,
+            geometry=self.geometry,
+            camera_coordinates=self.camera_coordinates,
+            camera_transport_prior=self.camera_transport_prior,
+            camera_support=self.camera_support,
+            camera_validity=self.camera_validity,
+            log_camera_validity=self.log_camera_validity,
+            validity=self.validity,
+            log_validity=self.log_validity,
+        )
+
+
+@dataclass(frozen=True)
+class ObjectWorldBelief:
+    """Compact current object belief retained for an outer W refinement.
+
+    This is a single-observation belief view, not a persistent cross-cycle
+    tracker.  It intentionally excludes dense source charts, reconstruction
+    targets and goal/intent values; those owners remain outside the W rerun.
+    """
+
+    content: Tensor  # [B,K,D]
+    semantic: Tensor  # [B,K,R]
+    appearance: Tensor  # [B,K,R]
+    geometry: Tensor  # [B,K,R]
+    camera_coordinates: Tensor  # [B,K,C,2]
+    camera_transport_prior: Tensor  # [B,K,C,2]
+    camera_support: Tensor  # [B,K,C,1]
+    camera_validity: Tensor  # [B,K,C,1]
+    log_camera_validity: Tensor  # [B,K,C,1]
+    validity: Tensor  # [B,K,1]
+    log_validity: Tensor  # [B,K,1]
+
+    @property
+    def batch(self) -> int:
+        return int(self.content.shape[0])
+
+    @property
+    def objects(self) -> int:
+        return int(self.content.shape[1])
+
+    @property
+    def transport_prior(self) -> Tensor:
+        weight = self.camera_validity.float() * self.camera_support.float()
+        return (self.camera_transport_prior.float() * weight).sum(dim=2) / (
+            weight.sum(dim=2).clamp_min(1e-6)
+        )
+
+    def validate(self) -> None:
+        if self.content.ndim != 3:
+            raise ValueError("world belief content must be [B,K,D]")
+        batch, objects = self.content.shape[:2]
+        for name in ("semantic", "appearance", "geometry"):
+            value = getattr(self, name)
+            if value.ndim != 3 or tuple(value.shape[:2]) != (batch, objects):
+                raise ValueError(f"world belief {name} must be [B,K,*]")
+        if self.camera_coordinates.ndim != 4:
+            raise ValueError("world belief camera coordinates must be [B,K,C,2]")
+        cameras = int(self.camera_coordinates.shape[2])
+        _shape(
+            self.camera_coordinates,
+            (batch, objects, cameras, 2),
+            "world belief camera coordinates",
+        )
+        for name in ("camera_transport_prior", "camera_support", "camera_validity", "log_camera_validity"):
+            value = getattr(self, name)
+            expected_width = 2 if name == "camera_transport_prior" else 1
+            _shape(
+                value,
+                (batch, objects, cameras, expected_width),
+                f"world belief {name}",
+            )
+        _shape(self.validity, (batch, objects, 1), "world belief validity")
+        _shape(self.log_validity, (batch, objects, 1), "world belief log validity")
+        if self.camera_validity.dtype != torch.float32:
+            raise TypeError("world belief camera validity must remain FP32")
+        if self.log_camera_validity.dtype != torch.float32:
+            raise TypeError("world belief camera log validity must remain FP32")
+        if self.validity.dtype != torch.float32:
+            raise TypeError("world belief validity must remain FP32")
+        if self.log_validity.dtype != torch.float32:
+            raise TypeError("world belief log validity must remain FP32")
+
+    def permute(self, permutation: Tensor) -> "ObjectWorldBelief":
+        self.validate()
+        if permutation.ndim != 1 or int(permutation.numel()) != self.objects:
+            raise ValueError("world-belief permutation must contain every object")
+        index = permutation.to(device=self.content.device, dtype=torch.long)
+        return ObjectWorldBelief(
+            content=self.content[:, index],
+            semantic=self.semantic[:, index],
+            appearance=self.appearance[:, index],
+            geometry=self.geometry[:, index],
+            camera_coordinates=self.camera_coordinates[:, index],
+            camera_transport_prior=self.camera_transport_prior[:, index],
+            camera_support=self.camera_support[:, index],
+            camera_validity=self.camera_validity[:, index],
+            log_camera_validity=self.log_camera_validity[:, index],
+            validity=self.validity[:, index],
+            log_validity=self.log_validity[:, index],
+        )
+
 
 @dataclass(frozen=True)
 class FactualPrecisionDock:
@@ -485,65 +600,6 @@ class ActionIntentDock:
             self.public_object_memory.shape[0]
         ) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
-
-
-@dataclass(frozen=True)
-class WorldIntentDock:
-    """S-owned relevance boundary consumed by W1/W2 exactly once."""
-
-    protected_goal_memory: Tensor  # [B,G,H]
-    public_interval_carrier: Tensor  # [B,I,H]
-    typed_common_mass: Tensor  # [B,K,type,1]
-    typed_common_value: Tensor  # [B,K,type,R]
-    typed_interval_residual_mass: Tensor  # [B,I,K,type,1]
-    typed_interval_residual_value: Tensor  # [B,I,K,type,R]
-
-    @property
-    def typed_relevance_mass(self) -> Tensor:
-        """Reconstruct the unchanged Schema25 interval relevance mass."""
-
-        return self.typed_common_mass[:, None] + self.typed_interval_residual_mass
-
-    @property
-    def typed_relevance_value(self) -> Tensor:
-        """Reconstruct the unchanged Schema25 interval relevance value."""
-
-        return self.typed_common_value[:, None] + self.typed_interval_residual_value
-
-    def validate(self, *, hidden: int) -> None:
-        batch = int(self.public_interval_carrier.shape[0])
-        _shape(
-            self.public_interval_carrier,
-            (batch, 4, hidden),
-            "world-intent public interval carrier",
-        )
-        _shape(
-            self.protected_goal_memory,
-            (batch, 4, hidden),
-            "world-intent protected goal memory",
-        )
-        if self.typed_common_mass.ndim != 4:
-            raise ValueError("typed common mass must be [B,K,type,1]")
-        if int(self.typed_common_mass.shape[0]) != batch:
-            raise ValueError("typed common mass batch does not align")
-        if tuple(self.typed_common_mass.shape[-2:]) != (3, 1):
-            raise ValueError("typed common mass lost semantic/appearance/geometry")
-        objects = int(self.typed_common_mass.shape[1])
-        _shape(
-            self.typed_interval_residual_mass,
-            (batch, 4, objects, 3, 1),
-            "typed interval residual mass",
-        )
-        if self.typed_common_value.ndim != 4 or tuple(
-            self.typed_common_value.shape[:3]
-        ) != (batch, objects, 3):
-            raise ValueError("typed common value lost object/type identity")
-        route = int(self.typed_common_value.shape[-1])
-        _shape(
-            self.typed_interval_residual_value,
-            (batch, 4, objects, 3, route),
-            "typed interval residual value",
-        )
 
 
 @dataclass(frozen=True)
@@ -662,16 +718,6 @@ class ObjectIntentState:
             public_object_memory=self.object_tokens,
         )
 
-    def world_dock(self) -> WorldIntentDock:
-        return WorldIntentDock(
-            protected_goal_memory=self.protected_goal_set,
-            public_interval_carrier=self.public_interval_carrier,
-            typed_common_mass=self.typed_common_mass,
-            typed_common_value=self.typed_common_value,
-            typed_interval_residual_mass=self.typed_interval_residual_mass,
-            typed_interval_residual_value=self.typed_interval_residual_value,
-        )
-
     def factual_dock(self) -> FactualIntentDock:
         batch = int(self.policy_interval_context.shape[0])
         return FactualIntentDock(
@@ -739,7 +785,6 @@ class ObjectIntentState:
             "typed policy components",
         )
         self.action_dock().validate(hidden=hidden)
-        self.world_dock().validate(hidden=hidden)
         self.factual_dock().validate(hidden=hidden)
         self.policy_dock().validate(horizon=horizon, hidden=hidden)
 
@@ -811,6 +856,178 @@ class CoarseActionIntentState:
     action_prediction: Tensor  # [B,4,A]
     target: Tensor | None
     loss: Tensor
+
+
+@dataclass(frozen=True)
+class PhysicalActionCondition:
+    """Canonical physical action condition owned by the proposal/world seam.
+
+    W predicts the four configured future intervals, so its physical action
+    ABI uses the same four interval rows rather than inventing a 24-row chart
+    whose final two intervals would not cover the W target horizons.  The
+    local delta is a deterministic view of the same normalized native action:
+    its first boundary is the currently observed action state and every later
+    boundary is the preceding interval action.  No hidden proposal coordinate,
+    goal token or S carrier is representable at this boundary.
+    """
+
+    interval_action: Tensor  # [B,4,A], normalized native physical action
+    interval_delta: Tensor  # [B,4,A], deterministic adjacent physical delta
+    current_action: Tensor  # [B,A], observed normalized action state
+
+    @classmethod
+    def from_interval_action(
+        cls,
+        interval_action: Tensor,
+        current_action: Tensor,
+    ) -> "PhysicalActionCondition":
+        if interval_action.ndim != 3 or int(interval_action.shape[1]) != 4:
+            raise ValueError("physical action condition must have four interval rows")
+        batch, _, action_dim = interval_action.shape
+        _shape(
+            current_action,
+            (batch, action_dim),
+            "physical action condition current action",
+        )
+        boundary = torch.cat(
+            (
+                current_action[:, None].to(
+                    device=interval_action.device,
+                    dtype=interval_action.dtype,
+                ),
+                interval_action[:, :-1],
+            ),
+            dim=1,
+        )
+        condition = cls(
+            interval_action=interval_action,
+            interval_delta=interval_action - boundary,
+            current_action=current_action,
+        )
+        condition.validate(action_dim=action_dim)
+        return condition
+
+    @classmethod
+    def from_horizon_action(
+        cls,
+        action: Tensor,
+        current_action: Tensor,
+    ) -> "PhysicalActionCondition":
+        """Build the four-row ABI from a decoded 24-row native action.
+
+        The W intervals are defined in the 48-step future chart while the
+        deployed action chart has 24 rows.  The same clipped interval windows
+        used by the recovered intent target are therefore used here: later
+        windows that extend past row 24 are represented by their final
+        available row.  This is deterministic and auditable; it is not a new
+        learned extrapolator.
+        """
+
+        if action.ndim != 3:
+            raise ValueError("horizon action must be [B,T,A]")
+        if int(action.shape[1]) != 24:
+            raise ValueError("horizon action condition requires 24 rows")
+        slices: list[slice] = []
+        for lower, upper in INTERVAL_BOUNDS:
+            start = min(max(int(lower) - 1, 0), int(action.shape[1]) - 1)
+            stop = min(max(int(upper), start + 1), int(action.shape[1]))
+            slices.append(slice(start, stop))
+        interval_action = torch.stack(
+            [action[:, row].mean(dim=1) for row in slices],
+            dim=1,
+        )
+        return cls.from_interval_action(interval_action, current_action)
+
+    @property
+    def batch(self) -> int:
+        return int(self.interval_action.shape[0])
+
+    @property
+    def action_dim(self) -> int:
+        return int(self.interval_action.shape[-1])
+
+    @property
+    def fingerprint(self) -> Tensor:
+        """Deterministic, lossless in-graph fingerprint of the physical ABI."""
+
+        return torch.cat((self.interval_action, self.interval_delta), dim=-1)
+
+    @property
+    def action_fingerprint(self) -> Tensor:
+        """Named alias used by the candidate-world boundary."""
+
+        return self.fingerprint
+
+    def reconstructed_interval_action(self) -> Tensor:
+        """Reconstruct interval absolutes from the stored adjacent deltas."""
+
+        boundary = torch.cat(
+            (
+                self.current_action[:, None].to(
+                    device=self.interval_action.device,
+                    dtype=self.interval_action.dtype,
+                ),
+                self.interval_action[:, :-1],
+            ),
+            dim=1,
+        )
+        return boundary + self.interval_delta
+
+    def validate(self, *, action_dim: int, intervals: int = 4) -> None:
+        if self.interval_action.ndim != 3:
+            raise ValueError("physical action condition must be [B,I,A]")
+        batch = self.batch
+        expected = (batch, int(intervals), int(action_dim))
+        _shape(
+            self.interval_action,
+            expected,
+            "physical action condition interval action",
+        )
+        _shape(
+            self.interval_delta,
+            expected,
+            "physical action condition interval delta",
+        )
+        _shape(
+            self.current_action,
+            (batch, int(action_dim)),
+            "physical action condition current action",
+        )
+        if not (
+            self.interval_action.device
+            == self.interval_delta.device
+            == self.current_action.device
+        ):
+            raise ValueError("physical action condition tensors must share a device")
+        if not self.interval_action.is_floating_point():
+            raise TypeError("physical action condition must be floating point")
+        expected_boundary = torch.cat(
+            (
+                self.current_action[:, None].to(
+                    device=self.interval_action.device,
+                    dtype=self.interval_action.dtype,
+                ),
+                self.interval_action[:, :-1],
+            ),
+            dim=1,
+        )
+        # This metadata validator is used on live CUDA paths; shape/device are
+        # checked here while exact deterministic reconstruction is guarded by
+        # focused CPU/CUDA contract tests to avoid a deployment sync.
+        if tuple(expected_boundary.shape) != tuple(self.interval_delta.shape):
+            raise ValueError("physical action condition delta boundary is invalid")
+
+    def assert_exact_reconstruction(self) -> None:
+        """Check the deterministic delta identity on an explicit audit call.
+
+        This is intentionally separate from the hot-path metadata validator:
+        comparing CUDA tensor values here would introduce a synchronization on
+        every deployment node.
+        """
+
+        reconstructed = self.reconstructed_interval_action()
+        if not torch.equal(reconstructed, self.interval_action):
+            raise ValueError("physical action condition delta reconstruction failed")
 
 
 @dataclass(frozen=True)
@@ -1061,6 +1278,43 @@ class FutureObjectDynamics:
             camera_chart_availability=facts.camera_validity.float(),
             log_camera_chart_availability=facts.log_camera_validity.float(),
         )
+
+
+@dataclass(frozen=True)
+class CandidateWorld:
+    """An action-tagged W prediction consumed by the consequence evaluator.
+
+    The tag is an object-identity boundary, not a numeric hash.  It makes a
+    stale-world mix-up fail before P2 while avoiding a CUDA synchronization on
+    every ODE node.  Explicit value equality remains available through the
+    action-condition audit method when a probe needs it.
+    """
+
+    action_condition: PhysicalActionCondition
+    dynamics: FutureObjectDynamics
+
+    @property
+    def action_fingerprint(self) -> Tensor:
+        return self.action_condition.action_fingerprint
+
+    def validate(self, *, action_dim: int) -> None:
+        self.action_condition.validate(action_dim=action_dim)
+        self.dynamics.validate()
+        if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
+            raise ValueError("candidate world action and dynamics batches do not align")
+        if self.action_condition.interval_action.device != self.dynamics.semantic_delta.device:
+            raise ValueError("candidate world action and dynamics must share a device")
+
+    def assert_action_identity(
+        self,
+        action_condition: PhysicalActionCondition,
+    ) -> None:
+        """Reject a world paired with another candidate action object."""
+
+        if self.action_condition is not action_condition:
+            raise ValueError(
+                "candidate world action fingerprint does not match current candidate"
+            )
 
 
 @dataclass(frozen=True)
