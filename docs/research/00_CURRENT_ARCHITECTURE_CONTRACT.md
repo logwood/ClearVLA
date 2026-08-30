@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        28
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 source and local contract implementation complete; 247/247 relevant tests, static checks and production-dimension CPU BF16 train/deployment verification pass; CUDA smoke and behavior unrun
+release status:         Schema28 source/local verification and fresh CUDA BF16 smoke pass; exact-commit batch-eight formal training is active and its first batch-100 audit is finite/ledger-closed; behavior acceptance remains pending
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -982,11 +982,31 @@ was exactly one at this first warmup step by schedule; the separate near-one
 FP32 contraction/VJP test covers the post-warmup numerical boundary.
 
 CPU BF16 validates dtype and backward boundaries, not CUDA memory or behavior.
+The fresh CUDA BF16 smoke
+`schema28_action_world_smoke_20260831_012955_r1` then completed at commit
+`097330a894d948d66c419f8af07325a5b0ff712e`: median runtime was
+`1.549 s/batch`, measured process peak was `3.974 GiB`, both complete ODE
+passes executed with exactly one W refinement, all closure fields were finite,
+and proposal-to-refined action delta was `3.75218e-05`. Final interval/delta
+mismatch was finite and nonzero (`3.42142e-05 / 1.84383e-05`), as allowed by
+the non-fixed-point contract. The two finite raw-gradient spikes (`6.17` and
+`7.56`) were both owned by the randomly initialized arm output head.
+
+Fresh batch-eight formal training started from the same exact commit as
+`schema28_action_world_b8_20260831_013140`. Its first archived audit through
+batch 100 has exact-zero group-ledger error, contribution gap at floating-point
+noise (`5.96046e-09` in the first full window), finite W/P2/action gradients,
+no forbidden goal/coarse-hidden W ingress, no action-lineage error, median
+runtime `1.838 s/batch`, and a `9.1%` decrease in total loss across the five
+available windows. Two threshold crossings through batch 100 were again owned
+by `bottom.decoder.velocity_head.arm_abs.weight`; no non-finite or new
+normalization-owner spike was observed. This is startup health evidence, not
+trained behavior evidence.
+
 Production acceptance remains:
 
-- fresh CUDA BF16 smoke with both ODE passes, one W rebuild and no Teacher in
-  deployment;
-- finite closure residuals, capacity, action, W/P2 and gradient metrics;
+- continued finite closure residuals, capacity, action, W/P2 and gradient
+  metrics after warmup and across every completed epoch;
 - batch-eight process peak no greater than 22 GiB;
 - aligned batch-2200 early comparison against V120, R2, Schema26 and Schema27;
 - all eight epochs and final/mean action, native, first/tail, horizon,
