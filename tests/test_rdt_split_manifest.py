@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import h5py
 import numpy as np
 
+from clearvla.data.cache_selection import load_cache_episode_selection
 from clearvla.tools.build_rdt_split_manifest import build_rdt_split_manifest
 
 
-def _episode(path: Path) -> None:
+def _episode(path: Path, *, length: int = 80) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as handle:
-        handle.create_dataset("action", data=np.zeros((1, 14), dtype=np.float32))
+        values = np.zeros((length, 14), dtype=np.float32)
+        handle.create_dataset("action", data=values)
+        handle.create_dataset("observations/qpos", data=values)
+        handle.create_dataset(
+            "observations/images/cam_high",
+            data=np.zeros((length, 2, 2, 3), dtype=np.uint8),
+        )
 
 
 def test_rdt_per_task_manifest_is_disjoint_stable_and_partition_aware(
@@ -23,6 +31,7 @@ def test_rdt_per_task_manifest_is_disjoint_stable_and_partition_aware(
             _episode(root / "rdt_data" / task / f"episode_{index}.hdf5")
     for index in range(2):
         _episode(root / "test" / "external" / f"episode_{index}.hdf5")
+    _episode(root / "rdt_data" / "many" / "episode_short.hdf5", length=30)
 
     first = build_rdt_split_manifest(root, seed=17)
     second = build_rdt_split_manifest(root, seed=17)
@@ -31,7 +40,12 @@ def test_rdt_per_task_manifest_is_disjoint_stable_and_partition_aware(
     assert first == second
     assert first["manifest_sha256"] == second["manifest_sha256"]
     assert first["manifest_sha256"] != changed["manifest_sha256"]
+    assert first["source_episode_count"] == 19
     assert first["episode_count"] == 18
+    assert first["minimum_episode_length"] == 73
+    assert first["excluded_too_short"] == [
+        {"episode_id": "rdt_data/many/episode_short", "length": 30}
+    ]
     assert first["split_counts"] == {
         "train": 12,
         "val": 2,
@@ -66,3 +80,39 @@ def test_rdt_manifest_rejects_an_unclassified_partition(tmp_path: Path) -> None:
         assert "unrecognized source partitions" in str(exc)
     else:
         raise AssertionError("unknown source partitions must fail closed")
+
+
+def test_cache_selection_verifies_full_manifest_before_bounding_lane(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "rdt-ft-data"
+    for task in ("a", "b"):
+        for index in range(3):
+            _episode(root / "rdt_data" / task / f"episode_{index}.hdf5")
+    _episode(root / "rdt_data" / "a" / "episode_short.hdf5", length=30)
+    _episode(root / "test" / "external" / "episode_0.hdf5")
+    payload = build_rdt_split_manifest(root, seed=11)
+    manifest = tmp_path / "split.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    selected = load_cache_episode_selection(
+        root,
+        "**/*.hdf5",
+        cameras=("high",),
+        action_key="action",
+        state_key="observations/qpos",
+        camera_key_overrides={"high": "observations/images/cam_high"},
+        split_manifest=manifest,
+        manifest_split="val",
+        max_episodes=1,
+        allow_skipped=False,
+    )
+
+    assert selected.eligible_episode_count == 7
+    assert selected.selected_episode_count_before_limit == 2
+    assert [episode.episode_id for episode in selected.episodes] == [
+        payload["splits"]["val"][0]
+    ]
+    assert selected.skipped[0][1] == "too_short_T=30, min_length=73"
+    assert selected.manifest_metadata is not None
+    assert selected.manifest_metadata["source_episode_count"] == 8

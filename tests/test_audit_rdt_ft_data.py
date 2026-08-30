@@ -80,6 +80,16 @@ def test_hierarchical_audit_preserves_duplicate_stems_and_source_partition(
     assert report["episode_identity"]["duplicates"] == []
     assert report["episode_identity"]["duplicate_stems"] == {"episode_0": 2}
     assert report["source_partitions"] == {"rdt_data": 2, "test": 1}
+    assert report["typed_window_eligibility"] == {
+        "minimum_episode_length": 73,
+        "eligible_episodes": 0,
+        "excluded_too_short_count": 3,
+        "excluded_too_short": [
+            {"episode_id": "rdt_data/task_a/episode_0", "length": 5},
+            {"episode_id": "rdt_data/task_b/episode_0", "length": 5},
+            {"episode_id": "test/task_a/episode_2", "length": 5},
+        ],
+    }
     assert report["tasks"]["count"] == 3
     assert report["action_qpos_widths"] == {"(14, 14)": 3}
     assert report["language"]["unique_original_instructions"] == 2

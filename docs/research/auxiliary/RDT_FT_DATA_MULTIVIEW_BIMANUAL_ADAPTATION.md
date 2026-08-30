@@ -89,15 +89,20 @@ instructions.  The first ClearVLA compatibility run deliberately uses only the
 exact HDF5 original instruction so the language distribution is deterministic;
 language augmentation is a later controlled change.
 
-Discovered episode lengths span 102--2,000 frames, with sampled median 549 and
-sampled p10/p90 approximately 275/1,132.  Official configuration ancestry
-indicates 25 Hz.  The sampled `action[t]` values are desired joint positions,
-but are not numerically identical to `qpos[t+1]` (sampled median RMSE about
-0.105).  The first implementation therefore treats `qpos[t]` as the observed
-boundary and `action[t]` as the command/target chart; it must not silently
-replace either with the other.
+The complete 2026-08-31 header scan found 6,131 episodes: 6,105 under
+`rdt_data/` and 26 under the isolated `test/`, with 3,222,474 total frames.
+Lengths span 30--2,864 with median 460.  Eleven `rdt_data/` episodes are
+shorter than the 73 rows required by the fixed `-24/+48` typed window.  They
+remain in the source inventory and are recorded by identity and length in the
+split manifest, but cannot enter a train/validation/test lane.  The earlier
+numeric sample had median 549 and p10/p90 approximately 275/1,132.  Official
+configuration ancestry indicates 25 Hz.  The sampled `action[t]` values are
+desired joint positions, but are not numerically identical to `qpos[t+1]`
+(sampled median RMSE about 0.105).  The first implementation therefore treats
+`qpos[t]` as the observed boundary and `action[t]` as the command/target chart;
+it must not silently replace either with the other.
 
-The all-episode numeric scan covered 3,222,474 rows.  Left/right gripper
+The all-episode numeric scan covered those 3,222,474 rows.  Left/right gripper
 commands have continuous ranges up to approximately 11.90/13.92 rather than a
 shared binary scale.  Their boundary-relative absolute deltas have p95
 approximately 0.0458/0.1373 and p99 approximately 0.490/0.618; a raw 0.10
@@ -127,7 +132,7 @@ this document.
 | Split | `clearvla/data/split.py` plus `tools/build_rdt_split_manifest.py` | Pen keeps ordered 63/5/5; the isolated RDT preset selects a verified four-lane manifest |
 | Goal | `mainline/data/loading.py::GoalTemplate` | legacy one-row artifact or exact episode-to-instruction-bank row selected on CPU |
 | Decoded RGB | `vision/decoded_image_store.py` or `vision/online_store.py` | strict mmap cache or direct JPEG decode with bounded process-local LRU |
-| DINO cache writer | `cli/build_dinov2_token_cache.py` and `experiments/classic_policy_lab/rdt2_dinov2_cache.py` | arbitrary ordered cameras and direct-HDF5 ingress; full real cache is not built yet |
+| DINO cache writer | `cli/build_dinov2_token_cache.py` and `experiments/classic_policy_lab/rdt2_dinov2_cache.py` | arbitrary ordered cameras, direct-HDF5 ingress, and verified manifest-lane selection; full real cache is not built yet |
 | DINO mainline reader | `mainline/data/token_store.py` | root-relative key plus explicit ordered subset of cached cameras |
 | Run identity | `mainline/runtime/identity.py` | episode/partition/task/instruction inventory plus decoded/DINO metadata digests are serialized |
 | Camera config | `mainline/config.py::DataConfig` | ordered names plus exact matching key map; active model consumption remains two-camera |
@@ -176,12 +181,14 @@ absolute root from its semantic content.
 The language preparation tool reads the exact scalar HDF5 instructions,
 deduplicates exact UTF-8 content, applies the official 120-token T5-v1.1-XXL
 encoding contract, and stores the first 32 ClearVLA policy rows plus a real
-mask in one typed cache.  The mainline loader accepts either that bank or the
-legacy one-condition `.pt`; an episode selects its row before transfer to the
-device.  Masked rows are exact zero, missing instruction mappings fail before
-training, and the existing Pen path remains a one-row bank.  S, its condition
-dropout, all losses, optimizer ownership, and checkpoint parameter shapes are
-unchanged.
+mask in one typed cache.  The generic loader accepts either that bank or the
+legacy one-condition `.pt`, but manifest-backed RDT loading requires the typed
+bank.  It rederives the complete source episode count and instruction
+multiset—including typed-window-short exclusions—and compares both with the
+bank metadata before selecting an episode row.  Masked rows are exact zero,
+missing or stale instruction mappings fail before training, and only the
+existing Pen path may remain a one-row bank.  S, its condition dropout, all
+losses, optimizer ownership, and checkpoint parameter shapes are unchanged.
 
 The isolated RDT data preset now selects that manifest and instruction-bank
 ABI.  The real manifest and T5 bank have not yet been materialized; those are
@@ -190,13 +197,16 @@ execution gates, not permission to substitute another split or encoder.
 ### D0c implementation status: selected split and source-chart profiles
 
 `DataConfig.split_mode=manifest` now loads the content-digested per-task
-manifest by root-relative episode identity.  The manifest glob, inventory,
-counts, four exact split names, disjointness, and exhaustive coverage are
-rechecked against the live HDF5 inventory before normalization.  A malformed
-episode, stale file list, unknown episode, changed glob, duplicate membership,
-or missing `external_test` therefore fails closed.  `external_test` becomes a
-real fourth dataset lane but is never iterated by ordinary training or
-validation.
+manifest by root-relative episode identity.  The manifest separately digests
+the complete source inventory and the typed-window-eligible inventory.  Every
+source episode below the fixed 73-row minimum is recorded by identity and
+length; the four exact split names must then cover every eligible episode once
+and only once.  The loader rederives the deterministic per-task policy,
+partition isolation, task counts, exclusions, glob and both inventories before
+normalization.  A malformed episode, stale file list, unknown episode, changed
+glob, policy drift, duplicate membership, or missing `external_test` therefore
+fails closed.  `external_test` becomes a real fourth dataset lane but is never
+iterated by ordinary training or validation.
 
 The action/qpos boundary is an explicit versioned profile rather than a shape
 heuristic:
@@ -244,6 +254,20 @@ path.  The full audit reports exact byte estimates for two- and three-camera
 potentially multi-TB DINO build until
 `RDT_CONFIRM_MULTI_TB_DINO_CACHE=YES` is explicitly supplied; decoded
 materialization has a separate confirmation.
+
+Both RGB and DINO cache writers can take the verified split manifest.  They
+first validate the complete source inventory, eligible inventory, exact short
+exclusions and deterministic split policy; only then do they select one named
+lane and apply `--max-episodes`.  The loader-only smoke mirrors that scope:
+normalizer and language identity remain global, but only the selected episode
+needs DINO rows.  The formal `load_mainline_data` path is unchanged and still
+requires cache metadata/arrays for every eligible episode, so a bounded cache
+cannot accidentally become a training cache.
+
+For the complete current inventory, the uncompressed estimates are about
+1.985/2.978 TiB for two/three-camera decoded RGB and 2.305/3.457 TiB for
+two/three-camera float16 DINO tokens.  These are storage bounds, not permission
+to materialize either cache.
 
 The selected RDT profile deliberately has no default sampling event threshold.
 An unshuffled loader-only smoke is legal, but creation of the shuffled formal
@@ -433,6 +457,19 @@ cost:
 RDT_PREPARE_THROUGH=language bash scripts/prepare_rdt_ft_data.sh
 ```
 
+The first real acceptance should use the bounded end-to-end launcher.  It
+builds or reuses the global audit, v2 manifest and full instruction bank,
+encodes at most one deterministic `val` episode into a separate three-camera
+DINO cache, then constructs one finite right-arm/two-camera typed batch.  It
+does not require the multi-TB acknowledgement because its limit is enforced
+before encoding, and it never constructs a model or optimizer:
+
+```bash
+RDT_SMOKE_SPLIT=val \
+RDT_SMOKE_EPISODE_LIMIT=1 \
+bash scripts/prepare_rdt_ft_data_bounded_smoke.sh
+```
+
 After inspecting `audit_full.json`, choosing storage scope and releasing the
 experiment GPU, the DINO stage requires an explicit multi-TB acknowledgement:
 
@@ -442,7 +479,8 @@ RDT_CONFIRM_MULTI_TB_DINO_CACHE=YES \
 bash scripts/prepare_rdt_ft_data.sh
 ```
 
-Once the required artifacts exist, the acceptance command constructs no model
+Once a compatible bounded or full cache already exists, the loader-only
+acceptance command can be repeated without encoding.  It constructs no model
 or optimizer and performs no backward or checkpoint write:
 
 ```bash

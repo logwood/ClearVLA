@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
 import torch
 
 from clearvla.mainline.config import ExperimentConfig, load_config
-from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
+from clearvla.mainline.data.loading import (
+    load_mainline_data_for_smoke,
+    to_training_batch,
+)
 from clearvla.mainline.interfaces import TrainingBatch
 
 
@@ -23,12 +29,20 @@ def _parser() -> argparse.ArgumentParser:
         "--split", choices=("train", "val", "test", "external_test"), default="val"
     )
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--episode-limit",
+        type=int,
+        default=1,
+        help="Maximum episodes in the selected loader-only dataset.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--decoded-cache", type=Path)
     parser.add_argument("--dino-cache", type=Path)
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--output", type=Path)
     return parser
 
 
@@ -54,6 +68,25 @@ def _shape(value: torch.Tensor) -> dict[str, object]:
         "shape": list(value.shape),
         "dtype": str(value.dtype).removeprefix("torch."),
         "device": str(value.device),
+    }
+
+
+def _digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_identity(path: Path) -> dict[str, object]:
+    source = Path(path).expanduser().resolve()
+    return {
+        "path": str(source),
+        "size_bytes": int(source.stat().st_size),
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
     }
 
 
@@ -84,10 +117,20 @@ def _validate_finite(batch: TrainingBatch) -> None:
 
 def main() -> None:
     args = _parser().parse_args()
-    if args.batch_size <= 0 or args.num_workers < 0:
-        raise ValueError("batch size must be positive and workers non-negative")
+    if args.batch_size <= 0 or args.episode_limit <= 0 or args.num_workers < 0:
+        raise ValueError(
+            "batch size/episode limit must be positive and workers non-negative"
+        )
+    if args.source_commit is not None and re.fullmatch(
+        r"[0-9a-f]{40}", str(args.source_commit)
+    ) is None:
+        raise ValueError("source commit must be a full lowercase Git SHA-1")
     config = _overrides(load_config(args.config), args)
-    bundle = load_mainline_data(config)
+    bundle = load_mainline_data_for_smoke(
+        config,
+        split=args.split,
+        episode_limit=int(args.episode_limit),
+    )
     if args.split not in bundle.datasets:
         raise ValueError(
             f"split {args.split!r} is absent; available={sorted(bundle.datasets)}"
@@ -107,11 +150,33 @@ def main() -> None:
         device=torch.device("cpu"),
     )
     _validate_finite(typed)
+    selected_indices = list(bundle.splits[args.split][: int(args.episode_limit)])
+    dino_cache = Path(config.data.dino_cache)
+    materialized_episodes = []
+    for episode_index in selected_indices:
+        episode = bundle.episodes[episode_index]
+        source_stat = episode.path.stat()
+        dino_metadata = dino_cache / episode.cache_key / "meta.json"
+        token_array = dino_cache / episode.cache_key / "tokens.float16.npy"
+        materialized_episodes.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_id": episode.episode_id,
+                "length": int(episode.length),
+                "source_size_bytes": int(source_stat.st_size),
+                "source_mtime_ns": int(source_stat.st_mtime_ns),
+                "dino_metadata": _file_identity(dino_metadata),
+                "dino_token_array_path": str(token_array.resolve()),
+                "dino_token_array_size_bytes": int(token_array.stat().st_size),
+            }
+        )
     report = {
-        "schema": "clearvla-mainline-data-smoke-v1",
+        "schema": "clearvla-mainline-data-smoke-v2",
+        "source_commit": args.source_commit,
         "model_constructed": False,
         "optimizer_constructed": False,
         "split": args.split,
+        "materialized_episode_limit": int(args.episode_limit),
         "split_sizes": {name: len(dataset) for name, dataset in bundle.datasets.items()},
         "split_metadata": bundle.split_metadata,
         "data_profile": bundle.data_profile_metadata,
@@ -120,6 +185,12 @@ def main() -> None:
         "gripper_indices": list(bundle.gripper_indices),
         "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
         "goal": bundle.goal.metadata,
+        "language_artifact": _file_identity(Path(config.data.t5_condition)),
+        "normalizer_identity": {
+            "action_sha256": _digest(bundle.action_normalizer.to_dict()),
+            "state_sha256": _digest(bundle.state_normalizer.to_dict()),
+        },
+        "materialized_episodes": materialized_episodes,
         "episode_count": len(bundle.episodes),
         "skipped": list(bundle.skipped),
         "typed": {
@@ -141,7 +212,20 @@ def main() -> None:
             "future_state": _shape(typed.future.state_sequence),
         },
     }
-    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    rendered = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
+    if args.output is not None:
+        destination = args.output.expanduser().resolve()
+        if destination.exists():
+            raise FileExistsError(f"refusing to overwrite smoke report: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+        try:
+            temporary.write_text(rendered + "\n", encoding="utf-8")
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    print(rendered)
 
 
 if __name__ == "__main__":

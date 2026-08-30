@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -14,8 +15,15 @@ from clearvla.data.hdf5_episode import LoadedEpisode, load_episodes
 from clearvla.data.split import load_rdt_split_manifest
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import save_episode_tokens
 from clearvla.mainline.config import load_config
-from clearvla.mainline.data.language import T5_INSTRUCTION_CACHE_SCHEMA
-from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
+from clearvla.mainline.data.language import (
+    T5_INSTRUCTION_CACHE_SCHEMA,
+    source_instruction_inventory_sha256,
+)
+from clearvla.mainline.data.loading import (
+    load_mainline_data,
+    load_mainline_data_for_smoke,
+    to_training_batch,
+)
 from clearvla.tools.build_rdt_split_manifest import build_rdt_split_manifest
 from clearvla.tools.build_t5_instruction_cache import build_t5_instruction_cache_payload
 from clearvla.vision.preprocessing import PreprocessConfig
@@ -95,11 +103,11 @@ def test_manifest_loader_resolves_identities_and_rejects_stale_inventory(
             path = root / "rdt_data" / task / f"episode_{index}.hdf5"
             path.parent.mkdir(parents=True, exist_ok=True)
             with h5py.File(path, "w") as handle:
-                handle.create_dataset("action", data=np.zeros((1, 14), dtype=np.float32))
+                handle.create_dataset("action", data=np.zeros((80, 14), dtype=np.float32))
     external = root / "test" / "external" / "episode_0.hdf5"
     external.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(external, "w") as handle:
-        handle.create_dataset("action", data=np.zeros((1, 14), dtype=np.float32))
+        handle.create_dataset("action", data=np.zeros((80, 14), dtype=np.float32))
 
     payload = build_rdt_split_manifest(root, seed=3)
     manifest = tmp_path / "split.json"
@@ -124,10 +132,36 @@ def test_manifest_loader_resolves_identities_and_rejects_stale_inventory(
             expected_pattern="**/*.hdf5",
         )
 
+    tampered = json.loads(json.dumps(payload))
+    external_id = tampered["splits"]["external_test"].pop()
+    tampered["splits"]["train"].append(external_id)
+    tampered.pop("manifest_sha256")
+    tampered["manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            tampered,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    tampered_manifest = tmp_path / "tampered-split.json"
+    tampered_manifest.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="deterministic policy"):
+        load_rdt_split_manifest(
+            tampered_manifest,
+            episode_names=names,
+            expected_pattern="**/*.hdf5",
+        )
 
-def _write_rdt_episode(path: Path, *, instruction: str, offset: float) -> None:
+
+def _write_rdt_episode(
+    path: Path,
+    *,
+    instruction: str,
+    offset: float,
+    length: int = 74,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    length = 74
     time = np.arange(length, dtype=np.float32)[:, None]
     action = np.zeros((length, 14), dtype=np.float32)
     qpos = np.zeros((length, 14), dtype=np.float32)
@@ -160,6 +194,12 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
                 instruction=f"perform {task}",
                 offset=float(10 * task_index + episode_index),
             )
+    _write_rdt_episode(
+        root / "rdt_data" / "task_a" / "episode_short.hdf5",
+        instruction="perform task_a",
+        offset=4.0,
+        length=30,
+    )
     _write_rdt_episode(
         root / "test" / "external" / "episode_0.hdf5",
         instruction="perform external",
@@ -206,7 +246,9 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
         attention_mask=torch.ones(len(instructions), 3, dtype=torch.bool),
         model_source="unit-test/google/t5-v1_1-xxl",
         source_episode_count=len(episodes),
-        source_instruction_inventory_sha256="a" * 64,
+        source_instruction_inventory_sha256=source_instruction_inventory_sha256(
+            [str(episode.instruction) for episode in episodes]
+        ),
     )
     assert t5_payload["schema"] == T5_INSTRUCTION_CACHE_SCHEMA
     t5 = tmp_path / "t5.pt"
@@ -234,6 +276,14 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
     config.validate()
     bundle = load_mainline_data(config)
     assert set(bundle.datasets) == {"train", "val", "test", "external_test"}
+    assert len(bundle.episodes) == 7
+    assert len(bundle.skipped) == 1
+    assert "too_short_T=30, min_length=73" in bundle.skipped[0][1]
+    assert bundle.split_metadata["source_episode_count"] == 8
+    assert bundle.split_metadata["episode_count"] == 7
+    assert bundle.split_metadata["excluded_too_short"] == [
+        {"episode_id": "rdt_data/task_a/episode_short", "length": 30}
+    ]
     assert bundle.data_profile_metadata["name"] == "rdt_right_arm_action_chart_v1"
     assert bundle.gripper_event_threshold is None
     with pytest.raises(ValueError, match="no adopted gripper-event threshold"):
@@ -267,3 +317,61 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
     assert typed.action_target.current_raw_units[0, -1].item() == pytest.approx(13.9231)
     assert bool(torch.isfinite(typed.online.observation.raw_rgb).all())
     assert int(typed.online.goal.mask.sum()) == 3
+
+    bounded_dino = tmp_path / "bounded-dino"
+    selected_episode = bundle.episodes[bundle.splits["val"][0]]
+    save_episode_tokens(
+        cache_dir=bounded_dino,
+        episode=selected_episode,
+        camera_names=all_cameras,
+        preprocessing=preprocessing,
+        dinov2_model="unit-test-dino",
+        tokens=np.ones(
+            (selected_episode.length, len(all_cameras), 64, 4),
+            dtype=np.float32,
+        ),
+    )
+    bounded_config = replace(
+        config,
+        data=replace(config.data, dino_cache=str(bounded_dino)),
+    )
+    bounded = load_mainline_data_for_smoke(
+        bounded_config,
+        split="val",
+        episode_limit=1,
+    )
+    assert set(bounded.datasets) == {"val"}
+    bounded_raw = next(
+        iter(
+            bounded.loader(
+                "val",
+                batch_size=1,
+                workers=0,
+                device=torch.device("cpu"),
+                shuffle=False,
+            )
+        )
+    )
+    to_training_batch(
+        bounded_raw,
+        goal=bounded.goal,
+        config=bounded_config,
+        device=torch.device("cpu"),
+    ).validate(bounded_config)
+    with pytest.raises(FileNotFoundError, match="missing DINO token metadata"):
+        load_mainline_data(bounded_config)
+
+    stale_payload = dict(t5_payload)
+    stale_payload["source_instruction_inventory_sha256"] = "f" * 64
+    stale_t5 = tmp_path / "stale-t5.pt"
+    torch.save(stale_payload, stale_t5)
+    stale_config = replace(
+        bounded_config,
+        data=replace(bounded_config.data, t5_condition=str(stale_t5)),
+    )
+    with pytest.raises(ValueError, match="source instruction inventory differs"):
+        load_mainline_data_for_smoke(
+            stale_config,
+            split="val",
+            episode_limit=1,
+        )

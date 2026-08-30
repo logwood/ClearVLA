@@ -12,6 +12,7 @@ exec python -u -m clearvla.tools.smoke_mainline_data \
   --config "${RDT_DATA_CONFIG:-configs/mainline/rdt_right_arm_data_v1.json}" \
   --split "${RDT_SMOKE_SPLIT:-val}" \
   --batch-size "${RDT_SMOKE_BATCH_SIZE:-1}" \
+  --episode-limit "${RDT_SMOKE_EPISODE_LIMIT:-1}" \
   --num-workers "${RDT_SMOKE_NUM_WORKERS:-0}" \
   --data-root "${RDT_DATA_ROOT:-/data/rdt-ft-data}" \
   --dino-cache "${RDT_DINO_CACHE:-${ARTIFACT_ROOT}/dinov2_rgb_336}" \

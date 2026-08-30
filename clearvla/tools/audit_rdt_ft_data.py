@@ -19,6 +19,8 @@ from typing import Any, Iterable, TypeVar
 import h5py
 import numpy as np
 
+from clearvla.data.split import RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH
+
 ACTION_KEY = "action"
 QPOS_KEY = "observations/qpos"
 BASE_ACTION_KEY = "base_action"
@@ -135,6 +137,7 @@ def audit_rdt_ft_data(
     partition_counts: Counter[str] = Counter()
     task_episode_counts: Counter[str] = Counter()
     length_rows: list[int] = []
+    typed_window_exclusions: list[dict[str, int | str]] = []
     action_qpos_shapes: Counter[tuple[int, int]] = Counter()
     rgb_storage: Counter[tuple[str, int]] = Counter()
     depth_presence: Counter[tuple[str, ...]] = Counter()
@@ -185,6 +188,10 @@ def audit_rdt_ft_data(
                 if length < 1:
                     raise ValueError("episode is empty")
                 length_rows.append(length)
+                if length < RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH:
+                    typed_window_exclusions.append(
+                        {"episode_id": identity, "length": length}
+                    )
                 action_qpos_shapes[(action_dim, qpos_dim)] += 1
                 instruction = _decode_instruction(_dataset(handle, INSTRUCTION_KEY)[()])
                 task_instructions[task].add(instruction)
@@ -307,6 +314,12 @@ def audit_rdt_ft_data(
             "p90": float(np.quantile(lengths, 0.90)) if lengths.size else 0.0,
             "max": int(lengths.max(initial=0.0)) if lengths.size else 0,
         },
+        "typed_window_eligibility": {
+            "minimum_episode_length": RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
+            "eligible_episodes": len(length_rows) - len(typed_window_exclusions),
+            "excluded_too_short_count": len(typed_window_exclusions),
+            "excluded_too_short": typed_window_exclusions,
+        },
         "cache_footprint_estimate": {
             "assumptions": {
                 "decoded_rgb": "uint8_336x336x3_per_camera_frame",
@@ -392,6 +405,12 @@ def _text_report(report: dict[str, Any]) -> str:
             f"unique:{report['episode_identity']['unique']} "
             f"duplicates:{len(report['episode_identity']['duplicates'])} "
             f"duplicate_stems:{len(report['episode_identity']['duplicate_stems'])}"
+        ),
+        (
+            "typed_window="
+            f"eligible:{report['typed_window_eligibility']['eligible_episodes']} "
+            "excluded_too_short:"
+            f"{report['typed_window_eligibility']['excluded_too_short_count']}"
         ),
         (
             "language="

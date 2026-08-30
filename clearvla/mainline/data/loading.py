@@ -12,12 +12,21 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from clearvla.data.action_chart import project_episodes, resolve_action_state_profile
-from clearvla.data.hdf5_episode import LoadedEpisode, load_episodes
+from clearvla.data.hdf5_episode import (
+    LoadedEpisode,
+    load_episodes,
+    load_hdf5_instruction,
+    resolve_too_short_episode_exclusions,
+)
 from clearvla.data.samplers import (
     InformationBalancedBatchSampler,
     InformationBalancedSamplerConfig,
 )
-from clearvla.data.split import load_rdt_split_manifest, resolve_episode_ids
+from clearvla.data.split import (
+    RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
+    load_rdt_split_manifest,
+    resolve_episode_ids,
+)
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
@@ -38,7 +47,10 @@ from .dataset import (
     ObservedStateDatasetConfig,
     ObservedStateWindowDataset,
 )
-from .language import load_t5_condition_bank
+from .language import (
+    load_t5_condition_bank,
+    source_instruction_inventory_sha256,
+)
 from .normalizer import ArrayNormalizer
 from .token_store import DinoV2TokenStore
 
@@ -146,14 +158,29 @@ def _normalizers(
     return actions, states
 
 
-def load_mainline_data(
+def _load_mainline_data(
     config: ExperimentConfig,
     *,
     allow_null_goal: bool = False,
+    materialized_splits: tuple[str, ...] | None = None,
+    max_episodes_per_materialized_split: int | None = None,
 ) -> MainlineDataBundle:
-    """Build formal train/val/test datasets without importing a legacy lab."""
+    """Build the formal inventory, optionally materializing bounded datasets."""
 
     config.validate()
+    if materialized_splits is None:
+        if max_episodes_per_materialized_split is not None:
+            raise ValueError("an episode limit requires explicit materialized splits")
+    else:
+        if not materialized_splits or len(set(materialized_splits)) != len(
+            materialized_splits
+        ):
+            raise ValueError("materialized split names must be non-empty and unique")
+        if (
+            max_episodes_per_materialized_split is None
+            or int(max_episodes_per_materialized_split) <= 0
+        ):
+            raise ValueError("loader-only materialization requires a positive episode limit")
     data = config.data
     dims = config.dimensions
     obs = config.observation
@@ -169,9 +196,19 @@ def load_mainline_data(
         stride=data.stride,
     )
     dataset_config.validate()
-    min_length = 48 + 8 + 2
+    if data.split_mode == "manifest":
+        min_length = dataset_config.minimum_episode_length
+        if min_length != RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH:
+            raise AssertionError(
+                "RDT manifest minimum length no longer matches the typed window ABI"
+            )
+    else:
+        # Preserve the exact Pen discovery/filter behavior.  Its formal source
+        # inventory and 63/5/5 membership are not changed by the RDT adapter.
+        min_length = 48 + 8 + 2
+    raw_root = Path(data.raw_hdf5_root)
     episodes, skipped = load_episodes(
-        Path(data.raw_hdf5_root),
+        raw_root,
         data.hdf5_glob,
         cameras=cameras,
         min_length=min_length,
@@ -181,10 +218,17 @@ def load_mainline_data(
     )
     episode_names = [episode.episode_id for episode in episodes]
     if data.split_mode == "manifest":
+        excluded_too_short = resolve_too_short_episode_exclusions(
+            raw_root,
+            skipped,
+            expected_minimum_length=min_length,
+        )
         split_ids, split_metadata = load_rdt_split_manifest(
             data.split_manifest,
             episode_names=episode_names,
             expected_pattern=data.hdf5_glob,
+            excluded_too_short=excluded_too_short,
+            expected_minimum_episode_length=min_length,
         )
     else:
         train_ids, val_ids, test_ids = resolve_episode_ids(
@@ -203,6 +247,29 @@ def load_mainline_data(
             "schema": "clearvla-ordered-counts-split-v1",
             "split_counts": {name: len(values) for name, values in split_ids.items()},
         }
+    if materialized_splits is None:
+        dataset_episode_ids = {
+            name: list(ids) for name, ids in split_ids.items()
+        }
+    else:
+        unknown_splits = sorted(set(materialized_splits) - set(split_ids))
+        if unknown_splits:
+            raise ValueError(
+                f"loader-only materialization names unknown splits: {unknown_splits}"
+            )
+        assert max_episodes_per_materialized_split is not None
+        dataset_episode_ids = {
+            name: list(split_ids[name][: int(max_episodes_per_materialized_split)])
+            for name in materialized_splits
+        }
+        empty_splits = [name for name, ids in dataset_episode_ids.items() if not ids]
+        if empty_splits:
+            raise ValueError(
+                f"loader-only materialization selected empty splits: {empty_splits}"
+            )
+    required_token_episode_ids = sorted(
+        {index for ids in dataset_episode_ids.values() for index in ids}
+    )
     episodes = project_episodes(episodes, profile)
     action_normalizer, state_normalizer = _normalizers(
         episodes,
@@ -229,6 +296,7 @@ def load_mainline_data(
         camera_names=cameras,
         preprocessing=preprocessing,
         dinov2_model=data.dinov2_model,
+        required_episode_indices=required_token_episode_ids,
     )
     if token_store.token_dim != dims.visual_token_dim:
         raise ValueError(
@@ -241,7 +309,7 @@ def load_mainline_data(
             f"native chart expects {dims.patches_per_camera}"
         )
     datasets: dict[str, CachedTokenPolicyWindowDataset] = {}
-    for name, ids in split_ids.items():
+    for name, ids in dataset_episode_ids.items():
         base = ObservedStateWindowDataset(
             episodes,
             ids,
@@ -261,6 +329,41 @@ def load_mainline_data(
         expected_width=dims.goal_token_dim,
         allow_null=allow_null_goal,
     )
+    if data.split_mode == "manifest":
+        if not goal_bank.is_instruction_bank:
+            raise ValueError(
+                "RDT manifest data requires a per-instruction T5 condition bank"
+            )
+        eligible_instructions = [episode.instruction for episode in episodes]
+        if any(value is None for value in eligible_instructions):
+            raise ValueError("every RDT episode must own an HDF5 instruction")
+        excluded_instructions = [
+            load_hdf5_instruction(Path(path)) for path, _reason in skipped
+        ]
+        if any(value is None for value in excluded_instructions):
+            raise ValueError("every excluded RDT source episode must own an instruction")
+        source_instructions = [
+            str(value) for value in (*eligible_instructions, *excluded_instructions)
+        ]
+        source_episode_count = int(
+            goal_bank.metadata.get("source_episode_count", -1)
+        )
+        if source_episode_count != len(source_instructions):
+            raise ValueError(
+                "T5 instruction bank source episode count differs from the live RDT inventory"
+            )
+        source_digest = source_instruction_inventory_sha256(source_instructions)
+        if (
+            str(
+                goal_bank.metadata.get(
+                    "source_instruction_inventory_sha256", ""
+                )
+            )
+            != source_digest
+        ):
+            raise ValueError(
+                "T5 instruction bank source instruction inventory differs from live RDT data"
+            )
     episode_condition_indices = goal_bank.condition_indices(
         [episode.instruction for episode in episodes]
     )
@@ -290,6 +393,33 @@ def load_mainline_data(
         gripper_indices=profile.gripper_indices,
         data_profile_metadata={**profile.as_dict(), "sha256": profile.digest()},
         split_metadata=split_metadata,
+    )
+
+
+def load_mainline_data(
+    config: ExperimentConfig,
+    *,
+    allow_null_goal: bool = False,
+) -> MainlineDataBundle:
+    """Build every formal dataset; training and validation use only this path."""
+
+    return _load_mainline_data(config, allow_null_goal=allow_null_goal)
+
+
+def load_mainline_data_for_smoke(
+    config: ExperimentConfig,
+    *,
+    split: str,
+    episode_limit: int = 1,
+    allow_null_goal: bool = False,
+) -> MainlineDataBundle:
+    """Verify the full inventory while requiring cache rows for a bounded lane."""
+
+    return _load_mainline_data(
+        config,
+        allow_null_goal=allow_null_goal,
+        materialized_splits=(str(split),),
+        max_episodes_per_materialized_split=int(episode_limit),
     )
 
 
@@ -417,5 +547,6 @@ __all__ = [
     "GoalTemplate",
     "MainlineDataBundle",
     "load_mainline_data",
+    "load_mainline_data_for_smoke",
     "to_training_batch",
 ]

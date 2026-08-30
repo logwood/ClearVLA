@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -101,6 +102,18 @@ def decode_hdf5_instruction(value: object) -> str:
     return result
 
 
+def load_hdf5_instruction(path: Path) -> str | None:
+    """Read the optional scalar instruction without materializing an episode."""
+
+    with h5py.File(path, "r") as handle:
+        instruction_dataset = handle.get("instruction")
+        return (
+            decode_hdf5_instruction(instruction_dataset[()])
+            if isinstance(instruction_dataset, h5py.Dataset)
+            else None
+        )
+
+
 def load_episode(
     path: Path,
     *,
@@ -145,6 +158,12 @@ def load_episode(
             if resolved_state is not None
             else actions.copy()
         )
+        camera_lengths: dict[str, int] = {}
+        for camera, key in camera_keys.items():
+            dataset = f.get(key)
+            if not isinstance(dataset, h5py.Dataset) or dataset.ndim < 1:
+                raise TypeError(f"{path}: camera={camera!r} must be an HDF5 sequence")
+            camera_lengths[camera] = int(dataset.shape[0])
         instruction_dataset = f.get("instruction")
         instruction = (
             decode_hdf5_instruction(instruction_dataset[()])
@@ -170,6 +189,16 @@ def load_episode(
     if not np.isfinite(states).all():
         bad = np.argwhere(~np.isfinite(states))
         raise ValueError(f"{path}: state contains non-finite values at {bad[:20].tolist()}")
+    misaligned_cameras = {
+        camera: length
+        for camera, length in camera_lengths.items()
+        if length != int(actions.shape[0])
+    }
+    if misaligned_cameras:
+        raise ValueError(
+            f"{path}: camera frame counts must align with action T={actions.shape[0]}, "
+            f"got {misaligned_cameras}"
+        )
 
     return LoadedEpisode(
         path=path,
@@ -235,11 +264,45 @@ def load_episodes(
     return episodes, skipped
 
 
+def resolve_too_short_episode_exclusions(
+    root: Path,
+    skipped: list[tuple[str, str]],
+    *,
+    expected_minimum_length: int,
+) -> dict[str, int]:
+    """Turn only exact typed-window length skips into manifest exclusions."""
+
+    minimum_length = int(expected_minimum_length)
+    if minimum_length <= 0:
+        raise ValueError("expected minimum episode length must be positive")
+    exclusions: dict[str, int] = {}
+    unexpected: list[tuple[str, str]] = []
+    for skipped_path, reason in skipped:
+        match = re.fullmatch(
+            r"too_short_T=(\d+), min_length=(\d+)", str(reason)
+        )
+        if match is None or int(match.group(2)) != minimum_length:
+            unexpected.append((str(skipped_path), str(reason)))
+            continue
+        identity, _, _ = episode_identity(Path(root), Path(skipped_path))
+        if identity in exclusions:
+            raise RuntimeError(f"duplicate skipped episode identity: {identity!r}")
+        exclusions[identity] = int(match.group(1))
+    if unexpected:
+        raise RuntimeError(
+            "formal RDT loading rejects malformed/unreadable episodes rather than "
+            f"treating them as manifest exclusions: {unexpected[:5]}"
+        )
+    return exclusions
+
+
 __all__ = [
     "LoadedEpisode",
     "decode_hdf5_instruction",
     "episode_identity",
     "find_hdf5_files",
+    "load_hdf5_instruction",
     "load_episode",
     "load_episodes",
+    "resolve_too_short_episode_exclusions",
 ]

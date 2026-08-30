@@ -100,6 +100,7 @@ class DinoV2TokenStore:
         camera_names: tuple[str, ...],
         preprocessing: PreprocessConfig,
         dinov2_model: str,
+        required_episode_indices: Sequence[int] | None = None,
     ) -> None:
         if not episodes:
             raise ValueError("DINO token store requires at least one episode")
@@ -111,11 +112,21 @@ class DinoV2TokenStore:
         self.preprocessing = preprocessing
         self.dinov2_model = str(dinov2_model)
         self._arrays: dict[int, np.ndarray] = {}
+        required = (
+            tuple(range(len(self.episodes)))
+            if required_episode_indices is None
+            else tuple(sorted(set(int(value) for value in required_episode_indices)))
+        )
+        if not required or required[0] < 0 or required[-1] >= len(self.episodes):
+            raise ValueError("required DINO episode indices are empty or out of range")
+        self.required_episode_indices = required
+        required_set = set(required)
         self._meta = {
             index: self._validate_episode(index, episode)
             for index, episode in enumerate(self.episodes)
+            if index in required_set
         }
-        first = self._meta[0]
+        first = self._meta[self.required_episode_indices[0]]
         self.storage_camera_names = first.cameras
         self._camera_indices = tuple(
             self.storage_camera_names.index(camera) for camera in self.camera_names
@@ -175,6 +186,10 @@ class DinoV2TokenStore:
         index = int(episode_idx)
         if not 0 <= index < len(self.episodes):
             raise IndexError(f"episode index {index} is outside the token store")
+        if index not in self._meta:
+            raise KeyError(
+                f"episode index {index} was not admitted by this loader-only cache scope"
+            )
         if index not in self._arrays:
             self._arrays[index] = np.load(
                 _tokens_path(self.cache_dir, self.episodes[index].cache_key),

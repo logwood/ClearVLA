@@ -651,12 +651,22 @@ supports may change targets and losses, never deployment action.
     model parameter, loss, dropout, or optimizer owner.
     The isolated RDT external adapter additionally owns a content-verified
     per-task split manifest with a separate `external_test` lane, ordered
-    camera/key identity, and named qpos/action chart profiles. Its right-arm
-    profile converts only observed qpos gripper into native command units
-    before the action normalizer; state normalization retains qpos units.
-    RDT has no inherited Pen event threshold, so its shuffled train loader
-    fails closed while that semantic decision is unresolved. These external
-    contracts do not claim three-camera or 14-D model consumption.
+    camera/key identity, and named qpos/action chart profiles. The manifest
+    covers the complete source inventory while recording any episode shorter
+    than the fixed 73-row `-24/+48` typed window as an explicit identity/length
+    exclusion; only eligible episodes enter the four disjoint split lanes.
+    Its right-arm profile converts only observed qpos gripper into native
+    command units before the action normalizer; state normalization retains
+    qpos units. Manifest-backed RDT loading requires a per-instruction T5 bank
+    whose complete source episode count and instruction multiset digest match
+    the live inventory; the legacy one-row condition remains legal only for
+    the Pen path. A loader-only smoke may materialize a bounded deterministic
+    split subset after verifying the complete source, manifest, train
+    normalizer and language identities, while formal loading still requires
+    DINO cache rows for every eligible episode. RDT has no inherited Pen event
+    threshold, so its shuffled train loader fails closed while that semantic
+    decision is unresolved. These external contracts do not claim
+    three-camera or 14-D model consumption.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

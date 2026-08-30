@@ -9,9 +9,12 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import h5py
+
 from clearvla.data.hdf5_episode import episode_identity, find_hdf5_files
 from clearvla.data.split import (
     RDT_SPLIT_MANIFEST_SCHEMA,
+    RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
     split_partitioned_episodes_per_task,
 )
 
@@ -37,19 +40,42 @@ def build_rdt_split_manifest(
     train_frac: float = 0.8,
     val_frac: float = 0.1,
     seed: int = 0,
+    minimum_episode_length: int = RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
 ) -> dict[str, Any]:
     source = Path(root).expanduser().resolve()
     paths = find_hdf5_files(source, pattern)
+    minimum_length = int(minimum_episode_length)
+    if minimum_length <= 0:
+        raise ValueError("minimum episode length must be positive")
+    source_episode_ids: list[str] = []
+    source_partitions: list[str] = []
     episode_ids: list[str] = []
     partitions: list[str] = []
     tasks: list[str] = []
+    excluded_too_short: list[dict[str, int | str]] = []
     for path in paths:
         identity, partition, task = episode_identity(source, path)
         if len(PurePosixPath(identity).parts) < 3:
             raise ValueError(f"RDT episode is not partition/task/episode: {identity!r}")
+        source_episode_ids.append(identity)
+        source_partitions.append(partition)
+        with h5py.File(path, "r") as handle:
+            action = handle.get("action")
+            if not isinstance(action, h5py.Dataset) or action.ndim != 2:
+                raise ValueError(f"{path}: action must be an HDF5 [T,D] dataset")
+            length = int(action.shape[0])
+        if length <= 0:
+            raise ValueError(f"{path}: action sequence is empty")
+        if length < minimum_length:
+            excluded_too_short.append({"episode_id": identity, "length": length})
+            continue
         episode_ids.append(identity)
         partitions.append(partition)
         tasks.append(task)
+    known_partitions = {str(train_partition), str(external_test_partition)}
+    unknown_partitions = sorted(set(source_partitions) - known_partitions)
+    if unknown_partitions:
+        raise ValueError(f"unrecognized source partitions: {unknown_partitions}")
     splits = split_partitioned_episodes_per_task(
         episode_names=episode_ids,
         source_partitions=partitions,
@@ -72,6 +98,7 @@ def build_rdt_split_manifest(
     payload: dict[str, Any] = {
         "schema": SPLIT_MANIFEST_SCHEMA,
         "pattern": str(pattern),
+        "minimum_episode_length": minimum_length,
         "policy": {
             "mode": "per-task-episodes",
             "train_partition": str(train_partition),
@@ -82,8 +109,11 @@ def build_rdt_split_manifest(
             "seed": int(seed),
             "tasks_with_fewer_than_three_episodes": "training-only",
         },
+        "source_episode_inventory_sha256": _digest(source_episode_ids),
+        "source_episode_count": len(source_episode_ids),
         "episode_inventory_sha256": _digest(episode_ids),
         "episode_count": len(episode_ids),
+        "excluded_too_short": excluded_too_short,
         "split_counts": {name: len(values) for name, values in split_ids.items()},
         "task_counts": {
             "train": len(train_tasks),
@@ -108,6 +138,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-frac", type=float, default=0.8)
     parser.add_argument("--val-frac", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--minimum-episode-length",
+        type=int,
+        default=RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -123,6 +158,7 @@ def main() -> None:
         train_frac=args.train_frac,
         val_frac=args.val_frac,
         seed=args.seed,
+        minimum_episode_length=args.minimum_episode_length,
     )
     rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     if args.output is None:

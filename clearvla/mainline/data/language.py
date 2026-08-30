@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -26,6 +27,20 @@ def instruction_sha256(instruction: str) -> str:
 def instruction_inventory_sha256(instructions: Sequence[str]) -> str:
     encoded = json.dumps(
         [str(value) for value in instructions],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def source_instruction_inventory_sha256(instructions: Sequence[str]) -> str:
+    """Digest the exact source instruction multiset used to build a bank."""
+
+    counts = Counter(str(value) for value in instructions)
+    if not counts or any(not value.strip() for value in counts):
+        raise ValueError("source instructions must be non-empty text")
+    encoded = json.dumps(
+        sorted((instruction, int(count)) for instruction, count in counts.items()),
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -98,6 +113,16 @@ def _load_instruction_bank(
         instructions
     ):
         raise ValueError("instruction cache inventory digest is inconsistent")
+    source_episode_count = int(payload.get("source_episode_count", 0))
+    source_inventory_digest = str(
+        payload.get("source_instruction_inventory_sha256", "")
+    ).lower()
+    if source_episode_count <= 0:
+        raise ValueError("instruction cache source episode count must be positive")
+    if len(source_inventory_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in source_inventory_digest
+    ):
+        raise ValueError("instruction cache source inventory identity must be SHA-256")
 
     if "tokens" not in payload or "attention_mask" not in payload:
         raise KeyError("instruction cache is missing tokens or attention_mask")
@@ -133,6 +158,8 @@ def _load_instruction_bank(
         "encoder_id": T5_ENCODER_ID,
         "instructions": len(instructions),
         "instruction_inventory_sha256": instruction_inventory_sha256(instructions),
+        "source_episode_count": source_episode_count,
+        "source_instruction_inventory_sha256": source_inventory_digest,
         "original_shape": list(raw_tokens.shape),
         "original_dtype": str(raw_tokens.dtype).removeprefix("torch."),
         "effective_tokens": int(tokens.shape[1]),
@@ -276,4 +303,5 @@ __all__ = [
     "instruction_sha256",
     "load_t5_condition",
     "load_t5_condition_bank",
+    "source_instruction_inventory_sha256",
 ]

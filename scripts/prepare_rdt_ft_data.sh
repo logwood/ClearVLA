@@ -42,6 +42,7 @@ if [[ ! -e "${SPLIT_PATH}" || "${RDT_OVERWRITE_METADATA:-0}" == "1" ]]; then
   python -u -m clearvla.tools.build_rdt_split_manifest \
     "${DATA_ROOT}" \
     --glob '**/*.hdf5' \
+    --minimum-episode-length 73 \
     --seed "${RDT_SPLIT_SEED:-0}" \
     --output "${SPLIT_PATH}" \
     "${OVERWRITE_ARGS[@]}"
@@ -88,6 +89,7 @@ fi
 DINO_ARGS=(
   --data-root "${DATA_ROOT}"
   --glob '**/*.hdf5'
+  --state-key observations/qpos
   --out-dir "${DINO_CACHE}"
   --cameras high left_wrist right_wrist
   --camera-key high=observations/images/cam_high
@@ -95,6 +97,8 @@ DINO_ARGS=(
   --camera-key right_wrist=observations/images/cam_right_wrist
   --cache-resize 336 336
   --dinov2-model "${RDT_DINOV2_MODEL:-facebook/dinov2-base}"
+  --split-manifest "${SPLIT_PATH}"
+  --manifest-split all
   --batch-size "${RDT_DINO_BATCH_SIZE:-32}"
   --device "${RDT_DINO_DEVICE:-auto}"
   --dtype "${RDT_DINO_DTYPE:-bf16}"
@@ -115,12 +119,15 @@ if [[ "${RDT_BUILD_DECODED_CACHE:-0}" == "1" ]]; then
   DECODED_ARGS=(
     --data-root "${DATA_ROOT}"
     --glob '**/*.hdf5'
+    --state-key observations/qpos
     --cache-dir "${DECODED_CACHE}"
     --cameras high left_wrist right_wrist
     --camera-key high=observations/images/cam_high
     --camera-key left_wrist=observations/images/cam_left_wrist
     --camera-key right_wrist=observations/images/cam_right_wrist
     --resize 336 336
+    --split-manifest "${SPLIT_PATH}"
+    --manifest-split all
   )
   if [[ "${RDT_DINO_MAX_EPISODES:-0}" != "0" ]]; then
     DECODED_ARGS+=(--max-episodes "${RDT_DINO_MAX_EPISODES:-0}")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from collections import Counter
@@ -25,6 +24,7 @@ from clearvla.mainline.data.language import (
     instruction_inventory_sha256,
     instruction_sha256,
     load_t5_condition_bank,
+    source_instruction_inventory_sha256,
 )
 
 
@@ -45,15 +45,6 @@ def collect_hdf5_instructions(
     if not instructions:
         raise RuntimeError("no HDF5 instructions were found")
     return instructions, counts
-
-
-def _source_inventory_digest(counts: Counter[str]) -> str:
-    encoded = json.dumps(
-        sorted((instruction, int(count)) for instruction, count in counts.items()),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_t5_instruction_cache_payload(
@@ -239,7 +230,13 @@ def main() -> None:
         attention_mask=mask,
         model_source=args.model,
         source_episode_count=sum(counts.values()),
-        source_instruction_inventory_sha256=_source_inventory_digest(counts),
+        source_instruction_inventory_sha256=source_instruction_inventory_sha256(
+            [
+                instruction
+                for instruction, count in counts.items()
+                for _ in range(int(count))
+            ]
+        ),
     )
     payload["transformers_version"] = transformers_version
     output_path.parent.mkdir(parents=True, exist_ok=True)

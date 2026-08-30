@@ -7,8 +7,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from clearvla.data.hdf5_episode import load_episodes
+from clearvla.data.cache_selection import load_cache_episode_selection
 from clearvla.data.schema import parse_camera_key_overrides
+from clearvla.data.split import RDT_SPLIT_NAMES
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import DinoV2DenseConditioner
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import (
     DinoV2TokenStore,
@@ -53,6 +54,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--device", default="auto")
     p.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
+    p.add_argument(
+        "--split-manifest",
+        type=Path,
+        default=None,
+        help="Optional verified RDT manifest used to exclude short episodes and select a lane.",
+    )
+    p.add_argument(
+        "--manifest-split",
+        choices=(*RDT_SPLIT_NAMES, "all"),
+        default="all",
+    )
     p.add_argument("--max-episodes", type=int, default=0)
     p.add_argument("--rebuild", action="store_true")
     p.add_argument("--allow-skipped", action="store_true")
@@ -87,21 +99,19 @@ def main() -> None:
     preprocessing = PreprocessConfig(
         resize_hw=parse_hw(args.cache_resize), crop_hw=parse_hw(args.cache_crop)
     )
-    episodes, skipped = load_episodes(
+    selection = load_cache_episode_selection(
         args.data_root,
         args.glob,
         cameras=cameras,
-        min_length=1,
         action_key=args.action_key,
         state_key=args.state_key,
         camera_key_overrides=camera_keys,
+        split_manifest=args.split_manifest,
+        manifest_split=args.manifest_split,
+        max_episodes=args.max_episodes,
+        allow_skipped=args.allow_skipped,
     )
-    if skipped and not args.allow_skipped:
-        raise RuntimeError(f"DINO cache inventory has skipped episodes: {skipped[:5]}")
-    if args.max_episodes < 0:
-        raise ValueError("--max-episodes must be non-negative")
-    if args.max_episodes:
-        episodes = episodes[: args.max_episodes]
+    episodes = list(selection.episodes)
     if args.decoded_image_cache_dir is None:
         image_store: DecodedImageStore | OnlineVisualStore = OnlineVisualStore(
             camera_names=cameras,
@@ -117,10 +127,16 @@ def main() -> None:
         )
     for episode in episodes:
         image_store.validate_episode(episode)
-    conditioner = DinoV2DenseConditioner(
-        args.dinov2_model, local_files_only=args.dinov2_local_files_only
+    needs_encoding = args.rebuild or any(
+        not episode_tokens_exist(args.out_dir, episode.cache_key)
+        for episode in episodes
     )
-    conditioner = conditioner.to(device=device, dtype=dtype).eval()
+    conditioner = None
+    if needs_encoding:
+        conditioner = DinoV2DenseConditioner(
+            args.dinov2_model, local_files_only=args.dinov2_local_files_only
+        )
+        conditioner = conditioner.to(device=device, dtype=dtype).eval()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for episode_idx, episode in enumerate(episodes):
@@ -142,6 +158,8 @@ def main() -> None:
                 torch.stack([frames[camera] for camera in cameras], dim=1).to(torch.float32) / 255.0
             )
             images = images.to(device=device, non_blocking=True)
+            if conditioner is None:
+                raise AssertionError("DINO conditioner is absent for an uncached episode")
             with torch.no_grad():
                 dense = conditioner.encode(images, camera_names=cameras).dense_tokens
             if dense is None:
@@ -184,7 +202,8 @@ def main() -> None:
     report = {
         "schema": "clearvla-rdt2-dinov2-token-cache-v1",
         "episodes": len(episodes),
-        "skipped": skipped,
+        "skipped": list(selection.skipped),
+        "selection": selection.report_metadata(),
         "out_dir": str(args.out_dir),
         "decoded_image_cache_dir": (
             None

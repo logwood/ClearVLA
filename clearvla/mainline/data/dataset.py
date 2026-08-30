@@ -67,6 +67,22 @@ class ObservedStateDatasetConfig:
     def future_offsets(self) -> tuple[int, ...]:
         return tuple(range(self.support_stride, self.world_horizon + 1, self.support_stride))
 
+    @property
+    def minimum_episode_length(self) -> int:
+        """Shortest episode that owns at least one complete typed window."""
+
+        min_relative = min(
+            min(self.visual_history_offsets) + self.image_offset,
+            min(self.state_history_offsets) + self.state_offset,
+            min(self.executed_action_offsets) + self.action_offset,
+        )
+        max_relative = max(
+            self.world_horizon + self.action_offset - 1,
+            self.world_horizon + self.state_offset,
+            max(self.future_offsets) + self.image_offset,
+        )
+        return max(0, -int(min_relative)) + int(max_relative) + 1
+
 
 @dataclass(frozen=True)
 class ObservedWindowRef:
