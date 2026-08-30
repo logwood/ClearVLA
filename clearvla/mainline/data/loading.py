@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -11,13 +11,15 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
+from clearvla.data.action_chart import project_episodes, resolve_action_state_profile
 from clearvla.data.hdf5_episode import LoadedEpisode, load_episodes
 from clearvla.data.samplers import (
     InformationBalancedBatchSampler,
     InformationBalancedSamplerConfig,
 )
-from clearvla.data.split import resolve_episode_ids
+from clearvla.data.split import load_rdt_split_manifest, resolve_episode_ids
 from clearvla.vision.decoded_image_store import DecodedImageStore
+from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
 
 from ..config import ExperimentConfig
@@ -62,7 +64,10 @@ class MainlineDataBundle:
     information_uniform_fraction: float
     information_event_fraction: float
     information_motion_quantile: float
-    gripper_event_threshold: float
+    gripper_event_threshold: float | None
+    gripper_indices: tuple[int, ...] = (-1,)
+    data_profile_metadata: dict[str, object] = field(default_factory=dict)
+    split_metadata: dict[str, object] = field(default_factory=dict)
 
     def loader(
         self,
@@ -89,8 +94,14 @@ class MainlineDataBundle:
         if split == "train" and do_shuffle:
             if not isinstance(dataset, CachedTokenPolicyWindowDataset):
                 raise TypeError("formal training requires the cached-token window dataset")
+            if self.gripper_event_threshold is None:
+                raise ValueError(
+                    "the selected data profile has no adopted gripper-event threshold; "
+                    "use a deterministic unshuffled loader-only smoke or configure an "
+                    "explicit source-chart threshold before training"
+                )
             motion_score, is_event = dataset.training_information_signals(
-                gripper_index=-1,
+                gripper_indices=self.gripper_indices,
                 event_threshold=self.gripper_event_threshold,
             )
             sampler = InformationBalancedBatchSampler(
@@ -147,6 +158,7 @@ def load_mainline_data(
     dims = config.dimensions
     obs = config.observation
     cameras = tuple(data.camera_names)
+    profile = resolve_action_state_profile(data.data_profile)
     dataset_config = ObservedStateDatasetConfig(
         world_horizon=48,
         policy_horizon=dims.action_horizon,
@@ -165,33 +177,52 @@ def load_mainline_data(
         min_length=min_length,
         action_key=data.action_key,
         state_key=data.state_key,
-        camera_key_overrides={
-            "top": data.top_camera_key,
-            "wrist": data.wrist_camera_key,
-        },
+        camera_key_overrides=data.camera_key_map(),
     )
-    train_ids, val_ids, test_ids = resolve_episode_ids(
-        len(episodes),
-        mode=data.split_mode,
-        train_frac=0.8,
-        val_frac=0.1,
-        seed=data.seed,
-        train_episode_count=data.train_episodes,
-        val_episode_count=data.val_episodes,
-        test_episode_count=data.test_episodes,
-        episode_names=[episode.episode_id for episode in episodes],
-    )
+    episode_names = [episode.episode_id for episode in episodes]
+    if data.split_mode == "manifest":
+        split_ids, split_metadata = load_rdt_split_manifest(
+            data.split_manifest,
+            episode_names=episode_names,
+            expected_pattern=data.hdf5_glob,
+        )
+    else:
+        train_ids, val_ids, test_ids = resolve_episode_ids(
+            len(episodes),
+            mode=data.split_mode,
+            train_frac=0.8,
+            val_frac=0.1,
+            seed=data.seed,
+            train_episode_count=data.train_episodes,
+            val_episode_count=data.val_episodes,
+            test_episode_count=data.test_episodes,
+            episode_names=episode_names,
+        )
+        split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
+        split_metadata = {
+            "schema": "clearvla-ordered-counts-split-v1",
+            "split_counts": {name: len(values) for name, values in split_ids.items()},
+        }
+    episodes = project_episodes(episodes, profile)
     action_normalizer, state_normalizer = _normalizers(
         episodes,
-        train_ids,
+        split_ids["train"],
         mode=data.normalizer,
     )
     preprocessing = PreprocessConfig(resize_hw=(data.cache_side, data.cache_side), crop_hw=None)
-    image_store = DecodedImageStore(
-        Path(data.decoded_cache),
-        camera_names=cameras,
-        preprocessing=preprocessing,
-    )
+    if data.image_store_mode == "decoded-cache":
+        image_store: DecodedImageStore | OnlineVisualStore = DecodedImageStore(
+            Path(data.decoded_cache),
+            camera_names=cameras,
+            preprocessing=preprocessing,
+        )
+    else:
+        image_store = OnlineVisualStore(
+            camera_names=cameras,
+            preprocessing=preprocessing,
+            frame_lru_capacity=data.image_frame_lru_capacity,
+            open_file_capacity=data.image_open_file_capacity,
+        )
     token_store = DinoV2TokenStore(
         Path(data.dino_cache),
         episodes=episodes,
@@ -209,7 +240,6 @@ def load_mainline_data(
             f"{token_store.tokens_per_camera} patches/camera, but the configured "
             f"native chart expects {dims.patches_per_camera}"
         )
-    split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
     datasets: dict[str, CachedTokenPolicyWindowDataset] = {}
     for name, ids in split_ids.items():
         base = ObservedStateWindowDataset(
@@ -251,7 +281,15 @@ def load_mainline_data(
         information_uniform_fraction=data.information_uniform_fraction,
         information_event_fraction=data.information_event_fraction,
         information_motion_quantile=data.information_motion_quantile,
-        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        gripper_event_threshold=(
+            config.objectives.gripper_event_threshold
+            if profile.name == "identity_7d_pen"
+            and data.sampling_gripper_event_threshold is None
+            else data.sampling_gripper_event_threshold
+        ),
+        gripper_indices=profile.gripper_indices,
+        data_profile_metadata={**profile.as_dict(), "sha256": profile.digest()},
+        split_metadata=split_metadata,
     )
 
 
@@ -355,7 +393,9 @@ def to_training_batch(
         raw_units=_device_tensor(
             batch, "policy_action_raw", device=device, dtype=torch.float32
         ),
-        current_raw_units=_device_tensor(batch, "state_raw", device=device, dtype=torch.float32),
+        current_raw_units=_device_tensor(
+            batch, "action_state_raw", device=device, dtype=torch.float32
+        ),
     )
     audit = AuditMetadata(
         sample_index=(

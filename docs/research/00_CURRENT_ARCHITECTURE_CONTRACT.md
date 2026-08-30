@@ -649,6 +649,14 @@ supports may change targets and losses, never deployment action.
     sample still exposes exactly one `[L,4096]` token sequence plus its real
     mask to S. Missing mappings fail before training; this selection adds no
     model parameter, loss, dropout, or optimizer owner.
+    The isolated RDT external adapter additionally owns a content-verified
+    per-task split manifest with a separate `external_test` lane, ordered
+    camera/key identity, and named qpos/action chart profiles. Its right-arm
+    profile converts only observed qpos gripper into native command units
+    before the action normalizer; state normalization retains qpos units.
+    RDT has no inherited Pen event threshold, so its shuffled train loader
+    fails closed while that semantic decision is unresolved. These external
+    contracts do not claim three-camera or 14-D model consumption.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

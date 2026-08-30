@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import re
 from collections import defaultdict
 from collections.abc import Sequence
+from pathlib import Path
+
+RDT_SPLIT_MANIFEST_SCHEMA = "clearvla-rdt-per-task-split-v1"
+RDT_SPLIT_NAMES = ("train", "val", "test", "external_test")
+
+
+def _canonical_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def split_episode_ids(
@@ -234,7 +249,90 @@ def split_partitioned_episodes_per_task(
     return result
 
 
+def load_rdt_split_manifest(
+    path: str | Path,
+    *,
+    episode_names: Sequence[str],
+    expected_pattern: str,
+) -> tuple[dict[str, list[int]], dict[str, object]]:
+    """Resolve a signed-by-content manifest to current machine-local indices.
+
+    Every loaded episode must occur exactly once.  A source read failure,
+    changed glob, stale manifest, or extra partition therefore fails before a
+    normalizer or training loader can be constructed.
+    """
+
+    source = Path(path).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(f"RDT split manifest does not exist: {source}")
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("RDT split manifest root must be a mapping")
+    if payload.get("schema") != RDT_SPLIT_MANIFEST_SCHEMA:
+        raise ValueError("unsupported RDT split manifest schema")
+    if str(payload.get("pattern", "")) != str(expected_pattern):
+        raise ValueError(
+            "RDT split manifest glob differs from the configured HDF5 inventory"
+        )
+    recorded_digest = str(payload.get("manifest_sha256", ""))
+    digest_payload = dict(payload)
+    digest_payload.pop("manifest_sha256", None)
+    if recorded_digest != _canonical_digest(digest_payload):
+        raise ValueError("RDT split manifest content digest is inconsistent")
+
+    names = [str(value) for value in episode_names]
+    if not names or len(set(names)) != len(names):
+        raise ValueError("loaded episode identities must be non-empty and unique")
+    if int(payload.get("episode_count", -1)) != len(names):
+        raise ValueError("RDT split manifest episode count differs from loaded data")
+    if str(payload.get("episode_inventory_sha256", "")) != _canonical_digest(names):
+        raise ValueError("RDT split manifest inventory differs from loaded data")
+    raw_splits = payload.get("splits")
+    if not isinstance(raw_splits, dict) or set(raw_splits) != set(RDT_SPLIT_NAMES):
+        raise ValueError(
+            f"RDT split manifest must contain exactly {list(RDT_SPLIT_NAMES)}"
+        )
+    identity_to_index = {name: index for index, name in enumerate(names)}
+    resolved: dict[str, list[int]] = {}
+    flattened: list[str] = []
+    for split in RDT_SPLIT_NAMES:
+        values = raw_splits[split]
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise TypeError(f"RDT split {split!r} must be a list of episode identities")
+        if len(set(values)) != len(values):
+            raise ValueError(f"RDT split {split!r} contains duplicate episodes")
+        unknown = sorted(set(values) - set(identity_to_index))
+        if unknown:
+            raise ValueError(f"RDT split {split!r} names unknown episodes: {unknown[:5]}")
+        flattened.extend(values)
+        resolved[split] = [identity_to_index[value] for value in values]
+    if len(flattened) != len(names) or set(flattened) != set(names):
+        raise ValueError("RDT split manifest must cover each loaded episode exactly once")
+    split_counts = payload.get("split_counts")
+    expected_counts = {name: len(resolved[name]) for name in RDT_SPLIT_NAMES}
+    if split_counts != expected_counts:
+        raise ValueError("RDT split manifest count summary is inconsistent")
+    if not resolved["train"] or not resolved["val"] or not resolved["test"]:
+        raise ValueError("RDT known-task train/val/test splits must be non-empty")
+    if not resolved["external_test"]:
+        raise ValueError("RDT external_test partition must be non-empty")
+    metadata: dict[str, object] = {
+        "schema": RDT_SPLIT_MANIFEST_SCHEMA,
+        "path": str(source.resolve()),
+        "file_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "manifest_sha256": recorded_digest,
+        "episode_inventory_sha256": payload["episode_inventory_sha256"],
+        "split_counts": expected_counts,
+        "task_counts": payload.get("task_counts"),
+        "policy": payload.get("policy"),
+    }
+    return resolved, metadata
+
+
 __all__ = [
+    "RDT_SPLIT_MANIFEST_SCHEMA",
+    "RDT_SPLIT_NAMES",
+    "load_rdt_split_manifest",
     "resolve_episode_ids",
     "split_episode_ids",
     "split_episode_ids_ordered",

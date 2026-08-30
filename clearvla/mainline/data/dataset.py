@@ -16,6 +16,7 @@ from torch.utils.data import Dataset
 
 from clearvla.data.hdf5_episode import LoadedEpisode
 from clearvla.vision.decoded_image_store import DecodedImageStore
+from clearvla.vision.online_store import OnlineVisualStore
 
 from .normalizer import ArrayNormalizer
 from .token_store import DinoV2TokenStore
@@ -85,7 +86,7 @@ class ObservedStateWindowDataset(Dataset):
         episodes: list[LoadedEpisode],
         episode_ids: list[int],
         *,
-        image_store: DecodedImageStore,
+        image_store: DecodedImageStore | OnlineVisualStore,
         camera_names: tuple[str, ...],
         state_normalizer: ArrayNormalizer,
         action_normalizer: ArrayNormalizer,
@@ -128,7 +129,7 @@ class ObservedStateWindowDataset(Dataset):
     def training_information_signals(
         self,
         *,
-        gripper_index: int,
+        gripper_indices: Sequence[int],
         event_threshold: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Precompute the formal sampling strata without image/cache reads."""
@@ -136,22 +137,28 @@ class ObservedStateWindowDataset(Dataset):
         motion = np.empty((len(self.refs),), dtype=np.float32)
         event = np.zeros((len(self.refs),), dtype=bool)
         cfg = self.config
-        grip_index = int(gripper_index)
         action_dim = int(self.action_normalizer.minimum.shape[-1])
-        if grip_index < 0:
-            grip_index += action_dim
-        if not 0 <= grip_index < action_dim:
-            raise ValueError("gripper_index is outside the action normalizer dimension")
+        grip_indices = []
+        for value in gripper_indices:
+            grip_index = int(value)
+            if grip_index < 0:
+                grip_index += action_dim
+            if not 0 <= grip_index < action_dim:
+                raise ValueError("gripper index is outside the action normalizer dimension")
+            grip_indices.append(grip_index)
+        if not grip_indices or len(set(grip_indices)) != len(grip_indices):
+            raise ValueError("gripper indices must be non-empty and unique")
         if float(event_threshold) < 0.0:
             raise ValueError("event_threshold must be non-negative")
         for index, ref in enumerate(self.refs):
             episode = self.episodes[ref.episode_idx]
             states_raw = episode.states_raw
+            action_states_raw = episode.action_states_raw
             actions_raw = episode.actions_raw
-            if states_raw is None or actions_raw is None:
+            if states_raw is None or action_states_raw is None or actions_raw is None:
                 raise ValueError("mainline policy episodes require state and action arrays")
-            state_raw = np.asarray(
-                states_raw[ref.center + cfg.state_offset], dtype=np.float32
+            action_state_raw = np.asarray(
+                action_states_raw[ref.center + cfg.state_offset], dtype=np.float32
             )
             action_raw = np.asarray(
                 actions_raw[
@@ -163,12 +170,12 @@ class ObservedStateWindowDataset(Dataset):
                 dtype=np.float32,
             )
             action = self.action_normalizer.encode(action_raw).astype(np.float32)
-            state = self.action_normalizer.encode(state_raw).astype(np.float32)
+            state = self.action_normalizer.encode(action_state_raw).astype(np.float32)
             boundary = np.concatenate((state[None], action[:-1]), axis=0)
             delta = action - boundary
             motion[index] = float(np.sqrt(np.mean(np.square(delta), dtype=np.float64)))
-            raw_boundary = np.concatenate((state_raw[None], action_raw[:-1]), axis=0)
-            gripper_delta = action_raw[:, grip_index] - raw_boundary[:, grip_index]
+            raw_boundary = np.concatenate((action_state_raw[None], action_raw[:-1]), axis=0)
+            gripper_delta = action_raw[:, grip_indices] - raw_boundary[:, grip_indices]
             event[index] = bool(np.any(np.abs(gripper_delta) >= float(event_threshold)))
         return motion, event
 
@@ -176,8 +183,9 @@ class ObservedStateWindowDataset(Dataset):
         ref = self.refs[int(index)]
         episode = self.episodes[ref.episode_idx]
         states_raw = episode.states_raw
+        action_states_raw = episode.action_states_raw
         actions_raw = episode.actions_raw
-        if states_raw is None or actions_raw is None:
+        if states_raw is None or action_states_raw is None or actions_raw is None:
             raise ValueError("mainline policy episodes require state and action arrays")
         cfg = self.config
         center = ref.center
@@ -185,6 +193,7 @@ class ObservedStateWindowDataset(Dataset):
         action_start = center + cfg.action_offset
 
         state_raw = np.asarray(states_raw[state_index], dtype=np.float32)
+        action_state_raw = np.asarray(action_states_raw[state_index], dtype=np.float32)
         history_state_indices = np.asarray(
             [center + cfg.state_offset + offset for offset in cfg.state_history_offsets],
             dtype=np.int64,
@@ -237,7 +246,10 @@ class ObservedStateWindowDataset(Dataset):
             ),
             "state": torch.from_numpy(self.state_normalizer.encode(state_raw)),
             "state_raw": torch.from_numpy(state_raw.copy()),
-            "action_state": torch.from_numpy(self.action_normalizer.encode(state_raw)),
+            "action_state": torch.from_numpy(
+                self.action_normalizer.encode(action_state_raw)
+            ),
+            "action_state_raw": torch.from_numpy(action_state_raw.copy()),
             "history_state": torch.from_numpy(self.state_normalizer.encode(history_state_raw)),
             "executed_action_history": torch.from_numpy(
                 self.action_normalizer.encode(executed_action_raw)
@@ -275,11 +287,11 @@ class CachedTokenPolicyWindowDataset(Dataset):
     def training_information_signals(
         self,
         *,
-        gripper_index: int,
+        gripper_indices: Sequence[int],
         event_threshold: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         return self.base.training_information_signals(
-            gripper_index=gripper_index,
+            gripper_indices=gripper_indices,
             event_threshold=event_threshold,
         )
 

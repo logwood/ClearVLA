@@ -23,6 +23,13 @@ class LoadedEpisode:
     state_key: str | None = None
     states_raw: np.ndarray | None = None
     states_norm: np.ndarray | None = None
+    # ``action_states_raw`` is observed qpos expressed in the command chart.
+    # It equals ``states_raw`` for legacy data and is explicitly converted by
+    # an RDT profile when qpos/action gripper source scales differ.
+    action_states_raw: np.ndarray | None = None
+    source_action_dim: int = 0
+    source_state_dim: int = 0
+    data_profile: str = "source_native"
 
     @property
     def stem(self) -> str:
@@ -115,14 +122,17 @@ def load_episode(
 
     camera_keys: dict[str, str] = {}
     for camera in cameras:
-        if camera not in CAMERA_ALIASES:
+        requested = overrides.get(camera)
+        aliases = CAMERA_ALIASES.get(camera, ())
+        if not aliases and requested is None:
             raise KeyError(
-                f"Unknown camera name={camera!r}. Known cameras={sorted(CAMERA_ALIASES)}"
+                f"Unknown camera name={camera!r}; provide an explicit camera key. "
+                f"Known aliases={sorted(CAMERA_ALIASES)}"
             )
         key = resolve_key(
             datasets,
-            overrides.get(camera),
-            CAMERA_ALIASES[camera],
+            requested,
+            aliases,
             required=True,
         )
         assert key is not None
@@ -172,6 +182,9 @@ def load_episode(
         instruction=instruction,
         state_key=resolved_state,
         states_raw=states,
+        action_states_raw=states,
+        source_action_dim=int(actions.shape[1]),
+        source_state_dim=int(states.shape[1]),
     )
 
 

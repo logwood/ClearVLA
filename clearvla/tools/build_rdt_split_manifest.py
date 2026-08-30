@@ -5,13 +5,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from clearvla.data.hdf5_episode import episode_identity, find_hdf5_files
-from clearvla.data.split import split_partitioned_episodes_per_task
+from clearvla.data.split import (
+    RDT_SPLIT_MANIFEST_SCHEMA,
+    split_partitioned_episodes_per_task,
+)
 
-SPLIT_MANIFEST_SCHEMA = "clearvla-rdt-per-task-split-v1"
+SPLIT_MANIFEST_SCHEMA = RDT_SPLIT_MANIFEST_SCHEMA
 
 
 def _digest(value: object) -> str:
@@ -105,6 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-frac", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
@@ -123,9 +128,18 @@ def main() -> None:
     if args.output is None:
         print(rendered)
     else:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered + "\n", encoding="utf-8")
-        print(f"wrote {args.output} ({payload['manifest_sha256']})")
+        destination = args.output.expanduser().resolve()
+        if destination.exists() and not args.overwrite:
+            raise FileExistsError(f"refusing to overwrite split manifest: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+        try:
+            temporary.write_text(rendered + "\n", encoding="utf-8")
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        print(f"wrote {destination} ({payload['manifest_sha256']})")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from clearvla.data.hdf5_episode import load_episodes
+from clearvla.data.schema import parse_camera_key_overrides
 from clearvla.experiments.classic_policy_lab.rdt2_conditioning import DinoV2DenseConditioner
 from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import (
     DinoV2TokenStore,
@@ -16,6 +17,7 @@ from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import (
     save_episode_tokens,
 )
 from clearvla.vision.decoded_image_store import DecodedImageStore
+from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig, parse_hw
 
 
@@ -25,13 +27,25 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--glob", default="*.hdf5")
-    p.add_argument("--decoded-image-cache-dir", type=Path, required=True)
+    p.add_argument(
+        "--decoded-image-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional decoded mmap cache; omit to decode JPEG rows directly with a bounded LRU.",
+    )
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--cameras", nargs="+", default=["top", "wrist"])
     p.add_argument("--action-key", default="action")
     p.add_argument("--state-key", default="qpos")
     p.add_argument("--top-key", default="observations/images/cam_high")
     p.add_argument("--wrist-key", default="observations/images/cam_right_wrist")
+    p.add_argument(
+        "--camera-key",
+        action="append",
+        default=[],
+        metavar="NAME=HDF5/PATH",
+        help="Repeatable explicit key for any ordered camera name.",
+    )
     p.add_argument("--cache-resize", nargs=2, type=int, default=[224, 224], metavar=("H", "W"))
     p.add_argument("--cache-crop", nargs=2, type=int, default=None, metavar=("H", "W"))
     p.add_argument("--dinov2-model", default="facebook/dinov2-base")
@@ -41,6 +55,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
     p.add_argument("--max-episodes", type=int, default=0)
     p.add_argument("--rebuild", action="store_true")
+    p.add_argument("--allow-skipped", action="store_true")
+    p.add_argument("--frame-lru-capacity", type=int, default=512)
+    p.add_argument("--open-file-capacity", type=int, default=8)
     return p.parse_args()
 
 
@@ -61,6 +78,12 @@ def main() -> None:
         raise RuntimeError("--dtype bf16 requires CUDA; use --dtype fp32 on CPU")
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
     cameras = tuple(str(x) for x in args.cameras)
+    camera_keys = parse_camera_key_overrides(args.camera_key)
+    unknown = sorted(set(camera_keys) - set(cameras))
+    if unknown:
+        raise ValueError(f"camera key assignments name unselected cameras: {unknown}")
+    camera_keys.setdefault("top", args.top_key)
+    camera_keys.setdefault("wrist", args.wrist_key)
     preprocessing = PreprocessConfig(
         resize_hw=parse_hw(args.cache_resize), crop_hw=parse_hw(args.cache_crop)
     )
@@ -71,13 +94,27 @@ def main() -> None:
         min_length=1,
         action_key=args.action_key,
         state_key=args.state_key,
-        camera_key_overrides={"top": args.top_key, "wrist": args.wrist_key},
+        camera_key_overrides=camera_keys,
     )
+    if skipped and not args.allow_skipped:
+        raise RuntimeError(f"DINO cache inventory has skipped episodes: {skipped[:5]}")
+    if args.max_episodes < 0:
+        raise ValueError("--max-episodes must be non-negative")
     if args.max_episodes:
         episodes = episodes[: args.max_episodes]
-    image_store = DecodedImageStore(
-        args.decoded_image_cache_dir, camera_names=cameras, preprocessing=preprocessing
-    )
+    if args.decoded_image_cache_dir is None:
+        image_store: DecodedImageStore | OnlineVisualStore = OnlineVisualStore(
+            camera_names=cameras,
+            preprocessing=preprocessing,
+            frame_lru_capacity=args.frame_lru_capacity,
+            open_file_capacity=args.open_file_capacity,
+        )
+    else:
+        image_store = DecodedImageStore(
+            args.decoded_image_cache_dir,
+            camera_names=cameras,
+            preprocessing=preprocessing,
+        )
     for episode in episodes:
         image_store.validate_episode(episode)
     conditioner = DinoV2DenseConditioner(
@@ -149,7 +186,14 @@ def main() -> None:
         "episodes": len(episodes),
         "skipped": skipped,
         "out_dir": str(args.out_dir),
-        "decoded_image_cache_dir": str(args.decoded_image_cache_dir),
+        "decoded_image_cache_dir": (
+            None
+            if args.decoded_image_cache_dir is None
+            else str(args.decoded_image_cache_dir)
+        ),
+        "image_source_mode": (
+            "hdf5-direct" if args.decoded_image_cache_dir is None else "decoded-cache"
+        ),
         "decoded_preprocessing": preprocessing.to_dict(),
         "cameras": list(cameras),
         "dinov2_model": args.dinov2_model,

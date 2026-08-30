@@ -11,6 +11,7 @@ from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.data.dataset import (
     CachedTokenPolicyWindowDataset,
     ObservedStateDatasetConfig,
+    ObservedStateWindowDataset,
 )
 from clearvla.mainline.data.language import load_t5_condition, load_t5_condition_bank
 from clearvla.mainline.data.loading import (
@@ -19,6 +20,7 @@ from clearvla.mainline.data.loading import (
     to_training_batch,
 )
 from clearvla.mainline.data.normalizer import ArrayNormalizer
+from clearvla.mainline.data.token_store import DinoV2TokenStore
 from clearvla.mainline.runtime.identity import v120_normalizer_fingerprint
 
 
@@ -52,6 +54,7 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
         "history_obs_image": torch.rand(batch, 3, 2, 3, 32, 32),
         "state": torch.randn(batch, 7),
         "state_raw": torch.randn(batch, 7),
+        "action_state_raw": torch.randn(batch, 7),
         "action_state": torch.randn(batch, 7),
         "history_state": torch.randn(batch, 3, 7),
         "executed_action_history": torch.randn(
@@ -86,7 +89,9 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
     assert not hasattr(typed.online, "future")
     assert typed.future.dino_supports.dtype == torch.float16
     assert torch.equal(typed.action_target.raw_units.cpu(), raw["policy_action_raw"])
-    assert torch.equal(typed.action_target.current_raw_units.cpu(), raw["state_raw"])
+    assert torch.equal(
+        typed.action_target.current_raw_units.cpu(), raw["action_state_raw"]
+    )
     assert torch.equal(typed.online.goal.tokens[0].cpu(), goal_rows[1])
     assert torch.equal(typed.online.goal.tokens[1].cpu(), goal_rows[0])
     assert typed.audit.frame_progress is not None
@@ -150,10 +155,10 @@ class _SamplingDataset(CachedTokenPolicyWindowDataset):
     def training_information_signals(
         self,
         *,
-        gripper_index: int,
+        gripper_indices: tuple[int, ...],
         event_threshold: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        assert gripper_index == -1
+        assert gripper_indices == (6,)
         assert event_threshold == 0.10
         return (
             np.arange(16, dtype=np.float32),
@@ -184,6 +189,7 @@ def test_train_loader_owns_the_resolved_information_balanced_sampler() -> None:
         information_event_fraction=0.125,
         information_motion_quantile=0.70,
         gripper_event_threshold=0.10,
+        gripper_indices=(6,),
     )
     train_loader = bundle.loader(
         "train",
@@ -233,7 +239,10 @@ def test_cached_dataset_groups_three_causal_dino_rows_with_future_supports() -> 
             return torch.zeros(len(keys), 2, 64, 16)
 
     store = Store()
-    dataset = CachedTokenPolicyWindowDataset(Base(), token_store=store)
+    dataset = CachedTokenPolicyWindowDataset(
+        cast(ObservedStateWindowDataset, Base()),
+        token_store=cast(DinoV2TokenStore, store),
+    )
     sample = dataset[0]
     assert len(store.calls) == 1
     assert torch.equal(store.calls[0][0], torch.tensor([2, 9]))

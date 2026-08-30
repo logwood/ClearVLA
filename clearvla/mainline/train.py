@@ -316,6 +316,10 @@ def _emit_training_window(
 def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
     return {
         "splits": {name: list(ids) for name, ids in bundle.splits.items()},
+        "split_metadata": bundle.split_metadata,
+        "data_profile": bundle.data_profile_metadata,
+        "gripper_indices": list(bundle.gripper_indices),
+        "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
         "action_normalizer": bundle.action_normalizer.to_dict(),
         "state_normalizer": bundle.state_normalizer.to_dict(),
         "goal": bundle.goal.metadata,
@@ -945,6 +949,14 @@ def main() -> None:
         "module_parameters": _module_parameter_context(model),
         "dataset_sizes": {name: len(value) for name, value in bundle.datasets.items()},
         "splits": {name: list(value) for name, value in bundle.splits.items()},
+        "data_adapter": {
+            "profile": bundle.data_profile_metadata,
+            "split": bundle.split_metadata,
+            "ordered_cameras": list(config.data.camera_names),
+            "camera_keys": config.data.camera_key_map(),
+            "gripper_indices": list(bundle.gripper_indices),
+            "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
+        },
         "skipped": list(bundle.skipped),
         "information_sampling": getattr(
             getattr(train_loader, "batch_sampler", None), "summary", None

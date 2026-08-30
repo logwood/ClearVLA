@@ -106,6 +106,8 @@ class DinoV2TokenStore:
         self.cache_dir = Path(cache_dir)
         self.episodes = list(episodes)
         self.camera_names = tuple(camera_names)
+        if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
+            raise ValueError("requested DINO cameras must be non-empty and unique")
         self.preprocessing = preprocessing
         self.dinov2_model = str(dinov2_model)
         self._arrays: dict[int, np.ndarray] = {}
@@ -114,9 +116,15 @@ class DinoV2TokenStore:
             for index, episode in enumerate(self.episodes)
         }
         first = self._meta[0]
+        self.storage_camera_names = first.cameras
+        self._camera_indices = tuple(
+            self.storage_camera_names.index(camera) for camera in self.camera_names
+        )
         self.token_dim = first.token_dim
         self.tokens_per_camera = first.tokens_per_camera
         for meta in self._meta.values():
+            if meta.cameras != self.storage_camera_names:
+                raise ValueError("DINO cache camera inventory differs across episodes")
             if (meta.token_dim, meta.tokens_per_camera) != (
                 self.token_dim,
                 self.tokens_per_camera,
@@ -136,8 +144,11 @@ class DinoV2TokenStore:
         meta = DinoTokenEpisodeMeta.from_path(meta_path)
         if meta.episode_stem != episode.cache_key or meta.num_frames != episode.length:
             raise ValueError(f"DINO cache episode mismatch for {episode.cache_key}")
-        if meta.cameras != self.camera_names:
-            raise ValueError(f"DINO cache cameras {meta.cameras} != {self.camera_names}")
+        missing_cameras = [camera for camera in self.camera_names if camera not in meta.cameras]
+        if missing_cameras:
+            raise ValueError(
+                f"DINO cache cameras {meta.cameras} do not contain {missing_cameras}"
+            )
         if meta.decoded_preprocessing != self.preprocessing.to_dict():
             raise ValueError("DINO and decoded-image preprocessing do not match")
         if meta.dinov2_model != self.dinov2_model:
@@ -150,7 +161,7 @@ class DinoV2TokenStore:
         array = np.load(token_path, mmap_mode="r")
         expected = (
             episode.length,
-            len(self.camera_names),
+            len(meta.cameras),
             meta.tokens_per_camera,
             meta.token_dim,
         )
@@ -192,7 +203,8 @@ class DinoV2TokenStore:
             frames = frame_ids[positions]
             if frames.size and (int(frames.min()) < 0 or int(frames.max()) >= len(array)):
                 raise IndexError(f"DINO frame index outside episode {episode_idx}")
-            result[positions] = np.asarray(array[frames], dtype=np.float16)
+            cached = np.asarray(array[frames], dtype=np.float16)
+            result[positions] = cached[:, self._camera_indices]
         return torch.from_numpy(np.ascontiguousarray(result))
 
 

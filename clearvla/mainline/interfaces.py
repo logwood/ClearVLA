@@ -265,7 +265,10 @@ class ActionSupervision:
 
     normalized: Tensor  # float32 [B,T,A]
     raw_units: Tensor  # float32 [B,T,A], native dataset units
-    current_raw_units: Tensor  # float32 [B,A], current native dataset state
+    # Observed qpos projected into the same raw command chart as ``raw_units``.
+    # It is byte-equivalent to native state only when the selected data
+    # profile declares the qpos and command coordinates identical.
+    current_raw_units: Tensor  # float32 [B,A], current raw action-chart state
 
     @property
     def batch(self) -> int:

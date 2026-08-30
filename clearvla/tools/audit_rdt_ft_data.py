@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TypeVar
 
 import h5py
 import numpy as np
@@ -68,8 +70,18 @@ def _decode_instruction(value: object) -> str:
     return result
 
 
-def _counter_dict(counter: Counter[object]) -> dict[str, int]:
+CounterKeyT = TypeVar("CounterKeyT")
+
+
+def _counter_dict(counter: Mapping[CounterKeyT, int]) -> dict[str, int]:
     return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda row: str(row[0]))}
+
+
+def _dataset(handle: h5py.File, key: str) -> h5py.Dataset:
+    value = handle.get(key)
+    if not isinstance(value, h5py.Dataset):
+        raise TypeError(f"{key} must be an HDF5 dataset")
+    return value
 
 
 def _quantile_dict(values: Iterable[np.ndarray]) -> dict[str, float]:
@@ -124,7 +136,7 @@ def audit_rdt_ft_data(
     task_episode_counts: Counter[str] = Counter()
     length_rows: list[int] = []
     action_qpos_shapes: Counter[tuple[int, int]] = Counter()
-    rgb_storage: Counter[tuple[str, tuple[int, ...]]] = Counter()
+    rgb_storage: Counter[tuple[str, int]] = Counter()
     depth_presence: Counter[tuple[str, ...]] = Counter()
     task_instructions: dict[str, set[str]] = defaultdict(set)
     instruction_counts: Counter[str] = Counter()
@@ -160,8 +172,8 @@ def audit_rdt_ft_data(
                 ]
                 if missing:
                     raise KeyError(f"missing required datasets: {missing}")
-                action_dataset = handle[ACTION_KEY]
-                qpos_dataset = handle[QPOS_KEY]
+                action_dataset = _dataset(handle, ACTION_KEY)
+                qpos_dataset = _dataset(handle, QPOS_KEY)
                 if action_dataset.ndim != 2 or qpos_dataset.ndim != 2:
                     raise ValueError("action and qpos must both be rank-two")
                 if tuple(action_dataset.shape) != tuple(qpos_dataset.shape):
@@ -174,12 +186,12 @@ def audit_rdt_ft_data(
                     raise ValueError("episode is empty")
                 length_rows.append(length)
                 action_qpos_shapes[(action_dim, qpos_dim)] += 1
-                instruction = _decode_instruction(handle[INSTRUCTION_KEY][()])
+                instruction = _decode_instruction(_dataset(handle, INSTRUCTION_KEY)[()])
                 task_instructions[task].add(instruction)
                 instruction_counts[instruction] += 1
 
                 for key in RGB_KEYS:
-                    dataset = handle[key]
+                    dataset = _dataset(handle, key)
                     if dataset.ndim != 1 or int(dataset.shape[0]) != length:
                         raise ValueError(f"{key} must be a byte row per frame")
                     if dataset.dtype.kind not in {"S", "O"}:
@@ -194,14 +206,14 @@ def audit_rdt_ft_data(
                 for name, key in zip(CAMERA_NAMES, DEPTH_KEYS, strict=True):
                     if key not in handle:
                         continue
-                    dataset = handle[key]
+                    dataset = _dataset(handle, key)
                     if dataset.ndim != 1 or int(dataset.shape[0]) != length:
                         raise ValueError(f"{key} must be a byte row per frame")
                     if dataset.dtype.kind not in {"S", "O"}:
                         raise TypeError(f"{key} must store encoded bytes, got {dataset.dtype}")
 
                 if BASE_ACTION_KEY in handle:
-                    base = np.asarray(handle[BASE_ACTION_KEY], dtype=np.float32)
+                    base = np.asarray(_dataset(handle, BASE_ACTION_KEY), dtype=np.float32)
                     if base.ndim != 2 or int(base.shape[0]) != length:
                         raise ValueError("base_action must align with episode frames")
                     maximum = float(np.abs(base).max(initial=0.0))
@@ -262,6 +274,9 @@ def audit_rdt_ft_data(
             }
 
     lengths = np.asarray(length_rows, dtype=np.float64)
+    total_frames = int(sum(length_rows))
+    decoded_bytes_per_camera = total_frames * 336 * 336 * 3
+    dino_bytes_per_camera = total_frames * 256 * 768 * 2
     report: dict[str, Any] = {
         "schema": "clearvla-rdt-ft-data-audit-v1",
         "root": str(source),
@@ -285,11 +300,27 @@ def audit_rdt_ft_data(
             "episode_count_max": max(task_episode_counts.values(), default=0),
         },
         "length": {
+            "total_frames": total_frames,
             "min": int(lengths.min()) if lengths.size else 0,
             "p10": float(np.quantile(lengths, 0.10)) if lengths.size else 0.0,
             "median": float(np.median(lengths)) if lengths.size else 0.0,
             "p90": float(np.quantile(lengths, 0.90)) if lengths.size else 0.0,
             "max": int(lengths.max(initial=0.0)) if lengths.size else 0,
+        },
+        "cache_footprint_estimate": {
+            "assumptions": {
+                "decoded_rgb": "uint8_336x336x3_per_camera_frame",
+                "dinov2": "float16_256_patches_x_768_per_camera_frame",
+                "filesystem_metadata_and_reports_excluded": True,
+            },
+            "decoded_rgb_bytes": {
+                "two_cameras": int(2 * decoded_bytes_per_camera),
+                "three_cameras": int(3 * decoded_bytes_per_camera),
+            },
+            "dinov2_bytes": {
+                "two_cameras": int(2 * dino_bytes_per_camera),
+                "three_cameras": int(3 * dino_bytes_per_camera),
+            },
         },
         "action_qpos_widths": _counter_dict(action_qpos_shapes),
         "rgb": {
@@ -392,6 +423,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-episodes", type=int, default=0)
     parser.add_argument("--schema-only", action="store_true")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--allow-errors",
         action="store_true",
@@ -407,10 +440,26 @@ def main() -> None:
         max_episodes=args.max_episodes,
         schema_only=args.schema_only,
     )
-    if args.format == "json":
-        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    rendered = (
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
+        if args.format == "json"
+        else _text_report(report)
+    )
+    if args.output is None:
+        print(rendered)
     else:
-        print(_text_report(report))
+        destination = args.output.expanduser().resolve()
+        if destination.exists() and not args.overwrite:
+            raise FileExistsError(f"refusing to overwrite RDT audit: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+        try:
+            temporary.write_text(rendered + "\n", encoding="utf-8")
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        print(f"wrote {destination}")
     if report["error_count"] and not args.allow_errors:
         raise SystemExit(2)
 

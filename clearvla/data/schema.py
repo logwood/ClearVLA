@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import h5py
@@ -54,6 +55,26 @@ CAMERA_ALIASES: dict[str, tuple[str, ...]] = {
     "left_wrist": LEFT_WRIST_ALIASES,
     "right_wrist": RIGHT_WRIST_ALIASES,
 }
+
+
+def parse_camera_key_overrides(values: Sequence[str] | None) -> dict[str, str]:
+    """Parse repeated ``NAME=HDF5/PATH`` CLI assignments without guessing."""
+
+    result: dict[str, str] = {}
+    for raw in values or ():
+        name, separator, key = str(raw).partition("=")
+        name = name.strip()
+        key = key.strip().lstrip("/")
+        if not separator or not name or not key:
+            raise ValueError(
+                f"camera key assignment must be NAME=HDF5/PATH, got {raw!r}"
+            )
+        if any(character in name for character in "/\\"):
+            raise ValueError(f"camera name is not cache safe: {name!r}")
+        if name in result:
+            raise ValueError(f"duplicate camera key assignment for {name!r}")
+        result[name] = key
+    return result
 
 
 def list_hdf5_datasets(path: str) -> dict[str, dict[str, Any]]:

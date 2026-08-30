@@ -67,6 +67,9 @@ def dataset_identity(
                     None if episode.instruction is None else _digest(episode.instruction)
                 ),
                 "length": int(episode.length),
+                "source_action_dim": int(episode.source_action_dim),
+                "source_state_dim": int(episode.source_state_dim),
+                "data_profile": episode.data_profile,
                 "size": int(stat.st_size),
                 "mtime_ns": int(stat.st_mtime_ns),
             }
@@ -77,24 +80,49 @@ def dataset_identity(
     decoded_rows = []
     for episode in bundle.episodes:
         dino_metadata = dino_cache_root / episode.cache_key / "meta.json"
-        decoded_metadata = decoded_cache_root / episode.cache_key / "meta.json"
         if not dino_metadata.is_file():
             raise FileNotFoundError(f"DINO cache metadata disappeared: {dino_metadata}")
-        if not decoded_metadata.is_file():
-            raise FileNotFoundError(f"decoded-image cache metadata disappeared: {decoded_metadata}")
         dino_rows.append(
             (episode.episode_id, hashlib.sha256(dino_metadata.read_bytes()).hexdigest())
         )
-        decoded_rows.append(
-            (episode.episode_id, hashlib.sha256(decoded_metadata.read_bytes()).hexdigest())
+        if config.data.image_store_mode == "decoded-cache":
+            decoded_metadata = decoded_cache_root / episode.cache_key / "meta.json"
+            if not decoded_metadata.is_file():
+                raise FileNotFoundError(
+                    f"decoded-image cache metadata disappeared: {decoded_metadata}"
+                )
+            decoded_rows.append(
+                (episode.episode_id, hashlib.sha256(decoded_metadata.read_bytes()).hexdigest())
+            )
+    decoded_identity = (
+        _digest(decoded_rows)
+        if config.data.image_store_mode == "decoded-cache"
+        else _digest(
+            {
+                "mode": "hdf5-direct",
+                "cache_side": config.data.cache_side,
+                "camera_keys": config.data.camera_key_map(),
+            }
         )
+    )
     return DatasetIdentity(
         raw_root=str(Path(config.data.raw_hdf5_root)),
         hdf5_glob=config.data.hdf5_glob,
-        inventory_sha256=_digest({"episodes": inventory, "splits": bundle.splits}),
+        inventory_sha256=_digest(
+            {
+                "episodes": inventory,
+                "splits": bundle.splits,
+                "data_profile": bundle.data_profile_metadata,
+                "split_contract": {
+                    name: value
+                    for name, value in bundle.split_metadata.items()
+                    if name not in {"path", "file_sha256"}
+                },
+            }
+        ),
         state_normalizer_sha256=_digest(bundle.state_normalizer.to_dict()),
         action_normalizer_sha256=_digest(bundle.action_normalizer.to_dict()),
-        decoded_cache_identity=_digest(decoded_rows),
+        decoded_cache_identity=decoded_identity,
         dino_cache_identity=_digest(dino_rows),
     )
 
@@ -110,7 +138,8 @@ def language_identity(
             size_bytes=0,
             sha256="0" * 64,
         )
-    return ArtifactIdentity.from_file("precomputed_t5_condition", config.data.t5_condition)
+    logical_name = str(bundle.goal.metadata.get("source", "precomputed_t5_condition"))
+    return ArtifactIdentity.from_file(logical_name, config.data.t5_condition)
 
 
 __all__ = [

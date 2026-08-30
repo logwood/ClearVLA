@@ -168,6 +168,8 @@ def test_hierarchical_identity_closes_decoded_dino_and_run_identity(
         splits={"train": (0,), "val": (1,), "test": ()},
         state_normalizer=normalizer,
         action_normalizer=normalizer,
+        data_profile_metadata={"name": "identity_7d_pen"},
+        split_metadata={"schema": "test"},
     )
     base = ExperimentConfig()
     config = replace(
@@ -236,6 +238,21 @@ def test_flat_episode_keeps_v1_cache_layout_and_metadata(tmp_path: Path) -> None
         "left_wrist": "observations/images/cam_left_wrist",
         "right_wrist": "observations/images/cam_right_wrist",
     }
+    custom, skipped = load_episodes(
+        root,
+        "*.hdf5",
+        cameras=("overhead_rgb",),
+        min_length=1,
+        action_key="action",
+        state_key="qpos",
+        camera_key_overrides={
+            "overhead_rgb": "observations/images/cam_high",
+        },
+    )
+    assert skipped == []
+    assert custom[0].camera_keys == {
+        "overhead_rgb": "observations/images/cam_high"
+    }
 
 
 def test_suffix_removal_collision_fails_before_cache_construction(tmp_path: Path) -> None:
@@ -245,3 +262,63 @@ def test_suffix_removal_collision_fails_before_cache_construction(tmp_path: Path
 
     with pytest.raises(RuntimeError, match="duplicate root-relative episode identity"):
         _load(root, "*")
+
+
+def test_three_camera_cache_can_serve_an_ordered_two_camera_view(tmp_path: Path) -> None:
+    root = tmp_path / "rdt-ft-data"
+    _write_episode(
+        root / "rdt_data" / "task" / "episode_0.hdf5",
+        value=12,
+        instruction="move object",
+    )
+    cameras = ("high", "left_wrist", "right_wrist")
+    episodes, skipped = load_episodes(
+        root,
+        "**/*.hdf5",
+        cameras=cameras,
+        min_length=1,
+        action_key="action",
+        state_key="qpos",
+    )
+    assert skipped == []
+    preprocessing = PreprocessConfig()
+    decoded = tmp_path / "decoded-three"
+    dino = tmp_path / "dino-three"
+    build_all_decoded_caches(
+        episodes,
+        cache_dir=decoded,
+        camera_names=cameras,
+        preprocessing=preprocessing,
+    )
+    tokens = np.zeros((episodes[0].length, 3, 2, 4), dtype=np.float32)
+    tokens[:, 0] = 1.0
+    tokens[:, 1] = 2.0
+    tokens[:, 2] = 3.0
+    save_episode_tokens(
+        cache_dir=dino,
+        episode=episodes[0],
+        camera_names=cameras,
+        preprocessing=preprocessing,
+        dinov2_model="unit-test-dino",
+        tokens=tokens,
+    )
+
+    selected = ("high", "right_wrist")
+    image_store = DecodedImageStore(
+        decoded,
+        camera_names=selected,
+        preprocessing=preprocessing,
+    )
+    frames = image_store.load_window(episodes[0], np.asarray([0], dtype=np.int64))
+    assert tuple(frames) == selected
+    token_store = DinoV2TokenStore(
+        dino,
+        episodes=episodes,
+        camera_names=selected,
+        preprocessing=preprocessing,
+        dinov2_model="unit-test-dino",
+    )
+    rows = token_store.load_batch([[0, 0]]).numpy()
+    assert tuple(rows.shape) == (1, 2, 2, 4)
+    assert np.all(rows[:, 0] == 1.0)
+    assert np.all(rows[:, 1] == 3.0)

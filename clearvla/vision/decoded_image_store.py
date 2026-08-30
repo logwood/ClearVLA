@@ -133,7 +133,11 @@ def build_episode_decoded_cache(
         for camera in camera_names:
             if camera not in episode.camera_keys:
                 raise KeyError(f"{episode.path}: unresolved camera={camera!r}")
-            dataset = f[episode.camera_keys[camera]]
+            dataset = f.get(episode.camera_keys[camera])
+            if not isinstance(dataset, h5py.Dataset):
+                raise TypeError(
+                    f"{episode.path}: camera={camera!r} key is not an HDF5 dataset"
+                )
             first = apply_preprocess(decode_image_value(dataset[0]), preprocessing)
             shape = (int(first.shape[0]), int(first.shape[1]), int(first.shape[2]))
             if shape[2] != 3:
@@ -239,9 +243,11 @@ class DecodedImageStore:
             raise ValueError(
                 f"decoded-image frame count mismatch: {meta.num_frames} != {episode.length}"
             )
-        if meta.cameras != self.camera_names:
+        missing_cameras = [camera for camera in self.camera_names if camera not in meta.cameras]
+        if missing_cameras:
             raise ValueError(
-                f"decoded-image cameras mismatch: {meta.cameras} != {self.camera_names}"
+                "decoded-image cache does not contain requested cameras: "
+                f"missing={missing_cameras}, cached={meta.cameras}"
             )
         if meta.preprocessing != self.preprocessing.to_dict():
             raise ValueError(
@@ -249,9 +255,10 @@ class DecodedImageStore:
                 f"requested={self.preprocessing.to_dict()}"
             )
         expected_keys = {camera: episode.camera_keys[camera] for camera in self.camera_names}
-        if meta.camera_keys != expected_keys:
+        cached_keys = {camera: meta.camera_keys[camera] for camera in self.camera_names}
+        if cached_keys != expected_keys:
             raise ValueError(
-                f"decoded-image camera key mismatch: cached={meta.camera_keys}, expected={expected_keys}"
+                f"decoded-image camera key mismatch: cached={cached_keys}, expected={expected_keys}"
             )
         fingerprint = _source_fingerprint(episode.path)
         if meta.source_fingerprint != fingerprint:

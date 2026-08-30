@@ -1,9 +1,12 @@
 # RDT fine-tuning data: multiview and bimanual adaptation boundary
 
-Status: active isolated compatibility line.  Its generic hierarchical-identity
-and per-sample language-loader boundary is implemented locally; its RDT split,
-camera, action, and experiment contracts are not yet selected by the formal
-mainline configuration.
+Status: active isolated compatibility line.  The complete algorithm-external
+boundary is implemented locally through a finite typed-batch loader smoke:
+hierarchical identity, manifest split, external-test isolation, per-sample
+language, ordered RGB/cache access, and explicit qpos/action chart profiles.
+No RDT artifact has been materialized on the real server yet, and no model,
+loss, optimizer, three-camera consumer, bimanual codec, or formal experiment
+has been declared adapted.
 
 This document defines the isolated compatibility line for
 `/data/rdt-ft-data/`.  It does not change the interpretation or acceptance of
@@ -121,13 +124,14 @@ this document.
 |---|---|---|
 | Episode discovery | `clearvla/data/hdf5_episode.py::find_hdf5_files` | recursive when its explicit glob is recursive; formal Pen config still supplies its existing flat glob |
 | Episode identity | `LoadedEpisode.episode_id/cache_key` | validated suffix-free root-relative identity; flat data remains stem-compatible |
-| Split | `clearvla/data/split.py` plus `tools/build_rdt_split_manifest.py` | deterministic per-task manifest exists, but formal loading still selects the Pen ordered 63/5/5 rule |
+| Split | `clearvla/data/split.py` plus `tools/build_rdt_split_manifest.py` | Pen keeps ordered 63/5/5; the isolated RDT preset selects a verified four-lane manifest |
 | Goal | `mainline/data/loading.py::GoalTemplate` | legacy one-row artifact or exact episode-to-instruction-bank row selected on CPU |
-| Decoded RGB cache | `vision/decoded_image_store.py` | directory, metadata, and mmap lookup use `cache_key` |
-| DINO cache writer | `cli/build_dinov2_token_cache.py` and `experiments/classic_policy_lab/rdt2_dinov2_cache.py` | writer/reuse lookup use `cache_key`; full RDT caches are not built yet |
-| DINO mainline reader | `mainline/data/token_store.py` | reader/meta lookup use the same `cache_key` |
+| Decoded RGB | `vision/decoded_image_store.py` or `vision/online_store.py` | strict mmap cache or direct JPEG decode with bounded process-local LRU |
+| DINO cache writer | `cli/build_dinov2_token_cache.py` and `experiments/classic_policy_lab/rdt2_dinov2_cache.py` | arbitrary ordered cameras and direct-HDF5 ingress; full real cache is not built yet |
+| DINO mainline reader | `mainline/data/token_store.py` | root-relative key plus explicit ordered subset of cached cameras |
 | Run identity | `mainline/runtime/identity.py` | episode/partition/task/instruction inventory plus decoded/DINO metadata digests are serialized |
-| Camera config | `mainline/config.py::DataConfig` | exactly `top,wrist` and two named key fields |
+| Camera config | `mainline/config.py::DataConfig` | ordered names plus exact matching key map; active model consumption remains two-camera |
+| Action/qpos chart | `data/action_chart.py` plus `mainline/data/dataset.py` | named source projection and explicit qpos-to-command boundary scale |
 
 The D0 unit must close every row together.  Fixing recursive discovery without
 fixing cache and run identity would create silent cross-task cache reuse.
@@ -152,10 +156,10 @@ tasks with the same `episode_0`, both cache layers, both DINO readers, run
 identity, and flat-v1 compatibility.
 
 This unit changes no tensor axis, normalization, model forward, objective,
-optimizer owner, checkpoint parameter, or gradient path.  D0b below implements
-the source-partition-aware manifest and serialized per-instruction T5 mapping,
-but formal configuration selection and real artifact materialization remain
-separate execution gates.  Stem-keyed caches in inactive historical labs are
+optimizer owner, checkpoint parameter, or gradient path.  D0b--D0d below
+complete the source-partition manifest, serialized per-instruction T5 mapping,
+chart profiles and cache ingress; real artifact materialization remains a
+separate execution gate.  Stem-keyed caches in inactive historical labs are
 not an RDT-data execution path and have not been promoted into this
 compatibility line.
 
@@ -179,9 +183,73 @@ training, and the existing Pen path remains a one-row bank.  S, its condition
 dropout, all losses, optimizer ownership, and checkpoint parameter shapes are
 unchanged.
 
-The split builder is not yet selected by the formal mainline config, and the
-real T5 bank has not been encoded while the Schema28 GPU run is active.  Those
-are execution gates, not permission to substitute another language encoder.
+The isolated RDT data preset now selects that manifest and instruction-bank
+ABI.  The real manifest and T5 bank have not yet been materialized; those are
+execution gates, not permission to substitute another split or encoder.
+
+### D0c implementation status: selected split and source-chart profiles
+
+`DataConfig.split_mode=manifest` now loads the content-digested per-task
+manifest by root-relative episode identity.  The manifest glob, inventory,
+counts, four exact split names, disjointness, and exhaustive coverage are
+rechecked against the live HDF5 inventory before normalization.  A malformed
+episode, stale file list, unknown episode, changed glob, duplicate membership,
+or missing `external_test` therefore fails closed.  `external_test` becomes a
+real fourth dataset lane but is never iterated by ordinary training or
+validation.
+
+The action/qpos boundary is an explicit versioned profile rather than a shape
+heuristic:
+
+```text
+identity_7d_pen
+rdt_right_arm_action_chart_v1
+rdt_left_arm_action_chart_v1
+rdt_bimanual_action_chart_v1
+```
+
+The right-arm profile selects source coordinates `7..13`; the left selects
+`0..6`; the bimanual profile retains all 14.  Command targets remain in native
+RDT action units.  Native qpos remains in its own state chart for the state
+normalizer.  Only the observed boundary sent through the action normalizer is
+converted into command units: left gripper is multiplied by
+`11.8997/4.7908`, right by `13.9231/4.7888`.  Thus action delta, physical
+decode and raw-unit evaluation share one command chart without erasing the
+different qpos chart.  The profile identity, source widths, projection,
+scales, gripper indices and digest enter run/data identity.
+
+The bimanual profile prepares a truthful 14-D typed external representation;
+it does not make the current single-gripper 7-D model codec consume it.
+
+### D0d implementation status: ordered RGB and scalable cache ingress
+
+Camera names are now an ordered unique tuple with either alias resolution or
+an exact ordered `camera_key_overrides` mapping.  A custom name is legal only
+with an explicit HDF5 key.  Decoded and DINO cache CLIs accept repeatable
+`--camera-key NAME=HDF5/PATH` assignments and recursive globs.  Hierarchical
+cache identity remains root-relative.
+
+One cache produced in `(high,left_wrist,right_wrist)` order can serve an
+ordered subset such as `(high,right_wrist)`: decoded RGB is camera-file local,
+and the mainline DINO reader performs an explicit cached-camera index select.
+No camera is pooled, duplicated, or inferred from position.  This lets a
+future three-view algorithm reuse the same external cache instead of copying
+the two-view cache.
+
+Persisting decoded RGB is no longer mandatory.  `image_store_mode=hdf5-direct`
+decodes JPEG rows through a bounded process-local frame/file LRU and returns
+the same preprocessed RGB contract.  DINO preparation can use the same direct
+path.  The full audit reports exact byte estimates for two- and three-camera
+336-RGB and float16 256x768 DINO caches.  The preparation launcher refuses a
+potentially multi-TB DINO build until
+`RDT_CONFIRM_MULTI_TB_DINO_CACHE=YES` is explicitly supplied; decoded
+materialization has a separate confirmation.
+
+The selected RDT profile deliberately has no default sampling event threshold.
+An unshuffled loader-only smoke is legal, but creation of the shuffled formal
+train sampler fails until a source-chart threshold is explicitly adopted.
+Pen's raw `0.10` therefore cannot leak into RDT merely because both profiles
+place a gripper last.
 
 ### Camera forward/backward plane
 
@@ -192,9 +260,9 @@ pooled and reconstructed later.
 
 Known non-generic boundaries are:
 
-- `mainline/config.py` rejects any camera list/count except two;
-- the loader owns only `top_camera_key` and `wrist_camera_key`;
-- cache metadata and build CLIs own the same two-key convention;
+- `ModelDimensions` still rejects model camera counts other than two, although
+  `DataConfig`, the loader, and both cache layers now accept explicit ordered
+  camera names and keys;
 - `model/transition.py::ControlledTransitionDynamics` explicitly rejects
   camera counts other than two, even though its protected G3 row shape is
   otherwise computed from `C`;
@@ -278,10 +346,10 @@ mandatory either way, so one failing limb cannot be hidden by the other.
   manifests;
 - read the HDF5 instruction as the first deterministic language source;
 - bind each sample to a precomputed T5 entry by instruction identity;
-- support the provided external `test/` partition plus two explicit split
-  meanings inside `rdt_data/`:
-  per-task episode split (known-task new trajectories) and held-out-task split
-  (new-task generalization);
+- support the provided external `test/` partition plus the adopted per-task
+  episode split inside `rdt_data/` for known-task new trajectories;
+- keep held-out-task generalization as a separately adopted future manifest
+  policy rather than silently deriving it from the per-task split;
 - retain current flat-data behavior and existing v1 caches exactly when the
   root is flat and the episode ID equals its stem.
 
@@ -296,6 +364,11 @@ indices `7..13`, and retain `(high,right_wrist)`.  This is a loader/cache/model
 plumbing check, not a representative dataset experiment and not evidence for
 bimanual task quality.  Run dataset/static tests and one fresh batch-one
 forward/backward only.
+
+The algorithm-external portion is now implemented and covered by a synthetic
+end-to-end HDF5 -> manifest -> three-camera DINO subset -> exact T5 row ->
+finite right-arm typed-batch test.  The real artifact smoke and the model
+forward/backward remain gates; neither is claimed by that synthetic test.
 
 ### D2 -- three-RGB-camera closure
 
@@ -345,6 +418,42 @@ cache probes, and bounded batch-one/batch-four smoke checks.  The first RDT
 long run changes the data domain relative to pen, but starts from a source
 whose camera and action ABIs have already been verified independently.
 
+## Preparation and acceptance commands
+
+Metadata-only preparation is the default and starts no encoder or training:
+
+```bash
+RDT_PREPARE_THROUGH=manifest bash scripts/prepare_rdt_ft_data.sh
+```
+
+Language preparation is explicit because T5-v1.1-XXL owns a GPU/host-memory
+cost:
+
+```bash
+RDT_PREPARE_THROUGH=language bash scripts/prepare_rdt_ft_data.sh
+```
+
+After inspecting `audit_full.json`, choosing storage scope and releasing the
+experiment GPU, the DINO stage requires an explicit multi-TB acknowledgement:
+
+```bash
+RDT_PREPARE_THROUGH=dino \
+RDT_CONFIRM_MULTI_TB_DINO_CACHE=YES \
+bash scripts/prepare_rdt_ft_data.sh
+```
+
+Once the required artifacts exist, the acceptance command constructs no model
+or optimizer and performs no backward or checkpoint write:
+
+```bash
+bash scripts/smoke_rdt_ft_data.sh
+```
+
+It validates one selected `val`, `test`, or `external_test` typed batch, all
+manifest/language/cache identities, tensor shapes/dtypes, future offsets and
+finite values.  It does not authorize `scripts/train_mainline.sh` with the RDT
+config.
+
 ## Unresolved assumptions blocking model edits
 
 1. Encode and verify the real 271-row T5-v1.1-XXL cache after the current GPU
@@ -356,9 +465,10 @@ whose camera and action ABIs have already been verified independently.
    the bimanual execution-value field ABI.
 4. Measure three-camera CUDA memory; do not infer the formal batch size from
    two-camera arithmetic alone.
-5. Materialize the implemented per-task manifest on the full dataset; the
-   later held-out-task rule remains a separate decision and must group
-   duplicate instruction identities before claiming language generalization.
+5. Materialize and validate the implemented per-task manifest on the full
+   dataset; the later held-out-task rule remains a separate decision and must
+   group duplicate instruction identities before claiming language
+   generalization.
 6. Determine how the provided 26-episode `test/` partition relates to the
    internal validation and held-out-task protocols; its name alone does not
    define the scientific claim.

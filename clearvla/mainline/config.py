@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, TypeVar, cast
 
+from clearvla.data.action_chart import resolve_action_state_profile
+
 from .manifest import ARCHITECTURE_MANIFEST
 
 
@@ -25,13 +27,19 @@ class DataConfig:
     t5_condition: str = "/data/senwang/checkpoint/grasp_pen_embed.pt"
     output_dir: str = "runs/clearvla_mainline"
     camera_names: tuple[str, ...] = ("top", "wrist")
+    data_profile: str = "identity_7d_pen"
     action_key: str = "action"
     state_key: str = "qpos"
     top_camera_key: str = "observations/images/cam_high"
     wrist_camera_key: str = "observations/images/cam_right_wrist"
+    camera_key_overrides: tuple[tuple[str, str], ...] = ()
+    image_store_mode: str = "decoded-cache"
+    image_frame_lru_capacity: int = 512
+    image_open_file_capacity: int = 8
     cache_side: int = 336
     dinov2_model: str = "facebook/dinov2-base"
     split_mode: str = "ordered-counts"
+    split_manifest: str = ""
     train_episodes: int = 63
     val_episodes: int = 5
     test_episodes: int = 5
@@ -42,6 +50,19 @@ class DataConfig:
     information_uniform_fraction: float = 0.50
     information_event_fraction: float = 0.125
     information_motion_quantile: float = 0.70
+    # ``None`` inherits the established Pen threshold only for the Pen
+    # identity profile.  Other source charts must opt into a threshold rather
+    # than silently borrowing raw units from another dataset.
+    sampling_gripper_event_threshold: float | None = None
+
+    def camera_key_map(self) -> dict[str, str]:
+        if self.camera_key_overrides:
+            return {str(name): str(key) for name, key in self.camera_key_overrides}
+        legacy = {
+            "top": self.top_camera_key,
+            "wrist": self.wrist_camera_key,
+        }
+        return {name: legacy[name] for name in self.camera_names if name in legacy}
 
     def validate(self) -> None:
         string_fields = (
@@ -51,10 +72,12 @@ class DataConfig:
             "dino_cache",
             "t5_condition",
             "output_dir",
+            "data_profile",
             "action_key",
             "state_key",
             "top_camera_key",
             "wrist_camera_key",
+            "image_store_mode",
             "dinov2_model",
             "split_mode",
             "normalizer",
@@ -63,22 +86,49 @@ class DataConfig:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"data.{name} must be a non-empty string")
-        if self.hdf5_glob != "*.hdf5":
-            raise ValueError("the formal dataset contract uses the flat *.hdf5 glob")
-        if tuple(self.camera_names) != ("top", "wrist"):
-            raise ValueError("the current observation contract uses top and wrist cameras")
+        if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
+            raise ValueError("data.camera_names must be a non-empty ordered unique tuple")
+        if any(not name or any(character in name for character in "/\\") for name in self.camera_names):
+            raise ValueError("camera names must be non-empty cache-safe identifiers")
+        override_rows = tuple((str(name), str(key)) for name, key in self.camera_key_overrides)
+        if len({name for name, _ in override_rows}) != len(override_rows):
+            raise ValueError("camera key overrides cannot contain duplicate camera names")
+        if override_rows:
+            if tuple(name for name, _ in override_rows) != tuple(self.camera_names):
+                raise ValueError(
+                    "explicit camera key overrides must follow and cover camera_names exactly"
+                )
+            if any(not key.strip() for _, key in override_rows):
+                raise ValueError("camera key override paths must be non-empty")
         if self.cache_side != 336:
             raise ValueError("the established decoded and DINO caches use 336x336 preprocessing")
-        if self.split_mode != "ordered-counts":
-            raise ValueError("formal comparison runs require an ordered-count split")
-        if (self.train_episodes, self.val_episodes, self.test_episodes) != (63, 5, 5):
-            raise ValueError("formal comparison runs use the established 63/5/5 episode split")
+        if self.image_store_mode not in {"decoded-cache", "hdf5-direct"}:
+            raise ValueError("data.image_store_mode must be decoded-cache or hdf5-direct")
+        if self.image_frame_lru_capacity < 0 or self.image_open_file_capacity <= 0:
+            raise ValueError("image-store LRU capacity must be non-negative and files positive")
+        if self.split_mode == "ordered-counts":
+            if self.split_manifest:
+                raise ValueError("ordered-counts split cannot also name a split manifest")
+            if (self.train_episodes, self.val_episodes, self.test_episodes) != (63, 5, 5):
+                raise ValueError("formal Pen comparison runs use the established 63/5/5 split")
+        elif self.split_mode == "manifest":
+            if not isinstance(self.split_manifest, str) or not self.split_manifest.strip():
+                raise ValueError("manifest split requires data.split_manifest")
+            if (self.train_episodes, self.val_episodes, self.test_episodes) != (0, 0, 0):
+                raise ValueError("manifest membership cannot also use ordered episode counts")
+        else:
+            raise ValueError("data.split_mode must be ordered-counts or manifest")
         if self.normalizer != "zscore":
             raise ValueError("the active action/state chart uses z-score normalization")
         if min(self.stride, self.num_workers) < 0 or self.stride == 0:
             raise ValueError("data stride must be positive and worker count non-negative")
         if self.seed < 0:
             raise ValueError("data seed must be non-negative")
+        resolve_action_state_profile(self.data_profile).validate()
+        if self.sampling_gripper_event_threshold is not None and float(
+            self.sampling_gripper_event_threshold
+        ) < 0.0:
+            raise ValueError("sampling gripper event threshold must be non-negative")
         if (
             self.information_uniform_fraction != 0.50
             or self.information_event_fraction != 0.125
@@ -446,6 +496,13 @@ class ExperimentConfig:
             raise ValueError("the coarse evidence grid cannot exceed the native chart")
         if self.bottom.controller_heads != self.dimensions.num_heads:
             raise ValueError("top and execution controller head counts must align")
+        if len(self.data.camera_names) != self.dimensions.num_cameras:
+            raise ValueError("data camera order must align with model num_cameras")
+        profile = resolve_action_state_profile(self.data.data_profile)
+        if profile.output_dim != self.dimensions.action_dim:
+            raise ValueError("data profile width must align with dimensions.action_dim")
+        if profile.output_dim != self.dimensions.state_dim:
+            raise ValueError("data profile width must align with dimensions.state_dim")
 
     def as_dict(self) -> dict[str, object]:
         return cast(dict[str, object], asdict(self))
@@ -465,6 +522,7 @@ class ExperimentConfig:
                 "dino_cache",
                 "t5_condition",
                 "output_dir",
+                "split_manifest",
             ):
                 data.pop(name, None)
             payload["data"] = data
@@ -505,9 +563,28 @@ def config_from_mapping(value: Mapping[str, object]) -> ExperimentConfig:
     if unknown:
         raise ValueError(f"unknown config sections: {', '.join(unknown)}")
     raw_data = value.get("data", {})
-    if isinstance(raw_data, Mapping) and "camera_names" in raw_data:
+    if isinstance(raw_data, Mapping):
         raw_data = dict(raw_data)
-        raw_data["camera_names"] = tuple(str(item) for item in raw_data["camera_names"])  # type: ignore[index]
+        if "camera_names" in raw_data:
+            raw_data["camera_names"] = tuple(  # type: ignore[index]
+                str(item) for item in raw_data["camera_names"]  # type: ignore[index]
+            )
+        if "camera_key_overrides" in raw_data:
+            camera_keys = raw_data["camera_key_overrides"]
+            if isinstance(camera_keys, Mapping):
+                names = tuple(raw_data.get("camera_names", ()))
+                unknown = sorted(set(str(name) for name in camera_keys) - set(names))
+                if unknown:
+                    raise ValueError(f"camera key overrides name unknown cameras: {unknown}")
+                raw_data["camera_key_overrides"] = tuple(
+                    (str(name), str(camera_keys[name])) for name in names
+                )
+            elif isinstance(camera_keys, (tuple, list)):
+                raw_data["camera_key_overrides"] = tuple(
+                    (str(row[0]), str(row[1])) for row in camera_keys
+                )
+            else:
+                raise TypeError("data.camera_key_overrides must be a mapping or pair sequence")
     config = ExperimentConfig(
         data=_section(DataConfig, raw_data, name="data"),
         dimensions=_section(ModelDimensions, value.get("dimensions", {}), name="dimensions"),
