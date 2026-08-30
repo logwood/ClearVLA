@@ -998,7 +998,7 @@ batch 100 has exact-zero group-ledger error, contribution gap at floating-point
 noise (`5.96046e-09` in the first full window), finite W/P2/action gradients,
 no forbidden goal/coarse-hidden W ingress, no action-lineage error, median
 runtime `1.838 s/batch`, and a `9.1%` decrease in total loss across the five
-available windows. Two threshold crossings through batch 100 were again owned
+available windows. Three threshold crossings through batch 100 were again owned
 by `bottom.decoder.velocity_head.arm_abs.weight`; no non-finite or new
 normalization-owner spike was observed. This is startup health evidence, not
 trained behavior evidence.
