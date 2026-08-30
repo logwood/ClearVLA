@@ -4,7 +4,6 @@ from typing import Any
 
 import h5py
 
-
 ACTION_ALIASES = ("action", "/action", "actions", "/actions")
 STATE_ALIASES = (
     "qpos",
@@ -37,10 +36,23 @@ WRIST_ALIASES = (
     "cam_right_wrist",
     "wrist_camera",
 )
+LEFT_WRIST_ALIASES = (
+    "observations/images/cam_left_wrist",
+    "observation/images/cam_left_wrist",
+    "cam_left_wrist",
+)
+RIGHT_WRIST_ALIASES = (
+    "observations/images/cam_right_wrist",
+    "observation/images/cam_right_wrist",
+    "cam_right_wrist",
+)
 
 CAMERA_ALIASES: dict[str, tuple[str, ...]] = {
     "top": TOP_ALIASES,
     "wrist": WRIST_ALIASES,
+    "high": TOP_ALIASES,
+    "left_wrist": LEFT_WRIST_ALIASES,
+    "right_wrist": RIGHT_WRIST_ALIASES,
 }
 
 

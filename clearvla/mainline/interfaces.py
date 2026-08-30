@@ -39,7 +39,7 @@ def _batch(value: Tensor, expected: int, name: str) -> None:
 
 @dataclass(frozen=True)
 class GoalCondition:
-    """One explicit precomputed T5 condition, expanded per batch by the loader."""
+    """One explicit precomputed T5 condition selected for each batch row."""
 
     tokens: Tensor  # [B,L,D_goal]
     mask: Tensor  # bool [B,L]

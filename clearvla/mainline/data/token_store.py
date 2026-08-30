@@ -30,16 +30,16 @@ def _source_fingerprint(path: Path) -> dict[str, Any]:
     }
 
 
-def _episode_dir(cache_dir: Path, episode_stem: str) -> Path:
-    return cache_dir / episode_stem
+def _episode_dir(cache_dir: Path, episode_key: str) -> Path:
+    return cache_dir / episode_key
 
 
-def _tokens_path(cache_dir: Path, episode_stem: str) -> Path:
-    return _episode_dir(cache_dir, episode_stem) / "tokens.float16.npy"
+def _tokens_path(cache_dir: Path, episode_key: str) -> Path:
+    return _episode_dir(cache_dir, episode_key) / "tokens.float16.npy"
 
 
-def _meta_path(cache_dir: Path, episode_stem: str) -> Path:
-    return _episode_dir(cache_dir, episode_stem) / "meta.json"
+def _meta_path(cache_dir: Path, episode_key: str) -> Path:
+    return _episode_dir(cache_dir, episode_key) / "meta.json"
 
 
 @dataclass(frozen=True)
@@ -130,12 +130,12 @@ class DinoV2TokenStore:
 
     def _validate_episode(self, episode_idx: int, episode: LoadedEpisode) -> DinoTokenEpisodeMeta:
         del episode_idx
-        meta_path = _meta_path(self.cache_dir, episode.stem)
+        meta_path = _meta_path(self.cache_dir, episode.cache_key)
         if not meta_path.is_file():
             raise FileNotFoundError(f"missing DINO token metadata: {meta_path}")
         meta = DinoTokenEpisodeMeta.from_path(meta_path)
-        if meta.episode_stem != episode.stem or meta.num_frames != episode.length:
-            raise ValueError(f"DINO cache episode mismatch for {episode.stem}")
+        if meta.episode_stem != episode.cache_key or meta.num_frames != episode.length:
+            raise ValueError(f"DINO cache episode mismatch for {episode.cache_key}")
         if meta.cameras != self.camera_names:
             raise ValueError(f"DINO cache cameras {meta.cameras} != {self.camera_names}")
         if meta.decoded_preprocessing != self.preprocessing.to_dict():
@@ -144,7 +144,7 @@ class DinoV2TokenStore:
             raise ValueError(f"DINO cache model {meta.dinov2_model!r} != {self.dinov2_model!r}")
         if meta.source_fingerprint != _source_fingerprint(episode.path):
             raise ValueError(f"source HDF5 changed after caching: {episode.path}")
-        token_path = _tokens_path(self.cache_dir, episode.stem)
+        token_path = _tokens_path(self.cache_dir, episode.cache_key)
         if not token_path.is_file():
             raise FileNotFoundError(f"missing DINO token array: {token_path}")
         array = np.load(token_path, mmap_mode="r")
@@ -166,7 +166,7 @@ class DinoV2TokenStore:
             raise IndexError(f"episode index {index} is outside the token store")
         if index not in self._arrays:
             self._arrays[index] = np.load(
-                _tokens_path(self.cache_dir, self.episodes[index].stem),
+                _tokens_path(self.cache_dir, self.episodes[index].cache_key),
                 mmap_mode="r",
             )
         return self._arrays[index]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import h5py
 import numpy as np
@@ -12,9 +12,13 @@ from .schema import ACTION_ALIASES, CAMERA_ALIASES, STATE_ALIASES, list_hdf5_dat
 @dataclass
 class LoadedEpisode:
     path: Path
+    episode_id: str
+    source_partition: str
+    task_id: str
     action_key: str
     camera_keys: dict[str, str]
     actions_raw: np.ndarray
+    instruction: str | None = None
     actions_norm: np.ndarray | None = None
     state_key: str | None = None
     states_raw: np.ndarray | None = None
@@ -23,6 +27,12 @@ class LoadedEpisode:
     @property
     def stem(self) -> str:
         return self.path.stem
+
+    @property
+    def cache_key(self) -> str:
+        """Root-relative cache directory; flat data remains stem-compatible."""
+
+        return self.episode_id
 
     @property
     def length(self) -> int:
@@ -38,9 +48,58 @@ def find_hdf5_files(root: Path, pattern: str) -> list[Path]:
     return files
 
 
+def _validate_episode_id(value: str) -> str:
+    identity = str(value)
+    pure = PurePosixPath(identity)
+    if (
+        not identity
+        or pure.is_absolute()
+        or "\\" in identity
+        or not pure.parts
+        or ":" in pure.parts[0]
+        or any(part in {"", ".", ".."} for part in pure.parts)
+        or pure.as_posix() != identity
+    ):
+        raise ValueError(f"invalid root-relative episode identity: {identity!r}")
+    return identity
+
+
+def episode_identity(root: Path, path: Path) -> tuple[str, str, str]:
+    """Return ``(root-relative id, source partition, task-local id)``."""
+
+    relative = path.resolve().relative_to(root.resolve()).with_suffix("")
+    identity = _validate_episode_id(relative.as_posix())
+    pure = PurePosixPath(identity)
+    # RDT data is partition/task/episode.  Existing flat datasets retain an
+    # empty partition/task and exactly their historical stem as cache key.
+    source_partition = pure.parts[0] if len(pure.parts) >= 3 else ""
+    task_parts = pure.parts[1:-1] if source_partition else pure.parts[:-1]
+    task_id = PurePosixPath(*task_parts).as_posix() if task_parts else ""
+    return identity, source_partition, task_id
+
+
+def decode_hdf5_instruction(value: object) -> str:
+    """Decode the scalar UTF-8 instruction format used by RDT HDF5 files."""
+
+    if isinstance(value, np.ndarray) and value.shape == ():
+        value = value.item()
+    if isinstance(value, (bytes, np.bytes_)):
+        result = bytes(value).decode("utf-8")
+    elif isinstance(value, str):
+        result = value
+    else:
+        raise TypeError(f"instruction must be scalar UTF-8 text, got {type(value)!r}")
+    if not result.strip():
+        raise ValueError("instruction cannot be empty")
+    return result
+
+
 def load_episode(
     path: Path,
     *,
+    episode_id: str | None = None,
+    source_partition: str = "",
+    task_id: str = "",
     cameras: tuple[str, ...],
     action_key: str = "action",
     state_key: str | None = None,
@@ -76,6 +135,12 @@ def load_episode(
             if resolved_state is not None
             else actions.copy()
         )
+        instruction_dataset = f.get("instruction")
+        instruction = (
+            decode_hdf5_instruction(instruction_dataset[()])
+            if isinstance(instruction_dataset, h5py.Dataset)
+            else None
+        )
 
     if actions.ndim != 2:
         raise ValueError(f"{path}: action must have shape [T,D], got {actions.shape}")
@@ -98,9 +163,13 @@ def load_episode(
 
     return LoadedEpisode(
         path=path,
+        episode_id=_validate_episode_id(path.stem if episode_id is None else episode_id),
+        source_partition=str(source_partition),
+        task_id=str(task_id),
         action_key=resolved_action,
         camera_keys=camera_keys,
         actions_raw=actions,
+        instruction=instruction,
         state_key=resolved_state,
         states_raw=states,
     )
@@ -118,22 +187,46 @@ def load_episodes(
 ) -> tuple[list[LoadedEpisode], list[tuple[str, str]]]:
     episodes: list[LoadedEpisode] = []
     skipped: list[tuple[str, str]] = []
+    identity_paths: dict[str, Path] = {}
     for path in find_hdf5_files(root, pattern):
         try:
+            identity, source_partition, task_id = episode_identity(root, path)
             ep = load_episode(
                 path,
+                episode_id=identity,
+                source_partition=source_partition,
+                task_id=task_id,
                 cameras=cameras,
                 action_key=action_key,
                 state_key=state_key,
                 camera_key_overrides=camera_key_overrides,
             )
-            if ep.length < min_length:
-                skipped.append((str(path), f"too_short_T={ep.length}, min_length={min_length}"))
-            else:
-                episodes.append(ep)
         except Exception as exc:  # surfaced in CLI metadata
             skipped.append((str(path), repr(exc)))
+            continue
+
+        previous = identity_paths.get(ep.episode_id)
+        if previous is not None:
+            raise RuntimeError(
+                "duplicate root-relative episode identity after removing the HDF5 suffix: "
+                f"{ep.episode_id!r} maps to both {previous} and {path}"
+            )
+        identity_paths[ep.episode_id] = path
+        if ep.length < min_length:
+            skipped.append((str(path), f"too_short_T={ep.length}, min_length={min_length}"))
+        else:
+            episodes.append(ep)
 
     if not episodes:
         raise RuntimeError(f"No usable episodes. skipped examples={skipped[:5]}")
     return episodes, skipped
+
+
+__all__ = [
+    "LoadedEpisode",
+    "decode_hdf5_instruction",
+    "episode_identity",
+    "find_hdf5_files",
+    "load_episode",
+    "load_episodes",
+]

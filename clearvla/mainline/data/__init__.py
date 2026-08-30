@@ -5,7 +5,7 @@ from .dataset import (
     ObservedStateDatasetConfig,
     ObservedStateWindowDataset,
 )
-from .language import load_t5_condition
+from .language import T5ConditionBank, load_t5_condition, load_t5_condition_bank
 from .loading import GoalTemplate, MainlineDataBundle, load_mainline_data, to_training_batch
 from .normalizer import ArrayNormalizer
 from .token_store import DinoTokenEpisodeMeta, DinoV2TokenStore
@@ -16,10 +16,12 @@ __all__ = [
     "DinoTokenEpisodeMeta",
     "DinoV2TokenStore",
     "GoalTemplate",
+    "T5ConditionBank",
     "MainlineDataBundle",
     "ObservedStateDatasetConfig",
     "ObservedStateWindowDataset",
     "load_mainline_data",
     "load_t5_condition",
+    "load_t5_condition_bank",
     "to_training_batch",
 ]

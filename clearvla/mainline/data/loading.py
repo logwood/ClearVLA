@@ -36,16 +36,17 @@ from .dataset import (
     ObservedStateDatasetConfig,
     ObservedStateWindowDataset,
 )
-from .language import load_t5_condition
+from .language import load_t5_condition_bank
 from .normalizer import ArrayNormalizer
 from .token_store import DinoV2TokenStore
 
 
 @dataclass(frozen=True)
 class GoalTemplate:
-    tokens: Tensor  # CPU float32 [1,L,D]
-    mask: Tensor  # CPU bool [1,L]
+    tokens: Tensor  # CPU float32 [N,L,D]
+    mask: Tensor  # CPU bool [N,L]
     metadata: dict[str, object]
+    episode_condition_indices: Tensor | None = None  # CPU long [episodes]
 
 
 @dataclass(frozen=True)
@@ -178,7 +179,7 @@ def load_mainline_data(
         train_episode_count=data.train_episodes,
         val_episode_count=data.val_episodes,
         test_episode_count=data.test_episodes,
-        episode_names=[episode.stem for episode in episodes],
+        episode_names=[episode.episode_id for episode in episodes],
     )
     action_normalizer, state_normalizer = _normalizers(
         episodes,
@@ -224,11 +225,14 @@ def load_mainline_data(
             base,
             token_store=token_store,
         )
-    goal_tokens, goal_mask, goal_metadata = load_t5_condition(
+    goal_bank = load_t5_condition_bank(
         data.t5_condition,
         max_tokens=dims.goal_max_tokens,
         expected_width=dims.goal_token_dim,
         allow_null=allow_null_goal,
+    )
+    episode_condition_indices = goal_bank.condition_indices(
+        [episode.instruction for episode in episodes]
     )
     return MainlineDataBundle(
         episodes=tuple(episodes),
@@ -236,7 +240,12 @@ def load_mainline_data(
         datasets=datasets,
         action_normalizer=action_normalizer,
         state_normalizer=state_normalizer,
-        goal=GoalTemplate(goal_tokens, goal_mask, goal_metadata),
+        goal=GoalTemplate(
+            goal_bank.tokens,
+            goal_bank.mask,
+            goal_bank.metadata,
+            episode_condition_indices,
+        ),
         skipped=tuple((str(path), str(reason)) for path, reason in skipped),
         sampling_seed=data.seed,
         information_uniform_fraction=data.information_uniform_fraction,
@@ -288,12 +297,26 @@ def to_training_batch(
 
     dino_history = _device_tensor(batch, "history_dinov2_tokens", device=device)
     batch_size = int(dino_history.shape[0])
-    goal_tokens = goal.tokens.expand(batch_size, -1, -1).to(
+    if goal.episode_condition_indices is None:
+        if int(goal.tokens.shape[0]) != 1:
+            raise ValueError("multi-row goal template requires episode condition indices")
+        condition_indices = torch.zeros(batch_size, dtype=torch.long)
+    else:
+        episode_indices = _audit_tensor(batch, "episode_idx").to(dtype=torch.long)
+        if tuple(episode_indices.shape) != (batch_size,):
+            raise ValueError("episode_idx must be one scalar per batch row")
+        if episode_indices.numel() and (
+            int(episode_indices.min()) < 0
+            or int(episode_indices.max()) >= len(goal.episode_condition_indices)
+        ):
+            raise IndexError("episode_idx is outside the goal-condition mapping")
+        condition_indices = goal.episode_condition_indices.index_select(0, episode_indices)
+    goal_tokens = goal.tokens.index_select(0, condition_indices).to(
         device=device,
         dtype=torch.float32,
         non_blocking=device.type == "cuda",
     )
-    goal_mask = goal.mask.expand(batch_size, -1).to(
+    goal_mask = goal.mask.index_select(0, condition_indices).to(
         device=device,
         non_blocking=device.type == "cuda",
     )

@@ -2,11 +2,147 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from torch import Tensor
+
+T5_INSTRUCTION_CACHE_SCHEMA = "clearvla-t5-instruction-cache-v1"
+T5_ENCODER_ID = "google/t5-v1_1-xxl"
+T5_SOURCE_MAX_TOKENS = 120
+
+
+def instruction_sha256(instruction: str) -> str:
+    value = str(instruction)
+    if not value.strip():
+        raise ValueError("instruction must be non-empty")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def instruction_inventory_sha256(instructions: Sequence[str]) -> str:
+    encoded = json.dumps(
+        [str(value) for value in instructions],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class T5ConditionBank:
+    """CPU condition rows plus an exact instruction-to-row mapping."""
+
+    tokens: Tensor  # float32 [N,L,D]
+    mask: Tensor  # bool [N,L]
+    instructions: tuple[str, ...]
+    metadata: dict[str, Any]
+
+    @property
+    def is_instruction_bank(self) -> bool:
+        return bool(self.instructions)
+
+    def condition_indices(self, values: Sequence[str | None]) -> Tensor:
+        if not self.is_instruction_bank:
+            return torch.zeros(len(values), dtype=torch.long)
+        index = {instruction: row for row, instruction in enumerate(self.instructions)}
+        missing = sorted(
+            {
+                "<missing>" if value is None else str(value)
+                for value in values
+                if value is None or str(value) not in index
+            }
+        )
+        if missing:
+            raise KeyError(
+                "T5 instruction cache does not cover episode instructions: "
+                f"{missing[:5]}"
+            )
+        return torch.tensor([index[str(value)] for value in values], dtype=torch.long)
+
+
+def _load_instruction_bank(
+    source: Path,
+    payload: dict[str, Any],
+    *,
+    max_tokens: int,
+    expected_width: int,
+) -> T5ConditionBank:
+    if str(payload.get("schema", "")) != T5_INSTRUCTION_CACHE_SCHEMA:
+        raise ValueError("unsupported T5 instruction cache schema")
+    if str(payload.get("encoder_id", "")) != T5_ENCODER_ID:
+        raise ValueError(f"instruction cache must use {T5_ENCODER_ID}")
+    if int(payload.get("source_tokenizer_max_length", 0)) != T5_SOURCE_MAX_TOKENS:
+        raise ValueError(
+            f"instruction cache source tokenizer length must be {T5_SOURCE_MAX_TOKENS}"
+        )
+    instructions_value = payload.get("instructions")
+    digests_value = payload.get("instruction_sha256")
+    if not isinstance(instructions_value, (tuple, list)) or not isinstance(
+        digests_value, (tuple, list)
+    ):
+        raise TypeError("instruction cache identities must be sequences")
+    instructions = tuple(str(value) for value in instructions_value)
+    digests = tuple(str(value) for value in digests_value)
+    if not instructions or any(not value.strip() for value in instructions):
+        raise ValueError("instruction cache must contain non-empty instructions")
+    if tuple(sorted(instructions)) != instructions or len(set(instructions)) != len(instructions):
+        raise ValueError("instruction cache instructions must be sorted and unique")
+    expected_digests = tuple(instruction_sha256(value) for value in instructions)
+    if digests != expected_digests:
+        raise ValueError("instruction cache text digests are inconsistent")
+    if str(payload.get("instruction_inventory_sha256", "")) != instruction_inventory_sha256(
+        instructions
+    ):
+        raise ValueError("instruction cache inventory digest is inconsistent")
+
+    if "tokens" not in payload or "attention_mask" not in payload:
+        raise KeyError("instruction cache is missing tokens or attention_mask")
+    raw_tokens = torch.as_tensor(payload["tokens"])
+    raw_mask = torch.as_tensor(payload["attention_mask"], dtype=torch.bool)
+    if raw_tokens.ndim != 3 or raw_mask.ndim != 2:
+        raise ValueError("instruction cache tensors must be [N,L,D] and [N,L]")
+    stored_max_tokens = int(payload.get("policy_max_tokens", 0))
+    if stored_max_tokens != int(raw_tokens.shape[1]) or stored_max_tokens < int(max_tokens):
+        raise ValueError("instruction cache does not cover the requested policy token length")
+    if tuple(raw_mask.shape) != tuple(raw_tokens.shape[:2]):
+        raise ValueError("instruction cache mask does not align with tokens")
+    if int(raw_tokens.shape[0]) != len(instructions):
+        raise ValueError("instruction cache tensor rows do not match instruction identities")
+    if int(raw_tokens.shape[2]) != int(expected_width):
+        raise ValueError(
+            f"T5 width {raw_tokens.shape[2]} does not match configured width {expected_width}"
+        )
+    if int(payload.get("embedding_width", 0)) != int(raw_tokens.shape[2]):
+        raise ValueError("instruction cache embedding width metadata is inconsistent")
+    tokens = raw_tokens[:, :max_tokens].detach().to(device="cpu", dtype=torch.float32)
+    mask = raw_mask[:, :max_tokens].detach().to(device="cpu", dtype=torch.bool)
+    if not bool(torch.isfinite(tokens).all()):
+        raise ValueError("instruction cache contains NaN or infinity")
+    if not bool(mask.any(dim=1).all()):
+        raise ValueError("every instruction cache row must retain at least one token")
+    if bool(tokens.masked_select(~mask[..., None].expand_as(tokens)).ne(0).any()):
+        raise ValueError("masked instruction-cache tokens must be exact zero")
+    metadata = {
+        "source": "precomputed_t5_instruction_cache",
+        "path": str(source.resolve()),
+        "schema": T5_INSTRUCTION_CACHE_SCHEMA,
+        "encoder_id": T5_ENCODER_ID,
+        "instructions": len(instructions),
+        "instruction_inventory_sha256": instruction_inventory_sha256(instructions),
+        "original_shape": list(raw_tokens.shape),
+        "original_dtype": str(raw_tokens.dtype).removeprefix("torch."),
+        "effective_tokens": int(tokens.shape[1]),
+    }
+    return T5ConditionBank(
+        tokens=tokens.contiguous(),
+        mask=mask.contiguous(),
+        instructions=instructions,
+        metadata=metadata,
+    )
 
 
 def load_t5_condition(
@@ -98,4 +234,46 @@ def load_t5_condition(
     )
 
 
-__all__ = ["load_t5_condition"]
+def load_t5_condition_bank(
+    path: str | Path,
+    *,
+    max_tokens: int,
+    expected_width: int,
+    allow_null: bool = False,
+) -> T5ConditionBank:
+    """Load either the legacy single condition or a typed instruction bank."""
+
+    source = Path(path).expanduser()
+    if source.is_file():
+        payload = torch.load(source, map_location="cpu", weights_only=False)
+        if isinstance(payload, dict) and payload.get("schema") == T5_INSTRUCTION_CACHE_SCHEMA:
+            return _load_instruction_bank(
+                source,
+                payload,
+                max_tokens=max_tokens,
+                expected_width=expected_width,
+            )
+    tokens, mask, metadata = load_t5_condition(
+        source,
+        max_tokens=max_tokens,
+        expected_width=expected_width,
+        allow_null=allow_null,
+    )
+    return T5ConditionBank(
+        tokens=tokens,
+        mask=mask,
+        instructions=(),
+        metadata=metadata,
+    )
+
+
+__all__ = [
+    "T5ConditionBank",
+    "T5_ENCODER_ID",
+    "T5_INSTRUCTION_CACHE_SCHEMA",
+    "T5_SOURCE_MAX_TOKENS",
+    "instruction_inventory_sha256",
+    "instruction_sha256",
+    "load_t5_condition",
+    "load_t5_condition_bank",
+]

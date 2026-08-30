@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Strict mmap-backed DINOv2 dense-token cache for RDT2-FM experiments.
 
 The frozen DINOv2 encoder is expensive but deterministic.  Formal experiments
@@ -7,8 +5,10 @@ should encode each decoded frame once, persist per-camera patch tokens, and let
 RDT2-FM training read only the dense token cache.
 """
 
-from dataclasses import asdict, dataclass
+from __future__ import annotations
+
 import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -18,7 +18,6 @@ from torch import Tensor
 
 from clearvla.data.hdf5_episode import LoadedEpisode
 from clearvla.vision.preprocessing import PreprocessConfig
-
 
 DINO_TOKEN_CACHE_VERSION = "rdt2-dinov2-dense-token-v1"
 
@@ -32,16 +31,16 @@ def _source_fingerprint(path: Path) -> dict[str, Any]:
     }
 
 
-def _episode_dir(cache_dir: Path, episode_stem: str) -> Path:
-    return Path(cache_dir) / episode_stem
+def _episode_dir(cache_dir: Path, episode_key: str) -> Path:
+    return Path(cache_dir) / episode_key
 
 
-def _tokens_path(cache_dir: Path, episode_stem: str) -> Path:
-    return _episode_dir(cache_dir, episode_stem) / "tokens.float16.npy"
+def _tokens_path(cache_dir: Path, episode_key: str) -> Path:
+    return _episode_dir(cache_dir, episode_key) / "tokens.float16.npy"
 
 
-def _meta_path(cache_dir: Path, episode_stem: str) -> Path:
-    return _episode_dir(cache_dir, episode_stem) / "meta.json"
+def _meta_path(cache_dir: Path, episode_key: str) -> Path:
+    return _episode_dir(cache_dir, episode_key) / "meta.json"
 
 
 @dataclass(frozen=True)
@@ -139,18 +138,22 @@ class DinoV2TokenStore:
         return state
 
     def validate_episode(self, episode_idx: int, episode: LoadedEpisode) -> DinoTokenEpisodeMeta:
-        meta_path = _meta_path(self.cache_dir, episode.stem)
+        meta_path = _meta_path(self.cache_dir, episode.cache_key)
         if not meta_path.exists():
             raise FileNotFoundError(
                 f"missing DINO token cache metadata: {meta_path}. "
                 "Run `python -m clearvla.cli.build_dinov2_token_cache ...` first."
             )
         meta = DinoTokenEpisodeMeta.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
-        if meta.episode_stem != episode.stem:
-            raise ValueError(f"DINO token stem mismatch: {meta.episode_stem!r} != {episode.stem!r}")
+        if meta.episode_stem != episode.cache_key:
+            raise ValueError(
+                "DINO token episode identity mismatch: "
+                f"{meta.episode_stem!r} != {episode.cache_key!r}"
+            )
         if meta.num_frames != episode.length:
             raise ValueError(
-                f"DINO token frame count mismatch for {episode.stem}: {meta.num_frames} != {episode.length}"
+                f"DINO token frame count mismatch for {episode.cache_key}: "
+                f"{meta.num_frames} != {episode.length}"
             )
         if meta.cameras != self.camera_names:
             raise ValueError(f"DINO token cameras mismatch: {meta.cameras} != {self.camera_names}")
@@ -169,7 +172,7 @@ class DinoV2TokenStore:
                 f"DINO token source fingerprint mismatch for {episode.path}; "
                 "the source HDF5 changed after token-cache construction"
             )
-        path = _tokens_path(self.cache_dir, episode.stem)
+        path = _tokens_path(self.cache_dir, episode.cache_key)
         if not path.exists():
             raise FileNotFoundError(f"missing DINO token mmap: {path}")
         array = np.load(path, mmap_mode="r")
@@ -186,7 +189,7 @@ class DinoV2TokenStore:
             raise IndexError(f"episode_idx={idx} outside [0,{len(self.episodes)})")
         if idx not in self._arrays:
             self._arrays[idx] = np.load(
-                _tokens_path(self.cache_dir, self.episodes[idx].stem), mmap_mode="r"
+                _tokens_path(self.cache_dir, self.episodes[idx].cache_key), mmap_mode="r"
             )
         return self._arrays[idx]
 
@@ -227,18 +230,18 @@ class DinoV2TokenStore:
         return torch.from_numpy(np.ascontiguousarray(out))
 
 
-def load_episode_token_meta(cache_dir: Path, episode_stem: str) -> DinoTokenEpisodeMeta:
+def load_episode_token_meta(cache_dir: Path, episode_key: str) -> DinoTokenEpisodeMeta:
     """Read and validate one persisted metadata record."""
-    path = _meta_path(Path(cache_dir), str(episode_stem))
+    path = _meta_path(Path(cache_dir), str(episode_key))
     if not path.exists():
         raise FileNotFoundError(f"missing DINO token cache metadata: {path}")
     return DinoTokenEpisodeMeta.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
-def episode_tokens_exist(cache_dir: Path, episode_stem: str) -> bool:
+def episode_tokens_exist(cache_dir: Path, episode_key: str) -> bool:
     return (
-        _meta_path(Path(cache_dir), str(episode_stem)).exists()
-        and _tokens_path(Path(cache_dir), str(episode_stem)).exists()
+        _meta_path(Path(cache_dir), str(episode_key)).exists()
+        and _tokens_path(Path(cache_dir), str(episode_key)).exists()
     )
 
 
@@ -258,9 +261,9 @@ def save_episode_tokens(
         raise ValueError(f"tokens must be [T,Cam,Patch,Dim], got {tokens.shape}")
     if tokens.shape[0] != episode.length or tokens.shape[1] != len(camera_names):
         raise ValueError("token episode/camera dimensions do not match source episode")
-    episode_root = _episode_dir(Path(cache_dir), episode.stem)
-    meta_path = _meta_path(Path(cache_dir), episode.stem)
-    path = _tokens_path(Path(cache_dir), episode.stem)
+    episode_root = _episode_dir(Path(cache_dir), episode.cache_key)
+    meta_path = _meta_path(Path(cache_dir), episode.cache_key)
+    path = _tokens_path(Path(cache_dir), episode.cache_key)
     if meta_path.exists() and path.exists() and not rebuild:
         return DinoTokenEpisodeMeta.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
     episode_root.mkdir(parents=True, exist_ok=True)
@@ -270,7 +273,7 @@ def save_episode_tokens(
     del mmap
     meta = DinoTokenEpisodeMeta(
         cache_version=DINO_TOKEN_CACHE_VERSION,
-        episode_stem=episode.stem,
+        episode_stem=episode.cache_key,
         num_frames=episode.length,
         cameras=tuple(camera_names),
         token_dim=int(tokens.shape[3]),

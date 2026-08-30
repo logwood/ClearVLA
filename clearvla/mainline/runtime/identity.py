@@ -60,7 +60,12 @@ def dataset_identity(
         stat = episode.path.stat()
         inventory.append(
             {
-                "stem": episode.stem,
+                "episode_id": episode.episode_id,
+                "source_partition": episode.source_partition,
+                "task_id": episode.task_id,
+                "instruction_sha256": (
+                    None if episode.instruction is None else _digest(episode.instruction)
+                ),
                 "length": int(episode.length),
                 "size": int(stat.st_size),
                 "mtime_ns": int(stat.st_mtime_ns),
@@ -71,15 +76,17 @@ def dataset_identity(
     decoded_cache_root = Path(config.data.decoded_cache)
     decoded_rows = []
     for episode in bundle.episodes:
-        dino_metadata = dino_cache_root / episode.stem / "meta.json"
-        decoded_metadata = decoded_cache_root / episode.stem / "meta.json"
+        dino_metadata = dino_cache_root / episode.cache_key / "meta.json"
+        decoded_metadata = decoded_cache_root / episode.cache_key / "meta.json"
         if not dino_metadata.is_file():
             raise FileNotFoundError(f"DINO cache metadata disappeared: {dino_metadata}")
         if not decoded_metadata.is_file():
             raise FileNotFoundError(f"decoded-image cache metadata disappeared: {decoded_metadata}")
-        dino_rows.append((episode.stem, hashlib.sha256(dino_metadata.read_bytes()).hexdigest()))
+        dino_rows.append(
+            (episode.episode_id, hashlib.sha256(dino_metadata.read_bytes()).hexdigest())
+        )
         decoded_rows.append(
-            (episode.stem, hashlib.sha256(decoded_metadata.read_bytes()).hexdigest())
+            (episode.episode_id, hashlib.sha256(decoded_metadata.read_bytes()).hexdigest())
         )
     return DatasetIdentity(
         raw_root=str(Path(config.data.raw_hdf5_root)),

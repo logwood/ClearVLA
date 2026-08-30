@@ -22,6 +22,7 @@ Schema25 replay worktree.
 | SCHEMA25_R2_SOURCE_DERIVED_IMPROVEMENT_PLAN.md | Source-first next-version gate: bounded validation, matched interventions and exactly one later behavioral repair |
 | ARCHITECTURE_REPLAY_LEDGER.md | Historical donor evidence; not implementation authority |
 | ACTIVE_MAINLINE_HANDOFF.md | Frozen Schema39 diagnostic context; not the active replay graph |
+| RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md | Isolated `/data/rdt-ft-data/` data, language, multiview, bimanual and experiment gates |
 
 The executable source is the exact Schema25 base plus completed R1a/G-01
 through R1h/N-01,D-01 slices and the LC-01 exact-zero deletion recorded above.

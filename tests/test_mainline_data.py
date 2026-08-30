@@ -12,7 +12,7 @@ from clearvla.mainline.data.dataset import (
     CachedTokenPolicyWindowDataset,
     ObservedStateDatasetConfig,
 )
-from clearvla.mainline.data.language import load_t5_condition
+from clearvla.mainline.data.language import load_t5_condition, load_t5_condition_bank
 from clearvla.mainline.data.loading import (
     GoalTemplate,
     MainlineDataBundle,
@@ -66,13 +66,15 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
         "target_future_dinov2_tokens": torch.randn(batch, 12, 2, 64, 16).half(),
         "target_future_offsets": torch.arange(4, 49, 4)[None].expand(batch, -1),
         "sample_index": torch.arange(batch),
-        "episode_idx": torch.zeros(batch, dtype=torch.long),
+        "episode_idx": torch.arange(batch, dtype=torch.long),
         "frame_progress": torch.rand(batch),
     }
+    goal_rows = torch.stack((torch.zeros(5, 12), torch.ones(5, 12)), dim=0)
     goal = GoalTemplate(
-        tokens=torch.randn(1, 5, 12),
-        mask=torch.ones(1, 5, dtype=torch.bool),
+        tokens=goal_rows,
+        mask=torch.ones(2, 5, dtype=torch.bool),
         metadata={"source": "test"},
+        episode_condition_indices=torch.tensor([1, 0]),
     )
     typed = to_training_batch(
         raw,
@@ -85,6 +87,8 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
     assert typed.future.dino_supports.dtype == torch.float16
     assert torch.equal(typed.action_target.raw_units.cpu(), raw["policy_action_raw"])
     assert torch.equal(typed.action_target.current_raw_units.cpu(), raw["state_raw"])
+    assert torch.equal(typed.online.goal.tokens[0].cpu(), goal_rows[1])
+    assert torch.equal(typed.online.goal.tokens[1].cpu(), goal_rows[0])
     assert typed.audit.frame_progress is not None
     assert typed.audit.frame_progress.device.type == "cpu"
 
@@ -126,6 +130,11 @@ def test_t5_loader_accepts_one_precomputed_condition(tmp_path) -> None:
     assert tokens.dtype == torch.float32
     assert tuple(mask.shape) == (1, 8)
     assert metadata["effective_tokens"] == 8
+    bank = load_t5_condition_bank(path, max_tokens=8, expected_width=12)
+    assert not bank.is_instruction_bank
+    assert bank.condition_indices([None, "any legacy single-task text"]).tolist() == [0, 0]
+    assert torch.equal(bank.tokens, tokens)
+    assert torch.equal(bank.mask, mask)
 
 
 class _SamplingDataset(CachedTokenPolicyWindowDataset):

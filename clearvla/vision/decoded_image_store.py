@@ -13,7 +13,6 @@ from clearvla.data.hdf5_episode import LoadedEpisode
 from clearvla.vision.image_io import decode_image_value
 from clearvla.vision.preprocessing import PreprocessConfig, apply_preprocess
 
-
 DECODED_IMAGE_CACHE_VERSION = "decoded-image-v1"
 
 
@@ -102,12 +101,12 @@ class DecodedImageEpisodeMeta:
         return out
 
 
-def _episode_dir(cache_dir: Path, episode_stem: str) -> Path:
-    return cache_dir / episode_stem
+def _episode_dir(cache_dir: Path, episode_key: str) -> Path:
+    return cache_dir / episode_key
 
 
-def _meta_path(cache_dir: Path, episode_stem: str) -> Path:
-    return _episode_dir(cache_dir, episode_stem) / "meta.json"
+def _meta_path(cache_dir: Path, episode_key: str) -> Path:
+    return _episode_dir(cache_dir, episode_key) / "meta.json"
 
 
 def build_episode_decoded_cache(
@@ -121,8 +120,8 @@ def build_episode_decoded_cache(
     """Decode one HDF5 episode once into per-camera native/preprocessed uint8 mmap arrays."""
     if not camera_names:
         raise ValueError("camera_names must be non-empty")
-    episode_root = _episode_dir(cache_dir, episode.stem)
-    meta_path = _meta_path(cache_dir, episode.stem)
+    episode_root = _episode_dir(cache_dir, episode.cache_key)
+    meta_path = _meta_path(cache_dir, episode.cache_key)
     if meta_path.exists() and not rebuild:
         store = DecodedImageStore(cache_dir, camera_names=camera_names, preprocessing=preprocessing)
         return store.validate_episode(episode)
@@ -162,7 +161,9 @@ def build_episode_decoded_cache(
 
     meta = DecodedImageEpisodeMeta(
         cache_version=DECODED_IMAGE_CACHE_VERSION,
-        episode_stem=episode.stem,
+        # Keep the v1 field name for compatibility.  Its value is the cache
+        # identity; for flat datasets this remains exactly the old stem.
+        episode_stem=episode.cache_key,
         num_frames=episode.length,
         cameras=tuple(camera_names),
         camera_keys={camera: episode.camera_keys[camera] for camera in camera_names},
@@ -222,16 +223,17 @@ class DecodedImageStore:
         self._arrays: dict[tuple[str, str], np.ndarray] = {}
 
     def validate_episode(self, episode: LoadedEpisode) -> DecodedImageEpisodeMeta:
-        meta_path = _meta_path(self.cache_dir, episode.stem)
+        meta_path = _meta_path(self.cache_dir, episode.cache_key)
         if not meta_path.exists():
             raise FileNotFoundError(
                 f"Missing decoded-image cache metadata: {meta_path}. "
                 "Run `python -m clearvla.cli.build_decoded_image_cache ...` first."
             )
         meta = DecodedImageEpisodeMeta.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
-        if meta.episode_stem != episode.stem:
+        if meta.episode_stem != episode.cache_key:
             raise ValueError(
-                f"decoded-image stem mismatch: {meta.episode_stem!r} != {episode.stem!r}"
+                "decoded-image episode identity mismatch: "
+                f"{meta.episode_stem!r} != {episode.cache_key!r}"
             )
         if meta.num_frames != episode.length:
             raise ValueError(
@@ -258,7 +260,7 @@ class DecodedImageStore:
                 "the source HDF5 changed after cache construction"
             )
         for camera in self.camera_names:
-            path = _episode_dir(self.cache_dir, episode.stem) / _camera_filename(camera)
+            path = _episode_dir(self.cache_dir, episode.cache_key) / _camera_filename(camera)
             if not path.exists():
                 raise FileNotFoundError(f"Missing decoded-image mmap: {path}")
             array = np.load(path, mmap_mode="r")
@@ -268,7 +270,7 @@ class DecodedImageStore:
                     f"Invalid decoded-image mmap {path}: shape={tuple(array.shape)}, dtype={array.dtype}; "
                     f"expected={expected_shape}, uint8"
                 )
-        self._meta[episode.stem] = meta
+        self._meta[episode.cache_key] = meta
         return meta
 
     def __getstate__(self):
@@ -278,11 +280,11 @@ class DecodedImageStore:
         return state
 
     def _array(self, episode: LoadedEpisode, camera: str) -> np.ndarray:
-        key = (episode.stem, camera)
+        key = (episode.cache_key, camera)
         if key not in self._arrays:
-            if episode.stem not in self._meta:
+            if episode.cache_key not in self._meta:
                 self.validate_episode(episode)
-            path = _episode_dir(self.cache_dir, episode.stem) / _camera_filename(camera)
+            path = _episode_dir(self.cache_dir, episode.cache_key) / _camera_filename(camera)
             self._arrays[key] = np.load(path, mmap_mode="r")
         return self._arrays[key]
 

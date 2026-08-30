@@ -20,7 +20,7 @@ training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
 global object slots:    K=4 plus explicit null mass
 visual history:         DINO/raw at -8 / -4 / 0, two adjacent learned flows
-formal language:        precomputed 4096-wide T5 .pt required
+formal language:        precomputed 4096-wide T5 .pt required; one row selected per sample
 bottom:                 V120 seed/transition/CVAE/workspace/Evidence MMDiT/execution
 long launcher:          scripts/train_mainline.sh (batch 8, workers 4)
 smoke launcher:         scripts/smoke_mainline.sh (batch 1, workers 0)
@@ -642,7 +642,13 @@ supports may change targets and losses, never deployment action.
     gate, entropy/mass quota, scalar progress loss, forced diversity or forced
     nonzero flow is legal.
 16. Formal training fails without the configured T5 file. Only explicit
-    null-goal smoke may omit it.
+    null-goal smoke may omit it. The established Pen artifact remains a
+    one-condition file. A hierarchical multi-task dataset may instead use the
+    typed T5-v1.1-XXL instruction bank: the loader binds each episode's exact
+    HDF5 instruction to one cache row before device transfer, and every online
+    sample still exposes exactly one `[L,4096]` token sequence plus its real
+    mask to S. Missing mappings fail before training; this selection adds no
+    model parameter, loss, dropout, or optimizer owner.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

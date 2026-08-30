@@ -87,11 +87,12 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for episode_idx, episode in enumerate(episodes):
-        if episode_tokens_exist(args.out_dir, episode.stem) and not args.rebuild:
-            meta = load_episode_token_meta(args.out_dir, episode.stem)
+        if episode_tokens_exist(args.out_dir, episode.cache_key) and not args.rebuild:
+            meta = load_episode_token_meta(args.out_dir, episode.cache_key)
             rows.append(meta.to_dict())
             print(
-                f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} stem={episode.stem} status=reuse",
+                f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} "
+                f"id={episode.episode_id} status=reuse",
                 flush=True,
             )
             continue
@@ -131,7 +132,8 @@ def main() -> None:
         )
         rows.append(meta.to_dict())
         print(
-            f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} stem={episode.stem} shape={tokens.shape}",
+            f"[dinov2-cache] episode={episode_idx + 1:03d}/{len(episodes):03d} "
+            f"id={episode.episode_id} shape={tokens.shape}",
             flush=True,
         )
     # Re-open strictly before reporting success.
