@@ -521,6 +521,38 @@ class JsonlRunLogger:
                         )
                     ),
                 ),
+                (
+                    "core-attribution-id",
+                    (
+                        "validation_core_attribution_coverage",
+                        "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs",
+                        "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact",
+                        "validation_core_attribution_world_vs_consequence_neutral_normalized_action_max_abs",
+                        "validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact",
+                        "validation_core_attribution_wrong_action_world_donor_valid_fraction",
+                        "validation_core_attribution_wrong_action_world_donor_valid_rows",
+                        "validation_core_attribution_wrong_action_world_donor_total_rows",
+                    ),
+                ),
+                (
+                    "core-attribution-effect",
+                    tuple(
+                        name
+                        for mode in (
+                            "world_dynamic_neutral",
+                            "consequence_effect_neutral",
+                            "controlled_transition_delta_neutral",
+                            "world_and_controlled_transition_neutral",
+                            "wrong_action_world",
+                        )
+                        for name in (
+                            f"validation_core_attribution_{mode}_band_13_24_mse_gain_vs_primary_physical",
+                            f"validation_core_attribution_{mode}_band_13_24_action_delta_rmse_physical",
+                            f"validation_core_attribution_{mode}_gripper_band_13_24_mse_gain_vs_primary_physical",
+                            f"validation_core_attribution_{mode}_gripper_band_13_24_action_delta_rmse_physical",
+                        )
+                    ),
+                ),
             )
         else:
             groups = ()

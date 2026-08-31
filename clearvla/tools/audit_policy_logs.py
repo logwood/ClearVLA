@@ -1373,6 +1373,7 @@ VALIDATION_KEYS = (
     "eval_proposal_ablation_coverage",
     "eval_sampling_diagnostic_coverage",
     "eval_execution_ablation_coverage",
+    "eval_core_attribution_coverage",
     "execution_ablation_primary_full_rmse",
     "execution_ablation_hard_full_rmse",
     "execution_ablation_neutral_full_rmse",
@@ -1392,6 +1393,7 @@ VALIDATION_KEYS = (
     "validation_sampling_diagnostic_coverage",
     "validation_proposal_ablation_coverage",
     "validation_execution_ablation_coverage",
+    "validation_core_attribution_coverage",
     "validation_proposal_primary_rmse_physical",
     "validation_execution_primary_rmse_physical",
     "validation_execution_hard_rmse_physical",
@@ -1826,6 +1828,7 @@ _MAINLINE_ALIASES: dict[str, str] = {
     "validation_sampling_diagnostic_coverage": "eval_sampling_diagnostic_coverage",
     "validation_proposal_ablation_coverage": "eval_proposal_ablation_coverage",
     "validation_execution_ablation_coverage": "eval_execution_ablation_coverage",
+    "validation_core_attribution_coverage": "eval_core_attribution_coverage",
     "validation_execution_primary_rmse_physical": (
         "execution_ablation_primary_full_rmse"
     ),
@@ -3313,7 +3316,18 @@ def build_summary(run: ParsedRun, *, tail: int = 20) -> dict[str, Any]:
                     )
                     if key in train
                 },
-                "val": {key: val[key] for key in VALIDATION_KEYS if key in val},
+                "val": {
+                    key: val[key]
+                    for key in (
+                        *VALIDATION_KEYS,
+                        *sorted(
+                            name
+                            for name in val
+                            if name.startswith("validation_core_attribution_")
+                        ),
+                    )
+                    if key in val
+                },
             }
         )
     return {
@@ -3493,6 +3507,10 @@ def _render_run_text(summary: Mapping[str, Any]) -> str:
                 "validation_sampling_diagnostic_coverage",
                 "validation_proposal_ablation_coverage",
                 "validation_execution_ablation_coverage",
+                "validation_core_attribution_coverage",
+                "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs",
+                "validation_core_attribution_world_vs_consequence_neutral_normalized_action_max_abs",
+                "validation_core_attribution_wrong_action_world_donor_valid_fraction",
             )
             metrics = " ".join(
                 f"{key}={_format_number(val[key])}" for key in selected if key in val
@@ -4117,6 +4135,8 @@ def _recovery_assessment(
         ]
         if schema26:
             coverage_stems.append("p2_intervention")
+        if "validation_core_attribution_coverage" in latest_val:
+            coverage_stems.append("core_attribution")
         for stem in coverage_stems:
             coverage = latest_val.get(f"validation_{stem}_coverage")
             record(
@@ -4125,6 +4145,53 @@ def _recovery_assessment(
                 if isinstance(coverage, (int, float)) and float(coverage) > 0.0
                 else "incomplete",
                 candidate_value=coverage,
+            )
+        if "validation_core_attribution_coverage" in latest_val:
+            explicit_identity = latest_val.get(
+                "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs"
+            )
+            record(
+                "core_attribution/primary_explicit_none_identity",
+                (
+                    "incomplete"
+                    if not isinstance(explicit_identity, (int, float))
+                    else ("pass" if float(explicit_identity) == 0.0 else "fail")
+                ),
+                baseline_value=0.0,
+                candidate_value=explicit_identity,
+                detail="same refined cache/noise must reproduce the primary action exactly",
+            )
+            sole_consumer_identity = latest_val.get(
+                "validation_core_attribution_world_vs_consequence_neutral_normalized_action_max_abs"
+            )
+            record(
+                "core_attribution/world_consequence_sole_consumer_identity",
+                (
+                    "incomplete"
+                    if not isinstance(sole_consumer_identity, (int, float))
+                    else (
+                        "pass"
+                        if float(sole_consumer_identity) == 0.0
+                        else "fail"
+                    )
+                ),
+                baseline_value=0.0,
+                candidate_value=sole_consumer_identity,
+                detail="a mismatch exposes an unmodelled CandidateWorld consumer or intervention leak",
+            )
+            donor_fraction = latest_val.get(
+                "validation_core_attribution_wrong_action_world_donor_valid_fraction"
+            )
+            record(
+                "core_attribution/wrong_world_donor_identifiability",
+                (
+                    "pass"
+                    if isinstance(donor_fraction, (int, float))
+                    and float(donor_fraction) > 0.0
+                    else "incomplete"
+                ),
+                candidate_value=donor_fraction,
+                detail="zero-delta donor rows do not count as wrong-world evidence",
             )
         proposal_primary = latest_val.get("validation_proposal_primary_rmse_physical")
         proposal_allowed = (

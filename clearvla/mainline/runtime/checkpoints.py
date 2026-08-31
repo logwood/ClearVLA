@@ -26,6 +26,7 @@ CHECKPOINT_SCHEMA = "clearvla-mainline-checkpoint-v4"
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/model/transition.py",
         "clearvla/mainline/runtime/checkpoints.py",
         "clearvla/mainline/runtime/evaluation.py",
         "clearvla/mainline/runtime/logging.py",
@@ -481,7 +482,7 @@ def load_checkpoint_for_validation(
     )
     if unexpected_source_files:
         raise ValueError(
-            "validation replay source drift escapes the observation-only boundary: "
+            "validation replay source drift escapes the validation-only allow-list: "
             + ", ".join(unexpected_source_files)
         )
 

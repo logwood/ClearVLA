@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        28
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 source/local verification and fresh CUDA BF16 smoke pass; exact-commit batch-eight formal training is active and its first batch-100 audit is finite/ledger-closed; behavior acceptance remains pending
+release status:         Schema28 source/local/CUDA verification and exact-commit eight-epoch run complete; Stage-A matched attribution is locally verified but awaits formal checkpoint replay; train/runtime action-conditioned-W alignment, far horizon and gripper remain open
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -95,8 +95,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > visible. It adds no parameter, buffer, state key, RNG draw, gain, clip or
 > loss. Schema26 and older checkpoints are not exact-resume sources for
 > Schema27. Schema28 changes the top/bottom/training/runtime ABIs again; all
-> earlier schemas are rejected for exact resume and the next formal run is
-> fresh.
+> earlier schemas are rejected for exact resume. Its completed formal run is
+> fresh and behavior-audited below.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -1056,11 +1056,13 @@ Do not redirect raw HDF5 merely because cache/checkpoint roots moved.
 
 ## Verification and run
 
-Historical behavior evidence is still Schema26: three complete validations
-plus epoch-4 batch 360, median `1.809 s/batch`, `12.020 GiB` process peak and
-64 finite spike events. Schema27 passed its local source suite and one
-production-dimension CPU BF16 batch, but never produced CUDA behavior evidence.
-Neither result proves Schema28.
+The authoritative Schema28 behavior artifact is
+`new_logs/schema28_final_20260831_013140/{run_context.json,metrics.jsonl}` at
+commit `097330a894d948d66c419f8af07325a5b0ff712e`. It contains all eight
+epochs and 1,144 train windows under seed 0, batch 8, the fixed 63/5 split and
+action-normalizer fingerprint `32a3a4d7f21f`. The loss ledger is exact; there
+are no tracebacks or non-finite rows. Median throughput is `1.840 s/batch` and
+the process peak estimate is `12.112 GiB`.
 
 Schema28's complete relevant mainline/runtime/auditor selection passes
 `247/247`, with touched-file Ruff, py_compile and diff checks also passing.
@@ -1099,26 +1101,47 @@ mismatch was finite and nonzero (`3.42142e-05 / 1.84383e-05`), as allowed by
 the non-fixed-point contract. The two finite raw-gradient spikes (`6.17` and
 `7.56`) were both owned by the randomly initialized arm output head.
 
-Fresh batch-eight formal training started from the same exact commit as
-`schema28_action_world_b8_20260831_013140`. Its first archived audit through
-batch 100 has exact-zero group-ledger error, contribution gap at floating-point
-noise (`5.96046e-09` in the first full window), finite W/P2/action gradients,
-no forbidden goal/coarse-hidden W ingress, no action-lineage error, median
-runtime `1.838 s/batch`, and a `9.1%` decrease in total loss across the five
-available windows. Three threshold crossings through batch 100 were again owned
-by `bottom.decoder.velocity_head.arm_abs.weight`; no non-finite or new
-normalization-owner spike was observed. This is startup health evidence, not
-trained behavior evidence.
+The completed behavior curve reaches its best aggregate point at epoch 6 and
+ends at physical full/arm/gripper RMSE
+`0.07657 / 0.05677 / 0.14733`. Final bands are
+`0.02502 / 0.05513 / 0.09743`; tail/first is `7.658`. Decoded gripper event
+precision/recall/F1 are `0.6006 / 0.2749 / 0.3771`, with `621/1357` predicted
+versus target events. Schema28 is directionally better than the aligned
+Schema26 final point but does not close far-horizon or gripper behavior.
 
-Production acceptance remains:
+The outer pass changes the action by RMS `0.02514`; its final interval/delta
+mismatch is `0.02933 / 0.01514`. Rebuilding W changes semantic/transport by
+`0.06639 / 0.00713`. This establishes one useful bounded correction, not a
+fixed point. W2 semantic and transport are respectively about `0.69x` and
+`0.44x` their Teacher magnitudes. Matched P2 interventions establish strong
+far semantic action responsibility and weak learned-scale geometry action
+responsibility, but do not separate W consequence from ControlledTransition.
 
-- continued finite closure residuals, capacity, action, W/P2 and gradient
-  metrics after warmup and across every completed epoch;
-- batch-eight process peak no greater than 22 GiB;
-- aligned batch-2200 early comparison against V120, R2, Schema26 and Schema27;
-- all eight epochs and final/mean action, native, first/tail, horizon,
-  arm/gripper, event/motion, G/S/W/P, capacity and gradient comparisons;
-- no late rebound hidden by a best checkpoint.
+There are 12 finite threshold crossings in the full run: four observation
+flow-delta, four observation target-DINO-key, three arm-output-head and one
+raw-flow-pyramid owner. The maximum global preclip is `24.63`. The Schema27
+typed-normalization owner does not recur, while older observation owners remain
+an open empirical boundary.
+
+Schema28 is therefore source-closed and runnable but not behavior-closed. The
+next architectural unit is not part of this contract until the matched
+W/consequence/ControlledTransition attribution and complete producer/consumer
+review in `CURRENT_MAINLINE_REPAIR_PLAN.md` select it. In particular, this
+contract adopts neither an extra W-to-transition bridge nor a transition-owned
+world generator.
+
+The post-run Stage-A attribution source adds only non-persistent evaluation
+state and scalar accounting. It reuses the refined cache and identical initial
+noise to compare explicit-none, W-dynamic neutral, consequence-effect neutral,
+CT-delta neutral, joint W+CT neutral and deterministic wrong-action W. It adds
+no parameter, buffer, state key, optimizer owner, RNG draw, loss or backward.
+The current inventory remains exactly `168,417,179 / 152,046,448`, 1,391 state
+keys and 23 optimizer groups. The relevant mainline/runtime/checkpoint/auditor
+selection passes `223/223`, and one complete fresh CPU FP32 validation batch
+passes all intervention identities and cleanup checks. These local results
+validate implementation algebra only; no Stage-B behavioral choice is legal
+until the authoritative Schema28 checkpoint replay supplies nonzero coverage,
+donor and event counts, first-boundary deltas and matched action/error results.
 
 Use new empty output directories:
 

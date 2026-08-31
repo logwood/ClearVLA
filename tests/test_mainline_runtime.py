@@ -17,6 +17,7 @@ from clearvla.mainline.interfaces import (
     TrainingBatch,
 )
 from clearvla.mainline.runtime.evaluation import (
+    MatchedCoreAttributionAccumulator,
     MatchedP2InterventionAccumulator,
     ValidationAccumulator,
     _gripper_event_class,
@@ -205,6 +206,18 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_deploy_object_action_world_refinement_transport_change_rms": 0.07,
         "validation_deploy_sampling_outer_final_world_action_interval_mismatch_rms": 0.08,
         "validation_deploy_sampling_outer_final_world_action_delta_mismatch_rms": 0.09,
+        "validation_core_attribution_coverage": 0.1,
+        "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs": 0.0,
+        "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact": 1.0,
+        "validation_core_attribution_world_vs_consequence_neutral_normalized_action_max_abs": 0.0,
+        "validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact": 1.0,
+        "validation_core_attribution_wrong_action_world_donor_valid_fraction": 1.0,
+        "validation_core_attribution_wrong_action_world_donor_valid_rows": 8.0,
+        "validation_core_attribution_wrong_action_world_donor_total_rows": 8.0,
+        "validation_core_attribution_controlled_transition_delta_neutral_band_13_24_mse_gain_vs_primary_physical": -0.004,
+        "validation_core_attribution_controlled_transition_delta_neutral_band_13_24_action_delta_rmse_physical": 0.02,
+        "validation_core_attribution_controlled_transition_delta_neutral_gripper_band_13_24_mse_gain_vs_primary_physical": -0.006,
+        "validation_core_attribution_controlled_transition_delta_neutral_gripper_band_13_24_action_delta_rmse_physical": 0.03,
     }
     validation_line = JsonlRunLogger.compact_line(
         "val", epoch=1, batch=None, step=100, metrics=validation
@@ -249,6 +262,17 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     assert (
         "validation_p2_intervention_semantic_far_zero_gripper_band_13_24_"
         "mse_gain_vs_primary_physical=-0.003" in validation_details
+    )
+    assert "[mainline-val-core-attribution-id]" in validation_details
+    assert "validation_core_attribution_coverage=0.1" in validation_details
+    assert (
+        "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact=1"
+        in validation_details
+    )
+    assert "[mainline-val-core-attribution-effect]" in validation_details
+    assert (
+        "validation_core_attribution_controlled_transition_delta_neutral_"
+        "band_13_24_mse_gain_vs_primary_physical=-0.004" in validation_details
     )
 
 
@@ -646,6 +670,101 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
     assert "validation_motion_head_f1" in metrics
     assert "validation_action_rmse" not in metrics
 
+    core = MatchedCoreAttributionAccumulator.from_action_normalizer(
+        normalizer,
+        device=torch.device("cpu"),
+        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        arm_motion_threshold=config.objectives.arm_motion_threshold,
+    )
+    primary = torch.zeros_like(normalized)
+    shifted = torch.ones_like(normalized)
+    core.update_primary(primary, training_batch)
+    core.update(
+        "explicit_none",
+        primary_action=primary,
+        counterfactual_action=primary,
+        batch=training_batch,
+        boundary_metrics={"intervention_active": torch.tensor(0.0)},
+    )
+    core.update(
+        "wrong_action_world",
+        primary_action=primary,
+        counterfactual_action=shifted,
+        batch=training_batch,
+        boundary_metrics={
+            "donor_valid_rows": torch.tensor(1.0),
+            "donor_total_rows": torch.tensor(1.0),
+            "donor_valid_fraction": torch.tensor(1.0),
+            "retained_support_identity_max_abs": torch.tensor(0.0),
+        },
+    )
+    core.update_identity("primary_vs_explicit_none", primary, primary)
+    core_metrics = core.means()
+    assert core_metrics["validation_core_attribution_primary_batches"] == 1.0
+    assert (
+        core_metrics[
+            "validation_core_attribution_primary_decoded_gripper_events_target"
+        ]
+        == 0.0
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_wrong_action_world_decoded_gripper_"
+            "events_predicted"
+        ]
+        >= 0.0
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_explicit_none_action_delta_rmse_physical"
+        ]
+        == 0.0
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_wrong_action_world_action_delta_rmse_physical"
+        ]
+        == 0.5
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_wrong_action_world_gripper_band_13_24_"
+            "action_delta_rmse_physical"
+        ]
+        == 0.5
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_primary_vs_explicit_none_normalized_"
+            "action_max_abs"
+        ]
+        == 0.0
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact"
+        ]
+        == 1.0
+    )
+    assert (
+        core_metrics[
+            "validation_core_attribution_wrong_action_world_retained_support_"
+            "identity_max_abs"
+        ]
+        == 0.0
+    )
+    try:
+        core.update(
+            "explicit_none",
+            primary_action=primary,
+            counterfactual_action=primary,
+            batch=training_batch,
+        )
+    except ValueError as error:
+        assert "one primary update" in str(error)
+    else:
+        raise AssertionError("a counterfactual cannot double-count one primary batch")
+
 
 def test_post_event_distance_resets_and_excludes_pre_event_rows() -> None:
     target_event = torch.tensor(
@@ -928,6 +1047,13 @@ def test_p2_replay_reuses_primary_noise_and_clears_the_eval_seam() -> None:
     assert "for mode in reader.INTERVENTION_MODES" in source
     assert "finally:" in source
     assert "reader.clear_eval_intervention()" in source
+    assert "core_attribution.update_primary(prediction.action, batch)" in source
+    assert "for mode in CORE_ATTRIBUTION_MODES" in source
+    assert "counterfactual_cache = refined_cache" in source
+    assert "consequence_module.clear_eval_intervention()" in source
+    assert "transition_module.clear_eval_intervention()" in source
+    assert '"primary_vs_explicit_none"' in source
+    assert '"world_vs_consequence_neutral"' in source
 
 
 def test_validation_keeps_decoded_events_and_motion_head_semantically_separate() -> None:
