@@ -1,7 +1,7 @@
 # ClearVLA Schema28 行为闭环与单/多任务合流计划
 
-状态：**完整 Schema28 已审计；Stage A attribution 已实现并通过本地闭环；正式 checkpoint replay 待跑；Schema29 核心语义单元尚未放行**
-更新：2026-08-31
+状态：**完整 Schema28 与正式 Stage A attribution 已审计；Stage B 已选择训练/runtime action-conditioned W 对齐为唯一核心候选；validation-only estimator/full-proposal 匹配门正在执行；八任务 train-only threshold 与联合 smoke 待完成**
+更新：2026-09-01
 
 本计划落实
 [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md) 中的完整八轮结论，
@@ -33,12 +33,13 @@
 ### 因果上仍未知
 
 - train/runtime action-condition 错位是否是远端与 gripper 的主要原因；
-- W consequence 与 CT 是互补还是重复；
 - geometry 弱是合理窄角色还是下游过滤；
 - 一次训练侧 detached self-conditioning 是否足以逼近部署 proposal 分布。
 
-因此当前放行的是一个**无训练的 attribution 实现单元**。训练侧
-self-conditioning 是首选结构候选，不是已经批准的 Schema29 事实。
+正式 attribution 已排除 W/CT 全局重复：W neutral 与 CT neutral 都有独立动作
+增量，组合影响更大；W dynamic 与 consequence neutral 的 bit-exact 恒等同时证明
+当前 sole-consumer 图完整。训练侧 self-conditioning 因此进入 estimator 匹配门，
+但尚不是已经批准的 Schema29 事实。
 
 ## 二、工作区与合流边界
 
@@ -215,8 +216,29 @@ checkpoint、BF16/CUDA 数值和第 5 项覆盖仍未实测，因此这些本地
 
 当前实现的 mainline/runtime/checkpoint/auditor 相关选择通过 `223/223`；另一个
 真实执行全部六种 core modes、既有四种 P2 modes、proposal/execution ablations 的
-一批 fresh CPU FP32 validation smoke 通过。生产 Schema28 checkpoint 尚未在此源码
-上运行，Stage B 决策表因此仍未触发。
+一批 fresh CPU FP32 validation smoke 通过。
+
+### A4. 正式 Schema28 checkpoint 结果（已完成）
+
+正式 replay 使用 Schema28 final checkpoint、179 个 validation batch 与分散的
+16-batch attribution subset，运行 `815.015 s`。有效性门全部通过：
+
+- primary 与 `explicit_none` normalized/physical action 均 bit-exact；
+- `world_dynamic_neutral` 与 `consequence_effect_neutral` 均 bit-exact；
+- wrong-action donor `128/128` 行有效，subset 内 target event `117`，不是空干预；
+- W semantic/transport 第一边界变化为 `0.24847 / 0.04108`；
+- 去掉 W dynamic 后 13--24 action delta `0.05829`、gripper delta `0.13240`，
+  paired MSE 分别恶化 `0.00557 / 0.03203`；
+- 去掉 CT delta 后对应 action/gripper delta `0.01605 / 0.04142`，MSE 分别
+  恶化 `0.00094 / 0.00655`；联合 neutral 的 delta 为 `0.06527 / 0.15345`；
+- wrong-action W 的首边界 action-condition/semantic/transport delta 为
+  `0.13604 / 0.02639 / 0.00406`，13--24 action/gripper delta 为
+  `0.00943 / 0.01952`。该 donor 在此小 subset 上误差略有改善，因此它只证明
+  correct-action identifiability，不证明当前条件已经最优。
+
+据此 Stage B 选择决策表第一行：保留 W 与 CT 的独立职责，只允许继续检查训练侧
+action-conditioned W 分布对齐。geometry gain、W->CT bridge、CT world generator、
+transport quota 与 hard event gate 继续禁止。
 
 ## 四、阶段 B：用 attribution 选择唯一核心语义单元
 
@@ -273,6 +295,15 @@ loss 简单相加从而翻倍 action budget。
 
 若 estimator 与完整 proposal 的差异大到改变 matched W 责任，停止本候选；不把
 第三遍 ODE 塞进训练来强行追平。
+
+这项门现在由 validation-only observer 实现：每个既有 diagnostic batch 复用完整
+proposal 已拥有的 initial physical noise，按训练 flow-time 分布取一个 `t`，只执行
+一次 cache0 endpoint velocity，detached decode 后只重建 W。它记录 normalized
+interval action/delta RMS、相对 coarse baseline 的 ratio、更新方向 cosine/有效覆盖、
+semantic/transport W RMS，以及完整额外路径的时间/实时 CUDA allocation。它不替换
+primary sample，不进入 loss，不增加参数、buffer、optimizer/checkpoint state 或全局
+RNG draw。observer 在 eval mode 下运行，因此训练 dropout 的匹配随机流仍属于真正
+Schema29 实现 smoke 的独立合同，不能由本门代替。
 
 ### C3. 梯度与生命周期合同
 
@@ -378,13 +409,20 @@ smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 ## 十、当前执行顺序
 
 ```text
-1. 固化本问题账本与本计划
-2. 在 Schema28 checkpoint 上运行已实现的 validation-only matched attribution
-3. 根据决策表放行或拒绝 detached self-conditioning
-4. 完成被放行 core unit 的双向源码审查、实现和单任务 smoke
-5. 将 core semantic commits 合入 rdt-multitask-prep
-6. 补多任务 experiment outlet、逐任务日志和联合 smoke
-7. 同一 core commit 依次启动 Pen 单任务与 RDT 多任务正式实验
+[done] 固化本问题账本与本计划
+[done] 在 replay 线实现并本地验证 validation-only matched attribution
+[done] 将 attribution 合入 rdt-multitask-prep
+[done] 补 task-first sampler、task-stratified validation、逐任务/micro/macro
+       日志和独立 RDT launcher
+[done] 在 Schema28 checkpoint 上运行 validation-only matched attribution
+[done] 明确 RDT continuous gripper：相邻 command 定义 activity/event，qpos 只作
+       codec/物理解码边界
+[next] 用 train-only adjacent-command audit 明确一个共享 threshold
+[done] 根据 attribution 决策表选择 detached self-conditioning 进入 estimator 门
+[next] 在同一 Schema28 checkpoint 上完成 estimator/full-proposal 匹配门
+[next] 对被放行 core unit 做双向源码审查、实现和 Pen 单任务 smoke
+[next] 在相同最终 core 上完成 RDT batch-eight mixed-model smoke
+[last] 依次启动 Pen 单任务与 RDT 多任务正式实验
 ```
 
 没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与

@@ -483,6 +483,24 @@ class JsonlRunLogger:
                     ),
                 ),
                 (
+                    "action-estimator-match",
+                    (
+                        "validation_action_estimator_match_coverage",
+                        "validation_action_estimator_to_full_interval_action_rms",
+                        "validation_action_estimator_to_full_interval_action_ratio_vs_coarse",
+                        "validation_action_estimator_to_full_interval_delta_rms",
+                        "validation_action_estimator_to_full_interval_delta_ratio_vs_coarse",
+                        "validation_action_estimator_full_update_direction_cosine",
+                        "validation_action_estimator_full_update_direction_valid_fraction",
+                        "validation_action_estimator_to_full_semantic_rms",
+                        "validation_action_estimator_to_full_semantic_ratio_vs_coarse",
+                        "validation_action_estimator_to_full_transport_rms",
+                        "validation_action_estimator_to_full_transport_ratio_vs_coarse",
+                        "validation_action_estimator_extra_path_runtime_seconds",
+                        "validation_action_estimator_extra_path_live_allocation_gib",
+                    ),
+                ),
+                (
                     "causal",
                     (
                         "validation_sampling_diagnostic_coverage",
