@@ -22,6 +22,7 @@ from .checkpoint import (
 )
 from .config import ExperimentConfig, load_config
 from .data.loading import MainlineDataBundle, load_mainline_data, to_training_batch
+from .interfaces import TrainingBatch
 from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
 from .model.types import PhysicalActionCondition
 from .runtime.checkpoints import (
@@ -62,6 +63,7 @@ from .training.gradient_audit import (
     FiniteGradientSpikeReport,
     GradientPreclipWindowAccumulator,
 )
+from .training.losses import sample_flow_matching
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
 
 
@@ -861,6 +863,195 @@ def _wrong_action_world_cache(
     return wrong_cache, metrics
 
 
+def _samplewise_direction_cosine(
+    left: torch.Tensor,
+    right: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return a finite per-sample cosine and its non-degenerate coverage."""
+
+    if tuple(left.shape) != tuple(right.shape) or left.ndim < 2:
+        raise ValueError("direction comparison tensors must align and retain batch")
+    left_rows = left.detach().float().flatten(1)
+    right_rows = right.detach().float().flatten(1)
+    left_norm = left_rows.square().sum(dim=1).sqrt()
+    right_norm = right_rows.square().sum(dim=1).sqrt()
+    denominator = left_norm * right_norm
+    valid = denominator > 1e-8
+    cosine = (left_rows * right_rows).sum(dim=1) / denominator.clamp_min(1e-8)
+    cosine = torch.where(valid, cosine, torch.zeros_like(cosine))
+    return cosine.mean(), valid.detach().float().mean()
+
+
+@torch.no_grad()
+def _validation_action_estimator_match(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    refined_cache: OnlinePolicyCache,
+    batch: TrainingBatch,
+    config: ExperimentConfig,
+    *,
+    initial_physical_noise: torch.Tensor,
+    generator: torch.Generator,
+    dtype: torch.dtype,
+) -> dict[str, torch.Tensor]:
+    """Compare the proposed train-time endpoint estimate with full proposal W.
+
+    The complete deployment proposal has already materialized
+    ``refined_cache`` from ``initial_physical_noise``.  This validation-only
+    observer samples one training flow time, places the same deployment noise
+    on the target bridge, evaluates exactly one cache0 velocity, and rebuilds
+    W from its detached endpoint estimate.  It never replaces the primary
+    validation sample and owns no persistent state.
+    """
+
+    if model.training:
+        raise ValueError("action-estimator matching is validation-only")
+    cache.validate(config)
+    refined_cache.validate(config)
+    batch.validate(config)
+    flow_state = sample_flow_matching(
+        batch.action_target.normalized,
+        action_state=batch.online.history.action_state,
+        codec=model.action_codec,
+        distribution=config.bottom.flow_time_distribution,
+        generator=generator,
+    )
+    source_noise = initial_physical_noise.to(
+        device=flow_state.target_physical.device,
+        dtype=flow_state.target_physical.dtype,
+    )
+    if tuple(source_noise.shape) != tuple(flow_state.target_physical.shape):
+        raise ValueError("estimator and deployment initial noise shapes differ")
+    alpha = flow_state.time.to(dtype=source_noise.dtype)[:, None, None]
+    noisy_physical = (
+        (1.0 - alpha) * source_noise + alpha * flow_state.target_physical
+    )
+    device = cache.history.state.device
+    autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        allocated_before = torch.cuda.memory_allocated(device)
+    else:
+        allocated_before = 0
+    started = time.perf_counter()
+    with torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=autocast_enabled,
+    ):
+        endpoint_output = model.velocity(
+            cache,
+            noisy_action_field=noisy_physical,
+            time=flow_state.time,
+            collect_diagnostics=False,
+        )
+    clean_physical = noisy_physical + (1.0 - alpha) * (
+        endpoint_output.bottom.physical_velocity.to(dtype=noisy_physical.dtype)
+    )
+    estimator_action = model.action_codec.decode(
+        clean_physical,
+        cache.history.action_state,
+    ).float()
+    estimator_condition = PhysicalActionCondition.from_horizon_action(
+        estimator_action.detach(),
+        cache.history.action_state,
+    )
+    with torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=autocast_enabled,
+    ):
+        estimator_top, _ = model.top.refine_deployment_world(
+            cache.top,
+            action_condition=estimator_condition,
+            collect_diagnostics=False,
+        )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        allocated_after = torch.cuda.memory_allocated(device)
+    else:
+        allocated_after = 0
+    elapsed = time.perf_counter() - started
+
+    coarse_condition = cache.top.action_condition
+    full_condition = refined_cache.top.action_condition
+    coarse_fingerprint = coarse_condition.fingerprint.detach().float()
+    estimator_fingerprint = estimator_condition.fingerprint.detach().float()
+    full_fingerprint = full_condition.fingerprint.detach().float()
+    direction_cosine, direction_valid = _samplewise_direction_cosine(
+        estimator_fingerprint - coarse_fingerprint,
+        full_fingerprint - coarse_fingerprint,
+    )
+    coarse_dynamics = cache.top.predicted_dynamics
+    estimator_dynamics = estimator_top.predicted_dynamics
+    full_dynamics = refined_cache.top.predicted_dynamics
+    scalar = full_fingerprint.new_tensor
+    return {
+        "estimator_to_full_interval_action_mse": (
+            estimator_condition.interval_action.detach().float()
+            - full_condition.interval_action.detach().float()
+        )
+        .square()
+        .mean(),
+        "estimator_to_full_interval_delta_mse": (
+            estimator_condition.interval_delta.detach().float()
+            - full_condition.interval_delta.detach().float()
+        )
+        .square()
+        .mean(),
+        "coarse_to_full_interval_action_mse": (
+            coarse_condition.interval_action.detach().float()
+            - full_condition.interval_action.detach().float()
+        )
+        .square()
+        .mean(),
+        "coarse_to_full_interval_delta_mse": (
+            coarse_condition.interval_delta.detach().float()
+            - full_condition.interval_delta.detach().float()
+        )
+        .square()
+        .mean(),
+        "estimator_full_update_direction_cosine": direction_cosine,
+        "estimator_full_update_direction_valid_fraction": direction_valid,
+        "estimator_to_full_semantic_mse": (
+            estimator_dynamics.semantic_delta.detach().float()
+            - full_dynamics.semantic_delta.detach().float()
+        )
+        .square()
+        .mean(),
+        "coarse_to_full_semantic_mse": (
+            coarse_dynamics.semantic_delta.detach().float()
+            - full_dynamics.semantic_delta.detach().float()
+        )
+        .square()
+        .mean(),
+        "estimator_to_full_transport_mse": (
+            estimator_dynamics.transport_mean.detach().float()
+            - full_dynamics.transport_mean.detach().float()
+        )
+        .square()
+        .mean(),
+        "coarse_to_full_transport_mse": (
+            coarse_dynamics.transport_mean.detach().float()
+            - full_dynamics.transport_mean.detach().float()
+        )
+        .square()
+        .mean(),
+        "estimator_endpoint_dynamic_calls": scalar(1.0, dtype=torch.float32),
+        "estimator_extra_path_runtime_seconds": scalar(
+            elapsed,
+            dtype=torch.float32,
+        ),
+        "estimator_extra_path_live_allocation_gib": scalar(
+            max(allocated_after - allocated_before, 0) / float(1024**3),
+            dtype=torch.float32,
+        ),
+    }
+
+
 @torch.no_grad()
 def _validate(
     *,
@@ -902,6 +1093,7 @@ def _validate(
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
+    estimator_matches = DeviceMetricAccumulator()
     proposal_ablations = DeviceMetricAccumulator()
     execution_ablations = DeviceMetricAccumulator()
     maximum = config.runtime.max_val_batches
@@ -909,6 +1101,7 @@ def _validate(
     sampling_diagnostic_batches = 0
     p2_intervention_batches = 0
     core_attribution_batches = 0
+    estimator_match_batches = 0
     proposal_ablation_batches = 0
     execution_ablation_batches = 0
     action_scale = torch.as_tensor(
@@ -1050,6 +1243,20 @@ def _validate(
                     f"validation_deploy_{name}": value
                     for name, value in prediction.metrics.items()
                 },
+                weight=batch.online.batch,
+            )
+            estimator_match_batches += 1
+            estimator_matches.update(
+                _validation_action_estimator_match(
+                    engine.model,
+                    cache,
+                    refined_cache,
+                    batch,
+                    config,
+                    initial_physical_noise=prediction.initial_physical_noise,
+                    generator=_owned_generator(device, 83_219 + batch_index),
+                    dtype=dtype,
+                ),
                 weight=batch.online.batch,
             )
             p2_intervention_batches += 1
@@ -1317,6 +1524,12 @@ def _validate(
     result["validation_core_attribution_coverage"] = float(
         core_attribution_batches / max(completed_batches, 1)
     )
+    result["validation_action_estimator_match_batches"] = float(
+        estimator_match_batches
+    )
+    result["validation_action_estimator_match_coverage"] = float(
+        estimator_match_batches / max(completed_batches, 1)
+    )
     result["validation_proposal_ablation_batches"] = float(
         proposal_ablation_batches
     )
@@ -1329,6 +1542,38 @@ def _validate(
     result["validation_execution_ablation_coverage"] = float(
         execution_ablation_batches / max(completed_batches, 1)
     )
+    if estimator_match_batches:
+        rows = estimator_matches.materialize()
+        rms_rows = (
+            "estimator_to_full_interval_action",
+            "estimator_to_full_interval_delta",
+            "coarse_to_full_interval_action",
+            "coarse_to_full_interval_delta",
+            "estimator_to_full_semantic",
+            "coarse_to_full_semantic",
+            "estimator_to_full_transport",
+            "coarse_to_full_transport",
+        )
+        for stem in rms_rows:
+            result[f"validation_action_{stem}_rms"] = math.sqrt(
+                max(rows[f"{stem}_mse"], 0.0)
+            )
+        for semantic in ("interval_action", "interval_delta", "semantic", "transport"):
+            estimator_rms = result[
+                f"validation_action_estimator_to_full_{semantic}_rms"
+            ]
+            coarse_rms = result[f"validation_action_coarse_to_full_{semantic}_rms"]
+            result[
+                f"validation_action_estimator_to_full_{semantic}_ratio_vs_coarse"
+            ] = float(estimator_rms / max(coarse_rms, 1e-12))
+        for name in (
+            "estimator_full_update_direction_cosine",
+            "estimator_full_update_direction_valid_fraction",
+            "estimator_endpoint_dynamic_calls",
+            "estimator_extra_path_runtime_seconds",
+            "estimator_extra_path_live_allocation_gib",
+        ):
+            result[f"validation_action_{name}"] = float(rows[name])
     if proposal_ablation_batches:
         rows = proposal_ablations.materialize()
         primary_normalized = rows["proposal_primary_mse_normalized"]

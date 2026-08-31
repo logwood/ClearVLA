@@ -208,6 +208,16 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_deploy_object_action_world_refinement_transport_change_rms": 0.07,
         "validation_deploy_sampling_outer_final_world_action_interval_mismatch_rms": 0.08,
         "validation_deploy_sampling_outer_final_world_action_delta_mismatch_rms": 0.09,
+        "validation_action_estimator_match_coverage": 0.1,
+        "validation_action_estimator_to_full_interval_action_rms": 0.03,
+        "validation_action_estimator_to_full_interval_action_ratio_vs_coarse": 0.6,
+        "validation_action_estimator_full_update_direction_cosine": 0.7,
+        "validation_action_estimator_to_full_semantic_rms": 0.02,
+        "validation_action_estimator_to_full_semantic_ratio_vs_coarse": 0.5,
+        "validation_action_estimator_to_full_transport_rms": 0.004,
+        "validation_action_estimator_to_full_transport_ratio_vs_coarse": 0.8,
+        "validation_action_estimator_extra_path_runtime_seconds": 0.01,
+        "validation_action_estimator_extra_path_live_allocation_gib": 0.0,
         "validation_core_attribution_coverage": 0.1,
         "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs": 0.0,
         "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact": 1.0,
@@ -251,6 +261,12 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     )
     assert (
         "validation_deploy_sampling_outer_final_world_action_delta_mismatch_rms=0.09"
+        in validation_details
+    )
+    assert "[mainline-val-action-estimator-match]" in validation_details
+    assert "validation_action_estimator_match_coverage=0.1" in validation_details
+    assert (
+        "validation_action_estimator_full_update_direction_cosine=0.7"
         in validation_details
     )
     assert "validation_gripper_band_13_24_rmse_physical=0.19" in validation_details

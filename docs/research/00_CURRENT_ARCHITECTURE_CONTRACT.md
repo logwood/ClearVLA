@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-08-31
+Updated: 2026-09-01
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        28
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 source/local/CUDA verification and exact-commit eight-epoch run complete; Stage-A matched attribution is locally verified but awaits formal checkpoint replay; train/runtime action-conditioned-W alignment, far horizon and gripper remain open
+release status:         Schema28 source/local/CUDA/eight-epoch run and formal Stage-A attribution complete; W/CT retain independent action responsibility; validation-only estimator/full-proposal gate is active; train/runtime action-conditioned-W alignment, far horizon and gripper remain open
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -1175,9 +1175,28 @@ The current inventory remains exactly `168,417,179 / 152,046,448`, 1,391 state
 keys and 23 optimizer groups. The relevant mainline/runtime/checkpoint/auditor
 selection passes `223/223`, and one complete fresh CPU FP32 validation batch
 passes all intervention identities and cleanup checks. These local results
-validate implementation algebra only; no Stage-B behavioral choice is legal
-until the authoritative Schema28 checkpoint replay supplies nonzero coverage,
-donor and event counts, first-boundary deltas and matched action/error results.
+validate implementation algebra. The authoritative Schema28 checkpoint replay
+has now completed on all 179 validation batches with a 16-batch diagnostic
+subset. Primary/explicit-none and W-neutral/consequence-neutral are bit-exact;
+all `128/128` wrong-action donor rows are valid and the subset contains 117
+target gripper events. W neutral changes far action/gripper by
+`0.05829 / 0.13240` and worsens their paired MSE by `0.00557 / 0.03203`; CT
+neutral independently changes them by `0.01605 / 0.04142` and worsens MSE by
+`0.00094 / 0.00655`. Wrong-action W changes far action/gripper by
+`0.00943 / 0.01952`. This selects train/runtime action-conditioned-W alignment
+for the next gate while retaining both W and CT; it does not authorize a
+W-to-transition bridge, transition-owned world, geometry gain, transport quota
+or hard event gate.
+
+The next validation-only observer reuses each diagnostic batch's complete
+proposal cache and initial physical noise, samples one training-distribution
+flow time, executes one cache0 endpoint velocity, detached-decodes its clean
+estimate and rebuilds only W. It records normalized interval action/delta
+distance and direction versus the full five-step proposal, semantic/transport
+W distance, and extra-path runtime/live allocation. It changes no primary
+sample, loss, parameter, buffer, optimizer/checkpoint field or global RNG. Its
+eval-mode result is only the estimator gate; training-dropout random-stream
+matching remains mandatory if Schema29 is implemented.
 
 Use new empty output directories:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import math
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
@@ -32,10 +33,12 @@ from clearvla.mainline.runtime.sampling import (
     sample_action,
     sample_cached_action,
     sample_refined_cached_action,
+    sample_refined_cached_action_with_cache,
 )
 from clearvla.mainline.train import (
     _optimizer_group_context,
     _validate,
+    _validation_action_estimator_match,
     _world_dynamic_neutral_cache,
     _wrong_action_world_cache,
 )
@@ -2282,6 +2285,54 @@ def test_core_attribution_preserves_primary_and_sole_consumer_identities() -> No
         assert wrong_metrics[name] == 0
 
 
+def test_validation_action_estimator_is_one_call_lossless_observer() -> None:
+    torch.manual_seed(2300)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config, batch=2)
+    with torch.no_grad():
+        cache, _, _ = model.encode_online(
+            batch.online,
+            training_mask=False,
+            geometry_supervision=False,
+            collect_diagnostics=False,
+        )
+        prediction, refined_cache = sample_refined_cached_action_with_cache(
+            model,
+            cache,
+            config,
+            generator=torch.Generator().manual_seed(23001),
+            collect_diagnostics=False,
+            dtype=torch.float32,
+        )
+    state_before = {
+        name: value.detach().clone() for name, value in model.state_dict().items()
+    }
+    cpu_rng_before = torch.get_rng_state().clone()
+    with mock.patch.object(model, "velocity", wraps=model.velocity) as velocity:
+        metrics = _validation_action_estimator_match(
+            model,
+            cache,
+            refined_cache,
+            batch,
+            config,
+            initial_physical_noise=prediction.initial_physical_noise,
+            generator=torch.Generator().manual_seed(23002),
+            dtype=torch.float32,
+        )
+    assert velocity.call_count == 1
+    assert torch.equal(torch.get_rng_state(), cpu_rng_before)
+    assert metrics["estimator_endpoint_dynamic_calls"] == 1.0
+    assert 0.0 <= metrics["estimator_full_update_direction_valid_fraction"] <= 1.0
+    for name, value in metrics.items():
+        assert value.ndim == 0, name
+        assert torch.isfinite(value), name
+        if name.endswith(("_mse", "_gib", "_seconds")):
+            assert value >= 0.0, name
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, state_before[name]), name
+
+
 def test_core_attribution_full_one_batch_validation_smoke() -> None:
     torch.manual_seed(2301)
     config = _config()
@@ -2328,6 +2379,12 @@ def test_core_attribution_full_one_batch_validation_smoke() -> None:
         )
     assert metrics["validation_core_attribution_batches"] == 1.0
     assert metrics["validation_core_attribution_coverage"] == 1.0
+    assert metrics["validation_action_estimator_match_batches"] == 1.0
+    assert metrics["validation_action_estimator_match_coverage"] == 1.0
+    assert metrics["validation_action_estimator_endpoint_dynamic_calls"] == 1.0
+    assert math.isfinite(
+        metrics["validation_action_estimator_to_full_interval_action_rms"]
+    )
     assert (
         metrics[
             "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact"
