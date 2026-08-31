@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,9 +27,57 @@ from clearvla.mainline.data.loading import (
 )
 from clearvla.tools.build_rdt_split_manifest import build_rdt_split_manifest
 from clearvla.tools.build_t5_instruction_cache import build_t5_instruction_cache_payload
+from clearvla.tools.smoke_mainline_data import (
+    _current_repository_commit,
+    _validated_source_commit,
+)
 from clearvla.vision.preprocessing import PreprocessConfig
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_smoke_report_source_commit_must_match_current_checkout() -> None:
+    current = "a" * 40
+    assert _validated_source_commit(None, current) == current
+    assert _validated_source_commit(current, current) == current
+    with pytest.raises(ValueError, match="does not match current checkout"):
+        _validated_source_commit("b" * 40, current)
+    with pytest.raises(ValueError, match="full lowercase Git SHA-1"):
+        _validated_source_commit("not-a-commit", current)
+    with pytest.raises(ValueError, match="full lowercase Git SHA-1"):
+        _validated_source_commit("A" * 40, current)
+
+
+def test_smoke_report_source_commit_is_read_from_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = "c" * 40
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            returncode=0,
+            stdout=f"{current}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "clearvla.tools.smoke_mainline_data.subprocess.run",
+        fake_run,
+    )
+
+    assert _current_repository_commit() == current
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[0] == "git"
+    assert command[1] == "-C"
+    assert command[-2:] == ["rev-parse", "HEAD"]
+    assert kwargs == {"check": True, "capture_output": True, "text": True}
 
 
 def _native_episode(tmp_path: Path) -> LoadedEpisode:

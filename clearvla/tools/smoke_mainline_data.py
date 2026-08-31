@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from clearvla.mainline.data.loading import (
     to_training_batch,
 )
 from clearvla.mainline.interfaces import TrainingBatch
+
+_FULL_GIT_SHA1 = re.compile(r"[0-9a-f]{40}")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -90,6 +93,35 @@ def _file_identity(path: Path) -> dict[str, object]:
     }
 
 
+def _validated_source_commit(requested: str | None, current: str) -> str:
+    actual = str(current).strip()
+    if _FULL_GIT_SHA1.fullmatch(actual) is None:
+        raise ValueError("current source commit must be a full lowercase Git SHA-1")
+    if requested is not None:
+        expected = str(requested).strip()
+        if _FULL_GIT_SHA1.fullmatch(expected) is None:
+            raise ValueError("source commit must be a full lowercase Git SHA-1")
+        if expected != actual:
+            raise ValueError(
+                f"source commit {expected} does not match current checkout {actual}"
+            )
+    return actual
+
+
+def _current_repository_commit() -> str:
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("smoke report requires a readable Git checkout identity") from exc
+    return _validated_source_commit(None, completed.stdout)
+
+
 def _validate_finite(batch: TrainingBatch) -> None:
     values = {
         "goal": batch.online.goal.tokens,
@@ -121,10 +153,10 @@ def main() -> None:
         raise ValueError(
             "batch size/episode limit must be positive and workers non-negative"
         )
-    if args.source_commit is not None and re.fullmatch(
-        r"[0-9a-f]{40}", str(args.source_commit)
-    ) is None:
-        raise ValueError("source commit must be a full lowercase Git SHA-1")
+    source_commit = _validated_source_commit(
+        args.source_commit,
+        _current_repository_commit(),
+    )
     config = _overrides(load_config(args.config), args)
     bundle = load_mainline_data_for_smoke(
         config,
@@ -172,7 +204,7 @@ def main() -> None:
         )
     report = {
         "schema": "clearvla-mainline-data-smoke-v2",
-        "source_commit": args.source_commit,
+        "source_commit": source_commit,
         "model_constructed": False,
         "optimizer_constructed": False,
         "split": args.split,
