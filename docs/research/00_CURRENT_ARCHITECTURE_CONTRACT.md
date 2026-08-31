@@ -679,6 +679,16 @@ supports may change targets and losses, never deployment action.
     threshold, so its shuffled train loader fails closed while that semantic
     decision is unresolved. These external contracts do not claim
     three-camera or 14-D model consumption.
+    The real bounded `val` acceptance at commit
+    `9a5611ede2133a5365d02e3a73b1a1fe5a6eb841` closed this external boundary:
+    6,131 source / 6,120 eligible episodes and 11 explicit short exclusions,
+    canonical manifest SHA-256
+    `2442ecd9c382d14123449a5b72d408bad4bcf84b164f6104a0d615cf5925212b`,
+    a corpus-derived 271-row language bank, one three-camera DINO cache, and
+    one finite two-camera/right-arm 7-D typed batch. The report explicitly
+    records `model_constructed=false` and `optimizer_constructed=false`; it is
+    not model-side multiview, bimanual, depth, backward, checkpoint or
+    experiment evidence.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

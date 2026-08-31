@@ -1,12 +1,12 @@
 # RDT fine-tuning data: multiview and bimanual adaptation boundary
 
 Status: active isolated compatibility line.  The complete algorithm-external
-boundary is implemented locally through a finite typed-batch loader smoke:
-hierarchical identity, manifest split, external-test isolation, per-sample
-language, ordered RGB/cache access, and explicit qpos/action chart profiles.
-No RDT artifact has been materialized on the real server yet, and no model,
-loss, optimizer, three-camera consumer, bimanual codec, or formal experiment
-has been declared adapted.
+boundary is implemented and accepted on the real server through a finite
+typed-batch loader smoke: hierarchical identity, manifest split, external-test
+isolation, per-sample language, ordered RGB/cache access, and explicit
+qpos/action chart profiles.  This acceptance constructs no model or optimizer
+and does not declare the loss, three-camera model consumer, native bimanual
+codec, depth path, or formal experiment adapted.
 
 This document defines the isolated compatibility line for
 `/data/rdt-ft-data/`.  It does not change the interpretation or acceptance of
@@ -215,8 +215,9 @@ losses, optimizer ownership, and checkpoint parameter shapes are unchanged.
 
 The isolated RDT data preset now selects that manifest and instruction-bank
 ABI.  The real full source audit and v2 split manifest have been materialized;
-the typed bank and bounded DINO/loader smoke remain execution gates, not
-permission to substitute another split or encoder.
+the typed bank and bounded DINO/loader smoke have now also passed on the real
+server.  Their acceptance is not permission to substitute another split or
+encoder and does not promote any model-side change.
 
 ### D0c implementation status: selected split and source-chart profiles
 
@@ -413,10 +414,45 @@ plumbing check, not a representative dataset experiment and not evidence for
 bimanual task quality.  Run dataset/static tests and one fresh batch-one
 forward/backward only.
 
-The algorithm-external portion is now implemented and covered by a synthetic
-end-to-end HDF5 -> manifest -> three-camera DINO subset -> exact T5 row ->
-finite right-arm typed-batch test.  The real artifact smoke and the model
-forward/backward remain gates; neither is claimed by that synthetic test.
+The algorithm-external portion is now implemented and covered by both a
+synthetic end-to-end test and the real bounded acceptance below.  A model
+forward/backward remains a later model-side gate and is not claimed by either
+loader test.
+
+### Real bounded external acceptance (2026-08-31)
+
+Commit `9a5611ede2133a5365d02e3a73b1a1fe5a6eb841` completed the real
+`val`, one-episode acceptance without constructing a model, optimizer,
+backward graph or checkpoint.  The full 6,131-episode inventory produced 6,120
+eligible identities and 11 explicit short-trajectory exclusions.  The four
+split identity sequences stayed byte-for-byte identical when the manifest's
+canonical ordering bug was repaired; its corrected semantic SHA-256 is
+`2442ecd9c382d14123449a5b72d408bad4bcf84b164f6104a0d615cf5925212b`.
+
+The language artifact was assembled from 303 corpus-provided
+`lang_embed_0.pt` files, not a downloaded encoder.  It contains 271 BF16
+`[32,4096]` policy rows, records all eight repeated-text variant groups, is
+71,241,050 bytes, and has file SHA-256
+`e3870e6e83fa354e3fdd6f1eaecb7bf9b72c958eadfa8e01b10a830870d57c65`.
+The selected real trajectory was
+`rdt_data/airpods_on_second_layer/episode_13` (`T=609`).  Its bounded cache
+materialized all three RGB cameras as `[609,3,256,768]` FP16 DINO tokens; the
+unchanged model-facing adapter selected the ordered `(high,right_wrist)`
+subset.
+
+The accepted typed batch contained DINO history `[1,3,2,256,768]`, future DINO
+`[1,12,2,256,768]`, raw RGB `[1,3,2,3,336,336]`, goal tokens
+`[1,32,4096]`, right-arm action target `[1,24,7]`, future action/state
+`[1,48,7]`, and executed-action history `[1,8,7]`.  The loader rederived the
+complete source, manifest, language, cache and train-normalizer identities and
+validated all values as finite.  The serialized report is
+`/data/senwang/data/rdt_ft_data/bounded_smoke_val_1/typed_batch_smoke_20260831_114959.json`
+with SHA-256
+`dd1e8effc3dca0c8be1d48d8cb52f1131a81cb633614b2f4808e5549e88d9dc3`.
+This closes the algorithm-external D0/D1 loader boundary only: the cache may
+hold three cameras while the current model input still consumes two, and the
+source may hold 14 coordinates while this accepted profile still consumes the
+right-arm seven.
 
 ### D2 -- three-RGB-camera closure
 
@@ -529,24 +565,18 @@ config.
 
 ## Unresolved assumptions blocking model edits
 
-1. Package and verify the real 271-row typed language bank from the existing
-   task-local `lang_embed_0.pt` files; no substitute embedding width or silent
-   re-encoding is legal.
-2. Confirm gripper direction and define continuous activity/transition
+1. Confirm gripper direction and define continuous activity/transition
    semantics for both native gripper coordinates.  The Pen threshold `0.10`
    is an audit cut only and is not inherited as an objective boundary.
-3. Finish the complete V120 decoder/execution/checkpoint review before choosing
+2. Finish the complete V120 decoder/execution/checkpoint review before choosing
    the bimanual execution-value field ABI.
-4. Measure three-camera CUDA memory; do not infer the formal batch size from
-   two-camera arithmetic alone.
-5. Materialize and validate the implemented per-task manifest on the full
-   dataset; the later held-out-task rule remains a separate decision and must
-   group duplicate instruction identities before claiming language
-   generalization.
-6. Determine how the provided 26-episode `test/` partition relates to the
+3. Measure three-camera model-side CUDA memory; do not infer the formal batch
+   size from the bounded cache/loader result or two-camera arithmetic alone.
+4. Determine how the provided 26-episode `test/` partition relates to the
    internal validation and held-out-task protocols; its name alone does not
-   define the scientific claim.
-7. Determine whether trustworthy camera calibration and depth units exist.
+   define the scientific claim.  Any later held-out-task policy must group
+   duplicate instruction identities before claiming language generalization.
+5. Determine whether trustworthy camera calibration and depth units exist.
    Until then, neither may be inferred from task names or image dimensions.
 
 No active model source may be edited while any assumption required by that
