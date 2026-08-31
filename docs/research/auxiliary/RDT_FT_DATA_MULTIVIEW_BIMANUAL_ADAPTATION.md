@@ -178,12 +178,30 @@ support all three internal lanes.  Unknown source partitions fail closed.  The
 manifest stores episode IDs rather than machine-local indices and excludes the
 absolute root from its semantic content.
 
-The language preparation tool reads the exact scalar HDF5 instructions,
-deduplicates exact UTF-8 content, applies the official 120-token T5-v1.1-XXL
-encoding contract, and stores the first 32 ClearVLA policy rows plus a real
-mask in one typed cache.  The generic loader accepts either that bank or the
-legacy one-condition `.pt`, but manifest-backed RDT loading requires the typed
-bank.  It rederives the complete source episode count and instruction
+The released corpus already contains one task-local `lang_embed_0.pt` beside
+each task's episodes.  The official `encode_lang_batch.py` constructs original,
+simplified and expanded instructions in that order and writes
+`lang_embed_{i}.pt`, so index zero is the exact original HDF5 instruction.  The
+language preparation tool therefore does not load or download T5: it reads the
+exact scalar HDF5 instructions, packages the existing BF16 `[L,4096]` rows,
+and stores the first 32 ClearVLA policy tokens plus a real mask in one typed
+cache.  Local tokenizer verification checks each full source row length against
+the official T5-v1.1-XXL contract without loading encoder weights.
+
+The observed corpus has 6,131 episode references, 303 task-local candidate
+files and 271 distinct original instructions.  Eight repeated instruction
+texts have more than one numerically distinct task-local embedding.  These are
+not averaged or normalized: the adopted `lexicographic` policy chooses the
+first root-relative candidate while the bank records every candidate path,
+file hash, tensor-storage hash and the exact retained-row hash.  The loader
+revalidates that provenance and fails if the selected policy row is changed.
+The generic encoder builder remains an explicit fallback, is local-only by
+default, and may use the network only when `RDT_ALLOW_T5_DOWNLOAD=YES` is also
+provided.
+
+The generic loader accepts either that bank or the legacy one-condition `.pt`,
+but manifest-backed RDT loading requires the typed bank.  It rederives the
+complete source episode count and instruction
 multiset—including typed-window-short exclusions—and compares both with the
 bank metadata before selecting an episode row.  Masked rows are exact zero,
 missing or stale instruction mappings fail before training, and only the
@@ -191,8 +209,9 @@ existing Pen path may remain a one-row bank.  S, its condition dropout, all
 losses, optimizer ownership, and checkpoint parameter shapes are unchanged.
 
 The isolated RDT data preset now selects that manifest and instruction-bank
-ABI.  The real manifest and T5 bank have not yet been materialized; those are
-execution gates, not permission to substitute another split or encoder.
+ABI.  The real full source audit and v2 split manifest have been materialized;
+the typed bank and bounded DINO/loader smoke remain execution gates, not
+permission to substitute another split or encoder.
 
 ### D0c implementation status: selected split and source-chart profiles
 
@@ -450,11 +469,22 @@ Metadata-only preparation is the default and starts no encoder or training:
 RDT_PREPARE_THROUGH=manifest bash scripts/prepare_rdt_ft_data.sh
 ```
 
-Language preparation is explicit because T5-v1.1-XXL owns a GPU/host-memory
-cost:
+Language preparation is explicit but uses the corpus-provided
+`lang_embed_0.pt` rows, so it has no T5 encoder-weight or GPU requirement:
 
 ```bash
 RDT_PREPARE_THROUGH=language bash scripts/prepare_rdt_ft_data.sh
+```
+
+Fresh re-encoding is not part of the acceptance path.  If it is deliberately
+requested, cached local weights remain the default; allowing a model download
+requires both explicit switches:
+
+```bash
+RDT_T5_SOURCE=encoder \
+RDT_ALLOW_T5_DOWNLOAD=YES \
+RDT_PREPARE_THROUGH=language \
+bash scripts/prepare_rdt_ft_data.sh
 ```
 
 The first real acceptance should use the bounded end-to-end launcher.  It
@@ -494,8 +524,9 @@ config.
 
 ## Unresolved assumptions blocking model edits
 
-1. Encode and verify the real 271-row T5-v1.1-XXL cache after the current GPU
-   run releases enough memory; no substitute embedding width is legal.
+1. Package and verify the real 271-row typed language bank from the existing
+   task-local `lang_embed_0.pt` files; no substitute embedding width or silent
+   re-encoding is legal.
 2. Confirm gripper direction and define continuous activity/transition
    semantics for both native gripper coordinates.  The Pen threshold `0.10`
    is an audit cut only and is not inherited as an objective boundary.

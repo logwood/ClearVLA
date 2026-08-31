@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -15,6 +16,163 @@ from torch import Tensor
 T5_INSTRUCTION_CACHE_SCHEMA = "clearvla-t5-instruction-cache-v1"
 T5_ENCODER_ID = "google/t5-v1_1-xxl"
 T5_SOURCE_MAX_TOKENS = 120
+
+
+def _is_sha256(value: object) -> bool:
+    text = str(value).lower()
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text
+    )
+
+
+def _tensor_storage_sha256(value: Tensor) -> str:
+    tensor = value.detach().to(device="cpu").contiguous()
+    if tensor.dtype == torch.bfloat16:
+        raw = tensor.view(torch.uint16).numpy().tobytes()
+    else:
+        raw = tensor.numpy().tobytes()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _rdt_precomputed_metadata(
+    payload: dict[str, Any],
+    instructions: tuple[str, ...],
+    raw_tokens: Tensor,
+    raw_mask: Tensor,
+) -> dict[str, Any]:
+    """Validate optional RDT precomputed-row provenance and expose its summary."""
+
+    source = payload.get("embedding_source")
+    if source is None:
+        return {}
+    if str(source) != "rdt_precomputed_lang_embed_0":
+        raise ValueError("unsupported instruction-bank embedding source")
+    if str(payload.get("embedding_name", "")) != "lang_embed_0.pt":
+        raise ValueError("RDT precomputed bank must identify lang_embed_0.pt")
+    duplicate_policy = str(payload.get("embedding_duplicate_policy", ""))
+    if duplicate_policy not in {"error", "lexicographic"}:
+        raise ValueError("RDT precomputed bank has an invalid duplicate policy")
+    tokenizer_verification = str(
+        payload.get("embedding_tokenizer_verification", "")
+    )
+    if tokenizer_verification not in {"local_only", "skipped_explicitly"}:
+        raise ValueError("RDT precomputed bank has invalid tokenizer verification")
+    records = payload.get("embedding_records")
+    if not isinstance(records, list) or len(records) != len(instructions):
+        raise ValueError(
+            "RDT precomputed bank must have one provenance record per instruction"
+        )
+    candidate_total = 0
+    variant_groups = 0
+    policy_tokens = int(raw_tokens.shape[1])
+    for row, (instruction, record_value) in enumerate(
+        zip(instructions, records, strict=True)
+    ):
+        if not isinstance(record_value, Mapping):
+            raise TypeError("RDT embedding provenance records must be mappings")
+        record = dict(record_value)
+        if str(record.get("instruction_sha256", "")) != instruction_sha256(
+            instruction
+        ):
+            raise ValueError("RDT embedding provenance instruction digest is stale")
+        selected_path = str(record.get("selected_relative_path", ""))
+        selected_file_digest = str(record.get("selected_file_sha256", ""))
+        selected_tensor_digest = str(record.get("selected_tensor_sha256", ""))
+        selected_policy_digest = str(
+            record.get("selected_policy_tensor_sha256", "")
+        )
+        selected_policy_tokens = int(record.get("selected_policy_tokens", 0))
+        if (
+            not selected_path
+            or not _is_sha256(selected_file_digest)
+            or not _is_sha256(selected_tensor_digest)
+            or not _is_sha256(selected_policy_digest)
+        ):
+            raise ValueError("RDT embedding selected-source identity is invalid")
+        candidates = record.get("candidates")
+        candidate_count = int(record.get("candidate_count", 0))
+        distinct_count = int(record.get("distinct_tensor_count", 0))
+        if (
+            not isinstance(candidates, list)
+            or candidate_count != len(candidates)
+            or candidate_count <= 0
+            or distinct_count <= 0
+            or distinct_count > candidate_count
+        ):
+            raise ValueError("RDT embedding candidate counts are inconsistent")
+        candidate_total += candidate_count
+        variant_groups += int(distinct_count > 1)
+        selected_matches = 0
+        selected_source_tokens = 0
+        tensor_digests: set[str] = set()
+        for candidate_value in candidates:
+            if not isinstance(candidate_value, Mapping):
+                raise TypeError("RDT embedding candidates must be mappings")
+            candidate = dict(candidate_value)
+            relative_path = str(candidate.get("relative_path", ""))
+            file_digest = str(candidate.get("file_sha256", ""))
+            tensor_digest = str(candidate.get("tensor_sha256", ""))
+            shape = candidate.get("shape")
+            dtype = str(candidate.get("dtype", ""))
+            if (
+                not relative_path
+                or not _is_sha256(file_digest)
+                or not _is_sha256(tensor_digest)
+                or not isinstance(shape, list)
+                or len(shape) != 2
+                or int(shape[0]) <= 0
+                or int(shape[1]) != 4096
+                or not dtype
+            ):
+                raise ValueError("RDT embedding candidate identity is invalid")
+            tensor_digests.add(tensor_digest)
+            selected_matches += int(
+                relative_path == selected_path
+                and file_digest == selected_file_digest
+                and tensor_digest == selected_tensor_digest
+            )
+            if (
+                relative_path == selected_path
+                and file_digest == selected_file_digest
+                and tensor_digest == selected_tensor_digest
+            ):
+                selected_source_tokens = int(shape[0])
+        if len(tensor_digests) != distinct_count or selected_matches != 1:
+            raise ValueError("RDT embedding selected candidate is inconsistent")
+        expected_retained = min(selected_source_tokens, policy_tokens)
+        expected_mask = torch.arange(policy_tokens) < expected_retained
+        if (
+            selected_policy_tokens != expected_retained
+            or not torch.equal(raw_mask[row].to(device="cpu"), expected_mask)
+            or _tensor_storage_sha256(raw_tokens[row, :expected_retained])
+            != selected_policy_digest
+        ):
+            raise ValueError(
+                "RDT embedding selected policy row does not match its provenance"
+            )
+    if int(payload.get("embedding_candidate_file_count", -1)) != candidate_total:
+        raise ValueError("RDT embedding candidate total is inconsistent")
+    if int(payload.get("embedding_variant_group_count", -1)) != variant_groups:
+        raise ValueError("RDT embedding variant-group count is inconsistent")
+    encoded = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    inventory_digest = hashlib.sha256(encoded).hexdigest()
+    if str(payload.get("embedding_inventory_sha256", "")) != inventory_digest:
+        raise ValueError("RDT embedding provenance inventory digest is inconsistent")
+    return {
+        "model_source": str(payload.get("model_source", "")),
+        "embedding_source": str(source),
+        "embedding_name": "lang_embed_0.pt",
+        "embedding_duplicate_policy": duplicate_policy,
+        "embedding_tokenizer_verification": tokenizer_verification,
+        "embedding_candidate_file_count": candidate_total,
+        "embedding_variant_group_count": variant_groups,
+        "embedding_inventory_sha256": inventory_digest,
+    }
 
 
 def instruction_sha256(instruction: str) -> str:
@@ -119,9 +277,7 @@ def _load_instruction_bank(
     ).lower()
     if source_episode_count <= 0:
         raise ValueError("instruction cache source episode count must be positive")
-    if len(source_inventory_digest) != 64 or any(
-        character not in "0123456789abcdef" for character in source_inventory_digest
-    ):
+    if not _is_sha256(source_inventory_digest):
         raise ValueError("instruction cache source inventory identity must be SHA-256")
 
     if "tokens" not in payload or "attention_mask" not in payload:
@@ -163,6 +319,7 @@ def _load_instruction_bank(
         "original_shape": list(raw_tokens.shape),
         "original_dtype": str(raw_tokens.dtype).removeprefix("torch."),
         "effective_tokens": int(tokens.shape[1]),
+        **_rdt_precomputed_metadata(payload, instructions, raw_tokens, raw_mask),
     }
     return T5ConditionBank(
         tokens=tokens.contiguous(),

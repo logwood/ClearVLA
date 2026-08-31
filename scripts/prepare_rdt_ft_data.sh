@@ -57,19 +57,54 @@ if [[ "${THROUGH}" == "manifest" ]]; then
 fi
 
 if [[ ! -e "${T5_PATH}" ]]; then
-  T5_ARGS=(
-    --data-root "${DATA_ROOT}"
-    --glob '**/*.hdf5'
-    --output "${T5_PATH}"
-    --device "${RDT_T5_DEVICE:-auto}"
-    --dtype "${RDT_T5_DTYPE:-bf16}"
-    --batch-size "${RDT_T5_BATCH_SIZE:-1}"
-    --policy-max-tokens 32
-  )
-  if [[ "${RDT_LOCAL_FILES_ONLY:-0}" == "1" ]]; then
-    T5_ARGS+=(--local-files-only)
-  fi
-  python -u -m clearvla.tools.build_t5_instruction_cache "${T5_ARGS[@]}"
+  case "${RDT_T5_SOURCE:-rdt-precomputed}" in
+    rdt-precomputed)
+      # The released corpus contains a small audited set of identical texts
+      # whose task-local BF16 rows differ numerically.  Select the stable
+      # root-relative first path and serialize every candidate/hash in the
+      # bank; the builder itself remains fail-closed unless this policy is
+      # supplied explicitly.
+      PRECOMPUTED_T5_ARGS=(
+        --data-root "${DATA_ROOT}"
+        --glob '**/*.hdf5'
+        --output "${T5_PATH}"
+        --embedding-root "${RDT_T5_EMBEDDING_ROOT:-${DATA_ROOT}}"
+        --policy-max-tokens 32
+        --duplicate-policy "${RDT_T5_DUPLICATE_POLICY:-lexicographic}"
+      )
+      if [[ "${RDT_T5_SKIP_TOKENIZER_CHECK:-0}" == "1" ]]; then
+        PRECOMPUTED_T5_ARGS+=(--skip-tokenizer-check)
+      fi
+      if [[ -n "${RDT_T5_TOKENIZER:-}" ]]; then
+        PRECOMPUTED_T5_ARGS+=(--tokenizer "${RDT_T5_TOKENIZER}")
+      fi
+      python -u -m clearvla.tools.build_rdt_t5_instruction_cache "${PRECOMPUTED_T5_ARGS[@]}"
+      ;;
+    encoder)
+      T5_ARGS=(
+        --data-root "${DATA_ROOT}"
+        --glob '**/*.hdf5'
+        --output "${T5_PATH}"
+        --device "${RDT_T5_DEVICE:-auto}"
+        --dtype "${RDT_T5_DTYPE:-bf16}"
+        --batch-size "${RDT_T5_BATCH_SIZE:-1}"
+        --policy-max-tokens 32
+      )
+      # Re-encoding is an exceptional fallback.  It is local-only by default
+      # so selecting `encoder` cannot silently begin a multi-GB model download.
+      # Network access requires a separate, conspicuous acknowledgement.
+      if [[ "${RDT_ALLOW_T5_DOWNLOAD:-NO}" != "YES" ]]; then
+        T5_ARGS+=(--local-files-only)
+      else
+        printf '[rdt-prepare] explicit T5 download permission accepted for encoder fallback\n' >&2
+      fi
+      python -u -m clearvla.tools.build_t5_instruction_cache "${T5_ARGS[@]}"
+      ;;
+    *)
+      printf 'RDT_T5_SOURCE must be rdt-precomputed or encoder\n' >&2
+      exit 2
+      ;;
+  esac
 else
   printf '[rdt-prepare] reuse T5 bank=%s; loader acceptance will verify all mappings\n' \
     "${T5_PATH}"

@@ -660,7 +660,16 @@ supports may change targets and losses, never deployment action.
     qpos units. Manifest-backed RDT loading requires a per-instruction T5 bank
     whose complete source episode count and instruction multiset digest match
     the live inventory; the legacy one-row condition remains legal only for
-    the Pen path. A loader-only smoke may materialize a bounded deterministic
+    the Pen path. The released RDT corpus already supplies task-local
+    `lang_embed_0.pt` rows: the official encoder script defines index zero as
+    the original instruction, before its simplified and expanded variants.
+    The adapter therefore builds the typed bank from those existing BF16
+    `[L,4096]` rows without loading or downloading T5. Repeated exact texts are
+    never averaged: every candidate path and storage digest is retained, and
+    the adopted lexicographic policy selects one stable root-relative source.
+    The generic encoder is only an explicit, local-only fallback; network
+    download additionally requires a separate acknowledgement. A loader-only
+    smoke may materialize a bounded deterministic
     split subset after verifying the complete source, manifest, train
     normalizer and language identities, while formal loading still requires
     DINO cache rows for every eligible episode. RDT has no inherited Pen event
