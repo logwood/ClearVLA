@@ -7,7 +7,7 @@ import json
 import math
 import random
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -195,9 +195,20 @@ def _limit(loader_length: int, maximum: int) -> int:
 
 
 @dataclass(frozen=True)
-class ValidationReport:
+class ValidationReport(Mapping[str, float]):
+    """Backward-compatible metric mapping plus an optional task report."""
+
     metrics: dict[str, float]
     multitask: dict[str, object] | None = None
+
+    def __getitem__(self, name: str) -> float:
+        return self.metrics[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.metrics)
+
+    def __len__(self) -> int:
+        return len(self.metrics)
 
 
 def _task_sample_mix(
@@ -866,15 +877,16 @@ def _validate(
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
+    is_multitask = bool(getattr(bundle, "is_multitask", False))
     task_deployment = (
         TaskValidationAccumulators.from_action_normalizer(
-            bundle.task_order,
+            getattr(bundle, "task_order"),
             bundle.action_normalizer,
             device=device,
             gripper_event_threshold=config.objectives.gripper_event_threshold,
             arm_motion_threshold=config.objectives.arm_motion_threshold,
         )
-        if bundle.is_multitask
+        if is_multitask
         else None
     )
     losses = DeviceMetricAccumulator()

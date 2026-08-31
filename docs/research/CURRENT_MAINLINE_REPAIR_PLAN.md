@@ -1,6 +1,6 @@
 # ClearVLA Schema28 行为闭环与单/多任务合流计划
 
-状态：**完整 Schema28 已审计；Stage A attribution 已实现并通过本地闭环；正式 checkpoint replay 待跑；Schema29 核心语义单元尚未放行**
+状态：**完整 Schema28 已审计；Stage A attribution 与八任务实验出口已在 RDT 线上合流并通过本地源码回归；正式 checkpoint replay、RDT gripper 语义与联合 smoke 待完成；Schema29 核心语义单元尚未放行**
 更新：2026-08-31
 
 本计划落实
@@ -46,28 +46,32 @@ self-conditioning 是首选结构候选，不是已经批准的 Schema29 事实�
 
 ```text
 codex/schema25-r1-replay
-  HEAD 76caa48
-  owns: Schema28 core, evidence ledger, next core unit
+  semantic tip 90557b6
+  owns: Schema28 core, evidence ledger, matched attribution
 
 codex/rdt-multitask-prep
-  base 76caa48 + eight RDT external-adaptation commits
-  owns: hierarchical data/language/camera/action adapter and multitask entry
+  base 76caa48 + RDT external preparation + multitask outlet + 90557b6
+  owns: hierarchical data/language/camera/action adapter, multitask experiment
+        entry and the same matched-attribution core
 ```
 
 仓库根目录的旧 Schema39 branch 不属于本流程，不作为 donor、merge base 或
 当前架构解释来源。
 
-RDT 线已经完成算法外部的 bounded real-server loader acceptance；其权威设计为
+RDT 线已经完成算法外部的 bounded real-server loader acceptance 与本地多任务
+experiment outlet；其权威设计为
 [`auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md)。
-它当前只证明外部数据 ABI，不证明三相机模型 consumer、双臂 codec/loss 或正式
-训练已适配。
+它当前证明外部数据 ABI、task-first sampling、逐任务 validation/logging 与单任务
+行为不回归；尚不证明 RDT mixed-model CUDA smoke、三相机模型 consumer、双臂
+codec/loss 或正式训练行为。
 
 合流规则：
 
-1. core attribution 与被放行的 core unit 先在 replay 线成为独立语义提交；
-2. 将这些提交合入 `rdt-multitask-prep`，不反向把数据域改动混入单任务基线；
-3. 在合流提交上同时保留 Pen 单任务入口和 RDT 多任务入口；
-4. 两个正式实验必须打印相同 core source/component digest；只能 dataset、adapter、
+1. core attribution 已先在 replay 线成为独立语义提交；任何被放行的下一 core
+   unit 仍必须遵循同一规则；
+2. attribution 已合入 `rdt-multitask-prep`，数据域改动没有反向进入单任务基线；
+3. 合流线同时保留 Pen 单任务入口和 fail-closed RDT 多任务入口；
+4. 两个正式实验仍必须打印相同 core source/component digest；只能 dataset、adapter、
    task mix 和相应 action/camera profile 不同。
 
 ## 三、阶段 A：运行已实现的 validation-only matched attribution
@@ -378,13 +382,17 @@ smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 ## 十、当前执行顺序
 
 ```text
-1. 固化本问题账本与本计划
-2. 在 Schema28 checkpoint 上运行已实现的 validation-only matched attribution
-3. 根据决策表放行或拒绝 detached self-conditioning
-4. 完成被放行 core unit 的双向源码审查、实现和单任务 smoke
-5. 将 core semantic commits 合入 rdt-multitask-prep
-6. 补多任务 experiment outlet、逐任务日志和联合 smoke
-7. 同一 core commit 依次启动 Pen 单任务与 RDT 多任务正式实验
+[done] 固化本问题账本与本计划
+[done] 在 replay 线实现并本地验证 validation-only matched attribution
+[done] 将 attribution 合入 rdt-multitask-prep
+[done] 补 task-first sampler、task-stratified validation、逐任务/micro/macro
+       日志和独立 RDT launcher
+[next] 在 Schema28 checkpoint 上运行 validation-only matched attribution
+[next] 明确 RDT continuous gripper 的 command/qpos 事件语义
+[next] 根据 attribution 决策表放行或拒绝 detached self-conditioning
+[next] 对被放行 core unit 做双向源码审查、实现和 Pen 单任务 smoke
+[next] 在相同最终 core 上完成 RDT batch-eight mixed-model smoke
+[last] 依次启动 Pen 单任务与 RDT 多任务正式实验
 ```
 
 没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与
