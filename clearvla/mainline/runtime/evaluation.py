@@ -220,8 +220,32 @@ class ValidationAccumulator:
         motion_target: Tensor | None = None,
         physical_field: Tensor | None = None,
         gripper_decode_delta_blend: float | None = None,
+        row_indices: Tensor | None = None,
     ) -> None:
         target = batch.action_target.normalized.float()
+        normalized_current = batch.online.history.action_state.float()
+        raw_target = batch.action_target.raw_units.float()
+        raw_current = batch.action_target.current_raw_units.float()
+        if row_indices is not None:
+            rows = row_indices.detach().to(device="cpu", dtype=torch.long)
+            if rows.ndim != 1 or not rows.numel():
+                raise ValueError("validation row selection must be a non-empty flat vector")
+            if int(rows.min()) < 0 or int(rows.max()) >= int(prediction.shape[0]):
+                raise IndexError("validation row selection is outside the batch")
+            if int(torch.unique(rows).numel()) != int(rows.numel()):
+                raise ValueError("validation row selection cannot contain duplicates")
+            device_rows = rows.to(device=prediction.device)
+            prediction = prediction.index_select(0, device_rows)
+            target = target.index_select(0, device_rows)
+            normalized_current = normalized_current.index_select(0, device_rows)
+            raw_target = raw_target.index_select(0, device_rows)
+            raw_current = raw_current.index_select(0, device_rows)
+            if motion_logits is not None:
+                motion_logits = motion_logits.index_select(0, device_rows)
+            if motion_target is not None:
+                motion_target = motion_target.index_select(0, device_rows)
+            if physical_field is not None:
+                physical_field = physical_field.index_select(0, device_rows)
         error = prediction.float() - target
         action_bands = _action_band_slices(int(error.shape[1]))
         rows = {
@@ -271,7 +295,7 @@ class ValidationAccumulator:
             gripper_field = physical_field.detach().float()[..., -6:]
             absolute_branch = gripper_field[..., :1]
             cumulative_branch = (
-                batch.online.history.action_state.detach().float()[:, None, -1:]
+                normalized_current.detach()[:, None, -1:]
                 + torch.cumsum(gripper_field[..., 1:2], dim=1)
             )
             reconstructed = (1.0 - blend) * absolute_branch + blend * cumulative_branch
@@ -314,13 +338,10 @@ class ValidationAccumulator:
             update = value.detach().float().square().sum()
             self.square_error[name] = self.square_error.get(name, update.new_zeros(())) + update
             self.element_count[name] = self.element_count.get(name, 0) + int(value.numel())
-        normalized_current = batch.online.history.action_state.float()
         if self.action_scale is not None:
             if self.action_offset is None:
                 raise ValueError("validation action offset is missing")
             raw_prediction = (prediction.float() - self.action_offset) / self.action_scale
-            raw_target = batch.action_target.raw_units.float()
-            raw_current = batch.action_target.current_raw_units.float()
         else:
             raw_prediction = prediction.float()
             raw_target = target

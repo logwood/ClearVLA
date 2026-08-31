@@ -549,6 +549,58 @@ participate in this decision. Until this source-semantic definition is
 adopted, the formal train loader fails closed; the completed CPU/cache
 preparation is not permission to start a long run.
 
+### Eight-task experiment interface closure (2026-08-31)
+
+The first D1 experiment outlet is implemented independently of the model
+graph. A manifest-derived immutable CPU registry maps loaded episode indices to
+the exact eight-task order. It has no sample field of its own: the model still
+receives only real per-episode T5, observation/history and supervision.
+
+Training now uses task-first information sampling. Batch slots rotate over the
+task registry and only then receive the unchanged uniform/event/motion lane
+ratio. With the adopted batch size eight, every batch owns one row per task.
+Uniform traversal is task-local and without replacement until rollover;
+event/motion repetition and fallback are also task-local, so a data-rich task
+cannot silently fill another task's slot. The actual epoch sample count and
+fraction for each task are archived.
+
+Bounded validation uses a deterministic equal-count panel per task. The model
+and deployment sampler execute once per row, after which detached CPU task
+indices partition the existing prediction for task metrics. Each observed task
+archives sample count, full physical RMSE, horizon bands `1..4`, `5..12` and
+`13..24`, arm/gripper RMSE, decoded event precision/recall/F1 and event counts.
+The same record includes sample-weighted micro and equal-observed-task macro
+values plus expected/observed task coverage. An absent task is named as absent;
+no zero score is synthesized. The console emits one bounded line per task and
+one micro/macro line, while the complete nested record remains in
+`metrics.jsonl`.
+
+The interface adds no model parameter, optimizer owner, differentiable task
+tensor or checkpoint tensor. Registry, sampler, validation panel, shared
+normalizer/language identity and the one adopted event threshold are recorded
+in run/data state. The threshold is a single CLI value bound to all three
+consumers: sampler strata, continuous gripper-trajectory supervision and
+decoded validation. The Pen path remains fixed at `0.10`; RDT accepts no
+implicit or mismatched value. Local sampler/config/runtime regressions pass
+`40/40`; remote mixed-model backward and deployment smoke remain pending.
+
+The threshold gate is intentionally still open. Candidate train-only exact
+sampler-boundary quantiles are:
+
+| Candidate | Raw threshold | Event windows | Window fraction |
+|---|---:|---:|---:|
+| p90 | 0.146484375 | 54,250 | 0.992717 |
+| p95 | 0.40283203125 | 44,724 | 0.818401 |
+| p97.5 | 0.7599645257 | 27,502 | 0.503257 |
+
+These high fractions are not evidence that most windows contain semantic
+open/close events. They arise because the first policy row compares a
+continuous command with observed qpos converted into the action chart. The
+source supplies neither their equivalence nor an event annotation. A formal
+run therefore requires an explicit decision about whether event ownership is
+defined by command change, executed-state change, or another sourced rule;
+choosing a convenient quantile alone is not sufficient.
+
 ### D2 -- three-RGB-camera closure
 
 Keep the D1 action projection fixed and change only the ordered camera tuple to
@@ -585,17 +637,23 @@ modality.  RGB-only tasks must remain a first-class legal path.
 
 ## Formal experiment policy
 
-There are two formal experiment families, but not two simultaneous GPU jobs:
+There are two experiment families, but not two simultaneous jobs on one GPU:
 
 - Schema28 pen remains the controlled architecture/recovery reference.
-- The first RDT-data formal run occurs only after D0--D3 gates pass.  Its first
-  split is per-task episode generalization; held-out-task generalization is a
-  separate later experiment and must not reuse the same label.
+- The first RDT-data run is the adopted D1 eight-task/two-camera/right-arm 7-D
+  interface experiment. It may start only after the gripper semantic boundary
+  is adopted and the mixed batch-eight model smoke passes. Its claim is
+  per-task episode generalization and outer-interface health, not three-camera
+  or bimanual closure. Held-out-task generalization remains a separate later
+  experiment and must not reuse the same label.
+- D2 three-camera and D3 native 14-D bimanual experiments remain later,
+  independently gated stages; their absence does not get relabeled as D1
+  support.
 
-No long run is spent on D0, D1, or D2.  These units consume only offline tests,
-cache probes, and bounded batch-one/batch-four smoke checks.  The first RDT
-long run changes the data domain relative to pen, but starts from a source
-whose camera and action ABIs have already been verified independently.
+No long run is spent on D0 or D2 preparation itself. The D1 outlet first uses
+offline tests and a bounded mixed smoke, then becomes the initial formal
+multitask run once its semantic gate closes. That run changes the data domain
+relative to Pen but keeps the already verified two-camera/right-arm ABI.
 
 ## Preparation and acceptance commands
 
@@ -658,11 +716,30 @@ manifest/language/cache identities, tensor shapes/dtypes, future offsets and
 finite values.  It does not authorize `scripts/train_mainline.sh` with the RDT
 config.
 
+After the RDT event semantic boundary is explicitly adopted, the mixed model
+smoke and formal entry points are:
+
+```bash
+RDT_GRIPPER_EVENT_THRESHOLD=ADOPTED_RAW_VALUE \
+OUT_DIR=runs/clearvla_rdt_multitask8_smoke_TIMESTAMP \
+bash scripts/smoke_rdt_multitask.sh
+
+RDT_GRIPPER_EVENT_THRESHOLD=ADOPTED_RAW_VALUE \
+RDT_MAX_VAL_BATCHES=64 \
+OUT_DIR=runs/clearvla_rdt_multitask8_TIMESTAMP \
+bash scripts/train_rdt_multitask.sh
+```
+
+Both commands fail before data/model construction if the threshold is absent.
+The formal default validation panel is 64 batches at batch eight, i.e. 64
+deterministic rows per task; an explicit CLI override remains recorded.
+
 ## Unresolved assumptions blocking model edits
 
 1. Confirm gripper direction and define continuous activity/transition
-   semantics for both native gripper coordinates.  The Pen threshold `0.10`
-   is an audit cut only and is not inherited as an objective boundary.
+   semantics for the selected native right gripper before the D1 experiment,
+   then both native gripper coordinates before D3. The Pen threshold `0.10`
+   is not inherited as an objective boundary.
 2. Finish the complete V120 decoder/execution/checkpoint review before choosing
    the bimanual execution-value field ABI.
 3. Measure three-camera model-side CUDA memory; do not infer the formal batch

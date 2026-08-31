@@ -3,21 +3,30 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from clearvla.data.multitask_selection import (
     RDT_MULTITASK_SELECTION_SCHEMA,
     load_rdt_multitask_selection_manifest,
 )
-from clearvla.mainline.config import DataConfig
+from clearvla.data.samplers import (
+    InformationBalancedSamplerConfig,
+    TaskBalancedInformationBatchSampler,
+    TaskStratifiedBatchSampler,
+)
+from clearvla.mainline.config import DataConfig, ExperimentConfig, ObjectiveConfig
 from clearvla.mainline.data.normalizer import ArrayNormalizer
 from clearvla.mainline.data.normalizer_artifact import (
     SHARED_NORMALIZER_SCHEMA,
     canonical_digest,
     load_shared_normalizers,
 )
+from clearvla.mainline.runtime.evaluation import ValidationAccumulator
+from clearvla.mainline.runtime.multitask import TaskValidationAccumulators
 from clearvla.tools.audit_rdt_multitask_gripper import _true_run_lengths
 
 
@@ -171,3 +180,130 @@ def test_bounded_selection_and_shared_normalizer_are_an_atomic_config_pair() -> 
         task_selection_manifest="selection.json",
         normalizer_artifact="normalizer.json",
     ).validate()
+
+
+def test_task_balanced_information_sampler_covers_every_task_per_batch() -> None:
+    task_index = np.repeat(np.arange(8, dtype=np.int64), 12)
+    motion = np.linspace(0.0, 1.0, num=len(task_index), dtype=np.float32)
+    events = np.arange(len(task_index)) % 5 == 0
+    config = InformationBalancedSamplerConfig(
+        batch_size=8,
+        batches_per_epoch=6,
+        seed=17,
+    )
+    first = TaskBalancedInformationBatchSampler(
+        motion,
+        events,
+        task_index,
+        tuple(f"task_{index}" for index in range(8)),
+        config,
+    )
+    second = TaskBalancedInformationBatchSampler(
+        motion,
+        events,
+        task_index,
+        tuple(f"task_{index}" for index in range(8)),
+        config,
+    )
+
+    first_batches = list(first)
+    assert first_batches == list(second)
+    for batch in first_batches:
+        assert sorted(task_index[batch].tolist()) == list(range(8))
+        assert len(batch) == len(set(batch)) == 8
+    first.set_epoch(1)
+    assert list(first) != first_batches
+
+
+def test_task_stratified_validation_panel_is_equal_and_deterministic() -> None:
+    task_index = np.repeat(np.arange(3, dtype=np.int64), (7, 11, 5))
+    sampler = TaskStratifiedBatchSampler(
+        task_index,
+        ("a", "b", "c"),
+        samples_per_task=4,
+        batch_size=5,
+    )
+    rows = [row for batch in sampler for row in batch]
+
+    assert len(rows) == 12
+    assert np.bincount(task_index[rows], minlength=3).tolist() == [4, 4, 4]
+    assert len(rows) == len(set(rows))
+    assert sampler.summary["selected_samples_per_task"] == {"a": 4, "b": 4, "c": 4}
+
+
+def test_rdt_threshold_binds_sampler_objective_and_validation_semantics() -> None:
+    data = replace(
+        DataConfig(),
+        data_profile="rdt_right_arm_action_chart_v1",
+        split_mode="manifest",
+        split_manifest="split.json",
+        task_selection_manifest="selection.json",
+        normalizer_artifact="normalizer.json",
+        train_episodes=0,
+        val_episodes=0,
+        test_episodes=0,
+        sampling_gripper_event_threshold=0.2,
+    )
+    ExperimentConfig(
+        data=data,
+        objectives=replace(ObjectiveConfig(), gripper_event_threshold=0.2),
+    ).validate()
+    with pytest.raises(ValueError, match="must be identical"):
+        ExperimentConfig(data=data).validate()
+    with pytest.raises(ValueError, match="Pen gripper trajectory threshold"):
+        ExperimentConfig(
+            objectives=replace(ObjectiveConfig(), gripper_event_threshold=0.2)
+        ).validate()
+
+
+def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None:
+    normalizer = ArrayNormalizer.fit_identity(
+        [np.asarray([[0.0] * 7, [1.0] * 7], dtype=np.float32)]
+    )
+    accumulators = TaskValidationAccumulators.from_action_normalizer(
+        ("a", "b", "missing"),
+        normalizer,
+        device=torch.device("cpu"),
+        gripper_event_threshold=0.1,
+        arm_motion_threshold=0.02,
+    )
+    batch_size = 4
+    horizon = 24
+    target = torch.zeros(batch_size, horizon, 7)
+    current = torch.zeros(batch_size, 7)
+    batch = SimpleNamespace(
+        action_target=SimpleNamespace(
+            normalized=target,
+            raw_units=target,
+            current_raw_units=current,
+        ),
+        online=SimpleNamespace(
+            history=SimpleNamespace(action_state=current),
+        ),
+    )
+    prediction = torch.cat(
+        (
+            torch.ones(2, horizon, 7),
+            torch.full((2, horizon, 7), 3.0),
+        ),
+        dim=0,
+    )
+    tasks = torch.tensor([0, 0, 1, 1])
+    accumulators.update(tasks, prediction, batch)
+    micro = ValidationAccumulator.from_action_normalizer(
+        normalizer,
+        device=torch.device("cpu"),
+        gripper_event_threshold=0.1,
+        arm_motion_threshold=0.02,
+    )
+    micro.update(prediction, batch)
+    report = accumulators.report(micro.means())
+
+    assert report["observed_task_count"] == 2
+    assert report["task_coverage"] == pytest.approx(2 / 3)
+    assert report["missing_tasks"] == ["missing"]
+    assert set(report["tasks"]) == {"a", "b"}
+    assert report["tasks"]["a"]["validation_action_rmse_physical"] == pytest.approx(1.0)
+    assert report["tasks"]["b"]["validation_action_rmse_physical"] == pytest.approx(3.0)
+    assert report["micro"]["validation_action_rmse_physical"] == pytest.approx(5**0.5)
+    assert report["macro"]["validation_action_rmse_physical"] == pytest.approx(2.0)

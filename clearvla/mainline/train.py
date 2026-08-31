@@ -7,7 +7,8 @@ import json
 import math
 import random
 import time
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,7 @@ from .runtime.logging import (
     archival_metrics,
     validate_resume_metric_boundary,
 )
+from .runtime.multitask import TaskValidationAccumulators
 from .runtime.numerics import resolve_compute_dtype
 from .runtime.sampling import (
     sample_cached_action,
@@ -82,6 +84,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
+    parser.add_argument(
+        "--gripper-event-threshold",
+        type=float,
+        help=(
+            "Bind one raw-unit threshold to information sampling, continuous "
+            "gripper-trajectory supervision and validation. Required by RDT."
+        ),
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--allow-null-goal", action="store_true")
     return parser
@@ -98,6 +108,7 @@ def _device(value: str) -> torch.device:
 
 def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
     data = config.data
+    objectives = config.objectives
     optimizer = config.optimizer
     runtime = config.runtime
     if args.output_dir is not None:
@@ -110,6 +121,10 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         data = replace(data, dino_cache=str(args.dino_cache))
     if args.t5_condition is not None:
         data = replace(data, t5_condition=str(args.t5_condition))
+    if args.gripper_event_threshold is not None:
+        threshold = float(args.gripper_event_threshold)
+        data = replace(data, sampling_gripper_event_threshold=threshold)
+        objectives = replace(objectives, gripper_event_threshold=threshold)
     if args.num_workers is not None:
         data = replace(data, num_workers=int(args.num_workers))
     if args.epochs is not None:
@@ -135,7 +150,18 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
             max_train_batches=(2 if args.max_train_batches is None else runtime.max_train_batches),
             max_val_batches=1 if args.max_val_batches is None else runtime.max_val_batches,
         )
-    result = replace(config, data=data, optimizer=optimizer, runtime=runtime)
+    if data.split_mode == "manifest" and data.sampling_gripper_event_threshold is None:
+        raise ValueError(
+            "manifest-backed training requires --gripper-event-threshold; "
+            "RDT cannot inherit the Pen 0.10 raw-unit boundary"
+        )
+    result = replace(
+        config,
+        data=data,
+        objectives=objectives,
+        optimizer=optimizer,
+        runtime=runtime,
+    )
     result.validate()
     if args.allow_null_goal and not args.smoke:
         raise ValueError("--allow-null-goal is restricted to explicit smoke runs")
@@ -161,6 +187,120 @@ def _seed(seed: int) -> None:
 
 def _limit(loader_length: int, maximum: int) -> int:
     return loader_length if maximum <= 0 else min(loader_length, maximum)
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    metrics: dict[str, float]
+    multitask: dict[str, object] | None = None
+
+
+def _task_sample_mix(
+    bundle: MainlineDataBundle,
+    sample_counts: list[int],
+) -> dict[str, object] | None:
+    if not bundle.is_multitask:
+        return None
+    if len(sample_counts) != len(bundle.task_order):
+        raise ValueError("training task counts do not match the task registry")
+    total = int(sum(sample_counts))
+    if total <= 0:
+        raise ValueError("multitask training completed no samples")
+    return {
+        "schema": "clearvla-training-task-mix-v1",
+        "sample_count": total,
+        "tasks": {
+            name: {
+                "samples": int(sample_counts[index]),
+                "fraction": float(sample_counts[index] / total),
+            }
+            for index, name in enumerate(bundle.task_order)
+        },
+    }
+
+
+def _print_multitask_validation(
+    report: dict[str, object] | None,
+    *,
+    epoch: int,
+    step: int,
+    train_mix: dict[str, object] | None = None,
+) -> None:
+    def number(values: Mapping[str, object], name: str) -> float:
+        value = values.get(name)
+        if not isinstance(value, (int, float)):
+            raise TypeError(f"multitask validation field {name!r} must be numeric")
+        return float(value)
+
+    if report is None:
+        return
+    tasks = report.get("tasks")
+    micro = report.get("micro")
+    macro = report.get("macro")
+    if not isinstance(tasks, Mapping) or not isinstance(
+        micro, Mapping
+    ) or not isinstance(
+        macro, Mapping
+    ):
+        raise TypeError("multitask validation report is malformed")
+    train_tasks = None if train_mix is None else train_mix.get("tasks")
+    for raw_task_name, raw_metrics in tasks.items():
+        task_name = str(raw_task_name)
+        if not isinstance(raw_metrics, Mapping):
+            raise TypeError("multitask task metrics must be a mapping")
+        train_suffix = ""
+        if isinstance(train_tasks, Mapping):
+            raw_train = train_tasks.get(task_name)
+            if isinstance(raw_train, Mapping):
+                train_suffix = (
+                    f" train_samples={int(number(raw_train, 'samples'))}"
+                    f" train_fraction={number(raw_train, 'fraction'):.6g}"
+                )
+        print(
+            "[mainline-val-task] "
+            f"epoch={epoch:03d} step={step} task={task_name} "
+            f"samples={int(number(raw_metrics, 'validation_sample_count'))} "
+            f"action_rmse_physical="
+            f"{number(raw_metrics, 'validation_action_rmse_physical'):.6g} "
+            f"band_1_4_rmse_physical="
+            f"{number(raw_metrics, 'validation_band_1_4_rmse_physical'):.6g} "
+            f"band_5_12_rmse_physical="
+            f"{number(raw_metrics, 'validation_band_5_12_rmse_physical'):.6g} "
+            f"band_13_24_rmse_physical="
+            f"{number(raw_metrics, 'validation_band_13_24_rmse_physical'):.6g} "
+            f"arm_rmse_physical="
+            f"{number(raw_metrics, 'validation_arm_rmse_physical'):.6g} "
+            f"gripper_rmse_physical="
+            f"{number(raw_metrics, 'validation_gripper_rmse_physical'):.6g} "
+            f"event_f1="
+            f"{number(raw_metrics, 'validation_decoded_gripper_event_f1'):.6g} "
+            f"events_predicted="
+            f"{int(number(raw_metrics, 'validation_decoded_gripper_events_predicted'))} "
+            f"events_target="
+            f"{int(number(raw_metrics, 'validation_decoded_gripper_events_target'))}"
+            f"{train_suffix}",
+            flush=True,
+        )
+    print(
+        "[mainline-val-multitask] "
+        f"epoch={epoch:03d} step={step} "
+        f"observed={int(number(report, 'observed_task_count'))}/"
+        f"{int(number(report, 'expected_task_count'))} "
+        f"coverage={number(report, 'task_coverage'):.6g} "
+        f"micro_action_rmse_physical="
+        f"{number(micro, 'validation_action_rmse_physical'):.6g} "
+        f"macro_action_rmse_physical="
+        f"{number(macro, 'validation_action_rmse_physical'):.6g} "
+        f"micro_gripper_rmse_physical="
+        f"{number(micro, 'validation_gripper_rmse_physical'):.6g} "
+        f"macro_gripper_rmse_physical="
+        f"{number(macro, 'validation_gripper_rmse_physical'):.6g} "
+        f"micro_event_f1="
+        f"{number(micro, 'validation_decoded_gripper_event_f1'):.6g} "
+        f"macro_event_f1="
+        f"{number(macro, 'validation_decoded_gripper_event_f1'):.6g}",
+        flush=True,
+    )
 
 
 def _owned_generator(device: torch.device, seed: int) -> torch.Generator:
@@ -321,6 +461,7 @@ def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
         "normalizer_metadata": bundle.normalizer_metadata,
         "gripper_indices": list(bundle.gripper_indices),
         "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
+        "task_registry": bundle.task_registry_summary(),
         "action_normalizer": bundle.action_normalizer.to_dict(),
         "state_normalizer": bundle.state_normalizer.to_dict(),
         "goal": bundle.goal.metadata,
@@ -507,12 +648,23 @@ def _validate(
     config: ExperimentConfig,
     device: torch.device,
     dtype: torch.dtype,
-) -> dict[str, float]:
+) -> ValidationReport:
     deployment = ValidationAccumulator.from_action_normalizer(
         bundle.action_normalizer,
         device=device,
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
+    )
+    task_deployment = (
+        TaskValidationAccumulators.from_action_normalizer(
+            bundle.task_order,
+            bundle.action_normalizer,
+            device=device,
+            gripper_event_threshold=config.objectives.gripper_event_threshold,
+            arm_motion_threshold=config.objectives.arm_motion_threshold,
+        )
+        if bundle.is_multitask
+        else None
     )
     losses = DeviceMetricAccumulator()
     p2_interventions = MatchedP2InterventionAccumulator.from_action_normalizer(
@@ -562,6 +714,13 @@ def _validate(
             config=config,
             device=device,
         )
+        validation_task_indices = None
+        if task_deployment is not None:
+            if batch.audit.episode_index is None:
+                raise ValueError("multitask validation lost CPU episode identity")
+            validation_task_indices = bundle.task_indices_for_episodes(
+                batch.audit.episode_index
+            )
         diagnostics = batch_index in sampling_diagnostic_indices
         run_proposal_ablation = batch_index in proposal_ablation_indices
         run_execution_ablation = batch_index in execution_ablation_indices
@@ -640,6 +799,20 @@ def _validate(
                 engine.model.action_codec.decode_delta_blend
             ),
         )
+        if task_deployment is not None:
+            if validation_task_indices is None:
+                raise RuntimeError("multitask validation task rows were not resolved")
+            task_deployment.update(
+                validation_task_indices,
+                prediction.action,
+                batch,
+                motion_logits=prediction.motion_logits,
+                motion_target=motion_target,
+                physical_field=prediction.physical_field,
+                gripper_decode_delta_blend=(
+                    engine.model.action_codec.decode_delta_blend
+                ),
+            )
         if diagnostics:
             sampling_diagnostic_batches += 1
             losses.update(
@@ -842,7 +1015,8 @@ def _validate(
             result[f"validation_{name}_action_delta_rmse_physical"] = float(
                 rows[f"{name}_action_delta_mse_physical"] ** 0.5
             )
-    return result
+    multitask = None if task_deployment is None else task_deployment.report(result)
+    return ValidationReport(metrics=result, multitask=multitask)
 
 
 def main() -> None:
@@ -872,6 +1046,9 @@ def main() -> None:
         workers=config.data.num_workers,
         device=device,
         shuffle=False,
+        task_panel_max_batches=(
+            config.runtime.max_val_batches if bundle.is_multitask else None
+        ),
     )
     model = ClearVLAMainlinePolicy(config).to(device)
     optimizer, ownership = build_optimizer(model, config)
@@ -957,10 +1134,14 @@ def main() -> None:
             "camera_keys": config.data.camera_key_map(),
             "gripper_indices": list(bundle.gripper_indices),
             "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
+            "task_registry": bundle.task_registry_summary(),
         },
         "skipped": list(bundle.skipped),
         "information_sampling": getattr(
             getattr(train_loader, "batch_sampler", None), "summary", None
+        ),
+        "validation_panel": getattr(
+            getattr(val_loader, "batch_sampler", None), "summary", None
         ),
         "normalizer_fingerprints": {
             "action_v120": v120_normalizer_fingerprint(bundle.action_normalizer),
@@ -1033,16 +1214,15 @@ def main() -> None:
         validation_started = time.perf_counter()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
-        validation = archival_metrics(
-            _validate(
-                engine=engine,
-                loader=val_loader,
-                bundle=bundle,
-                config=config,
-                device=device,
-                dtype=dtype,
-            )
+        validation_report = _validate(
+            engine=engine,
+            loader=val_loader,
+            bundle=bundle,
+            config=config,
+            device=device,
+            dtype=dtype,
         )
+        validation = archival_metrics(validation_report.metrics)
         runtime = archival_metrics(
             {
                 "runtime_validation_seconds": time.perf_counter() - validation_started,
@@ -1057,6 +1237,7 @@ def main() -> None:
             source_checkpoint=validation_checkpoint_resolved,
             train={},
             validation=validation,
+            multitask_validation=validation_report.multitask,
             runtime=runtime,
         )
         planned_batches = _limit(len(val_loader), config.runtime.max_val_batches)
@@ -1088,6 +1269,11 @@ def main() -> None:
             metrics=validation,
         ):
             print(detail_line, flush=True)
+        _print_multitask_validation(
+            validation_report.multitask,
+            epoch=validation_state.epoch,
+            step=validation_state.global_step,
+        )
         return
     data_state = _data_state(bundle)
     for epoch in range(start_epoch, config.optimizer.epochs + 1):
@@ -1101,6 +1287,7 @@ def main() -> None:
         epoch_batches = 0
         window_samples = 0
         window_batches = 0
+        task_sample_counts = [0 for _ in bundle.task_order]
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
         epoch_metrics = DeviceMetricAccumulator()
@@ -1119,6 +1306,14 @@ def main() -> None:
                 config=config,
                 device=device,
             )
+            if bundle.is_multitask:
+                if batch.audit.episode_index is None:
+                    raise ValueError("multitask training lost CPU episode identity")
+                task_indices = bundle.task_indices_for_episodes(
+                    batch.audit.episode_index
+                )
+                for task in task_indices.tolist():
+                    task_sample_counts[int(task)] += 1
             emit = batch_index % config.runtime.log_every == 0
             try:
                 result = engine.train_step(
@@ -1222,16 +1417,16 @@ def main() -> None:
         train_values["runtime_epoch_seconds"] = epoch_seconds
         train_values["runtime_seconds_per_batch"] = epoch_seconds / max(epoch_batches, 1)
         train_values["runtime_samples_per_second"] = epoch_samples / max(epoch_seconds, 1e-8)
-        validation = archival_metrics(
-            _validate(
-                engine=engine,
-                loader=val_loader,
-                bundle=bundle,
-                config=config,
-                device=device,
-                dtype=dtype,
-            )
+        train_task_mix = _task_sample_mix(bundle, task_sample_counts)
+        validation_report = _validate(
+            engine=engine,
+            loader=val_loader,
+            bundle=bundle,
+            config=config,
+            device=device,
+            dtype=dtype,
         )
+        validation = archival_metrics(validation_report.metrics)
         # Capture the peak after validation as well: a production memory claim
         # covers the complete train/eval epoch, not only the backward path.
         train_values.update(_cuda_memory_metrics(device))
@@ -1240,7 +1435,9 @@ def main() -> None:
             epoch=epoch,
             step=engine.global_step,
             train=train_values,
+            train_task_mix=train_task_mix,
             validation=validation,
+            multitask_validation=validation_report.multitask,
         )
         runtime_names = (
             "runtime_seconds_per_batch",
@@ -1274,6 +1471,12 @@ def main() -> None:
             metrics=validation,
         ):
             print(detail_line, flush=True)
+        _print_multitask_validation(
+            validation_report.multitask,
+            epoch=epoch,
+            step=engine.global_step,
+            train_mix=train_task_mix,
+        )
         metric = validation["validation_action_rmse_normalized"]
         improved = best_metric is None or metric < best_metric
         if improved:

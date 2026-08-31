@@ -25,6 +25,8 @@ from clearvla.data.multitask_selection import (
 from clearvla.data.samplers import (
     InformationBalancedBatchSampler,
     InformationBalancedSamplerConfig,
+    TaskBalancedInformationBatchSampler,
+    TaskStratifiedBatchSampler,
 )
 from clearvla.data.split import (
     RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
@@ -83,9 +85,75 @@ class MainlineDataBundle:
     information_motion_quantile: float
     gripper_event_threshold: float | None
     gripper_indices: tuple[int, ...] = (-1,)
+    task_order: tuple[str, ...] = ()
+    episode_task_indices: tuple[int, ...] = ()
     data_profile_metadata: dict[str, object] = field(default_factory=dict)
     split_metadata: dict[str, object] = field(default_factory=dict)
     normalizer_metadata: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def is_multitask(self) -> bool:
+        return bool(self.task_order)
+
+    def task_indices_for_episodes(self, episode_indices: Tensor) -> Tensor:
+        """Resolve detached episode identities to CPU-only task indices."""
+
+        if not self.is_multitask:
+            raise ValueError("the selected data bundle has no multitask registry")
+        if episode_indices.ndim != 1:
+            raise ValueError("episode indices must be a flat batch vector")
+        values = episode_indices.detach().to(device="cpu", dtype=torch.long).tolist()
+        if any(index < 0 or index >= len(self.episode_task_indices) for index in values):
+            raise IndexError("episode index is outside the multitask registry")
+        result = torch.tensor(
+            [self.episode_task_indices[index] for index in values],
+            dtype=torch.long,
+        )
+        if bool((result < 0).any()):
+            raise ValueError("a model-facing split contains an unregistered task")
+        return result
+
+    def dataset_task_indices(self, split: str) -> np.ndarray:
+        if split not in self.datasets:
+            raise KeyError(f"unknown data split {split!r}")
+        refs = self.datasets[split].base.refs
+        episode_indices = torch.tensor(
+            [int(ref.episode_idx) for ref in refs],
+            dtype=torch.long,
+        )
+        return self.task_indices_for_episodes(episode_indices).numpy()
+
+    def task_registry_summary(self) -> dict[str, object] | None:
+        if not self.is_multitask:
+            return None
+        episode_counts: dict[str, dict[str, int]] = {}
+        window_counts: dict[str, dict[str, int]] = {}
+        for split, episode_ids in self.splits.items():
+            counts = [0 for _ in self.task_order]
+            for episode_id in episode_ids:
+                task = self.episode_task_indices[int(episode_id)]
+                if task >= 0:
+                    counts[task] += 1
+            episode_counts[split] = {
+                name: counts[index]
+                for index, name in enumerate(self.task_order)
+            }
+        for split in self.datasets:
+            values = self.dataset_task_indices(split)
+            counts = np.bincount(values, minlength=len(self.task_order))
+            window_counts[split] = {
+                name: int(counts[index])
+                for index, name in enumerate(self.task_order)
+            }
+        return {
+            "schema": "clearvla-cpu-task-registry-v1",
+            "task_order": list(self.task_order),
+            "task_count": len(self.task_order),
+            "usage": "sampling_validation_logging_only",
+            "model_conditioning": False,
+            "episode_counts": episode_counts,
+            "window_counts": window_counts,
+        }
 
     def loader(
         self,
@@ -96,6 +164,7 @@ class MainlineDataBundle:
         device: torch.device,
         shuffle: bool | None = None,
         generator: torch.Generator | None = None,
+        task_panel_max_batches: int | None = None,
     ) -> DataLoader:
         if split not in self.datasets:
             raise KeyError(f"unknown data split {split!r}")
@@ -122,16 +191,46 @@ class MainlineDataBundle:
                 gripper_indices=self.gripper_indices,
                 event_threshold=self.gripper_event_threshold,
             )
-            sampler = InformationBalancedBatchSampler(
-                motion_score,
-                is_event,
-                InformationBalancedSamplerConfig(
-                    batch_size=batch_size,
-                    uniform_fraction=self.information_uniform_fraction,
-                    event_fraction=self.information_event_fraction,
-                    motion_quantile=self.information_motion_quantile,
-                    seed=self.sampling_seed,
-                ),
+            sampler_config = InformationBalancedSamplerConfig(
+                batch_size=batch_size,
+                uniform_fraction=self.information_uniform_fraction,
+                event_fraction=self.information_event_fraction,
+                motion_quantile=self.information_motion_quantile,
+                seed=self.sampling_seed,
+            )
+            if self.is_multitask:
+                sampler = TaskBalancedInformationBatchSampler(
+                    motion_score,
+                    is_event,
+                    self.dataset_task_indices(split),
+                    self.task_order,
+                    sampler_config,
+                )
+            else:
+                sampler = InformationBalancedBatchSampler(
+                    motion_score,
+                    is_event,
+                    sampler_config,
+                )
+            return DataLoader(dataset, batch_sampler=sampler, **common)
+        if (
+            self.is_multitask
+            and not do_shuffle
+            and task_panel_max_batches is not None
+            and int(task_panel_max_batches) > 0
+        ):
+            sample_slots = int(task_panel_max_batches) * int(batch_size)
+            samples_per_task = sample_slots // len(self.task_order)
+            if samples_per_task <= 0:
+                raise ValueError(
+                    "bounded multitask validation must have at least one sample "
+                    "slot per task"
+                )
+            sampler = TaskStratifiedBatchSampler(
+                self.dataset_task_indices(split),
+                self.task_order,
+                samples_per_task=samples_per_task,
+                batch_size=batch_size,
             )
             return DataLoader(dataset, batch_sampler=sampler, **common)
         return DataLoader(
@@ -162,6 +261,41 @@ def _normalizers(
     actions = ArrayNormalizer.fit_zscore(action_rows)
     states = ArrayNormalizer.fit_zscore(state_rows)
     return actions, states
+
+
+def _cpu_task_registry(
+    episodes: list[LoadedEpisode],
+    split_ids: Mapping[str, list[int]],
+    split_metadata: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    selection = split_metadata.get("task_selection")
+    if selection is None:
+        return (), ()
+    if not isinstance(selection, Mapping):
+        raise TypeError("task selection metadata must be a mapping")
+    raw_order = selection.get("task_order")
+    if not isinstance(raw_order, list):
+        raise TypeError("task selection metadata has no ordered task registry")
+    task_order = tuple(str(value) for value in raw_order)
+    if not task_order or len(set(task_order)) != len(task_order):
+        raise ValueError("task selection order must be non-empty and unique")
+    lookup = {name: index for index, name in enumerate(task_order)}
+    episode_task_indices = tuple(
+        lookup.get(str(episode.task_id), -1) for episode in episodes
+    )
+    for split in RDT_MULTITASK_INTERNAL_SPLITS:
+        if split not in split_ids:
+            raise ValueError(f"task selection is missing internal split {split!r}")
+        missing = [
+            episodes[index].episode_id
+            for index in split_ids[split]
+            if episode_task_indices[int(index)] < 0
+        ]
+        if missing:
+            raise ValueError(
+                f"selected split {split!r} contains unregistered tasks: {missing[:3]}"
+            )
+    return task_order, episode_task_indices
 
 
 def _load_mainline_data(
@@ -411,6 +545,11 @@ def _load_mainline_data(
     episode_condition_indices = goal_bank.condition_indices(
         [episode.instruction for episode in episodes]
     )
+    task_order, episode_task_indices = _cpu_task_registry(
+        episodes,
+        split_ids,
+        split_metadata,
+    )
     return MainlineDataBundle(
         episodes=tuple(episodes),
         splits={name: tuple(ids) for name, ids in split_ids.items()},
@@ -435,6 +574,8 @@ def _load_mainline_data(
             else data.sampling_gripper_event_threshold
         ),
         gripper_indices=profile.gripper_indices,
+        task_order=task_order,
+        episode_task_indices=episode_task_indices,
         data_profile_metadata={**profile.as_dict(), "sha256": profile.digest()},
         split_metadata=split_metadata,
         normalizer_metadata=normalizer_metadata,

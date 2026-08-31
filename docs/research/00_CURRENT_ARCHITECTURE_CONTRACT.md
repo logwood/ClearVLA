@@ -721,6 +721,35 @@ supports may change targets and losses, never deployment action.
     have not yet defined which continuous right-gripper transitions own an
     event/activity label. This preparation therefore still does not claim
     depth, a three-camera model consumer, or native 14-D bimanual adaptation.
+    The adopted eight-task experiment interface is now source-complete but
+    behavior-pending. It constructs one immutable CPU registry from the
+    selection manifest (`episode_idx -> task index`) and uses it in exactly
+    three non-model places. Shuffled training assigns batch slots to tasks
+    before applying the existing uniform/event/motion information lanes; at
+    batch eight, every batch contains exactly one row from every selected task,
+    and an absent informative pool falls back only to that task's uniform
+    pool. A bounded validation budget selects an equal deterministic panel per
+    task instead of truncating the task-sorted dataset. One shared deployment
+    prediction is then sliced for per-task full/three-band/arm/gripper/event
+    accounting, plus sample-weighted micro and equal-task macro summaries.
+    Missing tasks are listed through coverage and never receive fabricated
+    zero performance. Actual train sample counts/fractions, the task registry,
+    sampler and validation-panel summaries are serialized as run/data state;
+    task metadata owns no gradient, module, optimizer tensor or checkpoint
+    tensor and never enters `TrainingBatch.online`.
+    `scripts/train_rdt_multitask.sh` and `scripts/smoke_rdt_multitask.sh` are
+    the only RDT model launchers. They require one explicit positive
+    `RDT_GRIPPER_EVENT_THRESHOLD`, which is atomically bound to sampler event
+    rows, continuous gripper-trajectory ownership and decoded validation.
+    Pen remains exactly `0.10`; unlike thresholds fail configuration
+    validation. This executable closure does not itself adopt an RDT threshold
+    or authorize a formal run. The train-only candidates show why: thresholds
+    `0.146484375 / 0.40283203125 / 0.7599645256996155` label approximately
+    `99.27% / 81.84% / 50.33%` of sliding windows because command and observed
+    qpos are not synonymous boundaries. Source semantics must first decide
+    whether an event is command change, executed-state change, or another
+    explicitly justified object. Local data/config/runtime regression is
+    `40/40`; a mixed model backward/deployment smoke is still pending.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

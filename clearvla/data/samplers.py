@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import numpy as np
 from torch.utils.data import Sampler
@@ -248,6 +248,270 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
             batch.extend(motion_rows)
             rng.shuffle(batch)
             yield batch
+
+
+class TaskBalancedInformationBatchSampler(Sampler[list[int]]):
+    """Balance task identity before drawing the existing information lanes.
+
+    Task identity is CPU-side sampling metadata only.  It never enters a
+    dataset sample or model input.  Every batch owns the same fixed number of
+    slots as the ordinary information sampler; the slots are first assigned
+    round-robin over tasks, then assigned uniform/event/motion lanes using the
+    existing configured fractions.  With eight tasks and batch size eight,
+    every batch therefore contains exactly one row from every task.
+
+    Uniform rows traverse a task-local shuffled permutation before repeating.
+    Event and motion rows may repeat, matching the established informative
+    lane semantics.  A task with no event or motion distinction falls back to
+    its uniform lane rather than borrowing a row from another task.
+    """
+
+    def __init__(
+        self,
+        motion_score: np.ndarray,
+        is_event: np.ndarray,
+        task_index: np.ndarray,
+        task_names: Sequence[str],
+        config: InformationBalancedSamplerConfig,
+    ) -> None:
+        config.validate()
+        score = np.asarray(motion_score, dtype=np.float64)
+        events = np.asarray(is_event, dtype=bool)
+        tasks = np.asarray(task_index, dtype=np.int64)
+        names = tuple(str(value) for value in task_names)
+        if score.ndim != 1 or len(score) == 0:
+            raise ValueError("motion_score must be a non-empty flat vector")
+        if events.shape != score.shape or tasks.shape != score.shape:
+            raise ValueError("motion, event and task vectors must align")
+        if not np.isfinite(score).all() or (score < 0.0).any():
+            raise ValueError("motion_score must be finite and non-negative")
+        if not names or len(set(names)) != len(names) or any(not name for name in names):
+            raise ValueError("task names must be non-empty and unique")
+        if (tasks < 0).any() or (tasks >= len(names)).any():
+            raise ValueError("task indices must identify the declared task order")
+        self.motion_score = score
+        self.is_event = events
+        self.task_index = tasks
+        self.task_names = names
+        self.config = config
+        self.epoch = 0
+        self.all_indices = np.arange(len(score), dtype=np.int64)
+        self.task_pools: tuple[np.ndarray, ...] = tuple(
+            np.flatnonzero(tasks == task) for task in range(len(names))
+        )
+        if any(len(pool) == 0 for pool in self.task_pools):
+            missing = [names[index] for index, pool in enumerate(self.task_pools) if not len(pool)]
+            raise ValueError(f"task-balanced sampler has empty tasks: {missing}")
+        motion_pools: list[np.ndarray] = []
+        event_pools: list[np.ndarray] = []
+        motion_thresholds: list[float] = []
+        for pool in self.task_pools:
+            task_score = score[pool]
+            threshold = float(np.quantile(task_score, config.motion_quantile))
+            spread = float(task_score.max() - task_score.min())
+            motion_thresholds.append(threshold)
+            motion_pools.append(
+                pool[task_score >= threshold]
+                if spread > max(1e-12, abs(float(task_score.mean())) * 1e-8)
+                else np.empty((0,), dtype=np.int64)
+            )
+            event_pools.append(pool[events[pool]])
+        self.motion_pools = tuple(motion_pools)
+        self.event_pools = tuple(event_pools)
+        self.motion_thresholds = tuple(motion_thresholds)
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("epoch must be non-negative")
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        if self.config.batches_per_epoch is not None:
+            return int(self.config.batches_per_epoch)
+        if self.config.drop_last:
+            return len(self.all_indices) // self.config.batch_size
+        return math.ceil(len(self.all_indices) / self.config.batch_size)
+
+    @property
+    def summary(self) -> dict[str, object]:
+        total_slots = len(self) * int(self.config.batch_size)
+        task_count = len(self.task_names)
+        projected_floor = total_slots // task_count
+        projected_ceil = math.ceil(total_slots / task_count)
+        return {
+            "schema": "clearvla-task-balanced-information-sampler-v1",
+            "windows": int(len(self.all_indices)),
+            "task_count": task_count,
+            "task_order": list(self.task_names),
+            "batch_size": int(self.config.batch_size),
+            "batches_per_epoch": int(len(self)),
+            "uniform_fraction": float(self.config.uniform_fraction),
+            "event_fraction": float(self.config.event_fraction),
+            "motion_fraction": float(
+                1.0 - self.config.uniform_fraction - self.config.event_fraction
+            ),
+            "projected_samples_per_task_min": int(projected_floor),
+            "projected_samples_per_task_max": int(projected_ceil),
+            "projected_task_sample_count_gap_max": int(
+                projected_ceil - projected_floor
+            ),
+            "tasks": [
+                {
+                    "task_id": name,
+                    "windows": int(len(self.task_pools[index])),
+                    "event_windows": int(len(self.event_pools[index])),
+                    "motion_windows": int(len(self.motion_pools[index])),
+                    "motion_threshold": float(self.motion_thresholds[index]),
+                }
+                for index, name in enumerate(self.task_names)
+            ],
+        }
+
+    @staticmethod
+    def _lane_counts(config: InformationBalancedSamplerConfig) -> tuple[int, int, int]:
+        uniform = int(round(config.batch_size * config.uniform_fraction))
+        event = int(round(config.batch_size * config.event_fraction))
+        uniform = min(max(uniform, 1), config.batch_size)
+        event = min(max(event, 0), config.batch_size - uniform)
+        return uniform, event, config.batch_size - uniform - event
+
+    @staticmethod
+    def _draw_pool(
+        rng: np.random.Generator,
+        pool: np.ndarray,
+        selected: set[int],
+    ) -> int | None:
+        available = np.asarray(
+            [int(value) for value in pool if int(value) not in selected],
+            dtype=np.int64,
+        )
+        if not len(available):
+            return None
+        return int(rng.choice(available))
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = np.random.default_rng(self.config.seed + self.epoch * 1_000_003)
+        task_order = np.arange(len(self.task_names), dtype=np.int64)
+        rng.shuffle(task_order)
+        uniform_rows = [pool.copy() for pool in self.task_pools]
+        uniform_cursor = [0 for _ in self.task_pools]
+        for rows in uniform_rows:
+            rng.shuffle(rows)
+
+        def draw_uniform(task: int, selected: set[int]) -> int:
+            pool = uniform_rows[task]
+            attempts = 0
+            while attempts <= len(pool):
+                if uniform_cursor[task] >= len(pool):
+                    rng.shuffle(pool)
+                    uniform_cursor[task] = 0
+                value = int(pool[uniform_cursor[task]])
+                uniform_cursor[task] += 1
+                attempts += 1
+                if value not in selected:
+                    return value
+            # A repeated task can legally exhaust every unique row inside one
+            # oversized batch.  Repetition is then explicit and local to that
+            # task rather than silently borrowing another task's sample.
+            return int(rng.choice(self.task_pools[task]))
+
+        uniform_count, event_count, motion_count = self._lane_counts(self.config)
+        lane_template = np.asarray(
+            [0] * uniform_count + [1] * event_count + [2] * motion_count,
+            dtype=np.int8,
+        )
+        task_cursor = 0
+        for _batch in range(len(self)):
+            task_slots = [
+                int(task_order[(task_cursor + offset) % len(task_order)])
+                for offset in range(self.config.batch_size)
+            ]
+            task_cursor = (task_cursor + self.config.batch_size) % len(task_order)
+            lanes = lane_template.copy()
+            rng.shuffle(lanes)
+            selected: set[int] = set()
+            batch: list[int] = []
+            for task, lane in zip(task_slots, lanes, strict=True):
+                if int(lane) == 1:
+                    value = self._draw_pool(rng, self.event_pools[task], selected)
+                elif int(lane) == 2:
+                    value = self._draw_pool(rng, self.motion_pools[task], selected)
+                else:
+                    value = None
+                if value is None:
+                    value = draw_uniform(task, selected)
+                batch.append(value)
+                selected.add(value)
+            paired = list(zip(task_slots, batch, strict=True))
+            rng.shuffle(paired)
+            yield [value for _task, value in paired]
+
+
+class TaskStratifiedBatchSampler(Sampler[list[int]]):
+    """Deterministic bounded validation panel with equal rows per task."""
+
+    def __init__(
+        self,
+        task_index: np.ndarray,
+        task_names: Sequence[str],
+        *,
+        samples_per_task: int,
+        batch_size: int,
+    ) -> None:
+        tasks = np.asarray(task_index, dtype=np.int64)
+        names = tuple(str(value) for value in task_names)
+        if tasks.ndim != 1 or not len(tasks):
+            raise ValueError("validation task indices must be a non-empty vector")
+        if not names or len(set(names)) != len(names):
+            raise ValueError("validation task names must be non-empty and unique")
+        if samples_per_task <= 0 or batch_size <= 0:
+            raise ValueError("validation samples per task and batch size must be positive")
+        if (tasks < 0).any() or (tasks >= len(names)).any():
+            raise ValueError("validation task indices are outside the task registry")
+        per_task: list[np.ndarray] = []
+        for task in range(len(names)):
+            pool = np.flatnonzero(tasks == task)
+            if not len(pool):
+                raise ValueError(f"validation task has no windows: {names[task]}")
+            count = min(int(samples_per_task), len(pool))
+            positions = np.linspace(0, len(pool) - 1, num=count, dtype=np.int64)
+            selected = pool[positions]
+            if len(np.unique(selected)) != count:
+                raise AssertionError("stratified validation selected duplicate rows")
+            per_task.append(selected)
+        order: list[int] = []
+        for row in range(max(len(values) for values in per_task)):
+            for values in per_task:
+                if row < len(values):
+                    order.append(int(values[row]))
+        self.task_index = tasks
+        self.task_names = names
+        self.samples_per_task = int(samples_per_task)
+        self.batch_size = int(batch_size)
+        self.per_task = tuple(per_task)
+        self.order = tuple(order)
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.order) / self.batch_size)
+
+    @property
+    def summary(self) -> dict[str, object]:
+        return {
+            "schema": "clearvla-task-stratified-validation-panel-v1",
+            "task_order": list(self.task_names),
+            "requested_samples_per_task": self.samples_per_task,
+            "selected_samples": len(self.order),
+            "selected_samples_per_task": {
+                name: int(len(self.per_task[index]))
+                for index, name in enumerate(self.task_names)
+            },
+            "batch_size": self.batch_size,
+            "batches": len(self),
+        }
+
+    def __iter__(self) -> Iterator[list[int]]:
+        for start in range(0, len(self.order), self.batch_size):
+            yield list(self.order[start : start + self.batch_size])
 
 
 @dataclass(frozen=True)

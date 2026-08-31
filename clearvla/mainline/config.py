@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, TypeVar, cast
@@ -134,10 +135,12 @@ class DataConfig:
         if self.seed < 0:
             raise ValueError("data seed must be non-negative")
         resolve_action_state_profile(self.data_profile).validate()
-        if self.sampling_gripper_event_threshold is not None and float(
-            self.sampling_gripper_event_threshold
-        ) < 0.0:
-            raise ValueError("sampling gripper event threshold must be non-negative")
+        if self.sampling_gripper_event_threshold is not None:
+            threshold = float(self.sampling_gripper_event_threshold)
+            if not math.isfinite(threshold) or threshold < 0.0:
+                raise ValueError(
+                    "sampling gripper event threshold must be finite and non-negative"
+                )
         if (
             self.information_uniform_fraction != 0.50
             or self.information_event_fraction != 0.125
@@ -394,12 +397,12 @@ class ObjectiveConfig:
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
-            if float(value) < 0.0:
-                raise ValueError(f"objective.{name} must be non-negative")
+            if not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"objective.{name} must be finite and non-negative")
         if self.future_dynamics <= 0.0 or self.intent_structure <= 0.0:
             raise ValueError("W and G/S require active future/structure budgets")
-        if self.gripper_event_threshold != 0.10 or self.arm_motion_threshold != 0.02:
-            raise ValueError("the resolved event/motion thresholds are 0.10 raw and 0.02 normalized")
+        if self.arm_motion_threshold != 0.02:
+            raise ValueError("the resolved normalized arm-motion threshold is 0.02")
         if self.horizon_tail_emphasis != 0.20 or self.horizon_first_step_protection != 0.05:
             raise ValueError("the resolved anchor-band emphasis is tail=0.20 and first=0.05")
         if self.execution_value != 0.05 or self.execution_value_huber_delta != 0.10:
@@ -512,6 +515,22 @@ class ExperimentConfig:
             raise ValueError("data profile width must align with dimensions.action_dim")
         if profile.output_dim != self.dimensions.state_dim:
             raise ValueError("data profile width must align with dimensions.state_dim")
+        sampling_threshold = self.data.sampling_gripper_event_threshold
+        if profile.name == "identity_7d_pen":
+            if self.objectives.gripper_event_threshold != 0.10:
+                raise ValueError("the Pen gripper trajectory threshold remains exactly 0.10 raw")
+            if sampling_threshold is not None and float(sampling_threshold) != 0.10:
+                raise ValueError("the Pen sampler threshold cannot differ from 0.10 raw")
+        elif sampling_threshold is not None:
+            if float(sampling_threshold) <= 0.0:
+                raise ValueError("non-Pen gripper event threshold must be positive")
+            if float(sampling_threshold) != float(
+                self.objectives.gripper_event_threshold
+            ):
+                raise ValueError(
+                    "non-Pen sampling, gripper trajectory and validation thresholds "
+                    "must be identical"
+                )
 
     def as_dict(self) -> dict[str, object]:
         return cast(dict[str, object], asdict(self))
