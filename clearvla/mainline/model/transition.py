@@ -25,6 +25,8 @@ from .types import (
 class ControlledTransitionDynamics(nn.Module):
     """Static protected G3 source plus dynamic V120 action/neutral coefficients."""
 
+    INTERVENTION_MODES = ("delta_neutral",)
+
     @property
     def action_queries(self) -> nn.Parameter:
         return self.v120_transition.action_queries
@@ -87,6 +89,25 @@ class ControlledTransitionDynamics(nn.Module):
         # network evaluated on an all-zero proposal changes the function.
         self.v120_transition.neutral_queries.requires_grad_(True)
         self.v120_transition.neutral_bias.requires_grad_(True)
+        # Non-persistent validation state.  It is absent from state_dict and
+        # does not add a parameter, buffer, optimizer owner or initialization
+        # draw to the recovered transition.
+        self._eval_intervention = "none"
+
+    def set_eval_intervention(self, mode: str) -> None:
+        """Remove real-minus-neutral CT value only at its output boundary."""
+
+        if self.training:
+            raise ValueError("controlled-transition interventions are evaluation-only")
+        if mode not in self.INTERVENTION_MODES:
+            raise ValueError(
+                "controlled-transition intervention must be one of "
+                + ", ".join(self.INTERVENTION_MODES)
+            )
+        self._eval_intervention = mode
+
+    def clear_eval_intervention(self) -> None:
+        self._eval_intervention = "none"
 
     def build_source(
         self,
@@ -206,9 +227,26 @@ class ControlledTransitionDynamics(nn.Module):
             action_tokens=action_tokens,
             transition_tokens=transition,
         )
-        value = raw["rollout_delta_pred"]
-        action_coefficients = raw["rollout_action_coeff"]
+        primary_value = raw["rollout_delta_pred"]
+        primary_action_coefficients = raw["rollout_action_coeff"]
         neutral_coefficients = raw["rollout_neutral_coeff"]
+        mode = self._eval_intervention
+        if mode == "none":
+            # No identity arithmetic on the primary deployment path.
+            value = primary_value
+            action_coefficients = primary_action_coefficients
+        else:
+            if self.training:
+                raise ValueError(
+                    "controlled-transition interventions are evaluation-only"
+                )
+            if mode != "delta_neutral":
+                raise RuntimeError("controlled-transition intervention state is invalid")
+            # The full transition, context and action-token computations above
+            # remain live.  Only the real-minus-learned-neutral delta is made
+            # algebraically neutral; the protected G3 selector is retained.
+            value = torch.zeros_like(primary_value)
+            action_coefficients = neutral_coefficients
         result = ControlledTransitionState(
             selector=transition,
             value=value,
@@ -262,6 +300,29 @@ class ControlledTransitionDynamics(nn.Module):
                 .mean()
                 .sqrt()
             ),
+            "controlled_transition_intervention_active": value.new_tensor(
+                float(mode != "none"), dtype=torch.float32
+            ),
+            "controlled_transition_intervention_network_executed": value.new_ones(
+                (), dtype=torch.float32
+            ),
+            "controlled_transition_intervention_first_boundary_delta_rms": (
+                primary_value.detach().float() - value.detach().float()
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            "controlled_transition_intervention_action_neutral_identity_max_abs": (
+                action_coefficients.detach().float()
+                - neutral_coefficients.detach().float()
+            )
+            .abs()
+            .amax(),
+            "controlled_transition_intervention_selector_identity_max_abs": (
+                result.selector.detach().float() - source.selector.detach().float()
+            )
+            .abs()
+            .amax(),
         }
 
 

@@ -6,11 +6,13 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.data.dataset import ObservedStateDatasetConfig
+from clearvla.mainline.data.normalizer import ArrayNormalizer
 from clearvla.mainline.interfaces import (
     ActionSupervision,
     AuditMetadata,
@@ -31,7 +33,12 @@ from clearvla.mainline.runtime.sampling import (
     sample_cached_action,
     sample_refined_cached_action,
 )
-from clearvla.mainline.train import _optimizer_group_context
+from clearvla.mainline.train import (
+    _optimizer_group_context,
+    _validate,
+    _world_dynamic_neutral_cache,
+    _wrong_action_world_cache,
+)
 from clearvla.mainline.training.engine import (
     EncodedTrainingBatch,
     MainlineTrainingEngine,
@@ -1371,6 +1378,88 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert transition_metrics["controlled_transition_action_token_rows"] == (
         config.dimensions.action_horizon * config.dimensions.action_basis_tokens
     )
+    transition_state_before = {
+        name: value.detach().clone()
+        for name, value in model.transition.state_dict().items()
+    }
+    model.transition.train()
+    try:
+        model.transition.set_eval_intervention("delta_neutral")
+    except ValueError as error:
+        assert "evaluation-only" in str(error)
+    else:
+        raise AssertionError("training must reject a controlled-transition intervention")
+    model.transition.eval()
+    transition_calls = 0
+
+    def count_transition_network(_module, _args, _output):
+        nonlocal transition_calls
+        transition_calls += 1
+
+    execution_hook = model.transition.v120_transition.register_forward_hook(
+        count_transition_network
+    )
+    model.transition.set_eval_intervention("delta_neutral")
+    try:
+        neutral_transition, neutral_metrics = model.transition(
+            source=cache.transition_source,
+            action_query=query,
+            plan=compiled.plan,
+            seed=seed_context,
+            collect_diagnostics=True,
+        )
+    finally:
+        model.transition.clear_eval_intervention()
+        execution_hook.remove()
+    assert transition_calls == 1
+    assert torch.count_nonzero(neutral_transition.value) == 0
+    assert torch.equal(
+        neutral_transition.action_coefficients,
+        neutral_transition.neutral_coefficients,
+    )
+    assert neutral_transition.selector is cache.transition_source.selector
+    assert neutral_metrics["controlled_transition_intervention_active"] == 1
+    assert neutral_metrics["controlled_transition_intervention_network_executed"] == 1
+    assert (
+        neutral_metrics[
+            "controlled_transition_intervention_first_boundary_delta_rms"
+        ]
+        > 0
+    )
+    assert (
+        neutral_metrics[
+            "controlled_transition_intervention_action_neutral_identity_max_abs"
+        ]
+        == 0
+    )
+    assert (
+        neutral_metrics[
+            "controlled_transition_intervention_selector_identity_max_abs"
+        ]
+        == 0
+    )
+    assert tuple(model.transition.state_dict()) == tuple(transition_state_before)
+    for name, value in model.transition.state_dict().items():
+        assert torch.equal(value, transition_state_before[name])
+
+    restored_transition, restored_metrics = model.transition(
+        source=cache.transition_source,
+        action_query=query,
+        plan=compiled.plan,
+        seed=seed_context,
+        collect_diagnostics=True,
+    )
+    assert torch.equal(restored_transition.selector, transition.selector)
+    assert torch.equal(restored_transition.value, transition.value)
+    assert torch.equal(
+        restored_transition.action_coefficients,
+        transition.action_coefficients,
+    )
+    assert torch.equal(
+        restored_transition.neutral_coefficients,
+        transition.neutral_coefficients,
+    )
+    assert restored_metrics["controlled_transition_intervention_active"] == 0
     assert "p1_fact" not in inspect.signature(model.bottom.forward).parameters
     assert "action_query" not in inspect.signature(
         model.bottom._layer_contracts
@@ -2084,6 +2173,191 @@ def test_cached_deployment_forces_eval_mode_and_is_repeatable() -> None:
     )
     assert not model.training
     assert torch.equal(first.action, second.action)
+
+
+def test_core_attribution_preserves_primary_and_sole_consumer_identities() -> None:
+    torch.manual_seed(230)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config, batch=2)
+    with torch.no_grad():
+        cache, _, _ = model.encode_online(
+            batch.online,
+            training_mask=False,
+            geometry_supervision=False,
+            collect_diagnostics=True,
+        )
+    noise = torch.randn(
+        batch.action_target.batch,
+        config.dimensions.action_horizon,
+        model.action_codec.physical_dim,
+    )
+    primary = sample_cached_action(
+        model,
+        cache,
+        config,
+        initial_physical_noise=noise,
+        collect_diagnostics=True,
+        dtype=torch.float32,
+    )
+    explicit_none = sample_cached_action(
+        model,
+        cache,
+        config,
+        initial_physical_noise=noise,
+        collect_diagnostics=True,
+        dtype=torch.float32,
+    )
+    assert torch.equal(explicit_none.action, primary.action)
+    assert torch.equal(explicit_none.physical_field, primary.physical_field)
+    assert torch.equal(explicit_none.motion_logits, primary.motion_logits)
+
+    neutral_world_cache, world_metrics = _world_dynamic_neutral_cache(cache, config)
+    assert neutral_world_cache.top.action_condition is cache.top.action_condition
+    assert neutral_world_cache.top.belief is cache.top.belief
+    for name in (
+        "retained_current_reference_identity_max_abs",
+        "retained_support_identity_max_abs",
+        "retained_camera_identity_max_abs",
+        "retained_action_condition_identity_max_abs",
+    ):
+        assert world_metrics[name] == 0
+    world_neutral = sample_cached_action(
+        model,
+        neutral_world_cache,
+        config,
+        initial_physical_noise=noise,
+        collect_diagnostics=True,
+        dtype=torch.float32,
+    )
+    model.top.consequence.set_eval_intervention("effect_neutral")
+    try:
+        consequence_neutral = sample_cached_action(
+            model,
+            cache,
+            config,
+            initial_physical_noise=noise,
+            collect_diagnostics=True,
+            dtype=torch.float32,
+        )
+    finally:
+        model.top.consequence.clear_eval_intervention()
+    assert torch.equal(world_neutral.action, consequence_neutral.action)
+    assert torch.equal(world_neutral.physical_field, consequence_neutral.physical_field)
+    assert torch.equal(world_neutral.motion_logits, consequence_neutral.motion_logits)
+
+    wrong_world_cache, wrong_metrics = _wrong_action_world_cache(
+        model,
+        cache,
+        config,
+        dtype=torch.float32,
+    )
+    assert wrong_world_cache.top.belief is cache.top.belief
+    assert (
+        wrong_world_cache.top.candidate_world.action_condition
+        is wrong_world_cache.top.action_condition
+    )
+    assert not torch.equal(
+        wrong_world_cache.top.action_condition.interval_action,
+        cache.top.action_condition.interval_action,
+    )
+    assert torch.equal(
+        wrong_world_cache.top.action_condition.current_action,
+        cache.top.action_condition.current_action,
+    )
+    assert wrong_metrics["donor_valid_rows"] > 0
+    assert wrong_metrics["donor_total_rows"] == batch.action_target.batch
+    assert wrong_metrics["donor_valid_fraction"] > 0
+    assert wrong_metrics["first_boundary_action_condition_delta_rms"] > 0
+    for name in (
+        "retained_current_action_identity_max_abs",
+        "retained_current_reference_identity_max_abs",
+        "retained_support_identity_max_abs",
+        "retained_camera_identity_max_abs",
+    ):
+        assert wrong_metrics[name] == 0
+
+
+def test_core_attribution_full_one_batch_validation_smoke() -> None:
+    torch.manual_seed(2301)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config)
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    batch = _batch(config, batch=2)
+    action_dim = config.dimensions.action_dim
+    unit = np.ones((1, action_dim), dtype=np.float32)
+    normalizer = ArrayNormalizer(
+        offset=np.zeros_like(unit),
+        scale=unit,
+        mean=np.zeros_like(unit),
+        std=unit,
+        minimum=-unit,
+        maximum=unit,
+        mode="identity",
+    )
+    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None)
+    with mock.patch(
+        "clearvla.mainline.train.to_training_batch",
+        return_value=batch,
+    ):
+        metrics = _validate(
+            engine=engine,
+            loader=[object()],
+            bundle=bundle,
+            config=config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+    assert metrics["validation_core_attribution_batches"] == 1.0
+    assert metrics["validation_core_attribution_coverage"] == 1.0
+    assert (
+        metrics[
+            "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact"
+        ]
+        == 1.0
+    )
+    assert (
+        metrics[
+            "validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact"
+        ]
+        == 1.0
+    )
+    assert (
+        metrics[
+            "validation_core_attribution_controlled_transition_delta_neutral_"
+            "controlled_transition_network_executed"
+        ]
+        == 1.0
+    )
+    assert (
+        metrics[
+            "validation_core_attribution_controlled_transition_delta_neutral_"
+            "controlled_transition_action_neutral_identity_max_abs"
+        ]
+        == 0.0
+    )
+    assert (
+        metrics[
+            "validation_core_attribution_wrong_action_world_donor_valid_fraction"
+        ]
+        > 0.0
+    )
+    assert model.top.consequence._eval_intervention == "none"
+    assert model.transition._eval_intervention == "none"
 
 
 def test_validation_execution_interventions_match_the_native_v120_modes() -> None:

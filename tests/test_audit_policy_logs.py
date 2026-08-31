@@ -1289,6 +1289,113 @@ class AuditPolicyLogsTest(unittest.TestCase):
             9.8,
         )
 
+    def test_core_attribution_is_lossless_validation_only_and_coverage_checked(
+        self,
+    ) -> None:
+        run_dir = self.tmp_path / "schema28_core_attribution"
+        run_dir.mkdir()
+        validation = {
+            "validation_action_rmse_physical": 0.08,
+            "validation_core_attribution_coverage": 0.2,
+            "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs": 0.0,
+            "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact": 1.0,
+            "validation_core_attribution_world_vs_consequence_neutral_normalized_action_max_abs": 0.0,
+            "validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact": 1.0,
+            "validation_core_attribution_wrong_action_world_donor_valid_fraction": 1.0,
+            "validation_core_attribution_consequence_effect_neutral_first_boundary_delta_rms": 0.03,
+        }
+        _write(
+            run_dir / "metrics.jsonl",
+            json.dumps(
+                {
+                    "kind": "epoch",
+                    "epoch": 1,
+                    "step": 100,
+                    "train": {"loss_total": 0.9},
+                    "validation": validation,
+                }
+            ),
+        )
+        _write(
+            run_dir / "run_context.json",
+            json.dumps(
+                {
+                    "config": {
+                        "data": {"seed": 0},
+                        "optimizer": {"batch_size": 8},
+                    },
+                    "identity": {
+                        "manifest": {
+                            "capability": "object_intent_dynamics_323",
+                            "schema": 28,
+                            "layout": "clearvla_mainline",
+                            "layout_schema": 1,
+                        }
+                    },
+                }
+            ),
+        )
+        summary = build_summary(parse_run_input(run_dir))
+        recorded = summary["epochs"][0]["val"]
+        for name, value in validation.items():
+            self.assertEqual(recorded[name], value)
+        self.assertEqual(recorded["eval_core_attribution_coverage"], 0.2)
+        self.assertNotIn(
+            "validation_core_attribution_consequence_effect_neutral_first_boundary_delta_rms",
+            summary["trajectories"],
+        )
+
+        baseline = _complete_recovery_summary("v120")
+        candidate = deepcopy(baseline)
+        candidate["label"] = "schema28-attribution"
+        candidate["manifest"]["architecture_schema"] = 28
+        candidate["trajectories"]["gripper_trajectory"] = {
+            "count": 100,
+            "tail_median": 0.12,
+        }
+        latest = candidate["epochs"][-1]["val"]
+        latest.update(
+            {
+                "validation_sampling_diagnostic_coverage": 0.2,
+                "validation_p2_intervention_coverage": 0.2,
+                "validation_proposal_ablation_coverage": 0.2,
+                "validation_execution_ablation_coverage": 0.2,
+                **validation,
+            }
+        )
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        self.assertEqual(checks["causal_ablation/core_attribution_coverage"], "pass")
+        self.assertEqual(
+            checks["core_attribution/primary_explicit_none_identity"],
+            "pass",
+        )
+        self.assertEqual(
+            checks["core_attribution/world_consequence_sole_consumer_identity"],
+            "pass",
+        )
+        self.assertEqual(
+            checks["core_attribution/wrong_world_donor_identifiability"],
+            "pass",
+        )
+
+        latest[
+            "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs"
+        ] = 1e-7
+        latest[
+            "validation_core_attribution_wrong_action_world_donor_valid_fraction"
+        ] = 0.0
+        assessment = _recovery_assessment(baseline, candidate)
+        checks = {item["name"]: item["status"] for item in assessment["checks"]}
+        self.assertEqual(
+            checks["core_attribution/primary_explicit_none_identity"],
+            "fail",
+        )
+        self.assertEqual(
+            checks["core_attribution/wrong_world_donor_identifiability"],
+            "incomplete",
+        )
+
     def test_mainline_console_runtime_rows_remain_auditable(self) -> None:
         log = _write(
             self.tmp_path / "mainline_runtime.log",

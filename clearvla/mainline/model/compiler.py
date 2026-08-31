@@ -1072,6 +1072,8 @@ class ObjectFutureEffectReader(nn.Module):
 class ZeroPreservingObjectConsequence(nn.Module):
     """Exact identity when the P2 effect is zero."""
 
+    INTERVENTION_MODES = ("effect_neutral",)
+
     def __init__(self, hidden: int) -> None:
         super().__init__()
         self.fact = nn.Linear(hidden, hidden, bias=False)
@@ -1081,6 +1083,25 @@ class ZeroPreservingObjectConsequence(nn.Module):
         # consuming another initialization draw.  Ordinary gradients can then
         # assign independent semantic and geometry responsibilities.
         self.geometry_interaction = deepcopy(interaction)
+        # Plain evaluation state only.  It is deliberately neither a parameter
+        # nor a persistent buffer, so validation attribution cannot change the
+        # checkpoint/optimizer/RNG identity of the Schema28 graph.
+        self._eval_intervention = "none"
+
+    def set_eval_intervention(self, mode: str) -> None:
+        """Remove only the P2-owned consequence innovation during evaluation."""
+
+        if self.training:
+            raise ValueError("consequence interventions are evaluation-only")
+        if mode not in self.INTERVENTION_MODES:
+            raise ValueError(
+                "consequence intervention must be one of "
+                + ", ".join(self.INTERVENTION_MODES)
+            )
+        self._eval_intervention = mode
+
+    def clear_eval_intervention(self) -> None:
+        self._eval_intervention = "none"
 
     def forward(
         self,
@@ -1093,25 +1114,53 @@ class ZeroPreservingObjectConsequence(nn.Module):
         if tuple(factual_base.shape) != tuple(effect.semantic.shape):
             raise ValueError("factual base and typed effect must align")
         fact_gate = torch.tanh(self.fact(factual_base))
-        interaction = ObjectTypedEffect(
+        primary_interaction = ObjectTypedEffect(
             semantic=self.semantic_interaction(fact_gate * effect.semantic),
             geometry=self.geometry_interaction(fact_gate * effect.geometry),
         )
+        primary_interaction.validate()
+        mode = self._eval_intervention
+        if mode == "none":
+            # Preserve the primary path without an identity multiply, clone or
+            # reconstruction.  This is what makes explicit-none bit-exact.
+            consumed_effect = effect
+            interaction = primary_interaction
+        else:
+            if self.training:
+                raise ValueError("consequence interventions are evaluation-only")
+            if mode != "effect_neutral":
+                raise RuntimeError("consequence intervention state is invalid")
+            # The fact gate and both typed interaction networks have already
+            # executed.  Neutralization happens only where their P2-owned
+            # innovation enters the consequence state; factual P1 remains the
+            # exact original tensor and dynamic P1 precision remains outside
+            # this object under its own owner.
+            consumed_effect = ObjectTypedEffect(
+                semantic=torch.zeros_like(effect.semantic),
+                geometry=torch.zeros_like(effect.geometry),
+            )
+            interaction = ObjectTypedEffect(
+                semantic=torch.zeros_like(primary_interaction.semantic),
+                geometry=torch.zeros_like(primary_interaction.geometry),
+            )
+        consumed_effect.validate()
         interaction.validate()
         # This is the sole type-removal point.  Fusion is parameter-free and
         # happens only after both typed zero-preserving interactions complete.
-        combined_effect = effect.combined()
+        combined_effect = consumed_effect.combined()
         combined_interaction = interaction.combined()
         protected = factual_base + combined_effect + combined_interaction
         state = ObjectConsequenceState(
             factual_base=factual_base,
-            effect=effect,
+            effect=consumed_effect,
             interaction=interaction,
             protected_consequence=protected,
         )
         state.validate()
         if not collect_diagnostics:
             return state, {}
+        primary_combined_effect = effect.combined()
+        primary_combined_interaction = primary_interaction.combined()
         return state, {
             "object_consequence_effect_rms": combined_effect.detach()
             .float()
@@ -1142,6 +1191,38 @@ class ZeroPreservingObjectConsequence(nn.Module):
                 .sqrt()
                 / factual_base.detach().float().square().mean().sqrt().clamp_min(1e-6)
             ),
+            "object_consequence_intervention_active": factual_base.new_tensor(
+                float(mode != "none"), dtype=torch.float32
+            ),
+            "object_consequence_intervention_effect_delta_rms": (
+                primary_combined_effect.detach().float()
+                - combined_effect.detach().float()
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            "object_consequence_intervention_interaction_delta_rms": (
+                primary_combined_interaction.detach().float()
+                - combined_interaction.detach().float()
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            "object_consequence_intervention_first_boundary_delta_rms": (
+                (
+                    primary_combined_effect.detach().float()
+                    + primary_combined_interaction.detach().float()
+                )
+                - (combined_effect.detach().float() + combined_interaction.detach().float())
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            "object_consequence_intervention_factual_identity_max_abs": (
+                state.factual_base.detach().float() - factual_base.detach().float()
+            )
+            .abs()
+            .amax(),
         }
 
 

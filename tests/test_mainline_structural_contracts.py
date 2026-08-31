@@ -2702,6 +2702,75 @@ def test_consequence_keeps_typed_interactions_until_one_parameter_free_fusion() 
         for token in ("gain", "quota", "null", "type_gate")
     )
 
+    state_before = {
+        name: value.detach().clone() for name, value in consequence.state_dict().items()
+    }
+    try:
+        consequence.set_eval_intervention("effect_neutral")
+    except ValueError as error:
+        assert "evaluation-only" in str(error)
+    else:
+        raise AssertionError("training must reject a consequence intervention")
+
+    consequence.eval()
+    calls = {"semantic": 0, "geometry": 0}
+    semantic_hook = consequence.semantic_interaction.register_forward_hook(
+        lambda _module, _args, _output: calls.__setitem__(
+            "semantic", calls["semantic"] + 1
+        )
+    )
+    geometry_hook = consequence.geometry_interaction.register_forward_hook(
+        lambda _module, _args, _output: calls.__setitem__(
+            "geometry", calls["geometry"] + 1
+        )
+    )
+    consequence.set_eval_intervention("effect_neutral")
+    try:
+        intervened, intervention_metrics = consequence(
+            factual_base=factual,
+            effect=typed,
+            collect_diagnostics=True,
+        )
+    finally:
+        consequence.clear_eval_intervention()
+        semantic_hook.remove()
+        geometry_hook.remove()
+    assert calls == {"semantic": 1, "geometry": 1}
+    assert intervened.factual_base is factual
+    assert torch.count_nonzero(intervened.effect.semantic) == 0
+    assert torch.count_nonzero(intervened.effect.geometry) == 0
+    assert torch.count_nonzero(intervened.interaction.semantic) == 0
+    assert torch.count_nonzero(intervened.interaction.geometry) == 0
+    assert torch.equal(intervened.protected_consequence, factual)
+    assert intervention_metrics["object_consequence_intervention_active"] == 1
+    assert (
+        intervention_metrics[
+            "object_consequence_intervention_first_boundary_delta_rms"
+        ]
+        > 0
+    )
+    assert (
+        intervention_metrics[
+            "object_consequence_intervention_factual_identity_max_abs"
+        ]
+        == 0
+    )
+    assert tuple(consequence.state_dict()) == tuple(state_before)
+    for name, value in consequence.state_dict().items():
+        assert torch.equal(value, state_before[name])
+
+    restored, restored_metrics = consequence(
+        factual_base=factual,
+        effect=typed,
+        collect_diagnostics=True,
+    )
+    assert torch.equal(restored.effect.semantic, state.effect.semantic)
+    assert torch.equal(restored.effect.geometry, state.effect.geometry)
+    assert torch.equal(restored.interaction.semantic, state.interaction.semantic)
+    assert torch.equal(restored.interaction.geometry, state.interaction.geometry)
+    assert torch.equal(restored.protected_consequence, state.protected_consequence)
+    assert restored_metrics["object_consequence_intervention_active"] == 0
+
 
 def test_stateless_intent_is_repeatable_without_frame_progress_input() -> None:
 

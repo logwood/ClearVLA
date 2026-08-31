@@ -273,12 +273,12 @@ def test_validation_replay_allows_only_source_identity_drift(tmp_path: Path) -> 
         commit="1" * 40,
     )
     rows = list(saved_identity.source.files)
-    allowed_path = "clearvla/mainline/runtime/checkpoints.py"
+    allowed_path = "clearvla/mainline/model/transition.py"
     assert allowed_path in VALIDATION_REPLAY_SOURCE_PATHS
     allowed_index = next(index for index, row in enumerate(rows) if row[0] == allowed_path)
     rows[allowed_index] = (
         allowed_path,
-        hashlib.sha256(b"observation-only-edit").hexdigest(),
+        hashlib.sha256(b"transition-eval-only-edit").hexdigest(),
     )
     source_rows = tuple(rows)
     source_digest = hashlib.sha256(
@@ -319,6 +319,29 @@ def test_validation_replay_allows_only_source_identity_drift(tmp_path: Path) -> 
         global_step=0,
         best_metric=0.2,
     )
+    exact_target = torch.nn.Linear(3, 2)
+    exact_optimizer = torch.optim.AdamW(exact_target.parameters(), lr=1e-3)
+    exact_schedule = WarmupCosineSchedule(
+        exact_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    try:
+        load_checkpoint_exact(
+            path,
+            model=exact_target,
+            optimizer=exact_optimizer,
+            schedule=exact_schedule,
+            config=config,
+            identity=validation_identity,
+        )
+    except ValueError as error:
+        assert "exact resume rejected" in str(error)
+        assert "source identity differs" in str(error)
+    else:
+        raise AssertionError("exact resume must reject transition source drift")
+
     expected = {name: value.detach().clone() for name, value in source.state_dict().items()}
     target = torch.nn.Linear(3, 2)
     with torch.no_grad():
@@ -392,7 +415,7 @@ def test_validation_replay_allows_only_source_identity_drift(tmp_path: Path) -> 
             identity=unexpected_identity,
         )
     except ValueError as error:
-        assert "escapes the observation-only boundary" in str(error)
+        assert "escapes the validation-only allow-list" in str(error)
         assert unexpected_path in str(error)
     else:
         raise AssertionError("validation replay must reject source drift outside its allow-list")

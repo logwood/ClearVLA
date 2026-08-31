@@ -21,14 +21,19 @@ from .checkpoint import (
 )
 from .config import ExperimentConfig, load_config
 from .data.loading import MainlineDataBundle, load_mainline_data, to_training_batch
-from .model.policy import ClearVLAMainlinePolicy
+from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
+from .model.types import PhysicalActionCondition
 from .runtime.checkpoints import (
     load_checkpoint_exact,
     load_checkpoint_for_validation,
     migrate_bottom_only,
     save_checkpoint,
 )
-from .runtime.evaluation import MatchedP2InterventionAccumulator, ValidationAccumulator
+from .runtime.evaluation import (
+    MatchedCoreAttributionAccumulator,
+    MatchedP2InterventionAccumulator,
+    ValidationAccumulator,
+)
 from .runtime.identity import (
     dataset_identity,
     language_identity,
@@ -493,6 +498,212 @@ def _diagnostic_batch_indices(*, planned_batches: int, budget: int) -> set[int]:
     }
 
 
+CORE_ATTRIBUTION_MODES = (
+    "explicit_none",
+    "world_dynamic_neutral",
+    "consequence_effect_neutral",
+    "controlled_transition_delta_neutral",
+    "world_and_controlled_transition_neutral",
+    "wrong_action_world",
+)
+
+
+def _maximum_identity_error(*pairs: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    errors = [
+        (left.detach().float() - right.detach().float()).abs().amax()
+        for left, right in pairs
+    ]
+    if not errors:
+        raise ValueError("identity accounting requires at least one tensor pair")
+    return torch.stack(errors).amax()
+
+
+def _world_dynamic_neutral_cache(
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+) -> tuple[OnlinePolicyCache, dict[str, torch.Tensor]]:
+    """Neutralize only W-predicted dynamics while retaining current facts."""
+
+    cache.validate(config)
+    world = cache.top.candidate_world
+    dynamics = world.dynamics
+    neutral_dynamics = replace(
+        dynamics,
+        successor_content=dynamics.current_reference[:, None].expand_as(
+            dynamics.successor_content
+        ),
+        semantic_delta=torch.zeros_like(dynamics.semantic_delta),
+        transport_mean=torch.zeros_like(dynamics.transport_mean),
+        transport_covariance=torch.zeros_like(dynamics.transport_covariance),
+    )
+    neutral_world = replace(world, dynamics=neutral_dynamics)
+    neutral_cache = replace(
+        cache,
+        top=replace(cache.top, candidate_world=neutral_world),
+    )
+    neutral_cache.validate(config)
+    metrics = {
+        "first_boundary_successor_delta_rms": (
+            dynamics.successor_content.detach().float()
+            - neutral_dynamics.successor_content.detach().float()
+        )
+        .square()
+        .mean()
+        .sqrt(),
+        "first_boundary_semantic_delta_rms": dynamics.semantic_delta.detach()
+        .float()
+        .square()
+        .mean()
+        .sqrt(),
+        "first_boundary_transport_delta_rms": dynamics.transport_mean.detach()
+        .float()
+        .square()
+        .mean()
+        .sqrt(),
+        "first_boundary_covariance_delta_rms": dynamics.transport_covariance.detach()
+        .float()
+        .square()
+        .mean()
+        .sqrt(),
+        "retained_current_reference_identity_max_abs": _maximum_identity_error(
+            (neutral_dynamics.current_reference, dynamics.current_reference),
+        ),
+        "retained_support_identity_max_abs": _maximum_identity_error(
+            (neutral_dynamics.chart_availability, dynamics.chart_availability),
+            (
+                neutral_dynamics.log_chart_availability,
+                dynamics.log_chart_availability,
+            ),
+            (
+                neutral_dynamics.camera_chart_availability,
+                dynamics.camera_chart_availability,
+            ),
+            (
+                neutral_dynamics.log_camera_chart_availability,
+                dynamics.log_camera_chart_availability,
+            ),
+        ),
+        "retained_camera_identity_max_abs": _maximum_identity_error(
+            (neutral_dynamics.camera_coordinates, dynamics.camera_coordinates),
+        ),
+        "retained_action_condition_identity_max_abs": _maximum_identity_error(
+            (
+                neutral_world.action_condition.fingerprint,
+                world.action_condition.fingerprint,
+            ),
+        ),
+    }
+    return neutral_cache, metrics
+
+
+def _wrong_action_world_cache(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    dtype: torch.dtype,
+) -> tuple[OnlinePolicyCache, dict[str, torch.Tensor]]:
+    """Rebuild W for a deterministic in-batch donor action only."""
+
+    cache.validate(config)
+    primary_world = cache.top.candidate_world
+    primary_condition = primary_world.action_condition
+    batch = primary_condition.batch
+    shift = batch // 2 if batch >= 2 else 0
+    donor_interval_action = primary_condition.interval_action.roll(
+        shifts=shift,
+        dims=0,
+    )
+    donor_delta = (
+        donor_interval_action.detach().float()
+        - primary_condition.interval_action.detach().float()
+    )
+    donor_valid = donor_delta.abs().amax(dim=(1, 2)) > 0.0
+    # The current action anchor belongs to the receiving sample.  Only the four
+    # proposed interval actions are donated; delta is reconstructed from that
+    # retained anchor by the canonical physical-action ABI.
+    wrong_condition = PhysicalActionCondition.from_interval_action(
+        donor_interval_action,
+        primary_condition.current_action,
+    )
+    device = cache.history.state.device
+    autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    with torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=autocast_enabled,
+    ):
+        wrong_world, _ = model.top.build_candidate_world(
+            belief=cache.top.belief,
+            action_condition=wrong_condition,
+            collect_diagnostics=False,
+        )
+    wrong_cache = replace(
+        cache,
+        top=replace(cache.top, candidate_world=wrong_world),
+    )
+    wrong_cache.validate(config)
+    primary_dynamics = primary_world.dynamics
+    wrong_dynamics = wrong_world.dynamics
+    metrics = {
+        "donor_valid_rows": donor_valid.detach().float().sum(),
+        "donor_total_rows": donor_valid.new_tensor(float(batch), dtype=torch.float32),
+        "donor_valid_fraction": donor_valid.detach().float().mean(),
+        "donor_valid_batches": donor_valid.new_tensor(
+            float(bool(donor_valid.any())), dtype=torch.float32
+        ),
+        "first_boundary_action_condition_delta_rms": (
+            wrong_condition.fingerprint.detach().float()
+            - primary_condition.fingerprint.detach().float()
+        )
+        .square()
+        .mean()
+        .sqrt(),
+        "first_boundary_semantic_delta_rms": (
+            wrong_dynamics.semantic_delta.detach().float()
+            - primary_dynamics.semantic_delta.detach().float()
+        )
+        .square()
+        .mean()
+        .sqrt(),
+        "first_boundary_transport_delta_rms": (
+            wrong_dynamics.transport_mean.detach().float()
+            - primary_dynamics.transport_mean.detach().float()
+        )
+        .square()
+        .mean()
+        .sqrt(),
+        "retained_current_action_identity_max_abs": _maximum_identity_error(
+            (wrong_condition.current_action, primary_condition.current_action),
+        ),
+        "retained_current_reference_identity_max_abs": _maximum_identity_error(
+            (wrong_dynamics.current_reference, primary_dynamics.current_reference),
+        ),
+        "retained_support_identity_max_abs": _maximum_identity_error(
+            (wrong_dynamics.chart_availability, primary_dynamics.chart_availability),
+            (
+                wrong_dynamics.log_chart_availability,
+                primary_dynamics.log_chart_availability,
+            ),
+            (
+                wrong_dynamics.camera_chart_availability,
+                primary_dynamics.camera_chart_availability,
+            ),
+            (
+                wrong_dynamics.log_camera_chart_availability,
+                primary_dynamics.log_camera_chart_availability,
+            ),
+        ),
+        "retained_camera_identity_max_abs": _maximum_identity_error(
+            (wrong_dynamics.camera_coordinates, primary_dynamics.camera_coordinates),
+        ),
+    }
+    return wrong_cache, metrics
+
+
 @torch.no_grad()
 def _validate(
     *,
@@ -516,12 +727,19 @@ def _validate(
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
     )
+    core_attribution = MatchedCoreAttributionAccumulator.from_action_normalizer(
+        bundle.action_normalizer,
+        device=device,
+        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        arm_motion_threshold=config.objectives.arm_motion_threshold,
+    )
     proposal_ablations = DeviceMetricAccumulator()
     execution_ablations = DeviceMetricAccumulator()
     maximum = config.runtime.max_val_batches
     completed_batches = 0
     sampling_diagnostic_batches = 0
     p2_intervention_batches = 0
+    core_attribution_batches = 0
     proposal_ablation_batches = 0
     execution_ablation_batches = 0
     action_scale = torch.as_tensor(
@@ -666,6 +884,143 @@ def _validate(
                     batch=batch,
                 )
                 del counterfactual
+            core_attribution_batches += 1
+            core_attribution.update_primary(prediction.action, batch)
+            neutral_world_cache, neutral_world_boundary = (
+                _world_dynamic_neutral_cache(refined_cache, config)
+            )
+            wrong_world_cache, wrong_world_boundary = _wrong_action_world_cache(
+                engine.model,
+                refined_cache,
+                config,
+                dtype=dtype,
+            )
+            consequence_module = engine.model.top.consequence
+            transition_module = engine.model.transition
+            identity_actions: dict[str, torch.Tensor] = {}
+            for mode in CORE_ATTRIBUTION_MODES:
+                counterfactual_cache = refined_cache
+                boundary_metrics: dict[str, torch.Tensor] = {}
+                use_consequence_neutral = mode == "consequence_effect_neutral"
+                use_transition_neutral = mode in {
+                    "controlled_transition_delta_neutral",
+                    "world_and_controlled_transition_neutral",
+                }
+                if mode in {
+                    "world_dynamic_neutral",
+                    "world_and_controlled_transition_neutral",
+                }:
+                    counterfactual_cache = neutral_world_cache
+                    boundary_metrics.update(
+                        {
+                            f"world_{name}": value
+                            for name, value in neutral_world_boundary.items()
+                        }
+                    )
+                elif mode == "wrong_action_world":
+                    counterfactual_cache = wrong_world_cache
+                    boundary_metrics.update(wrong_world_boundary)
+                elif mode == "explicit_none":
+                    boundary_metrics["intervention_active"] = prediction.action.new_zeros(
+                        (), dtype=torch.float32
+                    )
+                try:
+                    if use_consequence_neutral:
+                        consequence_module.set_eval_intervention("effect_neutral")
+                    if use_transition_neutral:
+                        transition_module.set_eval_intervention("delta_neutral")
+                    counterfactual = sample_cached_action(
+                        engine.model,
+                        counterfactual_cache,
+                        config,
+                        initial_physical_noise=prediction.initial_physical_noise,
+                        # Boundary diagnostics execute only on the final real
+                        # ODE update and prove that each named intervention
+                        # changed its intended first consumer.
+                        collect_diagnostics=True,
+                        dtype=dtype,
+                    )
+                finally:
+                    # Clear both modules even when setting the second mode or
+                    # sampling raises; no intervention may leak into the next
+                    # mode, validation batch or ordinary deployment call.
+                    consequence_module.clear_eval_intervention()
+                    transition_module.clear_eval_intervention()
+                if use_consequence_neutral:
+                    boundary_metrics.update(
+                        {
+                            "first_boundary_delta_rms": counterfactual.metrics[
+                                "object_consequence_intervention_first_boundary_delta_rms"
+                            ],
+                            "effect_delta_rms": counterfactual.metrics[
+                                "object_consequence_intervention_effect_delta_rms"
+                            ],
+                            "interaction_delta_rms": counterfactual.metrics[
+                                "object_consequence_intervention_interaction_delta_rms"
+                            ],
+                            "retained_factual_identity_max_abs": counterfactual.metrics[
+                                "object_consequence_intervention_factual_identity_max_abs"
+                            ],
+                            "intervention_active": counterfactual.metrics[
+                                "object_consequence_intervention_active"
+                            ],
+                        }
+                    )
+                if use_transition_neutral:
+                    boundary_metrics.update(
+                        {
+                            "controlled_transition_first_boundary_delta_rms": (
+                                counterfactual.metrics[
+                                    "controlled_transition_intervention_first_boundary_delta_rms"
+                                ]
+                            ),
+                            "controlled_transition_action_neutral_identity_max_abs": (
+                                counterfactual.metrics[
+                                    "controlled_transition_intervention_action_neutral_identity_max_abs"
+                                ]
+                            ),
+                            "controlled_transition_selector_identity_max_abs": (
+                                counterfactual.metrics[
+                                    "controlled_transition_intervention_selector_identity_max_abs"
+                                ]
+                            ),
+                            "controlled_transition_network_executed": (
+                                counterfactual.metrics[
+                                    "controlled_transition_intervention_network_executed"
+                                ]
+                            ),
+                            "controlled_transition_intervention_active": (
+                                counterfactual.metrics[
+                                    "controlled_transition_intervention_active"
+                                ]
+                            ),
+                        }
+                    )
+                core_attribution.update(
+                    mode,
+                    primary_action=prediction.action,
+                    counterfactual_action=counterfactual.action,
+                    batch=batch,
+                    boundary_metrics=boundary_metrics,
+                )
+                if mode in {
+                    "explicit_none",
+                    "world_dynamic_neutral",
+                    "consequence_effect_neutral",
+                }:
+                    identity_actions[mode] = counterfactual.action
+                del counterfactual
+            core_attribution.update_identity(
+                "primary_vs_explicit_none",
+                prediction.action,
+                identity_actions["explicit_none"],
+            )
+            core_attribution.update_identity(
+                "world_vs_consequence_neutral",
+                identity_actions["world_dynamic_neutral"],
+                identity_actions["consequence_effect_neutral"],
+            )
+            del neutral_world_cache, wrong_world_cache, identity_actions
         if run_proposal_ablation or run_execution_ablation:
             common_sampling = {
                 "initial_physical_noise": prediction.initial_physical_noise,
@@ -754,6 +1109,8 @@ def _validate(
     result = {**losses.materialize(), **deployment.means()}
     if p2_intervention_batches:
         result.update(p2_interventions.means())
+    if core_attribution_batches:
+        result.update(core_attribution.means())
     result["validation_sampling_diagnostic_batches"] = float(
         sampling_diagnostic_batches
     )
@@ -765,6 +1122,10 @@ def _validate(
     )
     result["validation_p2_intervention_coverage"] = float(
         p2_intervention_batches / max(completed_batches, 1)
+    )
+    result["validation_core_attribution_batches"] = float(core_attribution_batches)
+    result["validation_core_attribution_coverage"] = float(
+        core_attribution_batches / max(completed_batches, 1)
     )
     result["validation_proposal_ablation_batches"] = float(
         proposal_ablation_batches

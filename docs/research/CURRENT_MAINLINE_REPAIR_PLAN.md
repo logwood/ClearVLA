@@ -1,257 +1,391 @@
-# ClearVLA S 对象/类型所有权受控收口计划
+# ClearVLA Schema28 行为闭环与单/多任务合流计划
 
-状态：**Schema25 源码实现与本地审查完成；CUDA smoke 和完整八轮 gate 待执行**
-更新：2026-08-20
+状态：**完整 Schema28 已审计；Stage A attribution 已实现并通过本地闭环；正式 checkpoint replay 待跑；Schema29 核心语义单元尚未放行**
+更新：2026-08-31
 
-本计划只处理 [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md) 中与 S 输入、输出和必要消费边界直接相关的故障。源码已切换到 Schema25；“实现完成”只表示结构与本地数值 gate 已通过，不代表 fresh 实验已经证明动作收益。
+本计划落实
+[`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md) 中的完整八轮结论，
+并规定单任务核心线与 `/data/rdt-ft-data/` 多任务接口线的合流顺序。目标不是
+再跑一个低信息量试验，而是在同一个最终核心提交上让单任务回答网络闭环、
+多任务回答外层接口与跨任务稳定性。
 
-## 实施结果
+## 一、证据层级与当前决定
 
-- `StatelessIntentBundle` 及四个 consumer docks 已接入；public carrier 与 `[interval,K,type]` typed relevance 分离。
-- 三种类型各自使用固定零 null；未增加 entropy、mass、diversity 或 progress loss。
-- CoarseAction 与 W 的 raw typed reread/shared learned-null router 已删除；W1/W2 block、预测头、P1/P2/P3、transition 和 bottom 内部未重写。
-- manifest 已升至 Schema25，旧 Schema24 checkpoint 不能 exact resume。
-- 当前参数为 `169,981,895 total / 153,587,574 trainable`；相对 Schema24 的 `-12,731,133` 全部来自已列明的重复 readers/routers，bottom 和 exact P1 参数量不变。
-- 122 个 mainline 测试通过，包括 CPU BF16 forward/backward、optimizer ownership、K permutation、typed-owner relabeling、per-type 扰动局部性、fixed-zero value、public-target 梯度隔离、部署与 checkpoint 边界；连同日志审计测试共 153 项通过。
-- 本机 GPU 可见，但当前 uv 环境为 CPU-only PyTorch，无法执行 CUDA gate；服务器 CUDA smoke、batch-8 显存/吞吐测量和完整八轮行为 gate 仍待执行。在这些结果返回前，不宣称 S 修复提高了 RMSE、gripper 或中远程动作。
+### 已确认实现事实
 
-## 一、完整八轮对原计划的修正
+1. 训练只消费 `W(coarse)` 并调用一次 `velocity`；部署最终策略消费
+   `W(proposal)` 并完成第二遍 ODE。
+2. W 已经通过 P2 consequence 到达 ControlledTransition 和 Bottom。
+3. CT 不是 world producer，也不是零梯度死路。
+4. semantic 已承担强远端动作责任；geometry 的 learned-scale 动作责任弱。
+5. Schema28 的 outer refinement 有非零 action/W change，但 final mismatch 与
+   correction 同量级。
 
-完整日志给出了三个必须写入实施边界的结论：
+### 已确认行为事实
 
-1. **S 的结构故障确定存在。** 当前 S 在形成 typed innovation 前丢掉 K 对象轴，并让 semantic、appearance、geometry 与同一个 null 竞争；CoarseAction 与 W 随后又各自重读 typed facts，所以 S relevance 不是唯一意图来源。
-2. **S 不是已被证明的 epoch 7/8 回归根因。** 当前 physical RMSE 在 epoch 6–8 为 `0.08008 / 0.08193 / 0.08218`；回归集中于 gripper 和 5–24 步。同期 S typed innovation 从 `0.00350` 回到 `0.01004 / 0.00860`，W interval 指标也没有突变。V120 自身也在最后一轮回升约 `2.65%`。
-3. **不能通过继续放大 W/P2 来补 S。** epoch 6→8 的 P2 null mass 从 `0.1270` 降至约 `0.0946`，consequence effect RMS 增长约 `10%`，但动作验证反而回退。这只构成验收护栏，不构成重写 P2/P3 的授权。
+- final full/arm/gripper physical RMSE 为
+  `0.07657 / 0.05677 / 0.14733`；
+- final horizon bands 为 `0.02502 / 0.05513 / 0.09743`；
+- decoded gripper event recall `0.2749`、ratio `0.4576`；
+- W2 semantic/Teacher 约 `0.69x`，transport/Teacher 约 `0.44x`；
+- 12 次 finite spike 主要仍由 observation owner 产生。
 
-因此本轮目标是消除确定的所有权与旁路故障，同时严格保持现有动作能力。只有 fresh 八轮同时显示 gripper 与中远程验证改善，才可以声称本轮缓解了晚期回归。
+### 因果上仍未知
 
-## 二、锁定范围
+- train/runtime action-condition 错位是否是远端与 gripper 的主要原因；
+- W consequence 与 CT 是互补还是重复；
+- geometry 弱是合理窄角色还是下游过滤；
+- 一次训练侧 detached self-conditioning 是否足以逼近部署 proposal 分布。
 
-### 允许修改
+因此当前放行的是一个**无训练的 attribution 实现单元**。训练侧
+self-conditioning 是首选结构候选，不是已经批准的 Schema29 事实。
 
-- `clearvla/mainline/model/intent.py` 中 S 的 public/typed 组织和 CoarseAction 的 typed 输入。
-- `clearvla/mainline/model/types.py` 中 S-owned typed interfaces 与 consumer docks。
-- `clearvla/mainline/model/dynamics.py` 中 W 对 S typed relevance 的最小输入接线。
-- `top.py`、训练日志、manifest、测试和当前文档中为上述接口迁移所必需的最小改动。
+## 二、工作区与合流边界
 
-### 禁止扩张
-
-- 不修改 G1/G2/G3 内部、Teacher、P1/P2/P3、transition、CVAE、workspace、Evidence MMDiT、execution 或 bottom。
-- 已确认的 G3 anchor→transition 问题继续单独挂账，本轮不同时修复。
-- 不改变 action/future loss 外部权重，不新增 block、辅助 loss、gain、quota、entropy target、hard gate 或人工梯度。
-- 不以降低 P1 精度、高分辨率带宽或 bottom 容量来迫使 S 显得重要。
-
-## 三、目标语义
-
-S 仍是无状态意图组织器，不是阶段分类器。它回答两个不同问题：
-
-- `public_interval_carrier`：在目标、可观测历史和当前公共事实下，四个时间区间的公共意图是什么；
-- `typed_relevance`：在每个区间内，哪个对象的 semantic/appearance/geometry 事实与意图相关。
-
-公共信息和 typed relevance 不再提前相加成一个信息汤。S 不承载完整 DINO/raw 内容；完整事实仍由 `ObjectFactSet`、P1 和 W 的既有字段持有，S 只组织可观察的相关性。
-
-```mermaid
-flowchart LR
-    T5["T5 goal tokens"] --> PUB["S public interval carrier"]
-    HIST["state + executed-action history"] --> PUB
-    OBJ["ObjectFactSet public content"] --> PUB
-
-    PUB --> Q["per-interval, per-type relevance queries"]
-    OBJ --> K["K-object typed route fields"]
-    Q --> REL["typed relevance: interval x K x type"]
-    K --> REL
-
-    PUB --> AD["ActionIntentDock"]
-    REL --> AD
-    AD --> CA["CoarseActionIntent"]
-
-    PUB --> WD["WorldIntentDock"]
-    REL --> WD
-    OBJ --> W["existing W1/W2"]
-    WD --> W
-    CA --> W
-
-    W --> P2["existing P2/P3/bottom"]
-```
-
-## 四、锁定接口
-
-新 S 边界使用单一 `StatelessIntentBundle`：
+只使用以下两条正确 lineage：
 
 ```text
-protected_goal_memory       [B,G,H]
-public_interval_carrier     [B,4,H]
-temporal_control            [B,24,H]
-observable_state_change     [B,H]
-typed_relevance_mass        [B,4,K,3,1]
-typed_relevance_value       [B,4,K,3,R]
+codex/schema25-r1-replay
+  HEAD 76caa48
+  owns: Schema28 core, evidence ledger, next core unit
 
-K = 4
-type = semantic / appearance / geometry
-R = 32（现有 ObjectFactSet route width）
+codex/rdt-multitask-prep
+  base 76caa48 + eight RDT external-adaptation commits
+  owns: hierarchical data/language/camera/action adapter and multitask entry
 ```
 
-`typed_relevance_value` 只能是现有 typed route value 经对应 relevance mass 的零保持调制，不得扩展成 512-wide 隐藏内容载体。这样 S 保留对象与类型身份，但不会复制完整视觉事实。
+仓库根目录的旧 Schema39 branch 不属于本流程，不作为 donor、merge base 或
+当前架构解释来源。
 
-S 只向下游公开四个视图：
+RDT 线已经完成算法外部的 bounded real-server loader acceptance；其权威设计为
+[`auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md)。
+它当前只证明外部数据 ABI，不证明三相机模型 consumer、双臂 codec/loss 或正式
+训练已适配。
 
-| View | 消费者 | 内容 |
+合流规则：
+
+1. core attribution 与被放行的 core unit 先在 replay 线成为独立语义提交；
+2. 将这些提交合入 `rdt-multitask-prep`，不反向把数据域改动混入单任务基线；
+3. 在合流提交上同时保留 Pen 单任务入口和 RDT 多任务入口；
+4. 两个正式实验必须打印相同 core source/component digest；只能 dataset、adapter、
+   task mix 和相应 action/camera profile 不同。
+
+## 三、阶段 A：运行已实现的 validation-only matched attribution
+
+这一步不训练、不写 checkpoint、不改变 primary deployment，也不增加 train-step
+开销。它复用 Schema28 final checkpoint、同一批 validation 样本、同一 initial
+physical noise 和同一 ODE 调度。
+
+### A1. 先完成第一边界定义
+
+每个 intervention 在写代码前必须列明：
+
+```text
+producer -> exact intervened tensor -> first consumer
+retained axes / dtype / scale / zero semantics
+expected first-boundary delta
+action/horizon/gripper readout
+```
+
+特别禁止把 execution controller 的 `neutral` 当作 CT neutral，也禁止把
+`protected_consequence` 整体清零后声称只移除了 W effect，因为其中包含 factual
+base。
+
+### A1.1 已完成的 active-source 正向数据流映射
+
+```text
+ObjectWorldBelief + PhysicalActionCondition[B,4,14]
+  -> W physical projection + W1/W2
+  -> CandidateWorld(
+       same action-condition object,
+       semantic [B,4,K,D],
+       transport/covariance [B,4,K,C,2|3],
+       FP32 current object/camera support)
+  -> P2 spatial selection
+       semantic: K within each physical interval
+       geometry: K*C within each physical interval
+  -> P2 no-null interval terminal, independently per type
+  -> semantic/geometry latent sum
+  -> one caller-owned 0.35 RMS contract
+  -> consequence fact-gated typed interactions
+  -> protected_consequence = factual_base + effect + interaction
+       |-> P3 temporal condition and protected base
+       |-> CT context plus terminal-normalized action tokens
+       `-> Bottom protected no-null basis reader
+
+completed G3 rollout [B,512,H]
+  -> CT protected selector, built once per observation
+  -> per-ODE real and learned-neutral coefficient evaluations
+  -> CT value = gain * (real-neutral) x learned basis [B,512,H]
+       |-> Bottom transition evidence memory
+       |-> 4-anchor event-context pooling
+       `-> output evidence-token audit
+```
+
+W values and P2/consequence/CT/Bottom activations follow the runtime autocast
+dtype; support/log-support, covariance, coordinate scoring, normalization
+denominators and matched-error accounting remain FP32 at their named boundaries.
+W has one `.35` physical-action carrier contract; P2 has one `.35` aggregate
+effect contract. Protected consequence has no extra gain. Bottom reads protected
+consequence outside optional routing; dynamic P1 precision joins the optional
+P3 sum only under the inherited fixed `0.25` ingress scale. CT trajectory uses
+the existing variance-floored affine normalization and its learned `delta_gain`;
+the attribution must not alter either scale.
+
+Normal deployment builds initial W once, runs five updates plus an endpoint,
+rebuilds W once, and runs the same six dynamic calls again from identical noise.
+Every Stage-A counterfactual starts from the already refined cache and repeats
+only that second six-call pass. It never rebuilds G/S/static-P1/CT source or
+Teacher and never changes the primary two-pass result.
+
+### A1.2 已完成的反向、owner 与 checkpoint 映射
+
+训练中的 W 有两条梯度来源：`future_dynamics/future_transition` 直接监督
+`W(coarse)`，action/execution loss 则沿
+`Bottom -> CT/P3/consequence -> P2 -> W` 回传。Consequence 还通过 Bottom 的
+protected reader、P3 temporal 和 CT 三个下游获得 action 梯度；CT value 同时经
+Evidence adapter、event context 和 action decoder 获得梯度。不存在 CandidateWorld
+绕过 P2 的 consumer，也不存在 W hidden 或 W value 直接写入 CT。CT 的 G3 selector
+独立到达 Bottom 是保留的事实路径，不能在 `controlled_transition_delta_neutral`
+中一并清零。
+
+参数 owner 分别是 `dynamics`、`p2_effect_reader`、`consequence`、
+`p3_compiler`、`controlled_transition`、`bottom_evidence_adapter`、
+`bottom_policy_bridge` 和后续 decoder owners；每个参数只属于一个 AdamW group。
+Stage A 只增加非持久 evaluation 状态和标量累计，不增加参数、buffer、optimizer
+group、state key、RNG draw、loss 或 backward。Schema28 checkpoint 继续由
+validation-only loader 读取；仅明确列入 validation replay allow-list 且由
+primary-vs-explicit-none 测试证明无主路径差异的源码文件可以发生 source drift。
+训练 exact resume 仍必须拒绝该 source drift。
+
+### A1.3 源码审查后仍待实测的假设
+
+1. 相同 refined cache、initial noise、dtype 和 eval 状态下，`explicit_none` 必须与
+   primary bit-exact；否则所有 matched 结果作废。
+2. `world_dynamic_neutral` 与 `consequence_effect_neutral` 干预点不同，但根据当前
+   sole-consumer 图应产生完全相同的下游动作。保留两者一次用于检验未映射旁路；
+   若恒等成立，后续日志/实验可删除其中一个重复模式。
+3. `controlled_transition_delta_neutral` 必须令 value 精确为零、real coefficients
+   精确等于 learned-neutral，同时保持 G3 selector、context 和 action-token计算不变。
+4. `wrong_action_world` 只轮换 batch 内 interval action，保留当前样本 action-state
+   anchor、belief、support 与 camera geometry。batch 小于 2 或 donor action delta
+   为零的行不能提供 identifiability 证据，必须显式记为无效而不能伪造覆盖。
+5. 默认 16 个分散 batch 是否含足够 episode、gripper event 与非零 donor delta
+   仍需由结果中的有效 batch/row 计数决定；只有这些计数会改变决策时才增加预算。
+
+前四项已经由当前源码回归和一批完整 CPU FP32 validation smoke 在 fresh 小模型上
+通过：`explicit_none` 与 primary、`world_dynamic_neutral` 与
+`consequence_effect_neutral` 均 bit-exact；CT 网络仍执行，value 为 exact zero，
+action coefficients 等于 learned-neutral，G3 selector 不变；wrong-world 只替换
+interval action 并保留接收样本 anchor/belief/support/camera。正式 Schema28
+checkpoint、BF16/CUDA 数值和第 5 项覆盖仍未实测，因此这些本地恒等不能被解释为
+行为 attribution 结论。
+
+### A2. 最小配对集合
+
+在同一固定 subset 上实现以下语义模式：
+
+1. `primary`：普通 Schema28 refined deployment；
+2. `world_dynamic_neutral`：保留 current belief、support、action tag 与 factual
+   base，只将 CandidateWorld 的预测 dynamic effect 置为其代数 neutral；
+3. `consequence_effect_neutral`：保留 factual base 和 dynamic P1 precision，只移除
+   P2 typed effect/interaction 对 consequence 的增量；
+4. `controlled_transition_delta_neutral`：保留 G3 source、context、action tokens 与
+   learned-neutral定义，只移除 real-minus-neutral transition delta；
+5. `world_dynamic_neutral + controlled_transition_delta_neutral`：用于判断两者的
+   加性/交互责任；
+6. `wrong_action_world`：从同 batch 的确定性 donor action 重建 W，保留当前样本
+   的其他路径，验证 W 对正确动作条件的特异性。
+
+如果源码审查证明其中两个模式在第一边界上同义，则删除重复模式，不用别名
+增加表面覆盖。默认仍使用现有 16 个 diagnostic batches；只有 episode/event
+覆盖不足以改变决定时才扩大，不扩到全验证集。
+
+### A3. 必须记录的最小结果
+
+- 第一边界 intended delta 和所有非目标边界 identity error；
+- full/arm/gripper、three horizon bands、decoded event ratio/P/R/F1 及该 subset 的
+  predicted/target event counts；
+- proposal/refined delta、final interval/delta mismatch；
+- W semantic/transport change、consequence effect、CT value/action delta；
+- paired MSE gain 与 paired action delta，不增加 tensor dump。
+
+若第一边界没有改变、coverage 不完整或 primary-vs-explicit-none 不一致，干预
+结果无效，不能进入结构决策。
+
+当前实现的 mainline/runtime/checkpoint/auditor 相关选择通过 `223/223`；另一个
+真实执行全部六种 core modes、既有四种 P2 modes、proposal/execution ablations 的
+一批 fresh CPU FP32 validation smoke 通过。生产 Schema28 checkpoint 尚未在此源码
+上运行，Stage B 决策表因此仍未触发。
+
+## 四、阶段 B：用 attribution 选择唯一核心语义单元
+
+### 决策表
+
+| 结果 | 下一步 |
+|---|---|
+| W/wrong-world 明显改变远端动作，CT 也有独立增量 | 保留两者职责，优先修训练侧 action-conditioned W 分布 |
+| W effect 有表示变化但 action delta 近零 | 先审 P2/consequence/Bottom 过滤，不增加 W->CT bridge |
+| CT neutral 近零而 W effect 有强责任 | 完整审 CT consumer 后才考虑收缩重复职责，不直接删除 |
+| W 与 CT 单独都弱、组合明显 | 审查交互/尺度竞争，不靠增益制造单路依赖 |
+| wrong-world 与 correct-world 无可辨动作差异 | self-conditioning 不放行，先关闭 W identifiability |
+| geometry neutral 仍近零而 semantic 强 | 保持 geometry 窄角色，不放大；后续用多相机任务再判断 |
+
+任何分支都不允许重新采用 W->CT bridge、CT world generator、geometry gain、
+transport quota 或 hard gripper event gate。
+
+## 五、阶段 C：首选候选——训练侧 detached action self-conditioning
+
+仅当阶段 A 证明 W 对正确 action/world 有动作责任时，实施本节。它修调用顺序，
+不增加第二套网络、不增加外部 loss weight，也不声称完全复现五步 proposal ODE。
+
+### C1. 候选前向
+
+```text
+encode observation/G/S/static-P1 once
+  -> cache0 owns W(coarse)
+
+same sampled t and same noisy physical field
+  -> velocity pass0 under no-grad
+  -> clean_physical0 = noisy + (1 - t) * velocity0
+  -> codec.decode(clean_physical0.detach(), action_state)
+  -> existing PhysicalActionCondition.from_horizon_action
+  -> rebuild only W -> cache1
+
+same t and same noisy physical field
+  -> velocity pass1(cache1)
+  -> existing action/event/motion/execution losses
+  -> existing W future loss reads cache1.predicted_dynamics
+```
+
+第一遍只产生 detached condition；参数更新来自第二遍以及既有 static top losses。
+两遍共享同一个模型参数。不得给 pass0 新增 auxiliary action loss，也不得把两遍
+loss 简单相加从而翻倍 action budget。
+
+### C2. 明确的近似边界
+
+训练 pass0 是随机 flow-time 上的 clean endpoint estimate；deployment proposal 是
+完整五步 ODE。二者不是 bit-exact 分布匹配。接受这一候选前必须离线比较：
+
+- train estimator 与同 checkpoint 完整 proposal 的 action-condition RMS/方向；
+- 二者重建 W 后 semantic/transport 差异；
+- 额外 dynamic call 的 CUDA memory/throughput。
+
+若 estimator 与完整 proposal 的差异大到改变 matched W 责任，停止本候选；不把
+第三遍 ODE 塞进训练来强行追平。
+
+### C3. 梯度与生命周期合同
+
+- pass0、decode、`PhysicalActionCondition` 对 pass1 条件的路径必须 detached；
+- pass1 action gradient正常到 P2/consequence/CT/Bottom 和 W 参数，但不反传到
+  pass0 的 sampled action；
+- observation/G/S/static-P1/Teacher 仍各构建一次；只重建 W 和完整 dynamic path；
+- 使用同一个 `FlowMatchingState`，不新增 RNG draw；
+- optimizer 参数集合不变；如无新参数，state-key 与 parameter inventory 不变；
+- training/runtime ABI 与 manifest 必须升级，Schema28 checkpoint 不得 exact
+  optimizer resume；只允许明确审计过的初始化/迁移策略；
+- first-boundary、consumer-backward、checkpoint 和 deployment call-count 必须在
+  修改后各自反向复核一次。
+
+### C4. 节制诊断面
+
+训练 JSONL 只新增或重用以下 decision-facing 标量：
+
+- pass0 endpoint action RMS、pass0->pass1 clean-action delta；
+- coarse->pass0 PhysicalActionCondition delta；
+- W rebuild semantic/transport delta；
+- pass1 clean action 与其 W condition 的 interval/delta mismatch；
+- pass0 detached audit action loss（只观测）与正式 pass1 action loss的差；
+- W physical-condition VJP、P2 semantic/geometry effect VJP、CT owner gradient。
+
+不增加每 batch tensor、完整 probe dump、重复别名或 console 长矩阵。现有 100-batch
+JSONL cadence 保持；console 只显示 stop/continue 所需摘要。
+
+## 六、阶段 D：多任务接口合流，不分叉网络行为
+
+多任务线先保持现有算法外部适配，随后只补正式 experiment outlet：
+
+1. 任务 registry/manifest 明确列出首轮任务集合，不靠目录名推断目标；
+2. 每个样本通过同一 canonical `TrainingBatch` 进入共享 core；
+3. 逐任务输出 full/arm-or-joint-group/gripper、horizon 和有效样本数；同时给出
+   micro 汇总，macro 只作为每任务等权摘要；
+4. camera/action profile、task id、instruction identity、normalizer 与 sampling mass
+   写入 run context；这些 metadata 不成为隐藏的模型旁路；
+5. 首轮仍使用已经验收的 right-arm/two-camera profile 验证训练出口。原生三相机
+   consumer 与 14-D bimanual codec/loss 是后续显式 ABI 单元，不能由 adapter
+   偷偷截断后宣称“多相机/双臂已支持”；
+6. Pen 单任务入口暂时保留以诊断核心；多任务入口稳定后，Pen 可作为单任务
+   registry 配置进入同一入口，再淘汰旧 loader，不淘汰核心行为测试。
+
+## 七、无正式实验的联合 smoke
+
+### 单任务 smoke
+
+- 一个真实 batch，fresh forward/backward/optimizer step；
+- pass0 detached、W rebuild、pass1 loss、finite gradient；
+- checkpoint save/load 与 exact rejection/migration contract；
+- 五步 proposal/refined deployment 和所有 matched attribution modes。
+
+### 多任务 smoke
+
+- 首轮每个任务各一个 batch，再做一个 mixed batch；
+- episode/language/camera/action profile 与 task id 对齐；
+- 每任务 loss/metric denominator 正确，缺失任务不输出伪零；
+- 同一 Pen 样本经旧单任务 adapter 与新 registry 单任务配置后，进入 core 的
+  tensor、mask、normalizer 和 language row 必须等价。
+
+smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
+
+## 八、同一核心提交的两个正式实验
+
+1. 先启动 Pen 单任务，完成 preflight 与首个健康窗口；确认不是立即 non-finite、
+   lineage、memory 或 loss-ledger 故障后即可启动多任务，不等待八轮结束。
+2. 两个运行串行占用同一 GPU；不得并发造成吞吐/显存不可比。
+3. 单任务看 core closure：far horizon、gripper、W/CT、refinement mismatch、spike。
+4. 多任务看 adapter/task competition：逐任务曲线、camera/action profile、sampling
+   share 与跨任务梯度健康。
+
+归因矩阵：
+
+| 单任务 | 多任务 | 主要判读 |
 |---|---|---|
-| `ActionIntentDock` | CoarseAction | public interval、既有 public/history memory、由 S relevance 得到的 typed action context |
-| `WorldIntentDock` | W1/W2 | protected goal、public interval、`[I,K,type]` relevance |
-| `FactualIntentDock` | P1 | 现有 goal/history/query context，数值保持不变 |
-| `PolicyIntentDock` | P2/P3 | 现有 interval key、temporal control、state-change evidence，数值保持不变 |
+| 坏 | 坏 | core unit 或共享训练引擎 |
+| 正常/改善 | 坏 | adapter、task mix、profile 或跨任务竞争 |
+| 改善 | 各任务稳定 | core 与外层接口同时通过 |
+| 改善 | 少数任务坏 | 回到该任务的数据/action/camera 语义，不回滚整个 core |
 
-内部 history/object 工作张量不再作为任意消费者可自由组合的通用 API。
+## 九、正式放行与停跑规则
 
-## 五、S 内部代数
+硬停：non-finite、lineage/identity failure、loss ledger 不闭合、目标边界 intervention
+无效、重复 severe spike、显存超界或 checkpoint ABI 违规。
 
-### 1. 公共 carrier
+不会单独触发停跑：早期 event F1 低、geometry RMS 小、transport/Teacher ratio
+未达某个固定值、capacity 接近全开。这些必须与动作责任和完整曲线一起解释。
 
-保留现有 goal、history、public object 与 interval identity 的读取和 `interval_self`。公共 future recognizer 只监督该 public carrier，不得直接向 typed relevance 回传公共 target 梯度。
+单任务验收至少要求：
 
-temporal control 继续读取 public carrier；frame progress 仍只作为 audit，不进入 forward 或 loss。
+- aggregate、arm、gripper、first/tail、三段 horizon 不以近端换远端；
+- event ratio/recall 与 post-event 三段同时看；
+- final mismatch 相对 proposal->refined correction 不再恶化；
+- correct-world 优于 wrong-world，且 W/CT matched 责任可解释；
+- spike owner/count/max 与 Schema28 完整曲线比较；
+- 完整八轮，不以 best epoch 代替 final。
 
-### 2. typed relevance
+多任务验收必须逐任务列出，不允许只给 aggregate。任何任务都要带样本/事件数、
+有效 camera/action profile 和 normalizer；macro 只回答“典型任务”，micro 只回答
+“总体样本”，二者不能互相替代。
 
-对每个 type 独立形成 interval query，并与 `ObjectFactSet` 中同类型的 K 个 route key 匹配：
+## 十、当前执行顺序
 
 ```text
-query[type]   : [B,4,R]
-key[type]     : [B,K,R]
-score         : bounded normalized similarity
-signal_logit  : score
-null_logit    : exact constant zero
-mass          : sigmoid(signal_logit - null_logit)
-value         : mass * typed_route_value
+1. 固化本问题账本与本计划
+2. 在 Schema28 checkpoint 上运行已实现的 validation-only matched attribution
+3. 根据决策表放行或拒绝 detached self-conditioning
+4. 完成被放行 core unit 的双向源码审查、实现和单任务 smoke
+5. 将 core semantic commits 合入 rdt-multitask-prep
+6. 补多任务 experiment outlet、逐任务日志和联合 smoke
+7. 同一 core commit 依次启动 Pen 单任务与 RDT 多任务正式实验
 ```
 
-边界如下：
-
-- 三种类型互补，不做跨类型 softmax；每种类型只与自己的固定零 null 比较。
-- null 没有 learned value、bias、key 或共享吸引子；合法样本仍可自主选择零 contribution。
-- K 轴和 type 轴一直保留到 consumer dock；禁止先求和再 `expand` 回来。
-- score 使用归一化相似度和有界数值，不新增可无界增长的 gain。
-- typed relevance 为零时，所有 optional typed consumer value 必须代数为零；public carrier 与当前 factual base 不受影响。
-
-## 六、必要的消费边界改动
-
-### 1. CoarseAction
-
-保留现有四区间 clean-action head、public interval、public object/history 条件与 loss。只替换 typed 路径：
-
-- 删除 CoarseAction 自己的 semantic/appearance/geometry `_CrossRead` 和跨类型 `typed_router`；
-- typed action context 由 S 的 `[I,K,type]` relevance 对现有 route values 做固定 K 归约，再经各类型 bias-free 投影相加；
-- 不按选中 mass 重新归一化，以保持“全零 relevance → 精确零 typed action context”；
-- 参数删除和新增必须单独列出，不得把参数下降误报成 S 容量丢失。
-
-### 2. W
-
-W1/W2 block、四区间、预测头、FutureObjectDynamics 和现有 loss 完全保留。只替换 `_base()` 中的 typed 输入组合：
-
-- current object content 仍是 protected factual base；
-- semantic、appearance、geometry 分别读取对应 S relevance 调制后的事实；
-- 删除 W 自己跨类型竞争的 generic `typed_router`，改为三个零保持、同尺度的类型贡献相加；
-- W 可以读取 clean action token，但其中的 typed 成分也必须来自同一个 S relevance，因此不再形成独立旁路；
-- relevance 为零时，W 的 current reference/public base 仍存在，只有 optional typed effect condition 为零。
-
-这不是重做 W；不改 W1/W2 block 和输出头，只收紧输入所有权。
-
-### 3. P 与 bottom
-
-P1、P2、P3、controlled transition 和 bottom 全部保持当前数值与接口。P2/consequence effect 仅作为观测护栏，不在本轮调 gain、null 或 routing。
-
-## 七、两阶段实施，不允许半接线
-
-### 阶段 A：接口收口（行为 bit-exact）
-
-1. 建立 `StatelessIntentBundle` 和四个 docks。
-2. 用 adapter 复现当前消费者获得的所有数值；不改参数、loss、forward 输出或梯度。
-3. 固定权重/输入验证 forward、loss 和逐参数梯度 bit-exact。
-
-阶段 A 不开正式实验；它只证明接口迁移没有偷偷改变模型。
-
-### 阶段 B：所有权原子切换
-
-以下修改必须在同一可回退提交中完成：
-
-1. public carrier 与 typed relevance 分离；
-2. typed relevance 保留 `[interval,K,type]`，改为 per-type fixed-zero null；
-3. CoarseAction 删除独立 typed reread，改读 `ActionIntentDock`；
-4. W 删除独立跨类型 router，改读 `WorldIntentDock` 的 matching relevance；
-5. 同步删除旧旁路参数和失效合并指标。
-
-禁止出现“先删旧路、以后再补新路”或长期保留 legacy/new 双路的中间主线。阶段 B 只允许 fresh checkpoint。
-
-## 八、三轮静态审查
-
-### 审查一：provenance 与所有权
-
-- 逐张量核对 T5/history/ObjectFactSet→S→docks→CoarseAction/W。
-- 搜索 CoarseAction/W 对 raw semantic/appearance/geometry tokens 的残余读取。
-- 核对 K/type permutation 等变、teacher/noisy-action/frame-progress 隔离。
-- 确认 P1/P2/P3/bottom diff 为空，除接口名透传外不得改变。
-
-### 审查二：数值与梯度
-
-- 核对 BF16/FP32、normalized score 上界、zero semantics、普通 autograd 和 optimizer ownership。
-- public recognizer target 对 typed relevance 的直接梯度必须为零。
-- 每一种 type 的 relevance 必须只改变对应 consumer 边界；无人工梯度和 detach 补丁。
-
-### 审查三：生命周期与成本
-
-- S 每 observation 构建一次；五步采样不得重复构建。
-- Teacher 调用次数、P1 高分辨率读取次数与当前主线相同。
-- 输出参数差异、batch-8 显存和吞吐；不得用永久 shadow path 换取对照。
-
-## 九、必须通过的测试
-
-### 行为与结构
-
-- 阶段 A：相同 checkpoint/input 下输出、loss、逐参数梯度 bit-exact。
-- K permutation 在 S→CoarseAction/W 全程等变；type permutation 只能在同步交换 type projection 时等变。
-- 单独扰动 semantic/appearance/geometry，只能先改变对应 relevance/value 与匹配 consumer contribution。
-- 固定零 null 的 value、bias 和梯度均为零；全部 relevance 为零时 typed action/W contribution 精确为零。
-- 公共 target 变化只能直接改变 public carrier loss；不能直接监督 typed mass。
-- 源码依赖检查确认 CoarseAction/W 不再独立重读或重选三类 typed facts。
-- P1/P2/P3/bottom 的基准 fixture 保持不变；部署 action 不接触 teacher/future supports。
-
-### 日志
-
-新增并仅保留可解释指标：
-
-- public goal/history/object innovation 与 interval/temporal variation；
-- 每个 type 的 raw route RMS、relevance mass、selected value RMS、K variation、interval variation；
-- `ActionIntentDock` typed context 以及 W 三类 typed contribution；
-- 每类 relevance zero/shuffle 对对应 dock、W field 和 action 的分层 JVP/变化；
-- P2 null mass、effect precontract、consequence/P3 effect RMS 作为下游护栏；
-- frame progress 相关性仅 audit，不落 loss。
-
-不得再用一个合并 `typed_innovation_rms` 代替三类指标，也不得设置固定 entropy/mass“健康目标”。
-
-## 十、实验放行与判断
-
-### smoke
-
-- fresh BF16 forward/backward、五步部署和 checkpoint round-trip 全部通过；
-- 本地微型测试不超过 8 GiB，生产 batch 8 不超过 22 GiB；
-- 参数变化必须能逐模块解释。
-
-### 完整八轮
-
-保持同一数据、seed、batch、worker、学习率和八轮训练，不提前停在最佳点。对照当前完整 Schema24 和 V120：
-
-- 当前基准：最佳/final physical RMSE `0.08008 / 0.08218`；final arm/gripper `0.06160 / 0.15653`。
-- V120 基准：最佳/final physical RMSE 约 `0.0793 / 0.0814`；final arm/gripper约 `0.0633 / 0.1498`。
-- 新实现至少不能同时恶化最佳点与最终点；若动作下降，即使 typed magnitude 变大也判为失败。
-- S 成功首先由轴身份、零语义、无旁路和分层干预成立来判断，不以 typed RMS 越大、null mass 越小为目标。
-- 若 P2/consequence effect 继续增大，却没有 W target-normalized error、gripper 或中远程动作验证改善，判定为新的下游放大，不接受。
-- 只有 epoch 7/8 的 gripper 与 5–24 步指标同步改善，才可以声称本轮缓解晚期回归；否则将晚期回归继续归类为独立泛化问题。
-
-## 十一、明确不做
-
-- 不在本轮顺手修 G3 anchor→transition。
-- 不增加 S/W block 数、未来阶段标签、scalar progress、plan recognizer 新目标或独立 Stage1。
-- 不删除合法 null，也不通过 quota、entropy loss 或硬门控强迫 typed 使用。
-- 不改 P1/P2/P3/bottom，不调大 W/effect，不减少真实图像或精细地址带宽。
-- 不把“梯度存在、张量非空、typed RMS 上升”当作接通证明。
+没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与
+联合 smoke，不启动两个正式实验。

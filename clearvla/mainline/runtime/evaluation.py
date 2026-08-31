@@ -797,6 +797,264 @@ class MatchedP2InterventionAccumulator:
         return result
 
 
+@dataclass
+class MatchedCoreAttributionAccumulator:
+    """Matched Schema28 W/consequence/CT responsibility accounting.
+
+    The primary refined action is accumulated once per selected validation
+    batch.  Every counterfactual then reuses that same primary action, refined
+    cache and initial noise while this object records only decision-making
+    scalars; no action/tensor dump is retained.
+    """
+
+    action_scale: Tensor
+    action_offset: Tensor
+    gripper_event_threshold: float
+    arm_motion_threshold: float
+    primary: ValidationAccumulator | None = None
+    counterfactual: dict[str, ValidationAccumulator] = field(default_factory=dict)
+    delta_square_error: dict[str, Tensor] = field(default_factory=dict)
+    delta_element_count: dict[str, int] = field(default_factory=dict)
+    boundary_totals: dict[str, Tensor] = field(default_factory=dict)
+    boundary_weights: dict[str, int] = field(default_factory=dict)
+    boundary_maxima: dict[str, Tensor] = field(default_factory=dict)
+    identity_square_error: dict[str, Tensor] = field(default_factory=dict)
+    identity_element_count: dict[str, int] = field(default_factory=dict)
+    identity_maxima: dict[str, Tensor] = field(default_factory=dict)
+    primary_batches: int = 0
+    batches: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_action_normalizer(
+        cls,
+        normalizer: ArrayNormalizer,
+        *,
+        device: torch.device,
+        gripper_event_threshold: float,
+        arm_motion_threshold: float,
+    ) -> "MatchedCoreAttributionAccumulator":
+        base = ValidationAccumulator.from_action_normalizer(
+            normalizer,
+            device=device,
+            gripper_event_threshold=gripper_event_threshold,
+            arm_motion_threshold=arm_motion_threshold,
+        )
+        if base.action_scale is None or base.action_offset is None:
+            raise RuntimeError("core attribution requires the physical action chart")
+        result = cls(
+            action_scale=base.action_scale,
+            action_offset=base.action_offset,
+            gripper_event_threshold=float(gripper_event_threshold),
+            arm_motion_threshold=float(arm_motion_threshold),
+        )
+        result.primary = result._new_validation_accumulator()
+        return result
+
+    def _new_validation_accumulator(self) -> ValidationAccumulator:
+        return ValidationAccumulator(
+            action_scale=self.action_scale,
+            action_offset=self.action_offset,
+            gripper_event_threshold=self.gripper_event_threshold,
+            arm_motion_threshold=self.arm_motion_threshold,
+        )
+
+    def update_primary(self, action: Tensor, batch: TrainingBatch) -> None:
+        if self.primary is None:
+            raise RuntimeError("core-attribution primary accumulator is missing")
+        self.primary.update(action, batch)
+        self.primary_batches += 1
+
+    def _add_delta(self, key: str, value: Tensor) -> None:
+        update = value.detach().float().square().sum()
+        self.delta_square_error[key] = self.delta_square_error.get(
+            key, update.new_zeros(())
+        ) + update
+        self.delta_element_count[key] = self.delta_element_count.get(key, 0) + int(
+            value.numel()
+        )
+
+    def update(
+        self,
+        mode: str,
+        *,
+        primary_action: Tensor,
+        counterfactual_action: Tensor,
+        batch: TrainingBatch,
+        boundary_metrics: Mapping[str, Tensor] | None = None,
+    ) -> None:
+        if self.primary_batches <= self.batches.get(mode, 0):
+            raise ValueError(
+                "core attribution requires one primary update before every mode update"
+            )
+        accumulator = self.counterfactual.get(mode)
+        if accumulator is None:
+            accumulator = self._new_validation_accumulator()
+            self.counterfactual[mode] = accumulator
+        accumulator.update(counterfactual_action, batch)
+        delta = (
+            counterfactual_action.detach().float() - primary_action.detach().float()
+        ) / self.action_scale
+        self._add_delta(f"{mode}_action", delta)
+        self._add_delta(f"{mode}_arm", delta[..., :-1])
+        self._add_delta(f"{mode}_gripper", delta[..., -1:])
+        for band_name, band_slice in _action_band_slices(int(delta.shape[1])):
+            self._add_delta(f"{mode}_band_{band_name}", delta[:, band_slice])
+            self._add_delta(
+                f"{mode}_gripper_band_{band_name}",
+                delta[:, band_slice, -1:],
+            )
+        batch_weight = int(primary_action.shape[0])
+        for name, value in (boundary_metrics or {}).items():
+            scalar = value.detach().float()
+            if scalar.ndim != 0:
+                raise ValueError("core-attribution boundary metrics must be scalar")
+            key = f"{mode}_{name}"
+            if name.endswith("_max_abs"):
+                previous = self.boundary_maxima.get(key)
+                self.boundary_maxima[key] = (
+                    scalar if previous is None else torch.maximum(previous, scalar)
+                )
+            elif name.endswith(("_rows", "_batches")):
+                self.boundary_totals[key] = self.boundary_totals.get(
+                    key, scalar.new_zeros(())
+                ) + scalar
+                self.boundary_weights[key] = 1
+            else:
+                self.boundary_totals[key] = self.boundary_totals.get(
+                    key, scalar.new_zeros(())
+                ) + scalar * batch_weight
+                self.boundary_weights[key] = self.boundary_weights.get(key, 0) + batch_weight
+        self.batches[mode] = self.batches.get(mode, 0) + 1
+
+    def update_identity(self, name: str, left: Tensor, right: Tensor) -> None:
+        if tuple(left.shape) != tuple(right.shape):
+            raise ValueError("core-attribution identity tensors must align")
+        normalized = left.detach().float() - right.detach().float()
+        physical = normalized / self.action_scale
+        for chart, value in (("normalized", normalized), ("physical", physical)):
+            key = f"{name}_{chart}"
+            update = value.square().sum()
+            self.identity_square_error[key] = self.identity_square_error.get(
+                key, update.new_zeros(())
+            ) + update
+            self.identity_element_count[key] = self.identity_element_count.get(
+                key, 0
+            ) + int(value.numel())
+            maximum = value.abs().amax()
+            previous = self.identity_maxima.get(key)
+            self.identity_maxima[key] = (
+                maximum if previous is None else torch.maximum(previous, maximum)
+            )
+
+    @staticmethod
+    def _rmse_surfaces(values: Mapping[str, float]) -> dict[str, float]:
+        result = {
+            "action": values["validation_action_rmse_physical"],
+            "arm": values["validation_arm_rmse_physical"],
+            "gripper": values["validation_gripper_rmse_physical"],
+        }
+        for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
+            result[f"band_{band_name}"] = values[
+                f"validation_band_{band_name}_rmse_physical"
+            ]
+            result[f"gripper_band_{band_name}"] = values[
+                f"validation_gripper_band_{band_name}_rmse_physical"
+            ]
+        return result
+
+    def means(self) -> dict[str, float]:
+        if self.primary is None or self.primary_batches <= 0:
+            raise ValueError("core attribution did not consume a primary batch")
+        if not self.batches:
+            raise ValueError("core attribution did not consume any counterfactual")
+        incomplete = {
+            mode: count
+            for mode, count in self.batches.items()
+            if count != self.primary_batches
+        }
+        if incomplete:
+            raise ValueError(
+                "core-attribution mode coverage is incomplete: " + repr(incomplete)
+            )
+        primary = self.primary.means()
+        primary_surfaces = self._rmse_surfaces(primary)
+        result: dict[str, float] = {
+            "validation_core_attribution_primary_batches": float(self.primary_batches)
+        }
+        for surface, rmse in primary_surfaces.items():
+            result[
+                f"validation_core_attribution_primary_{surface}_rmse_physical"
+            ] = rmse
+        for suffix in (
+            "event_precision",
+            "event_recall",
+            "event_f1",
+            "events_predicted",
+            "events_target",
+            "event_ratio",
+            "timing_mae_steps",
+        ):
+            result[
+                f"validation_core_attribution_primary_decoded_gripper_{suffix}"
+            ] = primary[f"validation_decoded_gripper_{suffix}"]
+        for mode in sorted(self.batches):
+            counterfactual = self.counterfactual[mode].means()
+            surfaces = self._rmse_surfaces(counterfactual)
+            stem = f"validation_core_attribution_{mode}"
+            result[f"{stem}_batches"] = float(self.batches[mode])
+            for surface, rmse in surfaces.items():
+                primary_rmse = primary_surfaces[surface]
+                result[f"{stem}_{surface}_rmse_physical"] = rmse
+                result[f"{stem}_{surface}_mse_gain_vs_primary_physical"] = (
+                    primary_rmse**2 - rmse**2
+                )
+                delta_key = f"{mode}_{surface}"
+                delta_name = (
+                    "action_delta_rmse_physical"
+                    if surface == "action"
+                    else f"{surface}_action_delta_rmse_physical"
+                )
+                result[f"{stem}_{delta_name}"] = float(
+                    (
+                        self.delta_square_error[delta_key]
+                        / max(self.delta_element_count[delta_key], 1)
+                    )
+                    .sqrt()
+                    .item()
+                )
+            for suffix in (
+                "event_precision",
+                "event_recall",
+                "event_f1",
+                "events_predicted",
+                "events_target",
+                "event_ratio",
+                "timing_mae_steps",
+            ):
+                result[f"{stem}_decoded_gripper_{suffix}"] = counterfactual[
+                    f"validation_decoded_gripper_{suffix}"
+                ]
+        for key, total in self.boundary_totals.items():
+            result[f"validation_core_attribution_{key}"] = float(
+                (total / max(self.boundary_weights[key], 1)).item()
+            )
+        for key, maximum in self.boundary_maxima.items():
+            result[f"validation_core_attribution_{key}"] = float(maximum.item())
+        for key, square_error in self.identity_square_error.items():
+            stem = f"validation_core_attribution_{key}"
+            result[f"{stem}_action_delta_rms"] = float(
+                (
+                    square_error / max(self.identity_element_count[key], 1)
+                )
+                .sqrt()
+                .item()
+            )
+            maximum = float(self.identity_maxima[key].item())
+            result[f"{stem}_action_max_abs"] = maximum
+            result[f"{stem}_bit_exact"] = float(maximum == 0.0)
+        return result
+
+
 @torch.no_grad()
 def evaluate_loader(
     model: ClearVLAMainlinePolicy,
@@ -857,6 +1115,7 @@ def evaluate_loader(
 
 
 __all__ = [
+    "MatchedCoreAttributionAccumulator",
     "MatchedP2InterventionAccumulator",
     "ValidationAccumulator",
     "evaluate_loader",
