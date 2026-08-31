@@ -221,6 +221,7 @@ def main() -> None:
         "normalizer_identity": {
             "action_sha256": _digest(bundle.action_normalizer.to_dict()),
             "state_sha256": _digest(bundle.state_normalizer.to_dict()),
+            "artifact": bundle.normalizer_metadata,
         },
         "materialized_episodes": materialized_episodes,
         "episode_count": len(bundle.episodes),

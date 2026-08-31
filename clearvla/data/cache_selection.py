@@ -10,6 +10,10 @@ from .hdf5_episode import (
     load_episodes,
     resolve_too_short_episode_exclusions,
 )
+from .multitask_selection import (
+    RDT_MULTITASK_INTERNAL_SPLITS,
+    load_rdt_multitask_selection_manifest,
+)
 from .split import (
     RDT_SPLIT_NAMES,
     RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
@@ -33,6 +37,7 @@ class CacheEpisodeSelection:
     manifest_split: str
     max_episodes: int
     manifest_metadata: dict[str, object] | None
+    task_selection_metadata: dict[str, object] | None
 
     def report_metadata(self) -> dict[str, object]:
         return {
@@ -44,6 +49,7 @@ class CacheEpisodeSelection:
             ),
             "selected_episode_ids": [episode.episode_id for episode in self.episodes],
             "manifest": self.manifest_metadata,
+            "task_selection": self.task_selection_metadata,
         }
 
 
@@ -56,6 +62,7 @@ def load_cache_episode_selection(
     state_key: str | None,
     camera_key_overrides: dict[str, str],
     split_manifest: Path | None,
+    task_selection_manifest: Path | None = None,
     manifest_split: str,
     max_episodes: int,
     allow_skipped: bool,
@@ -70,6 +77,8 @@ def load_cache_episode_selection(
         raise ValueError("max episodes must be non-negative")
     if split_manifest is None and split_name != "all":
         raise ValueError("a named manifest split requires --split-manifest")
+    if task_selection_manifest is not None and split_manifest is None:
+        raise ValueError("a task selection requires its verified base split manifest")
 
     minimum_length = (
         RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH if split_manifest is not None else 1
@@ -85,6 +94,7 @@ def load_cache_episode_selection(
     )
     eligible_count = len(episodes)
     manifest_metadata: dict[str, object] | None = None
+    task_selection_metadata: dict[str, object] | None = None
     if split_manifest is None:
         if skipped and not allow_skipped:
             raise RuntimeError(f"cache inventory has skipped episodes: {skipped[:5]}")
@@ -102,11 +112,32 @@ def load_cache_episode_selection(
             excluded_too_short=excluded_too_short,
             expected_minimum_episode_length=minimum_length,
         )
-        selected_indices = (
-            list(range(len(episodes)))
-            if split_name == "all"
-            else list(split_indices[split_name])
-        )
+        if task_selection_manifest is not None:
+            split_indices, task_selection_metadata = (
+                load_rdt_multitask_selection_manifest(
+                    task_selection_manifest,
+                    episode_names=[episode.episode_id for episode in episodes],
+                    task_names=[episode.task_id for episode in episodes],
+                    instructions=[episode.instruction for episode in episodes],
+                    base_splits=split_indices,
+                    base_split_metadata=manifest_metadata,
+                )
+            )
+            selected_indices = (
+                [
+                    index
+                    for name in RDT_MULTITASK_INTERNAL_SPLITS
+                    for index in split_indices[name]
+                ]
+                if split_name == "all"
+                else list(split_indices[split_name])
+            )
+        else:
+            selected_indices = (
+                list(range(len(episodes)))
+                if split_name == "all"
+                else list(split_indices[split_name])
+            )
 
     selected_count = len(selected_indices)
     if limit:
@@ -124,6 +155,7 @@ def load_cache_episode_selection(
         manifest_split=split_name,
         max_episodes=limit,
         manifest_metadata=manifest_metadata,
+        task_selection_metadata=task_selection_metadata,
     )
 
 

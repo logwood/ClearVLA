@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         choices=(*RDT_SPLIT_NAMES, "all"),
         default="all",
     )
+    p.add_argument(
+        "--task-selection-manifest",
+        type=Path,
+        default=None,
+        help="Optional verified bounded-task selection layered on --split-manifest.",
+    )
     p.add_argument("--max-episodes", type=int, default=0)
     p.add_argument("--rebuild", action="store_true")
     p.add_argument("--allow-skipped", action="store_true")
@@ -107,6 +113,7 @@ def main() -> None:
         state_key=args.state_key,
         camera_key_overrides=camera_keys,
         split_manifest=args.split_manifest,
+        task_selection_manifest=args.task_selection_manifest,
         manifest_split=args.manifest_split,
         max_episodes=args.max_episodes,
         allow_skipped=args.allow_skipped,

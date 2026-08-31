@@ -689,6 +689,38 @@ supports may change targets and losses, never deployment action.
     records `model_constructed=false` and `optimizer_constructed=false`; it is
     not model-side multiview, bimanual, depth, backward, checkpoint or
     experiment evidence.
+    The adopted first-round bounded RDT scope is now a content-verified exact
+    eight-task selection layered on that same manifest. A task-complete CPU
+    audit covers all 302 `rdt_data` directories and all of each task's
+    episodes; selection then retains 179 eligible episodes in deterministic
+    task order (`143/18/18` train/val/test), 81,237 frames and 68,349 fixed
+    typed windows (`54,648/6,711/6,990`). Semantics come only from the scalar
+    HDF5 instruction. Every selected episode is finite native 14-D, has
+    complete decodable high/right-wrist RGB, and is projected to native source
+    coordinates `7..13` for the unchanged right-arm 7-D model ABI. The
+    all-episode left-role audit combines numeric action/qpos/gripper evidence
+    with five uniformly spaced high-camera frames per episode and records that
+    no selected task requires left-arm support or collaboration.
+    The exact selection SHA-256 is
+    `99f082028be7d9b92f0be4ed02ce22b5367f5f4c7274bbb1064b403770d1fd6f`.
+    One shared train-only normalizer covers all 143 selected train episodes
+    and 64,944 rows; per-task normalizers are forbidden. Its canonical
+    SHA-256 is
+    `1aa44936eb3fa659270a2dcc2a0258fa1e888332a37de5034a56ccef09320e0c`.
+    The reusable DINO cache was written directly from HDF5 RGB in fixed
+    `(high,left_wrist,right_wrist)` order, while the first-round model reader
+    selects only `(high,right_wrist)`. Its 179 FP16 arrays occupy exactly
+    95,831,087,488 bytes before episode/report metadata; the complete token
+    inventory SHA-256 is
+    `2d9379804effa65968e4e8b19b032acd0b3e353f6dd3c468b774b9e26ee1833d`.
+    The 26 source `/test/` episodes remain `external_test`, are not
+    materialized by this bounded formal loader and cannot enter training or
+    tuning. Task ID remains CPU audit/sampling/logging metadata and is absent
+    from model samples. Formal shuffled training remains fail-closed: the
+    train-only gripper audit does not inherit Pen's `0.1`, and source semantics
+    have not yet defined which continuous right-gripper transitions own an
+    event/activity label. This preparation therefore still does not claim
+    depth, a three-camera model consumer, or native 14-D bimanual adaptation.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

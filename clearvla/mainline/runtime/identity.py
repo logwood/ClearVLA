@@ -118,6 +118,11 @@ def dataset_identity(
                     for name, value in bundle.split_metadata.items()
                     if name not in {"path", "file_sha256"}
                 },
+                "normalizer_contract": {
+                    name: value
+                    for name, value in getattr(bundle, "normalizer_metadata", {}).items()
+                    if name not in {"path", "file_sha256"}
+                },
             }
         ),
         state_normalizer_sha256=_digest(bundle.state_normalizer.to_dict()),

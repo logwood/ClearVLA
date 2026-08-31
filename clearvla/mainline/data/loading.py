@@ -18,6 +18,10 @@ from clearvla.data.hdf5_episode import (
     load_hdf5_instruction,
     resolve_too_short_episode_exclusions,
 )
+from clearvla.data.multitask_selection import (
+    RDT_MULTITASK_INTERNAL_SPLITS,
+    load_rdt_multitask_selection_manifest,
+)
 from clearvla.data.samplers import (
     InformationBalancedBatchSampler,
     InformationBalancedSamplerConfig,
@@ -52,6 +56,7 @@ from .language import (
     source_instruction_inventory_sha256,
 )
 from .normalizer import ArrayNormalizer
+from .normalizer_artifact import load_shared_normalizers
 from .token_store import DinoV2TokenStore
 
 
@@ -80,6 +85,7 @@ class MainlineDataBundle:
     gripper_indices: tuple[int, ...] = (-1,)
     data_profile_metadata: dict[str, object] = field(default_factory=dict)
     split_metadata: dict[str, object] = field(default_factory=dict)
+    normalizer_metadata: dict[str, object] = field(default_factory=dict)
 
     def loader(
         self,
@@ -230,6 +236,19 @@ def _load_mainline_data(
             excluded_too_short=excluded_too_short,
             expected_minimum_episode_length=min_length,
         )
+        if data.task_selection_manifest:
+            split_ids, selection_metadata = load_rdt_multitask_selection_manifest(
+                data.task_selection_manifest,
+                episode_names=episode_names,
+                task_names=[episode.task_id for episode in episodes],
+                instructions=[episode.instruction for episode in episodes],
+                base_splits=split_ids,
+                base_split_metadata=split_metadata,
+            )
+            split_metadata = {
+                **split_metadata,
+                "task_selection": selection_metadata,
+            }
     else:
         train_ids, val_ids, test_ids = resolve_episode_ids(
             len(episodes),
@@ -248,8 +267,13 @@ def _load_mainline_data(
             "split_counts": {name: len(values) for name, values in split_ids.items()},
         }
     if materialized_splits is None:
+        materialized_names = (
+            RDT_MULTITASK_INTERNAL_SPLITS
+            if data.task_selection_manifest
+            else tuple(split_ids)
+        )
         dataset_episode_ids = {
-            name: list(ids) for name, ids in split_ids.items()
+            name: list(split_ids[name]) for name in materialized_names
         }
     else:
         unknown_splits = sorted(set(materialized_splits) - set(split_ids))
@@ -276,6 +300,26 @@ def _load_mainline_data(
         split_ids["train"],
         mode=data.normalizer,
     )
+    normalizer_metadata: dict[str, object] = {
+        "source": "fresh_train_only_fit",
+        "train_episode_count": len(split_ids["train"]),
+    }
+    if data.normalizer_artifact:
+        selection_metadata = split_metadata.get("task_selection")
+        if not isinstance(selection_metadata, dict):
+            raise ValueError("a shared normalizer artifact requires task selection metadata")
+        action_normalizer, state_normalizer, normalizer_metadata = load_shared_normalizers(
+            data.normalizer_artifact,
+            expected_selection_sha256=str(
+                selection_metadata.get("selection_sha256", "")
+            ),
+            expected_profile_sha256=profile.digest(),
+            expected_train_episode_ids=[
+                episodes[index].episode_id for index in split_ids["train"]
+            ],
+            computed_action=action_normalizer,
+            computed_state=state_normalizer,
+        )
     preprocessing = PreprocessConfig(resize_hw=(data.cache_side, data.cache_side), crop_hw=None)
     if data.image_store_mode == "decoded-cache":
         image_store: DecodedImageStore | OnlineVisualStore = DecodedImageStore(
@@ -393,6 +437,7 @@ def _load_mainline_data(
         gripper_indices=profile.gripper_indices,
         data_profile_metadata={**profile.as_dict(), "sha256": profile.digest()},
         split_metadata=split_metadata,
+        normalizer_metadata=normalizer_metadata,
     )
 
 

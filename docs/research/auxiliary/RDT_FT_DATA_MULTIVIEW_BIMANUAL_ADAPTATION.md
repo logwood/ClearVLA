@@ -454,6 +454,101 @@ hold three cameras while the current model input still consumes two, and the
 source may hold 14 coordinates while this accepted profile still consumes the
 right-arm seven.
 
+### First-round exact eight-task preparation (2026-08-31)
+
+The first formal multitask candidate is deliberately bounded to eight task
+directories after an offline audit of all 302 `rdt_data` tasks. The audit
+aggregates native action/qpos and both grippers over every available episode,
+uses the scalar HDF5 instruction as the only semantic source, checks the
+high/right-wrist camera headers, and decodes deterministic audit frames. The
+selection producer then reopens every selected episode, checks finite aligned
+native 14-D arrays and all fixed typed windows, and decodes every selected
+high/right-wrist RGB row. Five uniformly spaced high-camera frames from every
+episode were also reviewed in task-complete contact sheets. The selected
+behaviors are right-arm-only in the observed corpus: objects or receivers are
+table/fixed-surface supported, with no left-arm brace, hold, alignment or
+handoff required.
+
+The deterministic task order and exact HDF5 instructions are:
+
+1. `put_cherry_bowl` -- "Pick up the cherry on the right side of the glass and
+   put it inside the glass."
+2. `stack_tomato_cans` -- "Stack a can of tomatoes on the right onto the can of
+   tomatoes on the left."
+3. `draw_triangle` -- "Pick up the pen on the shelf to the right of the
+   whiteboard and draw a triangle."
+4. `wipe_glass_water` -- "Pick up the sponge from the table, wipe the water off
+   the glass, and finally place the sponge back on the table."
+5. `press_stapler` -- "Press the stapler down."
+6. `grab_stick_into_bottle` -- "Grab a stick from the table and stick it in a
+   plastic bottle."
+7. `shake_glass` -- "Gently pick up the goblet, rotate it counterclockwise for
+   two full turns (viewing from above), and then place it back on the table."
+8. `pour_water_can2cup` -- "Pick up the metal can, pour some water into the
+   cup, then place the can back on the table."
+
+The eight tasks contain 179 eligible episodes and 81,237 frames. Their
+manifest lanes contain `143/18/18` train/val/test episodes and
+`54,648/6,711/6,990` valid typed windows. The source `/test/` partition stays
+as a separate 26-episode `external_test` lane: it is neither selected nor
+materialized and was not read for threshold choice. Task IDs control only
+CPU-side audit, split ordering, sampling and logging metadata; the typed model
+sample has no task ID/index/embedding field.
+
+The small artifact identities are:
+
+- 302-task audit: file
+  `27617de19b4feff5a1c4a5f2afd4f2ad146ce322129f0e968a5f5bc45a7e4218`,
+  canonical
+  `adbf96943a8dbee1d37188a1bf9f3afc84b1fc003a806c95737082b809d8dc40`;
+- selection manifest: file
+  `c905730106e31b35dc89c38eea5b1585faa391cc7f66cc2bc1e77db8f21721b5`,
+  canonical
+  `99f082028be7d9b92f0be4ed02ce22b5367f5f4c7274bbb1064b403770d1fd6f`;
+- corpus-derived typed language bank: 71,241,050 bytes, file
+  `e3870e6e83fa354e3fdd6f1eaecb7bf9b72c958eadfa8e01b10a830870d57c65`;
+- one shared train-only normalizer over 143 episodes/64,944 rows: file
+  `8c0e6ff4ef6692abb7cc80b7b60474ac642bb44541a40f78333390ff56b9c899`,
+  canonical
+  `1aa44936eb3fa659270a2dcc2a0258fa1e888332a37de5034a56ccef09320e0c`;
+- train-only right-gripper candidate audit: file
+  `729b9f47328e53c81f54e85be78e795f80f74c5b0de6ba922a98b20dec519a6f`,
+  canonical
+  `3fb2bd082707a508d6c2eaff0d6edcc3bfce4728f495e9cfb07f00e355dfe9f0`.
+
+No T5 encoder was loaded or downloaded. The 271-row language bank reuses the
+corpus-provided `lang_embed_0.pt` rows and retains their provenance. One copy
+of that bank, and no T5 model/checkpoint, was transferred to the local audit
+directory.
+
+The reusable DINO cache reads JPEG payloads directly from HDF5 and stores
+three-view FP16 patch tokens in fixed
+`(high,left_wrist,right_wrist)` order. The first-round model selects only
+`(high,right_wrist)`. The exact estimate and realized token-array size are
+both 95,831,087,488 bytes (89.25 GiB), consisting of 95,831,064,576 raw token
+bytes plus 22,912 bytes of NPY headers. Including 179 episode metadata files,
+the report and directories, the completed cache uses 95,832,104,978 logical
+bytes and 95,833,804,800 allocated bytes. Its cache-report file SHA-256 is
+`c47c8d3be8aa6f002d91c1969a82361bd5932b55637efbfdaa8e4da721d494b6`;
+the full token-file inventory digest is
+`2d9379804effa65968e4e8b19b032acd0b3e353f6dd3c468b774b9e26ee1833d`,
+and the complete inventory canonical digest is
+`2846e5b3b08e9568819e806218587616022e495bf676ed44218f89124110f847`.
+The encoder inventory binds the already-local `facebook/dinov2-base` revision
+`f9e44c814b77203eaa57a6bdbbd535f21ede1415`; no encoder or checkpoint was
+copied to the local workspace.
+
+One unresolved gate remains deliberately visible. The right-gripper audit
+uses only the selected train lane and reports continuous command values,
+command deltas, exact sampler-boundary deltas, activity/persistence run
+lengths and candidate quantiles. It adopts no event threshold, does not
+inherit Pen's `0.1`, and marks shuffled formal training not ready because the
+source does not define which continuous transitions own semantic event or
+activity labels. Validation, known-task test and external test rows did not
+participate in this decision. Until this source-semantic definition is
+adopted, the formal train loader fails closed; the completed CPU/cache
+preparation is not permission to start a long run.
+
 ### D2 -- three-RGB-camera closure
 
 Keep the D1 action projection fixed and change only the ordered camera tuple to

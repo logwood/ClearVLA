@@ -40,6 +40,8 @@ class DataConfig:
     dinov2_model: str = "facebook/dinov2-base"
     split_mode: str = "ordered-counts"
     split_manifest: str = ""
+    task_selection_manifest: str = ""
+    normalizer_artifact: str = ""
     train_episodes: int = 63
     val_episodes: int = 5
     test_episodes: int = 5
@@ -107,8 +109,10 @@ class DataConfig:
         if self.image_frame_lru_capacity < 0 or self.image_open_file_capacity <= 0:
             raise ValueError("image-store LRU capacity must be non-negative and files positive")
         if self.split_mode == "ordered-counts":
-            if self.split_manifest:
-                raise ValueError("ordered-counts split cannot also name a split manifest")
+            if self.split_manifest or self.task_selection_manifest or self.normalizer_artifact:
+                raise ValueError(
+                    "ordered-counts split cannot name RDT split/selection/normalizer artifacts"
+                )
             if (self.train_episodes, self.val_episodes, self.test_episodes) != (63, 5, 5):
                 raise ValueError("formal Pen comparison runs use the established 63/5/5 split")
         elif self.split_mode == "manifest":
@@ -116,6 +120,11 @@ class DataConfig:
                 raise ValueError("manifest split requires data.split_manifest")
             if (self.train_episodes, self.val_episodes, self.test_episodes) != (0, 0, 0):
                 raise ValueError("manifest membership cannot also use ordered episode counts")
+            if bool(self.task_selection_manifest) != bool(self.normalizer_artifact):
+                raise ValueError(
+                    "a bounded task selection requires one shared normalizer artifact, "
+                    "and the artifact cannot be configured without the selection"
+                )
         else:
             raise ValueError("data.split_mode must be ordered-counts or manifest")
         if self.normalizer != "zscore":
@@ -523,6 +532,8 @@ class ExperimentConfig:
                 "t5_condition",
                 "output_dir",
                 "split_manifest",
+                "task_selection_manifest",
+                "normalizer_artifact",
             ):
                 data.pop(name, None)
             payload["data"] = data

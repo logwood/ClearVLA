@@ -318,6 +318,7 @@ def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
         "splits": {name: list(ids) for name, ids in bundle.splits.items()},
         "split_metadata": bundle.split_metadata,
         "data_profile": bundle.data_profile_metadata,
+        "normalizer_metadata": bundle.normalizer_metadata,
         "gripper_indices": list(bundle.gripper_indices),
         "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
         "action_normalizer": bundle.action_normalizer.to_dict(),
