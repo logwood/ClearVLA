@@ -176,7 +176,12 @@ shuffled independently inside each `rdt_data` task by a stable task-local seed;
 tasks with fewer than three episodes remain training-only because they cannot
 support all three internal lanes.  Unknown source partitions fail closed.  The
 manifest stores episode IDs rather than machine-local indices and excludes the
-absolute root from its semantic content.
+absolute root and filesystem discovery order from its semantic content.  Both
+producer and loader canonicalize the flat root-relative POSIX identity; the
+loader maps verified identities back to the caller's current episode indices.
+This distinction is required by real task names such as `write_board_1` and
+`write_board_1+1`: component-wise `pathlib` order and serialized string order
+are not equivalent.
 
 The released corpus already contains one task-local `lang_embed_0.pt` beside
 each task's episodes.  The official `encode_lang_batch.py` constructs original,

@@ -43,7 +43,14 @@ def build_rdt_split_manifest(
     minimum_episode_length: int = RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
 ) -> dict[str, Any]:
     source = Path(root).expanduser().resolve()
-    paths = find_hdf5_files(source, pattern)
+    # pathlib orders path *components*, which is not the same order as the
+    # serialized POSIX identity when one task name is a prefix of another
+    # (for example ``write_board_1`` and ``write_board_1+1``).  The manifest
+    # ABI is machine-independent root-relative identity order.
+    paths = sorted(
+        find_hdf5_files(source, pattern),
+        key=lambda path: episode_identity(source, path)[0],
+    )
     minimum_length = int(minimum_episode_length)
     if minimum_length <= 0:
         raise ValueError("minimum episode length must be positive")

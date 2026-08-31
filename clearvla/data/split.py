@@ -304,11 +304,15 @@ def load_rdt_split_manifest(
     if recorded_digest != _canonical_digest(digest_payload):
         raise ValueError("RDT split manifest content digest is inconsistent")
 
-    names = [str(value) for value in episode_names]
-    if not names or len(set(names)) != len(names) or names != sorted(names):
-        raise ValueError(
-            "loaded episode identities must be non-empty, unique, and source ordered"
-        )
+    loaded_names = [str(value) for value in episode_names]
+    if not loaded_names or len(set(loaded_names)) != len(loaded_names):
+        raise ValueError("loaded episode identities must be non-empty and unique")
+    # Discovery order is deliberately not part of the serialized ABI.  A
+    # Linux pathlib Path compares components, while the manifest stores flat
+    # POSIX identities; those orders differ for real task names such as
+    # ``write_board_1`` and ``write_board_1+1``.  Rebuild the canonical order
+    # here, then map accepted identities back to the caller's episode list.
+    names = sorted(loaded_names)
     expected_excluded = {
         str(name): int(length) for name, length in (excluded_too_short or {}).items()
     }
@@ -394,7 +398,9 @@ def load_rdt_split_manifest(
                 f"RDT split {split!r} differs from its serialized deterministic policy"
             )
 
-    identity_to_index = {name: index for index, name in enumerate(names)}
+    identity_to_index = {
+        name: index for index, name in enumerate(loaded_names)
+    }
     resolved = {
         split: [identity_to_index[value] for value in expected_split_identities[split]]
         for split in RDT_SPLIT_NAMES

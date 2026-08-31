@@ -652,7 +652,10 @@ supports may change targets and losses, never deployment action.
     The isolated RDT external adapter additionally owns a content-verified
     per-task split manifest with a separate `external_test` lane, ordered
     camera/key identity, and named qpos/action chart profiles. The manifest
-    covers the complete source inventory while recording any episode shorter
+    canonicalizes root-relative POSIX episode identity independently of
+    machine-local `pathlib` component discovery order, then maps accepted
+    identities back to the caller's loaded-episode indices. It covers the
+    complete source inventory while recording any episode shorter
     than the fixed 73-row `-24/+48` typed window as an explicit identity/length
     exclusion; only eligible episodes enter the four disjoint split lanes.
     Its right-arm profile converts only observed qpos gripper into native
