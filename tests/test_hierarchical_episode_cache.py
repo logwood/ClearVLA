@@ -303,7 +303,10 @@ def test_three_camera_cache_can_serve_an_ordered_two_camera_view(tmp_path: Path)
         tokens=tokens,
     )
 
-    selected = ("high", "right_wrist")
+    # The requested view is deliberately not storage order.  Both decoded
+    # images and DINO tokens must reconstruct axes in caller order rather than
+    # merely selecting a storage-ordered subset.
+    selected = ("right_wrist", "high")
     image_store = DecodedImageStore(
         decoded,
         camera_names=selected,
@@ -311,6 +314,8 @@ def test_three_camera_cache_can_serve_an_ordered_two_camera_view(tmp_path: Path)
     )
     frames = image_store.load_window(episodes[0], np.asarray([0], dtype=np.int64))
     assert tuple(frames) == selected
+    assert int(frames["right_wrist"][0, 0, 0, 0]) == 13
+    assert int(frames["high"][0, 0, 0, 0]) == 12
     token_store = DinoV2TokenStore(
         dino,
         episodes=episodes,
@@ -320,5 +325,5 @@ def test_three_camera_cache_can_serve_an_ordered_two_camera_view(tmp_path: Path)
     )
     rows = token_store.load_batch([[0, 0]]).numpy()
     assert tuple(rows.shape) == (1, 2, 2, 4)
-    assert np.all(rows[:, 0] == 1.0)
-    assert np.all(rows[:, 1] == 3.0)
+    assert np.all(rows[:, 0] == 3.0)
+    assert np.all(rows[:, 1] == 1.0)
