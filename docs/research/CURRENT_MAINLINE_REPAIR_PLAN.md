@@ -1,6 +1,6 @@
 # ClearVLA Schema28 行为闭环与单/多任务合流计划
 
-状态：**完整 Schema28 与正式 Stage A attribution 已审计；Stage B 已选择训练/runtime action-conditioned W 对齐为唯一核心候选；validation-only estimator/full-proposal 匹配门正在执行；八任务 train-only threshold 与联合 smoke 待完成**
+状态：**完整 Schema28 与正式 Stage A attribution 已审计；Stage B 已选择训练/runtime action-conditioned W 对齐为唯一核心候选；validation-only estimator/full-proposal 匹配门正在执行；八任务 train-only p95 threshold 已固定，联合 smoke 待完成**
 更新：2026-09-01
 
 本计划落实
@@ -421,7 +421,7 @@ smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 [done] 在 Schema28 checkpoint 上运行 validation-only matched attribution
 [done] 明确 RDT continuous gripper：相邻 command 定义 activity/event，qpos 只作
        codec/物理解码边界
-[next] 用 train-only adjacent-command audit 明确一个共享 threshold
+[done] 用 train-only adjacent-command audit 固定共享 p95=0.18310546875 raw threshold
 [done] 根据 attribution 决策表选择 detached self-conditioning 进入 estimator 门
 [next] 在同一 Schema28 checkpoint 上完成 estimator/full-proposal 匹配门
 [next] 对被放行 core unit 做双向源码审查、实现和 Pen 单任务 smoke

@@ -716,30 +716,34 @@ manifest/language/cache identities, tensor shapes/dtypes, future offsets and
 finite values.  It does not authorize `scripts/train_mainline.sh` with the RDT
 config.
 
-After the RDT event semantic boundary is explicitly adopted, the mixed model
-smoke and formal entry points are:
+The train-only adjacent-command audit adopts p95 `0.18310546875` raw command
+units. Its total activity-window fraction is `0.269379`; the lowest nonzero
+per-task coverage is `0.123409`, while `press_stapler=0` is retained as a
+constant-command data fact. P97.5 would reduce `draw_triangle` coverage to
+`0.03646`; p90 would broaden total activity to `0.326618`. The eight-task
+config and formal launchers pin this value across sampler, continuous
+trajectory supervision and decoded validation. The mixed model smoke and
+formal entry points are therefore:
 
 ```bash
-RDT_GRIPPER_EVENT_THRESHOLD=ADOPTED_RAW_VALUE \
 OUT_DIR=runs/clearvla_rdt_multitask8_smoke_TIMESTAMP \
 bash scripts/smoke_rdt_multitask.sh
 
-RDT_GRIPPER_EVENT_THRESHOLD=ADOPTED_RAW_VALUE \
 RDT_MAX_VAL_BATCHES=64 \
 OUT_DIR=runs/clearvla_rdt_multitask8_TIMESTAMP \
 bash scripts/train_rdt_multitask.sh
 ```
 
-Both commands fail before data/model construction if the threshold is absent.
+Both commands fail before data/model construction if an environment or CLI
+override attempts to change the adopted threshold.
 The formal default validation panel is 64 batches at batch eight, i.e. 64
 deterministic rows per task; an explicit CLI override remains recorded.
 
 ## Unresolved assumptions blocking model edits
 
-1. Confirm gripper direction and define continuous activity/transition
-   semantics for the selected native right gripper before the D1 experiment,
-   then both native gripper coordinates before D3. The Pen threshold `0.10`
-   is not inherited as an objective boundary.
+1. Audit both native gripper coordinates before D3. D1 already uses the
+   selected right-gripper adjacent-command boundary and its train-only p95;
+   the Pen threshold `0.10` is not inherited.
 2. Finish the complete V120 decoder/execution/checkpoint review before choosing
    the bimanual execution-value field ABI.
 3. Measure three-camera model-side CUDA memory; do not infer the formal batch

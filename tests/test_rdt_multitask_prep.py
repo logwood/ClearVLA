@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,7 +19,12 @@ from clearvla.data.samplers import (
     TaskBalancedInformationBatchSampler,
     TaskStratifiedBatchSampler,
 )
-from clearvla.mainline.config import DataConfig, ExperimentConfig, ObjectiveConfig
+from clearvla.mainline.config import (
+    DataConfig,
+    ExperimentConfig,
+    ObjectiveConfig,
+    load_config,
+)
 from clearvla.mainline.data.normalizer import ArrayNormalizer
 from clearvla.mainline.data.normalizer_artifact import (
     SHARED_NORMALIZER_SCHEMA,
@@ -254,6 +260,17 @@ def test_rdt_threshold_binds_sampler_objective_and_validation_semantics() -> Non
         ExperimentConfig(
             objectives=replace(ObjectiveConfig(), gripper_event_threshold=0.2)
         ).validate()
+
+
+def test_multitask8_config_and_launcher_pin_the_adopted_train_p95_threshold() -> None:
+    root = Path(__file__).resolve().parents[1]
+    adopted = 0.18310546875
+    config = load_config(root / "configs/mainline/rdt_multitask8_data_v1.json")
+    assert config.data.sampling_gripper_event_threshold == adopted
+    assert config.objectives.gripper_event_threshold == adopted
+    launcher = (root / "scripts/train_rdt_multitask.sh").read_text(encoding="utf-8")
+    assert f'ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD="{adopted}"' in launcher
+    assert "does not allow a threshold override" in launcher
 
 
 def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None:
