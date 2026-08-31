@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        28
+manifest schema:        29
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 source/local/CUDA/eight-epoch run and formal Stage-A attribution complete; W/CT retain independent action responsibility; validation-only estimator/full-proposal gate is active; train/runtime action-conditioned-W alignment, far horizon and gripper remain open
+release status:         Schema28 eight-epoch behavior, formal Stage-A attribution and endpoint-estimator gate complete; Schema29 detached action self-conditioning is source/local closed and awaits Pen/RDT CUDA smoke; far horizon and gripper behavior remain open
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -32,8 +32,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > R1a/G-01, R1b/G-02, R1c/S-01,S-02, R1d/W-01,W-02, R1e/P1-01,
 > R1f/P2-01, R1g/P3-01,B-01, LC-01, R1h/N-01,D-01 and the three
 > R2-WG01/P202/GRIP02 structural units, the Schema26 closure and the active
-> Schema27 typed-W numerical boundary and the active Schema28 bounded
-> action-world closure below.**
+> Schema27 typed-W numerical boundary, the Schema28 bounded action-world
+> closure and the active Schema29 train/runtime alignment below.**
 > The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -96,7 +96,9 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > loss. Schema26 and older checkpoints are not exact-resume sources for
 > Schema27. Schema28 changes the top/bottom/training/runtime ABIs again; all
 > earlier schemas are rejected for exact resume. Its completed formal run is
-> fresh and behavior-audited below.
+> fresh and behavior-audited below. Schema29 retains its parameters and
+> deployment graph but changes the training/runtime ABI again; Schema28 is not
+> an exact optimizer-resume source.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -236,8 +238,8 @@ environment or fixed-point closure:
 - ordinary deployment and validation run one complete proposal ODE pass,
   rebuild W from that decoded 24-step proposal, then run one complete refined
   ODE pass from the exact same initial physical noise. G, S, cached factual P1
-  detail and transition source are built once. Training still materializes W
-  once and does not backpropagate through a second deployment sampler;
+  detail and transition source are built once. Schema28 training materialized
+  W once and did not backpropagate through a second deployment sampler;
 - the second pass may move away from the action that conditioned its W.
   Validation therefore records final interval/delta mismatch as a residual.
   No zero assertion, convergence claim or fixed-point label is legal;
@@ -260,6 +262,28 @@ Schema28 does **not** unify `ControlledTransition` with W, add persistent object
 identity, propagate future null/confidence through P2, execute a robot action,
 read a new observation, update belief, reconstruct all 18 flow coordinates or
 form a fixed point. Those remain explicit later-stage work.
+
+Schema29 aligns the formal training action with the deployed action-conditioned
+world without adding a sampler pass or a second model:
+
+- observation/G/S/static P1/transition source and Teacher still build once;
+- one `FlowMatchingState` is sampled once. A cache0 velocity call under
+  `no_grad` estimates its clean endpoint, the deterministic codec decodes it,
+  and `PhysicalActionCondition.from_horizon_action` creates a fully detached
+  condition;
+- only W is rebuilt from that condition. A second velocity call on cache1 uses
+  the exact same noisy physical field and flow time and alone owns the existing
+  action/event/motion/execution losses; the existing future objective also
+  consumes cache1 dynamics;
+- pass0 runs inside a forked CPU/current-CUDA RNG scope. Pass0 and pass1 begin
+  from the same dropout state, while the final global RNG state advances by
+  exactly one formal dynamic call as in Schema28;
+- pass0 has no loss and no backward path. The condition input VJP is exact zero
+  by design; the post-projection, post-`0.35` W action carrier is the named
+  consumer-gradient observation point;
+- parameters, buffers, state keys, optimizer groups, objective weights,
+  clipping, five-step deployment sampler and two-pass deployment call count are
+  unchanged. This is one detached training approximation, not a fixed point.
 
 R1e/P1-01 separates the static and dynamic P1 owners without changing their
 producers:
@@ -430,6 +454,14 @@ compact ObjectWorldBelief from current G + PhysicalActionCondition only
        plus camera transport/covariance [B,4,K,C,2|3], no predicted status
        copied current observable object/camera probability + log probability
     -> CandidateWorld(action-condition identity + dynamics)
+
+training detached action self-conditioning
+    -> sample one FlowMatchingState
+    -> pass0 velocity(cache0) under no-grad and forked RNG
+    -> decoded clean endpoint -> detached PhysicalActionCondition
+    -> rebuild W only -> cache1
+    -> pass1 velocity(cache1) from the same noisy field/time
+    -> compose the existing losses once; future loss reads cache1 dynamics
 
 deployment/validation bounded outer closure
     -> first complete five-update ODE + endpoint from initial CandidateWorld
@@ -966,9 +998,11 @@ GripperTrajectoryTrainingBoundary
   once at `1.0` for the retained motion head. Both passes use identical initial
   physical noise. The endpoint call cannot change the integrated action.
   Decoded gripper events come directly from the second integrated action.
-- The ordinary training loss forward materializes W once and runs no outer
-  deployment sampler. A diagnostic validation batch records refinement
-  pre/post/action/world changes plus the nonzero-allowed final mismatch.
+- The ordinary training loss forward samples flow once, executes one detached
+  cache0 endpoint estimator, rebuilds only W, then executes one formal cache1
+  dynamic pass and composes the loss once. It runs no outer deployment sampler.
+  A diagnostic batch records pass0/pass1 action, W-change and final
+  world/action mismatch scalars; full tensors are not logged.
 - Teacher builds once per training batch and zero times in deployment.
 - P1 N=49 queries use the V120 query budget/checkpoint configuration.
   Chunked and unchunked outputs and parameter gradients must be equivalent.
@@ -1068,19 +1102,22 @@ GripperTrajectoryTrainingBoundary
   Initialization-only retirement plus the deterministic replacement side
   stream preserves the post-construction CPU RNG SHA-256
   `d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21`.
+  Schema29 adds only ephemeral forward tensors, scalar diagnostics and one
+  activation-gradient hook. It retains all Schema28 parameter/state counts,
+  optimizer groups, ordered state-key digest and construction RNG digest.
 - Active manifest identity:
 
   ```text
-  schema:       28
+  schema:       29
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
   top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_fp32_capacity_gripper_private_continuous_field_no_event_head
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_physical_w_ingress_gradient_probes
-  runtime:      cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics
+  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_gradient_probes
+  runtime:      cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_train_cache0_endpoint_cache1_formal_pass_deploy_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `d26bf48ea1391f691662640c63ba17a23e56fd50cff7fab433d36e0af4930528`.
+  `96883e89ea3df8e5da1693022bdfff79d92fd3100a1deb55360d608cc897f8e6`.
 
 Storage defaults:
 
@@ -1190,31 +1227,38 @@ for the next gate while retaining both W and CT; it does not authorize a
 W-to-transition bridge, transition-owned world, geometry gain, transport quota
 or hard event gate.
 
-The next validation-only observer reuses each diagnostic batch's complete
-proposal cache and initial physical noise, samples one training-distribution
-flow time, executes one cache0 endpoint velocity, detached-decodes its clean
-estimate and rebuilds only W. It records normalized interval action/delta
-distance and direction versus the full five-step proposal, semantic/transport
-W distance, and extra-path runtime/live allocation. It changes no primary
-sample, loss, parameter, buffer, optimizer/checkpoint field or global RNG. Its
-eval-mode result is only the estimator gate; training-dropout random-stream
-matching remains mandatory if Schema29 is implemented.
+The validation-only estimator gate completed on all 179 validation batches
+with 16 diagnostic batches. Relative to coarse, its distance to the complete
+five-step proposal is `0.210828x` for interval action, `0.115498x` for interval
+delta, `0.168057x` for semantic W and `0.221124x` for transport W. Its update
+direction cosine is `0.984706` with `1.0` valid coverage. The extra path costs
+`0.200390 s/diagnostic batch` and `0.013094 GiB` live allocation. This passed
+the predeclared Schema29 gate; it did not itself change training.
+
+The Schema29 source/local closure selection passes `124/124`, with an
+additional focused `21/21` call-graph/manifest/checkpoint selection. Tests
+prove two velocity calls and one flow sample, pass0 no-grad and detached
+condition, cache1 ownership of the sole formal loss and future dynamics,
+matched dropout entry streams, net RNG advance equal to one dynamic pass,
+unchanged parameter/state/optimizer inventory, Schema28 exact-resume rejection
+and unchanged two-pass deployment call count. Ruff, py_compile and diff checks
+pass. Pen and RDT CUDA smokes remain the next release gate.
 
 Use new empty output directories:
 
 ```bash
-RUN_TAG=schema28_action_world_smoke_$(date +%Y%m%d_%H%M%S)
+RUN_TAG=schema29_self_condition_smoke_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
-RUN_TAG=schema28_action_world_b8_$(date +%Y%m%d_%H%M%S)
+RUN_TAG=schema29_self_condition_b8_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema28_action_world_b8_TIMESTAMP \
+  runs/schema29_self_condition_b8_TIMESTAMP \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

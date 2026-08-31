@@ -48,7 +48,13 @@ from clearvla.mainline.training.engine import (
     NonFiniteGradientError,
     validate_finite_training_batch,
 )
-from clearvla.mainline.training.losses import LossLedger, anchored_gripper_persistence
+from clearvla.mainline.training.losses import (
+    LossLedger,
+    action_terms,
+    anchored_gripper_persistence,
+    compose_losses,
+    sample_flow_matching,
+)
 from clearvla.mainline.training.optimizer import (
     WarmupCosineSchedule,
     build_optimizer,
@@ -227,6 +233,133 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
     )
 
 
+def test_schema29_detached_self_conditioning_owns_one_formal_loss_and_rng_pass() -> None:
+    torch.manual_seed(2900)
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).train()
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    batch = _batch(config)
+    cache, training_state, static_metrics = model.encode_online(
+        batch.online,
+        training_mask=True,
+        collect_diagnostics=False,
+        condition_generator=torch.Generator().manual_seed(29001),
+    )
+    encoded = EncodedTrainingBatch(cache, training_state, static_metrics)
+
+    grad_modes: list[bool] = []
+    rng_entries: list[torch.Tensor] = []
+    rng_exits: list[torch.Tensor] = []
+    velocity_caches = []
+    velocity_outputs = []
+    noisy_inputs = []
+    time_inputs = []
+    original_velocity = model.velocity
+
+    def tracked_velocity(*args, **kwargs):
+        grad_modes.append(torch.is_grad_enabled())
+        rng_entries.append(torch.get_rng_state().clone())
+        velocity_caches.append(args[0])
+        noisy_inputs.append(kwargs["noisy_action_field"])
+        time_inputs.append(kwargs["time"])
+        output = original_velocity(*args, **kwargs)
+        velocity_outputs.append(output)
+        rng_exits.append(torch.get_rng_state().clone())
+        return output
+
+    torch.manual_seed(29002)
+    with mock.patch.object(
+        model,
+        "velocity",
+        side_effect=tracked_velocity,
+    ) as velocity, mock.patch(
+        "clearvla.mainline.training.engine.sample_flow_matching",
+        wraps=sample_flow_matching,
+    ) as sample_flow, mock.patch(
+        "clearvla.mainline.training.engine.compose_losses",
+        wraps=compose_losses,
+    ) as compose:
+        ledger, metrics = engine._forward_encoded(
+            batch,
+            encoded=encoded,
+            collect_diagnostics=True,
+            generator=torch.Generator().manual_seed(29003),
+        )
+
+    assert velocity.call_count == 2
+    assert sample_flow.call_count == 1
+    assert compose.call_count == 1
+    assert grad_modes == [False, True]
+    assert velocity_caches[0] is cache
+    assert velocity_caches[1] is not cache
+    assert velocity_caches[1].top is not cache.top
+    assert noisy_inputs[0] is noisy_inputs[1]
+    assert time_inputs[0] is time_inputs[1]
+    assert torch.equal(rng_entries[0], rng_entries[1])
+    assert torch.equal(rng_exits[0], rng_exits[1])
+    assert torch.equal(torch.get_rng_state(), rng_exits[1])
+
+    formal_condition = velocity_caches[1].top.action_condition
+    assert not formal_condition.interval_action.requires_grad
+    assert not formal_condition.interval_delta.requires_grad
+    assert velocity_caches[1].top.predicted_dynamics.semantic_delta.requires_grad
+    assert compose.call_args.kwargs["policy_output"] is velocity_outputs[1]
+    assert (
+        compose.call_args.kwargs["predicted_dynamics"]
+        is velocity_caches[1].top.predicted_dynamics
+    )
+    assert (
+        compose.call_args.kwargs["predicted_dynamics"]
+        is not cache.top.predicted_dynamics
+    )
+    assert ledger.terms["action_flow"].requires_grad
+    with torch.no_grad():
+        pass0_terms = action_terms(
+            config,
+            model.action_codec,
+            velocity_outputs[0],
+            batch.action_target,
+            batch.online.history,
+            compose.call_args.kwargs["flow_state"],
+            collect_diagnostics=False,
+        )
+    torch.testing.assert_close(
+        metrics["training_self_conditioning_pass0_action_flow_audit"],
+        pass0_terms["action_flow"],
+    )
+    torch.testing.assert_close(
+        metrics["training_self_conditioning_pass1_action_flow_minus_pass0"],
+        ledger.terms["action_flow"].detach()
+        - pass0_terms["action_flow"].detach(),
+    )
+    for name in (
+        "training_self_conditioning_pass0_clean_action_rms",
+        "training_self_conditioning_coarse_to_pass0_condition_rms",
+        "training_self_conditioning_pass0_to_pass1_clean_action_delta_rms",
+        "training_self_conditioning_pass1_world_interval_mismatch_rms",
+        "training_self_conditioning_pass1_world_delta_mismatch_rms",
+        "training_self_conditioning_pass0_action_flow_audit",
+        "training_self_conditioning_pass1_action_flow_minus_pass0",
+    ):
+        assert name in metrics
+        assert metrics[name].ndim == 0
+        assert torch.isfinite(metrics[name])
+
+
 def test_full_mainline_has_complete_gradient_ownership() -> None:
     torch.manual_seed(4)
     config = _config()
@@ -301,6 +434,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
             "gradient_tensor_w_appearance_fact_ingress_rms",
             "gradient_tensor_w_geometry_fact_ingress_rms",
             "gradient_tensor_w_physical_action_condition_rms",
+            "gradient_tensor_w_physical_action_carrier_rms",
         "gradient_tensor_p2_semantic_effect_rms",
         "gradient_tensor_p2_geometry_effect_rms",
         "gradient_tensor_p2_geometry_address_correction_rms",
@@ -328,6 +462,12 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     )
     assert result.metrics["gradient_tensor_p2_semantic_effect_rms"] > 0
     assert result.metrics["gradient_tensor_p2_geometry_effect_rms"] > 0
+    assert result.metrics["gradient_tensor_w_physical_action_condition_rms"] == 0
+    # Fresh initialization can legally make the multiplicative action branch
+    # locally flat.  The carrier slot is the exact formal consumer boundary;
+    # mature-run nonzero responsibility is a behavior observation, not a unit
+    # test invariant.
+    assert result.metrics["gradient_tensor_w_physical_action_carrier_rms"] >= 0
     # Parameter hooks survive their forward graph. R2 parameter-gradient
     # diagnostics must therefore read .grad in the engine rather than stacking
     # a new persistent hook on every diagnostic batch.
@@ -2560,6 +2700,7 @@ def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlati
     audit_metrics = MainlineTrainingEngine._audit_progress_metrics(
         batch,
         EncodedTrainingBatch(cache=cache, training_state=training_state, metrics=metrics),
+        formal_cache=cache,
     )
     expected = {
         "object_intent_audit_frame_progress_centroid_correlation",

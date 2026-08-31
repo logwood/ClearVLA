@@ -476,6 +476,16 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self.physical_action_condition(action_source),
             0.35,
         )
+        if collect_diagnostics:
+            # Schema29 deliberately detaches the predicted action condition
+            # before rebuilding W.  The input-condition VJP is consequently
+            # exact zero by contract; observe the first trainable W consumer
+            # after projection and its sole 0.35 scale boundary instead.
+            register_gradient_rms_metric(
+                action_carrier,
+                gradient_metrics,
+                "gradient_tensor_w_physical_action_carrier_rms",
+            )
         interval = action_carrier + self.interval_identity.to(
             device=objects.device,
             dtype=objects.dtype,

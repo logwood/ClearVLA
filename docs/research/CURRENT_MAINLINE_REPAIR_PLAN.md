@@ -1,6 +1,6 @@
-# ClearVLA Schema28 行为闭环与单/多任务合流计划
+# ClearVLA Schema28→29 行为闭环与单/多任务合流计划
 
-状态：**完整 Schema28 与正式 Stage A attribution 已审计；Stage B 已选择训练/runtime action-conditioned W 对齐为唯一核心候选；validation-only estimator/full-proposal 匹配门正在执行；八任务 train-only p95 threshold 已固定，联合 smoke 待完成**
+状态：**完整 Schema28、正式 Stage A attribution 与 estimator/full-proposal 门已完成；Schema29 detached action self-conditioning 已实现并通过本地闭环；八任务 train-only p95 threshold 已固定，Pen/RDT 联合 CUDA smoke 待完成**
 更新：2026-09-01
 
 本计划落实
@@ -38,8 +38,8 @@
 
 正式 attribution 已排除 W/CT 全局重复：W neutral 与 CT neutral 都有独立动作
 增量，组合影响更大；W dynamic 与 consequence neutral 的 bit-exact 恒等同时证明
-当前 sole-consumer 图完整。训练侧 self-conditioning 因此进入 estimator 匹配门，
-但尚不是已经批准的 Schema29 事实。
+当前 sole-consumer 图完整。训练侧 self-conditioning 随后通过 estimator 匹配门并
+成为活动 Schema29 源码；它的正式行为收益仍必须由新实验回答。
 
 ## 二、工作区与合流边界
 
@@ -260,9 +260,9 @@ transport quota 与 hard event gate 继续禁止。
 任何分支都不允许重新采用 W->CT bridge、CT world generator、geometry gain、
 transport quota 或 hard gripper event gate。
 
-## 五、阶段 C：首选候选——训练侧 detached action self-conditioning
+## 五、阶段 C：已实现——训练侧 detached action self-conditioning
 
-仅当阶段 A 证明 W 对正确 action/world 有动作责任时，实施本节。它修调用顺序，
+阶段 A 已证明 W 对正确 action/world 有动作责任。本节修调用顺序，
 不增加第二套网络、不增加外部 loss weight，也不声称完全复现五步 proposal ODE。
 
 ### C1. 候选前向
@@ -300,7 +300,7 @@ loss 简单相加从而翻倍 action budget。
 若 estimator 与完整 proposal 的差异大到改变 matched W 责任，停止本候选；不把
 第三遍 ODE 塞进训练来强行追平。
 
-这项门现在由 validation-only observer 实现：每个既有 diagnostic batch 复用完整
+这项门由 validation-only observer 实现：每个既有 diagnostic batch 复用完整
 proposal 已拥有的 initial physical noise，按训练 flow-time 分布取一个 `t`，只执行
 一次 cache0 endpoint velocity，detached decode 后只重建 W。它记录 normalized
 interval action/delta RMS、相对 coarse baseline 的 ratio、更新方向 cosine/有效覆盖、
@@ -308,6 +308,13 @@ semantic/transport W RMS，以及完整额外路径的时间/实时 CUDA allocat
 primary sample，不进入 loss，不增加参数、buffer、optimizer/checkpoint state 或全局
 RNG draw。observer 在 eval mode 下运行，因此训练 dropout 的匹配随机流仍属于真正
 Schema29 实现 smoke 的独立合同，不能由本门代替。
+
+正式 gate 已在 179 个 validation batch、16 个 diagnostic batch 上完成：estimator
+相对 coarse 的 full-proposal interval action/delta 距离为
+`0.210828x / 0.115498x`，semantic/transport W 距离为
+`0.168057x / 0.221124x`，更新方向 cosine `0.984706`、有效覆盖 `1.0`；额外路径
+开销 `0.200390 s/diagnostic batch`、live allocation `0.013094 GiB`。该结果放行
+Schema29，但不预判正式训练收益。
 
 ### C3. 梯度与生命周期合同
 
@@ -321,6 +328,12 @@ Schema29 实现 smoke 的独立合同，不能由本门代替。
   optimizer resume；只允许明确审计过的初始化/迁移策略；
 - first-boundary、consumer-backward、checkpoint 和 deployment call-count 必须在
   修改后各自反向复核一次。
+
+当前实现满足以上合同：一次 flow 采样、pass0/pass1 两次 velocity、pass0
+`no_grad`、condition detached、cache1 同时进入唯一正式 action loss 与 future
+loss；forked RNG 令两遍 dropout 入口一致且全局状态只留下正式 pass1 的推进。没有
+新增参数、state key、optimizer owner 或 objective，Schema28 exact resume 被拒绝，
+部署仍是两遍各五次 update 加 endpoint。相关完整选择 `124/124` 通过。
 
 ### C4. 节制诊断面
 
@@ -423,9 +436,10 @@ smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
        codec/物理解码边界
 [done] 用 train-only adjacent-command audit 固定共享 p95=0.18310546875 raw threshold
 [done] 根据 attribution 决策表选择 detached self-conditioning 进入 estimator 门
-[next] 在同一 Schema28 checkpoint 上完成 estimator/full-proposal 匹配门
-[next] 对被放行 core unit 做双向源码审查、实现和 Pen 单任务 smoke
-[next] 在相同最终 core 上完成 RDT batch-eight mixed-model smoke
+[done] 在同一 Schema28 checkpoint 上完成 estimator/full-proposal 匹配门
+[done] 对被放行 core unit 做双向源码审查并实现 Schema29
+[next] 在 Schema29 精确提交上完成 Pen 单任务 CUDA smoke
+[next] 在相同精确提交上完成 RDT batch-eight mixed-model CUDA smoke
 [last] 依次启动 Pen 单任务与 RDT 多任务正式实验
 ```
 

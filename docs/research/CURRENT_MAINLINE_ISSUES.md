@@ -1,8 +1,9 @@
-# ClearVLA Schema28 当前纯问题账本
+# ClearVLA Schema29 当前纯问题账本
 
-更新：2026-08-31
+更新：2026-09-01
 
-本文件只保留完整 Schema28 行为运行之后仍未关闭的问题。当前执行图、动作
+本文件只保留完整 Schema28 行为运行之后、进入 Schema29 后仍未关闭的问题。
+在 Schema29 正式曲线产生前，Schema28 仍是行为基线，不是当前源码图。当前执行图、动作
 ABI、运行频率与检查点边界见
 [`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)，
 下一版的实施顺序与放行门槛见
@@ -25,10 +26,12 @@ ABI、运行频率与检查点边界见
 Schema26 与 Schema28 的数据、split、normalizer、seed 和训练长度对齐，可作
 近控制的版本方向比较；Schema27 只有 5 个完整 epoch，不能作为最终点对照。
 
-当前工作树已经实现无训练、无持久状态的 matched W/consequence/CT attribution，
-并通过源码回归和 fresh CPU validation smoke。它尚未在上述 Schema28 checkpoint
-上运行；本文件以下所有“责任尚未可分”结论因此保持不变，不得用 fresh-model
-恒等测试替代 checkpoint 行为证据。
+正式 matched W/consequence/CT attribution 已在上述 Schema28 checkpoint 的全部
+179 个 validation batch 上完成，16 个 diagnostic batch 通过所有 identity/coverage
+门。W neutral 与 CT neutral 都有独立远端动作责任，二者不重复。随后 endpoint
+estimator/full-proposal gate 以 `0.984706` 更新方向 cosine、`1.0` 有效覆盖通过，
+放行 Schema29 detached self-conditioning。它们选择结构修改，不替代 Schema29
+正式行为曲线。
 
 ## 已由本次运行关闭的边界
 
@@ -41,12 +44,15 @@ Schema26 与 Schema28 的数据、split、normalizer、seed 和训练长度对�
 - typed-W floor 修正后没有再出现 typed normalization owner spike；
 - capacity 的 FP32 路径、CandidateWorld identity、两遍 same-noise ODE、loss
   ledger、optimizer 和 checkpoint 合同均保持 finite/一致。
+- matched attribution 已分开 W 与 CT：neutralize W dynamic 的 far/gripper action
+  delta 为 `0.05829 / 0.13240`，neutralize CT 为 `0.01605 / 0.04142`，联合为
+  `0.06527 / 0.15345`；二者都有独立责任，不新增 W->CT bridge。
 
 这些是结构与运行健康，不等于以下行为问题已经解决。
 
-## V28-01 — 训练没有覆盖部署最终使用的 action-conditioned W 分布
+## S29-01 — train/runtime action-conditioned W 错位已结构修复，行为收益待验证
 
-源码事实：
+Schema28 的已确认错位是：
 
 ```text
 training
@@ -56,14 +62,14 @@ deployment / validation
   W(coarse) -> proposal ODE -> W(proposal) -> refined ODE -> final action
 ```
 
-`training/engine.py::_forward_encoded` 只调用一次 `model.velocity`；loss 中的 W
-future objective 也监督 encode 阶段缓存的 `W(coarse)`。训练没有让第二次策略调用
-在自己预测动作重建的 W 上承担最终 action loss。这是已确认的 train/runtime
-调用图错位。
+Schema29 已改为一次 flow 采样、cache0 detached endpoint estimator、只重建 W、
+cache1 正式 velocity；唯一 action loss 与 future loss 都消费 cache1。pass0 无
+backward，forked RNG 令净随机流仍等于一个正式 dynamic pass。参数、optimizer、
+loss 权重与部署两遍 ODE 不变，Schema28 exact resume 被拒绝。
 
-它尚不是已确认的行为根因。现有日志没有 matched `W dynamic neutral`、
-`ControlledTransition neutral` 与二者组合，因而不能证明只要增加一次训练侧
-self-conditioning 就会改善远端或 gripper。
+该结构已本地闭环，但尚不是已确认的行为根因。只有 Pen 完整曲线能回答它是否
+改善远端、gripper、final mismatch 与 spike；不得把 smoke finite 或早期 aggregate
+下降写成行为关闭。
 
 ## V28-02 — outer refinement 是有效 correction，但不是自洽闭环
 
@@ -136,24 +142,6 @@ address correction 为 `0.01196`。matched P2 切片显示：
 因此 semantic 的远端责任已经成立；geometry 当前行为效应很弱也成立。但现有
 干预不能判定 geometry 应成为独立动作值、只应辅助 address，还是在这个任务上
 本就信息量有限。直接放大 geometry 会改变 semantic/geometry 的竞争，依据不足。
-
-## V28-06 — W/P2 consequence 与 ControlledTransition 的责任尚未可分
-
-真实源码路径是：
-
-```text
-W -> P2 typed effect -> protected consequence
-                         |-> ControlledTransition context/action tokens
-                         `-> Bottom protected read
-```
-
-W 已经到达 ControlledTransition，不存在缺失的 `W -> CT` 边。CT 也不是死路：
-validation value RMS `1.4999`、spatial variation `0.6690`，训练尾部 raw gradient
-约 `0.003`。再增加一条 W 直连会制造重复消费。
-
-现有 `execution neutral/hard/full-capacity` 干预针对 execution controller，不是
-W/CT matched responsibility 分解。还无法判断 CT 与 W consequence 是互补、重复，
-还是分别负责不同动作频段。
 
 ## V28-07 — finite spike 显著减少，但 observation owner 仍会复发
 
