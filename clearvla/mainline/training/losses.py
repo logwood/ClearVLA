@@ -961,7 +961,10 @@ def action_terms(
     objective = config.objectives
     raw_grip = target.raw_units[..., -1].float()
     raw_boundary = torch.cat(
-        (target.current_raw_units[:, None, -1:].float(), raw_grip[:, :-1, None]),
+        (
+            target.gripper_transition_boundary_raw_units[:, None, -1:].float(),
+            raw_grip[:, :-1, None],
+        ),
         dim=1,
     )[..., 0]
     raw_grip_delta = raw_grip - raw_boundary
@@ -1049,16 +1052,23 @@ def action_terms(
     decoded_action_v120_comparable = (
         decoded_element_error.mean(dim=-1) * step_weight
     ).mean()
+    transition_start = torch.cat(
+        (
+            history.action_state[:, :-1].float(),
+            target.gripper_transition_boundary[:, -1:].float(),
+        ),
+        dim=-1,
+    )
     boundary = torch.cat(
         (
-            history.action_state[:, None].float(),
+            transition_start[:, None],
             target.normalized[:, :-1].float(),
         ),
         dim=1,
     )
     delta = target.normalized.float() - boundary
     predicted_boundary = torch.cat(
-        (history.action_state[:, None].float(), decoded[:, :-1]), dim=1
+        (transition_start[:, None], decoded[:, :-1]), dim=1
     )
     predicted_delta = decoded - predicted_boundary
     smooth_delta_rows = F.smooth_l1_loss(
@@ -1082,7 +1092,12 @@ def action_terms(
         event_mask,
     )
     continuous_gripper_target = target.normalized[..., -1:].float()
-    continuous_gripper_target_delta = delta[..., -1:].detach().float()
+    # Event ownership follows the dataset's continuous command transition,
+    # but the deployed delta branch remains the codec's qpos-anchored physical
+    # coordinate.  Reusing the command boundary here would give row zero two
+    # incompatible targets whenever qpos and the previous command differ.
+    target_parts = codec.split(flow_state.target_physical.detach())
+    continuous_gripper_target_delta = target_parts.gripper_field[..., 1:2].float()
     transition_mask, persistence_mask = event_transition_persistence_masks(
         event_mask
     )
@@ -1140,7 +1155,6 @@ def action_terms(
     gripper_trajectory = 0.5 * (
         gripper_trajectory_absolute + gripper_trajectory_delta
     )
-    target_parts = codec.split(flow_state.target_physical.detach())
     motion_target = (
         target_parts.arm_delta.float().norm(dim=-1)
         >= float(objective.arm_motion_threshold)

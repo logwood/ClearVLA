@@ -133,6 +133,12 @@ def _validate_finite(batch: TrainingBatch) -> None:
         "action_normalized": batch.action_target.normalized,
         "action_raw": batch.action_target.raw_units,
         "current_action_state_raw": batch.action_target.current_raw_units,
+        "gripper_transition_boundary": (
+            batch.action_target.gripper_transition_boundary
+        ),
+        "gripper_transition_boundary_raw": (
+            batch.action_target.gripper_transition_boundary_raw_units
+        ),
         "future_dino": batch.future.dino_supports,
         "future_action": batch.future.action_sequence,
         "future_state": batch.future.state_sequence,
@@ -239,6 +245,12 @@ def main() -> None:
             "action_target_raw": _shape(typed.action_target.raw_units),
             "current_action_state_raw": _shape(
                 typed.action_target.current_raw_units
+            ),
+            "gripper_transition_boundary": _shape(
+                typed.action_target.gripper_transition_boundary
+            ),
+            "gripper_transition_boundary_raw": _shape(
+                typed.action_target.gripper_transition_boundary_raw_units
             ),
             "future_dino": _shape(typed.future.dino_supports),
             "future_action": _shape(typed.future.action_sequence),

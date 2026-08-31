@@ -1,10 +1,11 @@
 """Train-only right-gripper evidence for a bounded RDT task selection.
 
 The artifact deliberately does not adopt an event threshold.  It reports the
-continuous source charts, exact deltas consumed by the current 24-step
-information sampler, and threshold-dependent candidate statistics using only
-the selected train lane.  Validation/test rows are never opened for threshold
-selection.
+continuous source charts, exact adjacent-command deltas consumed by the
+24-step information sampler, and threshold-dependent candidate statistics
+using only the selected train lane. Validation/test rows are never opened for
+threshold selection. Observed qpos remains reported as a physical-boundary
+audit but never becomes a command-transition label.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from clearvla.data.hdf5_episode import LoadedEpisode, episode_identity, find_hdf
 from clearvla.data.multitask_selection import RDT_MULTITASK_SELECTION_SCHEMA
 from clearvla.data.split import RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH
 
-GRIPPER_AUDIT_SCHEMA = "clearvla-rdt-multitask-gripper-train-audit-v1"
+GRIPPER_AUDIT_SCHEMA = "clearvla-rdt-multitask-gripper-train-audit-v2"
 PROFILE_NAME = "rdt_right_arm_action_chart_v1"
 POLICY_HORIZON = 24
 QUANTILES = (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 1.0)
@@ -164,7 +165,7 @@ def _episode_evidence(
     for center in range(low_center, high_center + 1):
         policy = command[center : center + POLICY_HORIZON]
         delta = np.concatenate(
-            ((policy[:1] - qpos_action_chart[center]), np.diff(policy))
+            ((policy[:1] - command[center - 1]), np.diff(policy))
         )
         sampler_rows.append(delta)
         window_max_abs.append(float(np.abs(delta).max()))
@@ -378,27 +379,34 @@ def audit_rdt_multitask_gripper(
         "train_episode_count": len(rows),
         "train_episode_inventory_sha256": _canonical_digest(train_ids, ensure_ascii=True),
         "train_episode_rows_sha256": _canonical_digest(episode_records, ensure_ascii=True),
-        "action_profile": {**profile.as_dict(), "sha256": profile.digest()},
+        "action_profile": {
+            **profile.as_dict(),
+            "sha256": profile.digest(),
+            "gripper_transition_boundary": profile.gripper_transition_boundary,
+        },
         "sampler_consumer": {
             "policy_horizon": POLICY_HORIZON,
-            "first_delta": "action_command[center]-qpos[center]_converted_to_action_chart",
+            "first_delta": "action_command[center]-action_command[center-1]",
             "remaining_deltas": "action_command[t]-action_command[t-1]",
             "window_event": "any_abs_delta_greater_than_or_equal_to_candidate_threshold",
+            "qpos_role": "physical_decode_boundary_only_not_event_or_activity_label",
         },
         "overall": _scope_stats(rows),
         "tasks": per_task,
         "candidate_thresholds": candidates,
         "threshold_decision": {
-            "status": "unresolved_source_semantics",
+            "status": "command_transition_boundary_adopted_threshold_unresolved",
             "adopted_value": None,
-            "candidate_source": "selected_train_split_exact_sampler_delta_quantiles_only",
+            "candidate_source": (
+                "selected_train_split_adjacent_command_delta_quantiles_only"
+            ),
             "validation_or_test_used": False,
             "pen_0_1_inherited": False,
             "formal_shuffled_training_ready": False,
             "blocker": (
-                "The source defines continuous command and qpos charts but does not define "
-                "which command transitions own a semantic gripper event/activity label. "
-                "Candidate statistics are descriptive and cannot authorize shuffled training."
+                "The continuous command-transition owner is fixed, but the source has no "
+                "discrete event label. Candidate thresholds describe command activity only "
+                "and one value must be adopted explicitly before shuffled training."
             ),
         },
     }

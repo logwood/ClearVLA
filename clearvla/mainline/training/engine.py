@@ -91,6 +91,12 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "target.action": batch.action_target.normalized,
         "target.action_raw_units": batch.action_target.raw_units,
         "target.current_raw_units": batch.action_target.current_raw_units,
+        "target.gripper_transition_boundary": (
+            batch.action_target.gripper_transition_boundary
+        ),
+        "target.gripper_transition_boundary_raw_units": (
+            batch.action_target.gripper_transition_boundary_raw_units
+        ),
         "future.dino": batch.future.dino_supports,
         "future.action": batch.future.action_sequence,
         "future.state": batch.future.state_sequence,

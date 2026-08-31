@@ -496,6 +496,7 @@ def _load_mainline_data(
             state_normalizer=state_normalizer,
             action_normalizer=action_normalizer,
             config=dataset_config,
+            gripper_transition_boundary=profile.gripper_transition_boundary,
         )
         datasets[name] = CachedTokenPolicyWindowDataset(
             base,
@@ -576,7 +577,11 @@ def _load_mainline_data(
         gripper_indices=profile.gripper_indices,
         task_order=task_order,
         episode_task_indices=episode_task_indices,
-        data_profile_metadata={**profile.as_dict(), "sha256": profile.digest()},
+        data_profile_metadata={
+            **profile.as_dict(),
+            "sha256": profile.digest(),
+            "gripper_transition_boundary": profile.gripper_transition_boundary,
+        },
         split_metadata=split_metadata,
         normalizer_metadata=normalizer_metadata,
     )
@@ -711,6 +716,18 @@ def to_training_batch(
         ),
         current_raw_units=_device_tensor(
             batch, "action_state_raw", device=device, dtype=torch.float32
+        ),
+        gripper_transition_boundary=_device_tensor(
+            batch,
+            "gripper_transition_boundary",
+            device=device,
+            dtype=torch.float32,
+        ),
+        gripper_transition_boundary_raw_units=_device_tensor(
+            batch,
+            "gripper_transition_boundary_raw",
+            device=device,
+            dtype=torch.float32,
         ),
     )
     audit = AuditMetadata(

@@ -56,6 +56,10 @@ def _batch(batch: int = 2) -> TrainingBatch:
             normalized=torch.zeros(batch, dims.action_horizon, dims.action_dim),
             raw_units=torch.zeros(batch, dims.action_horizon, dims.action_dim),
             current_raw_units=torch.zeros(batch, dims.action_dim),
+            gripper_transition_boundary=torch.zeros(batch, dims.action_dim),
+            gripper_transition_boundary_raw_units=torch.zeros(
+                batch, dims.action_dim
+            ),
         ),
         future=FutureSupervision(
             dino_supports=torch.zeros(

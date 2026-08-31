@@ -116,6 +116,12 @@ def test_rdt_profiles_keep_command_units_and_convert_qpos_boundary(tmp_path: Pat
     assert right.action_states_raw is not None
     assert right.action_states_raw[0, -1] == pytest.approx(13.9231)
     assert right.data_profile == "rdt_right_arm_action_chart_v1"
+    assert resolve_action_state_profile(
+        "rdt_right_arm_action_chart_v1"
+    ).gripper_transition_boundary == "previous_command"
+    assert resolve_action_state_profile(
+        "identity_7d_pen"
+    ).gripper_transition_boundary == "current_action_state"
     assert right.source_action_dim == right.source_state_dim == 14
 
     bimanual = resolve_action_state_profile(
@@ -219,7 +225,7 @@ def _write_rdt_episode(
     qpos[:, :6] = action[:, :6] - 0.01
     qpos[:, 7:13] = action[:, 7:13] - 0.02
     action[:, 6] = 11.8997
-    action[:, 13] = 13.9231
+    action[:, 13] = 13.0 + time[:, 0] * 0.01
     qpos[:, 6] = 4.7908
     qpos[:, 13] = 4.7888
     image = np.full((length, 32, 32, 3), int(offset) % 255, dtype=np.uint8)
@@ -335,6 +341,14 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
     ]
     assert bundle.data_profile_metadata["name"] == "rdt_right_arm_action_chart_v1"
     assert bundle.gripper_event_threshold is None
+    _, adjacent_command_events = bundle.datasets["val"].training_information_signals(
+        gripper_indices=(6,),
+        event_threshold=0.1,
+    )
+    # Synthetic commands move by 0.01 per row while qpos remains fixed at the
+    # converted 13.9231 boundary. A qpos->command first row would falsely mark
+    # every window; the adopted adjacent-command boundary marks none.
+    assert not bool(adjacent_command_events.any())
     with pytest.raises(ValueError, match="no adopted gripper-event threshold"):
         bundle.loader(
             "train",
@@ -364,6 +378,24 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
     assert tuple(typed.online.observation.dino_history.shape) == (1, 3, 2, 64, 4)
     assert tuple(typed.action_target.normalized.shape) == (1, 24, 7)
     assert typed.action_target.current_raw_units[0, -1].item() == pytest.approx(13.9231)
+    assert bundle.data_profile_metadata["gripper_transition_boundary"] == (
+        "previous_command"
+    )
+    assert torch.equal(
+        typed.action_target.gripper_transition_boundary.cpu(),
+        raw["gripper_transition_boundary"],
+    )
+    assert torch.equal(
+        typed.action_target.gripper_transition_boundary_raw_units.cpu(),
+        raw["gripper_transition_boundary_raw"],
+    )
+    assert typed.action_target.gripper_transition_boundary_raw_units[
+        0, -1
+    ].item() != pytest.approx(typed.action_target.current_raw_units[0, -1].item())
+    assert (
+        typed.action_target.raw_units[0, 0, -1]
+        - typed.action_target.gripper_transition_boundary_raw_units[0, -1]
+    ).item() == pytest.approx(0.01, abs=1e-6)
     assert bool(torch.isfinite(typed.online.observation.raw_rgb).all())
     assert int(typed.online.goal.mask.sum()) == 3
 

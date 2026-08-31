@@ -276,6 +276,8 @@ def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None
             normalized=target,
             raw_units=target,
             current_raw_units=current,
+            gripper_transition_boundary=current,
+            gripper_transition_boundary_raw_units=current,
         ),
         online=SimpleNamespace(
             history=SimpleNamespace(action_state=current),

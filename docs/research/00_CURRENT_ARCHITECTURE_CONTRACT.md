@@ -676,8 +676,13 @@ supports may change targets and losses, never deployment action.
     split subset after verifying the complete source, manifest, train
     normalizer and language identities, while formal loading still requires
     DINO cache rows for every eligible episode. RDT has no inherited Pen event
-    threshold, so its shuffled train loader fails closed while that semantic
-    decision is unresolved. These external contracts do not claim
+    threshold. Its continuous transition owner is the adjacent command stream:
+    the first policy row compares with the preceding executed command and later
+    rows compare with the preceding policy command. Observed qpos remains the
+    codec/physical-decode anchor and is never converted into a discrete event
+    label. The shuffled train loader still fails closed until a train-only
+    adjacent-command audit supplies one explicitly adopted activity threshold.
+    These external contracts do not claim
     three-camera or 14-D model consumption.
     The real bounded `val` acceptance at commit
     `9a5611ede2133a5365d02e3a73b1a1fe5a6eb841` closed this external boundary:
@@ -717,9 +722,9 @@ supports may change targets and losses, never deployment action.
     materialized by this bounded formal loader and cannot enter training or
     tuning. Task ID remains CPU audit/sampling/logging metadata and is absent
     from model samples. Formal shuffled training remains fail-closed: the
-    train-only gripper audit does not inherit Pen's `0.1`, and source semantics
-    have not yet defined which continuous right-gripper transitions own an
-    event/activity label. This preparation therefore still does not claim
+    train-only gripper audit does not inherit Pen's `0.1`, and one continuous
+    activity threshold has not yet been adopted from the adjacent-command
+    distribution. This preparation therefore still does not claim
     depth, a three-camera model consumer, or native 14-D bimanual adaptation.
     The adopted eight-task experiment interface is now source-complete but
     behavior-pending. It constructs one immutable CPU registry from the
@@ -743,13 +748,44 @@ supports may change targets and losses, never deployment action.
     rows, continuous gripper-trajectory ownership and decoded validation.
     Pen remains exactly `0.10`; unlike thresholds fail configuration
     validation. This executable closure does not itself adopt an RDT threshold
-    or authorize a formal run. The train-only candidates show why: thresholds
-    `0.146484375 / 0.40283203125 / 0.7599645256996155` label approximately
-    `99.27% / 81.84% / 50.33%` of sliding windows because command and observed
-    qpos are not synonymous boundaries. Source semantics must first decide
-    whether an event is command change, executed-state change, or another
-    explicitly justified object. Local data/config/runtime regression is
-    `40/40`; a mixed model backward/deployment smoke is still pending.
+    or authorize a formal run. The former candidates
+    `0.146484375 / 0.40283203125 / 0.7599645256996155` are invalid because their
+    first row mixed command with qpos. The v2 audit uses adjacent commands only;
+    qpos is retained only as a physical-boundary audit. Sampler strata, the
+    continuous trajectory mask and decoded event metrics consume the same
+    adopted command-activity threshold, while the physical action field keeps
+    its qpos-anchored first delta. A mixed model backward/deployment smoke is
+    still pending.
+
+    The active gripper boundary map is therefore:
+
+    ```text
+    HDF5 command[t-1], command[t]
+      -> profile projection / train-only normalization
+      -> ActionSupervision.gripper_transition_boundary [B,7] FP32
+      -> sampler activity stratum
+      -> loss event/transition/persistence masks
+      -> decoded validation event class
+
+    HDF5 qpos[t] -> command-chart projection
+      -> ObservableHistory.action_state [B,7] FP32
+      -> codec encode/decode and first physical-field delta
+      -> formal flow, decoded action and physical-delta consistency
+
+    .03 continuous gripper objective
+      -> event-owned absolute + codec-delta/persistence field
+      -> deployed gripper-private value/delta channels
+      -> bottom-head gradients
+    ```
+
+    The previous-command tensor is detached dataset supervision, not an online
+    model input. Its non-gripper coordinates have no consumer. It adds no model
+    parameter, optimizer owner or checkpoint tensor; the declared boundary is
+    serialized in data/run identity. The sole unresolved assumption is the
+    positive raw-unit activity threshold, which must be selected from train
+    adjacent-command evidence and then remain identical across all three mask/
+    metric consumers. Using command delta as the codec's first delta target is
+    forbidden because it would compete with the qpos-anchored formal flow target.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older
    schemas are rejected; explicit compatible bottom-only migration is the

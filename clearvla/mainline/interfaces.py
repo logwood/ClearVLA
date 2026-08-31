@@ -269,6 +269,10 @@ class ActionSupervision:
     # It is byte-equivalent to native state only when the selected data
     # profile declares the qpos and command coordinates identical.
     current_raw_units: Tensor  # float32 [B,A], current raw action-chart state
+    # Dataset-profile-owned first boundary for gripper command transitions.
+    # Pen uses current action-state; RDT uses the previous executed command.
+    gripper_transition_boundary: Tensor  # float32 [B,A], normalized action chart
+    gripper_transition_boundary_raw_units: Tensor  # float32 [B,A], raw action chart
 
     @property
     def batch(self) -> int:
@@ -289,13 +293,30 @@ class ActionSupervision:
             (self.batch, dims.action_dim),
             "current raw-unit action state",
         )
-        for name in ("raw_units", "current_raw_units"):
+        _shape(
+            self.gripper_transition_boundary,
+            (self.batch, dims.action_dim),
+            "normalized gripper transition boundary",
+        )
+        _shape(
+            self.gripper_transition_boundary_raw_units,
+            (self.batch, dims.action_dim),
+            "raw-unit gripper transition boundary",
+        )
+        for name in (
+            "raw_units",
+            "current_raw_units",
+            "gripper_transition_boundary",
+            "gripper_transition_boundary_raw_units",
+        ):
             if getattr(self, name).dtype != torch.float32:
                 raise TypeError(f"action supervision {name} must be float32")
         devices = {
             self.normalized.device,
             self.raw_units.device,
             self.current_raw_units.device,
+            self.gripper_transition_boundary.device,
+            self.gripper_transition_boundary_raw_units.device,
         }
         if len(devices) != 1:
             raise ValueError("normalized and raw-unit action supervision must share a device")

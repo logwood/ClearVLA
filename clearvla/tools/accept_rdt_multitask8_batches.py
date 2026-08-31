@@ -35,6 +35,8 @@ _EXPECTED_SHAPES = {
     "action_target_normalized": (1, 24, 7),
     "action_target_raw": (1, 24, 7),
     "current_action_state_raw": (1, 7),
+    "gripper_transition_boundary": (1, 7),
+    "gripper_transition_boundary_raw": (1, 7),
     "future_dino": (1, 12, 2, 256, 768),
     "future_action": (1, 48, 7),
     "future_state": (1, 48, 7),
@@ -100,6 +102,12 @@ def _typed_tensors(batch: TrainingBatch) -> dict[str, Tensor]:
         "action_target_normalized": batch.action_target.normalized,
         "action_target_raw": batch.action_target.raw_units,
         "current_action_state_raw": batch.action_target.current_raw_units,
+        "gripper_transition_boundary": (
+            batch.action_target.gripper_transition_boundary
+        ),
+        "gripper_transition_boundary_raw": (
+            batch.action_target.gripper_transition_boundary_raw_units
+        ),
         "future_dino": batch.future.dino_supports,
         "future_action": batch.future.action_sequence,
         "future_state": batch.future.state_sequence,

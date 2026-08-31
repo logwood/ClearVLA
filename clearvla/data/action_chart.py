@@ -36,6 +36,27 @@ class ActionStateChartProfile:
     def output_dim(self) -> int:
         return len(self.action_indices)
 
+    @property
+    def gripper_transition_boundary(self) -> str:
+        """Dataset-owned first boundary for continuous gripper commands.
+
+        This is deliberately not part of the numeric projection digest used
+        by already-built RDT normalizer/cache artifacts: it changes no stored
+        array. The resolved run metadata records it independently.
+        """
+
+        if self.name == "identity_7d_pen":
+            return "current_action_state"
+        if self.name in {
+            "rdt_right_arm_action_chart_v1",
+            "rdt_left_arm_action_chart_v1",
+            "rdt_bimanual_action_chart_v1",
+        }:
+            return "previous_command"
+        raise ValueError(
+            f"profile {self.name!r} has no declared gripper transition boundary"
+        )
+
     def validate(self) -> None:
         if not self.name or not self.action_chart or not self.state_chart:
             raise ValueError("action/state profile identities must be non-empty")

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
 import torch
 
+from clearvla.mainline.config import ExperimentConfig
+from clearvla.mainline.interfaces import ActionSupervision, ObservableHistory
 from clearvla.mainline.model.action_codec import (
     PhysicalActionFieldCodec,
     anchor_horizon_weights,
 )
+from clearvla.mainline.model.policy import PolicyStepOutput
 from clearvla.mainline.model.types import PhysicalActionCondition
 from clearvla.mainline.training.losses import (
+    FlowMatchingState,
+    action_terms,
     anchored_gripper_persistence,
     balanced_event_row_weights,
     causal_event_trajectory_mask,
@@ -229,6 +237,61 @@ def test_no_event_gripper_persistence_is_exact_zero() -> None:
     assert torch.count_nonzero(transition) == 0
     assert torch.count_nonzero(persistence) == 0
     assert torch.count_nonzero(reconstructed) == 0
+
+
+def test_command_event_boundary_does_not_retarget_the_qpos_anchored_codec_delta() -> None:
+    codec = _codec()
+    config = ExperimentConfig()
+    action = torch.zeros(1, 24, 7)
+    action[..., -1] = 1.0
+    current_qpos = torch.zeros(1, 7)
+    previous_command = torch.zeros(1, 7)
+    previous_command[..., -1] = 0.5
+    target_physical = codec.encode(action, current_qpos)
+    zero = torch.zeros_like(target_physical)
+    output = cast(
+        PolicyStepOutput,
+        SimpleNamespace(
+            bottom=SimpleNamespace(
+                physical_velocity=target_physical,
+                motion_logits=torch.zeros(1, 24),
+                decoder_tensors={},
+            )
+        )
+    )
+    target = ActionSupervision(
+        normalized=action,
+        raw_units=action,
+        current_raw_units=current_qpos,
+        gripper_transition_boundary=previous_command,
+        gripper_transition_boundary_raw_units=previous_command,
+    )
+    terms = action_terms(
+        config,
+        codec,
+        output,
+        target,
+        cast(ObservableHistory, SimpleNamespace(action_state=current_qpos)),
+        FlowMatchingState(
+            time=torch.zeros(1),
+            source_physical_noise=zero,
+            noisy_physical=zero,
+            target_physical=target_physical,
+            target_physical_velocity=target_physical,
+        ),
+    )
+
+    torch.testing.assert_close(
+        terms["action_gripper_event_rate"], torch.tensor(1.0 / 24.0)
+    )
+    for name in (
+        "action_flow",
+        "decoded_action",
+        "smooth_delta",
+        "physical_delta_consistency",
+        "gripper_trajectory",
+    ):
+        torch.testing.assert_close(terms[name], torch.tensor(0.0), atol=0.0, rtol=0.0)
 
 
 def test_horizon_action_condition_uses_deterministic_four_interval_projection() -> None:

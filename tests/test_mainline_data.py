@@ -56,6 +56,8 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
         "state_raw": torch.randn(batch, 7),
         "action_state_raw": torch.randn(batch, 7),
         "action_state": torch.randn(batch, 7),
+        "gripper_transition_boundary": torch.randn(batch, 7),
+        "gripper_transition_boundary_raw": torch.randn(batch, 7),
         "history_state": torch.randn(batch, 3, 7),
         "executed_action_history": torch.randn(
             batch,
@@ -91,6 +93,14 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
     assert torch.equal(typed.action_target.raw_units.cpu(), raw["policy_action_raw"])
     assert torch.equal(
         typed.action_target.current_raw_units.cpu(), raw["action_state_raw"]
+    )
+    assert torch.equal(
+        typed.action_target.gripper_transition_boundary.cpu(),
+        raw["gripper_transition_boundary"],
+    )
+    assert torch.equal(
+        typed.action_target.gripper_transition_boundary_raw_units.cpu(),
+        raw["gripper_transition_boundary_raw"],
     )
     assert torch.equal(typed.online.goal.tokens[0].cpu(), goal_rows[1])
     assert torch.equal(typed.online.goal.tokens[1].cpu(), goal_rows[0])

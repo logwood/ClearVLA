@@ -226,6 +226,9 @@ class ValidationAccumulator:
         normalized_current = batch.online.history.action_state.float()
         raw_target = batch.action_target.raw_units.float()
         raw_current = batch.action_target.current_raw_units.float()
+        raw_gripper_transition_boundary = (
+            batch.action_target.gripper_transition_boundary_raw_units.float()
+        )
         if row_indices is not None:
             rows = row_indices.detach().to(device="cpu", dtype=torch.long)
             if rows.ndim != 1 or not rows.numel():
@@ -240,6 +243,9 @@ class ValidationAccumulator:
             normalized_current = normalized_current.index_select(0, device_rows)
             raw_target = raw_target.index_select(0, device_rows)
             raw_current = raw_current.index_select(0, device_rows)
+            raw_gripper_transition_boundary = (
+                raw_gripper_transition_boundary.index_select(0, device_rows)
+            )
             if motion_logits is not None:
                 motion_logits = motion_logits.index_select(0, device_rows)
             if motion_target is not None:
@@ -346,8 +352,16 @@ class ValidationAccumulator:
             raw_prediction = prediction.float()
             raw_target = target
             raw_current = normalized_current
-        target_boundary = torch.cat((raw_current[:, None], raw_target[:, :-1]), dim=1)
-        pred_boundary = torch.cat((raw_current[:, None], raw_prediction[:, :-1]), dim=1)
+        transition_start = torch.cat(
+            (raw_current[:, :-1], raw_gripper_transition_boundary[:, -1:]),
+            dim=-1,
+        )
+        target_boundary = torch.cat(
+            (transition_start[:, None], raw_target[:, :-1]), dim=1
+        )
+        pred_boundary = torch.cat(
+            (transition_start[:, None], raw_prediction[:, :-1]), dim=1
+        )
         target_delta = raw_target - target_boundary
         pred_delta = raw_prediction - pred_boundary
         target_class = _gripper_event_class(

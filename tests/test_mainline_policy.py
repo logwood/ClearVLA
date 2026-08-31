@@ -203,6 +203,10 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
             normalized=torch.randn(batch, dims.action_horizon, dims.action_dim),
             raw_units=torch.randn(batch, dims.action_horizon, dims.action_dim),
             current_raw_units=torch.randn(batch, dims.action_dim),
+            gripper_transition_boundary=torch.zeros(batch, dims.action_dim),
+            gripper_transition_boundary_raw_units=torch.zeros(
+                batch, dims.action_dim
+            ),
         ),
         future=FutureSupervision(
             dino_supports=torch.randn(

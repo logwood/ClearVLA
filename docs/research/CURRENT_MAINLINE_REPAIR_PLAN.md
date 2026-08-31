@@ -1,6 +1,6 @@
 # ClearVLA Schema28 行为闭环与单/多任务合流计划
 
-状态：**完整 Schema28 已审计；Stage A attribution 与八任务实验出口已在 RDT 线上合流并通过本地源码回归；正式 checkpoint replay、RDT gripper 语义与联合 smoke 待完成；Schema29 核心语义单元尚未放行**
+状态：**完整 Schema28 已审计；Stage A attribution 与八任务实验出口已在 RDT 数据适配线上合流；gripper 相邻 command 语义已闭合，train-only threshold、正式 checkpoint replay 与联合 smoke 待完成；Schema29 核心语义单元尚未放行**
 更新：2026-08-31
 
 本计划落实
@@ -388,7 +388,9 @@ smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 [done] 补 task-first sampler、task-stratified validation、逐任务/micro/macro
        日志和独立 RDT launcher
 [next] 在 Schema28 checkpoint 上运行 validation-only matched attribution
-[next] 明确 RDT continuous gripper 的 command/qpos 事件语义
+[done] 明确 RDT continuous gripper：相邻 command 定义 activity/event，qpos 只作
+       codec/物理解码边界
+[next] 用 train-only adjacent-command audit 明确一个共享 threshold
 [next] 根据 attribution 决策表放行或拒绝 detached self-conditioning
 [next] 对被放行 core unit 做双向源码审查、实现和 Pen 单任务 smoke
 [next] 在相同最终 core 上完成 RDT batch-eight mixed-model smoke

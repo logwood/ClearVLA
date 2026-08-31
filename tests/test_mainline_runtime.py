@@ -1,4 +1,6 @@
 import inspect
+from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import torch
@@ -613,6 +615,10 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
             normalized=normalized,
             raw_units=torch.zeros_like(normalized),
             current_raw_units=torch.zeros(batch, dims.action_dim),
+            gripper_transition_boundary=torch.zeros(batch, dims.action_dim),
+            gripper_transition_boundary_raw_units=torch.zeros(
+                batch, dims.action_dim
+            ),
         ),
         future=FutureSupervision(
             dino_supports=torch.zeros(
@@ -825,6 +831,8 @@ def test_validation_reports_gripper_persistence_between_target_events() -> None:
             normalized=raw_target,
             raw_units=raw_target,
             current_raw_units=torch.zeros(1, dims.action_dim),
+            gripper_transition_boundary=torch.zeros(1, dims.action_dim),
+            gripper_transition_boundary_raw_units=torch.zeros(1, dims.action_dim),
         ),
         future=FutureSupervision(
             dino_supports=torch.zeros(
@@ -869,6 +877,53 @@ def test_validation_reports_gripper_persistence_between_target_events() -> None:
         np.sqrt(76.0 / 7.0),
     )
     assert metrics["validation_gripper_post_event_7_plus_rmse_physical"] == 5.0
+
+
+def test_validation_first_gripper_transition_uses_the_profile_command_boundary() -> None:
+    horizon = 24
+    target = torch.zeros(1, horizon, 7)
+    target[..., -1] = 1.0
+    current_qpos_boundary = torch.zeros(1, 7)
+    previous_command_boundary = torch.zeros(1, 7)
+    previous_command_boundary[..., -1] = 1.0
+    batch = SimpleNamespace(
+        action_target=SimpleNamespace(
+            normalized=target,
+            raw_units=target,
+            current_raw_units=current_qpos_boundary,
+            gripper_transition_boundary=previous_command_boundary,
+            gripper_transition_boundary_raw_units=previous_command_boundary,
+        ),
+        online=SimpleNamespace(
+            history=SimpleNamespace(action_state=current_qpos_boundary),
+        ),
+    )
+    identity = ArrayNormalizer.fit_identity(
+        [np.asarray([[0.0] * 7, [1.0] * 7], dtype=np.float32)]
+    )
+    accumulator = ValidationAccumulator.from_action_normalizer(
+        identity,
+        device=torch.device("cpu"),
+        gripper_event_threshold=0.1,
+    )
+    accumulator.update(target.clone(), cast(TrainingBatch, batch))
+    metrics = accumulator.means()
+    assert metrics["validation_decoded_gripper_events_target"] == 0.0
+    assert metrics["validation_decoded_gripper_events_predicted"] == 0.0
+
+    target_with_transition = target.clone()
+    target_with_transition[:, 4:, -1] = 0.0
+    batch.action_target.normalized = target_with_transition
+    batch.action_target.raw_units = target_with_transition
+    accumulator = ValidationAccumulator.from_action_normalizer(
+        identity,
+        device=torch.device("cpu"),
+        gripper_event_threshold=0.1,
+    )
+    accumulator.update(
+        target_with_transition.clone(), cast(TrainingBatch, batch)
+    )
+    assert accumulator.means()["validation_decoded_gripper_events_target"] == 1.0
 
 
 def test_validation_gripper_branches_and_event_context_reconstruct_band_error() -> None:
@@ -925,6 +980,8 @@ def test_validation_gripper_branches_and_event_context_reconstruct_band_error() 
             normalized=raw_target,
             raw_units=raw_target,
             current_raw_units=torch.zeros(1, dims.action_dim),
+            gripper_transition_boundary=torch.zeros(1, dims.action_dim),
+            gripper_transition_boundary_raw_units=torch.zeros(1, dims.action_dim),
         ),
         future=FutureSupervision(
             dino_supports=torch.zeros(
@@ -1101,6 +1158,8 @@ def test_validation_keeps_decoded_events_and_motion_head_semantically_separate()
             normalized=normalized,
             raw_units=raw,
             current_raw_units=torch.zeros(1, dims.action_dim),
+            gripper_transition_boundary=torch.zeros(1, dims.action_dim),
+            gripper_transition_boundary_raw_units=torch.zeros(1, dims.action_dim),
         ),
         future=FutureSupervision(
             dino_supports=torch.zeros(
