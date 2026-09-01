@@ -37,6 +37,7 @@ from clearvla.tools.audit_rdt_multitask_gripper import (
     GRIPPER_AUDIT_SCHEMA,
     _true_run_lengths,
 )
+from clearvla.tools.reconcile_rdt_gripper_audits import build_reconciliation
 
 
 def _selection_digest(value: object) -> str:
@@ -173,6 +174,62 @@ def test_gripper_activity_run_lengths_are_episode_local() -> None:
 
 def test_gripper_audit_labels_quantiles_as_descriptive_only() -> None:
     assert GRIPPER_AUDIT_SCHEMA == "clearvla-rdt-multitask-gripper-train-audit-v3"
+
+
+def test_gripper_audit_reconciliation_rejects_legacy_values(tmp_path) -> None:
+    legacy = tmp_path / "legacy.json"
+    corrected = tmp_path / "corrected.json"
+    authoritative = tmp_path / "authoritative.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "schema": "clearvla-rdt-multitask-gripper-train-audit-v1",
+                "candidate_thresholds": [
+                    {"source_quantile": "p95", "threshold": 0.4, "event_window_fraction": 0.8}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    corrected.write_text(
+        json.dumps(
+            {
+                "schema": "clearvla-rdt-multitask-gripper-train-audit-v2",
+            }
+        ),
+        encoding="utf-8",
+    )
+    authoritative.write_text(
+        json.dumps(
+            {
+                "schema": "clearvla-rdt-multitask-gripper-train-audit-v3",
+                "threshold_decision": {
+                    "adopted_value": None,
+                    "descriptive_values_are_thresholds": False,
+                },
+                "descriptive_activity_quantiles": [
+                    {
+                        "source_quantile": "p95",
+                        "raw_abs_adjacent_command_delta_quantile": 0.18,
+                        "source_units": "raw_action_command_chart",
+                        "eligible_for_threshold_adoption": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = build_reconciliation(
+        legacy_path=legacy,
+        corrected_path=corrected,
+        authoritative_path=authoritative,
+    )
+    assert result["training_threshold"] is None
+    assert result["training_ready"] is False
+    assert result["artifacts"]["legacy_v1"]["use_for_training"] is False
+    assert result["artifacts"]["authoritative_v3"]["values"][0][
+        "eligible_for_threshold_adoption"
+    ] is False
 
 
 def test_bounded_selection_and_shared_normalizer_are_an_atomic_config_pair() -> None:
