@@ -25,6 +25,7 @@ from clearvla.mainline.data.loading import (
     load_mainline_data_for_smoke,
     to_training_batch,
 )
+from clearvla.mainline.runtime.identity import dataset_identity
 from clearvla.tools.build_rdt_split_manifest import build_rdt_split_manifest
 from clearvla.tools.build_t5_instruction_cache import build_t5_instruction_cache_payload
 from clearvla.tools.smoke_mainline_data import (
@@ -422,6 +423,9 @@ def test_rdt_external_adapter_reaches_a_finite_typed_batch_without_a_model(
         episode_limit=1,
     )
     assert set(bounded.datasets) == {"val"}
+    assert bounded.materialized_episode_indices == (bundle.splits["val"][0],)
+    bounded_identity = dataset_identity(bounded, bounded_config)
+    assert len(bounded_identity.dino_cache_identity) == 64
     bounded_raw = next(
         iter(
             bounded.loader(

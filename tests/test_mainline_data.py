@@ -190,6 +190,7 @@ def test_train_loader_owns_the_resolved_information_balanced_sampler() -> None:
         episodes=(),
         splits={"train": (), "val": ()},
         datasets={"train": dataset, "val": dataset},
+        materialized_episode_indices=(),
         action_normalizer=cast(ArrayNormalizer, None),
         state_normalizer=cast(ArrayNormalizer, None),
         goal=goal,

@@ -75,6 +75,11 @@ class MainlineDataBundle:
     episodes: tuple[LoadedEpisode, ...]
     splits: dict[str, tuple[int, ...]]
     datasets: dict[str, CachedTokenPolicyWindowDataset]
+    # Exact union of the episode indices materialized by the model-facing
+    # datasets.  ``episodes`` remains the complete verified source inventory;
+    # unselected and external-only rows must not silently become cache or
+    # checkpoint dependencies after split selection.
+    materialized_episode_indices: tuple[int, ...]
     action_normalizer: ArrayNormalizer
     state_normalizer: ArrayNormalizer
     goal: GoalTemplate
@@ -555,6 +560,7 @@ def _load_mainline_data(
         episodes=tuple(episodes),
         splits={name: tuple(ids) for name, ids in split_ids.items()},
         datasets=datasets,
+        materialized_episode_indices=tuple(required_token_episode_ids),
         action_normalizer=action_normalizer,
         state_normalizer=state_normalizer,
         goal=GoalTemplate(

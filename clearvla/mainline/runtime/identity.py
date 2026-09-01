@@ -74,11 +74,30 @@ def dataset_identity(
                 "mtime_ns": int(stat.st_mtime_ns),
             }
         )
+    materialized_indices = tuple(
+        int(value)
+        for value in getattr(
+            bundle,
+            "materialized_episode_indices",
+            tuple(range(len(bundle.episodes))),
+        )
+    )
+    if (
+        not materialized_indices
+        or materialized_indices != tuple(sorted(set(materialized_indices)))
+        or materialized_indices[0] < 0
+        or materialized_indices[-1] >= len(bundle.episodes)
+    ):
+        raise ValueError(
+            "materialized episode identity scope must be non-empty, sorted, "
+            "unique and inside the verified source inventory"
+        )
+    materialized_episodes = [bundle.episodes[index] for index in materialized_indices]
     dino_rows = []
     dino_cache_root = Path(config.data.dino_cache)
     decoded_cache_root = Path(config.data.decoded_cache)
     decoded_rows = []
-    for episode in bundle.episodes:
+    for episode in materialized_episodes:
         dino_metadata = dino_cache_root / episode.cache_key / "meta.json"
         if not dino_metadata.is_file():
             raise FileNotFoundError(f"DINO cache metadata disappeared: {dino_metadata}")

@@ -707,7 +707,12 @@ supports may change targets and losses, never deployment action.
     smoke may materialize a bounded deterministic
     split subset after verifying the complete source, manifest, train
     normalizer and language identities, while formal loading still requires
-    DINO cache rows for every eligible episode. RDT has no inherited Pen event
+    DINO cache rows for every model-materialized episode. The data bundle owns
+    that materialized episode union once and supplies the same scope to the
+    token reader and dataset/checkpoint identity. The complete raw inventory,
+    split manifest, train normalizer and language bank remain source-wide;
+    unselected tasks and the preserved `external_test` lane cannot become
+    model-cache requirements through the identity path. RDT has no inherited Pen event
     threshold. Its continuous transition owner is the adjacent command stream:
     the first policy row compares with the preceding executed command and later
     rows compare with the preceding policy command. Observed qpos remains the
