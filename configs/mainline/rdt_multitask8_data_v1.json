@@ -35,7 +35,7 @@
     "information_uniform_fraction": 0.5,
     "information_event_fraction": 0.125,
     "information_motion_quantile": 0.7,
-    "sampling_gripper_event_threshold": 0.18310546875
+    "sampling_gripper_event_threshold": null
   },
   "dimensions": {
     "action_dim": 7,
@@ -53,8 +53,5 @@
     "num_cameras": 2,
     "patches_per_camera": 256,
     "future_supports": 12
-  },
-  "objectives": {
-    "gripper_event_threshold": 0.18310546875
   }
 }

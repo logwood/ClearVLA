@@ -717,9 +717,9 @@ supports may change targets and losses, never deployment action.
     the first policy row compares with the preceding executed command and later
     rows compare with the preceding policy command. Observed qpos remains the
     codec/physical-decode anchor and is never converted into a discrete event
-    label. The eight-task shuffled train loader uses only the explicitly
-    adopted train-only adjacent-command p95 activity threshold
-    `0.18310546875` raw command units.
+    label. The eight-task shuffled train loader remains fail-closed until a
+    source-backed train-only adjacent-command activity threshold is explicitly
+    adopted; descriptive quantiles do not authorize shuffled training.
     These external contracts do not claim
     three-camera or 14-D model consumption.
     The real bounded `val` acceptance at commit
@@ -759,13 +759,11 @@ supports may change targets and losses, never deployment action.
     The 26 source `/test/` episodes remain `external_test`, are not
     materialized by this bounded formal loader and cannot enter training or
     tuning. Task ID remains CPU audit/sampling/logging metadata and is absent
-    from model samples. The train-only adjacent-command audit adopts p95
-    `0.18310546875` raw command units for all eight tasks: total activity-window
-    fraction is `0.269379`, and the lowest nonzero task coverage remains
-    `0.123409`; `press_stapler=0` is a constant-command data fact and receives
-    no fabricated event. P97.5 would reduce `draw_triangle` to `0.03646`, while
-    p90 would broaden total activity to `0.326618`. This preparation therefore
-    still does not claim
+    from model samples. The train-only adjacent-command audit emits only
+    descriptive raw-unit quantiles and counterfactual activity statistics;
+    it adopts no event threshold. The legacy mixed command/qpos values are
+    rejected and are not comparable to the adjacent-command chart. This
+    preparation therefore still does not claim
     depth, a three-camera model consumer, or native 14-D bimanual adaptation.
     The adopted eight-task experiment interface is now source-complete but
     behavior-pending. It constructs one immutable CPU registry from the
@@ -784,16 +782,17 @@ supports may change targets and losses, never deployment action.
     task metadata owns no gradient, module, optimizer tensor or checkpoint
     tensor and never enters `TrainingBatch.online`.
     `scripts/train_rdt_multitask.sh` and `scripts/smoke_rdt_multitask.sh` are
-    the only RDT model launchers. The eight-task config and both launchers pin
-    `0.18310546875`, atomically binding sampler event rows, continuous
-    gripper-trajectory ownership and decoded validation; the formal launcher
-    rejects environment or CLI threshold overrides. Pen remains exactly
-    `0.10`; unlike thresholds fail configuration validation. The former candidates
+    the only RDT model launchers. They require one explicit positive
+    `RDT_GRIPPER_EVENT_THRESHOLD`, atomically bound to sampler event rows,
+    continuous gripper-trajectory ownership and decoded validation; no audit
+    quantile is injected automatically. Pen remains exactly `0.10`; unlike
+    thresholds fail configuration validation. The former candidates
     `0.146484375 / 0.40283203125 / 0.7599645256996155` are invalid because their
-    first row mixed command with qpos. The v2 audit uses adjacent commands only;
+    first row mixed command with qpos. The v3 audit uses adjacent commands only;
     qpos is retained only as a physical-boundary audit. Sampler strata, the
     continuous trajectory mask and decoded event metrics consume the same
-    adopted command-activity threshold, while the physical action field keeps
+    explicitly selected command-activity threshold once the semantic gate
+    closes, while the physical action field keeps
     its qpos-anchored first delta. A mixed model backward/deployment smoke is
     still pending.
 
@@ -821,9 +820,9 @@ supports may change targets and losses, never deployment action.
     The previous-command tensor is detached dataset supervision, not an online
     model input. Its non-gripper coordinates have no consumer. It adds no model
     parameter, optimizer owner or checkpoint tensor; the declared boundary is
-    serialized in data/run identity. The adopted p95 threshold remains identical
-    across all three mask/metric consumers and is serialized with the data/run
-    identity. Using command delta as the codec's first delta target is
+    serialized in data/run identity. Once adopted, the selected threshold must
+    remain identical across all three mask/metric consumers and be serialized
+    with the data/run identity. Using command delta as the codec's first delta target is
     forbidden because it would compete with the qpos-anchored formal flow target.
 17. Fresh runs require an empty output directory. Exact resume verifies
    manifest, source/data/language, model/optimizer/scheduler and RNG. Older

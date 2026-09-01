@@ -33,7 +33,10 @@ from clearvla.mainline.data.normalizer_artifact import (
 )
 from clearvla.mainline.runtime.evaluation import ValidationAccumulator
 from clearvla.mainline.runtime.multitask import TaskValidationAccumulators
-from clearvla.tools.audit_rdt_multitask_gripper import _true_run_lengths
+from clearvla.tools.audit_rdt_multitask_gripper import (
+    GRIPPER_AUDIT_SCHEMA,
+    _true_run_lengths,
+)
 
 
 def _selection_digest(value: object) -> str:
@@ -168,6 +171,10 @@ def test_gripper_activity_run_lengths_are_episode_local() -> None:
     assert _true_run_lengths(np.asarray([False, True, True, False, True])).tolist() == [2, 1]
 
 
+def test_gripper_audit_labels_quantiles_as_descriptive_only() -> None:
+    assert GRIPPER_AUDIT_SCHEMA == "clearvla-rdt-multitask-gripper-train-audit-v3"
+
+
 def test_bounded_selection_and_shared_normalizer_are_an_atomic_config_pair() -> None:
     manifest = replace(
         DataConfig(),
@@ -262,15 +269,17 @@ def test_rdt_threshold_binds_sampler_objective_and_validation_semantics() -> Non
         ).validate()
 
 
-def test_multitask8_config_and_launcher_pin_the_adopted_train_p95_threshold() -> None:
+def test_multitask8_config_and_launcher_fail_closed_until_threshold_is_adopted() -> None:
     root = Path(__file__).resolve().parents[1]
-    adopted = 0.18310546875
     config = load_config(root / "configs/mainline/rdt_multitask8_data_v1.json")
-    assert config.data.sampling_gripper_event_threshold == adopted
-    assert config.objectives.gripper_event_threshold == adopted
+    assert config.data.sampling_gripper_event_threshold is None
+    # The generic objective default is retained for the Pen profile, but the
+    # non-Pen manifest cannot consume it when the data-side threshold is null.
+    assert config.objectives.gripper_event_threshold == 0.10
     launcher = (root / "scripts/train_rdt_multitask.sh").read_text(encoding="utf-8")
-    assert f'ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD="{adopted}"' in launcher
-    assert "does not allow a threshold override" in launcher
+    assert 'RDT_GRIPPER_EVENT_THRESHOLD:?Set one explicitly adopted' in launcher
+    assert "descriptive audit quantiles are not thresholds" in launcher
+    assert "ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD" not in launcher
 
 
 def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None:

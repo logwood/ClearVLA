@@ -2,10 +2,14 @@
 
 The artifact deliberately does not adopt an event threshold.  It reports the
 continuous source charts, exact adjacent-command deltas consumed by the
-24-step information sampler, and threshold-dependent candidate statistics
-using only the selected train lane. Validation/test rows are never opened for
-threshold selection. Observed qpos remains reported as a physical-boundary
-audit but never becomes a command-transition label.
+24-step information sampler, and explicitly *descriptive* counterfactual
+activity statistics using only the selected train lane.  Validation/test rows
+are never opened for threshold selection.  Observed qpos remains reported as
+a physical-boundary audit but never becomes a command-transition label.
+
+The older v1 audit mixed the first command delta with converted qpos.  Its
+numeric ``candidate_thresholds`` are therefore retained only as historical
+evidence and are never emitted by this producer.
 """
 
 from __future__ import annotations
@@ -25,11 +29,11 @@ from clearvla.data.hdf5_episode import LoadedEpisode, episode_identity, find_hdf
 from clearvla.data.multitask_selection import RDT_MULTITASK_SELECTION_SCHEMA
 from clearvla.data.split import RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH
 
-GRIPPER_AUDIT_SCHEMA = "clearvla-rdt-multitask-gripper-train-audit-v2"
+GRIPPER_AUDIT_SCHEMA = "clearvla-rdt-multitask-gripper-train-audit-v3"
 PROFILE_NAME = "rdt_right_arm_action_chart_v1"
 POLICY_HORIZON = 24
 QUANTILES = (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 1.0)
-CANDIDATE_QUANTILES = (0.9, 0.95, 0.975, 0.99, 0.995, 0.999)
+DESCRIPTIVE_QUANTILES = (0.9, 0.95, 0.975, 0.99, 0.995, 0.999)
 
 
 def _canonical_digest(value: object, *, ensure_ascii: bool) -> str:
@@ -211,7 +215,9 @@ def _scope_stats(rows: list[dict[str, Any]]) -> dict[str, object]:
     }
 
 
-def _candidate_stats(rows: list[dict[str, Any]], threshold: float) -> dict[str, object]:
+def _descriptive_activity_stats(
+    rows: list[dict[str, Any]], threshold: float
+) -> dict[str, object]:
     task_ids = []
     for row in rows:
         if row["task_id"] not in task_ids:
@@ -236,45 +242,74 @@ def _candidate_stats(rows: list[dict[str, Any]], threshold: float) -> dict[str, 
             {
                 "task_id": task_id,
                 "transition_rows": int(steps.size),
-                "significant_transition_rows": int(np.count_nonzero(significant)),
-                "positive_transition_rows": int(np.count_nonzero(steps >= threshold)),
-                "negative_transition_rows": int(np.count_nonzero(steps <= -threshold)),
-                "activity_segment_count": int(
+                "active_transition_rows": int(np.count_nonzero(significant)),
+                "positive_active_transition_rows": int(
+                    np.count_nonzero(steps >= threshold)
+                ),
+                "negative_active_transition_rows": int(
+                    np.count_nonzero(steps <= -threshold)
+                ),
+                "counterfactual_activity_segment_count": int(
                     sum(int(value.size) for value in active_runs)
                 ),
-                "activity_segment_length": (
+                "counterfactual_activity_segment_length": (
                     None
                     if not any(value.size for value in active_runs)
                     else _series_stats(active_runs)
                 ),
-                "persistence_segment_count": int(
+                "counterfactual_persistence_segment_count": int(
                     sum(int(value.size) for value in inactive_runs)
                 ),
-                "persistence_segment_length": _series_stats(inactive_runs),
+                "counterfactual_persistence_segment_length": _series_stats(
+                    inactive_runs
+                ),
                 "typed_windows": int(windows.size),
-                "event_windows": int(np.count_nonzero(windows >= threshold)),
-                "event_window_fraction": float(np.mean(windows >= threshold)),
+                "counterfactual_active_windows": int(
+                    np.count_nonzero(windows >= threshold)
+                ),
+                "counterfactual_active_window_fraction": float(
+                    np.mean(windows >= threshold)
+                ),
             }
         )
     all_steps = _merge(row["step_delta"] for row in rows)
     all_windows = _merge(row["window_max_abs"] for row in rows)
     return {
-        "threshold": float(threshold),
+        "raw_abs_adjacent_command_delta_quantile": float(threshold),
+        "source_units": "raw_action_command_chart",
+        "semantic_status": "descriptive_only_not_a_training_threshold",
+        "eligible_for_threshold_adoption": False,
         "transition_rows": int(all_steps.size),
-        "significant_transition_rows": int(np.count_nonzero(np.abs(all_steps) >= threshold)),
-        "positive_transition_rows": int(np.count_nonzero(all_steps >= threshold)),
-        "negative_transition_rows": int(np.count_nonzero(all_steps <= -threshold)),
-        "activity_segment_count": int(sum(int(value.size) for value in all_active_runs)),
-        "activity_segment_length": (
+        "active_transition_rows": int(
+            np.count_nonzero(np.abs(all_steps) >= threshold)
+        ),
+        "positive_active_transition_rows": int(
+            np.count_nonzero(all_steps >= threshold)
+        ),
+        "negative_active_transition_rows": int(
+            np.count_nonzero(all_steps <= -threshold)
+        ),
+        "counterfactual_activity_segment_count": int(
+            sum(int(value.size) for value in all_active_runs)
+        ),
+        "counterfactual_activity_segment_length": (
             None
             if not any(value.size for value in all_active_runs)
             else _series_stats(all_active_runs)
         ),
-        "persistence_segment_count": int(sum(int(value.size) for value in all_inactive_runs)),
-        "persistence_segment_length": _series_stats(all_inactive_runs),
+        "counterfactual_persistence_segment_count": int(
+            sum(int(value.size) for value in all_inactive_runs)
+        ),
+        "counterfactual_persistence_segment_length": _series_stats(
+            all_inactive_runs
+        ),
         "typed_windows": int(all_windows.size),
-        "event_windows": int(np.count_nonzero(all_windows >= threshold)),
-        "event_window_fraction": float(np.mean(all_windows >= threshold)),
+        "counterfactual_active_windows": int(
+            np.count_nonzero(all_windows >= threshold)
+        ),
+        "counterfactual_active_window_fraction": float(
+            np.mean(all_windows >= threshold)
+        ),
         "tasks": task_records,
     }
 
@@ -351,13 +386,13 @@ def audit_rdt_multitask_gripper(
         )
 
     sampler_abs = np.abs(_merge(row["sampler_delta"] for row in rows))
-    candidate_values = np.quantile(sampler_abs, CANDIDATE_QUANTILES)
-    candidates = [
+    descriptive_values = np.quantile(sampler_abs, DESCRIPTIVE_QUANTILES)
+    descriptive_quantiles = [
         {
             "source_quantile": _quantile_key(q),
-            **_candidate_stats(rows, float(value)),
+            **_descriptive_activity_stats(rows, float(value)),
         }
-        for q, value in zip(CANDIDATE_QUANTILES, candidate_values, strict=True)
+        for q, value in zip(DESCRIPTIVE_QUANTILES, descriptive_values, strict=True)
     ]
     per_task = [
         {
@@ -388,26 +423,36 @@ def audit_rdt_multitask_gripper(
             "policy_horizon": POLICY_HORIZON,
             "first_delta": "action_command[center]-action_command[center-1]",
             "remaining_deltas": "action_command[t]-action_command[t-1]",
-            "window_event": "any_abs_delta_greater_than_or_equal_to_candidate_threshold",
+            "window_activity_counterfactual": (
+                "any_abs_delta_greater_than_or_equal_to_descriptive_quantile"
+            ),
             "qpos_role": "physical_decode_boundary_only_not_event_or_activity_label",
         },
         "overall": _scope_stats(rows),
         "tasks": per_task,
-        "candidate_thresholds": candidates,
+        "descriptive_activity_quantiles": descriptive_quantiles,
         "threshold_decision": {
-            "status": "command_transition_boundary_adopted_threshold_unresolved",
+            "status": "unresolved_source_semantics",
             "adopted_value": None,
-            "candidate_source": (
-                "selected_train_split_adjacent_command_delta_quantiles_only"
-            ),
+            "descriptive_source": "selected_train_split_adjacent_command_delta_quantiles_only",
+            "descriptive_values_are_thresholds": False,
             "validation_or_test_used": False,
             "pen_0_1_inherited": False,
             "formal_shuffled_training_ready": False,
             "blocker": (
-                "The continuous command-transition owner is fixed, but the source has no "
-                "discrete event label. Candidate thresholds describe command activity only "
-                "and one value must be adopted explicitly before shuffled training."
+                "The source has no discrete event/activity label. Quantiles are descriptive "
+                "counterfactual activity summaries only; no value is eligible for shuffled "
+                "training until a source-backed semantic rule is explicitly adopted."
             ),
+        },
+        "rejected_legacy_candidates": {
+            "status": "rejected",
+            "legacy_schema": "clearvla-rdt-multitask-gripper-train-audit-v1",
+            "reason": (
+                "The legacy first sampler row mixed action command with converted qpos; "
+                "its candidate values are not comparable to adjacent-command deltas."
+            ),
+            "use_for_training": False,
         },
     }
     payload["gripper_audit_sha256"] = _canonical_digest(payload, ensure_ascii=True)
@@ -416,7 +461,7 @@ def audit_rdt_multitask_gripper(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Audit selected-train RDT right-gripper candidate statistics"
+        description="Audit selected-train RDT right-gripper descriptive activity statistics"
     )
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--selection-manifest", type=Path, required=True)

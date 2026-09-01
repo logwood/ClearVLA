@@ -132,7 +132,7 @@ this document.
 | Split | `clearvla/data/split.py` plus `tools/build_rdt_split_manifest.py` | Pen keeps ordered 63/5/5; the isolated RDT preset selects a verified four-lane manifest |
 | Goal | `mainline/data/loading.py::GoalTemplate` | legacy one-row artifact or exact episode-to-instruction-bank row selected on CPU |
 | Decoded RGB | `vision/decoded_image_store.py` or `vision/online_store.py` | strict mmap cache or direct JPEG decode with bounded process-local LRU |
-| DINO cache writer | `cli/build_dinov2_token_cache.py` and `experiments/classic_policy_lab/rdt2_dinov2_cache.py` | arbitrary ordered cameras, direct-HDF5 ingress, and verified manifest-lane selection; full real cache is not built yet |
+| DINO cache writer | `cli/build_dinov2_token_cache.py` and `experiments/classic_policy_lab/rdt2_dinov2_cache.py` | arbitrary ordered cameras, direct-HDF5 ingress, and verified manifest-lane selection; the selected 179-episode real cache is complete, while no all-eligible multi-task cache is built |
 | DINO mainline reader | `mainline/data/token_store.py` | root-relative key plus explicit ordered subset of cached cameras |
 | Run identity | `mainline/runtime/identity.py` | episode/partition/task/instruction inventory plus decoded/DINO metadata digests are serialized |
 | Camera config | `mainline/config.py::DataConfig` | ordered names plus exact matching key map; active model consumption remains two-camera |
@@ -511,10 +511,10 @@ The small artifact identities are:
   `8c0e6ff4ef6692abb7cc80b7b60474ac642bb44541a40f78333390ff56b9c899`,
   canonical
   `1aa44936eb3fa659270a2dcc2a0258fa1e888332a37de5034a56ccef09320e0c`;
-- train-only right-gripper candidate audit: file
-  `729b9f47328e53c81f54e85be78e795f80f74c5b0de6ba922a98b20dec519a6f`,
-  canonical
-  `3fb2bd082707a508d6c2eaff0d6edcc3bfce4728f495e9cfb07f00e355dfe9f0`.
+- train-only right-gripper descriptive audit: the v3 artifact records only
+  adjacent-command statistics and explicitly rejects the legacy mixed
+  command/qpos candidates; its final file and canonical digests are recorded
+  in the launch-gate report.
 
 No T5 encoder was loaded or downloaded. The 271-row language bank reuses the
 corpus-provided `lang_embed_0.pt` rows and retains their provenance. One copy
@@ -577,29 +577,24 @@ one micro/macro line, while the complete nested record remains in
 
 The interface adds no model parameter, optimizer owner, differentiable task
 tensor or checkpoint tensor. Registry, sampler, validation panel, shared
-normalizer/language identity and the one adopted event threshold are recorded
-in run/data state. The threshold is a single CLI value bound to all three
+normalizer/language identity and, once adopted, the one event threshold are
+recorded in run/data state. The threshold is a single CLI value bound to all three
 consumers: sampler strata, continuous gripper-trajectory supervision and
 decoded validation. The Pen path remains fixed at `0.10`; RDT accepts no
 implicit or mismatched value. Local sampler/config/runtime regressions pass
 `40/40`; remote mixed-model backward and deployment smoke remain pending.
 
-The threshold gate is intentionally still open. Candidate train-only exact
-sampler-boundary quantiles are:
-
-| Candidate | Raw threshold | Event windows | Window fraction |
-|---|---:|---:|---:|
-| p90 | 0.146484375 | 54,250 | 0.992717 |
-| p95 | 0.40283203125 | 44,724 | 0.818401 |
-| p97.5 | 0.7599645257 | 27,502 | 0.503257 |
-
-These high fractions are not evidence that most windows contain semantic
-open/close events. They arise because the first policy row compares a
-continuous command with observed qpos converted into the action chart. The
-source supplies neither their equivalence nor an event annotation. A formal
-run therefore requires an explicit decision about whether event ownership is
-defined by command change, executed-state change, or another sourced rule;
-choosing a convenient quantile alone is not sufficient.
+The threshold gate is intentionally still open. The v3 train-only audit emits
+descriptive quantiles of absolute adjacent command deltas in raw action-command
+units. They are counterfactual activity summaries, not event thresholds and
+are marked in the artifact as ineligible for training. The legacy v1 values
+(`0.146484375 / 0.40283203125 / 0.7599645257`) are rejected because their first
+window row mixed a command with converted qpos; they must not be compared with
+the v3 values. The source supplies neither a discrete event annotation nor a
+rule assigning continuous transitions to semantic open/close events. A formal
+run therefore requires an explicit source-backed decision about event
+ownership and a separately recorded positive threshold; a convenient quantile
+alone is not sufficient.
 
 ### D2 -- three-RGB-camera closure
 
@@ -716,14 +711,12 @@ manifest/language/cache identities, tensor shapes/dtypes, future offsets and
 finite values.  It does not authorize `scripts/train_mainline.sh` with the RDT
 config.
 
-The train-only adjacent-command audit adopts p95 `0.18310546875` raw command
-units. Its total activity-window fraction is `0.269379`; the lowest nonzero
-per-task coverage is `0.123409`, while `press_stapler=0` is retained as a
-constant-command data fact. P97.5 would reduce `draw_triangle` coverage to
-`0.03646`; p90 would broaden total activity to `0.326618`. The eight-task
-config and formal launchers pin this value across sampler, continuous
-trajectory supervision and decoded validation. The mixed model smoke and
-formal entry points are therefore:
+The train-only adjacent-command audit adopts no threshold. Its v3 report keeps
+the continuous command values, adjacent deltas, run lengths and descriptive
+quantiles, while explicitly rejecting the legacy mixed command/qpos values.
+The eight-task config and formal launcher remain fail-closed until a
+source-backed threshold is explicitly adopted. After that decision, the mixed
+model smoke and formal entry points are:
 
 ```bash
 OUT_DIR=runs/clearvla_rdt_multitask8_smoke_TIMESTAMP \
@@ -734,16 +727,16 @@ OUT_DIR=runs/clearvla_rdt_multitask8_TIMESTAMP \
 bash scripts/train_rdt_multitask.sh
 ```
 
-Both commands fail before data/model construction if an environment or CLI
-override attempts to change the adopted threshold.
+Both commands fail before data/model construction if the explicit threshold is
+absent or invalid; no audit quantile is injected automatically.
 The formal default validation panel is 64 batches at batch eight, i.e. 64
 deterministic rows per task; an explicit CLI override remains recorded.
 
 ## Unresolved assumptions blocking model edits
 
-1. Audit both native gripper coordinates before D3. D1 already uses the
-   selected right-gripper adjacent-command boundary and its train-only p95;
-   the Pen threshold `0.10` is not inherited.
+1. Define and explicitly adopt a source-backed right-gripper activity/event
+   rule and positive raw threshold for D1. The Pen threshold `0.10` is not
+   inherited, and descriptive quantiles are not a substitute.
 2. Finish the complete V120 decoder/execution/checkpoint review before choosing
    the bimanual execution-value field ABI.
 3. Measure three-camera model-side CUDA memory; do not infer the formal batch

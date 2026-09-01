@@ -3,20 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD="0.18310546875"
-if [[ -n "${RDT_GRIPPER_EVENT_THRESHOLD:-}" && "${RDT_GRIPPER_EVENT_THRESHOLD}" != "${ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD}" ]]; then
-  printf 'RDT_GRIPPER_EVENT_THRESHOLD is fixed at %s by the train-only p95 audit; use a separate experimental config for an ablation\n' \
-    "${ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD}" >&2
+: "${RDT_GRIPPER_EVENT_THRESHOLD:?Set one explicitly adopted positive raw-unit RDT threshold; descriptive audit quantiles are not thresholds}"
+
+if [[ "${RDT_GRIPPER_EVENT_THRESHOLD}" == *[!0-9.eE+-]* || "${RDT_GRIPPER_EVENT_THRESHOLD}" == "" ]]; then
+  printf '%s\n' 'RDT_GRIPPER_EVENT_THRESHOLD must be a finite numeric value explicitly adopted from a source-chart decision' >&2
   exit 2
 fi
-readonly RDT_GRIPPER_EVENT_THRESHOLD="${ADOPTED_RDT_GRIPPER_EVENT_THRESHOLD}"
-
-for argument in "$@"; do
-  if [[ "${argument}" == "--gripper-event-threshold" || "${argument}" == --gripper-event-threshold=* ]]; then
-    printf '%s\n' 'train_rdt_multitask.sh does not allow a threshold override; use a separate experimental config for an ablation' >&2
-    exit 2
-  fi
-done
 
 export MAINLINE_CONFIG="${MAINLINE_CONFIG:-configs/mainline/rdt_multitask8_data_v1.json}"
 export MAINLINE_BATCH_SIZE="${MAINLINE_BATCH_SIZE:-8}"
