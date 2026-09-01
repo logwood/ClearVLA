@@ -86,6 +86,7 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
             "observation_flow_rms": 0.0,
             "gripper_private_gate_rms": 0.0,
             "gripper_private_state_delta_rms": 0.0,
+            "training_self_conditioning_pass1_world_interval_mismatch_rms": 0.0,
             "inactive_ancestry_metric": 0.0,
         }
     )
@@ -95,6 +96,7 @@ def test_archival_logging_keeps_active_exact_zero_but_not_ancestry() -> None:
         "observation_flow_rms": 0.0,
         "gripper_private_gate_rms": 0.0,
         "gripper_private_state_delta_rms": 0.0,
+        "training_self_conditioning_pass1_world_interval_mismatch_rms": 0.0,
     }
 
 
@@ -135,6 +137,7 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
             "object_grounding_object_content_pair_cosine": 0.34,
             "object_p2_semantic_effect_rms": 0.35,
             "object_p3_protected_policy_precision_rms": 0.41,
+            "training_self_conditioning_pass1_world_interval_mismatch_rms": 0.36,
             "flow_jepa_address_coarse_variance_min": 0.01,
             "object_p2_terminal_has_null": 0.0,
             "gradient_raw_observation_l2": 0.42,
@@ -156,6 +159,10 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     assert "object_grounding_object_content_pair_cosine=0.34" in joined
     assert "object_p2_semantic_effect_rms=0.35" in joined
     assert "object_p3_protected_policy_precision_rms=0.41" in joined
+    assert (
+        "training_self_conditioning_pass1_world_interval_mismatch_rms=0.36"
+        in joined
+    )
     assert "flow_jepa_address_coarse_variance_min=0.01" in joined
     assert "object_p2_terminal_has_null=0" in joined
     assert "gradient_raw_observation_l2=0.42" in joined

@@ -36,6 +36,7 @@ ACTIVE_PREFIXES = (
     "evidence_",
     "validation_",
     "runtime_",
+    "training_",
     "action_",
     "event_",
     "motion_",
