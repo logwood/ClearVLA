@@ -1,6 +1,6 @@
 # ClearVLA Schema28→29 行为闭环与单/多任务合流计划
 
-状态：**完整 Schema28、正式 Stage A attribution 与 estimator/full-proposal 门已完成；Schema29 detached action self-conditioning 已实现并通过本地闭环；八任务 train-only p95 threshold 已固定，Pen/RDT 联合 CUDA smoke 待完成**
+状态：**Schema29 detached action self-conditioning、八任务外层接口与 Pen/RDT CUDA smoke 已闭合；两条正式行为实验正在同一核心提交上运行，far horizon、gripper 与跨任务行为仍待完整曲线判断**
 更新：2026-09-01
 
 本计划落实
@@ -43,7 +43,7 @@
 
 ## 二、工作区与合流边界
 
-只使用以下两条正确 lineage：
+收编阶段只使用以下两条正确 lineage：
 
 ```text
 codex/schema25-r1-replay
@@ -54,17 +54,26 @@ codex/rdt-multitask-prep
   base 76caa48 + RDT external preparation + multitask outlet + 90557b6
   owns: hierarchical data/language/camera/action adapter, multitask experiment
         entry and the same matched-attribution core
+
+codex/schema29-mainline
+  promoted integration source 4125a3d
+  owns: the complete Schema29 core, retained Pen outlet and bounded RDT
+        multitask outlet
 ```
+
+`schema28-estimator-gate` 的生产代码/测试补丁已经以 `ab80fe3` 等价收入集成线；
+`rdt-multitask-prep` 的最终 cache-identity 修正止于 `4125a3d`。完成本节联合验收后，
+二者只保留为只读审计历史，不再作为开发入口，也不得再次 merge/cherry-pick。
 
 仓库根目录的旧 Schema39 branch 不属于本流程，不作为 donor、merge base 或
 当前架构解释来源。
 
-RDT 线已经完成算法外部的 bounded real-server loader acceptance 与本地多任务
-experiment outlet；其权威设计为
+RDT 线已经完成算法外部的 bounded real-server loader acceptance、本地多任务
+experiment outlet 与真实 mixed-model CUDA smoke；其权威设计为
 [`auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md)。
-它当前证明外部数据 ABI、task-first sampling、逐任务 validation/logging 与单任务
-行为不回归；尚不证明 RDT mixed-model CUDA smoke、三相机模型 consumer、双臂
-codec/loss 或正式训练行为。
+它当前证明外部数据 ABI、task-first sampling、逐任务 validation/logging 与共享
+Schema29 模型路径可运行；尚不证明三相机模型 consumer、双臂 codec/loss 或正式
+跨任务训练行为。
 
 合流规则：
 
@@ -384,11 +393,17 @@ JSONL cadence 保持；console 只显示 stop/continue 所需摘要。
 
 smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 
+本门已在精确提交 `4125a3d` 完成。Pen smoke 完成一个 batch 的训练/反向、
+checkpoint 与 deploy-style validation；RDT batch-eight smoke 同样完成，并在训练与
+验证各观察到八任务每任务一条、coverage `8/8`、missing task 为空。两者 manifest、
+source 与网络参数身份一致；随机初始化的 smoke RMSE/event 数字不进入行为判断。
+
 ## 八、同一核心提交的两个正式实验
 
 1. 先启动 Pen 单任务，完成 preflight 与首个健康窗口；确认不是立即 non-finite、
    lineage、memory 或 loss-ledger 故障后即可启动多任务，不等待八轮结束。
-2. 两个运行串行占用同一 GPU；不得并发造成吞吐/显存不可比。
+2. 两个运行必须各自独占一张 GPU；只有单卡环境才串行。不得让两个进程共享同一
+   GPU 后比较吞吐或显存。当前正式 RDT/Pen 分别运行在 GPU0/GPU1。
 3. 单任务看 core closure：far horizon、gripper、W/CT、refinement mismatch、spike。
 4. 多任务看 adapter/task competition：逐任务曲线、camera/action profile、sampling
    share 与跨任务梯度健康。
@@ -438,9 +453,10 @@ smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 [done] 根据 attribution 决策表选择 detached self-conditioning 进入 estimator 门
 [done] 在同一 Schema28 checkpoint 上完成 estimator/full-proposal 匹配门
 [done] 对被放行 core unit 做双向源码审查并实现 Schema29
-[next] 在 Schema29 精确提交上完成 Pen 单任务 CUDA smoke
-[next] 在相同精确提交上完成 RDT batch-eight mixed-model CUDA smoke
-[last] 依次启动 Pen 单任务与 RDT 多任务正式实验
+[done] 在 Schema29 精确提交上完成 Pen 单任务 CUDA smoke
+[done] 在相同精确提交上完成 RDT batch-eight mixed-model CUDA smoke
+[done] 从同一 4125a3d 核心在独立 GPU 上启动 Pen 与 RDT 正式实验
+[next] 按预定 epoch 节点联合审计完整行为曲线，不再修改已封存的来源分支
 ```
 
 没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与

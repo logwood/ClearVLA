@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        29
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 eight-epoch behavior, formal Stage-A attribution and endpoint-estimator gate complete; Schema29 detached action self-conditioning is source/local closed and awaits Pen/RDT CUDA smoke; far horizon and gripper behavior remain open
+release status:         Schema28 eight-epoch behavior, formal Stage-A attribution and endpoint-estimator gate complete; Schema29 detached action self-conditioning is source/local/CUDA-interface closed at integration source 4125a3d and fresh Pen/RDT behavior runs are active; far horizon and gripper behavior remain open
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -1247,7 +1247,35 @@ condition, cache1 ownership of the sole formal loss and future dynamics,
 matched dropout entry streams, net RNG advance equal to one dynamic pass,
 unchanged parameter/state/optimizer inventory, Schema28 exact-resume rejection
 and unchanged two-pass deployment call count. Ruff, py_compile and diff checks
-pass. Pen and RDT CUDA smokes remain the next release gate.
+pass.
+
+The Pen/RDT CUDA interface gate is complete at integration commit
+`4125a3ded5b47b0cc73a5d128a1bbcfeb5477436`. The one-batch Pen smoke
+`schema29_pen_smoke_4125a3d_20260901_105930` completed a fresh forward,
+backward, optimizer step, checkpoint write and deployment-style validation at
+`2.155 s/batch` with a `2.921 GiB` process-peak estimate. The batch-eight RDT
+smoke `schema29_rdt8_smoke_4125a3d_20260901_104957` completed the same model
+path plus the task-aware outlet at a cold one-batch `9.775 s/batch` and
+`10.321 GiB`: its training batch contained exactly one row from each of the
+eight tasks, its validation panel observed all `8/8` tasks with no missing
+task, and per-task, micro and macro records were serialized. Both runs used
+Schema29 manifest digest
+`96883e89ea3df8e5da1693022bdfff79d92fd3100a1deb55360d608cc897f8e6`,
+source digest
+`3f22432e4ab4d0ce1d6581c2c09a55ecb5571ec67f611627d5e81217bc89dfc0`
+and an exact loss ledger. Random-initialized smoke RMSE/event values are not
+behavior evidence.
+
+Fresh formal Pen and RDT runs from the same commit then reached at least
+`2160 / 1720` optimizer steps on separate GPUs with no traceback, OOM,
+non-finite row, lineage failure or ledger gap. Their steady window medians
+were `2.295 / 2.288 s/batch`; the Pen value is about `1.25x` the Schema28
+formal median and remains inside the `1.5x` runtime gate. The finite threshold
+crossings at this acceptance snapshot were `2 / 1`, owned by the existing
+observation flow or target-DINO-key paths rather than the new Schema29
+self-conditioning boundary. These runs establish source/runtime usability;
+they have not yet completed an epoch validation record and therefore do not
+close far-horizon, gripper or multi-task behavior.
 
 Use new empty output directories:
 
