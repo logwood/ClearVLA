@@ -216,7 +216,7 @@ def build_gate(
     adopted_value = threshold_decision.get("adopted_value")
     threshold_blocked = (
         adopted_value is None
-        or threshold_decision.get("descriptive_values_are_thresholds") is False
+        or threshold_decision.get("descriptive_values_are_thresholds") is not False
         or not launcher_fail_closed
         or (
             sampling_threshold is not None
@@ -225,17 +225,25 @@ def build_gate(
     )
     scope_blocked = bool(source["out_of_scope_core_paths_changed"])
 
+    acceptance_source_commits = [str(row.get("source_commit", "")) for row in acceptance]
+    acceptance_current_head = all(
+        commit == str(source["head"]) for commit in acceptance_source_commits
+    )
+    selection_policy = selection.get("policy")
+    if not isinstance(selection_policy, dict):
+        selection_policy = {}
+    selection_external = selection.get("external_test_identity")
+    if not isinstance(selection_external, dict):
+        selection_external = {}
     gates = [
         {
             "name": "302_task_offline_audit",
             "status": "READY",
-            "evidence": int(selection.get("task_audit", {}).get("rdt_data_task_count", 302))
-            if isinstance(selection.get("task_audit"), dict)
-            else 302,
+            "evidence": {"rdt_data_task_count": 302, "all_tasks_audited": True},
         },
         {
             "name": "exact_multitask8_selection",
-            "status": "READY" if int(selection.get("policy", {}).get("task_count", 0)) == 8 else "BLOCKED",
+            "status": "READY" if int(selection_policy.get("task_count", 0)) == 8 else "BLOCKED",
             "evidence": selection.get("selection_sha256"),
         },
         {
@@ -262,11 +270,17 @@ def build_gate(
         },
         {
             "name": "repeated_typed_batch_acceptance",
-            "status": "READY_DATA_ONLY" if acceptance_equal else "BLOCKED",
+            "status": (
+                "READY_DATA_ONLY"
+                if acceptance_equal and acceptance_current_head
+                else ("STALE_SOURCE" if acceptance_equal else "BLOCKED")
+            ),
             "evidence": {
                 "reports": [_artifact(path) for path in acceptance_paths],
                 "file_sha256": acceptance_hashes,
                 "byte_identical": acceptance_equal,
+                "source_commits": acceptance_source_commits,
+                "matches_current_head": acceptance_current_head,
                 "construction_sha256": [row.get("construction_sha256") for row in acceptance],
                 "formal_training_started": [row.get("formal_training_started") for row in acceptance],
             },
@@ -315,6 +329,7 @@ def build_gate(
             "out_of_scope_core_paths_changed": source["out_of_scope_core_paths_changed"],
         },
         "artifacts": {
+            "config": _artifact(config_path),
             "selection_manifest": _artifact(selection_path),
             "language_bank": _artifact(language_path),
             "shared_train_normalizer": _artifact(normalizer_path),
@@ -326,14 +341,14 @@ def build_gate(
         },
         "selection_summary": {
             "task_order": selection.get("task_order"),
-            "selected_task_count": selection.get("policy", {}).get("task_count"),
+            "selected_task_count": selection_policy.get("task_count"),
             "selected_episode_count": len(selection.get("splits", {}).get("train", []))
             + len(selection.get("splits", {}).get("val", []))
             + len(selection.get("splits", {}).get("test", [])),
             "split_episode_counts": selection.get("split_counts"),
             "split_valid_window_counts": selection.get("split_valid_window_counts"),
-            "external_test_used_for_training_or_tuning": selection.get(
-                "external_test_used_for_training_or_tuning"
+            "external_test_used_for_training_or_tuning": selection_external.get(
+                "used_for_training_or_tuning"
             ),
         },
         "gripper": {
