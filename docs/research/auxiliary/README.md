@@ -21,6 +21,7 @@ Schema25 replay worktree.
 | SCHEMA25_BASE_VERSION_CARD.md | Closed source/behavior audit of the fixed base |
 | SCHEMA25_R2_SOURCE_DERIVED_IMPROVEMENT_PLAN.md | Source-first next-version gate: bounded validation, matched interventions and exactly one later behavioral repair |
 | ARCHITECTURE_REPLAY_LEDGER.md | Historical donor evidence; not implementation authority |
+| CONVERSATION_INSIGHT_LEDGER.md | Completed curated conversation memory through visible message 5493; use its research map for historical hypotheses, reversals and evidence, never as implementation authority |
 | ACTIVE_MAINLINE_HANDOFF.md | Frozen Schema39 diagnostic context; not the active replay graph |
 | RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md | Isolated `/data/rdt-ft-data/` data, language, multiview, bimanual and experiment gates |
 
@@ -30,3 +31,10 @@ The R1 source candidate is statically closed and one formal run has reached
 epoch 8.  Its behavior is observational evidence for the prospective R2 plan;
 it does not authorize later mechanics. Historical documents and the
 user-supplied external protocol do not override the active source.
+
+For a new task, read `../00_CURRENT_ARCHITECTURE_CONTRACT.md` first and
+`../CURRENT_MAINLINE_ISSUES.md` for unresolved active work. Use
+`ARCHITECTURE_REPLAY_PLAN.md` and the source-unit register for adopted replay
+decisions. Open `CONVERSATION_INSIGHT_LEDGER.md` only when ancestry, an old log,
+or the reasoning behind a repair matters; start from its curated research map,
+not its chronological evidence archive.
