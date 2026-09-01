@@ -46,8 +46,9 @@ from clearvla.mainline.training.losses import (
     compose_losses,
     sample_flow_matching,
 )
+from clearvla.mainline.training.optimizer import parameter_role
 
-REPORT_SCHEMA = "clearvla-schema29-real-batch-gradient-ab-v1"
+REPORT_SCHEMA = "clearvla-schema29-real-batch-gradient-ab-v2"
 _ACTION_CONTRIBUTIONS = (
     "action_flow",
     "decoded_action",
@@ -143,12 +144,22 @@ def _overrides(
     return result
 
 
-def _autocast(device: torch.device, dtype: torch.dtype):
+def _autocast(
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    cache_enabled: bool = True,
+):
     enabled = device.type in {"cuda", "cpu"} and dtype in {
         torch.bfloat16,
         torch.float16,
     }
-    return torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled)
+    return torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=enabled,
+        cache_enabled=bool(cache_enabled),
+    )
 
 
 def _rms(value: Tensor) -> float:
@@ -235,6 +246,26 @@ def _named_owner_parameters(
     return owners
 
 
+def _named_trainable_parameters(
+    model: ClearVLAMainlinePolicy,
+) -> tuple[tuple[str, nn.Parameter], ...]:
+    named = tuple(
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    )
+    if not named:
+        raise RuntimeError("gradient probe found no trainable parameters")
+    parameter_ids = [id(parameter) for _, parameter in named]
+    if len(parameter_ids) != len(set(parameter_ids)):
+        raise RuntimeError("trainable parameter inventory contains an alias")
+    # Fail before the expensive VJP if a newly added parameter has escaped the
+    # same optimizer-role map used by formal training.
+    for name, _ in named:
+        parameter_role(name)
+    return named
+
+
 def _gradient_l2(values: Iterable[Tensor | None]) -> float:
     squares = [
         value.detach().float().square().sum()
@@ -250,6 +281,36 @@ def _gradient_rms(value: Tensor | None) -> float:
     if value is None:
         return 0.0
     return _rms(value)
+
+
+def _parameter_gradient_stats(
+    named_parameters: Iterable[tuple[str, nn.Parameter]],
+    gradients: Iterable[Tensor | None],
+) -> dict[str, float | int]:
+    named = tuple(named_parameters)
+    values = tuple(gradients)
+    if len(named) != len(values):
+        raise ValueError("parameter and gradient owner rows do not align")
+    if not named:
+        raise ValueError("parameter gradient aggregation received an empty owner")
+    elements = sum(int(parameter.numel()) for _, parameter in named)
+    present = tuple(value for value in values if value is not None)
+    if present:
+        square_sum = torch.stack(
+            [value.detach().float().square().sum() for value in present]
+        ).sum()
+        gradient_l2 = float(square_sum.sqrt())
+        gradient_rms = float((square_sum / float(max(elements, 1))).sqrt())
+    else:
+        gradient_l2 = 0.0
+        gradient_rms = 0.0
+    return {
+        "parameter_tensors": len(named),
+        "parameter_elements": elements,
+        "gradient_present_tensors": len(present),
+        "gradient_l2": gradient_l2,
+        "gradient_rms_over_parameter_elements": gradient_rms,
+    }
 
 
 def _loss_surfaces(ledger: LossLedger) -> tuple[tuple[str, Tensor], ...]:
@@ -274,9 +335,11 @@ def _vjp_report(
     ledger: LossLedger,
     *,
     owners: Mapping[str, tuple[tuple[str, nn.Parameter], ...]],
+    trainable_parameters: tuple[tuple[str, nn.Parameter], ...],
     physical_velocity: Tensor,
     velocity_head_input: Tensor,
-) -> dict[str, dict[str, float]]:
+    retain_graph_after_total: bool,
+) -> tuple[dict[str, dict[str, float]], dict[str, object]]:
     owner_parameters = {
         name: tuple(parameter for _, parameter in values)
         for name, values in owners.items()
@@ -296,14 +359,16 @@ def _vjp_report(
     targets = (*ordered_parameters, physical_velocity, velocity_head_input)
     rows: dict[str, dict[str, float]] = {}
     surfaces = _loss_surfaces(ledger)
-    for index, (name, loss) in enumerate(surfaces):
+    if not surfaces or surfaces[-1][0] != "total":
+        raise RuntimeError("total loss must be the final VJP surface")
+    for name, loss in surfaces[:-1]:
         if loss.ndim != 0:
             raise ValueError(f"diagnostic loss {name!r} must be scalar")
         if loss.requires_grad:
             gradients = torch.autograd.grad(
                 loss,
                 targets,
-                retain_graph=index < len(surfaces) - 1,
+                retain_graph=True,
                 allow_unused=True,
             )
         else:
@@ -326,7 +391,87 @@ def _vjp_report(
                 gradients[activation_start + 1]
             ),
         }
-    return rows
+
+    total_name, total_loss = surfaces[-1]
+    if total_loss.ndim != 0:
+        raise ValueError("diagnostic total loss must be scalar")
+    trainable = tuple(parameter for _, parameter in trainable_parameters)
+    total_targets = (*trainable, physical_velocity, velocity_head_input)
+    if total_loss.requires_grad:
+        total_gradients = torch.autograd.grad(
+            total_loss,
+            total_targets,
+            retain_graph=retain_graph_after_total,
+            allow_unused=True,
+        )
+    else:
+        total_gradients = tuple(None for _ in total_targets)
+    parameter_gradients = total_gradients[: len(trainable)]
+    activation_gradients = total_gradients[len(trainable) :]
+    parameter_index = {
+        id(parameter): index
+        for index, (_, parameter) in enumerate(trainable_parameters)
+    }
+
+    def selected_stats(
+        selected: Iterable[tuple[str, nn.Parameter]],
+    ) -> dict[str, float | int]:
+        named = tuple(selected)
+        try:
+            indices = tuple(parameter_index[id(parameter)] for _, parameter in named)
+        except KeyError as error:
+            raise RuntimeError("VJP owner is absent from the trainable inventory") from error
+        return _parameter_gradient_stats(
+            named,
+            (parameter_gradients[index] for index in indices),
+        )
+
+    rows[total_name] = {
+        "loss_value": float(total_loss.detach().float()),
+        "velocity_output_parameter_gradient_l2": float(
+            selected_stats(owners["velocity_output"])["gradient_l2"]
+        ),
+        "gripper_gate_parameter_gradient_l2": float(
+            selected_stats(owners["gripper_gate"])["gradient_l2"]
+        ),
+        "motion_head_parameter_gradient_l2": float(
+            selected_stats(owners["motion_head"])["gradient_l2"]
+        ),
+        "physical_velocity_gradient_rms": _gradient_rms(
+            activation_gradients[0]
+        ),
+        "velocity_head_input_gradient_rms": _gradient_rms(
+            activation_gradients[1]
+        ),
+    }
+    role_names = sorted({parameter_role(name) for name, _ in trainable_parameters})
+    role_stats = {
+        role: selected_stats(
+            (name, parameter)
+            for name, parameter in trainable_parameters
+            if parameter_role(name) == role
+        )
+        for role in role_names
+    }
+    block_stats: dict[str, dict[str, float | int]] = {}
+    for index in range(3):
+        prefix = f"bottom.decoder.blocks.{index}."
+        selected = tuple(
+            (name, parameter)
+            for name, parameter in trainable_parameters
+            if name.startswith(prefix)
+        )
+        if not selected:
+            raise RuntimeError(f"active Evidence MMDiT block {index} has no parameters")
+        block_stats[f"block_{index}"] = selected_stats(selected)
+    return rows, {
+        "all_trainable": _parameter_gradient_stats(
+            trainable_parameters,
+            parameter_gradients,
+        ),
+        "parameter_roles": role_stats,
+        "bottom_mmdit_blocks": block_stats,
+    }
 
 
 def _variation_rms(value: Tensor, dim: int) -> float:
@@ -399,10 +544,12 @@ def _mode_report(
     ledger: LossLedger,
     *,
     owners: Mapping[str, tuple[tuple[str, nn.Parameter], ...]],
+    trainable_parameters: tuple[tuple[str, nn.Parameter], ...],
     velocity_head_input: Tensor,
     transition_value: Tensor,
     predicted_semantic: Tensor,
     predicted_transport: Tensor,
+    retain_graph_after_total: bool = False,
 ) -> tuple[dict[str, object], dict[str, Tensor]]:
     physical_velocity = output.bottom.physical_velocity
     boundaries = {
@@ -420,13 +567,31 @@ def _mode_report(
         .cpu(),
         "controlled_transition": transition_value.detach().float().cpu(),
     }
+    losses_and_vjps, total_owner_vjps = _vjp_report(
+        ledger,
+        owners=owners,
+        trainable_parameters=trainable_parameters,
+        physical_velocity=physical_velocity,
+        velocity_head_input=velocity_head_input,
+        retain_graph_after_total=retain_graph_after_total,
+    )
     report = {
-        "losses_and_vjps": _vjp_report(
-            ledger,
-            owners=owners,
-            physical_velocity=physical_velocity,
-            velocity_head_input=velocity_head_input,
-        ),
+        "losses_and_vjps": losses_and_vjps,
+        "total_owner_vjps": total_owner_vjps,
+        "dtypes": {
+            "physical_velocity": str(physical_velocity.dtype).removeprefix("torch."),
+            "velocity_head_input": str(velocity_head_input.dtype).removeprefix(
+                "torch."
+            ),
+            "w_semantic": str(predicted_semantic.dtype).removeprefix("torch."),
+            "w_transport": str(predicted_transport.dtype).removeprefix("torch."),
+            "p2_effect": str(output.compiled.effect.combined().dtype).removeprefix(
+                "torch."
+            ),
+            "controlled_transition": str(transition_value.dtype).removeprefix(
+                "torch."
+            ),
+        },
         "forward": {
             "physical_velocity": _single_tensor_stats(boundaries["physical_velocity"]),
             "velocity_head_input": _single_tensor_stats(
@@ -473,6 +638,36 @@ def _relative_decision(left: float, right: float) -> dict[str, object]:
     }
 
 
+def _relative_total_owner_decisions(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> dict[str, dict[str, dict[str, object]]]:
+    result: dict[str, dict[str, dict[str, object]]] = {}
+    for section in ("parameter_roles", "bottom_mmdit_blocks"):
+        left_section = left.get(section)
+        right_section = right.get(section)
+        if not isinstance(left_section, Mapping) or not isinstance(
+            right_section, Mapping
+        ):
+            raise RuntimeError(f"total-owner VJP section {section!r} is malformed")
+        if set(left_section) != set(right_section):
+            raise RuntimeError(f"total-owner VJP section {section!r} changed owners")
+        rows: dict[str, dict[str, object]] = {}
+        for name in sorted(str(value) for value in left_section):
+            left_row = left_section[name]
+            right_row = right_section[name]
+            if not isinstance(left_row, Mapping) or not isinstance(
+                right_row, Mapping
+            ):
+                raise RuntimeError(f"total-owner VJP row {name!r} is malformed")
+            rows[name] = _relative_decision(
+                float(left_row["gradient_l2"]),
+                float(right_row["gradient_l2"]),
+            )
+        result[section] = rows
+    return result
+
+
 def run_schema29_real_batch_probe(
     *,
     model: ClearVLAMainlinePolicy,
@@ -494,6 +689,7 @@ def run_schema29_real_batch_probe(
     if any(parameter.grad is not None for parameter in model.parameters()):
         raise RuntimeError("gradient probe requires a pristine model gradient state")
     owners = _named_owner_parameters(model)
+    trainable_parameters = _named_trainable_parameters(model)
     initialization = {
         name: _parameter_fingerprint(values)
         for name, values in owners.items()
@@ -555,6 +751,7 @@ def run_schema29_real_batch_probe(
         # A is forked so B begins from the exact same dynamic dropout state.
         with torch.random.fork_rng(devices=cuda_devices):
             with _autocast(device, dtype):
+                cache0_autocast_cache_enabled = torch.is_autocast_cache_enabled()
                 output0 = model.velocity(
                     cache0,
                     noisy_action_field=flow_state.noisy_physical,
@@ -582,10 +779,12 @@ def run_schema29_real_batch_probe(
                 output0,
                 ledger0,
                 owners=owners,
+                trainable_parameters=trainable_parameters,
                 velocity_head_input=head_input0,
                 transition_value=transition0,
                 predicted_semantic=cache0.top.predicted_dynamics.semantic_delta,
                 predicted_transport=cache0.top.predicted_dynamics.transport_mean,
+                retain_graph_after_total=True,
             )
         cache0_fork_restored_cpu = torch.equal(
             torch.get_rng_state(),
@@ -608,30 +807,42 @@ def run_schema29_real_batch_probe(
         with _autocast(device, dtype):
             with torch.random.fork_rng(devices=cuda_devices):
                 with torch.no_grad():
-                    pass0_output = model.velocity(
-                        cache0,
-                        noisy_action_field=flow_state.noisy_physical,
-                        time=flow_state.time,
-                        require_execution_supervision=False,
-                        collect_diagnostics=False,
-                    )
-                    remaining = (1.0 - flow_state.time.to(
-                        dtype=flow_state.noisy_physical.dtype
-                    ))[:, None, None]
-                    pass0_clean_physical = flow_state.noisy_physical + remaining * (
-                        pass0_output.bottom.physical_velocity.to(
-                            dtype=flow_state.noisy_physical.dtype
+                    with _autocast(device, dtype, cache_enabled=False):
+                        pass0_autocast_cache_enabled = (
+                            torch.is_autocast_cache_enabled()
                         )
-                    )
-                    pass0_clean_action = model.action_codec.decode(
-                        pass0_clean_physical,
-                        cache0.history.action_state,
-                    ).detach()
-                    pass0_condition = PhysicalActionCondition.from_horizon_action(
-                        pass0_clean_action,
-                        cache0.history.action_state.detach(),
-                    )
-                    del pass0_output, pass0_clean_physical
+                        pass0_output = model.velocity(
+                            cache0,
+                            noisy_action_field=flow_state.noisy_physical,
+                            time=flow_state.time,
+                            require_execution_supervision=False,
+                            collect_diagnostics=False,
+                        )
+                        pass0_velocity_requires_grad = bool(
+                            pass0_output.bottom.physical_velocity.requires_grad
+                        )
+                        remaining = (1.0 - flow_state.time.to(
+                            dtype=flow_state.noisy_physical.dtype
+                        ))[:, None, None]
+                        pass0_clean_physical = (
+                            flow_state.noisy_physical
+                            + remaining
+                            * pass0_output.bottom.physical_velocity.to(
+                                dtype=flow_state.noisy_physical.dtype
+                            )
+                        )
+                        pass0_clean_action = model.action_codec.decode(
+                            pass0_clean_physical,
+                            cache0.history.action_state,
+                        ).detach()
+                        pass0_condition = PhysicalActionCondition.from_horizon_action(
+                            pass0_clean_action,
+                            cache0.history.action_state.detach(),
+                        )
+                        pass0_velocity_dtype = str(
+                            pass0_output.bottom.physical_velocity.dtype
+                        ).removeprefix("torch.")
+                        del pass0_output, pass0_clean_physical
 
             pass0_fork_restored_cpu = torch.equal(
                 torch.get_rng_state(),
@@ -654,6 +865,9 @@ def run_schema29_real_batch_probe(
                 collect_diagnostics=False,
             )
             cache1 = replace(cache0, top=cache1_top)
+            cache1_formal_autocast_cache_enabled = (
+                torch.is_autocast_cache_enabled()
+            )
             output1 = model.velocity(
                 cache1,
                 noisy_action_field=flow_state.noisy_physical,
@@ -681,6 +895,7 @@ def run_schema29_real_batch_probe(
             output1,
             ledger1,
             owners=owners,
+            trainable_parameters=trainable_parameters,
             velocity_head_input=head_input1,
             transition_value=transition1,
             predicted_semantic=cache1.top.predicted_dynamics.semantic_delta,
@@ -712,6 +927,18 @@ def run_schema29_real_batch_probe(
     motion_decision = _relative_decision(
         float(motion0["motion_head_parameter_gradient_l2"]),
         float(motion1["motion_head_parameter_gradient_l2"]),
+    )
+    if report0["dtypes"] != report1["dtypes"]:
+        raise RuntimeError("cache0/cache1 formal boundaries changed dtype")
+    total_owner0 = report0["total_owner_vjps"]
+    total_owner1 = report1["total_owner_vjps"]
+    if not isinstance(total_owner0, Mapping) or not isinstance(
+        total_owner1, Mapping
+    ):
+        raise RuntimeError("total-owner VJP report is malformed")
+    total_owner_decisions = _relative_total_owner_decisions(
+        total_owner0,
+        total_owner1,
     )
     coarse_fingerprint = cache0.top.action_condition.fingerprint.detach().float()
     refined_fingerprint = pass0_condition.fingerprint.detach().float()
@@ -750,11 +977,27 @@ def run_schema29_real_batch_probe(
         },
         "self_conditioning": {
             "pass0_clean_action_rms": _rms(pass0_clean_action),
+            "pass0_velocity_dtype": pass0_velocity_dtype,
+            "pass0_velocity_requires_grad": pass0_velocity_requires_grad,
+            "pass0_action_requires_grad": bool(pass0_clean_action.requires_grad),
+            "pass0_condition_interval_action_requires_grad": bool(
+                pass0_condition.interval_action.requires_grad
+            ),
+            "pass0_condition_interval_delta_requires_grad": bool(
+                pass0_condition.interval_delta.requires_grad
+            ),
             "coarse_to_pass0_condition_rms": _rms(
                 refined_fingerprint - coarse_fingerprint
             ),
             "cache0_to_cache1_w_semantic": pairs["w_semantic"],
             "cache0_to_cache1_w_transport": pairs["w_transport"],
+        },
+        "autocast": {
+            "cache0_formal_cache_enabled": cache0_autocast_cache_enabled,
+            "cache1_pass0_cache_enabled": pass0_autocast_cache_enabled,
+            "cache1_formal_cache_enabled": (
+                cache1_formal_autocast_cache_enabled
+            ),
         },
         "modes": {
             "cache0_single": report0,
@@ -764,6 +1007,7 @@ def run_schema29_real_batch_probe(
         "relative_decision": {
             "action_flow_to_velocity_output_layers": velocity_decision,
             "motion_loss_to_motion_head": motion_decision,
+            "total_loss_owners": total_owner_decisions,
             "scope": (
                 "relative first-batch attribution only; this does not claim "
                 "trained behavior or a fixed-point property"

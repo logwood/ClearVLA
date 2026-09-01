@@ -262,6 +262,7 @@ def test_schema29_detached_self_conditioning_owns_one_formal_loss_and_rng_pass()
     encoded = EncodedTrainingBatch(cache, training_state, static_metrics)
 
     grad_modes: list[bool] = []
+    autocast_cache_modes: list[bool] = []
     rng_entries: list[torch.Tensor] = []
     rng_exits: list[torch.Tensor] = []
     velocity_caches = []
@@ -272,6 +273,7 @@ def test_schema29_detached_self_conditioning_owns_one_formal_loss_and_rng_pass()
 
     def tracked_velocity(*args, **kwargs):
         grad_modes.append(torch.is_grad_enabled())
+        autocast_cache_modes.append(torch.is_autocast_cache_enabled())
         rng_entries.append(torch.get_rng_state().clone())
         velocity_caches.append(args[0])
         noisy_inputs.append(kwargs["noisy_action_field"])
@@ -304,6 +306,7 @@ def test_schema29_detached_self_conditioning_owns_one_formal_loss_and_rng_pass()
     assert sample_flow.call_count == 1
     assert compose.call_count == 1
     assert grad_modes == [False, True]
+    assert autocast_cache_modes == [False, True]
     assert velocity_caches[0] is cache
     assert velocity_caches[1] is not cache
     assert velocity_caches[1].top is not cache.top

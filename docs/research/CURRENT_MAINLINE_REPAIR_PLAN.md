@@ -1,6 +1,6 @@
 # ClearVLA Schema28→29 行为闭环与单/多任务合流计划
 
-状态：**Schema29 detached action self-conditioning、八任务外层接口与 Pen/RDT CUDA smoke 已闭合；两条正式行为实验正在同一核心提交上运行，far horizon、gripper 与跨任务行为仍待完整曲线判断**
+状态：**Schema29 首轮 Pen/RDT 训练已因 CUDA BF16 formal 参数 VJP 截断而作废并停止；局部 cache-isolation 修复已完成源码/CPU 回归，正等待真实 Pen B8 CUDA VJP 门、两项 fresh smoke 与全新正式重启**
 更新：2026-09-01
 
 本计划落实
@@ -39,7 +39,9 @@
 正式 attribution 已排除 W/CT 全局重复：W neutral 与 CT neutral 都有独立动作
 增量，组合影响更大；W dynamic 与 consequence neutral 的 bit-exact 恒等同时证明
 当前 sole-consumer 图完整。训练侧 self-conditioning 随后通过 estimator 匹配门并
-成为活动 Schema29 源码；它的正式行为收益仍必须由新实验回答。
+成为活动 Schema29 源码；它的正式行为收益仍必须由新实验回答。首轮实验后来
+发现的不是 W/CT 拓扑问题，而是 pass0 与 pass1 共享 CUDA BF16 autocast 权重
+cache 后 formal 参数边被截断。旧运行不再参与任何行为比较。
 
 ## 二、工作区与合流边界
 
@@ -338,11 +340,79 @@ Schema29，但不预判正式训练收益。
 - first-boundary、consumer-backward、checkpoint 和 deployment call-count 必须在
   修改后各自反向复核一次。
 
-当前实现满足以上合同：一次 flow 采样、pass0/pass1 两次 velocity、pass0
-`no_grad`、condition detached、cache1 同时进入唯一正式 action loss 与 future
-loss；forked RNG 令两遍 dropout 入口一致且全局状态只留下正式 pass1 的推进。没有
-新增参数、state key、optimizer owner 或 objective，Schema28 exact resume 被拒绝，
-部署仍是两遍各五次 update 加 endpoint。相关完整选择 `124/124` 通过。
+原实现满足调用次数、condition detach、loss ownership 与 RNG 合同，却漏掉一项
+混合精度生命周期合同：pass0 是外层 CUDA BF16 autocast 中第一次 dynamic 参数
+调用，`no_grad` 权重 cast 被 cache 后由 pass1 复用。真实 batch 的 cache0
+velocity/gripper/motion 参数 VJP 为
+`3.1299548 / 0.01231698 / 0.05398325`，cache1 formal 三者全为 `0`；两处
+activation VJP 则完全保留。这证明旧 `124/124` 选择不足以宣称 CUDA closure。
+
+修复后仍是一次 flow 采样、两次 velocity、pass0 detached、cache1 唯一正式 action
+与 future loss、相同 forked RNG。新增的唯一执行合同是：外层 formal autocast
+cache 保持开启；pass0 内嵌 `cache_enabled=False`，使 detached cast 不进入 formal
+cache。完整数据流复核还发现 native candidate target probe 与旧 sequential
+learned-execution hard audit 是同型 parameterized no-grad scope，二者也局部
+cache-off。没有新增参数、buffer、state key、optimizer owner、objective、RNG draw
+或部署调用；manifest 仍为 Schema29，但 source digest 改变并拒绝旧 exact resume。
+当前相关 CPU 回归为 `166 passed, 2 skipped`，CUDA-only VJP 必须在远端单独关闭。
+
+### C3.1 修复后的完整数据流与反向复核
+
+活动 producer -> consumer 路径以
+`clearvla/mainline/training/engine.py::_forward_encoded` 为唯一训练入口：
+
+```text
+TrainingBatch
+  -> encode_online: attached observation/G/S/coarse-W/static-P1 cache
+  -> frozen Teacher targets in FP32/no-grad
+  -> one FlowMatchingState
+       noisy_physical [B,24,18], time [B]
+  -> pass0 velocity(cache0), forked RNG, no-grad, BF16, weight-cache off
+       physical_velocity [B,24,18]
+  -> noisy + (1-t)*velocity -> codec.decode [B,24,7]
+  -> detached PhysicalActionCondition [B,4,7 action + B,4,7 delta]
+  -> refine_deployment_world: attached W parameters, only top cache replaced
+  -> pass1 velocity(cache1), BF16, weight-cache on
+       P1 -> P2/consequence -> CT -> Evidence-MMDiT -> output heads
+  -> existing action/future/execution/static losses -> one scalar total
+  -> one backward
+  -> bottom.decoder local clip 1.0 -> configured global clip
+  -> one-owner AdamW -> one schedule step -> one global_step increment
+```
+
+Consumer -> producer 反向检查从 `LossLedger.total` 开始：action/decoded-gripper/
+motion/execution loss 到 formal physical velocity、velocity/gripper/motion heads、
+三个 MMDiT block、execution/capacity/evidence owner，再到 P2/consequence、CT 与
+cache1 W；future loss 另一路直接到同一个 cache1 W。pass0 output、decoded action 与
+condition 均无梯度边，不能通过 cache0 偷得第二份 action objective。全部 trainable
+parameter 仍由 `training/optimizer.py::parameter_role` 唯一归属；checkpoint 仍保存
+model/optimizer/schedule/global RNG/owned generators，源 digest 变化在任何 live object
+被改写前拒绝旧 exact resume。部署的两个五-update-plus-endpoint pass 整体处于
+no-grad，彼此不承担训练参数 VJP，因此不改变本修复。
+
+轴、零值、scale 与重复频率没有变化：pass0 与 pass1 共用同一 `[B,24,18]`
+flow state；`(1-t)` 是唯一 endpoint 外推因子；condition 的 current anchor 与四段
+投影不变；W `.35` action carrier、P2 `.35` effect contract、CT learned gain、bottom
+residual/addition点和 objective weights 都不变。训练每 batch 仍只重建一次 W、只
+compose 一次 loss。candidate target probe 可在每个执行决策重复调用 block/head，
+但它返回 detached target；其局部 cache-off 防止污染以后 attached 调用，不把它
+升级成 optimizer owner。
+
+同类旁路清单已经逐项解释：Teacher 参数冻结且 autocast disabled；runtime/eval
+整个调用无梯度；初始化 no-grad 不在训练 forward 生命周期；gradient hooks 只复制
+detached 标量；Flow-DINO eval probes 训练时不执行；pass1 后诊断只调用无参数 codec。
+除已修复的 pass0、candidate probe 与 sequential hard audit 外，没有发现第四个
+“同一 autocast 内 no-grad 参数首调 -> attached 参数复用”路径。
+
+仍未决、不得由 CPU 测试代答的假设只有：
+
+1. 目标远端 PyTorch/CUDA 的 nested `cache_enabled=False` 与本地 2.11 API 一致；
+2. cache1/cache0 因 W condition 不同可以有真实梯度差，但不得出现 `<=0.10x` 的
+   cache1-specific strong attenuation；
+3. 正式 Pen 与 RDT launcher 的外层 autocast 生命周期与 probe 相同；这由两个
+   fresh smoke 的 parameter VJP/optimizer update 再确认；
+4. 修复只恢复本应存在的梯度，不保证远端、gripper 或多任务行为改善；这些仍由
+   完整新曲线回答。
 
 ### C4. 节制诊断面
 
@@ -393,17 +463,29 @@ JSONL cadence 保持；console 只显示 stop/continue 所需摘要。
 
 smoke 失败只修 ABI/实现，不用正式 GPU 训练判调试错误。
 
-本门已在精确提交 `4125a3d` 完成。Pen smoke 完成一个 batch 的训练/反向、
-checkpoint 与 deploy-style validation；RDT batch-eight smoke 同样完成，并在训练与
-验证各观察到八任务每任务一条、coverage `8/8`、missing task 为空。两者 manifest、
-source 与网络参数身份一致；随机初始化的 smoke RMSE/event 数字不进入行为判断。
+精确提交 `4125a3d` 的旧 Pen/RDT smoke 曾完成 finite backward、checkpoint、
+deploy-style validation 与八任务 coverage，但它们没有检查原始参数 VJP，已经被
+后续真实 batch 反例推翻。其 launcher/data-ABI 结果可作参考，训练接口 closure
+结论作废。
+
+新联合门顺序固定为：
+
+1. 在真实 Pen B8 CUDA BF16 batch 上运行 v2 VJP probe；
+2. 要求 pass0/condition detached、cache state/dtype/RNG/forward/loss 与原合同一致；
+3. cache1 的 velocity/gripper/motion、optimizer roles 和 MMDiT block `0/1/2`
+   参数 VJP 非零，且相对 cache0 无强衰减；
+4. 在同一精确修复提交上各跑一个 fresh Pen B8 与 RDT-8 smoke；
+5. 两者都完成 backward/optimizer/checkpoint/deployment 后，才允许正式实验。
 
 ## 八、同一核心提交的两个正式实验
 
-1. 先启动 Pen 单任务，完成 preflight 与首个健康窗口；确认不是立即 non-finite、
-   lineage、memory 或 loss-ledger 故障后即可启动多任务，不等待八轮结束。
+目前没有有效的 Schema29 正式实验在运行。旧 Pen/RDT checkpoint 禁止续训。
+
+1. 新 VJP 与双 smoke 门通过后，先以新空目录启动 Pen 单任务，完成 preflight 与
+   首个健康窗口；确认参数 VJP、non-finite、lineage、memory 与 loss-ledger 均正常
+   后即可启动多任务，不等待八轮结束。
 2. 两个运行必须各自独占一张 GPU；只有单卡环境才串行。不得让两个进程共享同一
-   GPU 后比较吞吐或显存。当前正式 RDT/Pen 分别运行在 GPU0/GPU1。
+   GPU 后比较吞吐或显存。
 3. 单任务看 core closure：far horizon、gripper、W/CT、refinement mismatch、spike。
 4. 多任务看 adapter/task competition：逐任务曲线、camera/action profile、sampling
    share 与跨任务梯度健康。
@@ -421,6 +503,9 @@ source 与网络参数身份一致；随机初始化的 smoke RMSE/event 数字�
 
 硬停：non-finite、lineage/identity failure、loss ledger 不闭合、目标边界 intervention
 无效、重复 severe spike、显存超界或 checkpoint ABI 违规。
+
+本轮已触发硬停：formal output activation 有梯度而其 trainable owner 参数 VJP 为
+零，属于反向所有权断路。finite total gradient 或 optimizer.step 不能覆盖该门。
 
 不会单独触发停跑：早期 event F1 低、geometry RMS 小、transport/Teacher ratio
 未达某个固定值、capacity 接近全开。这些必须与动作责任和完整曲线一起解释。
@@ -452,11 +537,16 @@ source 与网络参数身份一致；随机初始化的 smoke RMSE/event 数字�
 [done] 用 train-only adjacent-command audit 固定共享 p95=0.18310546875 raw threshold
 [done] 根据 attribution 决策表选择 detached self-conditioning 进入 estimator 门
 [done] 在同一 Schema28 checkpoint 上完成 estimator/full-proposal 匹配门
-[done] 对被放行 core unit 做双向源码审查并实现 Schema29
-[done] 在 Schema29 精确提交上完成 Pen 单任务 CUDA smoke
-[done] 在相同精确提交上完成 RDT batch-eight mixed-model CUDA smoke
-[done] 从同一 4125a3d 核心在独立 GPU 上启动 Pen 与 RDT 正式实验
-[next] 按预定 epoch 节点联合审计完整行为曲线，不再修改已封存的来源分支
+[done] 对被放行 core unit 做首次双向源码审查并实现 Schema29 调用图
+[invalidated] 4125a3d Pen/RDT CUDA smoke：launcher/data ABI 可参考，参数梯度门未过
+[invalidated] 4125a3d Pen/RDT 正式实验：已停止，禁止续训或进入行为比较
+[done] 用真实 Pen batch VJP 定位 pass0 -> autocast cache -> pass1 参数断路
+[done] 重新审查完整活动训练数据流并封住另外两个同型 no-grad 参数 scope
+[done] 完成局部 cache-isolation 实现、v2 probe、CPU/静态回归
+[next] 提交推送修复，在远端完成 Pen B8 CUDA v2 VJP gate
+[pending] 同一修复提交各完成 fresh Pen B8 与 RDT-8 smoke
+[pending] 两门通过后用新空目录重启 Pen/RDT 正式实验
+[pending] 按预定 epoch 节点联合审计完整行为曲线
 ```
 
 没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与

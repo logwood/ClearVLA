@@ -33,6 +33,14 @@ estimator/full-proposal gate 以 `0.984706` 更新方向 cosine、`1.0` 有效�
 放行 Schema29 detached self-conditioning。它们选择结构修改，不替代 Schema29
 正式行为曲线。
 
+Schema29 首轮 Pen/RDT 运行不是有效行为证据。真实 Pen batch 的 CUDA BF16 VJP
+报告 `new_logs/schema29_real_batch_probe_a671640.json` 证明：cache0 单遍的
+velocity/gripper/motion 参数梯度 L2 分别为
+`3.1299548 / 0.01231698 / 0.05398325`，而实际 cache1 formal 路径三者全为
+`0`；与此同时 physical-velocity 与 head-input activation VJP 在两边都保持
+`7.79045e-4 / 3.24186e-6`。因此 finite loss、ledger、activation gradient 和
+optimizer step 都掩盖了参数边被截断。旧实验已经停止，禁止续训。
+
 ## 已由本次运行关闭的边界
 
 - Schema28 能稳定完成一次
@@ -49,6 +57,39 @@ estimator/full-proposal gate 以 `0.984706` 更新方向 cosine、`1.0` 有效�
   `0.06527 / 0.15345`；二者都有独立责任，不新增 W->CT bridge。
 
 这些是结构与运行健康，不等于以下行为问题已经解决。
+
+## S29-00 — CUDA BF16 autocast 权重缓存截断 formal 参数梯度
+
+活动训练在同一个外层 BF16 autocast 生命周期中执行：
+
+```text
+pass0 velocity under no_grad
+  -> rebuild W
+  -> pass1 formal velocity
+  -> backward
+```
+
+PyTorch autocast 会缓存参数的 BF16 cast。pass0 是 dynamic path 第一次参数调用，
+在 `no_grad` 下生成的 cached cast 没有参数边；pass1 随后复用它。forward 与
+activation VJP 仍正常，只有 block/head 到原始参数的 VJP 变成零，所以原 smoke
+只看 finite backward 不能发现该错误。
+
+修复合同是不全局关闭 AMP cache，也不改变 dtype、loss 或数学图，而只在可能与
+后续 attached 调用共享外层 autocast 的 parameterized no-grad scope 内嵌套
+`cache_enabled=False`：训练 pass0、native candidate target probe、旧 sequential
+learned-execution hard audit。formal path 仍使用正常 cache。源码候选已经通过
+`166` 项相关 CPU 回归，并为两条内部路径证明 no-grad/cache-off 后 attached
+block/head VJP 非零；CUDA 专项仍必须由远端通过。
+
+关闭本条必须同时满足：
+
+- v2 Pen B8 real-batch probe 中 pass0/condition 全 detached；
+- pass0 cache off、cache1 formal cache on，formal dtype/forward/loss/RNG 不变；
+- cache1 velocity/gripper/motion 与 Evidence-MMDiT block `0/1/2` 参数 VJP 非零，
+  且相对 cache0 不出现 order-of-magnitude 强衰减；
+- 新提交的 Pen B8 与 RDT-8 fresh smoke 都完成 backward/optimizer/checkpoint/
+  deployment；
+- 只用新空目录重启正式实验，旧 checkpoint exact resume 被 source digest 拒绝。
 
 ## S29-01 — train/runtime action-conditioned W 错位已结构修复，行为收益待验证
 
@@ -67,9 +108,10 @@ cache1 正式 velocity；唯一 action loss 与 future loss 都消费 cache1。p
 backward，forked RNG 令净随机流仍等于一个正式 dynamic pass。参数、optimizer、
 loss 权重与部署两遍 ODE 不变，Schema28 exact resume 被拒绝。
 
-该结构已本地闭环，但尚不是已确认的行为根因。只有 Pen 完整曲线能回答它是否
-改善远端、gripper、final mismatch 与 spike；不得把 smoke finite 或早期 aggregate
-下降写成行为关闭。
+这套调用与所有权结构在源码上成立，但首轮 CUDA 参数梯度并未闭合，见
+S29-00。只有先通过新 VJP 门、再从 fresh state 得到 Pen 完整曲线，才能回答它
+是否改善远端、gripper、final mismatch 与 spike；不得把旧 smoke finite、旧早期
+aggregate 或修复后的首批 loss 当作行为关闭。
 
 ## V28-02 — outer refinement 是有效 correction，但不是自洽闭环
 
@@ -183,3 +225,6 @@ capacity 来换取表面稀疏。
 consumer -> gradient owner -> optimizer -> producer 的反向审查均闭合，并且
 matched intervention 改变了预定第一边界且有完整 coverage 后才能进入结构修改。
 源码可解释但尚无行为证据时保留本条；日志幅度异常但责任未归属时不得直接改图。
+混合精度路径还必须在真实 CUDA autocast 生命周期内验证原始参数 VJP；非零
+activation gradient、finite global norm、optimizer.step 被调用或 CPU backward
+均不能替代该门。

@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        29
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 eight-epoch behavior, formal Stage-A attribution and endpoint-estimator gate complete; Schema29 detached action self-conditioning is source/local/CUDA-interface closed at integration source 4125a3d and fresh Pen/RDT behavior runs are active; far horizon and gripper behavior remain open
+release status:         Schema28 eight-epoch behavior, formal Stage-A attribution and endpoint-estimator gate complete; the first Schema29 Pen/RDT runs are invalidated by a CUDA BF16 autocast weight-cache gradient break; a source-local cache-isolation repair is under a new real-batch VJP gate, and no Schema29 behavior run is currently valid
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -98,7 +98,11 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > earlier schemas are rejected for exact resume. Its completed formal run is
 > fresh and behavior-audited below. Schema29 retains its parameters and
 > deployment graph but changes the training/runtime ABI again; Schema28 is not
-> an exact optimizer-resume source.
+> an exact optimizer-resume source. The first Schema29 CUDA launches are not
+> behavior evidence: a later real-batch parameter VJP proved that pass0 had
+> polluted the enclosing BF16 autocast weight cache and severed formal-pass
+> parameter edges. The repaired lifecycle below must pass a fresh CUDA gate
+> before either outlet restarts.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -278,6 +282,13 @@ world without adding a sampler pass or a second model:
 - pass0 runs inside a forked CPU/current-CUDA RNG scope. Pass0 and pass1 begin
   from the same dropout state, while the final global RNG state advances by
   exactly one formal dynamic call as in Schema28;
+- the enclosing formal autocast cache remains enabled, but every parameterized
+  no-grad call that can share its lifetime with a later attached call uses a
+  nested autocast context with `cache_enabled=False`. This applies to pass0,
+  the native candidate target probe, and the retired-sequential
+  learned-execution hard audit. The later formal block/head calls retain the
+  normal cache. Disabling the cache globally, changing compute dtype, or
+  detaching the formal activations is not allowed;
 - pass0 has no loss and no backward path. The condition input VJP is exact zero
   by design; the post-projection, post-`0.35` W action carrier is the named
   consumer-gradient observation point;
@@ -794,8 +805,10 @@ supports may change targets and losses, never deployment action.
     qpos is retained only as a physical-boundary audit. Sampler strata, the
     continuous trajectory mask and decoded event metrics consume the same
     adopted command-activity threshold, while the physical action field keeps
-    its qpos-anchored first delta. A mixed model backward/deployment smoke is
-    still pending.
+    its qpos-anchored first delta. The first mixed-model backward/deployment
+    smoke reached this interface, but its training-validity claim was later
+    withdrawn after the shared CUDA BF16 weight-cache defect was found. It must
+    be rerun from fresh state after the real-batch parameter-VJP gate passes.
 
     The active gripper boundary map is therefore:
 
@@ -1203,12 +1216,13 @@ raw-flow-pyramid owner. The maximum global preclip is `24.63`. The Schema27
 typed-normalization owner does not recur, while older observation owners remain
 an open empirical boundary.
 
-Schema28 is therefore source-closed and runnable but not behavior-closed. The
-next architectural unit is not part of this contract until the matched
-W/consequence/ControlledTransition attribution and complete producer/consumer
-review in `CURRENT_MAINLINE_REPAIR_PLAN.md` select it. In particular, this
-contract adopts neither an extra W-to-transition bridge nor a transition-owned
-world generator.
+At the completion of the Schema28 behavior run, it was source-closed and
+runnable but not behavior-closed. The next architectural unit was deliberately
+held outside the contract until matched W/consequence/ControlledTransition
+attribution and the complete producer/consumer review selected it. The
+subsequent evidence below selected the Schema29 train/runtime alignment while
+still rejecting an extra W-to-transition bridge and a transition-owned world
+generator.
 
 The post-run Stage-A attribution source adds only non-persistent evaluation
 state and scalar accounting. It reuses the refined cache and identical initial
@@ -1240,42 +1254,60 @@ direction cosine is `0.984706` with `1.0` valid coverage. The extra path costs
 `0.200390 s/diagnostic batch` and `0.013094 GiB` live allocation. This passed
 the predeclared Schema29 gate; it did not itself change training.
 
-The Schema29 source/local closure selection passes `124/124`, with an
-additional focused `21/21` call-graph/manifest/checkpoint selection. Tests
-prove two velocity calls and one flow sample, pass0 no-grad and detached
-condition, cache1 ownership of the sole formal loss and future dynamics,
-matched dropout entry streams, net RNG advance equal to one dynamic pass,
-unchanged parameter/state/optimizer inventory, Schema28 exact-resume rejection
-and unchanged two-pass deployment call count. Ruff, py_compile and diff checks
-pass.
+The original Schema29 source/local selection proved the call count, detached
+condition, loss owner, RNG restoration, parameter inventory and checkpoint
+ABI, but it did **not** prove that the formal CUDA BF16 pass retained parameter
+edges. That omission invalidates its former CUDA-interface closure claim.
 
-The Pen/RDT CUDA interface gate is complete at integration commit
-`4125a3ded5b47b0cc73a5d128a1bbcfeb5477436`. The one-batch Pen smoke
-`schema29_pen_smoke_4125a3d_20260901_105930` completed a fresh forward,
-backward, optimizer step, checkpoint write and deployment-style validation at
-`2.155 s/batch` with a `2.921 GiB` process-peak estimate. The batch-eight RDT
-smoke `schema29_rdt8_smoke_4125a3d_20260901_104957` completed the same model
-path plus the task-aware outlet at a cold one-batch `9.775 s/batch` and
-`10.321 GiB`: its training batch contained exactly one row from each of the
-eight tasks, its validation panel observed all `8/8` tasks with no missing
-task, and per-task, micro and macro records were serialized. Both runs used
-Schema29 manifest digest
-`96883e89ea3df8e5da1693022bdfff79d92fd3100a1deb55360d608cc897f8e6`,
-source digest
-`3f22432e4ab4d0ce1d6581c2c09a55ecb5571ec67f611627d5e81217bc89dfc0`
-and an exact loss ledger. Random-initialized smoke RMSE/event values are not
-behavior evidence.
+The decisive real Pen batch report is
+`new_logs/schema29_real_batch_probe_a671640.json`, schema
+`clearvla-schema29-real-batch-gradient-ab-v1`, from clean source
+`a6716405ff363657e0acfb9fc6e8b2802accf255`. It ran cache0 as a single
+attached pass and cache1 with the actual no-grad pass0 followed by the formal
+pass inside one enclosing BF16 autocast context. The total-loss VJPs were:
 
-Fresh formal Pen and RDT runs from the same commit then reached at least
-`2160 / 1720` optimizer steps on separate GPUs with no traceback, OOM,
-non-finite row, lineage failure or ledger gap. Their steady window medians
-were `2.295 / 2.288 s/batch`; the Pen value is about `1.25x` the Schema28
-formal median and remains inside the `1.5x` runtime gate. The finite threshold
-crossings at this acceptance snapshot were `2 / 1`, owned by the existing
-observation flow or target-DINO-key paths rather than the new Schema29
-self-conditioning boundary. These runs establish source/runtime usability;
-they have not yet completed an epoch validation record and therefore do not
-close far-horizon, gripper or multi-task behavior.
+```text
+                                         cache0 attached       cache1 formal
+velocity-output parameter L2             3.1299548             0
+gripper-gate parameter L2                 0.01231698            0
+motion-head parameter L2                  0.05398325            0
+physical-velocity activation RMS          7.79045e-4            7.79045e-4
+velocity-head-input activation RMS        3.24186e-6            3.24186e-6
+```
+
+Forward boundaries remained numerically aligned while activation VJPs stayed
+nonzero. The zero appeared only at parameter ownership. This isolates the
+cause to PyTorch autocast's cached BF16 parameter copies: pass0 was the first
+dynamic parameter call under `no_grad`, its cached casts had no parameter edge,
+and pass1 reused them. It is not evidence for a detached W condition, a weak
+loss, clipping, optimizer ownership or a zero activation gradient.
+
+The source-local repair leaves the Schema29 graph, parameters, buffers, state
+keys, optimizer groups, objective weights, RNG schedule and deployment calls
+unchanged. It disables autocast weight caching only inside the three
+parameterized no-grad scopes named above and expands the real-batch probe to
+all optimizer roles, Evidence-MMDiT blocks `0/1/2`, the three output owners,
+formal activation VJPs, dtype/detach state and nested cache state. The current
+relevant CPU selection passes `166/166` with two CUDA-only regressions skipped;
+Ruff and py_compile pass. CPU results prove placement and graph semantics, not
+the CUDA repair.
+
+The former Pen/RDT smokes at `4125a3d` and the formal runs that reached
+`2160 / 1720` steps are invalid as training/behavior evidence. Their finite
+losses, exact ledgers, throughput and task coverage remain useful only as
+launcher/data-ABI observations. Both formal runs were stopped and must never
+be resumed from their checkpoints.
+
+A fresh release gate must first run the v2 real-batch probe on Pen B8 CUDA
+BF16. Cache1 must keep pass0 and its decoded condition fully detached, keep
+pass0 cache disabled and formal cache enabled, preserve dtype/forward/loss/RNG
+semantics, and produce nonzero velocity/gripper/motion plus block `0/1/2`
+parameter VJPs at the same order of magnitude as cache0. Only then may fresh
+one-batch Pen and RDT-8 smokes run. Only after both smokes pass may the two
+formal experiments restart in new empty directories; no old checkpoint may be
+loaded. The code change does not raise the manifest schema because it changes
+no serialized graph state, but its new source digest intentionally makes the
+old checkpoint fail exact resume.
 
 Use new empty output directories:
 

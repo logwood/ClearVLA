@@ -28,6 +28,27 @@ from .refinement import NestedLowRankContractionBank
 from .role_delta_attnres import PolicyRoleDeltaBank, RoleDeltaAttnRes
 
 
+def _autocast_without_weight_cache(device: torch.device):
+    """Keep a no-grad parameter probe out of the surrounding AMP cache.
+
+    PyTorch's autocast weight cache lives for the enclosing autocast context.
+    If a trainable module is first called under ``no_grad``, its cached cast can
+    be reused by a later attached call without a parameter edge.  Candidate
+    probes still need the surrounding compute dtype, so isolate only their
+    weight casts instead of disabling autocast or its cache for the formal
+    path.
+    """
+
+    if device.type not in {"cpu", "cuda"}:
+        return nullcontext()
+    return torch.autocast(
+        device_type=device.type,
+        dtype=torch.get_autocast_dtype(device.type),
+        enabled=torch.is_autocast_enabled(device.type),
+        cache_enabled=False,
+    )
+
+
 @dataclass
 class EvidenceView:
     """Typed, normalized evidence visible to the action solver.
@@ -1638,7 +1659,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             operation_mask.float() * (candidate_repeats.detach().float() + 1.0)
         ).sum(dim=-1)
         modules: list[nn.Module] = [*self.blocks, *self.operator_contractions]
-        with deterministic_module_probe(*modules), torch.no_grad():
+        with (
+            deterministic_module_probe(*modules),
+            torch.no_grad(),
+            _autocast_without_weight_cache(action.device),
+        ):
             probe_factors = (
                 None
                 if not self.operator_capacity_enabled or identity_boundary
@@ -3170,7 +3195,18 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             block_ids = torch.full(
                 (batch,), block_index, device=action.device, dtype=torch.long
             )
-            with torch.no_grad() if learned_execution else nullcontext():
+            # The hard action is an audit/selection surface when learned
+            # execution uses the attached soft candidate chart below.  Its
+            # first call to this block must not publish a detached BF16 weight
+            # cast that the formal candidate graph can then reuse.
+            with (
+                torch.no_grad() if learned_execution else nullcontext(),
+                (
+                    _autocast_without_weight_cache(action.device)
+                    if learned_execution
+                    else nullcontext()
+                ),
+            ):
                 hard_action, committed_metrics, committed_contractions = (
                     self._apply_selected_native_operations(
                         block_input,

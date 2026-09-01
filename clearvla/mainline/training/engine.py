@@ -72,12 +72,22 @@ _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _autocast(device: torch.device, dtype: torch.dtype):
+def _autocast(
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    cache_enabled: bool = True,
+):
     enabled = device.type in {"cuda", "cpu"} and dtype in {
         torch.bfloat16,
         torch.float16,
     }
-    return torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled)
+    return torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=enabled,
+        cache_enabled=bool(cache_enabled),
+    )
 
 
 def validate_finite_training_batch(batch: TrainingBatch) -> None:
@@ -636,38 +646,50 @@ class MainlineTrainingEngine:
             )
         with torch.random.fork_rng(devices=cuda_devices):
             with torch.no_grad():
-                pass0_output = self.model.velocity(
-                    encoded.cache,
-                    noisy_action_field=flow_state.noisy_physical,
-                    time=flow_state.time,
-                    require_execution_supervision=False,
-                    collect_diagnostics=False,
-                )
-                remaining = (1.0 - flow_state.time.to(
-                    dtype=flow_state.noisy_physical.dtype
-                ))[:, None, None]
-                pass0_clean_physical = flow_state.noisy_physical + remaining * (
-                    pass0_output.bottom.physical_velocity.to(
+                # CUDA autocast caches lower-precision parameter copies for
+                # the lifetime of the outer training context.  If a module's
+                # first dynamic call happens under no-grad, a cached BF16
+                # copy can lose its parameter edge and then be reused by the
+                # formal pass.  Keep pass0 numerically identical but forbid
+                # this detached estimator from publishing weight copies into
+                # the surrounding pass1 cache.
+                with _autocast(
+                    self.device,
+                    self.dtype,
+                    cache_enabled=False,
+                ):
+                    pass0_output = self.model.velocity(
+                        encoded.cache,
+                        noisy_action_field=flow_state.noisy_physical,
+                        time=flow_state.time,
+                        require_execution_supervision=False,
+                        collect_diagnostics=False,
+                    )
+                    remaining = (1.0 - flow_state.time.to(
                         dtype=flow_state.noisy_physical.dtype
+                    ))[:, None, None]
+                    pass0_clean_physical = flow_state.noisy_physical + remaining * (
+                        pass0_output.bottom.physical_velocity.to(
+                            dtype=flow_state.noisy_physical.dtype
+                        )
                     )
-                )
-                pass0_clean_action = self.model.action_codec.decode(
-                    pass0_clean_physical,
-                    encoded.cache.history.action_state,
-                ).detach()
-                pass0_condition = PhysicalActionCondition.from_horizon_action(
-                    pass0_clean_action,
-                    encoded.cache.history.action_state.detach(),
-                )
-                pass0_action_flow = (
-                    self._detached_v120_action_flow(
-                        pass0_output.bottom.physical_velocity,
-                        flow_state.target_physical_velocity,
+                    pass0_clean_action = self.model.action_codec.decode(
+                        pass0_clean_physical,
+                        encoded.cache.history.action_state,
+                    ).detach()
+                    pass0_condition = PhysicalActionCondition.from_horizon_action(
+                        pass0_clean_action,
+                        encoded.cache.history.action_state.detach(),
                     )
-                    if collect_diagnostics
-                    else None
-                )
-                del pass0_output, pass0_clean_physical
+                    pass0_action_flow = (
+                        self._detached_v120_action_flow(
+                            pass0_output.bottom.physical_velocity,
+                            flow_state.target_physical_velocity,
+                        )
+                        if collect_diagnostics
+                        else None
+                    )
+                    del pass0_output, pass0_clean_physical
 
         refined_top, refinement_metrics = self.model.top.refine_deployment_world(
             encoded.cache.top,
