@@ -41,8 +41,27 @@ velocity/gripper/motion 参数梯度 L2 分别为
 `7.79045e-4 / 3.24186e-6`。因此 finite loss、ledger、activation gradient 和
 optimizer step 都掩盖了参数边被截断。旧实验已经停止，禁止续训。
 
+局部修复提交 `d8a77a19cfbd7520ae790b3938e2d1fb3a8a7a6f` 已通过新的真实
+Pen B8 CUDA v2 VJP、Pen B8 smoke 与 RDT-8 smoke。cache1 的
+velocity/gripper/motion、三个 Evidence-MMDiT block 以及所有 cache0 有信号的
+optimizer role 均保留约 `1.0x` 的参数 VJP；pass0/condition detached、
+cache-off/cache-on、BF16 与 RNG 合同不变。两项 smoke 都完成 optimizer step、
+deploy-style validation 与 checkpoint 写入，RDT validation/training mix 覆盖
+`8/8` 任务。两个 fresh formal run 已从空目录启动。Pen 已到至少 step400，所有
+named optimizer role 均有 formal 参数梯度；三次有限 `arm_abs.weight` crossing
+只出现在 step `8/10/40`，之后到 step400 未复发。RDT-8 已完成首个 20-batch
+窗口，ledger 闭合，P2/consequence/CT/MMDiT/head 均非零且无 spike；其 B8
+task-balanced sampler 每批恰好覆盖八个任务。因此 Schema29 已有持续运行放行
+证据，但仍没有任何完整 epoch 行为曲线。
+
 ## 已由本次运行关闭的边界
 
+- S29-00 已关闭：同一外层 CUDA BF16 autocast 内的 parameterized no-grad 首调
+  只在训练 pass0、native candidate target probe 和旧 sequential hard audit 三处
+  构成同型风险；三处均局部 `cache_enabled=False`，formal cache 仍开启。门禁要求
+  cache0 有信号的 role 在 cache1 保留，而不是强迫合法 step0 零初始化 owner
+  非零。`bottom_capacity`、`consequence`、`p2_effect_reader` 在两模式同时为零，
+  不属于 cache1 特异性断路；
 - Schema28 能稳定完成一次
   `proposal -> W(proposal) -> refined action`，不是空调用或 lineage 旁路；
 - W 的 goal/coarse-hidden direct ingress 为零，显式
@@ -57,39 +76,6 @@ optimizer step 都掩盖了参数边被截断。旧实验已经停止，禁止�
   `0.06527 / 0.15345`；二者都有独立责任，不新增 W->CT bridge。
 
 这些是结构与运行健康，不等于以下行为问题已经解决。
-
-## S29-00 — CUDA BF16 autocast 权重缓存截断 formal 参数梯度
-
-活动训练在同一个外层 BF16 autocast 生命周期中执行：
-
-```text
-pass0 velocity under no_grad
-  -> rebuild W
-  -> pass1 formal velocity
-  -> backward
-```
-
-PyTorch autocast 会缓存参数的 BF16 cast。pass0 是 dynamic path 第一次参数调用，
-在 `no_grad` 下生成的 cached cast 没有参数边；pass1 随后复用它。forward 与
-activation VJP 仍正常，只有 block/head 到原始参数的 VJP 变成零，所以原 smoke
-只看 finite backward 不能发现该错误。
-
-修复合同是不全局关闭 AMP cache，也不改变 dtype、loss 或数学图，而只在可能与
-后续 attached 调用共享外层 autocast 的 parameterized no-grad scope 内嵌套
-`cache_enabled=False`：训练 pass0、native candidate target probe、旧 sequential
-learned-execution hard audit。formal path 仍使用正常 cache。源码候选已经通过
-`166` 项相关 CPU 回归，并为两条内部路径证明 no-grad/cache-off 后 attached
-block/head VJP 非零；CUDA 专项仍必须由远端通过。
-
-关闭本条必须同时满足：
-
-- v2 Pen B8 real-batch probe 中 pass0/condition 全 detached；
-- pass0 cache off、cache1 formal cache on，formal dtype/forward/loss/RNG 不变；
-- cache1 velocity/gripper/motion 与 Evidence-MMDiT block `0/1/2` 参数 VJP 非零，
-  且相对 cache0 不出现 order-of-magnitude 强衰减；
-- 新提交的 Pen B8 与 RDT-8 fresh smoke 都完成 backward/optimizer/checkpoint/
-  deployment；
-- 只用新空目录重启正式实验，旧 checkpoint exact resume 被 source digest 拒绝。
 
 ## S29-01 — train/runtime action-conditioned W 错位已结构修复，行为收益待验证
 

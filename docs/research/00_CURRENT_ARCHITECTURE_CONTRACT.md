@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        29
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 eight-epoch behavior, formal Stage-A attribution and endpoint-estimator gate complete; the first Schema29 Pen/RDT runs are invalidated by a CUDA BF16 autocast weight-cache gradient break; a source-local cache-isolation repair is under a new real-batch VJP gate, and no Schema29 behavior run is currently valid
+release status:         Schema28 remains the completed behavior reference; the d8a77a1 source-local cache-isolation repair passed the real Pen B8 CUDA v2 VJP gate and fresh Pen/RDT-8 smokes; two fresh Schema29 formal runs are active, but no completed Schema29 behavior curve is valid yet
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -1286,11 +1286,13 @@ The source-local repair leaves the Schema29 graph, parameters, buffers, state
 keys, optimizer groups, objective weights, RNG schedule and deployment calls
 unchanged. It disables autocast weight caching only inside the three
 parameterized no-grad scopes named above and expands the real-batch probe to
-all optimizer roles, Evidence-MMDiT blocks `0/1/2`, the three output owners,
-formal activation VJPs, dtype/detach state and nested cache state. The current
-relevant CPU selection passes `166/166` with two CUDA-only regressions skipped;
-Ruff and py_compile pass. CPU results prove placement and graph semantics, not
-the CUDA repair.
+every optimizer role, Evidence-MMDiT blocks `0/1/2`, the three output owners,
+formal activation VJPs, dtype/detach state and nested cache state. The gate is
+relational: every role with cache0 signal must retain it in cache1; a role that
+is zero in both modes because of a legal zero initialization is not required to
+become nonzero. The relevant CPU selection passes `166/166` with two CUDA-only
+regressions skipped; Ruff and py_compile pass. CPU results prove placement and
+graph semantics, not the CUDA repair.
 
 The former Pen/RDT smokes at `4125a3d` and the formal runs that reached
 `2160 / 1720` steps are invalid as training/behavior evidence. Their finite
@@ -1298,16 +1300,74 @@ losses, exact ledgers, throughput and task coverage remain useful only as
 launcher/data-ABI observations. Both formal runs were stopped and must never
 be resumed from their checkpoints.
 
-A fresh release gate must first run the v2 real-batch probe on Pen B8 CUDA
-BF16. Cache1 must keep pass0 and its decoded condition fully detached, keep
-pass0 cache disabled and formal cache enabled, preserve dtype/forward/loss/RNG
-semantics, and produce nonzero velocity/gripper/motion plus block `0/1/2`
-parameter VJPs at the same order of magnitude as cache0. Only then may fresh
-one-batch Pen and RDT-8 smokes run. Only after both smokes pass may the two
-formal experiments restart in new empty directories; no old checkpoint may be
-loaded. The code change does not raise the manifest schema because it changes
-no serialized graph state, but its new source digest intentionally makes the
-old checkpoint fail exact resume.
+The fresh v2 Pen B8 CUDA BF16 gate has now passed at source commit
+`d8a77a19cfbd7520ae790b3938e2d1fb3a8a7a6f`; its local artifact is
+`new_logs/schema29_real_batch_probe_d8a77a1_r1.json`. The report's
+`worktree_dirty=true` comes only from untracked report/log artifacts in the
+dedicated probe worktree; tracked executable source is exact `d8a77a1`.
+Pass0/decoded condition are detached, pass0 uses cache-off, cache0/cache1 formal
+use cache-on, pass0 velocity is BF16, and CPU/current-CUDA fork RNG is restored.
+The decisive total-loss parameter VJPs are:
+
+```text
+                                         cache0 attached       cache1 formal
+all trainable parameter L2               3.1506655             3.1506667
+velocity-output parameter L2             3.1299548             3.1299548
+gripper-gate parameter L2                 0.01231698            0.01231698
+motion-head parameter L2                  0.05398325            0.05398325
+Evidence-MMDiT block 0 L2                 0.0244343             0.0244343
+Evidence-MMDiT block 1 L2                 0.0245463             0.0245463
+Evidence-MMDiT block 2 L2                 0.0243540             0.0243540
+```
+
+Every optimizer role with cache0 signal is preserved in cache1 at approximately
+`1.0x`. `bottom_capacity`, `consequence` and `p2_effect_reader` are zero in both
+modes at the fresh step-zero boundary; that is the existing capacity warmup and
+zero-initialized W/P2 consequence semantics, not cache1-specific attenuation.
+The two CUDA-only internal regressions for the candidate target probe and
+sequential learned-execution hard audit also pass on the target server.
+
+Fresh B8 smokes then completed from the same commit and source digest
+`5294ee5521705adbcc3b85da82755063befd3de68fa5a79bce5b165b01be47a9`:
+
+- `schema29_cachefix_pen_b8_smoke_d8a77a1_r1` completed one optimizer step,
+  deploy-style validation, exact ledger, and atomic `latest.pt`/`best.pt`
+  writes. Raw global/MMDiT/head gradients were
+  `3.02863 / 0.04150 / 3.00206`.
+- `schema29_cachefix_rdt8_smoke_d8a77a1_r1` completed the same lifecycle with
+  raw global/MMDiT/head gradients `3.89867 / 0.05054 / 3.87384`; its bounded
+  validation panel and training mix both cover all eight tasks exactly once.
+- Both serialize manifest digest
+  `96883e89ea3df8e5da1693022bdfff79d92fd3100a1deb55360d608cc897f8e6`,
+  identical module inventory and optimizer ownership. Their one-batch RMSE,
+  event F1 and cold-start runtime are interface evidence only, not behavior or
+  throughput conclusions.
+
+The fresh formal runs
+`schema29_cachefix_pen_b8_d8a77a1_20260901_r1` and
+`schema29_cachefix_rdt8_b8_d8a77a1_20260901_r1` were then launched on separate
+GPUs with no resume or migration argument. Pen has reached at least step `400`
+with an exact ledger, no lineage/non-finite error and all named optimizer roles
+carrying a formal parameter gradient. At step `400`, raw global/P2/consequence/
+CT/MMDiT/head L2 are `1.959996 / 0.066696 / 2.716e-4 / 0.027799 /
+0.306001 / 1.584174`; the step-zero-legal capacity owner has also opened
+naturally to `0.001073`. Three finite `arm_abs.weight` cold-start crossings
+occurred at steps `8/10/40` (`5.44/5.40/5.36`) and did not recur through step
+`400`. After the overlapping cold start, its 20-batch windows are in the
+`2.11-2.75 s/batch` range; no release throughput value is selected before a
+controlled epoch comparison.
+
+RDT-8 completed its source-wide HDF5 cold start, the same model preflight and
+its first 20-batch window. The ledger is exact; raw global/P2/consequence/CT/
+MMDiT/head L2 are `2.88159 / 1.627e-4 / 4.102e-7 / 0.004355 / 0.039080 /
+2.86530`, with no spike, lineage or non-finite row. Its serialized
+`clearvla-task-balanced-information-sampler-v1` contract uses task count `8`
+and batch size `8`, so every formal batch contains one row per selected task.
+The first-window `6.81283 s/batch` still includes data/model cold start and is
+not a steady throughput claim. No completed Schema29 epoch or behavior claim
+exists yet. The code change does not raise the manifest schema because it
+changes no serialized graph state, but its new source digest intentionally
+makes every old checkpoint fail exact resume.
 
 Use new empty output directories:
 

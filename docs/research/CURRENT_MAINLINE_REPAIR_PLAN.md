@@ -1,6 +1,6 @@
 # ClearVLA Schema28→29 行为闭环与单/多任务合流计划
 
-状态：**Schema29 首轮 Pen/RDT 训练已因 CUDA BF16 formal 参数 VJP 截断而作废并停止；局部 cache-isolation 修复已完成源码/CPU 回归，正等待真实 Pen B8 CUDA VJP 门、两项 fresh smoke 与全新正式重启**
+状态：**局部 cache-isolation 修复 `d8a77a1` 已通过真实 Pen B8 CUDA v2 VJP 与 fresh Pen/RDT-8 双 smoke；两个正式实验已从空目录重启，当前等待完整 Schema29 行为曲线**
 更新：2026-09-01
 
 本计划落实
@@ -404,15 +404,13 @@ detached 标量；Flow-DINO eval probes 训练时不执行；pass1 后诊断只�
 除已修复的 pass0、candidate probe 与 sequential hard audit 外，没有发现第四个
 “同一 autocast 内 no-grad 参数首调 -> attached 参数复用”路径。
 
-仍未决、不得由 CPU 测试代答的假设只有：
-
-1. 目标远端 PyTorch/CUDA 的 nested `cache_enabled=False` 与本地 2.11 API 一致；
-2. cache1/cache0 因 W condition 不同可以有真实梯度差，但不得出现 `<=0.10x` 的
-   cache1-specific strong attenuation；
-3. 正式 Pen 与 RDT launcher 的外层 autocast 生命周期与 probe 相同；这由两个
-   fresh smoke 的 parameter VJP/optimizer update 再确认；
-4. 修复只恢复本应存在的梯度，不保证远端、gripper 或多任务行为改善；这些仍由
-   完整新曲线回答。
+CUDA/runtime 假设已经由目标服务器关闭：nested `cache_enabled=False` 保留 BF16
+数值域；pass0 cache off、formal cache on；所有 cache0 有参数 VJP 的 role 在 cache1
+保留约 `1.0x`，三个 MMDiT block 与 velocity/gripper/motion owner 也逐项一致；Pen
+和 RDT launcher 均完成真实 optimizer step。cache0/cache1 同为零的
+`bottom_capacity`、`consequence`、`p2_effect_reader` 是合法 step0 初始化，不作为
+失败。仍未决的只有行为问题：修复只是恢复本应存在的梯度，不保证远端、gripper
+或多任务行为改善，这些必须由完整新曲线回答。
 
 ### C4. 节制诊断面
 
@@ -444,18 +442,20 @@ JSONL cadence 保持；console 只显示 stop/continue 所需摘要。
 6. Pen 单任务入口暂时保留以诊断核心；多任务入口稳定后，Pen 可作为单任务
    registry 配置进入同一入口，再淘汰旧 loader，不淘汰核心行为测试。
 
-## 七、无正式实验的联合 smoke
+## 七、正式实验前的联合 smoke（已完成）
 
 ### 单任务 smoke
 
 - 一个真实 batch，fresh forward/backward/optimizer step；
 - pass0 detached、W rebuild、pass1 loss、finite gradient；
-- checkpoint save/load 与 exact rejection/migration contract；
+- checkpoint 原子写入；exact load/rejection/migration 由相同 source identity 的
+  checkpoint 回归覆盖；
 - 五步 proposal/refined deployment 和所有 matched attribution modes。
 
 ### 多任务 smoke
 
-- 首轮每个任务各一个 batch，再做一个 mixed batch；
+- 一个 task-balanced B8 mixed batch，每个任务恰好一行；
+- 一个 task-stratified B8 validation panel，每个任务恰好一行；
 - episode/language/camera/action profile 与 task id 对齐；
 - 每任务 loss/metric denominator 正确，缺失任务不输出伪零；
 - 同一 Pen 样本经旧单任务 adapter 与新 registry 单任务配置后，进入 core 的
@@ -472,14 +472,36 @@ deploy-style validation 与八任务 coverage，但它们没有检查原始参�
 
 1. 在真实 Pen B8 CUDA BF16 batch 上运行 v2 VJP probe；
 2. 要求 pass0/condition detached、cache state/dtype/RNG/forward/loss 与原合同一致；
-3. cache1 的 velocity/gripper/motion、optimizer roles 和 MMDiT block `0/1/2`
-   参数 VJP 非零，且相对 cache0 无强衰减；
+3. cache1 的 velocity/gripper/motion 和 MMDiT block `0/1/2` 参数 VJP 非零；每个
+   cache0 有信号的 optimizer role 在 cache1 保留且无强衰减，cache0/cache1 同为
+   零的合法初始化 owner 不视为失败；
 4. 在同一精确修复提交上各跑一个 fresh Pen B8 与 RDT-8 smoke；
 5. 两者都完成 backward/optimizer/checkpoint/deployment 后，才允许正式实验。
 
 ## 八、同一核心提交的两个正式实验
 
-目前没有有效的 Schema29 正式实验在运行。旧 Pen/RDT checkpoint 禁止续训。
+当前两个 fresh Schema29 正式实验都在精确提交 `d8a77a1` 上运行：
+
+```text
+Pen:   schema29_cachefix_pen_b8_d8a77a1_20260901_r1
+RDT-8: schema29_cachefix_rdt8_b8_d8a77a1_20260901_r1
+```
+
+二者没有 `--resume`/migration 参数，分别使用独立 GPU 与空目录。旧 Pen/RDT
+checkpoint 仍禁止续训。Pen 已到至少 step400，ledger 持续闭合且全部 named
+optimizer role 都有 formal 参数梯度；step400 的 P2/consequence/CT/MMDiT/head
+分别为 `0.066696 / 2.716e-4 / 0.027799 / 0.306001 / 1.584174`。三个有限
+`arm_abs.weight` crossing 为 step `8/10/40` 的 `5.44/5.40/5.36`，此后到
+step400 未复发。冷启动后的 20-batch 窗口为 `2.11-2.75 s/batch`，但仍不在异步
+负载下选择 release 吞吐值。
+
+RDT-8 已完成 source-wide HDF5 冷启动、相同模型 preflight 和首个 20-batch
+窗口：ledger 闭合，global/P2/consequence/CT/MMDiT/head 为
+`2.88159 / 1.627e-4 / 4.102e-7 / 0.004355 / 0.039080 / 2.86530`，无 spike、
+lineage 或 non-finite。运行合同是 task count `8`、batch size `8` 的
+task-balanced sampler，所以每批恰好包含每个任务一行。首窗 `6.81283 s/batch`
+仍包含数据/模型冷启动，不作稳态性能结论。两线完整行为判断都等待 epoch
+validation。
 
 1. 新 VJP 与双 smoke 门通过后，先以新空目录启动 Pen 单任务，完成 preflight 与
    首个健康窗口；确认参数 VJP、non-finite、lineage、memory 与 loss-ledger 均正常
@@ -504,8 +526,9 @@ deploy-style validation 与八任务 coverage，但它们没有检查原始参�
 硬停：non-finite、lineage/identity failure、loss ledger 不闭合、目标边界 intervention
 无效、重复 severe spike、显存超界或 checkpoint ABI 违规。
 
-本轮已触发硬停：formal output activation 有梯度而其 trainable owner 参数 VJP 为
-零，属于反向所有权断路。finite total gradient 或 optimizer.step 不能覆盖该门。
+旧运行触发过硬停：formal output activation 有梯度而其 trainable owner 参数 VJP
+为零，属于反向所有权断路。`d8a77a1` 已关闭该实现故障；finite total gradient 或
+optimizer.step 以后仍不能替代原始参数 VJP 门。
 
 不会单独触发停跑：早期 event F1 低、geometry RMS 小、transport/Teacher ratio
 未达某个固定值、capacity 接近全开。这些必须与动作责任和完整曲线一起解释。
@@ -543,10 +566,10 @@ deploy-style validation 与八任务 coverage，但它们没有检查原始参�
 [done] 用真实 Pen batch VJP 定位 pass0 -> autocast cache -> pass1 参数断路
 [done] 重新审查完整活动训练数据流并封住另外两个同型 no-grad 参数 scope
 [done] 完成局部 cache-isolation 实现、v2 probe、CPU/静态回归
-[next] 提交推送修复，在远端完成 Pen B8 CUDA v2 VJP gate
-[pending] 同一修复提交各完成 fresh Pen B8 与 RDT-8 smoke
-[pending] 两门通过后用新空目录重启 Pen/RDT 正式实验
-[pending] 按预定 epoch 节点联合审计完整行为曲线
+[done] 提交推送 `d8a77a1`，在远端完成 Pen B8 CUDA v2 VJP gate
+[done] 同一修复提交完成 fresh Pen B8 与 RDT-8 smoke，RDT coverage=8/8
+[done] 两门通过后用新空目录重启 Pen/RDT 正式实验
+[next] 按预定 epoch 节点联合审计完整行为曲线
 ```
 
 没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与
