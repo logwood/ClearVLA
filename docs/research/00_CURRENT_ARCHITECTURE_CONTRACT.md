@@ -14,7 +14,7 @@ capability:             object_intent_dynamics_323
 manifest schema:        30
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 remains the completed behavior reference; the d8a77a1 Schema29 cache-isolation repair passed the real Pen B8 CUDA v2 VJP gate and fresh Pen/RDT-8 smokes; Schema30 structural repairs, focused CPU BF16 smoke, checkpoint round-trip/Schema29 rejection, tests and static gates are locally closed; fresh remote CUDA VJP/smoke/checkpoint gates remain required before formal runs
+release status:         Schema28 remains the completed behavior reference; Schema30 structural repairs and all local gates are closed; the remote Pen B8 CUDA VJP, Pen/RDT-8 smokes and read-only checkpoint validations passed on 3fef2fc; fresh Schema30 formal Pen/RDT-8 runs are now authorized from empty directories
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -102,8 +102,9 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > an exact optimizer-resume source. The first Schema29 CUDA launches are not
 > behavior evidence: a later real-batch parameter VJP proved that pass0 had
 > polluted the enclosing BF16 autocast weight cache and severed formal-pass
-> parameter edges. The repaired lifecycle below must pass a fresh CUDA gate
-> before either outlet restarts.
+> parameter edges. The repaired lifecycle passed its fresh CUDA gate; any new
+> outlet must still start from a fresh Schema30 state and retain the same VJP
+> and identity checks.
 
 Schema30 is the current source candidate. It does not add a block, parameter,
 buffer, optimizer group, loss weight, sampler draw or deployment pass. Its
@@ -130,6 +131,46 @@ exact-resume sources. The candidate closes six source-level boundary defects:
 
 These are semantic/ABI changes rather than numerical hardening. Fresh source,
 config and checkpoint identities must be used for all Schema30 runs.
+
+## Schema30 remote release gates (2026-09-02)
+
+All required pre-training gates passed on the exact source commit
+`3fef2fc0dce297f600c813307c998f587cca1ca3` with manifest digest
+`1323dcff095cbddb8da02c0e263c3e9865fbae39add9af4e539d38e9745f9c46`.
+The authoritative Linux source digest is
+`0d0957a75ab22e37f552ccf9a4505049876af5785837cb9787edde181b04c1c2`.
+
+- Real Pen B8 CUDA BF16 VJP:
+  `/home/sen.wang/workspace/robotics/clear/schema30-mainline-3fef2fc/diagnostics/schema30_pen_b8_vjp_3fef2fc.json`.
+  Cache-0/cache-1 total
+  parameter VJP is `3.1326139 / 3.1326158`; velocity output,
+  gripper-gate and motion-head owners remain nonzero in both passes
+  (`3.1118524`, `0.01000276`, `0.05398693`). Evidence-MMDiT blocks 0/1/2
+  remain about `0.02416/0.02437/0.02422`. Pass-0 is detached and cache-off;
+  formal cache-on, dtype and forked-RNG contracts are intact. Fresh step-zero
+  zeros for `bottom_capacity`, `consequence` and `p2_effect_reader` are legal.
+- Pen B8 smoke:
+  `runs/schema30_pen_b8_smoke_20260902_112950`; one train and one validation
+  batch completed with exact ledger (`loss_ledger_gap=0`, contribution gap
+  `1.19e-7`), finite global raw gradient `3.19852`, and atomic latest/best
+  checkpoints. Runtime was `13.008 s/batch`, process peak `4.228 GiB`.
+- RDT-8 mixed smoke:
+  `runs/schema30_rdt8_smoke_20260902_113250`; one train and one validation
+  batch completed with exact ledger, finite global raw gradient `4.02218`,
+  eight-of-eight task validation coverage, `19.26 s/batch` cold-start runtime,
+  and `10.53 GiB` process peak. The serialized sampler is task-balanced with
+  one row per task in the B8 batch.
+- Read-only checkpoint validation passed for both smoke artifacts:
+  `runs/schema30_pen_checkpoint_validation_20260902_113954` and
+  `runs/schema30_rdt8_checkpoint_validation_20260902_114122`. Both report
+  `source_delta_files=0` and disable optimizer/schedule/RNG loading and
+  checkpoint writing. A validation with a mismatched smoke config was rejected
+  by the manifest digest as intended; the matching validation passed.
+
+These are release/interface gates, not behavior results. The one-batch event,
+geometry and gripper values from smoke are not used to accept or reject the
+formal model. No Schema29 checkpoint or smoke checkpoint is a Schema30 resume
+source.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete

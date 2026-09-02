@@ -1,6 +1,6 @@
 # ClearVLA Schema29→30 结构收尾与单/多任务合流计划
 
-状态：**Schema30 候选的结构修正、本地 CPU BF16 smoke、checkpoint 往返与旧 Schema29 拒绝门已经通过；待远端 CUDA VJP、Pen/RDT-8 smoke 和 checkpoint validation 通过后，才启动新的正式单任务/RDT-8 实验**
+状态：**Schema30 结构修正、本地门与远端 CUDA VJP、Pen/RDT-8 smoke、read-only checkpoint validation 均已通过；正式 Pen 单任务与 RDT-8 多任务已获放行，使用新空目录启动并单独观察首个健康窗口**
 更新：2026-09-02
 
 本计划落实
@@ -470,13 +470,25 @@ deploy-style validation 与八任务 coverage，但它们没有检查原始参�
 
 新联合门顺序固定为：
 
-1. 在真实 Pen B8 CUDA BF16 batch 上运行 v2 VJP probe；
-2. 要求 pass0/condition detached、cache state/dtype/RNG/forward/loss 与原合同一致；
+1. 在真实 Pen B8 CUDA BF16 batch 上运行 v2 VJP probe；**已通过**；
+2. 要求 pass0/condition detached、cache state/dtype/RNG/forward/loss 与原合同一致；**已通过**；
 3. cache1 的 velocity/gripper/motion 和 MMDiT block `0/1/2` 参数 VJP 非零；每个
    cache0 有信号的 optimizer role 在 cache1 保留且无强衰减，cache0/cache1 同为
-   零的合法初始化 owner 不视为失败；
-4. 在同一精确修复提交上各跑一个 fresh Pen B8 与 RDT-8 smoke；
-5. 两者都完成 backward/optimizer/checkpoint/deployment 后，才允许正式实验。
+   零的合法初始化 owner 不视为失败；**已通过**；
+4. 在同一精确修复提交上各跑一个 fresh Pen B8 与 RDT-8 smoke；**已通过**；
+5. 两者都完成 backward/optimizer/checkpoint/deployment 后，才允许正式实验；**已满足**。
+
+Schema30 门禁的精确记录如下：提交
+`3fef2fc0dce297f600c813307c998f587cca1ca3`，manifest digest
+`1323dcff095cbddb8da02c0e263c3e9865fbae39add9af4e539d38e9745f9c46`，远端
+source digest `0d0957a75ab22e37f552ccf9a4505049876af5785837cb9787edde181b04c1c2`。
+Pen VJP 报告为 `schema30_pen_b8_vjp_3fef2fc.json`；Pen/RDT smoke 分别为
+`schema30_pen_b8_smoke_20260902_112950` 与
+`schema30_rdt8_smoke_20260902_113250`；只读 checkpoint validation 为
+`schema30_pen_checkpoint_validation_20260902_113954` 与
+`schema30_rdt8_checkpoint_validation_20260902_114122`。两条 validation 均确认
+`source_delta_files=0`、optimizer/schedule/RNG 不加载且不写 checkpoint。
+Smoke 的单批行为指标仍只作接口证据，不替代正式曲线。
 
 ## 八、Schema29 历史正式实验（已封存，不得续训）
 
@@ -537,9 +549,9 @@ proposal dropout。它不增加模型容量或目标权重，也不改变部署 
 3. 用 Schema30 新空目录完成本地 1-batch train/validation smoke，并验证旧
    Schema29 checkpoint exact-resume 被拒绝；
 4. 推送同一提交到远端，在目标 CUDA 主机上运行真实 Pen B8 VJP/gradient gate、
-   Pen B8 smoke、RDT-8 mixed smoke 与 checkpoint validation；
-5. 仅当上述门全部通过，才从新空目录启动单任务和多任务正式训练。任何旧
-   Schema29 checkpoint 都不得 resume 或迁移。
+   Pen B8 smoke、RDT-8 mixed smoke 与 checkpoint validation；**已完成**；
+5. 上述门全部通过后，从新空目录启动单任务和多任务正式训练。**当前已进入
+   启动阶段**；任何旧 Schema29 checkpoint 都不得 resume 或迁移。
 
 单任务先作为 core 行为出口，多任务作为同一 core 的外层/task adapter 出口；两者
 必须序列化相同 Schema30 manifest、source digest、optimizer ownership 和 loss
@@ -598,9 +610,10 @@ optimizer.step 以后仍不能替代原始参数 VJP 门。
        （223 passed, 2 CUDA-only skipped）、changed-source Ruff 与 compileall
 [done] Schema30 checkpoint round-trip、CPU BF16 1-batch train/eval smoke 与旧
        Schema29 exact-resume rejection
-[next] 推送同一提交并完成远端 CUDA VJP、Pen/RDT smoke 与 checkpoint validation
-[next] 所有门通过后从空目录启动新的单任务与多任务正式训练
+[done] 推送 `3fef2fc` 并完成远端 CUDA VJP、Pen/RDT smoke 与 checkpoint validation
+[in_progress] 从新空目录启动 Schema30 Pen 单任务与 RDT-8 多任务正式训练，分别
+             观察 preflight、首个健康窗口和持续 ledger/gradient/memory
 ```
 
 没有 Schema30 的 checkpoint/双 smoke 门，不启动正式实验；旧 Schema29 运行和
-checkpoint 永不续训。
+checkpoint 永不续训。正式运行只接受当前 Schema30 manifest/source identity。

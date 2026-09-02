@@ -76,8 +76,37 @@ loss weight、sampler draw 或 deployment pass：
 
 本候选尚无正式行为曲线。本地 checkpoint 往返、CPU BF16 1-batch train/eval smoke、
 旧 Schema29 checkpoint exact-resume rejection、223 项相关回归与静态门已经通过。
-仍须在同一提交上完成远端 CUDA VJP、Pen/RDT-8 smoke 和 checkpoint validation，
-才允许启动新的单任务与 RDT-8 正式运行。
+远端 CUDA VJP、Pen/RDT-8 smoke 和 read-only checkpoint validation 也已在同一
+提交完成并通过；因此正式单任务与 RDT-8 运行已获放行，但其行为曲线仍待观察。
+
+## Schema30 远端门禁封存（2026-09-02）
+
+门禁使用精确提交 `3fef2fc0dce297f600c813307c998f587cca1ca3`、manifest digest
+`1323dcff095cbddb8da02c0e263c3e9865fbae39add9af4e539d38e9745f9c46`，远端
+Linux source digest 为 `0d0957a75ab22e37f552ccf9a4505049876af5785837cb9787edde181b04c1c2`。
+
+- **真实 Pen B8 CUDA VJP**：`schema30_pen_b8_vjp_3fef2fc.json`。cache0/cache1
+  总参数 VJP `3.1326139 / 3.1326158`；velocity、gripper-gate、motion-head
+  分别保持 `3.1118524 / 0.01000276 / 0.05398693`，Evidence-MMDiT
+  block 0/1/2 约为 `0.02416/0.02437/0.02422`。pass0 detached/cache-off，
+  formal cache-on、BF16 与 forked-RNG 合同均成立；step-zero 合法零 owner
+  不作为失败。
+- **Pen B8 smoke**：`schema30_pen_b8_smoke_20260902_112950`。一 train + 一
+  validation batch 完成 backward、optimizer step、deploy-style validation、
+  exact ledger（`loss_ledger_gap=0`）与 latest/best 原子 checkpoint；global
+  raw gradient `3.19852`，冷启动 `13.008 s/batch`，process peak `4.228 GiB`。
+- **RDT-8 mixed smoke**：`schema30_rdt8_smoke_20260902_113250`。ledger 闭合、
+  global raw gradient `4.02218`、validation task coverage `8/8`；B8 task-balanced
+  sampler 每任务一行，冷启动 `19.26 s/batch`，process peak `10.53 GiB`。
+- **checkpoint validation**：`schema30_pen_checkpoint_validation_20260902_113954`
+  与 `schema30_rdt8_checkpoint_validation_20260902_114122` 均通过，
+  `source_delta_files=0`，且 optimizer/schedule/RNG load 与 checkpoint write
+  全部 disabled。故意使用不匹配 smoke config 的一次验证被 manifest digest
+  正确拒绝。
+
+上述是接口/发布门证据，不是行为结果；smoke 的单批 RMSE、event F1、geometry
+幅度和冷启动吞吐不用于提前判断正式训练。Schema29 或 smoke checkpoint 均不得
+作为 Schema30 resume/migration 输入。
 
 ## 已由本次运行关闭的边界
 
