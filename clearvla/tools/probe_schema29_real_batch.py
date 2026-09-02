@@ -1,4 +1,4 @@
-"""Compare Schema29 cache0 and cache1 gradients on one real training batch.
+"""Compare Schema29/30 cache0 and cache1 gradients on one real training batch.
 
 This tool is intentionally outside the training hot path.  It constructs the
 formal data/model boundary in the same order as ``clearvla.mainline.train``,
@@ -63,7 +63,7 @@ _ACTION_CONTRIBUTIONS = (
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare cache0 and Schema29 cache1 VJPs on one real training batch"
+            "Compare detached cache0 and formal cache1 VJPs on one real training batch"
         )
     )
     parser.add_argument(
@@ -680,8 +680,10 @@ def run_schema29_real_batch_probe(
 ) -> dict[str, object]:
     """Run the controlled A/B comparison on an already typed real/fake batch."""
 
-    if int(ARCHITECTURE_MANIFEST.schema) != 29:
-        raise RuntimeError("the active manifest is not Schema29")
+    if int(ARCHITECTURE_MANIFEST.schema) < 29:
+        raise RuntimeError(
+            "the active manifest predates detached cache0/formal cache1 training"
+        )
     config.validate()
     batch.validate(config)
     model.train()
@@ -857,7 +859,7 @@ def run_schema29_real_batch_probe(
                 )
             )
             if not pass0_fork_restored_cpu or not pass0_fork_restored_cuda:
-                raise RuntimeError("Schema29 pass0 failed to restore the formal RNG entry")
+                raise RuntimeError("Schema29/30 pass0 failed to restore the formal RNG entry")
 
             cache1_top, _ = model.top.refine_deployment_world(
                 cache0.top,

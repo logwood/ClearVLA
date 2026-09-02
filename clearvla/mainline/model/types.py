@@ -257,7 +257,11 @@ class ObjectFactSet:
     def coordinates(self) -> Tensor:
         """V120 object coordinate reduced only over physical camera support."""
 
-        weight = self.camera_validity.float() * self.camera_support.float()
+        # ``camera_support`` is the producer's geometric read width/radius.  It
+        # is consumed by Teacher as a variance scale, not as evidence quality.
+        # Using it as a camera vote would give a less precise (wider) view more
+        # authority.  Only physical camera validity may decide this reduction.
+        weight = self.camera_validity.float()
         return (
             self.camera_coordinates.float() * weight
         ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
@@ -266,7 +270,10 @@ class ObjectFactSet:
     def transport_prior(self) -> Tensor:
         """V120 object transport prior reduced only over valid cameras."""
 
-        weight = self.camera_validity.float() * self.camera_support.float()
+        # Keep the cross-camera vote in the physical-validity measure.  Support
+        # width remains metadata for geometry uncertainty and must not become a
+        # second, implicit evidence weight.
+        weight = self.camera_validity.float()
         return (
             self.camera_transport_prior.float() * weight
         ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
@@ -429,7 +436,9 @@ class ObjectWorldBelief:
 
     @property
     def transport_prior(self) -> Tensor:
-        weight = self.camera_validity.float() * self.camera_support.float()
+        # ``camera_support`` is a spatial width, not cross-camera confidence.
+        # Weighting by it would systematically prefer the least precise view.
+        weight = self.camera_validity.float()
         return (self.camera_transport_prior.float() * weight).sum(dim=2) / (
             weight.sum(dim=2).clamp_min(1e-6)
         )

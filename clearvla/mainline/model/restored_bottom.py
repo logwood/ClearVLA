@@ -425,20 +425,10 @@ class RestoredV120EvidenceBottom(nn.Module):
         return torch.cat(rows_out, dim=1)
 
     def _role_bank(self, plan: ObjectPolicyPlanDeltaBank) -> PolicyRoleDeltaBank:
-        plan.validate()
-        return PolicyRoleDeltaBank(
-            values=torch.stack(
-                (
-                    plan.temporal,
-                    plan.state_change,
-                ),
-                dim=1,
-            ),
-            source_names=plan.source_names,
-            source_depths=(7, 7),
-            protected_detail=plan.protected_base,
-            protected_policy_precision=plan.protected_policy_precision,
-        )
+        # Keep the runtime adapter on the same cardinality-checked constructor
+        # used by the public compiler API; duplicating the stack/metadata here
+        # previously allowed the two paths to drift silently.
+        return plan.as_policy_role_bank(source_depth=7)
 
     def _layer_contract_canvas(
         self,

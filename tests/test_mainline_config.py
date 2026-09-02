@@ -73,6 +73,15 @@ def test_mainline_config_rejects_legacy_or_unknown_switches() -> None:
     else:
         raise AssertionError("dead active-looking architecture fields must be rejected")
 
+    payload = ExperimentConfig().as_dict()
+    payload["top"]["proposal_condition_dropout"] = 0.25
+    try:
+        config_from_mapping(payload)
+    except ValueError as error:
+        assert "unknown top fields" in str(error)
+    else:
+        raise AssertionError("a dropout mask without a forward consumer must be rejected")
+
 
 def test_mainline_config_enforces_fixed_graph_boundaries() -> None:
     config = ExperimentConfig()

@@ -111,7 +111,10 @@ class ObjectPolicyPlanDeltaBank:
                 dim=1,
             ),
             source_names=self.source_names,
-            source_depths=(int(source_depth),) * 5,
+            # ``values`` has exactly one axis entry per declared optional
+            # source.  The protected carriers are separate lanes and must not
+            # inflate the source-depth metadata cardinality.
+            source_depths=(int(source_depth),) * len(self.source_names),
             protected_detail=self.protected_base,
             protected_policy_precision=self.protected_policy_precision,
         )

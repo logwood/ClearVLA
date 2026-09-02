@@ -203,21 +203,18 @@ class ClearVLAMainlinePolicy(nn.Module):
                 >= float(dropout)
             ).to(dtype=dtype)
 
-        # These three masks are the fixed formal-launcher semantics inherited
-        # by the V120 reference from V103.  Build the proposal from complete
+        # Goal and executed history are the two conditioning values that enter
+        # the active policy graph.  Build the history proposal from complete
         # observable history so its auxiliary target remains fully supervised;
-        # exact-null only the values that enter the policy graph.  Deployment
-        # and validation never sample these masks and therefore always keep 1.
+        # it has no separate proposal-token consumer in this graph and therefore
+        # owns no third dropout mask or RNG draw.  Deployment and validation do
+        # not sample either active mask and therefore always keep 1.
         goal_keep = condition_keep(
             self.config.top.goal_condition_dropout,
             dtype=policy_input.goal.tokens.dtype,
         )
         history_keep = condition_keep(
             self.config.top.action_history_condition_dropout,
-            dtype=policy_input.history.executed_action_history.dtype,
-        )
-        proposal_keep = condition_keep(
-            self.config.top.proposal_condition_dropout,
             dtype=policy_input.history.executed_action_history.dtype,
         )
         history_proposal = self.history_proposal(
@@ -398,7 +395,6 @@ class ClearVLAMainlinePolicy(nn.Module):
             **gradient_metrics,
             "condition_goal_keep": goal_keep.detach().float().mean(),
             "condition_action_history_keep": history_keep.detach().float().mean(),
-            "condition_proposal_keep": proposal_keep.detach().float().mean(),
         }
 
     def build_training_targets(

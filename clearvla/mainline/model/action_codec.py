@@ -156,14 +156,36 @@ class PhysicalActionFieldCodec(nn.Module):
         arm_from_delta = state[:, None, : self.arm_dim] + torch.cumsum(
             parts.arm_delta, dim=1
         )
-        grip_absolute = parts.gripper_field[..., :1]
-        grip_from_delta = state[:, None, -1:] + torch.cumsum(
-            parts.gripper_field[..., 1:2], dim=1
+        grip_absolute, grip_from_delta = self.gripper_decode_branches(
+            field,
+            action_state,
         )
         blend = self.decode_delta_blend
         arm = (1.0 - blend) * parts.arm_absolute + blend * arm_from_delta
         grip = (1.0 - blend) * grip_absolute + blend * grip_from_delta
         return torch.cat((arm, grip), dim=-1)
+
+    def gripper_decode_branches(
+        self,
+        field: Tensor,
+        action_state: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Return the two exact continuous operands used by deployment.
+
+        The delta branch has one online anchor: the observed gripper state at
+        the start of the chunk.  Target events may select training rows, but
+        they cannot reanchor this deployed tensor because they are unavailable
+        at runtime.
+        """
+
+        self._validate_field(field, action_state)
+        parts = self.split(field)
+        state = action_state.to(device=field.device, dtype=field.dtype)
+        absolute = parts.gripper_field[..., :1]
+        cumulative_delta = state[:, None, -1:] + torch.cumsum(
+            parts.gripper_field[..., 1:2], dim=1
+        )
+        return absolute, cumulative_delta
 
     def delta_consistency(
         self,

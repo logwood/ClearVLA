@@ -48,13 +48,13 @@ def test_mainline_manifest_contains_no_run_label() -> None:
 
 def test_mainline_manifest_names_the_current_component_semantics() -> None:
     components = ARCHITECTURE_MANIFEST.components
-    assert ARCHITECTURE_MANIFEST.schema == 29
+    assert ARCHITECTURE_MANIFEST.schema == 30
     assert components.observation == (
         "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
     )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_typed_chronology_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3"
     )
     assert (
         components.bottom
@@ -62,14 +62,14 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_gradient_probes"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_deployed_cumulative_persistence_gripper_trajectory_v120_decay_local_global_clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_gradient_probes"
     )
     assert components.runtime == (
         "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_train_cache0_endpoint_cache1_formal_pass_deploy_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics"
     )
 
 
-def test_schema_29_parameter_inventory_is_explained_by_active_modules() -> None:
+def test_schema_30_parameter_inventory_is_explained_by_active_modules() -> None:
     torch.manual_seed(0)
     model = ClearVLAMainlinePolicy(ExperimentConfig())
 

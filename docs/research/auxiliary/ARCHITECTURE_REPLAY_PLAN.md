@@ -1,15 +1,18 @@
 # ClearVLA architecture replay plan
 
-Status: source-first replay method adopted; Schema25-R1 source bundle selected;
-R1a/G-01 through R1h/N-01,D-01 plus LC-01 exact-zero cleanup implemented and
-statically closed; formal-run boundary awaits separate authorization; no
-training run.
+Status: adopted Schema25-R1 replay procedure; R1a/G-01 through
+R1h/N-01,D-01 plus LC-01 exact-zero cleanup implemented and statically closed;
+the first formal R1 run later completed through epoch 8. The active graph has
+since advanced through R2 and Schema29, so this file preserves replay-base,
+unit-disposition and implementation-order authority only; it is not current
+release status.
 Established on 2026-08-26.
 
-This is the only auxiliary document that owns the current replay procedure and
-per-change disposition. It does not by itself change the checked-out source or
-the active architecture contract. `../00_CURRENT_ARCHITECTURE_CONTRACT.md`
-remains the compact source of truth for the checked-out replay graph.
+This is the only auxiliary document that owns the adopted Schema25-R1 replay
+procedure and per-change disposition. It does not by itself change the
+checked-out source or the active architecture contract.
+`../00_CURRENT_ARCHITECTURE_CONTRACT.md` remains the compact source of truth for
+the checked-out graph and current release state.
 
 Historical evidence and donor ancestry are owned by
 `ARCHITECTURE_REPLAY_LEDGER.md`. The frozen Schema39 diagnosis is owned by
@@ -217,9 +220,9 @@ in ARCHITECTURE_REPLAY_SOURCE_UNITS.md. The adopted dispositions are:
 | D-01 | KEEP matching diagnostics | only diagnostics whose producer still exists |
 | T-01 | DEFER | retain Schema25 Teacher row-softmax for the first candidate |
 
-### 6.2 Selected next candidate
+### 6.2 Historically selected R1 candidate
 
-Working name: Schema25-R1 ownership and terminal closure.
+Selected working name: Schema25-R1 ownership and terminal closure.
 
 R1 is one coherent training candidate, not one historical version and not one
 experiment per unit. It is assembled as reversible source commits in this
@@ -272,10 +275,12 @@ content-only K identity. It also does not import fixed candidate-count null
 calibration, fixed complementary averaging, bilateral W isolation, six P3
 aliases or Schema39's exact S-W score relation.
 
-The run decision comes only after the complete R1 source graph passes
-algebraic reconstruction, axis sentinel, exact-zero, call-count, forward-path
-and reverse-VJP checks. Those static gates now pass; they do not themselves
-authorize dataset/checkpoint access or a training run.
+At candidate-selection time, the run decision came only after the complete R1
+source graph passed algebraic reconstruction, axis sentinel, exact-zero,
+call-count, forward-path and reverse-VJP checks. Those static gates passed but
+did not themselves authorize dataset/checkpoint access or training; later
+authorization and the completed R1 run are recorded by the current contract
+and run evidence, not retroactively by this plan.
 
 ## 7. Base-state audit before the first donor
 

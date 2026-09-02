@@ -1,8 +1,9 @@
 # Cross-version replay source units
 
-Status: source-derived working register; G-01, G-02, S-01, S-02, W-01, W-02,
-P1-01, P2-01, P3-01 and B-01 implemented and statically closed; S-03 guard
-verified; N-01/D-01 next.
+Status: source-derived frozen R1 register; G-01, G-02, S-01, S-02, W-01,
+W-02, P1-01, P2-01, P3-01, B-01, N-01 and D-01 implemented and statically
+closed; S-03 guard verified; T-01 deferred. All eight R1 slices are complete;
+the first formal R1 run later completed through epoch 8.
 Established on 2026-08-26.
 
 This file records the implementation semantic units recovered across
@@ -34,8 +35,9 @@ For each unit, the review coordinate is:
 
 The Schema25 source at 6a6c1bf is the comparison base. Later source is not
 assumed correct merely because a class, test or comment names an ownership
-contract. The current Schema39 source is used only to inspect which boundaries
-survived and how their consumers are wired.
+contract. The then-current Schema39 donor snapshot was used only to inspect
+which boundaries survived and how their consumers were wired; it is not the
+active checkout named by this historical register.
 
 ## 2. Unit index
 
@@ -56,8 +58,8 @@ survived and how their consumers are wired.
 | D-01 | Source-owner diagnostics and spike attribution | Schema34, Schema38 and Schema39 | KEEP only matching diagnostics | yes |
 | T-01 | Teacher association backend | Schema31 teacher.py | DEFER; retain Schema25 row softmax | no |
 
-R1 means the unit belongs to the next reconstructed candidate. It does not
-authorize a training run or a whole-commit cherry-pick.
+R1 means the unit was selected for the reconstructed R1 candidate. The label
+does not authorize a new training run or a whole-commit cherry-pick.
 
 ## 3. Selected source units
 
@@ -742,19 +744,20 @@ R1 deliberately does not freeze:
 - Schema39's exact S-W scoring relation;
 - Schema31 partial OT.
 
-## 7. Preconditions before source implementation
+## 7. Historical preconditions used before R1 source implementation
 
-The semantic units are source-acquired, but source modification still requires
-an implementation-boundary worksheet for the exact replay checkout. Before
-each slice begins:
+The semantic units were source-acquired under an implementation-boundary
+worksheet for the exact replay checkout. Before each R1 slice began, the
+implementation task had to:
 
-1. check out or create the Schema25 replay branch without mutating the current
-   Schema39 worktree;
+1. check out or create the Schema25 replay branch without mutating the
+   then-current Schema39 worktree;
 2. map the exact touched producer and all consumers in that checkout;
 3. record optimizer ownership, state-dict keys, config/manifest fields,
    deployment call sites and diagnostics;
 4. record unresolved mechanism choices in the slice commit message;
 5. reject exact checkpoint migration and plan a fresh formal checkpoint.
 
-No source unit is considered closed merely because its historical donor tests
-pass on Schema39.
+No source unit was considered closed merely because its historical donor tests
+passed on Schema39. This section records the completed R1 procedure; it is not
+an instruction to recreate or modify a current checkout.

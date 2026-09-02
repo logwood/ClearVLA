@@ -183,7 +183,8 @@ def sample_refined_cached_action_with_cache(
 ) -> tuple[SamplingResult, OnlinePolicyCache]:
     """Run one proposal pass, one W rerun, and one refined pass.
 
-    This is the Schema28 deployment surface.  ``sample_cached_action`` remains
+    This remains the Schema28-compatible deployment surface used by Schema29/30.
+    ``sample_cached_action`` remains
     the single-pass primitive so matched ablations can hold the world cache
     fixed; normal deployment and validation use this explicit outer closure.
     """

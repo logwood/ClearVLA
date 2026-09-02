@@ -1,7 +1,9 @@
-# Schema25 replay workspace memory
+# Auxiliary replay and historical memory
 
-This directory is the self-contained planning memory copied into the isolated
-Schema25 replay worktree.
+This directory preserves the Schema25 replay foundation, later source-unit
+worksheets and historical research memory used by the active mainline. It is
+not a statement that the current checkout remains Schema25; current graph and
+release truth belong only to `../00_CURRENT_ARCHITECTURE_CONTRACT.md`.
 
 | File | Responsibility |
 |---|---|
@@ -21,16 +23,17 @@ Schema25 replay worktree.
 | SCHEMA25_BASE_VERSION_CARD.md | Closed source/behavior audit of the fixed base |
 | SCHEMA25_R2_SOURCE_DERIVED_IMPROVEMENT_PLAN.md | Source-first next-version gate: bounded validation, matched interventions and exactly one later behavioral repair |
 | ARCHITECTURE_REPLAY_LEDGER.md | Historical donor evidence; not implementation authority |
-| CONVERSATION_INSIGHT_LEDGER.md | Completed curated conversation memory through visible message 5493; use its research map for historical hypotheses, reversals and evidence, never as implementation authority |
+| CONVERSATION_INSIGHT_LEDGER.md | Compact historical research index and frozen synthesis through visible message 5493; the full 431-card archive is recoverable from the Git commit recorded inside it |
 | ACTIVE_MAINLINE_HANDOFF.md | Frozen Schema39 diagnostic context; not the active replay graph |
 | RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md | Isolated `/data/rdt-ft-data/` data, language, multiview, bimanual and experiment gates |
 
-The executable source is the exact Schema25 base plus completed R1a/G-01
-through R1h/N-01,D-01 slices and the LC-01 exact-zero deletion recorded above.
-The R1 source candidate is statically closed and one formal run has reached
-epoch 8.  Its behavior is observational evidence for the prospective R2 plan;
-it does not authorize later mechanics. Historical documents and the
-user-supplied external protocol do not override the active source.
+The replay root documented here is the exact Schema25 base plus completed
+R1a/G-01 through R1h/N-01,D-01 slices and the LC-01 exact-zero deletion. The R1
+candidate is statically closed and its first formal run reached epoch 8. The
+active graph subsequently advanced through R2 and Schema29; consult the current
+contract rather than reconstructing that active graph from this directory.
+Historical documents and the user-supplied external protocol do not override
+the active source.
 
 For a new task, read `../00_CURRENT_ARCHITECTURE_CONTRACT.md` first and
 `../CURRENT_MAINLINE_ISSUES.md` for unresolved active work. Use

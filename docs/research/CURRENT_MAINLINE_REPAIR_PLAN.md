@@ -1,7 +1,7 @@
-# ClearVLA Schema28→29 行为闭环与单/多任务合流计划
+# ClearVLA Schema29→30 结构收尾与单/多任务合流计划
 
-状态：**局部 cache-isolation 修复 `d8a77a1` 已通过真实 Pen B8 CUDA v2 VJP 与 fresh Pen/RDT-8 双 smoke；两个正式实验已从空目录重启，当前等待完整 Schema29 行为曲线**
-更新：2026-09-01
+状态：**Schema30 候选的结构修正、本地 CPU BF16 smoke、checkpoint 往返与旧 Schema29 拒绝门已经通过；待远端 CUDA VJP、Pen/RDT-8 smoke 和 checkpoint validation 通过后，才启动新的正式单任务/RDT-8 实验**
+更新：2026-09-02
 
 本计划落实
 [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md) 中的完整八轮结论，
@@ -478,17 +478,18 @@ deploy-style validation 与八任务 coverage，但它们没有检查原始参�
 4. 在同一精确修复提交上各跑一个 fresh Pen B8 与 RDT-8 smoke；
 5. 两者都完成 backward/optimizer/checkpoint/deployment 后，才允许正式实验。
 
-## 八、同一核心提交的两个正式实验
+## 八、Schema29 历史正式实验（已封存，不得续训）
 
-当前两个 fresh Schema29 正式实验都在精确提交 `d8a77a1` 上运行：
+此前两个 fresh Schema29 正式实验都在精确提交 `d8a77a1` 上运行，现仅作
+接口/启动记录保留：
 
 ```text
 Pen:   schema29_cachefix_pen_b8_d8a77a1_20260901_r1
 RDT-8: schema29_cachefix_rdt8_b8_d8a77a1_20260901_r1
 ```
 
-二者没有 `--resume`/migration 参数，分别使用独立 GPU 与空目录。旧 Pen/RDT
-checkpoint 仍禁止续训。Pen 已到至少 step400，ledger 持续闭合且全部 named
+二者没有 `--resume`/migration 参数，分别使用独立 GPU 与空目录。其 checkpoint
+与旧 Pen/RDT checkpoint 均禁止续训。Pen 已到至少 step400，ledger 持续闭合且全部 named
 optimizer role 都有 formal 参数梯度；step400 的 P2/consequence/CT/MMDiT/head
 分别为 `0.066696 / 2.716e-4 / 0.027799 / 0.306001 / 1.584174`。三个有限
 `arm_abs.weight` crossing 为 step `8/10/40` 的 `5.44/5.40/5.36`，此后到
@@ -500,8 +501,8 @@ RDT-8 已完成 source-wide HDF5 冷启动、相同模型 preflight 和首个 20
 `2.88159 / 1.627e-4 / 4.102e-7 / 0.004355 / 0.039080 / 2.86530`，无 spike、
 lineage 或 non-finite。运行合同是 task count `8`、batch size `8` 的
 task-balanced sampler，所以每批恰好包含每个任务一行。首窗 `6.81283 s/batch`
-仍包含数据/模型冷启动，不作稳态性能结论。两线完整行为判断都等待 epoch
-validation。
+仍包含数据/模型冷启动，不作稳态性能结论。两线完整行为判断不转移为
+Schema30 行为证据。
 
 1. 新 VJP 与双 smoke 门通过后，先以新空目录启动 Pen 单任务，完成 preflight 与
    首个健康窗口；确认参数 VJP、non-finite、lineage、memory 与 loss-ledger 均正常
@@ -519,7 +520,30 @@ validation。
 | 坏 | 坏 | core unit 或共享训练引擎 |
 | 正常/改善 | 坏 | adapter、task mix、profile 或跨任务竞争 |
 | 改善 | 各任务稳定 | core 与外层接口同时通过 |
-| 改善 | 少数任务坏 | 回到该任务的数据/action/camera 语义，不回滚整个 core |
+ | 改善 | 少数任务坏 | 回到该任务的数据/action/camera 语义，不回滚整个 core |
+
+## 八-A、Schema30 候选实施与放行顺序
+
+Schema30 的实现已经落在当前工作区，改动范围限定为以下语义边界：S 的
+complementary K/type fusion、W 的 action+chronology typed interval owner、
+validity 的单一 public field boundary、camera-support reduction、部署一致的
+gripper trajectory branch、P3 source-depth metadata，以及删除无 consumer 的
+proposal dropout。它不增加模型容量或目标权重，也不改变部署 ODE 次数。
+
+放行顺序固定如下：
+
+1. 完成 producer→consumer 正向审查和 loss→owner→optimizer→producer 反向审查；
+2. 运行完整 mainline 测试、Ruff、compileall，并做 checkpoint save/load round-trip；
+3. 用 Schema30 新空目录完成本地 1-batch train/validation smoke，并验证旧
+   Schema29 checkpoint exact-resume 被拒绝；
+4. 推送同一提交到远端，在目标 CUDA 主机上运行真实 Pen B8 VJP/gradient gate、
+   Pen B8 smoke、RDT-8 mixed smoke 与 checkpoint validation；
+5. 仅当上述门全部通过，才从新空目录启动单任务和多任务正式训练。任何旧
+   Schema29 checkpoint 都不得 resume 或迁移。
+
+单任务先作为 core 行为出口，多任务作为同一 core 的外层/task adapter 出口；两者
+必须序列化相同 Schema30 manifest、source digest、optimizer ownership 和 loss
+ledger。多任务结果必须逐任务列出，不用 macro 聚合替代单任务闭环。
 
 ## 九、正式放行与停跑规则
 
@@ -568,9 +592,15 @@ optimizer.step 以后仍不能替代原始参数 VJP 门。
 [done] 完成局部 cache-isolation 实现、v2 probe、CPU/静态回归
 [done] 提交推送 `d8a77a1`，在远端完成 Pen B8 CUDA v2 VJP gate
 [done] 同一修复提交完成 fresh Pen B8 与 RDT-8 smoke，RDT coverage=8/8
-[done] 两门通过后用新空目录重启 Pen/RDT 正式实验
-[next] 按预定 epoch 节点联合审计完整行为曲线
+[archived] 两门通过后启动的 Schema29 Pen/RDT 正式实验；只保留接口证据，禁止续训
+[done] Schema30 S/W/camera/gripper/validity/compiler structural implementation
+[done] Schema30 source-first 双向审查、223 项 mainline/RDT/schema29 回归
+       （223 passed, 2 CUDA-only skipped）、changed-source Ruff 与 compileall
+[done] Schema30 checkpoint round-trip、CPU BF16 1-batch train/eval smoke 与旧
+       Schema29 exact-resume rejection
+[next] 推送同一提交并完成远端 CUDA VJP、Pen/RDT smoke 与 checkpoint validation
+[next] 所有门通过后从空目录启动新的单任务与多任务正式训练
 ```
 
-没有阶段 A 的有效因果边界，不进入阶段 C；没有单/多任务 tensor-equivalence 与
-联合 smoke，不启动两个正式实验。
+没有 Schema30 的 checkpoint/双 smoke 门，不启动正式实验；旧 Schema29 运行和
+checkpoint 永不续训。

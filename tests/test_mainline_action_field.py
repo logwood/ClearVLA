@@ -16,7 +16,6 @@ from clearvla.mainline.model.types import PhysicalActionCondition
 from clearvla.mainline.training.losses import (
     FlowMatchingState,
     action_terms,
-    anchored_gripper_persistence,
     balanced_event_row_weights,
     causal_event_trajectory_mask,
     event_transition_persistence_masks,
@@ -182,61 +181,53 @@ def test_gripper_transition_and_persistence_masks_are_disjoint_and_complete() ->
     assert torch.count_nonzero(persistence[2]) == 0
 
 
-def test_gripper_persistence_reanchors_at_every_open_or_close_event() -> None:
-    absolute = torch.tensor(
-        [[[10.0], [11.0], [12.0], [13.0], [14.0], [20.0], [21.0]]]
-    )
-    local_delta = torch.tensor(
-        [[[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]]]
-    )
-    event = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]])
-    reconstructed = anchored_gripper_persistence(
-        absolute,
-        local_delta,
-        event,
-    )
+def test_gripper_decode_branches_are_the_exact_deployed_operands() -> None:
+    codec = _codec()
+    field = torch.zeros(1, 24, codec.physical_dim)
+    field[..., 12] = torch.arange(24, dtype=torch.float32)
+    field[..., 13] = torch.arange(1, 25, dtype=torch.float32)
+    action_state = torch.zeros(1, 7)
+    action_state[..., -1] = 3.0
+    absolute, cumulative_delta = codec.gripper_decode_branches(field, action_state)
+    torch.testing.assert_close(absolute[..., 0], field[..., 12])
     torch.testing.assert_close(
-        reconstructed[..., 0],
-        torch.tensor([[0.0, 0.0, 12.0, 16.0, 21.0, 20.0, 27.0]]),
-        atol=0.0,
-        rtol=0.0,
+        cumulative_delta[..., 0],
+        3.0 + torch.cumsum(field[..., 13], dim=1),
+    )
+    decoded = codec.decode(field, action_state)
+    torch.testing.assert_close(
+        decoded[..., -1:],
+        0.75 * absolute + 0.25 * cumulative_delta,
     )
 
 
-def test_gripper_persistence_has_exact_zero_pre_event_delta_vjp() -> None:
-    absolute = torch.randn(1, 8, 1, requires_grad=True)
-    local_delta = torch.randn(1, 8, 1, requires_grad=True)
-    event = torch.zeros(1, 8)
+def test_deployed_gripper_delta_branch_retains_pre_event_causal_vjp() -> None:
+    codec = _codec()
+    field = torch.zeros(1, 24, codec.physical_dim, requires_grad=True)
+    action_state = torch.zeros(1, 7)
+    event = torch.zeros(1, 24)
     event[:, 3] = 1.0
     _, persistence = event_transition_persistence_masks(event)
-    reconstructed = anchored_gripper_persistence(
-        absolute,
-        local_delta,
-        event,
-    )
-    (reconstructed[..., 0] * persistence).sum().backward()
-    assert local_delta.grad is not None
-    assert absolute.grad is not None
-    assert torch.count_nonzero(local_delta.grad[:, :4]) == 0
-    assert torch.count_nonzero(local_delta.grad[:, 4:]) > 0
-    assert torch.count_nonzero(absolute.grad[:, :3]) == 0
-    assert torch.count_nonzero(absolute.grad[:, 3]) > 0
-    assert torch.count_nonzero(absolute.grad[:, 4:]) == 0
+    _, cumulative_delta = codec.gripper_decode_branches(field, action_state)
+    (cumulative_delta[..., 0] * persistence).sum().backward()
+    assert field.grad is not None
+    # Every post-event deployed value contains the earlier prefix. Removing
+    # this VJP would train a target-only reanchoring operation absent at runtime.
+    assert torch.count_nonzero(field.grad[:, :4, 13]) > 0
+    assert torch.count_nonzero(field.grad[..., 12]) == 0
+    assert torch.count_nonzero(field.grad[..., 14:]) == 0
 
 
-def test_no_event_gripper_persistence_is_exact_zero() -> None:
-    absolute = torch.randn(2, 8, 1)
-    local_delta = torch.randn(2, 8, 1)
-    event = torch.zeros(2, 8)
+def test_no_event_gripper_trajectory_masks_are_exact_zero() -> None:
+    codec = _codec()
+    field = torch.randn(2, 24, codec.physical_dim)
+    action_state = torch.randn(2, 7)
+    event = torch.zeros(2, 24)
     transition, persistence = event_transition_persistence_masks(event)
-    reconstructed = anchored_gripper_persistence(
-        absolute,
-        local_delta,
-        event,
-    )
+    _, cumulative_delta = codec.gripper_decode_branches(field, action_state)
     assert torch.count_nonzero(transition) == 0
     assert torch.count_nonzero(persistence) == 0
-    assert torch.count_nonzero(reconstructed) == 0
+    assert (cumulative_delta[..., 0] * persistence).sum() == 0
 
 
 def test_command_event_boundary_does_not_retarget_the_qpos_anchored_codec_delta() -> None:
@@ -292,6 +283,60 @@ def test_command_event_boundary_does_not_retarget_the_qpos_anchored_codec_delta(
         "gripper_trajectory",
     ):
         torch.testing.assert_close(terms[name], torch.tensor(0.0), atol=0.0, rtol=0.0)
+
+
+def test_gripper_persistence_cannot_hide_a_pre_event_deployed_delta_error() -> None:
+    codec = _codec()
+    config = ExperimentConfig()
+    action = torch.zeros(1, 24, 7)
+    action[:, 2:, -1] = 1.0
+    current_qpos = torch.zeros(1, 7)
+    previous_command = torch.zeros(1, 7)
+    target_physical = codec.encode(action, current_qpos)
+    predicted_physical = target_physical.clone()
+    # This pre-event error is invisible to the retired target-event reanchor,
+    # but it changes every later value of the actual deployed delta branch.
+    predicted_physical[:, 0, 13] += 0.5
+    zero = torch.zeros_like(target_physical)
+    output = cast(
+        PolicyStepOutput,
+        SimpleNamespace(
+            bottom=SimpleNamespace(
+                physical_velocity=predicted_physical,
+                motion_logits=torch.zeros(1, 24),
+                decoder_tensors={},
+            )
+        ),
+    )
+    target = ActionSupervision(
+        normalized=action,
+        raw_units=action,
+        current_raw_units=current_qpos,
+        gripper_transition_boundary=previous_command,
+        gripper_transition_boundary_raw_units=previous_command,
+    )
+    terms = action_terms(
+        config,
+        codec,
+        output,
+        target,
+        cast(ObservableHistory, SimpleNamespace(action_state=current_qpos)),
+        FlowMatchingState(
+            time=torch.zeros(1),
+            source_physical_noise=zero,
+            noisy_physical=zero,
+            target_physical=target_physical,
+            target_physical_velocity=target_physical,
+        ),
+    )
+    torch.testing.assert_close(
+        terms["gripper_trajectory_transition"],
+        torch.tensor(0.0),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert terms["gripper_trajectory_persistence"] > 0
+    assert terms["gripper_trajectory"] > 0
 
 
 def test_horizon_action_condition_uses_deterministic_four_interval_projection() -> None:

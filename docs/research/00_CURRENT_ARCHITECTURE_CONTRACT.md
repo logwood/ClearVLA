@@ -1,6 +1,6 @@
 # Current ClearVLA Architecture Contract
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 This is the compact source of truth for the active independent mainline.
 Experiment labels never select model semantics. Historical evidence lives in
@@ -11,10 +11,10 @@ Experiment labels never select model semantics. Historical evidence lives in
 
 ```text
 capability:             object_intent_dynamics_323
-manifest schema:        29
+manifest schema:        30
 behavior reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 source reference:       .audit/v120_exact_source_0b92d359/
-release status:         Schema28 remains the completed behavior reference; the d8a77a1 source-local cache-isolation repair passed the real Pen B8 CUDA v2 VJP gate and fresh Pen/RDT-8 smokes; two fresh Schema29 formal runs are active, but no completed Schema29 behavior curve is valid yet
+release status:         Schema28 remains the completed behavior reference; the d8a77a1 Schema29 cache-isolation repair passed the real Pen B8 CUDA v2 VJP gate and fresh Pen/RDT-8 smokes; Schema30 structural repairs, focused CPU BF16 smoke, checkpoint round-trip/Schema29 rejection, tests and static gates are locally closed; fresh remote CUDA VJP/smoke/checkpoint gates remain required before formal runs
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 training:               fresh, single-stage end-to-end
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
@@ -33,7 +33,8 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > R1f/P2-01, R1g/P3-01,B-01, LC-01, R1h/N-01,D-01 and the three
 > R2-WG01/P202/GRIP02 structural units, the Schema26 closure and the active
 > Schema27 typed-W numerical boundary, the Schema28 bounded action-world
-> closure and the active Schema29 train/runtime alignment below.**
+> closure, the Schema29 train/runtime alignment and the active Schema30
+> semantic-boundary repairs below.**
 > The untouched R0 fingerprint,
 > selected cross-version units and implementation gates live in
 > `docs/research/auxiliary/SCHEMA25_R0_BASELINE_FINGERPRINT.md`,
@@ -103,6 +104,32 @@ resolved config:        configs/mainline/object_intent_dynamics_323.json
 > polluted the enclosing BF16 autocast weight cache and severed formal-pass
 > parameter edges. The repaired lifecycle below must pass a fresh CUDA gate
 > before either outlet restarts.
+
+Schema30 is the current source candidate. It does not add a block, parameter,
+buffer, optimizer group, loss weight, sampler draw or deployment pass. Its
+manifest/config ABI is intentionally new, so Schema29 checkpoints are not
+exact-resume sources. The candidate closes six source-level boundary defects:
+
+- S keeps K and semantic/appearance/geometry type axes as complementary owners:
+  each axis is summed without an assumed active-owner divisor, then the one
+  existing outer RMS contract is applied once;
+- typed W interval innovations use the existing learned chronology together
+  with the physical action carrier, so zero action does not erase interval
+  identity;
+- camera support width remains geometry metadata/uncertainty, not a second
+  cross-camera vote weight; coordinate and transport reductions use only
+  producer-owned camera validity;
+- gripper trajectory supervision reads the exact deployment codec operands:
+  absolute value and qpos-anchored cumulative delta. Event masks select loss
+  rows only and never reanchor the deployed branch;
+- continuous object/camera validity is applied once at the public W field
+  boundary. Private typed owners remain continuous, while zero support still
+  exports exact-zero fields;
+- optional P3 metadata is constructed through the public cardinality-checked
+  compiler path, and the unconsumed proposal dropout field is removed.
+
+These are semantic/ABI changes rather than numerical hardening. Fresh source,
+config and checkpoint identities must be used for all Schema30 runs.
 
 > **Replay scope lock:** R1 is assembled as reversible semantic units in the
 > adopted order. A later unit cannot be implemented until its complete
@@ -253,10 +280,10 @@ environment or fixed-point closure:
   deterministic side stream so retained/downstream fresh initialization and
   the post-construction RNG digest remain unchanged;
 - continuous gripper supervision now separates event-row transition from
-  between-event persistence. Every event reanchors the absolute branch and
-  only strictly later local deltas accumulate; pre-event deltas cannot own a
-  later segment. The existing `.03` budget, physical decoder and runtime
-  action field remain unchanged;
+  between-event persistence while using the exact deployment codec branches.
+  Every event row owns transition loss; later rows own persistence loss, but
+  neither mask resets the qpos-anchored cumulative decoder branch. The existing
+  `.03` budget, physical decoder and runtime action field remain unchanged;
 - execution capacity logits and the near-one schedule interpolation remain
   FP32 through the contraction boundary. This prevents CUDA BF16 from rounding
   a live capacity to exact one; it changes no schedule, controller ownership,
@@ -459,7 +486,8 @@ ActionIntentDock public S context
        absolute interval means + current-anchored adjacent deltas [B,4,14]
 
 compact ObjectWorldBelief from current G + PhysicalActionCondition only
-    -> W1: current typed facts once, then 4-8 and 8-16 near innovations
+     -> W1: current typed facts once, then chronology/action-conditioned
+        4-8 and 8-16 near innovations
     -> W2: 16-32 and 32-48 far innovations, read-only over completed W1
     -> semantic FutureObjectDynamics [B,4,K,D]
        plus camera transport/covariance [B,4,K,C,2|3], no predicted status
@@ -672,11 +700,11 @@ supports may change targets and losses, never deployment action.
     that state. Arm, four auxiliary gripper coordinates and motion retain the
     base action read. There is no final event classifier or event logit in the
     deployed output. The raw target event threshold is used only to start a
-    continuous training mask. Each event row owns continuous absolute and
-    local-delta transition error; rows strictly after that event own
-    persistence until the next event reanchors the segment. No-event samples
-    are exact zero for both owners and pre-event deltas cannot leak into a
-    later segment. Decoded event precision/recall/F1 remains an evaluation of
+     continuous training mask. Each event row owns continuous absolute and
+     local-delta transition error; later rows own persistence using the
+     deployment codec's qpos-anchored cumulative delta. The masks select rows
+     only and do not reanchor or reconstruct the deployed branch. No-event
+     samples are exact zero for both owners. Decoded event precision/recall/F1 remains an evaluation of
     deployed action, never a runtime gate. Capacity logits and the
     near-identity interpolation remain FP32 until the contraction forms its
     update; the capacity remains continuous and non-expansive, not hardware
@@ -926,10 +954,10 @@ GripperPrivateState
   consumers: deployed gripper value/delta heads
 
 GripperTrajectoryTrainingBoundary
-  clean absolute / local-delta / reanchored persistence    [B,24,1] each
+  clean absolute / local-delta / qpos-anchored cumulative-delta branches [B,24,1] each
   disjoint event-transition / between-event masks          [B,24]
   continuous target                                       [B,24,1]
-  consumer: `.03` continuous training loss only; absent at deployment
+  consumer: `.03` continuous training loss only; branch algebra matches deployment
 ```
 
 ## Provenance table
@@ -976,14 +1004,14 @@ GripperTrajectoryTrainingBoundary
   `0.55/0.15/0.05` semantic/transport/covariance coefficients and outer future
   weight are unchanged. No successor duplicate or status objective remains.
 - The former `.03` categorical event budget is renamed
-  `gripper_trajectory`. Schema28 keeps that budget but separates two disjoint
-  owners: event rows regress clean absolute and local delta transition, while
-  later rows regress absolute and event-reanchored cumulative-delta
-  persistence until the next event. The threshold selects rows only; it does
-  not binarize the target. No event classifier, class boost or focal term
-  remains. All other action, future, flow geometry, intent scaffold, history
-  proposal and execution-value external weights are unchanged from the
-  recovery reference.
+  `gripper_trajectory`. Schema30 keeps that budget and separates two disjoint
+  owners: event rows regress clean absolute and local-delta transition, while
+  later rows regress absolute and the deployment codec's qpos-anchored
+  cumulative-delta persistence. The threshold selects rows only; it does not
+  binarize the target or reanchor the deployed branch. No event classifier,
+  class boost or focal term remains. All other action, future, flow geometry,
+  intent scaffold, history proposal and execution-value external weights are
+  unchanged from the recovery reference.
 - The whole-segment recognizer supervises only S's public interval carrier.
   S typed relevance is trained through factual/P2/P3/final action paths and no
   longer supplies W values. The typed-free coarse-action physical head is
@@ -1112,7 +1140,7 @@ GripperTrajectoryTrainingBoundary
   `out_proj.weight`, `-1,048,576` parameters at H=512) and adds one bias-free
   `14 -> H` physical action-condition projection (`+7,168`). The exact net is
   `-1,041,408` trainable parameters and `-1` parameter/state tensor. Gripper
-  reanchoring and FP32 capacity execution are parameter-free. The active model
+  codec-branch alignment and FP32 capacity execution are parameter-free. The active model
   has `168,417,179` total / `152,046,448` trainable parameters, 1,385 parameter
   tensors, 1,063 trainable/optimizer tensors, 23 optimizer groups and 1,391
   state-key names. The ordered state-key-name SHA-256 is
@@ -1123,19 +1151,23 @@ GripperTrajectoryTrainingBoundary
   Schema29 adds only ephemeral forward tensors, scalar diagnostics and one
   activation-gradient hook. It retains all Schema28 parameter/state counts,
   optimizer groups, ordered state-key digest and construction RNG digest.
+  Schema30 changes only source/config semantics and ephemeral owner routing; it
+  retains the same parameter/state counts, optimizer groups, state-key names and
+  construction RNG stream. Its fresh manifest/config/source identity still
+  rejects Schema29 exact resume.
 - Active manifest identity:
 
   ```text
-  schema:       29
+   schema:       30
   observation:  restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance
-  top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3
+   top:          v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_typed_chronology_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3
   bottom:       restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_fp32_capacity_gripper_private_continuous_field_no_event_head
-  training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_gradient_probes
+   training:     v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_deployed_cumulative_persistence_gripper_trajectory_v120_decay_local_global_clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_gradient_probes
   runtime:      cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_train_cache0_endpoint_cache1_formal_pass_deploy_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics
   ```
 
   The canonical manifest SHA-256 is
-  `96883e89ea3df8e5da1693022bdfff79d92fd3100a1deb55360d608cc897f8e6`.
+  `1323dcff095cbddb8da02c0e263c3e9865fbae39add9af4e539d38e9745f9c46`.
 
 Storage defaults:
 
@@ -1168,8 +1200,8 @@ They add explicit checks for:
 - exactly one outer W rebuild, identical initial noise and finite pre/post
   semantic/transport/action diagnostics;
 - finite final action/world mismatch without asserting a fixed point;
-- event-local gripper transition, reanchored persistence and no pre-event
-  delta leakage;
+- event-local gripper transition, deployment-aligned cumulative persistence and
+  no target-side reanchoring;
 - FP32 near-one capacity and retained contraction VJP;
 - matched proposal, P2 and execution validation counterfactual schedules;
 - current manifest/state/optimizer/RNG inventories and checkpoint rejection.
@@ -1364,26 +1396,31 @@ MMDiT/head L2 are `2.88159 / 1.627e-4 / 4.102e-7 / 0.004355 / 0.039080 /
 `clearvla-task-balanced-information-sampler-v1` contract uses task count `8`
 and batch size `8`, so every formal batch contains one row per selected task.
 The first-window `6.81283 s/batch` still includes data/model cold start and is
-not a steady throughput claim. No completed Schema29 epoch or behavior claim
-exists yet. The code change does not raise the manifest schema because it
-changes no serialized graph state, but its new source digest intentionally
-makes every old checkpoint fail exact resume.
+not a steady throughput claim. These are Schema29 launcher/interface records,
+not Schema30 behavior evidence; the fresh Schema30 manifest and source digest
+intentionally reject every older exact-resume checkpoint.
 
-Use new empty output directories:
+Use new empty output directories.  Schema29 checkpoints are neither resume nor
+migration inputs for any command below:
 
 ```bash
-RUN_TAG=schema29_self_condition_smoke_$(date +%Y%m%d_%H%M%S)
+RUN_TAG=schema30_pen_b8_smoke_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
-RUN_TAG=schema29_self_condition_b8_$(date +%Y%m%d_%H%M%S)
+RUN_TAG=schema30_pen_b8_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 
+RUN_TAG=schema30_rdt8_b8_$(date +%Y%m%d_%H%M%S)
+CUDA_VISIBLE_DEVICES=1 \
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/train_rdt_multitask.sh > "${RUN_TAG}.log" 2>&1 &
+
 uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema29_self_condition_b8_TIMESTAMP \
+  runs/schema30_pen_b8_TIMESTAMP \
   --recovery-baseline v120_long.log \
   --recovery-parent mainline_v120_contract_repair_b8.log \
   --tail 120 --require-recovery --format text

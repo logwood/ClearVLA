@@ -1,9 +1,10 @@
-# ClearVLA Schema29 当前纯问题账本
+# ClearVLA Schema30 当前纯问题账本
 
-更新：2026-09-01
+更新：2026-09-02
 
-本文件只保留完整 Schema28 行为运行之后、进入 Schema29 后仍未关闭的问题。
-在 Schema29 正式曲线产生前，Schema28 仍是行为基线，不是当前源码图。当前执行图、动作
+本文件只保留完整 Schema28 行为运行之后、进入 Schema30 后仍未关闭的问题。
+Schema28 仍是已完成行为基线；Schema29 的 cache-fix 运行只提供接口/门禁证据，
+不是当前源码图的行为基线。当前执行图、动作
 ABI、运行频率与检查点边界见
 [`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)，
 下一版的实施顺序与放行门槛见
@@ -51,8 +52,32 @@ deploy-style validation 与 checkpoint 写入，RDT validation/training mix 覆�
 named optimizer role 均有 formal 参数梯度；三次有限 `arm_abs.weight` crossing
 只出现在 step `8/10/40`，之后到 step400 未复发。RDT-8 已完成首个 20-batch
 窗口，ledger 闭合，P2/consequence/CT/MMDiT/head 均非零且无 spike；其 B8
-task-balanced sampler 每批恰好覆盖八个任务。因此 Schema29 已有持续运行放行
-证据，但仍没有任何完整 epoch 行为曲线。
+task-balanced sampler 每批恰好覆盖八个任务。这些记录只封存 Schema29 的
+运行/接口证据；它们不授权续训，也不构成 Schema30 行为结论。
+
+## Schema30 候选的已实现结构边界
+
+当前工作区已完成以下 source-first 修正，均不增加参数、buffer、optimizer group、
+loss weight、sampler draw 或 deployment pass：
+
+- S 对 K 与三类 type 使用互补求和，随后只经过一次已有的 outer RMS contract；
+- W typed interval innovation 同时读取已有 interval chronology 与 physical action
+  condition，零动作不再抹掉四个时间身份；
+- `camera_support` 保留为几何读宽/不确定性元数据，不再作为跨相机投票权；
+- gripper trajectory loss 直接复用部署 codec 的 absolute 与 qpos-anchored cumulative
+  delta 分支，event/persistence mask 只选择训练行，不重建部署分支；
+- object/camera validity 只在 W public field boundary 应用一次，private typed owner
+  保持连续，零支持仍输出 exact zero；
+- P3 optional source depth 由公开 compiler 构造器按 source cardinality 生成，删除没有
+  forward consumer 的 `proposal_condition_dropout`。
+
+这些是语义与 ABI 修正，不是通过 gain、clip、quota、hard gate 或额外 loss 把数值压回
+阈值。Schema30 manifest/config/source identity 已改变；必须使用新空目录和新 checkpoint。
+
+本候选尚无正式行为曲线。本地 checkpoint 往返、CPU BF16 1-batch train/eval smoke、
+旧 Schema29 checkpoint exact-resume rejection、223 项相关回归与静态门已经通过。
+仍须在同一提交上完成远端 CUDA VJP、Pen/RDT-8 smoke 和 checkpoint validation，
+才允许启动新的单任务与 RDT-8 正式运行。
 
 ## 已由本次运行关闭的边界
 
@@ -77,7 +102,7 @@ task-balanced sampler 每批恰好覆盖八个任务。因此 Schema29 已有持
 
 这些是结构与运行健康，不等于以下行为问题已经解决。
 
-## S29-01 — train/runtime action-conditioned W 错位已结构修复，行为收益待验证
+## S30-01 — train/runtime action-conditioned W 错位已结构修复，行为收益待验证
 
 Schema28 的已确认错位是：
 
@@ -94,10 +119,11 @@ cache1 正式 velocity；唯一 action loss 与 future loss 都消费 cache1。p
 backward，forked RNG 令净随机流仍等于一个正式 dynamic pass。参数、optimizer、
 loss 权重与部署两遍 ODE 不变，Schema28 exact resume 被拒绝。
 
-这套调用与所有权结构在源码上成立，但首轮 CUDA 参数梯度并未闭合，见
-S29-00。只有先通过新 VJP 门、再从 fresh state 得到 Pen 完整曲线，才能回答它
-是否改善远端、gripper、final mismatch 与 spike；不得把旧 smoke finite、旧早期
-aggregate 或修复后的首批 loss 当作行为关闭。
+这套调用与所有权结构在 Schema29 源码上成立，但首轮 CUDA 参数梯度并未闭合，
+见 S29-00；Schema30 保留该已通过的 cache-isolation 生命周期。只有在新候选
+通过 checkpoint/smoke 门并从 fresh state 得到完整曲线后，才能回答它是否改善
+远端、gripper、final mismatch 与 spike；不得把旧 smoke finite、旧早期 aggregate
+或修复后的首批 loss 当作行为关闭。
 
 ## V28-02 — outer refinement 是有效 correction，但不是自洽闭环
 

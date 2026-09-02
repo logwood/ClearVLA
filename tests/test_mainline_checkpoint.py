@@ -128,7 +128,7 @@ def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: P
     assert "top" in historical_report.rejected_components
 
 
-def test_schema28_training_manifest_cannot_exact_resume_schema29(tmp_path: Path) -> None:
+def test_schema29_manifest_cannot_exact_resume_schema30(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     condition = tmp_path / "goal.pt"
     condition.write_bytes(b"t5-condition")
@@ -139,36 +139,38 @@ def test_schema28_training_manifest_cannot_exact_resume_schema29(tmp_path: Path)
         language=ArtifactIdentity.from_file("t5_goal", condition),
         commit="2" * 40,
     )
-    schema28_mapping = copy.deepcopy(current.manifest)
-    schema28_mapping["schema"] = 28
-    components = dict(schema28_mapping["components"])
+    schema29_mapping = copy.deepcopy(current.manifest)
+    schema29_mapping["schema"] = 29
+    components = dict(schema29_mapping["components"])
+    components["top"] = (
+        "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_"
+        "s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_"
+        "consequence_refinement_p2_transport_address_typed_consequence_two_"
+        "optional_p3"
+    )
     components["training"] = (
         "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_"
         "event_transition_persistence_gripper_trajectory_v120_decay_local_global_"
-        "clip_physical_w_ingress_gradient_probes"
+        "clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_"
+        "gradient_probes"
     )
-    components["runtime"] = (
-        "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_"
-        "single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_"
-        "teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics"
-    )
-    schema28_mapping["components"] = components
-    schema28_manifest = manifest_from_mapping(
-        schema28_mapping,
+    schema29_mapping["components"] = components
+    schema29_manifest = manifest_from_mapping(
+        schema29_mapping,
         require_current_schema=False,
     )
-    schema28 = replace(
+    schema29 = replace(
         current,
-        manifest=schema28_mapping,
-        manifest_digest=schema28_manifest.digest(),
+        manifest=schema29_mapping,
+        manifest_digest=schema29_manifest.digest(),
     )
 
-    report = compare_checkpoint_identity(schema28, current)
+    report = compare_checkpoint_identity(schema29, current)
     assert not report.exact_resume
     assert "manifest identity differs" in report.reasons
     assert report.reusable_components == ("bottom",)
+    assert "top" in report.rejected_components
     assert "training" in report.rejected_components
-    assert "runtime" in report.rejected_components
 
 
 def test_artifact_relocation_does_not_change_semantic_identity(tmp_path: Path) -> None:

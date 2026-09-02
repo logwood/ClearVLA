@@ -49,9 +49,9 @@ from clearvla.mainline.training.engine import (
     validate_finite_training_batch,
 )
 from clearvla.mainline.training.losses import (
+    FlowMatchingState,
     LossLedger,
     action_terms,
-    anchored_gripper_persistence,
     compose_losses,
     sample_flow_matching,
 )
@@ -90,7 +90,6 @@ def _config() -> ExperimentConfig:
             teacher_key_dim=8,
             goal_condition_dropout=0.0,
             action_history_condition_dropout=0.0,
-            proposal_condition_dropout=0.0,
         ),
         bottom=replace(
             base.bottom,
@@ -233,7 +232,7 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
     )
 
 
-def test_schema29_detached_self_conditioning_owns_one_formal_loss_and_rng_pass() -> None:
+def test_detached_self_conditioning_owns_one_formal_loss_and_rng_pass() -> None:
     torch.manual_seed(2900)
     config = _config()
     model = ClearVLAMainlinePolicy(config).train()
@@ -918,14 +917,10 @@ def test_continuous_gripper_trajectory_reads_only_value_and_delta_channels() -> 
         model.action_codec.physical_dim,
         requires_grad=True,
     )
-    parts = model.action_codec.split(physical)
-    absolute = parts.gripper_field[..., :1]
-    event = torch.zeros(batch, model.config.dimensions.action_horizon)
-    event[:, 0] = 1.0
-    cumulative = anchored_gripper_persistence(
-        absolute,
-        parts.gripper_field[..., 1:2],
-        event,
+    action_state = torch.randn(batch, model.config.dimensions.action_dim)
+    absolute, cumulative = model.action_codec.gripper_decode_branches(
+        physical,
+        action_state,
     )
     target = torch.randn_like(absolute)
     loss = 0.5 * (
@@ -940,7 +935,6 @@ def test_continuous_gripper_trajectory_reads_only_value_and_delta_channels() -> 
     assert torch.count_nonzero(physical.grad[..., :12]) == 0
     assert torch.count_nonzero(physical.grad[..., 14:]) == 0
     assert torch.count_nonzero(physical.grad[..., 12:14]) > 0
-
 
 
 def test_gripper_head_diagnostics_are_separate_from_execution_diagnostics() -> None:
@@ -966,33 +960,67 @@ def test_gripper_head_diagnostics_are_separate_from_execution_diagnostics() -> N
     assert "gradient_tensor_gripper_private_state_rms" in captured_metrics
 
 
-def test_continuous_gripper_trajectory_loss_reaches_the_private_gate() -> None:
+def test_formal_gripper_trajectory_loss_reaches_both_private_deployed_heads() -> None:
     torch.manual_seed(46)
-    model = ClearVLAMainlinePolicy(_config()).train()
+    config = _config()
+    model = ClearVLAMainlinePolicy(config).train()
     head = model.bottom.decoder.velocity_head
+    batch = _batch(config, batch=2)
+    action_state = torch.zeros(2, config.dimensions.action_dim)
+    history = replace(batch.online.history, action_state=action_state)
+    target_action = torch.zeros(
+        2,
+        config.dimensions.action_horizon,
+        config.dimensions.action_dim,
+    )
+    target_action[:, 3:, -1] = 1.0
+    target = replace(
+        batch.action_target,
+        normalized=target_action,
+        raw_units=target_action,
+        current_raw_units=action_state,
+        gripper_transition_boundary=torch.zeros_like(
+            batch.action_target.gripper_transition_boundary
+        ),
+        gripper_transition_boundary_raw_units=torch.zeros_like(
+            batch.action_target.gripper_transition_boundary_raw_units
+        ),
+    )
+    target_physical = model.action_codec.encode(target_action, action_state)
+    zero_physical = torch.zeros_like(target_physical)
     tokens = torch.randn(2, 24, 32, requires_grad=True)
     physical, _, _ = head.forward_with_gripper_state(tokens)
-    parts = model.action_codec.split(physical)
-    absolute = parts.gripper_field[..., :1]
-    event = torch.zeros(2, model.config.dimensions.action_horizon)
-    event[:, 0] = 1.0
-    cumulative = anchored_gripper_persistence(
-        absolute,
-        parts.gripper_field[..., 1:2],
-        event,
+    terms = action_terms(
+        config,
+        model.action_codec,
+        SimpleNamespace(
+            bottom=SimpleNamespace(
+                physical_velocity=physical,
+                motion_logits=torch.zeros(2, 24),
+                decoder_tensors={},
+            )
+        ),
+        target,
+        history,
+        FlowMatchingState(
+            time=torch.zeros(2),
+            source_physical_noise=zero_physical,
+            noisy_physical=zero_physical,
+            target_physical=target_physical,
+            target_physical_velocity=target_physical,
+        ),
     )
-    target = torch.randn_like(absolute)
-    (
-        0.5
-        * (
-            torch.nn.functional.smooth_l1_loss(absolute, target)
-            + torch.nn.functional.smooth_l1_loss(cumulative, target)
-        )
-    ).backward()
+    assert terms["gripper_trajectory_transition_mask_fraction"] > 0
+    assert terms["gripper_trajectory_persistence_mask_fraction"] > 0
+    terms["gripper_trajectory"].backward()
     gate_gradient = head.gripper_gate.weight.grad
     assert gate_gradient is not None
     assert torch.isfinite(gate_gradient).all()
     assert torch.count_nonzero(gate_gradient) > 0
+    assert head.grip_value is not None and head.grip_value.weight.grad is not None
+    assert head.grip_delta is not None and head.grip_delta.weight.grad is not None
+    assert torch.count_nonzero(head.grip_value.weight.grad) > 0
+    assert torch.count_nonzero(head.grip_delta.weight.grad) > 0
 
 
 def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
@@ -1160,7 +1188,6 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
             base.top,
             goal_condition_dropout=0.5,
             action_history_condition_dropout=0.5,
-            proposal_condition_dropout=0.5,
         ),
     )
     model = ClearVLAMainlinePolicy(config).train()
@@ -1211,7 +1238,7 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
     )
     assert metrics["condition_goal_keep"] == 0
     assert metrics["condition_action_history_keep"] == 0
-    assert metrics["condition_proposal_keep"] == 0
+    assert "condition_proposal_keep" not in metrics
 
     deployment_generator = torch.Generator().manual_seed(91)
     generator_state = deployment_generator.get_state().clone()

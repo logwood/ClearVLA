@@ -258,7 +258,6 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
-    proposal_condition_dropout: float = 0.25
 
     def validate(self) -> None:
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
@@ -280,7 +279,6 @@ class TopConfig:
                 "action_history_condition_dropout",
                 self.action_history_condition_dropout,
             ),
-            ("proposal_condition_dropout", self.proposal_condition_dropout),
         ):
             if not 0.0 <= float(value) < 1.0:
                 raise ValueError(f"top {name} must be in [0,1)")

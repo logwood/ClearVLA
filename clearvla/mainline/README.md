@@ -74,17 +74,19 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        28
+schema:        30
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 27 and older are not exact-resume sources for schema 28. Formal runs
+Schema 29 and older are not exact-resume sources for schema 30. Formal runs
 start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
-Schema28 keeps Schema27's bounded typed W normalization but changes W's
+Schema30 keeps Schema27's bounded typed W normalization and Schema29's
+detached self-conditioning/cache lifecycle, while closing the current
+semantic boundaries. W's
 ownership. W reads only a compact current object belief plus the normalized
 physical action interval means and their adjacent deltas. Goal, S values and
 coarse hidden tokens are absent from its API. P2 consumes an atomic
@@ -96,9 +98,14 @@ complete ODE pass from identical initial noise. The final action may differ
 from the action that conditioned W, so interval/delta mismatch is logged as a
 residual and is not labeled a fixed point. Training still builds W once.
 
-The same schema reanchors continuous gripper persistence after every target
-event and keeps near-one capacity control in FP32 through contraction. It adds
-no event gate, capacity quota, new loss weight or extra clipping stage.
+S uses complementary K/type owners with one outer RMS contract; typed W keeps
+learned chronology when the physical action is zero; camera support width is
+metadata rather than a cross-camera vote; and validity is applied once at the
+public W field boundary. Gripper trajectory supervision uses the exact deployed
+absolute and qpos-anchored cumulative-delta codec branches. Event masks select
+rows only and never reanchor deployment. Near-one capacity control remains FP32
+through contraction. No event gate, capacity quota, new loss weight or extra
+clipping stage is added.
 
 ## Runtime contract
 

@@ -68,8 +68,7 @@
     "proposal_recent_tokens": 4,
     "proposal_summary_tokens": 3,
     "goal_condition_dropout": 0.05,
-    "action_history_condition_dropout": 0.1,
-    "proposal_condition_dropout": 0.25
+    "action_history_condition_dropout": 0.1
   },
   "bottom": {
     "flow_time_distribution": "v120_mirrored_beta_1_5_1",
