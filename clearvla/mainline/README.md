@@ -85,9 +85,8 @@ start fresh unless the complete manifest, model, optimizer, scheduler and RNG
 identity matches. Bottom-only migration is explicit and emits a report.
 
 Schema30 keeps Schema27's bounded typed W normalization and Schema29's
-detached self-conditioning/cache lifecycle, while closing the current
-semantic boundaries. W's
-ownership. W reads only a compact current object belief plus the normalized
+detached self-conditioning/cache lifecycle while closing the current semantic
+boundaries. W reads only a compact current object belief plus normalized
 physical action interval means and their adjacent deltas. Goal, S values and
 coarse hidden tokens are absent from its API. P2 consumes an atomic
 CandidateWorld whose action-condition identity must match the current cache.
@@ -96,7 +95,11 @@ Deployment and validation use one bounded outer correction: a complete ODE
 proposal pass, one W rebuild from the decoded 24-row proposal, then a second
 complete ODE pass from identical initial noise. The final action may differ
 from the action that conditioned W, so interval/delta mismatch is logged as a
-residual and is not labeled a fixed point. Training still builds W once.
+residual and is not labeled a fixed point. Training encodes observation/G/S/P1
+once, builds W from the coarse proposal, estimates one detached clean endpoint
+from the sampled noisy field, rebuilds W once, and sends the sole action/future
+loss through the formal second dynamic pass. The detached pass owns no loss or
+parameter gradient.
 
 S uses complementary K/type owners with one outer RMS contract; typed W keeps
 learned chronology when the physical action is zero; camera support width is
@@ -128,7 +131,7 @@ clipping stage is added.
 
 ## Run
 
-Both launchers use the established server defaults:
+The Pen launcher uses the established server defaults:
 
 ```text
 data:          /data/liang.zhang/dataset/grab_pen_single/grab_pen_single
@@ -137,22 +140,36 @@ DINO cache:    /data/senwang/data/dinov2_cache_336
 T5:            /data/senwang/checkpoint/grasp_pen_embed.pt
 ```
 
-Smoke:
+Pen smoke:
 
 ```bash
-RUN_TAG=schema28_action_world_smoke_$(date +%Y%m%d_%H%M%S)
+RUN_TAG=schema30_pen_smoke_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 ```
 
-Formal batch-eight run:
+Pen formal batch-eight run:
 
 ```bash
-RUN_TAG=schema28_action_world_b8_$(date +%Y%m%d_%H%M%S)
+RUN_TAG=schema30_pen_b8_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
+```
+
+RDT-8 uses the bounded two-camera/right-arm adapter and its separate launcher:
+
+```bash
+RUN_TAG=schema30_rdt8_smoke_$(date +%Y%m%d_%H%M%S)
+CUDA_VISIBLE_DEVICES=1 \
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/smoke_rdt_multitask.sh > "${RUN_TAG}.log" 2>&1 &
+
+RUN_TAG=schema30_rdt8_b8_$(date +%Y%m%d_%H%M%S)
+CUDA_VISIBLE_DEVICES=1 \
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/train_rdt_multitask.sh > "${RUN_TAG}.log" 2>&1 &
 ```
 
 Each fresh output directory must be absent or empty. Override
@@ -160,15 +177,16 @@ Each fresh output directory must be absent or empty. Override
 `MAINLINE_BATCH_SIZE` or `MAINLINE_NUM_WORKERS` only when the server layout
 actually differs.
 
-Audit the complete result rather than a best checkpoint:
+Audit a run directory, not a copied console tail or a best checkpoint:
 
 ```bash
-uv run python -m clearvla.tools.audit_policy_logs \
-  runs/schema28_action_world_b8 \
-  --recovery-baseline v120_long.log \
-  --recovery-parent mainline_v120_contract_repair_b8.log \
-  --tail 120 --require-recovery --format text
+python -m clearvla.tools.audit_policy_logs \
+  runs/schema30_pen_b8_<timestamp> --format text
 ```
+
+For final recovery assessment, add a verified local V120 baseline with
+`--recovery-baseline /path/to/v120_long.log --require-recovery`. Cross-version
+claims also require a matching split and action-normalizer fingerprint.
 
 ## Release gates
 

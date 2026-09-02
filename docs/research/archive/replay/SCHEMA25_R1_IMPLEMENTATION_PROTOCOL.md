@@ -212,15 +212,15 @@ Execution ledger:
 
 | Slice | State | Evidence |
 |---|---|---|
-| R1a / G-01 | `COMPLETE` | `R1A_G01_G3_HANDOFF_WORKSHEET.md`; 123/123 retained tests |
-| R1b / G-02 | `COMPLETE` | `R1B_G02_CONDITIONAL_K_RECONSTRUCTION_WORKSHEET.md`; 129/129 retained tests |
-| R1c / S-01,S-02 | `COMPLETE` | `R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`; 134/134 retained tests |
-| R1d / W-01,W-02 | `COMPLETE` | `R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`; 140/140 retained tests |
-| R1e / P1-01 | `COMPLETE` | `R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`; 140/140 retained tests; zero parameter/state delta |
-| R1f / P2-01 | `COMPLETE` | `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; 144/144 retained tests |
-| R1g / P3-01,B-01 | `COMPLETE` | `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`; 145/145 retained tests |
-| LC-01 exact-zero cleanup | `COMPLETE` | `LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`; retained contract/decoder/RNG exact; 145/145 retained tests |
-| R1h / N-01,D-01 | `COMPLETE` | `R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`; LC-01 inventory/RNG exact; 155/155 retained tests |
+| R1a / G-01 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1a-g01`; 123/123 retained tests |
+| R1b / G-02 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1b-g02`; 129/129 retained tests |
+| R1c / S-01,S-02 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1c-s01-s02`; 134/134 retained tests |
+| R1d / W-01,W-02 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1d-w01-w02`; 140/140 retained tests |
+| R1e / P1-01 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1e-p1-01`; 140/140 retained tests; zero parameter/state delta |
+| R1f / P2-01 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1f-p2-01`; 144/144 retained tests |
+| R1g / P3-01,B-01 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1g-p3-01-b-01`; 145/145 retained tests |
+| LC-01 exact-zero cleanup | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#lc-01`; retained contract/decoder/RNG exact; 145/145 retained tests |
+| R1h / N-01,D-01 | `COMPLETE` | `R1_R2_CLOSURE_INDEX.md#r1h-n01-d01`; LC-01 inventory/RNG exact; 155/155 retained tests |
 
 For every slice:
 

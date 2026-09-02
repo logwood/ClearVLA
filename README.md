@@ -1,133 +1,73 @@
-# ClearVLA Current Policy Run
+# ClearVLA 当前入口
 
-## Current Object Intent–Dynamics 3-2-3 Mainline
+本仓库的活动实现只有
+[`clearvla/mainline/`](clearvla/mainline/README.md)。版本号只是记录用标签；
+模型语义、检查点身份和可恢复边界由 manifest、源码和运行上下文决定。
 
-The current experiment candidate is the `object_intent_dynamics_323`
-capability, logged as V122. The numeric label is bookkeeping; source selection
-and checkpoint identity use the capability manifest. The top graph has K=4
-global grounded objects plus an explicit null. Protected query identity is
-separate from causal interval innovations in the stateless online intent
-organizer; the future recognizer remains training-only. W1/W2 model object
-dynamics over `4-8 / 8-16 / 16-32 / 32-48`, P1 uses an `ObjectFactualDock`,
-P2 keeps semantic routing separate from camera-specific geometry and exposes
-only relative validity calibration, and P3 carries centred precision, temporal
-and observable state-change innovations. The Evidence MMDiT/CVAE/workspace
-bottom remains intact behind exactly one protected-consequence ingress.
+## 先读什么
 
-Batch-eight memory smoke (diagnostic synchronization is enabled, so do not use
-its timing as throughput):
+| 目的 | 唯一入口 |
+|---|---|
+| 当前架构、ABI、运行与放行门槛 | [`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`](docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md) |
+| 当前未关闭问题 | [`docs/research/CURRENT_MAINLINE_ISSUES.md`](docs/research/CURRENT_MAINLINE_ISSUES.md) |
+| 当前修复顺序与实验门槛 | [`docs/research/CURRENT_MAINLINE_REPAIR_PLAN.md`](docs/research/CURRENT_MAINLINE_REPAIR_PLAN.md) |
+| 当前实现的模块边界与启动方式 | [`clearvla/mainline/README.md`](clearvla/mainline/README.md) |
+| Python/uv 开发环境 | [`docs/development/uv_environment.md`](docs/development/uv_environment.md) |
+| 原始日志的放置、保留和再审计规则 | [`new_logs/README.md`](new_logs/README.md) |
+| 研究文档分层与历史入口 | [`docs/research/README.md`](docs/research/README.md) |
+
+`00_CURRENT_ARCHITECTURE_CONTRACT.md` 是当前真相；历史文档只能用于追溯
+ancestry、旧日志或既往修复原因，不能授权把旧机制搬回活动主线。
+
+## 当前身份
+
+```text
+capability: object_intent_dynamics_323
+manifest:   Schema30
+topology:   G1 G2 G3 / W1 W2 / P1 P2 P3
+intervals:  4-8 / 8-16 / 16-32 / 32-48
+training:   fresh, single-stage end-to-end
+```
+
+Schema30 的结构修正以及远端 CUDA VJP、Pen/RDT-8 smoke 和只读 checkpoint
+验证已通过；Pen 与 RDT-8 正式运行已经从空目录启动。动态 PID、run tag 和最近
+step 只记录在
+[`ACTIVE_MAINLINE_HANDOFF.md`](docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)。
+Schema29 及更早 checkpoint 不是 Schema30 的 exact-resume 来源。
+
+## 启动入口
+
+先跑小批量 smoke：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OBJECT_323_BATCH_SIZE=8 \
-SMOKE_TRAIN_BATCHES=2 \
-OUT_DIR=runs/v122_object_323_identity_innovation_b8_memory_smoke \
-nohup bash scripts/current_object_intent_dynamics_323_smoke.sh \
-  > v122_object_323_identity_innovation_b8_memory_smoke.log 2>&1 &
+OUT_DIR=runs/clearvla_mainline_smoke \
+bash scripts/smoke_mainline.sh
 ```
 
-Long run:
+确认资源和 backward/validation 合同后，再启动 batch-8：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-OBJECT_323_BATCH_SIZE=8 \
-OUT_DIR=runs/v122_object_intent_dynamics_323_identity_innovation_b8 \
-nohup bash scripts/current_object_intent_dynamics_323.sh \
-  > v122_object_intent_dynamics_323_identity_innovation_b8.log 2>&1 &
+OUT_DIR=runs/clearvla_mainline \
+bash scripts/train_mainline.sh
 ```
 
-The raw HDF5 default remains
-`/data/liang.zhang/dataset/grab_pen_single/grab_pen_single`. The current
-launchers use `/data/senwang/data` only for decoded/DINO caches and
-`/data/senwang/checkpoint` for T5/model weights. `DATA_ROOT`, `CACHE_DIR`,
-`DINO_CACHE_DIR` and `T5_CONDITION_PATH` remain individually overridable.
-Top resume is intentionally rejected because the object graph is fresh-only.
-
-Do not start the long run unless the batch-eight smoke remains below 22.0 GiB
-total device use and completes backward plus five-step deployment. The
-compact architecture and resource contract is in
-`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`.
-
-## Development Environment
-
-The repository uses Python 3.12 and uv for dependency locking and development
-tools. See `docs/development/uv_environment.md` for clean installation, reuse
-of an existing CUDA Torch environment, and lightweight checks that do not run
-the full policy trunk.
-
-## Current Layout
-
-当前 policy 主线已经迁移到 `clearvla/policy/`；训练与烟测入口就是上一节的两个
-capability 脚本。V53、V87、V118 和 V119 脚本只保留作历史回放，
-不应被当作当前默认实验。
-
-性能审计与 reader/DCT 的保留边界见：
-`docs/performance/typed_reader_dct_performance_audit.md`。
-
-已完成阶段的设计文档已归档到 `history_design/archive/`，实验脚本仍按版本保留在
-`scripts/`，避免破坏历史复现实验。
-
-Historical V53 replay entry point:
+已有 checkpoint 只能走只读验证入口：
 
 ```bash
-bash run_current_policy.sh
+CHECKPOINT=/path/to/clearvla-mainline-checkpoint-v4 \
+bash scripts/validate_mainline_checkpoint.sh
 ```
 
-`run_current_policy.sh` dispatches to `scripts/current_v53_full.sh`.
+数据、decoded/DINO cache、T5 条件文件和 batch/worker 可通过脚本中列出的
+环境变量覆盖；不要把 checkpoint、cache 或 raw log 复制进架构记忆文档。
 
-## Recommended Experiments
+## 历史资料
 
-Run these as controlled comparisons. V53-A and V53-B are the default mainline;
-the second experiment adds V53-C only.
-
-### Experiment 1: V53-A + V53-B
-
-Purpose: mainline vertical-depth run. This is the default setting of
-`scripts/current_v53_full.sh`.
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-OUT_DIR=runs/v53ab_vertical_depth_b8 \
-LATENT_CVAE_NOISY_GATE=1 \
-LAYER_BOOST_RESIDUAL=1 \
-LAYER_ZERO_BASE_DIAGNOSTIC=1 \
-LATENT_CVAE_LAYER_SCAN=1 \
-LATENT_CVAE_LAYER_SCAN_ALPHA=0.2 \
-ADAPTIVE_CVAE_MONOTONIC_LAYER_ROUTE=1 \
-ADAPTIVE_CVAE_LAYER_ROUTE_DISTANCE_SCALE=3.0 \
-LATENT_CVAE_CANVAS_CROSS_ATTENTION=0 \
-ADAPTIVE_CVAE_SERIAL_WRITERS=0 \
-nohup bash run_current_policy.sh > v53ab_vertical_depth_b8.log 2>&1 &
-```
-
-### Experiment 2: V53-A + V53-B + V53-C
-
-Purpose: test whether full-canvas cross-attention and serialized writers improve
-trunk bandwidth without reintroducing shortcut behavior.
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-OUT_DIR=runs/v53abc_canvas_serial_b8 \
-LATENT_CVAE_NOISY_GATE=1 \
-LAYER_BOOST_RESIDUAL=1 \
-LAYER_ZERO_BASE_DIAGNOSTIC=1 \
-LATENT_CVAE_LAYER_SCAN=1 \
-LATENT_CVAE_LAYER_SCAN_ALPHA=0.2 \
-ADAPTIVE_CVAE_MONOTONIC_LAYER_ROUTE=1 \
-ADAPTIVE_CVAE_LAYER_ROUTE_DISTANCE_SCALE=3.0 \
-LATENT_CVAE_CANVAS_CROSS_ATTENTION=1 \
-ADAPTIVE_CVAE_SERIAL_WRITERS=1 \
-nohup bash run_current_policy.sh > v53abc_canvas_serial_b8.log 2>&1 &
-```
-
-If running both at the same time, put the second command on another free GPU.
-
-## Key Log Fields
-
-- `cxgate`, `xnorm`, `xratio`: direct `x_t` branch gate and branch strength.
-- `cscan`, `clat`: depth-scan condition norm and lateral concat condition norm.
-- `crmax`, `creff`, `cprmax`, `cpeff`: layer/progress route concentration.
-- `czbase`: consequence zero-base shift; low values indicate action-feature parroting.
-- `lboost`, `ldres`: residual magnitude learned by boosted layer contracts.
-- `ctctrl`, `ctupd`, `ctsm`, `ctusm`, `ctue`, `ctpr`: trajectory projection/update diagnostics; smoothing/projection penalties are off by default.
-- `pflow`, `rollout`, `delta`, `event`, `first8`, `tail`: main health metrics.
+旧版 V-numbered launcher、设计稿和
+[`legacy/README.md`](legacy/README.md) 仅用于复现或归因，集中在
+[`history_design/`](history_design/README.md)、
+[`docs/research/archive/`](docs/research/archive/README.md) 和 `legacy/`。
+辅助目录只保留当前交接、RDT 详参以及两份压缩历史索引；完整旧文可由各索引
+记录的 Git commit 恢复。

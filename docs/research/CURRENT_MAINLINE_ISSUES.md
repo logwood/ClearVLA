@@ -1,271 +1,161 @@
-# ClearVLA Schema30 当前纯问题账本
+# ClearVLA Schema30 current issues
 
-更新：2026-09-02
+Updated: 2026-09-02
 
-本文件只保留完整 Schema28 行为运行之后、进入 Schema30 后仍未关闭的问题。
-Schema28 仍是已完成行为基线；Schema29 的 cache-fix 运行只提供接口/门禁证据，
-不是当前源码图的行为基线。当前执行图、动作
-ABI、运行频率与检查点边界见
-[`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md)，
-下一版的实施顺序与放行门槛见
-[`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md)。历史 donor
-与已完成修复不在这里重演。
+This ledger contains only unresolved questions that can change the next source
+unit or the release decision. The active graph and invariants live in
+[`00_CURRENT_ARCHITECTURE_CONTRACT.md`](00_CURRENT_ARCHITECTURE_CONTRACT.md),
+the execution order in
+[`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md), and
+volatile process state in
+[`auxiliary/ACTIVE_MAINLINE_HANDOFF.md`](auxiliary/ACTIVE_MAINLINE_HANDOFF.md).
+Completed repair narratives belong to Git history or the archive, not here.
 
-## 当前证据合同
+## Evidence boundary
 
-正式证据来自
-`new_logs/schema28_final_20260831_013140/{run_context.json,metrics.jsonl}`：
+- Schema30 (`object_intent_dynamics_323`, manifest 30) is the active candidate.
+  Fresh Pen and RDT-8 formal runs are active, but neither had produced a
+  validation epoch at the latest handoff snapshot. Early train rows are health
+  evidence only.
+- Schema28 commit `097330a8` remains the latest complete, comparable Pen
+  behavior anchor: eight epochs, exact loss ledger, matching split and action
+  normalizer. Raw evidence is under
+  `new_logs/reference/primary/schema28_action_world_b8_20260831_013140/`.
+- Schema29 formal runs are invalid behavior evidence. A CUDA BF16 autocast
+  weight-cache interaction removed formal parameter VJP after the detached
+  pass0 even though losses, activations and optimizer steps stayed finite.
+  Commit `d8a77a1` repaired that lifecycle; Schema30 retains the repair and has
+  passed the real Pen B8 VJP gate.
+- Smoke, checkpoint round-trip and read-only validation establish interface
+  correctness, not learned behavior. Low-coverage interventions establish only
+  the boundary they actually changed.
 
-- source commit `097330a894d948d66c419f8af07325a5b0ff712e`，manifest Schema28；
-- `object_intent_dynamics_323`，seed 0，batch 8，63/5 train/val episodes；
-- action normalizer fingerprint `32a3a4d7f21f`；
-- 8 个完整 epoch、1,144 个 train windows、无 traceback/non-finite；
-- exact loss ledger；median `1.840 s/batch`，process peak `12.112 GiB`；
-- validation sampling/P2/proposal coverage `8.94%`，execution matched coverage
-  `4.47%`。低覆盖干预只能作局部归因，不能代替全验证行为结论。
+## S30-01 — self-conditioning closes the training call graph, not the final fixed point
 
-Schema26 与 Schema28 的数据、split、normalizer、seed 和训练长度对齐，可作
-近控制的版本方向比较；Schema27 只有 5 个完整 epoch，不能作为最终点对照。
+Training now estimates one detached clean endpoint from the same noisy field,
+rebuilds only W, and applies the sole action/future loss to the formal second
+pass. Deployment still performs one complete proposal ODE, rebuilds W once,
+then performs one complete refined ODE. The final action may move away from the
+action that conditioned W.
 
-正式 matched W/consequence/CT attribution 已在上述 Schema28 checkpoint 的全部
-179 个 validation batch 上完成，16 个 diagnostic batch 通过所有 identity/coverage
-门。W neutral 与 CT neutral 都有独立远端动作责任，二者不重复。随后 endpoint
-estimator/full-proposal gate 以 `0.984706` 更新方向 cosine、`1.0` 有效覆盖通过，
-放行 Schema29 detached self-conditioning。它们选择结构修改，不替代 Schema29
-正式行为曲线。
-
-Schema29 首轮 Pen/RDT 运行不是有效行为证据。真实 Pen batch 的 CUDA BF16 VJP
-报告 `new_logs/schema29_real_batch_probe_a671640.json` 证明：cache0 单遍的
-velocity/gripper/motion 参数梯度 L2 分别为
-`3.1299548 / 0.01231698 / 0.05398325`，而实际 cache1 formal 路径三者全为
-`0`；与此同时 physical-velocity 与 head-input activation VJP 在两边都保持
-`7.79045e-4 / 3.24186e-6`。因此 finite loss、ledger、activation gradient 和
-optimizer step 都掩盖了参数边被截断。旧实验已经停止，禁止续训。
-
-局部修复提交 `d8a77a19cfbd7520ae790b3938e2d1fb3a8a7a6f` 已通过新的真实
-Pen B8 CUDA v2 VJP、Pen B8 smoke 与 RDT-8 smoke。cache1 的
-velocity/gripper/motion、三个 Evidence-MMDiT block 以及所有 cache0 有信号的
-optimizer role 均保留约 `1.0x` 的参数 VJP；pass0/condition detached、
-cache-off/cache-on、BF16 与 RNG 合同不变。两项 smoke 都完成 optimizer step、
-deploy-style validation 与 checkpoint 写入，RDT validation/training mix 覆盖
-`8/8` 任务。两个 fresh formal run 已从空目录启动。Pen 已到至少 step400，所有
-named optimizer role 均有 formal 参数梯度；三次有限 `arm_abs.weight` crossing
-只出现在 step `8/10/40`，之后到 step400 未复发。RDT-8 已完成首个 20-batch
-窗口，ledger 闭合，P2/consequence/CT/MMDiT/head 均非零且无 spike；其 B8
-task-balanced sampler 每批恰好覆盖八个任务。这些记录只封存 Schema29 的
-运行/接口证据；它们不授权续训，也不构成 Schema30 行为结论。
-
-## Schema30 候选的已实现结构边界
-
-当前工作区已完成以下 source-first 修正，均不增加参数、buffer、optimizer group、
-loss weight、sampler draw 或 deployment pass：
-
-- S 对 K 与三类 type 使用互补求和，随后只经过一次已有的 outer RMS contract；
-- W typed interval innovation 同时读取已有 interval chronology 与 physical action
-  condition，零动作不再抹掉四个时间身份；
-- `camera_support` 保留为几何读宽/不确定性元数据，不再作为跨相机投票权；
-- gripper trajectory loss 直接复用部署 codec 的 absolute 与 qpos-anchored cumulative
-  delta 分支，event/persistence mask 只选择训练行，不重建部署分支；
-- object/camera validity 只在 W public field boundary 应用一次，private typed owner
-  保持连续，零支持仍输出 exact zero；
-- P3 optional source depth 由公开 compiler 构造器按 source cardinality 生成，删除没有
-  forward consumer 的 `proposal_condition_dropout`。
-
-这些是语义与 ABI 修正，不是通过 gain、clip、quota、hard gate 或额外 loss 把数值压回
-阈值。Schema30 manifest/config/source identity 已改变；必须使用新空目录和新 checkpoint。
-
-本候选尚无正式行为曲线。本地 checkpoint 往返、CPU BF16 1-batch train/eval smoke、
-旧 Schema29 checkpoint exact-resume rejection、223 项相关回归与静态门已经通过。
-远端 CUDA VJP、Pen/RDT-8 smoke 和 read-only checkpoint validation 也已在同一
-提交完成并通过；因此正式单任务与 RDT-8 运行已获放行，但其行为曲线仍待观察。
-
-## Schema30 远端门禁封存（2026-09-02）
-
-门禁使用精确提交 `3fef2fc0dce297f600c813307c998f587cca1ca3`、manifest digest
-`1323dcff095cbddb8da02c0e263c3e9865fbae39add9af4e539d38e9745f9c46`，远端
-Linux source digest 为 `0d0957a75ab22e37f552ccf9a4505049876af5785837cb9787edde181b04c1c2`。
-
-- **真实 Pen B8 CUDA VJP**：`schema30_pen_b8_vjp_3fef2fc.json`。cache0/cache1
-  总参数 VJP `3.1326139 / 3.1326158`；velocity、gripper-gate、motion-head
-  分别保持 `3.1118524 / 0.01000276 / 0.05398693`，Evidence-MMDiT
-  block 0/1/2 约为 `0.02416/0.02437/0.02422`。pass0 detached/cache-off，
-  formal cache-on、BF16 与 forked-RNG 合同均成立；step-zero 合法零 owner
-  不作为失败。
-- **Pen B8 smoke**：`schema30_pen_b8_smoke_20260902_112950`。一 train + 一
-  validation batch 完成 backward、optimizer step、deploy-style validation、
-  exact ledger（`loss_ledger_gap=0`）与 latest/best 原子 checkpoint；global
-  raw gradient `3.19852`，冷启动 `13.008 s/batch`，process peak `4.228 GiB`。
-- **RDT-8 mixed smoke**：`schema30_rdt8_smoke_20260902_113250`。ledger 闭合、
-  global raw gradient `4.02218`、validation task coverage `8/8`；B8 task-balanced
-  sampler 每任务一行，冷启动 `19.26 s/batch`，process peak `10.53 GiB`。
-- **checkpoint validation**：`schema30_pen_checkpoint_validation_20260902_113954`
-  与 `schema30_rdt8_checkpoint_validation_20260902_114122` 均通过，
-  `source_delta_files=0`，且 optimizer/schedule/RNG load 与 checkpoint write
-  全部 disabled。故意使用不匹配 smoke config 的一次验证被 manifest digest
-  正确拒绝。
-
-上述是接口/发布门证据，不是行为结果；smoke 的单批 RMSE、event F1、geometry
-幅度和冷启动吞吐不用于提前判断正式训练。Schema29 或 smoke checkpoint 均不得
-作为 Schema30 resume/migration 输入。
-
-## 已由本次运行关闭的边界
-
-- S29-00 已关闭：同一外层 CUDA BF16 autocast 内的 parameterized no-grad 首调
-  只在训练 pass0、native candidate target probe 和旧 sequential hard audit 三处
-  构成同型风险；三处均局部 `cache_enabled=False`，formal cache 仍开启。门禁要求
-  cache0 有信号的 role 在 cache1 保留，而不是强迫合法 step0 零初始化 owner
-  非零。`bottom_capacity`、`consequence`、`p2_effect_reader` 在两模式同时为零，
-  不属于 cache1 特异性断路；
-- Schema28 能稳定完成一次
-  `proposal -> W(proposal) -> refined action`，不是空调用或 lineage 旁路；
-- W 的 goal/coarse-hidden direct ingress 为零，显式
-  `PhysicalActionCondition` 有非零 VJP；
-- P2 semantic、geometry 和 geometry-address 的真实 consumed tensor 都有非零
-  action gradient；
-- typed-W floor 修正后没有再出现 typed normalization owner spike；
-- capacity 的 FP32 路径、CandidateWorld identity、两遍 same-noise ODE、loss
-  ledger、optimizer 和 checkpoint 合同均保持 finite/一致。
-- matched attribution 已分开 W 与 CT：neutralize W dynamic 的 far/gripper action
-  delta 为 `0.05829 / 0.13240`，neutralize CT 为 `0.01605 / 0.04142`，联合为
-  `0.06527 / 0.15345`；二者都有独立责任，不新增 W->CT bridge。
-
-这些是结构与运行健康，不等于以下行为问题已经解决。
-
-## S30-01 — train/runtime action-conditioned W 错位已结构修复，行为收益待验证
-
-Schema28 的已确认错位是：
+Schema28 showed a real correction and a remaining residual:
 
 ```text
-training
-  coarse action -> W(coarse) -> one velocity call -> action loss
-
-deployment / validation
-  W(coarse) -> proposal ODE -> W(proposal) -> refined ODE -> final action
+proposal -> refined action RMS          0.02514
+final interval vs W-condition mismatch 0.02933
+final adjacent-delta mismatch           0.01514
 ```
 
-Schema29 已改为一次 flow 采样、cache0 detached endpoint estimator、只重建 W、
-cache1 正式 velocity；唯一 action loss 与 future loss 都消费 cache1。pass0 无
-backward，forked RNG 令净随机流仍等于一个正式 dynamic pass。参数、optimizer、
-loss 权重与部署两遍 ODE 不变，Schema28 exact resume 被拒绝。
+Open question: does Schema30 improve far-horizon/gripper behavior and keep the
+final mismatch from growing? Close only with a complete validation curve and
+matched proposal/refinement measurements. A third unconsumed `W(final)` call
+would not close this issue.
 
-这套调用与所有权结构在 Schema29 源码上成立，但首轮 CUDA 参数梯度并未闭合，
-见 S29-00；Schema30 保留该已通过的 cache-isolation 生命周期。只有在新候选
-通过 checkpoint/smoke 门并从 fresh state 得到完整曲线后，才能回答它是否改善
-远端、gripper、final mismatch 与 spike；不得把旧 smoke finite、旧早期 aggregate
-或修复后的首批 loss 当作行为关闭。
+## S30-02 — far horizon and continuous gripper remain the behavior target
 
-## V28-02 — outer refinement 是有效 correction，但不是自洽闭环
-
-epoch 8 的 matched deployment 聚合为：
+Schema28 final validation was:
 
 ```text
-proposal -> refined action delta RMS       0.02514
-final interval vs W-condition mismatch     0.02933
-final adjacent-delta mismatch              0.01514
-W semantic change after proposal           0.06639
-W transport change after proposal          0.00713
+full / arm / gripper physical RMSE  0.07657 / 0.05677 / 0.14733
+horizon bands 1-4 / 5-12 / 13-24   0.02502 / 0.05513 / 0.09743
+tail / first                         7.66
+decoded gripper P / R / F1           0.6006 / 0.2749 / 0.3771
+decoded predicted / target events    621 / 1357
 ```
 
-refinement 明确改变了 W 与动作，但最终动作又离开了其 W 的条件。interval
-mismatch 与 action delta 使用不同聚合轴，不能作严格等式比较；它们处于同一量级
-已经足以拒绝“fixed point/已闭环”的说法。只重算 `W(final action)` 而不再让策略
-消费它，也不能把最终动作变成被该 world 条件化的结果。
+The low event recall and far-gripper error show a deployed continuous-action
+failure, not merely an aggregate-scale artifact. Schema30 repaired the
+trajectory-supervision operands to match the deployed absolute and cumulative
+delta codec, but behavior remains open until validation. Never trade a better
+near band for a worse far band or use event-head accuracy as a substitute for
+decoded gripper behavior.
 
-## V28-03 — 远端和 gripper 仍是主要行为失败
+## S30-03 — temporal/transport bandwidth is active but still unproven
 
-Schema28 的最佳 aggregate 点在 epoch 6，final 有小幅回升：
+At Schema28 final validation, W2 prediction-to-Teacher amplitude was about
+`0.69x` for semantics and `0.44x` for transport. Both W and P2 consumers had
+nonzero gradients, so this was under-use rather than a proven disconnection.
+Schema30 gives typed W innovation both learned chronology and the physical
+action condition; zero action no longer erases interval identity.
+
+Open question: does that semantic repair produce distinct late intervals and
+useful transport on validation? Read every interval's prediction/Teacher
+semantic and transport rows together with action ablations. Do not change a
+loss weight, add a quota, or amplify transport merely because one RMS is small.
+
+## S30-04 — geometry has a legal path but weak established action responsibility
+
+Schema28 matched interventions found:
 
 ```text
-                         epoch 6       epoch 8
-full physical RMSE       0.0751        0.07657
-arm physical RMSE        0.0566        0.05677
-gripper physical RMSE    0.1422        0.14733
-tail / first             6.42          7.66
+geometry address neutral: far arm/gripper action delta  0.00050 / 0.00106
+geometry value zero:      far-gripper action delta       about 0.00729
+far semantic zero:        far arm/gripper action delta   0.02642 / 0.11407
 ```
 
-final horizon bands 为 `0.02502 / 0.05513 / 0.09743`，tail 为 `0.09016`；训练
-flow 持续下降并没有消除 deployed tail gap。相对完整 Schema26 final，Schema28
-aggregate、arm、gripper 和 tail/first 均方向性改善，但问题没有关闭。
+Schema30 corrected camera validity ownership and keeps camera support as width
+metadata, while preserving independent semantic-K and geometry-K*C selection.
+Open question: does geometry gain responsibility on Pen or the richer RDT-8
+camera/task distribution? A weak but correctly connected geometry lane is not
+automatically a defect; deletion, forced mass and learned gain remain
+unsupported.
 
-decoded gripper 同时证明这不是单纯的尺度展示问题：precision `0.6006`、recall
-`0.2749`、F1 `0.3771`，只预测 `621/1357` 个目标事件，event ratio `0.4576`。
-远端 gripper band 为 `0.18233`；post-event `1-2 / 3-6 / 7+` 为
-`0.34163 / 0.27129 / 0.17776`。下一版不能只改善 aggregate 或近端。
+## S30-05 — finite spikes are a watch item, not yet one proven mechanism
 
-## V28-04 — W transport 相对 semantic 更欠拟合，但原因未归属
+Schema28 had 12 finite threshold-5 crossings, mainly observation flow/
+`target_dino_key` plus three output-head events; maximum global preclip was
+`24.63`. Schema30's early formal rows are finite and ledger-closed, but the
+current runs have already shown:
 
-epoch 8 validation：
+- seven early Pen crossings through step 106, dominated by
+  `bottom.decoder.velocity_head.arm_abs.weight`, with no further Pen crossing
+  through the latest completed window at step 2000;
+- three early RDT output-head crossings followed by three separated
+  observation-side crossings at steps 954/1251/1317. The maximum was step 954:
+  `target_dino_key.1.weight` owner L2 `19.28`, global preclip `22.60`;
+  later owners were `target_dino_key` and `flow.delta_head`.
 
-```text
-W2 semantic / Teacher semantic       0.25078 / 0.36198 = 0.69x
-W2 transport / Teacher transport     0.04072 / 0.09265 = 0.44x
-```
+One finite recurrence does not establish the proposed “G1/G2 address gradient
+confluence” explanation. Keep training unless crossings become persistent,
+grow materially, produce non-finite values, or coincide with a behavior/
+representation break. If that happens, replay the same checkpoint/batch with
+per-loss parameter VJP before changing clipping, LR, normalization or loss
+weights.
 
-transport 相对 Teacher 的缺口更大；W physical-action condition、dynamics 参数和
-P2 consumer 均有非零梯度，所以不能称为断路。现有证据也不能区分：
+## S30-06 — RDT-8 currently validates the adapter, not native multiview/bimanual support
 
-- 训练只见 `W(coarse)` 导致条件分布不足；
-- W objective/representation 本身不足；
-- P2/consequence/Bottom 对 transport 的行为价值过滤；
-- Teacher transport 的一部分在当前任务上并非动作必要信息。
+The first multitask outlet uses eight-task balanced sampling, high + right-wrist
+cameras, and a right-arm 7-D projection from native 14-D action. Task identity
+controls sampling, validation and logging only. It is not a hidden model input.
 
-不得据此直接调 transport loss、gain、quota 或 Huber 尺度。
+Open question: are all eight task rows healthy under one shared core and are
+failures task/profile-specific rather than global? Report every task with its
+sample/event counts and action/camera profile. Native three-camera consumption,
+depth and 14-D bimanual modeling remain later explicit ABI units; the adapter
+must not be described as already solving them.
 
-## V28-05 — semantic 已承担明显动作责任，geometry 的角色很弱
+## Closed facts that should not be reopened without contradictory evidence
 
-deployment effect RMS 为 semantic `0.15870`、geometry `0.01820`，geometry
-address correction 为 `0.01196`。matched P2 切片显示：
+- W and ControlledTransition have independent matched action responsibility;
+  W remains the only world producer and CT remains a transition consumer.
+- Semantic P2 carries strong far/gripper responsibility. Geometry being weaker
+  does not invalidate that result.
+- The Schema29 autocast-cache VJP break is closed by local cache isolation and
+  a real CUDA parameter-owner gate.
+- Schema30's S fusion, W chronology, single-validity boundary, camera-support
+  semantics, gripper codec operands and P3 source-depth compiler passed forward,
+  reverse, checkpoint and smoke gates without new parameters, losses or passes.
+- Capacity near full width is not a release failure or a hardware-rank claim.
 
-- neutralize geometry address 后 far arm/gripper action delta 只有
-  `0.00050 / 0.00106`；
-- zero geometry value 后 far-gripper action delta 约 `0.00729`；
-- zero far semantic 后 far arm/gripper action delta 为 `0.02642 / 0.11407`，
-  far-gripper RMSE 从 `0.12825` 恶化为 `0.20784`。
+## Stop and closure rules
 
-因此 semantic 的远端责任已经成立；geometry 当前行为效应很弱也成立。但现有
-干预不能判定 geometry 应成为独立动作值、只应辅助 address，还是在这个任务上
-本就信息量有限。直接放大 geometry 会改变 semantic/geometry 的竞争，依据不足。
+Hard-stop a run for non-finite values, identity/lineage failure, an open loss
+ledger, vanished formal parameter-owner VJP, checkpoint ABI violation, process
+memory above 22 GiB, or a persistent severe spike pattern. Early event F1,
+small geometry RMS, one finite spike or warmup capacity does not stop alone.
 
-## V28-07 — finite spike 显著减少，但 observation owner 仍会复发
-
-完整 Schema28 共有 12 次 threshold `5.0` 的 finite preclip spike：
-
-```text
-observation flow delta_head                         4
-observation target_dino_key                        4
-bottom arm_abs output head                         3
-observation raw-flow pyramid stem                  1
-```
-
-最大 global preclip 为 `24.63`（epoch 4 step 9118），owner 是
-`target_dino_key`，owner L2 `13.49`。这比 Schema26 的 64 次、最大 `435.04`
-明显缓和，但 observation 的两个旧 owner 仍复发；不能宣称数值问题已全部关闭。
-若下一版相同 owner 再出现严重峰值，先对同 checkpoint/same batch 做 per-loss
-VJP，不先加 clip、降 LR 或改 objective weight。
-
-## V28-08 — execution capacity 基本全开，hard/soft 仍有差距
-
-尾部 effective basis mass 约 `31.999/32`。matched full-capacity 对 primary 的
-动作与 RMSE 几乎不变，而 hard execution RMSE `0.07737` 高于 matched primary
-`0.07175`；neutral 更差至 `0.08750`。这说明 learned soft execution 有行为价值，
-但 capacity 当前没有形成实质压缩。它不是下一版核心修复目标，也不能用硬化
-capacity 来换取表面稀疏。
-
-## 明确撤回和禁止的方案
-
-- 撤回新增 `W -> ControlledTransition` bridge；已有 consequence 路径已到达 CT。
-- 撤回“由 CT 生成 world1”；world producer 是 W，CT 只生成策略 transition。
-- 不把第三次 `W(final action)` 重算冒充闭环；没有后续策略消费就没有条件闭合。
-- 不直接放大 geometry、transport、gripper 或 interval-3。
-- 不新增 hard event gate、entropy/route quota、额外 clip、人工梯度或 best-checkpoint
-  选择器来掩盖完整八轮行为。
-
-## 关闭规则
-
-一个问题只有在 producer -> transform -> consumer -> loss 的正向审查与
-consumer -> gradient owner -> optimizer -> producer 的反向审查均闭合，并且
-matched intervention 改变了预定第一边界且有完整 coverage 后才能进入结构修改。
-源码可解释但尚无行为证据时保留本条；日志幅度异常但责任未归属时不得直接改图。
-混合精度路径还必须在真实 CUDA autocast 生命周期内验证原始参数 VJP；非零
-activation gradient、finite global norm、optimizer.step 被调用或 CPU backward
-均不能替代该门。
+Close an issue only when the producer-to-consumer forward path, the
+loss-to-owner-to-optimizer reverse path and the relevant matched intervention
+all agree, with stated coverage. A source explanation without behavior evidence
+remains open; an unusual metric without attributed responsibility does not
+authorize a structural edit.

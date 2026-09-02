@@ -41,3 +41,5 @@ policy_semantic_map/
 checkpoints/
 outputs/
 wandb/
+/new_logs/**
+!/new_logs/README.md

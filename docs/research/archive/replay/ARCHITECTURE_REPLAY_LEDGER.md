@@ -10,7 +10,7 @@ owned by `ARCHITECTURE_REPLAY_PLAN.md`.
 This ledger is not the active architecture contract, not a list of current
 issues, and not authorization to modify the mainline. The checked-out graph
 remains defined by `../00_CURRENT_ARCHITECTURE_CONTRACT.md`; open release
-questions remain in `../CURRENT_MAINLINE_ISSUES.md` until a replay
+questions remain in `../../CURRENT_MAINLINE_ISSUES.md` until a replay
 implementation explicitly enters active scope.
 
 ## 1. Evidence boundary

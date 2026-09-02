@@ -206,7 +206,7 @@ Relevant sources:
 Relevant source:
 
 - `clearvla/mainline/model/compiler.py`
-- `docs/research/auxiliary/R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`
+- `docs/research/auxiliary/R1_R2_CLOSURE_INDEX.md#r1f-p2-01`
 
 #### P3 and bottom ingress
 
@@ -229,7 +229,7 @@ Relevant sources:
 - `clearvla/mainline/model/compiler.py`
 - `clearvla/mainline/model/restored_bottom.py`
 - `clearvla/mainline/v120_core/time_domain_mmdit.py`
-- `docs/research/auxiliary/R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`
+- `docs/research/auxiliary/R1_R2_CLOSURE_INDEX.md#r1g-p3-01-b-01`
 
 #### Validation and checkpoint selection
 

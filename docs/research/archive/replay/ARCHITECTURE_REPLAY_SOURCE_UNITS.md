@@ -264,7 +264,7 @@ Static acceptance:
 - no expand manufactures a missing K or type axis.
 
 Implementation closure: R1c is recorded in
-`R1C_S01_S02_TYPED_INGRESS_DECOMPOSITION_WORKSHEET.md`. The existing
+`R1_R2_CLOSURE_INDEX.md#r1c-s01-s02`. The existing
 Schema25 score is decomposed only after it is computed; typed common/residual
 fields enter W through `WorldIntentDock`, ActionIntentDock is typed-free, and
 the R1c W boundary reconstructed its former source once. R1d later supersedes
@@ -377,7 +377,7 @@ Static acceptance:
 - neutral W heads make the downstream effect exact zero.
 
 Implementation closure: R1d is recorded in
-`R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`. W1 processes the protected common
+`R1_R2_CLOSURE_INDEX.md#r1d-w01-w02`. W1 processes the protected common
 once and writes only near innovations; W2 reads completed W1 and writes only
 far innovations. Appearance and generic context are zero-preserving
 conditions, not value owners. The existing camera transport-prior projection
@@ -434,7 +434,7 @@ Static acceptance:
   optional factual/static-precision aliases is owned by P3-01.
 
 Implementation closure: R1e is recorded in
-`R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`. The exact static reader is unchanged
+`R1_R2_CLOSURE_INDEX.md#r1e-p1-01`. The exact static reader is unchanged
 and still runs once. `CompletedP1PolicyState` keeps its factual base and live
 policy residual disjoint; only `P2QueryDock` forms the exact three-term P2
 query. Consequence starts from the static fact. The same raw residual reaches
@@ -510,7 +510,7 @@ Static acceptance:
   per-type gain.
 
 Implementation closure: R1f is recorded in
-`R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`. Semantic K and geometry K*C
+`R1_R2_CLOSURE_INDEX.md#r1f-p2-01`. Semantic K and geometry K*C
 posteriors are normalized independently for every physical interval and use
 only current observable support. `SelectedIntervalEvidence` preserves I/type
 and the exact common-plus-innovation identity. The same W posterior selects S
@@ -590,7 +590,7 @@ Static acceptance:
 - all retained V120 CVAE/workspace/controller consumers remain reachable.
 
 Implementation closure: R1g is recorded in
-`R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`.
+`R1_R2_CLOSURE_INDEX.md#r1g-p3-01-b-01`.
 `ObjectPolicyPlanDeltaBank` now carries only protected consequence, raw dynamic
 precision, temporal and state-change. Temporal uses only S temporal context and
 the consequence innovation under action conditioning; state-change preserves
@@ -603,7 +603,7 @@ scale. The manifest names both changed ABIs, retained/downstream seed-0
 initialization remains R1f-identical, and the retained suite passes 145/145.
 
 LC-01 is the closed deletion-only cleanup recorded in
-`LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`. A complete
+`R1_R2_CLOSURE_INDEX.md#lc-01`. A complete
 producer-to-consumer and reverse-VJP audit proved that the two inherited
 layer-contract trajectory formulas and their frozen action/motion probes have
 exact-zero effect on every live contract output and active loss. They are now
@@ -632,7 +632,7 @@ Only diagnostics whose producer still exists in R1 are copied. Historical
 metrics are not recreated merely to preserve a log vocabulary.
 
 Implementation closure: R1h is recorded in
-`R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`. The four active address
+`R1_R2_CLOSURE_INDEX.md#r1h-n01-d01`. The four active address
 variance consumers now use the finite-slope exact-zero transform. G2/G3 retain
 one FP32 probability/log view of their existing owner measure through the
 grounder, W/Teacher boundary and P2; no support floor or new owner is present.
@@ -711,14 +711,14 @@ Implementation slices:
 8. matching numerics and diagnostics: N-01 and D-01.
 
 Slices 1-8 are complete as separate reversible source units. P2-01 closure is
-recorded in `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`: K/C disappear
+recorded in `R1_R2_CLOSURE_INDEX.md#r1f-p2-01`: K/C disappear
   only at their type-local spatial consumers, I disappears only at independent
   no-null physical terminals, and semantic/geometry add before the single outer
   contract. P3-01/B-01 closure is recorded in
-  `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`: protected values have
+  `R1_R2_CLOSURE_INDEX.md#r1g-p3-01-b-01`: protected values have
   no optional aliases, and the two real optional innovations receive disjoint
   normalization calls. N-01/D-01 closure is recorded in
-  `R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`: numerical support is
+  `R1_R2_CLOSURE_INDEX.md#r1h-n01-d01`: numerical support is
   finite without creating mass, and diagnostics observe the closed graph only.
 
 There is no training between these slices. Each slice receives only algebraic,

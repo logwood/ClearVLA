@@ -15,8 +15,11 @@ checked-out source or the active architecture contract.
 the checked-out graph and current release state.
 
 Historical evidence and donor ancestry are owned by
-`ARCHITECTURE_REPLAY_LEDGER.md`. The frozen Schema39 diagnosis is owned by
-`ACTIVE_MAINLINE_HANDOFF.md`. Neither of those files selects the replay base.
+`ARCHITECTURE_REPLAY_LEDGER.md`. The frozen Schema39 diagnosis that informed
+this plan is recoverable from
+`f60bd80:docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md`; the filename now
+holds a rolling current handoff. Neither historical artifact selects the replay
+base.
 
 ## 1. Fixed replay base
 
@@ -243,29 +246,29 @@ alias, and gives W lossless common/residual coordinates through its sole typed
 dock. R1d processes common once, gives W2 read-only access to completed W1,
 retains camera-specific geometry through Teacher/loss/P2, and removes online
 status authority. Its closed worksheet is
-`R1D_W01_W02_CAUSAL_FIELD_ABI_WORKSHEET.md`; the retained suite is 140/140.
+`R1_R2_CLOSURE_INDEX.md#r1d-w01-w02`; the retained suite is 140/140.
 R1e keeps the cached fact and live P1 policy residual disjoint, materializes
 their full query only at P2, and passes the raw residual to transition and
 bottom without adding a parameter or amplitude contract. Its closed worksheet
-is `R1E_P101_STATIC_DYNAMIC_P1_WORKSHEET.md`; the retained suite remains
+is `R1_R2_CLOSURE_INDEX.md#r1e-p1-01`; the retained suite remains
 140/140. R1f retains I through semantic K and geometry K*C selection, lets S
 condition only the selected nonzero W key, and uses independent no-null
 physical-I terminals before the raw complementary sum. Its closed worksheet
-  is `R1F_P201_SPATIAL_PHYSICAL_TERMINAL_WORKSHEET.md`; the retained suite is
+  is `R1_R2_CLOSURE_INDEX.md#r1f-p2-01`; the retained suite is
   144/144. R1g removes optional factual/static-precision/effect aliases,
   retains only temporal and state-change innovations, and gives each a
   separate shared-parameter Q+null bottom decision. Protected consequence and
   dynamic precision keep separate no-null calls. Its closed worksheet is
-  `R1G_P301_B01_UNIQUE_LANE_BOTTOM_INGRESS_WORKSHEET.md`; the retained suite is
+  `R1_R2_CLOSURE_INDEX.md#r1g-p3-01-b-01`; the retained suite is
   145/145. LC-01 then deletes two source-proven exact-zero terminal-contract
   trajectory aliases and 23,590 frozen readout parameters without changing a
   retained contract/decoder tensor, optimizer owner or the construction RNG;
   its closed worksheet is
-  `LC01_EXACT_ZERO_LAYER_TRAJECTORY_CLEANUP_WORKSHEET.md`. R1h then keeps
+  `R1_R2_CLOSURE_INDEX.md#lc-01`. R1h then keeps
   observable measures/logs FP32, makes the four active address variance paths
   exact-zero with finite slope, and adds only matching read-only diagnostics.
   Its closed worksheet is
-  `R1H_N01_D01_FINITE_NUMERICS_DIAGNOSTICS_WORKSHEET.md`; the final retained
+  `R1_R2_CLOSURE_INDEX.md#r1h-n01-d01`; the final retained
   suite is 155/155 and every LC-01 inventory/RNG sentinel remains exact.
 
 There is no training between these commits. R1 retains the Schema25 Teacher

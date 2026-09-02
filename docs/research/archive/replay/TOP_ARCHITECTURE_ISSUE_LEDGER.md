@@ -10,7 +10,7 @@
 虽然恢复了若干 producer/consumer，却把 V120 动态 P1 policy block 放进
 了静态 factual query，并给 protected detail 增加了可相消 value 与 learned
 null；batch-600 的 factual collapse 已在 schema 22 修正。当前未解决项只看
-[`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md)，不要从本历史
+[`CURRENT_MAINLINE_ISSUES.md`](../../CURRENT_MAINLINE_ISSUES.md)，不要从本历史
 账本重新拼装当前图。
 
 ## 1. 审查规则

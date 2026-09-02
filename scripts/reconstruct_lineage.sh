@@ -22,7 +22,8 @@
 #
 # The last triplet may point at the current repo itself to commit the present
 # working state as the newest lineage node.  If an intermediate copy is lost,
-# synthesize it first per history_design/v76_code_reconstruction.md (path B),
+# synthesize it first per history_design/archive/v76_code_reconstruction.md
+# (path B),
 # then feed the synthesized directory here.
 # =============================================================================
 set -euo pipefail
