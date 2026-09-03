@@ -6,6 +6,14 @@ from typing import Any
 import h5py
 
 ACTION_ALIASES = ("action", "/action", "actions", "/actions")
+ACTION_STATE_ALIASES = (
+    "action_state",
+    "/action_state",
+    "observations/action_state",
+    "observation/action_state",
+    "previous_action",
+    "/previous_action",
+)
 STATE_ALIASES = (
     "qpos",
     "/qpos",
@@ -66,9 +74,7 @@ def parse_camera_key_overrides(values: Sequence[str] | None) -> dict[str, str]:
         name = name.strip()
         key = key.strip().lstrip("/")
         if not separator or not name or not key:
-            raise ValueError(
-                f"camera key assignment must be NAME=HDF5/PATH, got {raw!r}"
-            )
+            raise ValueError(f"camera key assignment must be NAME=HDF5/PATH, got {raw!r}")
         if any(character in name for character in "/\\"):
             raise ValueError(f"camera name is not cache safe: {name!r}")
         if name in result:

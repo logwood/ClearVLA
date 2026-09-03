@@ -477,10 +477,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             0.35,
         )
         if collect_diagnostics:
-            # Schema29/30 deliberately detach the predicted action condition
-            # before rebuilding W.  The input-condition VJP is consequently
-            # exact zero by contract; observe the first trainable W consumer
-            # after projection and its sole 0.35 scale boundary instead.
+            # Keep the first trainable W carrier visible in the recovery
+            # diagnostics.  In the single-pass training path this tensor is
+            # attached to the coarse action condition again.
             register_gradient_rms_metric(
                 action_carrier,
                 gradient_metrics,
@@ -494,22 +493,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
 
         # W owns physical evolution for every current object.  Goal relevance
         # belongs to P2's evaluator, so typed W owners come directly from G's
-        # goal-free facts.  The same learned chronology plus physical-action
-        # coordinate used by generic W modulates the typed owner.  Multiplying
-        # the existing common keeps a missing typed fact exact zero, while an
-        # action projection at zero can no longer erase all four time identities.
-        # Grounding already forms each typed value by a normalized read inside
-        # observable support.  ``validity`` is exported separately as the
-        # public availability/loss measure.  Multiplying it here and again at
-        # the field boundary would square partial support and make the
-        # unscaled Teacher optimum unreachable.  In particular, do not turn
-        # the continuous measure into a ``> 0`` gate: fractional support must
-        # retain its ordinary derivative and exact-zero output is enforced once
-        # at the public field boundary below.
+        # goal-free facts.  The interval coordinate is a zero-mean,
+        # zero-preserving modulation of the same physical owner; it cannot
+        # create a typed value from a missing fact.
         typed_sources = (
-            facts.semantic,
-            facts.appearance,
-            facts.geometry,
+            facts.semantic * facts.validity.to(dtype=facts.semantic.dtype),
+            facts.appearance * facts.validity.to(dtype=facts.appearance.dtype),
+            facts.geometry * facts.validity.to(dtype=facts.geometry.dtype),
         )
         typed_source_views: list[Tensor] = []
         if collect_diagnostics:
@@ -534,7 +524,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 projection(source),
                 0.35,
             )
-            interval_raw = common[:, None] * torch.tanh(interval[:, :, None])
+            interval_raw = common[:, None] * torch.tanh(
+                action_carrier[:, :, None]
+            )
             innovation, _ = smooth_rms_contract(
                 interval_raw,
                 0.35,
@@ -607,6 +599,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 raise ValueError("typed common geometry lost object identity")
             carrier = typed_geometry[:, :, None].expand(-1, -1, cameras, -1)
             condition = camera_context
+            availability = facts.camera_validity
         else:
             if tuple(typed_geometry.shape[:1] + typed_geometry.shape[2:3]) != tuple(
                 camera_context.shape[:2]
@@ -614,18 +607,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 raise ValueError("typed interval geometry lost object identity")
             carrier = typed_geometry[:, :, :, None].expand(-1, -1, -1, cameras, -1)
             condition = camera_context[:, None].expand(-1, int(typed_geometry.shape[1]), -1, -1, -1)
+            availability = facts.camera_validity[:, None]
         conditioned, _ = self._zero_preserving_condition(carrier, condition)
-        # Camera availability is applied once to the public transport and
-        # covariance fields.  Applying it to this private carrier as well
-        # would duplicate attenuation while P2/loss still retain the same
-        # explicit support tensor.
-        # Do not apply camera validity to this private carrier.  A fractional
-        # measure denotes partial observable support and must retain its
-        # continuous derivative; applying it here and again to the public
-        # transport/covariance fields would square that measure.  The public
-        # fields below own the one continuous availability boundary and remain
-        # exact zero when the producer reports zero support.
-        return conditioned
+        return conditioned * availability.to(dtype=conditioned.dtype)
 
     def _field_with_diagnostics(
         self,

@@ -31,6 +31,7 @@ from .runtime.checkpoints import (
     migrate_bottom_only,
     save_checkpoint,
 )
+from .runtime.deployment import build_deployment_abi
 from .runtime.evaluation import (
     MatchedCoreAttributionAccumulator,
     MatchedP2InterventionAccumulator,
@@ -471,8 +472,12 @@ def _emit_training_window(
     return values
 
 
-def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
-    return {
+def _data_state(
+    bundle: MainlineDataBundle,
+    config: ExperimentConfig,
+    identity: CheckpointIdentity,
+) -> dict[str, object]:
+    state: dict[str, object] = {
         "splits": {name: list(ids) for name, ids in bundle.splits.items()},
         "split_metadata": bundle.split_metadata,
         "data_profile": bundle.data_profile_metadata,
@@ -484,6 +489,16 @@ def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
         "state_normalizer": bundle.state_normalizer.to_dict(),
         "goal": bundle.goal.metadata,
     }
+    state["deployment_abi"] = build_deployment_abi(
+        config,
+        identity,
+        action_normalizer=bundle.action_normalizer,
+        state_normalizer=bundle.state_normalizer,
+        data_profile=bundle.data_profile_metadata,
+        gripper_indices=tuple(int(value) for value in bundle.gripper_indices),
+        goal_metadata=bundle.goal.metadata,
+    )
+    return state
 
 
 def _optimizer_group_context(
@@ -1893,7 +1908,7 @@ def main() -> None:
             step=validation_state.global_step,
         )
         return
-    data_state = _data_state(bundle)
+    data_state = _data_state(bundle, config, identity)
     for epoch in range(start_epoch, config.optimizer.epochs + 1):
         train_batch_sampler = getattr(train_loader, "batch_sampler", None)
         set_epoch = getattr(train_batch_sampler, "set_epoch", None)

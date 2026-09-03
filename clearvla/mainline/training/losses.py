@@ -95,6 +95,44 @@ def event_transition_persistence_masks(
     return event, persistence
 
 
+def anchored_gripper_persistence(
+    absolute: Tensor,
+    local_delta: Tensor,
+    event_mask: Tensor,
+) -> Tensor:
+    """Reconstruct post-event segments without pre-event delta leakage."""
+
+    if absolute.ndim != 3 or int(absolute.shape[-1]) != 1:
+        raise ValueError("gripper absolute trajectory must be [B,T,1]")
+    if tuple(local_delta.shape) != tuple(absolute.shape):
+        raise ValueError("gripper local delta must align with absolute trajectory")
+    if tuple(event_mask.shape) != tuple(absolute.shape[:2]):
+        raise ValueError("gripper event mask must align with trajectory rows")
+    batch, horizon = event_mask.shape
+    row = torch.arange(horizon, device=event_mask.device, dtype=torch.long)[None]
+    latest = torch.where(
+        event_mask > 0,
+        row.expand(batch, -1),
+        torch.full(
+            (batch, horizon),
+            -1,
+            device=event_mask.device,
+            dtype=torch.long,
+        ),
+    )
+    latest = torch.cummax(latest, dim=1).values
+    gather = latest.clamp_min(0)[..., None]
+    anchor = absolute.gather(1, gather)
+    prefix = torch.cumsum(local_delta, dim=1)
+    prefix_at_event = prefix.gather(1, gather)
+    reconstructed = anchor + prefix - prefix_at_event
+    return torch.where(
+        (latest >= 0)[..., None],
+        reconstructed,
+        torch.zeros_like(reconstructed),
+    )
+
+
 def sample_flow_matching(
     target: Tensor,
     *,
@@ -919,10 +957,7 @@ def action_terms(
     objective = config.objectives
     raw_grip = target.raw_units[..., -1].float()
     raw_boundary = torch.cat(
-        (
-            target.gripper_transition_boundary_raw_units[:, None, -1:].float(),
-            raw_grip[:, :-1, None],
-        ),
+        (target.current_raw_units[:, None, -1:].float(), raw_grip[:, :-1, None]),
         dim=1,
     )[..., 0]
     raw_grip_delta = raw_grip - raw_boundary
@@ -1010,23 +1045,16 @@ def action_terms(
     decoded_action_v120_comparable = (
         decoded_element_error.mean(dim=-1) * step_weight
     ).mean()
-    transition_start = torch.cat(
-        (
-            history.action_state[:, :-1].float(),
-            target.gripper_transition_boundary[:, -1:].float(),
-        ),
-        dim=-1,
-    )
     boundary = torch.cat(
         (
-            transition_start[:, None],
+            history.action_state[:, None].float(),
             target.normalized[:, :-1].float(),
         ),
         dim=1,
     )
     delta = target.normalized.float() - boundary
     predicted_boundary = torch.cat(
-        (transition_start[:, None], decoded[:, :-1]), dim=1
+        (history.action_state[:, None].float(), decoded[:, :-1]), dim=1
     )
     predicted_delta = decoded - predicted_boundary
     smooth_delta_rows = F.smooth_l1_loss(
@@ -1042,20 +1070,15 @@ def action_terms(
     )
     physical_delta_consistency = (physical_delta_rows * step_weight).mean()
     clean_parts = codec.split(clean_physical)
-    clean_gripper_absolute, clean_gripper_delta_branch = (
-        codec.gripper_decode_branches(
-            clean_physical,
-            history.action_state.float(),
-        )
-    )
+    clean_gripper_absolute = clean_parts.gripper_field[..., :1]
     clean_gripper_local_delta = clean_parts.gripper_field[..., 1:2]
+    clean_gripper_cumulative = anchored_gripper_persistence(
+        clean_gripper_absolute,
+        clean_gripper_local_delta,
+        event_mask,
+    )
     continuous_gripper_target = target.normalized[..., -1:].float()
-    # Event ownership follows the dataset's continuous command transition,
-    # but the deployed delta branch remains the codec's qpos-anchored physical
-    # coordinate.  Reusing the command boundary here would give row zero two
-    # incompatible targets whenever qpos and the previous command differ.
-    target_parts = codec.split(flow_state.target_physical.detach())
-    continuous_gripper_target_delta = target_parts.gripper_field[..., 1:2].float()
+    continuous_gripper_target_delta = delta[..., -1:].detach().float()
     transition_mask, persistence_mask = event_transition_persistence_masks(
         event_mask
     )
@@ -1084,7 +1107,7 @@ def action_terms(
     )[..., 0]
     persistence_absolute_rows = transition_absolute_rows
     persistence_delta_rows = F.smooth_l1_loss(
-        clean_gripper_delta_branch,
+        clean_gripper_cumulative,
         continuous_gripper_target,
         reduction="none",
     )[..., 0]
@@ -1113,6 +1136,7 @@ def action_terms(
     gripper_trajectory = 0.5 * (
         gripper_trajectory_absolute + gripper_trajectory_delta
     )
+    target_parts = codec.split(flow_state.target_physical.detach())
     motion_target = (
         target_parts.arm_delta.float().norm(dim=-1)
         >= float(objective.arm_motion_threshold)
@@ -1179,8 +1203,8 @@ def action_terms(
             raise ValueError("gripper-private diagnostics lost [B,T,H]")
         if tuple(clean_gripper_absolute.shape) != (*expected_private, 1):
             raise ValueError("absolute gripper trajectory must be [B,T,1]")
-        if tuple(clean_gripper_delta_branch.shape) != (*expected_private, 1):
-            raise ValueError("deployed gripper delta branch must be [B,T,1]")
+        if tuple(clean_gripper_cumulative.shape) != (*expected_private, 1):
+            raise ValueError("cumulative gripper trajectory must be [B,T,1]")
 
         context_masks = {
             "hold": event_target == 0,
@@ -1262,7 +1286,7 @@ def action_terms(
                 ),
                 "gripper_trajectory_branch_disagreement_rms": (
                     clean_gripper_absolute.detach().float()
-                    - clean_gripper_delta_branch.detach().float()
+                    - clean_gripper_cumulative.detach().float()
                 )
                 .square()
                 .mean()
@@ -1281,7 +1305,7 @@ def action_terms(
             ] = conditional_rms(clean_gripper_absolute, context_mask)
             gripper_private_metrics[
                 f"gripper_trajectory_delta_{context_name}_rms"
-            ] = conditional_rms(clean_gripper_delta_branch, context_mask)
+            ] = conditional_rms(clean_gripper_cumulative, context_mask)
             register_conditional_gradient(
                 gate,
                 context_mask,
@@ -1298,7 +1322,7 @@ def action_terms(
                 f"gradient_tensor_gripper_trajectory_absolute_{context_name}_rms",
             )
             register_conditional_gradient(
-                clean_gripper_delta_branch,
+                clean_gripper_cumulative,
                 context_mask,
                 f"gradient_tensor_gripper_trajectory_delta_{context_name}_rms",
             )
@@ -1561,6 +1585,7 @@ def compose_losses(
 __all__ = [
     "FlowMatchingState",
     "LossLedger",
+    "anchored_gripper_persistence",
     "action_terms",
     "balanced_event_row_weights",
     "causal_event_trajectory_mask",

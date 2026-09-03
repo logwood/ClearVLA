@@ -14,6 +14,9 @@ except Exception:  # optional dependency
     cv2 = None
 
 
+RGB_PREPROCESS_SCHEMA = "clearvla-rgb-preprocess-v1"
+
+
 @dataclass(frozen=True)
 class PreprocessConfig:
     """Explicit visual preprocessing.
@@ -80,3 +83,32 @@ def apply_preprocess(img: np.ndarray, config: PreprocessConfig) -> np.ndarray:
     if config.crop_hw is not None:
         out = _center_crop(out, config.crop_hw)
     return np.ascontiguousarray(out, dtype=np.uint8)
+
+
+def preprocessing_identity(config: PreprocessConfig) -> dict[str, Any]:
+    """Return the executable pixel preprocessing identity.
+
+    ``PreprocessConfig`` alone is insufficient for cache/deployment parity:
+    OpenCV and Pillow use different resize kernels.  Formal simulation
+    preflight records this mapping and then compares online tokens against the
+    actual offline DINO cache before a checkpoint is admitted.
+    """
+
+    return {
+        "schema": RGB_PREPROCESS_SCHEMA,
+        "config": config.to_dict(),
+        "resize_backend": (
+            "opencv-inter-area" if cv2 is not None else "pillow-bilinear"
+        ),
+        "input": "uint8-hwc-rgb",
+        "output": "uint8-hwc-rgb",
+    }
+
+
+__all__ = [
+    "RGB_PREPROCESS_SCHEMA",
+    "PreprocessConfig",
+    "apply_preprocess",
+    "parse_hw",
+    "preprocessing_identity",
+]

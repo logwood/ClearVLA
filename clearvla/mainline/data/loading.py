@@ -30,6 +30,8 @@ from clearvla.data.samplers import (
 )
 from clearvla.data.split import (
     RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
+    load_episode_split_manifest,
+    load_episode_split_manifest_inventory,
     load_rdt_split_manifest,
     resolve_episode_ids,
 )
@@ -60,6 +62,34 @@ from .language import (
 from .normalizer import ArrayNormalizer
 from .normalizer_artifact import load_shared_normalizers
 from .token_store import DinoV2TokenStore
+
+
+def _configure_worker_tensor_sharing(workers: int) -> None:
+    """Use path-backed tensor sharing when multiprocessing workers are active.
+
+    The mainline batches contain many independent tensor storages.  PyTorch's
+    default ``file_descriptor`` strategy keeps one descriptor per shared
+    storage in each worker, which can exhaust the server's 1024-FD soft limit
+    during a long CUDA run even with a bounded prefetch queue.  The
+    ``file_system`` strategy keeps the same tensor ABI while moving that
+    bookkeeping out of the worker descriptor table.  Fail closed if the
+    runtime cannot provide it; silently falling back would recreate the
+    original EMFILE failure.
+    """
+
+    if workers <= 0:
+        return
+    desired = "file_system"
+    try:
+        current = torch.multiprocessing.get_sharing_strategy()
+        if current != desired:
+            torch.multiprocessing.set_sharing_strategy(desired)
+        if torch.multiprocessing.get_sharing_strategy() != desired:
+            raise RuntimeError("PyTorch did not retain the requested sharing strategy")
+    except (RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "mainline multiprocessing requires PyTorch file_system tensor sharing"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -140,15 +170,13 @@ class MainlineDataBundle:
                 if task >= 0:
                     counts[task] += 1
             episode_counts[split] = {
-                name: counts[index]
-                for index, name in enumerate(self.task_order)
+                name: counts[index] for index, name in enumerate(self.task_order)
             }
         for split in self.datasets:
             values = self.dataset_task_indices(split)
             counts = np.bincount(values, minlength=len(self.task_order))
             window_counts[split] = {
-                name: int(counts[index])
-                for index, name in enumerate(self.task_order)
+                name: int(counts[index]) for index, name in enumerate(self.task_order)
             }
         return {
             "schema": "clearvla-cpu-task-registry-v1",
@@ -176,12 +204,29 @@ class MainlineDataBundle:
         if batch_size <= 0 or workers < 0:
             raise ValueError("batch size must be positive and workers non-negative")
         do_shuffle = split == "train" if shuffle is None else bool(shuffle)
+        _configure_worker_tensor_sharing(workers)
+        # The training loop owns a long-lived iterator, so persistent workers
+        # are useful there.  Validation is also used by the startup preflight
+        # through ``next(iter(val_loader))``; keeping those workers persistent
+        # would let them prefetch the entire validation set after that one
+        # batch is consumed, retaining one shared-storage FD per tensor until
+        # the soft limit is reached (PyTorch then raises ``EMFILE`` in the
+        # worker feeder).  Validation iterators must therefore be
+        # self-terminating, especially when the preflight iterator is dropped.
+        persistent_workers = workers > 0 and split == "train"
         common = {
             "num_workers": workers,
             "pin_memory": device.type == "cuda",
-            "persistent_workers": workers > 0,
+            "persistent_workers": persistent_workers,
             "generator": generator,
         }
+        if workers > 0:
+            # A policy sample contains many independent tensor storages.  The
+            # default prefetch factor of two can therefore consume most of a
+            # 1024-FD worker budget even when every storage is released
+            # correctly.  One in-flight batch per worker keeps the queue
+            # bounded without changing sample order or model semantics.
+            common["prefetch_factor"] = 1
         dataset = self.datasets[split]
         if split == "train" and do_shuffle:
             if not isinstance(dataset, CachedTokenPolicyWindowDataset):
@@ -228,8 +273,7 @@ class MainlineDataBundle:
             samples_per_task = sample_slots // len(self.task_order)
             if samples_per_task <= 0:
                 raise ValueError(
-                    "bounded multitask validation must have at least one sample "
-                    "slot per task"
+                    "bounded multitask validation must have at least one sample slot per task"
                 )
             sampler = TaskStratifiedBatchSampler(
                 self.dataset_task_indices(split),
@@ -285,9 +329,7 @@ def _cpu_task_registry(
     if not task_order or len(set(task_order)) != len(task_order):
         raise ValueError("task selection order must be non-empty and unique")
     lookup = {name: index for index, name in enumerate(task_order)}
-    episode_task_indices = tuple(
-        lookup.get(str(episode.task_id), -1) for episode in episodes
-    )
+    episode_task_indices = tuple(lookup.get(str(episode.task_id), -1) for episode in episodes)
     for split in RDT_MULTITASK_INTERNAL_SPLITS:
         if split not in split_ids:
             raise ValueError(f"task selection is missing internal split {split!r}")
@@ -297,9 +339,7 @@ def _cpu_task_registry(
             if episode_task_indices[int(index)] < 0
         ]
         if missing:
-            raise ValueError(
-                f"selected split {split!r} contains unregistered tasks: {missing[:3]}"
-            )
+            raise ValueError(f"selected split {split!r} contains unregistered tasks: {missing[:3]}")
     return task_order, episode_task_indices
 
 
@@ -317,9 +357,7 @@ def _load_mainline_data(
         if max_episodes_per_materialized_split is not None:
             raise ValueError("an episode limit requires explicit materialized splits")
     else:
-        if not materialized_splits or len(set(materialized_splits)) != len(
-            materialized_splits
-        ):
+        if not materialized_splits or len(set(materialized_splits)) != len(materialized_splits):
             raise ValueError("materialized split names must be non-empty and unique")
         if (
             max_episodes_per_materialized_split is None
@@ -341,9 +379,9 @@ def _load_mainline_data(
         stride=data.stride,
     )
     dataset_config.validate()
-    if data.split_mode == "manifest":
+    if data.split_mode in {"manifest", "episode-manifest"}:
         min_length = dataset_config.minimum_episode_length
-        if min_length != RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH:
+        if data.split_mode == "manifest" and min_length != RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH:
             raise AssertionError(
                 "RDT manifest minimum length no longer matches the typed window ABI"
             )
@@ -352,15 +390,32 @@ def _load_mainline_data(
         # inventory and 63/5/5 membership are not changed by the RDT adapter.
         min_length = 48 + 8 + 2
     raw_root = Path(data.raw_hdf5_root)
+    episode_inventory = None
+    if data.split_mode == "episode-manifest":
+        _manifest_path, _manifest_payload, episode_inventory = (
+            load_episode_split_manifest_inventory(data.split_manifest)
+        )
     episodes, skipped = load_episodes(
         raw_root,
         data.hdf5_glob,
         cameras=cameras,
         min_length=min_length,
         action_key=data.action_key,
+        action_state_key=data.action_state_key or None,
         state_key=data.state_key,
         camera_key_overrides=data.camera_key_map(),
+        episode_names=episode_inventory,
     )
+    if data.task_filter:
+        requested_task = str(data.task_filter)
+        filtered = [episode for episode in episodes if episode.task_id == requested_task]
+        if not filtered:
+            observed = sorted({episode.task_id for episode in episodes if episode.task_id})
+            raise ValueError(
+                f"data.task_filter={requested_task!r} matched no episodes; "
+                f"observed examples={observed[:12]}"
+            )
+        episodes = filtered
     episode_names = [episode.episode_id for episode in episodes]
     if data.split_mode == "manifest":
         excluded_too_short = resolve_too_short_episode_exclusions(
@@ -388,6 +443,15 @@ def _load_mainline_data(
                 **split_metadata,
                 "task_selection": selection_metadata,
             }
+    elif data.split_mode == "episode-manifest":
+        train_ids, val_ids, test_ids, split_metadata = load_episode_split_manifest(
+            data.split_manifest,
+            episode_names=episode_names,
+        )
+        split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
+        manifest_task_filter = str(split_metadata.get("task_filter", ""))
+        if manifest_task_filter != data.task_filter:
+            raise ValueError("episode split manifest task_filter differs from data.task_filter")
     else:
         train_ids, val_ids, test_ids = resolve_episode_ids(
             len(episodes),
@@ -407,19 +471,13 @@ def _load_mainline_data(
         }
     if materialized_splits is None:
         materialized_names = (
-            RDT_MULTITASK_INTERNAL_SPLITS
-            if data.task_selection_manifest
-            else tuple(split_ids)
+            RDT_MULTITASK_INTERNAL_SPLITS if data.task_selection_manifest else tuple(split_ids)
         )
-        dataset_episode_ids = {
-            name: list(split_ids[name]) for name in materialized_names
-        }
+        dataset_episode_ids = {name: list(split_ids[name]) for name in materialized_names}
     else:
         unknown_splits = sorted(set(materialized_splits) - set(split_ids))
         if unknown_splits:
-            raise ValueError(
-                f"loader-only materialization names unknown splits: {unknown_splits}"
-            )
+            raise ValueError(f"loader-only materialization names unknown splits: {unknown_splits}")
         assert max_episodes_per_materialized_split is not None
         dataset_episode_ids = {
             name: list(split_ids[name][: int(max_episodes_per_materialized_split)])
@@ -427,9 +485,7 @@ def _load_mainline_data(
         }
         empty_splits = [name for name, ids in dataset_episode_ids.items() if not ids]
         if empty_splits:
-            raise ValueError(
-                f"loader-only materialization selected empty splits: {empty_splits}"
-            )
+            raise ValueError(f"loader-only materialization selected empty splits: {empty_splits}")
     required_token_episode_ids = sorted(
         {index for ids in dataset_episode_ids.values() for index in ids}
     )
@@ -449,13 +505,9 @@ def _load_mainline_data(
             raise ValueError("a shared normalizer artifact requires task selection metadata")
         action_normalizer, state_normalizer, normalizer_metadata = load_shared_normalizers(
             data.normalizer_artifact,
-            expected_selection_sha256=str(
-                selection_metadata.get("selection_sha256", "")
-            ),
+            expected_selection_sha256=str(selection_metadata.get("selection_sha256", "")),
             expected_profile_sha256=profile.digest(),
-            expected_train_episode_ids=[
-                episodes[index].episode_id for index in split_ids["train"]
-            ],
+            expected_train_episode_ids=[episodes[index].episode_id for index in split_ids["train"]],
             computed_action=action_normalizer,
             computed_state=state_normalizer,
         )
@@ -513,38 +565,28 @@ def _load_mainline_data(
         expected_width=dims.goal_token_dim,
         allow_null=allow_null_goal,
     )
-    if data.split_mode == "manifest":
+    if data.split_mode in {"manifest", "episode-manifest"}:
         if not goal_bank.is_instruction_bank:
             raise ValueError(
-                "RDT manifest data requires a per-instruction T5 condition bank"
+                "manifest-backed benchmark data requires a per-instruction T5 condition bank"
             )
+    if data.split_mode == "manifest":
         eligible_instructions = [episode.instruction for episode in episodes]
         if any(value is None for value in eligible_instructions):
             raise ValueError("every RDT episode must own an HDF5 instruction")
-        excluded_instructions = [
-            load_hdf5_instruction(Path(path)) for path, _reason in skipped
-        ]
+        excluded_instructions = [load_hdf5_instruction(Path(path)) for path, _reason in skipped]
         if any(value is None for value in excluded_instructions):
             raise ValueError("every excluded RDT source episode must own an instruction")
         source_instructions = [
             str(value) for value in (*eligible_instructions, *excluded_instructions)
         ]
-        source_episode_count = int(
-            goal_bank.metadata.get("source_episode_count", -1)
-        )
+        source_episode_count = int(goal_bank.metadata.get("source_episode_count", -1))
         if source_episode_count != len(source_instructions):
             raise ValueError(
                 "T5 instruction bank source episode count differs from the live RDT inventory"
             )
         source_digest = source_instruction_inventory_sha256(source_instructions)
-        if (
-            str(
-                goal_bank.metadata.get(
-                    "source_instruction_inventory_sha256", ""
-                )
-            )
-            != source_digest
-        ):
+        if str(goal_bank.metadata.get("source_instruction_inventory_sha256", "")) != source_digest:
             raise ValueError(
                 "T5 instruction bank source instruction inventory differs from live RDT data"
             )
@@ -576,8 +618,7 @@ def _load_mainline_data(
         information_motion_quantile=data.information_motion_quantile,
         gripper_event_threshold=(
             config.objectives.gripper_event_threshold
-            if profile.name == "identity_7d_pen"
-            and data.sampling_gripper_event_threshold is None
+            if profile.name == "identity_7d_pen" and data.sampling_gripper_event_threshold is None
             else data.sampling_gripper_event_threshold
         ),
         gripper_indices=profile.gripper_indices,
@@ -587,6 +628,10 @@ def _load_mainline_data(
             **profile.as_dict(),
             "sha256": profile.digest(),
             "gripper_transition_boundary": profile.gripper_transition_boundary,
+            # Physical units/ranges are metadata-only.  They deliberately do
+            # not enter the numeric action-profile digest or alter z-score
+            # normalization, projection, decoding, or model conditioning.
+            "physical_chart": profile.physical_chart.as_dict(),
         },
         split_metadata=split_metadata,
         normalizer_metadata=normalizer_metadata,
@@ -717,9 +762,7 @@ def to_training_batch(
     )
     action = ActionSupervision(
         normalized=_device_tensor(batch, "policy_action", device=device, dtype=torch.float32),
-        raw_units=_device_tensor(
-            batch, "policy_action_raw", device=device, dtype=torch.float32
-        ),
+        raw_units=_device_tensor(batch, "policy_action_raw", device=device, dtype=torch.float32),
         current_raw_units=_device_tensor(
             batch, "action_state_raw", device=device, dtype=torch.float32
         ),
