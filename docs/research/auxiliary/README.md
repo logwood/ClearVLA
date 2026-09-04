@@ -1,13 +1,26 @@
-# Current detailed references
+# Auxiliary research references
 
 This directory is not an alternate architecture contract. Read
 [`../00_CURRENT_ARCHITECTURE_CONTRACT.md`](../00_CURRENT_ARCHITECTURE_CONTRACT.md)
 first.
 
+## Operational and current contracts
+
 | File | Use |
 |---|---|
 | [`ACTIVE_MAINLINE_HANDOFF.md`](ACTIVE_MAINLINE_HANDOFF.md) | Rolling remote/local state, run tags and immediate next action |
 | [`RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md) | Current bounded RDT data/language/camera/action adapter contract |
+
+## Exploratory research
+
+| File | Use |
+|---|---|
+| [`CLEARVLA_WAM_LITERATURE_INTEGRATION.md`](CLEARVLA_WAM_LITERATURE_INTEGRATION.md) | Non-authoritative literature-to-source map with falsifiable WAM, solver/MIP, future-supervision and chunk-continuity hypotheses |
+
+## Historical indexes
+
+| File | Use |
+|---|---|
 | [`R1_R2_CLOSURE_INDEX.md`](R1_R2_CLOSURE_INDEX.md) | Compact decision record for ten completed Schema25 R1/R2 units |
 | [`CONVERSATION_INSIGHT_LEDGER.md`](CONVERSATION_INSIGHT_LEDGER.md) | Curated historical research index; not an execution queue |
 

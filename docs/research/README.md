@@ -20,6 +20,11 @@ for each conversation.
 RDT adapter contract and two compact historical indexes. Read one only when
 the active contract or the task requires its detail.
 
+The auxiliary
+[`CLEARVLA_WAM_LITERATURE_INTEGRATION.md`](auxiliary/CLEARVLA_WAM_LITERATURE_INTEGRATION.md)
+is an exploratory literature-to-source map. It records falsifiable hypotheses
+but does not authorize an architecture or experiment change.
+
 ## Historical evidence
 
 - [`archive/replay/`](archive/replay/README.md): Schema25 replay provenance,
