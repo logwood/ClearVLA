@@ -26,6 +26,7 @@ def _spine(*, hidden: int = 32) -> BSpine0:
 
 def test_bspine0_fixed_chart_is_exact_and_zero_initialized() -> None:
     spine = _spine()
+    assert spine.basis_digest == BSPINE0_BASIS_DIGEST
     physical = torch.randn(3, 24, 18)
     controls, coarse, detail = spine.decompose(physical)
     assert controls.shape == (3, 12, 18)

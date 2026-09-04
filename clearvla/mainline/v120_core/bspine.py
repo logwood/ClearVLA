@@ -7,6 +7,8 @@ added to the raw tokens before the existing Evidence-MMDiT blocks.
 
 from __future__ import annotations
 
+import hashlib
+import struct
 from contextlib import nullcontext
 from typing import Final
 
@@ -23,11 +25,38 @@ BSPINE0_PHYSICAL_DIM: Final[int] = 18
 BSPINE0_DEGREE: Final[int] = 3
 BSPINE0_CONTROL_POINTS: Final[int] = 12
 BSPINE0_BASIS_DIGEST: Final[str] = (
-    "b827be93bd2a9db0b2d53242f1fd77d620b4b11d4040d0eddd86c83775d11d75"
+    "f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34"
 )
 BSPINE0_SPEC_FINGERPRINT: Final[str] = (
     "a2234eb6c9f553c47e793e11c8734d8cfadfbaaf86c5b950dab8f672965a8c10"
 )
+_RUNTIME_BASIS_DIGEST_SCHEMA: Final[bytes] = b"clearvla-bspine0-runtime-basis-v1"
+
+
+def _runtime_basis_digest(*, analysis: Tensor, synthesis: Tensor) -> str:
+    """Hash exactly the FP32 operators used by the production B-spine.
+
+    The standalone lossless representation also constructs an arbitrary
+    orthogonal detail coordinate chart.  That chart is useful for serialized
+    representation payloads, but its QR completion is not consumed by
+    ``BSpine0`` and may legitimately differ across LAPACK backends.  The
+    production identity therefore covers the unique coarse pseudoinverse and
+    collocation matrices after their actual FP32 runtime cast.
+    """
+
+    digest = hashlib.sha256()
+    digest.update(_RUNTIME_BASIS_DIGEST_SCHEMA)
+    for name, source in (("analysis", analysis), ("synthesis", synthesis)):
+        value = source.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        if value.ndim != 2 or not bool(torch.isfinite(value).all()):
+            raise ValueError(f"B-spine runtime {name} must be a finite matrix")
+        digest.update(name.encode("ascii"))
+        digest.update(struct.pack("<I", value.ndim))
+        for dimension in value.shape:
+            digest.update(struct.pack("<Q", int(dimension)))
+        for scalar in value.reshape(-1).tolist():
+            digest.update(struct.pack("<f", float(scalar)))
+    return digest.hexdigest()
 
 
 class _ZeroInitializedBiasFreeLinear(nn.Module):
@@ -96,19 +125,6 @@ class BSpine0(nn.Module):
             mode="hierarchical_exact",
         )
         bundle = build_basis_bundle(spec)
-        if not expected_basis_digest:
-            raise ValueError("enabled B-spine requires a serialized basis digest")
-        if str(expected_basis_digest) != bundle.digest:
-            raise ValueError("configured B-spine basis digest does not match the constructed basis")
-        if not expected_spec_fingerprint:
-            raise ValueError("enabled B-spine requires a serialized spec fingerprint")
-        if str(expected_spec_fingerprint) != spec.fingerprint:
-            raise ValueError(
-                "configured B-spine spec fingerprint does not match the constructed chart"
-            )
-        self.basis_digest = bundle.digest
-        self.spec_fingerprint = spec.fingerprint
-
         synthesis64 = bundle.coarse_collocation
         analysis64 = torch.linalg.solve_triangular(
             bundle.coarse_r,
@@ -119,14 +135,34 @@ class BSpine0(nn.Module):
         closure_error = (analysis64 @ synthesis64 - identity64).abs().amax()
         if not bool(torch.isfinite(closure_error)) or float(closure_error) > 1.0e-10:
             raise ValueError("B-spine analysis/synthesis matrices do not close")
+        analysis32 = analysis64.to(dtype=torch.float32)
+        synthesis32 = synthesis64.to(dtype=torch.float32)
+        runtime_basis_digest = _runtime_basis_digest(
+            analysis=analysis32,
+            synthesis=synthesis32,
+        )
+        if not expected_basis_digest:
+            raise ValueError("enabled B-spine requires a serialized basis digest")
+        if str(expected_basis_digest) != runtime_basis_digest:
+            raise ValueError(
+                "configured B-spine basis digest does not match the runtime operators"
+            )
+        if not expected_spec_fingerprint:
+            raise ValueError("enabled B-spine requires a serialized spec fingerprint")
+        if str(expected_spec_fingerprint) != spec.fingerprint:
+            raise ValueError(
+                "configured B-spine spec fingerprint does not match the constructed chart"
+            )
+        self.basis_digest = runtime_basis_digest
+        self.spec_fingerprint = spec.fingerprint
         self.register_buffer(
             "analysis",
-            analysis64.to(dtype=torch.float32),
+            analysis32,
             persistent=True,
         )
         self.register_buffer(
             "synthesis",
-            synthesis64.to(dtype=torch.float32),
+            synthesis32,
             persistent=True,
         )
 

@@ -99,7 +99,7 @@
     "bspine_implementation": "fixed_bspline_coarse_detail_v1",
     "bspine_degree": 3,
     "bspine_control_points": 12,
-    "bspine_basis_digest": "b827be93bd2a9db0b2d53242f1fd77d620b4b11d4040d0eddd86c83775d11d75",
+    "bspine_basis_digest": "f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34",
     "bspine_spec_fingerprint": "a2234eb6c9f553c47e793e11c8734d8cfadfbaaf86c5b950dab8f672965a8c10"
   },
   "objectives": {

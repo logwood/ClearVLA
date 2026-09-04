@@ -422,6 +422,8 @@ uses manifest schema 31 with digest
 `a10eabe896acc214ea04338de7f85f568a4a9a13c0447212f96b15aecdf6edf6`,
 component selection `execution_bottom=v120_evidence_mmdit_bspine0_v1`, and
 config [`configs/mainline/object_intent_dynamics_323_pen_bspine0.json`](../../configs/mainline/object_intent_dynamics_323_pen_bspine0.json).
+The resolved path-independent config digest is
+`0a73c0a1f5c847227629fb7867834c8e1cba01ddf53bf4f3909fcaf16773fbfc`.
 It is an experiment identity, not an accepted replacement for Schema30.
 
 The only new calculation is a bottom-internal parallel numerical view of the
@@ -433,8 +435,11 @@ u_spine = BSpine0(x_t)
 action += (u_raw + u_spine) * action_state_factor
 ```
 
-`BSpine0` is fixed at `T=24`, cubic degree 3 and `K=12`.  Its basis digest is
-`b827be93bd2a9db0b2d53242f1fd77d620b4b11d4040d0eddd86c83775d11d75`
+`BSpine0` is fixed at `T=24`, cubic degree 3 and `K=12`. Its production basis
+identity hashes the exact FP32 analysis/synthesis operators actually registered
+by the bottom, excluding the unused backend-dependent lossless-detail QR chart;
+that runtime-operator digest is
+`f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34`,
 and its complete spec fingerprint is
 `a2234eb6c9f553c47e793e11c8734d8cfadfbaaf86c5b950dab8f672965a8c10`.
 Fixed analysis/synthesis run in FP32.  Independent zero-initialized, bias-free
@@ -453,7 +458,9 @@ The disabled Schema30 graph is still certified against the immutable
 pre-modular capture at `atol=0`, `rtol=0`: 15,014 tensors / 10,443,735 values
 and 206,237 metadata paths have zero differences.  The candidate source-tree
 digest recorded by that report is
-`1898e2633606cfcabf017c78709fb6f446b47f658cf6abbd01507095ba7f4695`.
+`55e4f2a9fb7ddd2bf410bd6a9d57228cf778e7dea29b2c5725835583230e81ba`;
+the executable source-closure digest is
+`1117ddd398b4b921d976f2a3571d31c63176e1c2e971184bd0228ceff9aec9c3`.
 Local B-spine gates cover fixed-basis rank/partition/endpoints, exact
 coarse-plus-detail closure, independent raw/coarse/detail JVP/VJP, complete
 loss-side owner gradients, CPU BF16, zero-init bit identity, matched learned
