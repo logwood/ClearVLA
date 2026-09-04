@@ -199,6 +199,7 @@ def sample_refined_cached_action_with_cache(
     initial_physical_noise: Tensor | None = None,
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
+    execution_mode: str = "learned",
 ) -> tuple[SamplingResult, OnlinePolicyCache]:
     """Run one proposal pass, one W rerun, and one refined pass.
 
@@ -219,6 +220,7 @@ def sample_refined_cached_action_with_cache(
         initial_physical_noise=initial_physical_noise,
         collect_diagnostics=False,
         dtype=runtime_dtype,
+        execution_mode=execution_mode,
     )
     refined_cache, refinement_metrics = refine_cached_world(
         model,
@@ -236,6 +238,7 @@ def sample_refined_cached_action_with_cache(
         initial_physical_noise=proposal.initial_physical_noise,
         collect_diagnostics=collect_diagnostics,
         dtype=runtime_dtype,
+        execution_mode=execution_mode,
     )
     proposal_action = proposal.action.detach().float()
     refined_action = refined.action.detach().float()
@@ -291,6 +294,7 @@ def sample_refined_cached_action(
     initial_physical_noise: Tensor | None = None,
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
+    execution_mode: str = "learned",
 ) -> SamplingResult:
     """Run the bounded outer closure and return only its final sample."""
 
@@ -302,6 +306,7 @@ def sample_refined_cached_action(
         initial_physical_noise=initial_physical_noise,
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
+        execution_mode=execution_mode,
     )
     return result
 

@@ -586,19 +586,25 @@ class JsonlRunLogger:
                         "validation_execution_full_capacity_action_delta_rmse_physical",
                         "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical",
                         "validation_execution_three_basis_reduction_action_delta_rmse_physical",
-                        "validation_execution_spine_zero_mse_gain_vs_primary_physical",
-                        "validation_execution_spine_zero_action_delta_rmse_physical",
+                        "validation_execution_spine_zero_refined_pass_mse_gain_vs_primary_physical",
+                        "validation_execution_spine_zero_refined_pass_action_delta_rmse_physical",
+                        "validation_execution_spine_zero_full_lifecycle_mse_gain_vs_primary_physical",
+                        "validation_execution_spine_zero_full_lifecycle_action_delta_rmse_physical",
                     ),
                 ),
                 (
                     "b-spine-ablation",
                     tuple(
                         name
+                        for mode in (
+                            "spine_zero_refined_pass",
+                            "spine_zero_full_lifecycle",
+                        )
                         for band in ("1_4", "5_12", "13_24")
                         for owner in ("arm", "gripper")
                         for name in (
-                            f"validation_execution_spine_zero_{owner}_band_{band}_mse_gain_vs_primary_physical",
-                            f"validation_execution_spine_zero_{owner}_band_{band}_action_delta_rmse_physical",
+                            f"validation_execution_{mode}_{owner}_band_{band}_mse_gain_vs_primary_physical",
+                            f"validation_execution_{mode}_{owner}_band_{band}_action_delta_rmse_physical",
                         )
                     ),
                 ),

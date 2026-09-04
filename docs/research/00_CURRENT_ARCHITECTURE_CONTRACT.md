@@ -405,9 +405,10 @@ Local closure evidence on 2026-09-04 is exact: the topology-complete reduced
 dual-source gate compared 15,014 tensors / 10,443,735 shared elements with zero
 difference across initialization/RNG, static and six-time dynamic boundaries,
 raw and post-clip gradients, one optimizer step, sidecars and the two-pass
-five-update deployment lifecycle. The focused policy/runtime/structural suite
-passes 150 tests; checkpoint/layout and AMP/data/interface/action-field suites
-pass 20 and 58 tests respectively (one environment-dependent AMP test skipped).
+five-update deployment lifecycle. The combined mainline,
+policy/runtime/structural, checkpoint/layout, AMP/data/interface/action-field,
+RDT preparation and standalone B-spline suite passes 284 tests with three
+environment-dependent tests skipped.
 The final registered state inventory remains 1,391 keys with digest
 `846b1edd7933b796882bcb5a8422816f768110fe9741282ba4435ac45927b7ca`.
 The separately owned B-spine source is now integrated into the modular tree and
@@ -451,21 +452,27 @@ The full Schema31 inventory is 168,435,611 parameters / 1,395 parameter
 tensors, 152,064,880 trainable parameters / 1,073 trainable tensors, 1,403
 state keys and 24 optimizer groups.  All ten new parameter tensors have the
 single `bottom_spine` owner at the existing bottom-decoder `0.7x` LR and normal
-decay.  `spine_zero` is evaluation-only and preserves the learned computation
-for diagnostics while zeroing only its action-stream contribution.
+decay. `spine_zero` is the evaluation-only model intervention and preserves
+the learned computation for diagnostics while zeroing only its action-stream
+contribution. Validation names its two uses separately:
+`spine_zero_refined_pass` holds the learned-proposal W cache fixed, while
+`spine_zero_full_lifecycle` applies it to proposal and refined passes so the
+intervened proposal owns the single W rebuild. Both reuse the primary initial
+physical noise; only the latter is complete deployment attribution.
 
 The disabled Schema30 graph is still certified against the immutable
 pre-modular capture at `atol=0`, `rtol=0`: 15,014 tensors / 10,443,735 values
-and 206,237 metadata paths have zero differences.  The candidate source-tree
-digest recorded by that report is
-`55e4f2a9fb7ddd2bf410bd6a9d57228cf778e7dea29b2c5725835583230e81ba`;
-the executable source-closure digest is
-`1117ddd398b4b921d976f2a3571d31c63176e1c2e971184bd0228ceff9aec9c3`.
+and 206,237 metadata paths have zero differences. The candidate source-tree
+digest recorded by the post-lifecycle report is
+`ad226fd56bcc7ec3eb1d19e08791e095a5526866d00ef3f043cfa6275b350ba9`;
+the checkout-newline-independent executable source-closure digest is
+`ababb7ce0a87973de273e5d69bda94d91339ad217b9ccd658f54ecf68cc64ddc`.
 Local B-spine gates cover fixed-basis rank/partition/endpoints, exact
 coarse-plus-detail closure, independent raw/coarse/detail JVP/VJP, complete
 loss-side owner gradients, CPU BF16, zero-init bit identity, matched learned
-`spine_zero`, one formal decoder call, twelve deployed calls, optimizer
-ownership and Schema31 checkpoint round trip with Schema30 exact-resume
+fixed-cache and full-lifecycle `spine_zero`, one formal decoder call, twelve
+deployed calls, optimizer ownership and Schema31 checkpoint round trip with
+Schema30 exact-resume
 rejection.  Real Pen CUDA/BF16 VJP, smoke, runtime/memory and read-only
 checkpoint replay remain mandatory before the single fresh Pen run starts.
 

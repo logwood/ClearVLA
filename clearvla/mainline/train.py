@@ -1093,7 +1093,11 @@ def _execution_ablation_modes(config: ExperimentConfig) -> tuple[str, ...]:
         "three_basis_reduction",
     )
     if config.bottom.bspine_implementation != BSPINE_DISABLED_IMPLEMENTATION:
-        return (*modes, "spine_zero")
+        return (
+            *modes,
+            "spine_zero_refined_pass",
+            "spine_zero_full_lifecycle",
+        )
     return modes
 
 
@@ -1530,13 +1534,34 @@ def _validate(
                 ).square().mean(),
             }
             for mode in _execution_ablation_modes(config):
-                execution = sample_cached_action(
-                    engine.model,
-                    refined_cache,
-                    config,
-                    execution_mode=mode,
-                    **common_sampling,
-                )
+                if mode == "spine_zero_full_lifecycle":
+                    # Re-run proposal, the single W rebuild and the refined
+                    # pass with B-spine removed throughout.  This is the
+                    # deployment-lifecycle intervention; it intentionally
+                    # starts from the original observation cache.
+                    execution = sample_refined_cached_action(
+                        engine.model,
+                        cache,
+                        config,
+                        execution_mode="spine_zero",
+                        **common_sampling,
+                    )
+                else:
+                    # Ordinary execution interventions hold the already
+                    # rebuilt W cache fixed.  Keep that useful diagnostic for
+                    # B-spine too, but name it as a refined-pass-only result.
+                    execution_mode = (
+                        "spine_zero"
+                        if mode == "spine_zero_refined_pass"
+                        else mode
+                    )
+                    execution = sample_cached_action(
+                        engine.model,
+                        refined_cache,
+                        config,
+                        execution_mode=execution_mode,
+                        **common_sampling,
+                    )
                 error = execution.action.float() - target
                 delta = execution.action.float() - primary
                 stem = f"execution_{mode}"
@@ -1550,7 +1575,7 @@ def _validate(
                 execution_rows[f"{stem}_action_delta_mse_physical"] = (
                     delta / action_scale
                 ).square().mean()
-                if mode == "spine_zero":
+                if mode.startswith("spine_zero_"):
                     physical_primary_error = primary_error / action_scale
                     physical_error = error / action_scale
                     physical_delta = delta / action_scale
@@ -1718,7 +1743,7 @@ def _validate(
             result[f"validation_{name}_action_delta_rmse_physical"] = float(
                 rows[f"{name}_action_delta_mse_physical"] ** 0.5
             )
-            if mode == "spine_zero":
+            if mode.startswith("spine_zero_"):
                 for band_name in ("1_4", "5_12", "13_24"):
                     for owner in ("arm", "gripper"):
                         surface = f"{name}_{owner}_band_{band_name}"

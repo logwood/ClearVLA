@@ -44,8 +44,9 @@
   `model/restored_bottom.py`, `model/components.py`, `training/optimizer.py`,
   `train.py`, and `runtime/logging.py`
   - the opt-in Schema31 fixed cubic `T=24/K=12` coarse/detail view beside the
-    unchanged raw action lift, its sole optimizer owner, evaluation-only
-    `spine_zero` route and matched band/channel validation surface;
+  unchanged raw action lift, its sole optimizer owner, evaluation-only
+  `spine_zero` route, and the separately named fixed-W refined-pass versus
+  complete proposal/W/refined lifecycle band/channel validation surfaces;
   - the spline reads only the deployed noisy physical field. It adds no loss,
     top carrier, action codec, output head, ODE step or W rebuild;
 - `clearvla/tools/audit_policy_logs.py`

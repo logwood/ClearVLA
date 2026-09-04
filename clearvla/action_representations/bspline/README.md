@@ -1,9 +1,13 @@
 # ClearVLA B-spline action representation
 
-Status: accepted only as a standalone schema-v1 CPU/static mathematical and
-compatibility prototype.
-It is not B-spine-0, is not wired into the active mainline, and closes none of
-Gate A, Gate B, the CUDA gate or the production gate.
+Status: the schema-v1 mathematics are shared by the provisional Schema31
+`BSpine0`, while the general native-action representation and compatibility
+façade remain standalone.
+The active opt-in mainline imports only `BSplineSpec` and
+`build_basis_bundle`; it does not route through `BSplineActionRepresentation`
+or `PhysicalActionFieldBSplineAdapter`. The fixed cubic `T=24/K=12` chart and
+bottom-internal raw-plus-spine integration are locally closed, while real
+CUDA/BF16, smoke, read-only checkpoint and formal Pen acceptance remain open.
 This directory is the canonical long-term workspace for B-spline action
 representation work. It is intentionally independent of a particular ClearVLA
 policy version.
@@ -18,9 +22,11 @@ The implementation is entirely contained here:
   native/physical codec;
 - `tests/` owns representation and current-boundary compatibility checks.
 
-No existing mainline, policy, codec or training source is modified by this
-package. The package itself imports neither `clearvla.mainline` nor a historical
-experiment module.
+The package itself imports neither `clearvla.mainline` nor a historical
+experiment module. Dependency direction stays one-way: the opt-in mainline
+`clearvla/mainline/v120_core/bspine.py` imports the construction-only public
+math API from this directory. The general representation/payload/façade API is
+not an active model path.
 
 ## Ownership boundary
 
@@ -50,7 +56,7 @@ Those systems may consume this representation through adapters, but they must
 not be imported into this package. Conversely, this package must not import
 from `clearvla.mainline`, `clearvla.policy` or an experiment-version module.
 
-## Standalone native-action scope versus planned B-spine-0
+## Standalone native-action scope versus integrated B-spine-0
 
 The active mainline currently accepts a normalized native action chunk
 `[B,24,7]`: six arm channels and one gripper channel. Its current codec expands
@@ -61,7 +67,7 @@ This standalone package acts on a native arm trajectory `[B,T,D_arm]` before
 the redundant absolute/delta field. Gripper and any future
 discontinuous/event-like channels remain exact pass-through values owned by the
 caller. That scope is useful for basis mathematics, serialization and offline
-representation audits, but it is not the planned model insertion point.
+representation audits, but it is not the active model insertion point.
 
 `PhysicalActionFieldBSplineAdapter` only demonstrates outer-boundary shape and
 semantic compatibility. It decodes the native arm trajectory and delegates the
@@ -70,7 +76,7 @@ marked `bspine0_gate_b_compatible=False` and
 `repeated_bottom_call_safe=False`; it is neither the B-spine-0 implementation
 nor authorization to replace the active codec.
 
-The planned B-spine-0 is a different, integration-owned bottom unit. It reads
+The opt-in B-spine-0 is a different, integration-owned bottom unit. It reads
 only the existing deployed noisy physical flow state `x_t [B,24,18]`, after the
 unchanged `PhysicalActionFieldCodec`, and forms a parallel numerical view beside
 `NativeTimePhysicalActionTokenLift` / `noisy_lift`:
@@ -87,17 +93,19 @@ existing action seed + (u_raw + u_spine) * action_state_factor
 The original raw path remains independently usable. B-spine-0 may not change
 `PhysicalActionFieldCodec`, flow targets or source noise, the raw lift, the
 physical velocity head, the number of ODE updates or W passes, or the existing
-action/output ABI. This package does not implement that branch and must not be
-used as a native-action compression bottleneck in its place.
+action/output ABI. That branch is implemented in
+`clearvla/mainline/v120_core/bspine.py` and uses this package only to construct
+its fixed operators. The standalone representation and façade do not implement
+the branch and must not be used as a native-action compression bottleneck in
+its place.
 
 The public payload API performs defensive finite and identity checks. On an
 accelerator those checks may synchronize with the host, so `encode`, `decode`,
 `evaluate` and the compatibility façade must not be placed inside an ODE loop
-or the deployed path's 12 bottom calls per action. A future Gate-B
-implementation must be a separate integration-owned tensor primitive that
-reuses construction-time precomputed FP32 analysis/synthesis buffers and
-performs direct tensor algebra without rebuilding a basis or validating Python
-payloads on every bottom call.
+or the deployed path's 12 bottom calls per action. The integrated Gate-B tensor
+primitive therefore registers construction-time FP32 analysis/synthesis
+buffers and performs direct tensor algebra without rebuilding a basis or
+validating Python payloads on every bottom call.
 
 ## Design decision
 
@@ -310,8 +318,10 @@ a separate cleanup decision.
 ## Performance-preservation gates
 
 No representation can claim unchanged task performance from basis tests alone.
-All externally meaningful gates remain open. The following sequence separates
-representation fidelity from integration quality.
+The standalone compact-replacement gates remain open; the Schema31
+raw-plus-spine candidate has a separately serialized local integration record.
+The following sequence separates representation fidelity from integration
+quality.
 
 ### Local structural verification
 
@@ -325,9 +335,10 @@ representation fidelity from integration quality.
   never hides them with clipping.
 
 These checks can reject an unsafe representation, but passing them does not
-close Gate A, Gate B, the CUDA gate or the production gate.
+close the standalone compact-replacement or production gates. They are also
+the construction substrate used by the locally integrated Schema31 candidate.
 
-### Gate A: real-data representation audit — open
+### Standalone compact-replacement audit — open
 
 Use the real train-only normalizer and identical windows to compare:
 
@@ -346,7 +357,7 @@ below the matched baseline model error; the initial gate is at most 10% of that
 error, including early/action-critical slices. If no compact candidate passes,
 the exact detail coordinates remain enabled.
 
-### Gate B: integration non-inferiority — open
+### Standalone façade integration non-inferiority — open
 
 The integration owner runs the matched training/deployment A/B. Acceptance
 requires no meaningful regression in near/mid/far arm error, gripper behavior,
@@ -354,10 +365,11 @@ task success, runtime health or chunk-boundary behavior. Continuous high-rate
 resampling is a separate opt-in gate because an interpolating cubic can be exact
 at sample times and still overshoot between them.
 
-The CUDA gate remains open until the CUDA-specific autocast/backward test runs
-on real CUDA hardware rather than being skipped. The production gate remains
-open until Gate A, Gate B, runtime profiling, serialized identity checks and the
-owner's deployment acceptance all pass.
+For Schema31, local bottom integration, serialized identity and CPU lifecycle
+tests are closed outside this façade. Its CUDA gate remains open until the
+CUDA-specific autocast/backward test runs on real hardware, and its production
+gate remains open until smoke, checkpoint replay, runtime/memory and the Pen
+deployment acceptance all pass.
 
 ## CALVIN diagnostic boundary
 
@@ -466,13 +478,14 @@ that question remains subject to the gates above.
    compact projection, gradients, BF16 boundaries, arbitrary safe `T/D/time`
    grids, explicit origin, serialization, identity, diagnostics and the
    outer-boundary codec façade.
-3. **Gate A open:** run the dataset-only audit without importing a policy
-   model; freeze a compact candidate only if it passes.
-4. **Gate B open:** integration owner designs the tensor-only cut and performs
-   matched training/deployment A/B using the serialized spec fingerprint and
-   basis digest.
-5. **CUDA and production gates open:** run the CUDA test on actual hardware,
-   profile the accepted integration and complete deployment acceptance.
+3. **Standalone compact gate open:** a lossy native-action replacement still
+   requires the dataset-only audit and is not enabled by Schema31.
+4. **Schema31 integrated locally:** the tensor-only bottom cut uses cubic
+   `T=24/K=12`, serialized runtime/spec identities, exact raw-path preservation
+   and separately named fixed-W/full-lifecycle matched interventions.
+5. **CUDA and production gates open:** run the CUDA/VJP test, smoke, read-only
+   checkpoint validation and runtime/memory check on actual hardware before
+   completing Pen deployment acceptance.
 
 Local structural reference for uniform `T=24`, cubic `K=12`:
 
@@ -489,6 +502,7 @@ Reproducible local checks:
 .venv/Scripts/pyright.exe --pythonpath .venv/Scripts/python.exe --level error clearvla/action_representations/bspline
 ```
 
-The verified acceptance scope is only a standalone CPU/static prototype. This
-directory makes no active-mainline, B-spine-0, CUDA or production claim; its
-local test pass cannot close the open gates listed above.
+The verified standalone acceptance scope remains the CPU/static representation
+and façade. The opt-in mainline's B-spine claim comes only from its separate
+Schema31 manifest, config, implementation and tests; neither that integration
+nor this directory alone claims CUDA or production acceptance.

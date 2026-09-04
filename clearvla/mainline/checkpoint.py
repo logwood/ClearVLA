@@ -34,6 +34,14 @@ def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def _sha256_source_text(path: Path) -> str:
+    """Hash source text with checkout-independent newline semantics."""
+
+    raw = path.read_bytes()
+    canonical = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _is_hex_digest(value: str, *, length: int) -> bool:
     if len(value) != int(length):
         return False
@@ -187,7 +195,7 @@ class DatasetIdentity:
 
 @dataclass(frozen=True)
 class SourceSnapshot:
-    """Content hash of only the active mainline source closure."""
+    """Canonical-text hash of only the active mainline source closure."""
 
     files: tuple[tuple[str, str], ...]
     digest: str
@@ -239,7 +247,8 @@ def active_source_snapshot(repo_root: str | Path) -> SourceSnapshot:
     if preset.is_file():
         sources.append(preset)
     rows = tuple(
-        (path.relative_to(root).as_posix(), _sha256_file(path)) for path in sorted(set(sources))
+        (path.relative_to(root).as_posix(), _sha256_source_text(path))
+        for path in sorted(set(sources))
     )
     digest = hashlib.sha256(_canonical(rows)).hexdigest()
     snapshot = SourceSnapshot(files=rows, digest=digest)

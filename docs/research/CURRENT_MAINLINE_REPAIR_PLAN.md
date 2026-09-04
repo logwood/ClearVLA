@@ -82,7 +82,7 @@ The high-information questions are deliberately separated:
 | Question | Single selecting observation | Falsifier |
 |---|---|---|
 | Is a temporal chart present in the field? | cross-outlet coarse/detail energy and locality table | no stable split beyond the DCT/identity controls |
-| Does a learned view reach the action path? | matched `spine_zero` action delta and MSE change | zero delta, or removal improves MSE |
+| Does a learned view reach the action path? | matched `spine_zero_full_lifecycle` action delta and MSE change, with fixed-W localization | zero full-lifecycle delta, or removal improves MSE |
 | Does it help the intended failure? | complete-curve far/gripper result with near/arm guard | far/gripper regression or a near/arm trade |
 | Does it preserve sharp information? | event/post-event/hold residuals plus detail share | apparent gain comes from suppressing event/detail rows |
 
@@ -1237,6 +1237,29 @@ synthesis matrix can still acquire a globally coupled or amplifying analysis
 operator. If a solve needs regularization, stop and record that as a separate
 chart decision instead of silently importing the historical ridge value.
 
+The frozen candidate decision is intentionally compact and reproducible from
+`BSplineSpec.uniform` plus `build_basis_bundle`; the DCT rows use the exact
+orthonormal DCT-II definition in `v120_core/codec.py`. `B support` is the
+maximum/mean count of nonzero sample rows per synthesis column, and endpoint
+leverage is the mean of the first/last diagonal of `B @ A`:
+
+| fixed chart | cond(B) | `||A||2` | B support max/mean | endpoint leverage | decision |
+|---|---:|---:|---:|---:|---|
+| quadratic K=10 | 2.7602 | 1.6589 | 9 / 6.80 | 0.9175 | stable local neighbor |
+| quadratic K=12 | 2.7381 | 1.8275 | 7 / 5.67 | 0.9597 | tighter-support control |
+| cubic K=8 | 4.7266 | 2.3849 | 18 / 11.25 | 0.9050 | too coarse for first candidate |
+| cubic K=10 | 4.6783 | 2.6822 | 13 / 9.00 | 0.9675 | viable lower-K neighbor |
+| **cubic K=12** | **4.6703** | **2.9883** | **10 / 7.50** | **0.9910** | **frozen Schema31 candidate** |
+| DCT K=12 | 1.0000 | 1.0000 | 24 / 23.33 | 0.7970 | global-support control |
+
+This table does not claim cubic dominates quadratic or DCT. It records the one
+experiment choice: K=12 gains two temporal degrees and higher endpoint
+leverage over cubic K=10 without a condition-number transition; cubic retains
+local support unlike the DCT control. Exact detail plus the unchanged raw path
+preserve information, so the Pen run tests whether the locally smoother view
+is useful rather than treating this structural table as a performance result.
+No degree/K training sweep is authorized.
+
 The probe output is a compact decision table, not a raw-window dump. Report
 separately for clean `x_1`, actual sampled `x_t`, flow-time bins, Pen and each
 RDT task where available:
@@ -1319,7 +1342,11 @@ map) must be serialized in the Schema31 config/manifest. It is not an
 environment-only switch. The Schema30 config and manifest remain unchanged.
 
 The implementation must expose an evaluation-only `spine_zero` intervention
-without changing training behavior. Log only the decision-complete surface:
+without changing training behavior. Validation must distinguish a fixed-W
+`spine_zero_refined_pass` from a `spine_zero_full_lifecycle` that applies to
+both proposal and refined ODE passes and therefore changes the one W rebuild.
+Both use the primary initial physical noise; the full-lifecycle row is the
+deployment attribution decision. Log only the decision-complete surface:
 coarse/detail field RMS, coarse/detail token RMS, total spine update RMS,
 spine/raw token ratio, exact decomposition error, and separate coarse/detail
 parameter-owner gradients. Detailed per-role rows belong in the bounded probe,
@@ -1363,16 +1390,20 @@ identity. Schema30 remains the baseline; do not train separate degree/K
 variants. The usual hard stops remain the only early stops. This first result
 is Pen-scoped and does not claim cross-outlet acceptance; RDT and CALVIN remain
 unlaunched until a later explicit decision.
-Use existing validation budgets for a matched `spine_zero` action intervention
-and report coverage, action delta and MSE gain by near/mid/far and arm/gripper.
+Use existing validation budgets for both matched `spine_zero_refined_pass` and
+`spine_zero_full_lifecycle` action interventions and report coverage, action
+delta and MSE gain by near/mid/far and arm/gripper. Use the full-lifecycle row
+for the acceptance decision; retain the fixed-W row only to localize whether W
+reconditioning explains their difference.
 
 Accept the semantic unit only when all of the following agree:
 
 - health, ledger, owner VJP, checkpoint, memory and runtime gates stay closed;
 - final and complete-curve Pen far/gripper behavior improves or remains stable
   without a near/arm trade;
-- `spine_zero` proves the learned view reaches deployed action and does not
-  improve matched MSE by removing it;
+- `spine_zero_full_lifecycle` proves the learned view reaches deployed action
+  and does not improve matched MSE by removing it; the fixed-W row only
+  localizes the outer-refinement contribution;
 - detail/event information is retained rather than obtaining a cosmetically
   smooth trajectory by suppressing transitions.
 

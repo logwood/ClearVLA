@@ -144,6 +144,21 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert not any("scripts/current_v" in path for path in paths)
 
 
+def test_active_source_snapshot_canonicalizes_checkout_newlines(tmp_path: Path) -> None:
+    snapshots = []
+    for name, newline in (("lf", b"\n"), ("crlf", b"\r\n")):
+        root = tmp_path / name
+        package = root / "clearvla" / "mainline"
+        preset = root / "configs" / "mainline" / "object_intent_dynamics_323.json"
+        package.mkdir(parents=True)
+        preset.parent.mkdir(parents=True)
+        (package / "train.py").write_bytes(newline.join((b"from __future__ import annotations", b"VALUE = 1", b"")))
+        preset.write_bytes(newline.join((b"{", b'  "schema": 1', b"}", b"")))
+        snapshots.append(active_source_snapshot(root))
+
+    assert snapshots[0] == snapshots[1]
+
+
 def test_checkpoint_identity_roundtrip_and_explicit_bottom_migration(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     condition = tmp_path / "goal.pt"

@@ -1022,6 +1022,38 @@ def test_bspine_deployment_keeps_exactly_twelve_bottom_calls() -> None:
     assert torch.isfinite(result.action).all()
 
 
+def test_bspine_full_lifecycle_intervention_reaches_both_ode_passes() -> None:
+    torch.manual_seed(4065)
+    config = _bspine_config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    cache, _, _ = model.encode_online(batch.online)
+    initial_noise = torch.randn(1, 24, 18)
+
+    with mock.patch.object(model, "velocity", wraps=model.velocity) as velocity:
+        result = sample_refined_cached_action(
+            model,
+            cache,
+            config,
+            initial_physical_noise=initial_noise,
+            execution_mode="spine_zero",
+            dtype=torch.float32,
+        )
+
+    expected_calls = 2 * (config.runtime.inference_steps + 1)
+    assert velocity.call_count == expected_calls == 12
+    assert all(
+        call.kwargs["execution_mode"] == "spine_zero"
+        for call in velocity.call_args_list
+    )
+    torch.testing.assert_close(
+        result.initial_physical_noise,
+        initial_noise,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
 def test_bspine_validation_archives_matched_band_and_channel_surfaces() -> None:
     torch.manual_seed(4070)
     base = _bspine_config()
@@ -1090,23 +1122,26 @@ def test_bspine_validation_archives_matched_band_and_channel_surfaces() -> None:
         )
 
     assert report["validation_execution_ablation_coverage"] == 1.0
-    assert report["validation_execution_spine_zero_action_delta_rmse_normalized"] > 0.0
-    for band in ("1_4", "5_12", "13_24"):
-        for owner in ("arm", "gripper"):
-            stem = f"validation_execution_spine_zero_{owner}_band_{band}"
-            for suffix in (
-                "primary_rmse_normalized",
-                "rmse_normalized",
-                "mse_gain_vs_primary_normalized",
-                "action_delta_rmse_normalized",
-                "primary_rmse_physical",
-                "rmse_physical",
-                "mse_gain_vs_primary_physical",
-                "action_delta_rmse_physical",
-            ):
-                name = f"{stem}_{suffix}"
-                assert name in report
-                assert math.isfinite(report[name])
+    for mode in ("spine_zero_refined_pass", "spine_zero_full_lifecycle"):
+        assert report[
+            f"validation_execution_{mode}_action_delta_rmse_normalized"
+        ] > 0.0
+        for band in ("1_4", "5_12", "13_24"):
+            for owner in ("arm", "gripper"):
+                stem = f"validation_execution_{mode}_{owner}_band_{band}"
+                for suffix in (
+                    "primary_rmse_normalized",
+                    "rmse_normalized",
+                    "mse_gain_vs_primary_normalized",
+                    "action_delta_rmse_normalized",
+                    "primary_rmse_physical",
+                    "rmse_physical",
+                    "mse_gain_vs_primary_physical",
+                    "action_delta_rmse_physical",
+                ):
+                    name = f"{stem}_{suffix}"
+                    assert name in report
+                    assert math.isfinite(report[name])
 
 
 def test_nonfinite_gradient_reports_first_owner_before_any_update() -> None:

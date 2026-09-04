@@ -977,12 +977,18 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
 - Read `gradient_raw_bottom_spine_coarse_l2` and
   `gradient_raw_bottom_spine_detail_l2` separately. A healthy aggregate bottom
   or raw-action-lift gradient cannot establish that both numerical views learn.
-- `spine_zero` is evaluation-only and uses matched initial physical noise.
-  Interpret it only when `validation_execution_ablation_coverage` is nonzero.
-  Report its action delta and MSE gain for `1-4 / 5-12 / 13-24`, split into arm
-  and gripper. At zero initialization an exact-zero action delta is required;
-  after learning, a zero delta means the branch did not reach deployed action,
-  while a positive MSE gain means removing the branch improved error and is
+- `spine_zero` is the evaluation-only model intervention. Validation exposes
+  two distinct matched-noise lifecycles and they must never be collapsed into
+  one row. `spine_zero_refined_pass` holds the already rebuilt W cache fixed
+  and removes B-spine only from the second ODE pass.
+  `spine_zero_full_lifecycle` removes B-spine from both the proposal and
+  refined passes, so the intervened proposal also owns the single W rebuild;
+  this is the deployment-level attribution result. Interpret either only when
+  `validation_execution_ablation_coverage` is nonzero. Report action delta and
+  MSE gain for `1-4 / 5-12 / 13-24`, split into arm and gripper. At zero
+  initialization both action deltas must be exact zero. After learning, a zero
+  full-lifecycle delta means the branch did not reach deployed action, while a
+  positive full-lifecycle MSE gain means removing it improved error and is
   evidence against the candidate.
 - B-spine adds no objective contribution. Never infer optimization dominance
   from its token magnitude and never repair an unfavorable intervention with a
