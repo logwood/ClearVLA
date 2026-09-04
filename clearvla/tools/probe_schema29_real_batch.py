@@ -218,7 +218,7 @@ def _named_owner_parameters(
     named = tuple(model.named_parameters())
     velocity_output_ids = {
         id(parameter)
-        for layer in model.bottom.decoder.velocity_head.output_layers()
+        for layer in model.execution_bottom.decoder.terminal_controller.velocity_head.output_layers()
         for parameter in layer.parameters()
     }
     owners = {
@@ -230,12 +230,17 @@ def _named_owner_parameters(
         "gripper_gate": tuple(
             (name, parameter)
             for name, parameter in named
-            if name.startswith("bottom.decoder.velocity_head.gripper_gate.")
+            if name.startswith(
+                "execution_bottom.decoder.terminal_controller.velocity_head."
+                "gripper_gate."
+            )
         ),
         "motion_head": tuple(
             (name, parameter)
             for name, parameter in named
-            if name.startswith("bottom.decoder.motion_head.")
+            if name.startswith(
+                "execution_bottom.decoder.terminal_controller.motion_head."
+            )
         ),
     }
     if any(not values for values in owners.values()):
@@ -455,7 +460,7 @@ def _vjp_report(
     }
     block_stats: dict[str, dict[str, float | int]] = {}
     for index in range(3):
-        prefix = f"bottom.decoder.blocks.{index}."
+        prefix = f"execution_bottom.decoder.blocks.{index}."
         selected = tuple(
             (name, parameter)
             for name, parameter in trainable_parameters
@@ -712,7 +717,8 @@ def run_schema29_real_batch_probe(
         flow_state = sample_flow_matching(
             batch.action_target.normalized,
             action_state=batch.online.history.action_state,
-            codec=model.action_codec,
+            codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
+            codec=model.outlet_adapter,
             distribution=config.bottom.flow_time_distribution,
             generator=flow_generator,
         )
@@ -745,7 +751,7 @@ def run_schema29_real_batch_probe(
             raise RuntimeError("controlled transition state lost its value tensor")
         transition_values.append(value)
 
-    head_hook = model.bottom.decoder.velocity_head.norm.register_forward_pre_hook(
+    head_hook = model.execution_bottom.decoder.terminal_controller.velocity_head.norm.register_forward_pre_hook(
         capture_head_input
     )
     transition_hook = model.transition.register_forward_hook(capture_transition)
@@ -774,7 +780,7 @@ def run_schema29_real_batch_probe(
                     observation=training_state.observation,
                     top_targets=top_targets,
                     predicted_dynamics=cache0.top.predicted_dynamics,
-                    action_codec=model.action_codec,
+                    action_codec=model.outlet_adapter,
                     collect_diagnostics=False,
                 )
             report0, boundaries0 = _mode_report(
@@ -833,9 +839,10 @@ def run_schema29_real_batch_probe(
                                 dtype=flow_state.noisy_physical.dtype
                             )
                         )
-                        pass0_clean_action = model.action_codec.decode(
+                        pass0_clean_action = model.outlet_adapter.decode(
                             pass0_clean_physical,
                             cache0.history.action_state,
+                            codec_gripper_boundary=cache0.history.codec_gripper_boundary,
                         ).detach()
                         pass0_condition = PhysicalActionCondition.from_horizon_action(
                             pass0_clean_action,
@@ -861,7 +868,7 @@ def run_schema29_real_batch_probe(
             if not pass0_fork_restored_cpu or not pass0_fork_restored_cuda:
                 raise RuntimeError("Schema29/30 pass0 failed to restore the formal RNG entry")
 
-            cache1_top, _ = model.top.refine_deployment_world(
+            cache1_top, _ = model.world.refine_deployment_world(
                 cache0.top,
                 action_condition=pass0_condition,
                 collect_diagnostics=False,
@@ -890,7 +897,7 @@ def run_schema29_real_batch_probe(
                 observation=training_state.observation,
                 top_targets=top_targets,
                 predicted_dynamics=cache1.top.predicted_dynamics,
-                action_codec=model.action_codec,
+                action_codec=model.outlet_adapter,
                 collect_diagnostics=False,
             )
         report1, boundaries1 = _mode_report(

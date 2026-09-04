@@ -31,6 +31,7 @@ from .runtime.checkpoints import (
     migrate_bottom_only,
     save_checkpoint,
 )
+from .runtime.deployment import build_deployment_abi
 from .runtime.evaluation import (
     MatchedCoreAttributionAccumulator,
     MatchedP2InterventionAccumulator,
@@ -65,6 +66,7 @@ from .training.gradient_audit import (
 )
 from .training.losses import sample_flow_matching
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
+from .v120_core.bspine import BSPINE_DISABLED_IMPLEMENTATION
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -278,18 +280,24 @@ def _print_multitask_validation(
             "[mainline-val-task] "
             f"epoch={epoch:03d} step={step} task={task_name} "
             f"samples={int(number(raw_metrics, 'validation_sample_count'))} "
-            f"action_rmse_physical="
-            f"{number(raw_metrics, 'validation_action_rmse_physical'):.6g} "
-            f"band_1_4_rmse_physical="
-            f"{number(raw_metrics, 'validation_band_1_4_rmse_physical'):.6g} "
-            f"band_5_12_rmse_physical="
-            f"{number(raw_metrics, 'validation_band_5_12_rmse_physical'):.6g} "
-            f"band_13_24_rmse_physical="
-            f"{number(raw_metrics, 'validation_band_13_24_rmse_physical'):.6g} "
-            f"arm_rmse_physical="
-            f"{number(raw_metrics, 'validation_arm_rmse_physical'):.6g} "
-            f"gripper_rmse_physical="
-            f"{number(raw_metrics, 'validation_gripper_rmse_physical'):.6g} "
+            f"action_rmse_normalized="
+            f"{number(raw_metrics, 'validation_action_rmse_normalized'):.6g} "
+            f"action_rmse_source_native="
+            f"{number(raw_metrics, 'validation_action_rmse_source_native'):.6g} "
+            f"band_1_4_rmse_source_native="
+            f"{number(raw_metrics, 'validation_band_1_4_rmse_source_native'):.6g} "
+            f"band_5_12_rmse_source_native="
+            f"{number(raw_metrics, 'validation_band_5_12_rmse_source_native'):.6g} "
+            f"band_13_24_rmse_source_native="
+            f"{number(raw_metrics, 'validation_band_13_24_rmse_source_native'):.6g} "
+            f"arm_rmse_normalized="
+            f"{number(raw_metrics, 'validation_arm_rmse_normalized'):.6g} "
+            f"arm_rmse_source_native="
+            f"{number(raw_metrics, 'validation_arm_rmse_source_native'):.6g} "
+            f"gripper_rmse_normalized="
+            f"{number(raw_metrics, 'validation_gripper_rmse_normalized'):.6g} "
+            f"gripper_rmse_source_native="
+            f"{number(raw_metrics, 'validation_gripper_rmse_source_native'):.6g} "
             f"event_f1="
             f"{number(raw_metrics, 'validation_decoded_gripper_event_f1'):.6g} "
             f"events_predicted="
@@ -305,14 +313,22 @@ def _print_multitask_validation(
         f"observed={int(number(report, 'observed_task_count'))}/"
         f"{int(number(report, 'expected_task_count'))} "
         f"coverage={number(report, 'task_coverage'):.6g} "
-        f"micro_action_rmse_physical="
-        f"{number(micro, 'validation_action_rmse_physical'):.6g} "
-        f"macro_action_rmse_physical="
-        f"{number(macro, 'validation_action_rmse_physical'):.6g} "
-        f"micro_gripper_rmse_physical="
-        f"{number(micro, 'validation_gripper_rmse_physical'):.6g} "
-        f"macro_gripper_rmse_physical="
-        f"{number(macro, 'validation_gripper_rmse_physical'):.6g} "
+        f"micro_action_rmse_normalized="
+        f"{number(micro, 'validation_action_rmse_normalized'):.6g} "
+        f"macro_action_rmse_normalized="
+        f"{number(macro, 'validation_action_rmse_normalized'):.6g} "
+        f"micro_action_rmse_source_native="
+        f"{number(micro, 'validation_action_rmse_source_native'):.6g} "
+        f"macro_action_rmse_source_native="
+        f"{number(macro, 'validation_action_rmse_source_native'):.6g} "
+        f"micro_gripper_rmse_normalized="
+        f"{number(micro, 'validation_gripper_rmse_normalized'):.6g} "
+        f"macro_gripper_rmse_normalized="
+        f"{number(macro, 'validation_gripper_rmse_normalized'):.6g} "
+        f"micro_gripper_rmse_source_native="
+        f"{number(micro, 'validation_gripper_rmse_source_native'):.6g} "
+        f"macro_gripper_rmse_source_native="
+        f"{number(macro, 'validation_gripper_rmse_source_native'):.6g} "
         f"micro_event_f1="
         f"{number(micro, 'validation_decoded_gripper_event_f1'):.6g} "
         f"macro_event_f1="
@@ -471,8 +487,12 @@ def _emit_training_window(
     return values
 
 
-def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
-    return {
+def _data_state(
+    bundle: MainlineDataBundle,
+    config: ExperimentConfig,
+    identity: CheckpointIdentity,
+) -> dict[str, object]:
+    state: dict[str, object] = {
         "splits": {name: list(ids) for name, ids in bundle.splits.items()},
         "split_metadata": bundle.split_metadata,
         "data_profile": bundle.data_profile_metadata,
@@ -484,6 +504,16 @@ def _data_state(bundle: MainlineDataBundle) -> dict[str, object]:
         "state_normalizer": bundle.state_normalizer.to_dict(),
         "goal": bundle.goal.metadata,
     }
+    state["deployment_abi"] = build_deployment_abi(
+        config,
+        identity,
+        action_normalizer=bundle.action_normalizer,
+        state_normalizer=bundle.state_normalizer,
+        data_profile=bundle.data_profile_metadata,
+        gripper_indices=tuple(int(value) for value in bundle.gripper_indices),
+        goal_metadata=bundle.goal.metadata,
+    )
+    return state
 
 
 def _optimizer_group_context(
@@ -516,16 +546,16 @@ def _module_parameter_context(
     modules = {
         "complete_model": model,
         "observation": model.observation,
-        "grounding_g1_g2_g3": model.top.grounding_blocks,
-        "global_object_grounder": model.top.grounder,
-        "stateless_intent": model.top.intent,
-        "future_dynamics_w1_w2": model.top.dynamics,
-        "factual_precision_p1": model.factual_reader,
-        "future_effect_p2": model.top.effect_reader,
-        "policy_compiler_p3": model.top.plan_compiler,
+        "grounding_g1_g2_g3": model.grounding.blocks,
+        "global_object_grounder": model.grounding.grounder,
+        "stateless_intent": model.intent.organizer,
+        "future_dynamics_w1_w2": model.world.dynamics,
+        "factual_precision_p1": model.p1.factual_reader,
+        "future_effect_p2": model.policy_compiler.effect_reader,
+        "policy_compiler_p3": model.policy_compiler.plan_compiler,
         "controlled_transition": model.transition,
-        "retained_bottom": model.bottom,
-        "retained_bottom_decoder": model.bottom.decoder,
+        "retained_bottom": model.execution_bottom,
+        "retained_bottom_decoder": model.execution_bottom.decoder,
     }
     result: dict[str, dict[str, int]] = {}
     for name, module in modules.items():
@@ -795,7 +825,7 @@ def _wrong_action_world_cache(
         dtype=dtype,
         enabled=autocast_enabled,
     ):
-        wrong_world, _ = model.top.build_candidate_world(
+        wrong_world, _ = model.world.materialize(
             belief=cache.top.belief,
             action_condition=wrong_condition,
             collect_diagnostics=False,
@@ -912,7 +942,8 @@ def _validation_action_estimator_match(
     flow_state = sample_flow_matching(
         batch.action_target.normalized,
         action_state=batch.online.history.action_state,
-        codec=model.action_codec,
+        codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
+        codec=model.outlet_adapter.codec,
         distribution=config.bottom.flow_time_distribution,
         generator=generator,
     )
@@ -951,9 +982,10 @@ def _validation_action_estimator_match(
     clean_physical = noisy_physical + (1.0 - alpha) * (
         endpoint_output.bottom.physical_velocity.to(dtype=noisy_physical.dtype)
     )
-    estimator_action = model.action_codec.decode(
+    estimator_action = model.outlet_adapter.decode(
         clean_physical,
         cache.history.action_state,
+        codec_gripper_boundary=cache.history.codec_gripper_boundary,
     ).float()
     estimator_condition = PhysicalActionCondition.from_horizon_action(
         estimator_action.detach(),
@@ -964,7 +996,7 @@ def _validation_action_estimator_match(
         dtype=dtype,
         enabled=autocast_enabled,
     ):
-        estimator_top, _ = model.top.refine_deployment_world(
+        estimator_top, _ = model.world.refine_deployment_world(
             cache.top,
             action_condition=estimator_condition,
             collect_diagnostics=False,
@@ -1053,6 +1085,18 @@ def _validation_action_estimator_match(
 
 
 @torch.no_grad()
+def _execution_ablation_modes(config: ExperimentConfig) -> tuple[str, ...]:
+    modes = (
+        "hard",
+        "neutral",
+        "full_capacity",
+        "three_basis_reduction",
+    )
+    if config.bottom.bspine_implementation != BSPINE_DISABLED_IMPLEMENTATION:
+        return (*modes, "spine_zero")
+    return modes
+
+
 def _validate(
     *,
     engine: MainlineTrainingEngine,
@@ -1067,6 +1111,8 @@ def _validate(
         device=device,
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
+        gripper_output_mode=config.bottom.gripper_output_mode,
+        arm_flow_mode=config.bottom.arm_flow_mode,
     )
     is_multitask = bool(getattr(bundle, "is_multitask", False))
     task_deployment = (
@@ -1076,6 +1122,8 @@ def _validate(
             device=device,
             gripper_event_threshold=config.objectives.gripper_event_threshold,
             arm_motion_threshold=config.objectives.arm_motion_threshold,
+            gripper_output_mode=config.bottom.gripper_output_mode,
+            arm_flow_mode=config.bottom.arm_flow_mode,
         )
         if is_multitask
         else None
@@ -1086,12 +1134,16 @@ def _validate(
         device=device,
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
+        gripper_output_mode=config.bottom.gripper_output_mode,
+        arm_flow_mode=config.bottom.arm_flow_mode,
     )
     core_attribution = MatchedCoreAttributionAccumulator.from_action_normalizer(
         bundle.action_normalizer,
         device=device,
         gripper_event_threshold=config.objectives.gripper_event_threshold,
         arm_motion_threshold=config.objectives.arm_motion_threshold,
+        gripper_output_mode=config.bottom.gripper_output_mode,
+        arm_flow_mode=config.bottom.arm_flow_mode,
     )
     estimator_matches = DeviceMetricAccumulator()
     proposal_ablations = DeviceMetricAccumulator()
@@ -1204,12 +1256,11 @@ def _validate(
             # preserves matched cross-version/action-ablation comparisons.
             generator=_owned_generator(device, 37_237 + batch_index),
         )
-        target_physical = engine.model.action_codec.encode(
-            batch.action_target.normalized,
-            batch.online.history.action_state,
-        )
         motion_target = (
-            engine.model.action_codec.split(target_physical).arm_delta.float().norm(dim=-1)
+            engine.model.outlet_adapter.arm_motion_magnitude(
+                batch.action_target.normalized,
+                batch.online.history.action_state,
+            )
             >= float(config.objectives.arm_motion_threshold)
         )
         deployment.update(
@@ -1219,8 +1270,11 @@ def _validate(
             motion_target=motion_target,
             physical_field=prediction.physical_field,
             gripper_decode_delta_blend=(
-                engine.model.action_codec.decode_delta_blend
+                engine.model.outlet_adapter.decode_delta_blend
             ),
+            gripper_command_logits=prediction.gripper_command_logits,
+            gripper_command=prediction.gripper_command,
+            gripper_output_mode=config.bottom.gripper_output_mode,
         )
         if task_deployment is not None:
             if validation_task_indices is None:
@@ -1233,8 +1287,11 @@ def _validate(
                 motion_target=motion_target,
                 physical_field=prediction.physical_field,
                 gripper_decode_delta_blend=(
-                    engine.model.action_codec.decode_delta_blend
+                    engine.model.outlet_adapter.decode_delta_blend
                 ),
+                gripper_command_logits=prediction.gripper_command_logits,
+                gripper_command=prediction.gripper_command,
+                gripper_output_mode=config.bottom.gripper_output_mode,
             )
         if diagnostics:
             sampling_diagnostic_batches += 1
@@ -1260,7 +1317,7 @@ def _validate(
                 weight=batch.online.batch,
             )
             p2_intervention_batches += 1
-            reader = engine.model.top.effect_reader
+            reader = engine.model.policy_compiler.effect_reader
             for mode in reader.INTERVENTION_MODES:
                 reader.set_eval_intervention(mode)
                 try:
@@ -1292,7 +1349,7 @@ def _validate(
                 config,
                 dtype=dtype,
             )
-            consequence_module = engine.model.top.consequence
+            consequence_module = engine.model.policy_compiler.consequence
             transition_module = engine.model.transition
             identity_actions: dict[str, torch.Tensor] = {}
             for mode in CORE_ATTRIBUTION_MODES:
@@ -1472,12 +1529,7 @@ def _validate(
                     primary_error / action_scale
                 ).square().mean(),
             }
-            for mode in (
-                "hard",
-                "neutral",
-                "full_capacity",
-                "three_basis_reduction",
-            ):
+            for mode in _execution_ablation_modes(config):
                 execution = sample_cached_action(
                     engine.model,
                     refined_cache,
@@ -1498,6 +1550,44 @@ def _validate(
                 execution_rows[f"{stem}_action_delta_mse_physical"] = (
                     delta / action_scale
                 ).square().mean()
+                if mode == "spine_zero":
+                    physical_primary_error = primary_error / action_scale
+                    physical_error = error / action_scale
+                    physical_delta = delta / action_scale
+                    for band_name, band_slice in (
+                        ("1_4", slice(0, 4)),
+                        ("5_12", slice(4, 12)),
+                        ("13_24", slice(12, 24)),
+                    ):
+                        for owner, channel_slice in (
+                            ("arm", slice(None, -1)),
+                            ("gripper", slice(-1, None)),
+                        ):
+                            surface = f"{stem}_{owner}_band_{band_name}"
+                            for chart, primary_value, value, delta_value in (
+                                (
+                                    "normalized",
+                                    primary_error,
+                                    error,
+                                    delta,
+                                ),
+                                (
+                                    "physical",
+                                    physical_primary_error,
+                                    physical_error,
+                                    physical_delta,
+                                ),
+                            ):
+                                selection = (slice(None), band_slice, channel_slice)
+                                execution_rows[
+                                    f"{surface}_primary_mse_{chart}"
+                                ] = primary_value[selection].square().mean()
+                                execution_rows[f"{surface}_mse_{chart}"] = (
+                                    value[selection].square().mean()
+                                )
+                                execution_rows[
+                                    f"{surface}_action_delta_mse_{chart}"
+                                ] = delta_value[selection].square().mean()
                 del execution
             execution_ablations.update(
                 execution_rows,
@@ -1610,12 +1700,7 @@ def _validate(
         result["validation_execution_primary_rmse_physical"] = float(
             primary_physical**0.5
         )
-        for mode in (
-            "hard",
-            "neutral",
-            "full_capacity",
-            "three_basis_reduction",
-        ):
+        for mode in _execution_ablation_modes(config):
             name = f"execution_{mode}"
             normalized = rows[f"{name}_mse_normalized"]
             physical = rows[f"{name}_mse_physical"]
@@ -1633,6 +1718,27 @@ def _validate(
             result[f"validation_{name}_action_delta_rmse_physical"] = float(
                 rows[f"{name}_action_delta_mse_physical"] ** 0.5
             )
+            if mode == "spine_zero":
+                for band_name in ("1_4", "5_12", "13_24"):
+                    for owner in ("arm", "gripper"):
+                        surface = f"{name}_{owner}_band_{band_name}"
+                        for chart in ("normalized", "physical"):
+                            primary_surface = rows[f"{surface}_primary_mse_{chart}"]
+                            counterfactual_surface = rows[f"{surface}_mse_{chart}"]
+                            result[f"validation_{surface}_primary_rmse_{chart}"] = float(
+                                primary_surface**0.5
+                            )
+                            result[f"validation_{surface}_rmse_{chart}"] = float(
+                                counterfactual_surface**0.5
+                            )
+                            result[
+                                f"validation_{surface}_mse_gain_vs_primary_{chart}"
+                            ] = float(primary_surface - counterfactual_surface)
+                            result[
+                                f"validation_{surface}_action_delta_rmse_{chart}"
+                            ] = float(
+                                rows[f"{surface}_action_delta_mse_{chart}"] ** 0.5
+                            )
     multitask = None if task_deployment is None else task_deployment.report(result)
     return ValidationReport(metrics=result, multitask=multitask)
 
@@ -1730,16 +1836,25 @@ def main() -> None:
         validation_checkpoint_resolved = str(Path(validation_checkpoint).resolve())
         engine.global_step = validation_state.global_step
     elif args.migrate_bottom is not None:
-        report = migrate_bottom_only(args.migrate_bottom, model, identity=identity)
+        report = migrate_bottom_only(
+            args.migrate_bottom,
+            model,
+            identity=identity,
+            config=config,
+        )
         print(
             "[mainline-migration] "
             f"loaded={len(report.loaded)} missing={len(report.missing)} "
-            f"shape_mismatch={len(report.shape_mismatch)} rejected={len(report.rejected)}",
+            f"shape_mismatch={len(report.shape_mismatch)} "
+            f"dtype_mismatch={len(report.dtype_mismatch)} "
+            f"rejected={len(report.rejected)}",
             flush=True,
         )
     context = {
         "config": config.as_dict(),
         "identity": identity.as_dict(),
+        "component_selection": model.selection.as_dict(),
+        "component_abi_revision": model.selection.abi_revision,
         "optimizer_roles": ownership.role_counts,
         "optimizer_groups": _optimizer_group_context(optimizer, config),
         "module_parameters": _module_parameter_context(model),
@@ -1893,7 +2008,7 @@ def main() -> None:
             step=validation_state.global_step,
         )
         return
-    data_state = _data_state(bundle)
+    data_state = _data_state(bundle, config, identity)
     for epoch in range(start_epoch, config.optimizer.epochs + 1):
         train_batch_sampler = getattr(train_loader, "batch_sampler", None)
         set_epoch = getattr(train_batch_sampler, "set_epoch", None)

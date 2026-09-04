@@ -9,6 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from ..config import ExperimentConfig
+from ..model.component_contracts import legacy_named_parameters, modular_to_legacy_name
 
 ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("observation", ("observation.",)),
@@ -82,14 +83,25 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "bottom.decoder.action_norm.",
             "bottom.decoder.velocity_head.",
+            # CALVIN's discrete command-state readout is a sibling of the
+            # retained physical/motion heads.  Keep it in the same bottom
+            # decoder owner so it receives the existing 0.7x LR/decay policy
+            # while still being covered exactly once by the optimizer audit.
+            "bottom.decoder.gripper_command_head.",
             "bottom.decoder.motion_head.",
         ),
     ),
 )
 
+OPTIONAL_ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("bottom_spine", ("bottom.decoder.spine.",)),
+)
+ALL_ROLE_PREFIXES = (*OPTIONAL_ROLE_PREFIXES, *ROLE_PREFIXES)
+
 BOTTOM_DECODER_ROLES = frozenset(
     {
         "bottom_query",
+        "bottom_spine",
         "bottom_evidence_adapter",
         "bottom_policy_bridge",
         "bottom_organizer",
@@ -117,7 +129,16 @@ def role_lr_scale(role: str, config: ExperimentConfig) -> float:
 
 
 def parameter_role(name: str) -> str:
-    for role, prefixes in ROLE_PREFIXES:
+    # The optimizer ABI is intentionally expressed in the frozen legacy
+    # logical namespace.  Accepting a final registered path here is useful for
+    # diagnostics, but ownership and ordering always resolve through the same
+    # explicit map.
+    if not name.startswith(("top.", "bottom.", "observation.", "transition.", "history_proposal.", "factual_reader.")):
+        try:
+            name = modular_to_legacy_name(name)
+        except KeyError:
+            pass
+    for role, prefixes in ALL_ROLE_PREFIXES:
         if any(name.startswith(prefix) for prefix in prefixes):
             return role
     if name.startswith("top.teacher."):
@@ -134,6 +155,10 @@ def parameter_uses_v120_no_decay(name: str) -> bool:
     separated because their forward parameterization is scale invariant.
     """
 
+    try:
+        name = modular_to_legacy_name(name)
+    except KeyError:
+        pass
     if not name.startswith("bottom.decoder.operator_contractions."):
         return False
     return name.endswith((".basis_raw", ".depth_weight", ".depth_bias"))
@@ -159,7 +184,7 @@ def build_optimizer(
     trainable: list[str] = []
     frozen: list[str] = []
     seen: set[int] = set()
-    for name, parameter in model.named_parameters():
+    for name, parameter in legacy_named_parameters(model):
         if not parameter.requires_grad:
             frozen.append(name)
             continue
@@ -174,7 +199,11 @@ def build_optimizer(
         grouped.setdefault((role, decay), []).append(parameter)
         grouped_names.setdefault((role, decay), []).append(name)
         trainable.append(name)
-    expected = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
+    expected = {
+        id(parameter)
+        for _, parameter in legacy_named_parameters(model)
+        if parameter.requires_grad
+    }
     if seen != expected:
         raise ValueError("optimizer ownership did not cover every trainable parameter")
     optimizer_groups: list[dict[str, object]] = []
@@ -201,6 +230,10 @@ def build_optimizer(
         role: sum(len(grouped.get((role, decay), ())) for decay in (False, True))
         for role, _ in ROLE_PREFIXES
     }
+    for role, _ in OPTIONAL_ROLE_PREFIXES:
+        count = sum(len(grouped.get((role, decay), ())) for decay in (False, True))
+        if count:
+            role_counts[role] = count
     return optimizer, OptimizerOwnership(
         trainable_names=tuple(trainable),
         frozen_names=tuple(frozen),
@@ -284,11 +317,24 @@ def gradient_diagnostics(
     if stage not in {"raw", "postlocal", "postglobal"}:
         raise ValueError("gradient stage must be raw/postlocal/postglobal")
 
+    named_parameters = legacy_named_parameters(model)
     rows: dict[str, list[Tensor]] = {role: [] for role, _ in ROLE_PREFIXES}
-    for name, parameter in model.named_parameters():
+    for role, _ in OPTIONAL_ROLE_PREFIXES:
+        if any(
+            parameter.requires_grad and parameter_role(name) == role
+            for name, parameter in named_parameters
+        ):
+            rows[role] = []
+    spine_branches: dict[str, list[Tensor]] = {"coarse": [], "detail": []}
+    for name, parameter in named_parameters:
         if not parameter.requires_grad or parameter.grad is None:
             continue
-        rows[parameter_role(name)].append(parameter.grad.detach())
+        role = parameter_role(name)
+        rows[role].append(parameter.grad.detach())
+        if role == "bottom_spine":
+            for branch in spine_branches:
+                if name.startswith(f"bottom.decoder.spine.{branch}_lifts."):
+                    spine_branches[branch].append(parameter.grad.detach())
     reference = next(model.parameters())
     result: dict[str, Tensor] = {}
     for role, values in rows.items():
@@ -304,6 +350,20 @@ def gradient_diagnostics(
             if values
             else reference.new_zeros((), dtype=torch.float32)
         )
+    if "bottom_spine" in rows:
+        for branch, values in spine_branches.items():
+            result[f"gradient_{stage}_bottom_spine_{branch}_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    values,
+                    norm_type=2.0,
+                    error_if_nonfinite=False,
+                    foreach=True,
+                )
+                .detach()
+                .float()
+                if values
+                else reference.new_zeros((), dtype=torch.float32)
+            )
     return result
 
 

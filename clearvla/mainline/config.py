@@ -17,6 +17,14 @@ from typing import Mapping, TypeVar, cast
 from clearvla.data.action_chart import resolve_action_state_profile
 
 from .manifest import ARCHITECTURE_MANIFEST
+from .v120_core.bspine import (
+    BSPINE0_BASIS_DIGEST,
+    BSPINE0_CONTROL_POINTS,
+    BSPINE0_DEGREE,
+    BSPINE0_IMPLEMENTATION,
+    BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_DISABLED_IMPLEMENTATION,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,7 @@ class DataConfig:
     camera_names: tuple[str, ...] = ("top", "wrist")
     data_profile: str = "identity_7d_pen"
     action_key: str = "action"
+    action_state_key: str = ""
     state_key: str = "qpos"
     top_camera_key: str = "observations/images/cam_high"
     wrist_camera_key: str = "observations/images/cam_right_wrist"
@@ -39,10 +48,19 @@ class DataConfig:
     image_open_file_capacity: int = 8
     cache_side: int = 336
     dinov2_model: str = "facebook/dinov2-base"
+    # CUDA attention kernels can choose a different numerical reduction path
+    # for different batch shapes (especially in bf16).  The existing DINO
+    # cache was built with 32 samples per encoder call; deployment must use
+    # the same reference shape to remain token-equivalent to training.
+    dinov2_reference_batch_size: int = 32
     split_mode: str = "ordered-counts"
     split_manifest: str = ""
     task_selection_manifest: str = ""
     normalizer_artifact: str = ""
+    # Optional source-side task filter.  It is applied before split resolution
+    # so a single CALVIN task can reuse the full /data cache namespace without
+    # copying or relinking HDF5 files.
+    task_filter: str = ""
     train_episodes: int = 63
     val_episodes: int = 5
     test_episodes: int = 5
@@ -89,9 +107,13 @@ class DataConfig:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"data.{name} must be a non-empty string")
+        if not isinstance(self.action_state_key, str):
+            raise ValueError("data.action_state_key must be a string")
         if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
             raise ValueError("data.camera_names must be a non-empty ordered unique tuple")
-        if any(not name or any(character in name for character in "/\\") for name in self.camera_names):
+        if any(
+            not name or any(character in name for character in "/\\") for name in self.camera_names
+        ):
             raise ValueError("camera names must be non-empty cache-safe identifiers")
         override_rows = tuple((str(name), str(key)) for name, key in self.camera_key_overrides)
         if len({name for name, _ in override_rows}) != len(override_rows):
@@ -105,10 +127,14 @@ class DataConfig:
                 raise ValueError("camera key override paths must be non-empty")
         if self.cache_side != 336:
             raise ValueError("the established decoded and DINO caches use 336x336 preprocessing")
+        if self.dinov2_reference_batch_size <= 0:
+            raise ValueError("data.dinov2_reference_batch_size must be positive")
         if self.image_store_mode not in {"decoded-cache", "hdf5-direct"}:
             raise ValueError("data.image_store_mode must be decoded-cache or hdf5-direct")
         if self.image_frame_lru_capacity < 0 or self.image_open_file_capacity <= 0:
             raise ValueError("image-store LRU capacity must be non-negative and files positive")
+        if not isinstance(self.task_filter, str):
+            raise ValueError("data.task_filter must be a string")
         if self.split_mode == "ordered-counts":
             if self.split_manifest or self.task_selection_manifest or self.normalizer_artifact:
                 raise ValueError(
@@ -126,8 +152,21 @@ class DataConfig:
                     "a bounded task selection requires one shared normalizer artifact, "
                     "and the artifact cannot be configured without the selection"
                 )
+        elif self.split_mode == "episode-manifest":
+            if not isinstance(self.split_manifest, str) or not self.split_manifest.strip():
+                raise ValueError("episode-manifest split requires data.split_manifest")
+            if (self.train_episodes, self.val_episodes, self.test_episodes) != (0, 0, 0):
+                raise ValueError(
+                    "episode-manifest membership cannot also use ordered episode counts"
+                )
+            if self.task_selection_manifest or self.normalizer_artifact:
+                raise ValueError(
+                    "episode-manifest split cannot use RDT task-selection or normalizer artifacts"
+                )
         else:
-            raise ValueError("data.split_mode must be ordered-counts or manifest")
+            raise ValueError(
+                "data.split_mode must be ordered-counts, manifest, or episode-manifest"
+            )
         if self.normalizer != "zscore":
             raise ValueError("the active action/state chart uses z-score normalization")
         if min(self.stride, self.num_workers) < 0 or self.stride == 0:
@@ -138,9 +177,7 @@ class DataConfig:
         if self.sampling_gripper_event_threshold is not None:
             threshold = float(self.sampling_gripper_event_threshold)
             if not math.isfinite(threshold) or threshold < 0.0:
-                raise ValueError(
-                    "sampling gripper event threshold must be finite and non-negative"
-                )
+                raise ValueError("sampling gripper event threshold must be finite and non-negative")
         if (
             self.information_uniform_fraction != 0.50
             or self.information_event_fraction != 0.125
@@ -310,12 +347,28 @@ class BottomConfig:
     controlled_delta_dropout: float = 0.0
     gripper_field_dim: int = 6
     physical_decode_delta_blend: float = 0.25
+    # Arm chart carried by the fixed 12-channel arm field.  Pen/RDT retain the
+    # historical absolute plus finite-difference chart.  CALVIN actions are
+    # already relative TCP commands, so both branches carry that command
+    # directly instead of manufacturing a second temporal derivative.
+    arm_flow_mode: str = "legacy_independent"
+    # Native deployment policy for the final gripper command.  Pen/RDT keep
+    # the continuous physical field; CALVIN owns an explicit two-class
+    # command-state head whose argmax is mapped to {-1,+1} by the adapter.
+    gripper_output_mode: str = "continuous"
+    # B-spine is a separately identified execution-bottom implementation.
+    # Disabled configs serialize none of these fields, preserving the exact
+    # Schema30 baseline config payload.  The enabled Schema31 config must name
+    # every fixed-chart identity field explicitly.
+    bspine_implementation: str = BSPINE_DISABLED_IMPLEMENTATION
+    bspine_degree: int = 0
+    bspine_control_points: int = 0
+    bspine_basis_digest: str = ""
+    bspine_spec_fingerprint: str = ""
 
     def validate(self) -> None:
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
-            raise ValueError(
-                "formal training uses the mirrored V120 beta_1_5_1 flow time"
-            )
+            raise ValueError("formal training uses the mirrored V120 beta_1_5_1 flow time")
         integer_fields = (
             self.evidence_depth,
             self.latent_dim,
@@ -363,6 +416,52 @@ class BottomConfig:
             raise ValueError("the resolved legacy physical action field has six gripper channels")
         if self.physical_decode_delta_blend != 0.25:
             raise ValueError("the resolved physical action decode blend is exactly 0.25")
+        if self.arm_flow_mode not in {
+            "legacy_independent",
+            "relative_command_direct",
+        }:
+            raise ValueError(
+                "bottom.arm_flow_mode must be legacy_independent or "
+                "relative_command_direct"
+            )
+        if self.gripper_output_mode not in {"continuous", "calvin_binary_command"}:
+            raise ValueError(
+                "bottom.gripper_output_mode must be continuous or calvin_binary_command"
+            )
+        if self.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
+            if (
+                int(self.bspine_degree) != 0
+                or int(self.bspine_control_points) != 0
+                or self.bspine_basis_digest
+                or self.bspine_spec_fingerprint
+            ):
+                raise ValueError(
+                    "disabled B-spine cannot carry an inactive degree, control count, "
+                    "basis digest or spec fingerprint"
+                )
+        elif self.bspine_implementation == BSPINE0_IMPLEMENTATION:
+            expected = (
+                BSPINE0_DEGREE,
+                BSPINE0_CONTROL_POINTS,
+                BSPINE0_BASIS_DIGEST,
+                BSPINE0_SPEC_FINGERPRINT,
+            )
+            actual = (
+                int(self.bspine_degree),
+                int(self.bspine_control_points),
+                str(self.bspine_basis_digest),
+                str(self.bspine_spec_fingerprint),
+            )
+            if actual != expected:
+                raise ValueError(
+                    "B-spine-0 must use the frozen cubic K=12 basis digest and "
+                    "spec fingerprint"
+                )
+        else:
+            raise ValueError(
+                "bottom.bspine_implementation must be disabled or "
+                f"{BSPINE0_IMPLEMENTATION}"
+            )
 
 
 @dataclass(frozen=True)
@@ -377,6 +476,9 @@ class ObjectiveConfig:
     flow_uncertainty: float = 0.005
     flow_refinement_sequence: float = 0.02
     proposal: float = 0.05
+    # CALVIN's discrete gripper command-state objective.  It is deliberately
+    # zero for the continuous Pen/RDT paths so their loss ledger is unchanged.
+    gripper_command: float = 0.0
     gripper_trajectory: float = 0.03
     motion: float = 0.03
     decoded_action: float = 0.08
@@ -438,11 +540,14 @@ class OptimizerConfig:
             raise ValueError("optimizer betas must be in [0,1)")
         if not 0.0 < self.min_lr_ratio <= 1.0:
             raise ValueError("min_lr_ratio must be in (0,1]")
-        if min(
-            self.history_proposal_lr_scale,
-            self.bottom_decoder_lr_scale,
-            self.bottom_capacity_relative_lr_scale,
-        ) <= 0.0:
+        if (
+            min(
+                self.history_proposal_lr_scale,
+                self.bottom_decoder_lr_scale,
+                self.bottom_capacity_relative_lr_scale,
+            )
+            <= 0.0
+        ):
             raise ValueError("optimizer role LR scales must be positive")
 
 
@@ -522,16 +627,63 @@ class ExperimentConfig:
         elif sampling_threshold is not None:
             if float(sampling_threshold) <= 0.0:
                 raise ValueError("non-Pen gripper event threshold must be positive")
-            if float(sampling_threshold) != float(
-                self.objectives.gripper_event_threshold
-            ):
+            if float(sampling_threshold) != float(self.objectives.gripper_event_threshold):
                 raise ValueError(
                     "non-Pen sampling, gripper trajectory and validation thresholds "
                     "must be identical"
                 )
+        elif self.data.split_mode == "episode-manifest":
+            raise ValueError(
+                "episode-manifest training requires an explicit source-chart "
+                "gripper-event threshold"
+            )
+        profile_grippers = tuple(int(value) for value in profile.gripper_indices)
+        mode = str(self.bottom.gripper_output_mode)
+        arm_mode = str(self.bottom.arm_flow_mode)
+        if profile.name == "calvin_relative_7d_v1":
+            if mode != "calvin_binary_command":
+                raise ValueError(
+                    "CALVIN profile requires bottom.gripper_output_mode="
+                    "calvin_binary_command"
+                )
+            if profile_grippers != (6,):
+                raise ValueError("CALVIN's binary command must own native action dimension 7")
+            if float(self.objectives.gripper_command) <= 0.0:
+                raise ValueError(
+                    "CALVIN binary command mode requires a positive objective.gripper_command"
+                )
+            if arm_mode != "relative_command_direct":
+                raise ValueError(
+                    "CALVIN relative-command profile requires bottom.arm_flow_mode="
+                    "relative_command_direct"
+                )
+        else:
+            if mode != "continuous":
+                raise ValueError(
+                    "calvin_binary_command is valid only for the CALVIN action profile"
+                )
+            if float(self.objectives.gripper_command) != 0.0:
+                raise ValueError(
+                    "objective.gripper_command must be zero for continuous Pen/RDT paths"
+                )
+            if arm_mode != "legacy_independent":
+                raise ValueError(
+                    "relative_command_direct is valid only for the CALVIN action profile"
+                )
 
     def as_dict(self) -> dict[str, object]:
-        return cast(dict[str, object], asdict(self))
+        payload = cast(dict[str, object], asdict(self))
+        bottom = cast(dict[str, object], payload["bottom"])
+        if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
+            for name in (
+                "bspine_implementation",
+                "bspine_degree",
+                "bspine_control_points",
+                "bspine_basis_digest",
+                "bspine_spec_fingerprint",
+            ):
+                bottom.pop(name)
+        return payload
 
     def digest(self, *, include_paths: bool = False) -> str:
         payload = self.as_dict()
@@ -595,7 +747,8 @@ def config_from_mapping(value: Mapping[str, object]) -> ExperimentConfig:
         raw_data = dict(raw_data)
         if "camera_names" in raw_data:
             raw_data["camera_names"] = tuple(  # type: ignore[index]
-                str(item) for item in raw_data["camera_names"]  # type: ignore[index]
+                str(item)
+                for item in raw_data["camera_names"]  # type: ignore[index]
             )
         if "camera_key_overrides" in raw_data:
             camera_keys = raw_data["camera_key_overrides"]

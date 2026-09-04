@@ -74,41 +74,43 @@ The recovery reference is V120 `long`, commit
 
 ```text
 capability:    object_intent_dynamics_323
-schema:        30
+schema:        30 (Schema28-core recovery ABI)
 topology:      3-2-3
 intervals:     4-8 / 8-16 / 16-32 / 32-48
 parameters:    measured and written per module at startup; never hard-coded
 ```
 
-Schema 29 and older are not exact-resume sources for schema 30. Formal runs
-start fresh unless the complete manifest, model, optimizer, scheduler and RNG
-identity matches. Bottom-only migration is explicit and emits a report.
+The local recovery overlay deliberately changes the top/training/runtime ABI
+identity while keeping the manifest schema at 30. Pre-recovery Schema29/30
+checkpoints are not exact-resume or migration inputs; any future run must start
+fresh with a new output directory and the complete current identity.
 
-Schema30 keeps Schema27's bounded typed W normalization and Schema29's
-detached self-conditioning/cache lifecycle while closing the current semantic
-boundaries. W reads only a compact current object belief plus normalized
-physical action interval means and their adjacent deltas. Goal, S values and
-coarse hidden tokens are absent from its API. P2 consumes an atomic
-CandidateWorld whose action-condition identity must match the current cache.
+The recovery path keeps W's compact physical-action API, but restores the
+Schema28 core semantics for the disputed S/W/camera/gripper boundaries. Training
+encodes the observation once, runs one formal velocity forward, and composes
+the loss once; it does not estimate a detached endpoint or rebuild W during
+training. Deployment remains the existing bounded two-pass correction: a
+proposal ODE, one W rebuild from its decoded proposal, then a refined ODE.
+Goal, S values and coarse hidden tokens remain absent from W's API, and P2
+continues to consume an atomic CandidateWorld whose action-condition identity
+matches the cache.
 
 Deployment and validation use one bounded outer correction: a complete ODE
 proposal pass, one W rebuild from the decoded 24-row proposal, then a second
 complete ODE pass from identical initial noise. The final action may differ
 from the action that conditioned W, so interval/delta mismatch is logged as a
 residual and is not labeled a fixed point. Training encodes observation/G/S/P1
-once, builds W from the coarse proposal, estimates one detached clean endpoint
-from the sampled noisy field, rebuilds W once, and sends the sole action/future
-loss through the formal second dynamic pass. The detached pass owns no loss or
-parameter gradient.
+once and sends the sole action/future loss through the formal dynamic pass.
 
-S uses complementary K/type owners with one outer RMS contract; typed W keeps
-learned chronology when the physical action is zero; camera support width is
-metadata rather than a cross-camera vote; and validity is applied once at the
-public W field boundary. Gripper trajectory supervision uses the exact deployed
-absolute and qpos-anchored cumulative-delta codec branches. Event masks select
-rows only and never reanchor deployment. Near-one capacity control remains FP32
-through contraction. No event gate, capacity quota, new loss weight or extra
-clipping stage is added.
+S uses the Schema28 fixed K/type mean and RMS contracts; typed W uses the
+action-carrier modulation; camera coordinate/transport reduction uses
+validity-times-support; and continuous gripper encode/decode/loss/evaluation
+share one profile-owned causal boundary. Pen/CALVIN use current action-state;
+RDT uses the previous executed command. Arm deltas and the network-facing
+`PhysicalActionCondition` remain current-state anchored. Event masks select
+rows only and never reanchor deployment. Near-one capacity control remains
+FP32 through contraction. No event gate, capacity quota, new loss weight or
+extra clipping stage is added.
 
 ## Runtime contract
 
@@ -125,6 +127,8 @@ clipping stage is added.
   forward, even after the optional diagnostic-batch budget is exhausted; they
   stay disabled during both ordinary deployment ODE passes.
 - Teacher builds once per training batch and zero times in deployment.
+- Training has one formal velocity call and one loss composition per batch; the
+  detached endpoint self-conditioning lifecycle is historical only.
 - P1 retains N=49 until each action/object query chooses a candidate; chunks
   are checkpointed rather than materializing the complete backward graph.
 - Batch-eight production process peak must remain at or below 22 GiB.
@@ -154,6 +158,26 @@ Pen formal batch-eight run:
 ```bash
 RUN_TAG=schema30_pen_b8_$(date +%Y%m%d_%H%M%S)
 CUDA_VISIBLE_DEVICES=0 \
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
+```
+
+The provisional Schema31 B-spine-0 candidate uses the dedicated Pen config.
+Run its smoke and formal job from fresh output directories; omitting
+`MAINLINE_CONFIG` would silently select the Schema30 baseline instead:
+
+```bash
+RUN_TAG=schema31_pen_bspine0_smoke_$(date +%Y%m%d_%H%M%S)
+CUDA_VISIBLE_DEVICES=0 \
+MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json \
+MAINLINE_BATCH_SIZE=8 \
+OUT_DIR="runs/${RUN_TAG}" \
+nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
+
+RUN_TAG=schema31_pen_bspine0_b8_$(date +%Y%m%d_%H%M%S)
+CUDA_VISIBLE_DEVICES=0 \
+MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json \
+MAINLINE_BATCH_SIZE=8 \
 OUT_DIR="runs/${RUN_TAG}" \
 nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
 ```
@@ -188,7 +212,11 @@ For final recovery assessment, add a verified local V120 baseline with
 `--recovery-baseline /path/to/v120_long.log --require-recovery`. Cross-version
 claims also require a matching split and action-normalizer fingerprint.
 
-## Release gates
+## Release gates and current state
+
+The gate list below is the checklist for a future fresh recovery run. The
+historical Schema30 gates were run before the recovery overlay and do not
+certify this dirty working tree; no recovery anchor has been launched.
 
 - full finite forward/backward and unique optimizer ownership;
 - teacher isolation, two matched ODE passes and one W-rebuild frequency checks;

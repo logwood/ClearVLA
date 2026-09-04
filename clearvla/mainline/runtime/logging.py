@@ -204,19 +204,12 @@ class JsonlRunLogger:
                 "learning_rate",
             )
         elif kind == "val":
-            # Validation is emitted only once per epoch, so retain the complete
-            # task surface in both physical and normalized coordinates.
+            # Validation is emitted only once per epoch.  Put the two truthful
+            # chart spaces first: normalized values are directly comparable
+            # across outlets, while source-native values preserve the producer
+            # chart without claiming SI units.  The historical ``*_physical``
+            # aliases remain at the end solely for dashboard compatibility.
             priority = (
-                "validation_action_rmse_physical",
-                "validation_first_rmse_physical",
-                "validation_first8_rmse_physical",
-                "validation_tail_rmse_physical",
-                "validation_tail_first_ratio_physical",
-                "validation_band_1_4_rmse_physical",
-                "validation_band_5_12_rmse_physical",
-                "validation_band_13_24_rmse_physical",
-                "validation_arm_rmse_physical",
-                "validation_gripper_rmse_physical",
                 "validation_action_rmse_normalized",
                 "validation_first_rmse_normalized",
                 "validation_first8_rmse_normalized",
@@ -227,6 +220,37 @@ class JsonlRunLogger:
                 "validation_band_13_24_rmse_normalized",
                 "validation_arm_rmse_normalized",
                 "validation_gripper_rmse_normalized",
+                "validation_action_rmse_source_native",
+                "validation_first_rmse_source_native",
+                "validation_first8_rmse_source_native",
+                "validation_tail_rmse_source_native",
+                "validation_tail_first_ratio_source_native",
+                "validation_band_1_4_rmse_source_native",
+                "validation_band_5_12_rmse_source_native",
+                "validation_band_13_24_rmse_source_native",
+                "validation_arm_rmse_source_native",
+                "validation_gripper_rmse_source_native",
+                "validation_codec_gripper_boundary_qpos_gap_rms_normalized",
+                "validation_codec_gripper_boundary_qpos_gap_rms_source_native",
+                "validation_action_state_gripper_abs_gt3_rate_normalized",
+                "validation_action_state_gripper_abs_gt5_rate_normalized",
+                "validation_gripper_command_accuracy",
+                "validation_gripper_command_precision",
+                "validation_gripper_command_recall",
+                "validation_gripper_command_f1",
+                "validation_gripper_command_rmse_physical",
+                # Compatibility aliases; keep them visible only after the
+                # normalized/source-native decision metrics above.
+                "validation_action_rmse_physical",
+                "validation_first_rmse_physical",
+                "validation_first8_rmse_physical",
+                "validation_tail_rmse_physical",
+                "validation_tail_first_ratio_physical",
+                "validation_band_1_4_rmse_physical",
+                "validation_band_5_12_rmse_physical",
+                "validation_band_13_24_rmse_physical",
+                "validation_arm_rmse_physical",
+                "validation_gripper_rmse_physical",
             )
         else:
             priority = ()
@@ -263,6 +287,7 @@ class JsonlRunLogger:
                         "loss_group_execution",
                         "loss_contrib_action_flow",
                         "loss_contrib_decoded_action",
+                        "loss_contrib_gripper_command",
                         "loss_contrib_gripper_trajectory",
                         "loss_contrib_motion",
                         "loss_contrib_future_dynamics",
@@ -303,13 +328,6 @@ class JsonlRunLogger:
                         "object_action_world_refinement_post_transport_rms",
                         "object_action_world_refinement_transport_change_rms",
                         "object_action_world_refinement_tag_identity_error",
-                        "training_self_conditioning_pass0_clean_action_rms",
-                        "training_self_conditioning_coarse_to_pass0_condition_rms",
-                        "training_self_conditioning_pass0_to_pass1_clean_action_delta_rms",
-                        "training_self_conditioning_pass1_world_interval_mismatch_rms",
-                        "training_self_conditioning_pass1_world_delta_mismatch_rms",
-                        "training_self_conditioning_pass0_action_flow_audit",
-                        "training_self_conditioning_pass1_action_flow_minus_pass0",
                         "object_w2_interval_adjacent_cosine",
                         "loss_future_semantic_common",
                         "loss_future_semantic_innovation",
@@ -360,6 +378,21 @@ class JsonlRunLogger:
                     ),
                 ),
                 (
+                    "b-spine",
+                    (
+                        "bottom_spine_coarse_field_rms",
+                        "bottom_spine_detail_field_rms",
+                        "bottom_spine_coarse_token_rms",
+                        "bottom_spine_detail_token_rms",
+                        "bottom_spine_update_rms",
+                        "bottom_spine_raw_token_rms",
+                        "bottom_spine_to_raw_token_rms_ratio",
+                        "bottom_spine_decomposition_max_abs",
+                        "gradient_raw_bottom_spine_coarse_l2",
+                        "gradient_raw_bottom_spine_detail_l2",
+                    ),
+                ),
+                (
                     "grad-owner",
                     (
                         "gradient_raw_observation_l2",
@@ -375,6 +408,7 @@ class JsonlRunLogger:
                         "gradient_raw_bottom_mmdit_l2",
                         "gradient_raw_bottom_execution_l2",
                         "gradient_raw_bottom_heads_l2",
+                        "gradient_raw_bottom_spine_l2",
                         "gradient_raw_global_l2",
                         "gradient_postlocal_global_l2",
                         "gradient_postglobal_global_l2",
@@ -406,8 +440,31 @@ class JsonlRunLogger:
         elif kind == "val":
             groups = (
                 (
+                    "command",
+                    (
+                        "validation_gripper_command_rmse_physical",
+                        "validation_gripper_command_accuracy",
+                        "validation_gripper_command_precision",
+                        "validation_gripper_command_recall",
+                        "validation_gripper_command_f1",
+                        "validation_gripper_command_predicted_positive_rate",
+                        "validation_gripper_command_target_positive_rate",
+                    ),
+                ),
+                (
+                    "boundary",
+                    (
+                        "validation_codec_gripper_boundary_qpos_gap_rms_normalized",
+                        "validation_codec_gripper_boundary_qpos_gap_rms_source_native",
+                        "validation_action_state_gripper_abs_gt3_rate_normalized",
+                        "validation_action_state_gripper_abs_gt5_rate_normalized",
+                    ),
+                ),
+                (
                     "gripper",
                     (
+                        "validation_gripper_rmse_normalized",
+                        "validation_gripper_rmse_source_native",
                         "validation_gripper_band_1_4_rmse_physical",
                         "validation_gripper_band_5_12_rmse_physical",
                         "validation_gripper_band_13_24_rmse_physical",
@@ -529,6 +586,20 @@ class JsonlRunLogger:
                         "validation_execution_full_capacity_action_delta_rmse_physical",
                         "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical",
                         "validation_execution_three_basis_reduction_action_delta_rmse_physical",
+                        "validation_execution_spine_zero_mse_gain_vs_primary_physical",
+                        "validation_execution_spine_zero_action_delta_rmse_physical",
+                    ),
+                ),
+                (
+                    "b-spine-ablation",
+                    tuple(
+                        name
+                        for band in ("1_4", "5_12", "13_24")
+                        for owner in ("arm", "gripper")
+                        for name in (
+                            f"validation_execution_spine_zero_{owner}_band_{band}_mse_gain_vs_primary_physical",
+                            f"validation_execution_spine_zero_{owner}_band_{band}_action_delta_rmse_physical",
+                        )
                     ),
                 ),
                 (

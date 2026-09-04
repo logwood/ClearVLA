@@ -17,7 +17,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..model.component_contracts import TerminalHeadOutput
 from ..model.routing import register_gradient_rms_metric
+from .bspine import BSpine0
 from .codec import NativeTimePhysicalActionTokenLift
 from .controller import EvidenceExecutionController
 from .decoder import ActionOnlyPhysicalVelocityHead
@@ -722,6 +724,106 @@ class TimeDomainMMDiTBlock(nn.Module):
         modules = (self.evidence_query, self.evidence_kv, self.evidence_out)
         return tuple(parameter for module in modules for parameter in module.parameters())
 
+
+class TerminalActionController(nn.Module):
+    """The sole owner and caller of every terminal action readout.
+
+    Candidate reads accept the already-normalized terminal state.  Final reads
+    additionally preserve the private gripper state, CALVIN masking, command
+    logits, optional historical event head, motion head, and diagnostic hooks
+    in their original expression order.
+    """
+
+    def __init__(
+        self,
+        *,
+        action_norm: nn.Module,
+        velocity_head: ActionOnlyPhysicalVelocityHead,
+        optional_command_head: nn.Sequential | None,
+        optional_event_head: nn.Sequential | None,
+        motion_head: nn.Sequential,
+        arm_dim: int,
+    ) -> None:
+        super().__init__()
+        self.action_norm = action_norm
+        self.velocity_head = velocity_head
+        self.optional_command_head = optional_command_head
+        self.optional_event_head = optional_event_head
+        self.motion_head = motion_head
+        self.arm_dim = int(arm_dim)
+
+    def normalize(self, action: Tensor) -> Tensor:
+        return self.action_norm(action)
+
+    def predict_candidate_velocity(self, normalized_terminal_state: Tensor) -> Tensor:
+        return self.velocity_head(normalized_terminal_state)
+
+    def read_heads(
+        self,
+        normalized_terminal_state: Tensor,
+        *,
+        collect_diagnostics: bool,
+        collect_gripper_diagnostics: bool | None = None,
+    ) -> TerminalHeadOutput:
+        if collect_gripper_diagnostics is None:
+            collect_gripper_diagnostics = collect_diagnostics
+        pred_velocity, gripper_state, gripper_gate = (
+            self.velocity_head.forward_with_gripper_state(normalized_terminal_state)
+        )
+        command_logits = (
+            self.optional_command_head(gripper_state)
+            if self.optional_command_head is not None
+            else None
+        )
+        if command_logits is not None:
+            arm_channels = 2 * int(self.arm_dim)
+            pred_velocity = torch.cat(
+                (
+                    pred_velocity[..., :arm_channels],
+                    pred_velocity[..., arm_channels:] * 0.0,
+                ),
+                dim=-1,
+            )
+        metrics: dict[str, Tensor] = {}
+        if collect_gripper_diagnostics:
+            gripper_state_delta = gripper_state - normalized_terminal_state
+            metrics = {
+                "gripper_private_gate_rms": gripper_gate.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt(),
+                "gripper_private_state_delta_rms": (
+                    gripper_state_delta.detach().float()
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "gripper_private_gate_tensor": gripper_gate,
+                "gripper_private_state_tensor": gripper_state,
+                "gripper_private_state_delta_tensor": gripper_state_delta,
+            }
+            if self.training:
+                register_gradient_rms_metric(
+                    gripper_state,
+                    metrics,
+                    "gradient_tensor_gripper_private_state_rms",
+                )
+        event_logits = (
+            self.optional_event_head(gripper_state)
+            if self.optional_event_head is not None
+            else None
+        )
+        motion_logits = self.motion_head(normalized_terminal_state).squeeze(-1)
+        return TerminalHeadOutput(
+            physical_velocity=pred_velocity,
+            motion_logits=motion_logits,
+            command_logits=command_logits,
+            event_logits=event_logits,
+            diagnostics=metrics,
+        )
+
+
 class EvidenceLatentMMDiTActionDecoder(nn.Module):
     """Deterministic latent organizer followed by native-time MMDiT blocks."""
 
@@ -736,6 +838,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         self.evidence_adapter = EvidenceViewAdapter(config)
         self.organizer = EvidenceConditionOrganizer(config)
         self.noisy_lift = NativeTimePhysicalActionTokenLift(config)
+        # B-spine is installed only by the selected Schema31 execution-bottom
+        # factory, after every baseline decoder owner has been constructed.
+        # Keeping ``None`` here preserves Schema30 registration and RNG exactly.
+        self.spine: BSpine0 | None = None
         self.trajectory_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         # Retain the legacy module name for checkpoint compatibility.  The
         # proposal is evidence, not a second direct action writer.
@@ -885,19 +991,42 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             "execution_progress", torch.zeros((), dtype=torch.float32), persistent=True
         )
         self._execution_progress_value = 0.0
-        self.action_norm = nn.LayerNorm(h, elementwise_affine=False)
-        self.velocity_head = ActionOnlyPhysicalVelocityHead(config)
-        self.event_head: nn.Sequential | None = nn.Sequential(
+        action_norm = nn.LayerNorm(h, elementwise_affine=False)
+        velocity_head = ActionOnlyPhysicalVelocityHead(config)
+        self.gripper_output_mode = str(
+            getattr(config, "gripper_output_mode", "continuous")
+        )
+        if self.gripper_output_mode not in {"continuous", "calvin_binary_command"}:
+            raise ValueError(
+                "decoder gripper_output_mode must be continuous or calvin_binary_command"
+            )
+        # Keep the command-state branch explicit and separate from the legacy
+        # continuous field.  It is only materialized for CALVIN, so continuous
+        # Pen/RDT construction and parameter inventory remain unchanged.
+        optional_command_head: nn.Sequential | None = (
+            nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 2))
+            if self.gripper_output_mode == "calvin_binary_command"
+            else None
+        )
+        optional_event_head: nn.Sequential | None = nn.Sequential(
             nn.LayerNorm(h), nn.Linear(h, 3)
         )
-        self.motion_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
+        motion_head = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, 1))
+        self.terminal_controller = TerminalActionController(
+            action_norm=action_norm,
+            velocity_head=velocity_head,
+            optional_command_head=optional_command_head,
+            optional_event_head=optional_event_head,
+            motion_head=motion_head,
+            arm_dim=self.arm_dim,
+        )
         self._initialize_outputs(config)
         if not bool(hidden_event_head):
             # The active mainline classifies events only after its deployed
             # physical codec.  Construct and initialize the historical head
             # first so removing its state does not perturb retained weights or
             # the post-construction RNG stream.
-            self.event_head = None
+            self.terminal_controller.optional_event_head = None
 
     def _initialize_outputs(self, config: Any) -> None:
         # Match the early deterministic MMDiT decoder: action readouts start
@@ -905,77 +1034,32 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # keeps the migration from changing the initial flow scale merely
         # because the head class is shared with newer decoders.
         std = float(getattr(config, "latent_cvae_output_init_std", 1e-3))
-        for module in self.velocity_head.output_layers():
+        terminal = self.terminal_controller
+        for module in terminal.velocity_head.output_layers():
             if std > 0.0:
                 nn.init.normal_(module.weight, mean=0.0, std=std)
             else:
                 nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
-        if self.event_head is not None:
-            event_output = self.event_head[-1]
+        if terminal.optional_event_head is not None:
+            event_output = terminal.optional_event_head[-1]
             if not isinstance(event_output, nn.Linear):
                 raise TypeError("event head output must remain a linear layer")
             nn.init.zeros_(event_output.weight)
             nn.init.zeros_(event_output.bias)
-        motion_output = self.motion_head[-1]
+        if terminal.optional_command_head is not None:
+            command_output = terminal.optional_command_head[-1]
+            if not isinstance(command_output, nn.Linear):
+                raise TypeError("gripper command head output must remain a linear layer")
+            # A neutral zero-logit start means the new branch cannot inject a
+            # preferred open/close command before it has seen CALVIN loss.
+            nn.init.zeros_(command_output.weight)
+            nn.init.zeros_(command_output.bias)
+        motion_output = terminal.motion_head[-1]
         if not isinstance(motion_output, nn.Linear):
             raise TypeError("motion head output must remain a linear layer")
         nn.init.zeros_(motion_output.weight)
         nn.init.zeros_(motion_output.bias)
-
-    def _read_output_heads(
-        self,
-        action: Tensor,
-        *,
-        collect_diagnostics: bool,
-        collect_gripper_diagnostics: bool | None = None,
-    ) -> tuple[Tensor, Tensor | None, Tensor, dict[str, Tensor]]:
-        """Read the field/event state with an independently gated health surface.
-
-        Training execution supervision needs candidate tensors on every batch,
-        while the gripper-private state/VJP scalars are sampled only on the
-        caller's existing diagnostic cadence.  The explicit second flag keeps
-        those concerns from being coupled.
-        """
-
-        if collect_gripper_diagnostics is None:
-            collect_gripper_diagnostics = collect_diagnostics
-        pred_velocity, gripper_state, gripper_gate = (
-            self.velocity_head.forward_with_gripper_state(action)
-        )
-        metrics: dict[str, Tensor] = {}
-        if collect_gripper_diagnostics:
-            gripper_state_delta = gripper_state - action
-            metrics = {
-                "gripper_private_gate_rms": gripper_gate.detach()
-                .float()
-                .square()
-                .mean()
-                .sqrt(),
-                "gripper_private_state_delta_rms": (
-                    gripper_state_delta.detach().float()
-                )
-                .square()
-                .mean()
-                .sqrt(),
-                # These two live tensors remain inside the in-memory bottom
-                # output only on diagnostic batches.  The loss surface reduces
-                # them by target event context; no tensor dump is serialized.
-                "gripper_private_gate_tensor": gripper_gate,
-                "gripper_private_state_tensor": gripper_state,
-                "gripper_private_state_delta_tensor": gripper_state_delta,
-            }
-            if self.training:
-                register_gradient_rms_metric(
-                    gripper_state,
-                    metrics,
-                    "gradient_tensor_gripper_private_state_rms",
-                )
-        event_logits = (
-            self.event_head(gripper_state) if self.event_head is not None else None
-        )
-        motion_logits = self.motion_head(action).squeeze(-1)
-        return pred_velocity, event_logits, motion_logits, metrics
 
     def set_execution_training_step(self, global_step: int) -> float:
         """Open execution controls gradually without changing the host warm-up."""
@@ -1025,6 +1109,15 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # non-identity update. Casting this interpolation back to BF16 would
         # recreate the exact-one dead zone even though the head itself is FP32.
         return 1.0 - progress * (1.0 - learned_fp32.clamp(0.0, 1.0))
+
+    def install_spine(self, spine: BSpine0) -> None:
+        """Install the selected numerical view after baseline construction."""
+
+        if self.spine is not None:
+            raise RuntimeError("the execution decoder already owns a B-spine")
+        if not isinstance(spine, BSpine0):
+            raise TypeError("execution decoder spine must be BSpine0")
+        self.spine = spine
 
     def set_execution_eval_ablation(
         self,
@@ -1697,7 +1790,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     identity_boundary=identity_boundary,
                     prepared_factors=probe_factors,
                 )
-                candidate_velocity = self.velocity_head(self.action_norm(candidate_action))
+                candidate_velocity = self.terminal_controller.predict_candidate_velocity(
+                    self.terminal_controller.normalize(candidate_action)
+                )
                 predictions[:, candidate_index].index_copy_(0, rows, candidate_velocity)
         return predictions.detach(), probe_mask, operation_rows.mean()
 
@@ -1768,8 +1863,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 candidate_action = candidate_action.index_copy(0, rows, updated)
             candidate_actions.append(candidate_action)
         action_stack = torch.stack(candidate_actions, dim=1)
-        candidate_velocity = self.velocity_head(
-            self.action_norm(action_stack.reshape(-1, *action_stack.shape[2:]))
+        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
+            self.terminal_controller.normalize(
+                action_stack.reshape(-1, *action_stack.shape[2:])
+            )
         ).reshape(
             batch,
             candidate_count,
@@ -2084,7 +2181,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         hard_dwell_rows: list[Tensor] = []
         terminal_probability_rows: list[Tensor] = []
         hard_terminal_rows: list[Tensor] = []
-        prefix_velocity_rows: list[Tensor] = [self.velocity_head(self.action_norm(action))]
+        prefix_velocity_rows: list[Tensor] = [
+            self.terminal_controller.predict_candidate_velocity(
+                self.terminal_controller.normalize(action)
+            )
+        ]
         candidate_prediction_rows: list[Tensor] = []
         candidate_mask_rows: list[Tensor] = []
         value_field_rows: list[Tensor] = []
@@ -2135,7 +2236,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         ),
                         "action_token_norm": action.detach().float().norm(dim=-1).mean(),
                     }
-                    idle_velocity = self.velocity_head(self.action_norm(action))
+                    idle_velocity = self.terminal_controller.predict_candidate_velocity(
+                        self.terminal_controller.normalize(action)
+                    )
                     candidate_prediction_rows.append(
                         idle_velocity[:, None].expand(-1, candidate_count, -1, -1).detach()
                     )
@@ -2515,7 +2618,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             value_mask_rows.append(probe_mask)
             probe_operation_rows.append(probe_operation_count)
             block_rows.append(committed_metrics)
-            prefix_velocity_rows.append(self.velocity_head(self.action_norm(action)))
+            prefix_velocity_rows.append(
+                self.terminal_controller.predict_candidate_velocity(
+                    self.terminal_controller.normalize(action)
+                )
+            )
             feedback = action - block_input
 
         return {
@@ -2559,14 +2666,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         collect_diagnostics: bool = True,
         collect_gripper_diagnostics: bool | None = None,
     ) -> dict[str, Tensor]:
-        action = self.action_norm(result["action"])
-        pred_velocity, event_logits, motion_logits, gripper_metrics = (
-            self._read_output_heads(
-                action,
-                collect_diagnostics=collect_diagnostics,
-                collect_gripper_diagnostics=collect_gripper_diagnostics,
-            )
+        action = self.terminal_controller.normalize(result["action"])
+        terminal = self.terminal_controller.read_heads(
+            action,
+            collect_diagnostics=collect_diagnostics,
+            collect_gripper_diagnostics=collect_gripper_diagnostics,
         )
+        pred_velocity = terminal.physical_velocity
+        event_logits = terminal.event_logits
+        motion_logits = terminal.motion_logits
+        gripper_command_logits = terminal.command_logits
+        gripper_metrics = dict(terminal.diagnostics)
         if not collect_diagnostics:
             output = {
                 "pred_velocity": pred_velocity,
@@ -2575,6 +2685,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             }
             if event_logits is not None:
                 output["event_logits"] = event_logits
+            if gripper_command_logits is not None:
+                output["gripper_command_logits"] = gripper_command_logits
             return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
@@ -2596,6 +2708,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         }
         if event_logits is not None:
             out["event_logits"] = event_logits
+        if gripper_command_logits is not None:
+            out["gripper_command_logits"] = gripper_command_logits
         block_rows = result["block_rows"]
         zero = torch.zeros((), device=action.device, dtype=torch.float32)
         for name in (
@@ -2845,6 +2959,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         collect_gripper_diagnostics: bool | None = None,
         evidence_scale: float | Tensor = 1.0,
         noisy_scale: float | Tensor = 1.0,
+        spine_zero: bool = False,
     ) -> dict[str, Tensor]:
         if not self.training:
             # Parent-module ``load_state_dict`` restores child buffers through
@@ -2858,6 +2973,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError(f"noisy_physical must be [B,{self.horizon},P]")
         if time.ndim != 1 or int(time.shape[0]) != int(noisy_physical.shape[0]):
             raise ValueError("time must be [B] aligned with noisy_physical")
+        if spine_zero and self.training:
+            raise ValueError("B-spine zero intervention is evaluation-only")
+        if spine_zero and self.spine is None:
+            raise ValueError("B-spine zero intervention requires the Schema31 execution bottom")
         if self.policy_delta_bridge_enabled:
             if policy_action_tokens is not None:
                 raise ValueError(
@@ -2930,6 +3049,21 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # stream so the MMDiT self-attention learns its interaction with the
         # evidence condition.
         action_state_tokens = self.noisy_lift(noisy_physical)
+        spine_metrics: dict[str, Tensor] = {}
+        spine_tokens: Tensor | None = None
+        if self.spine is not None:
+            spine_tokens, spine_metrics = self.spine(
+                noisy_physical,
+                zero_output=bool(spine_zero),
+                collect_diagnostics=collect_diagnostics,
+            )
+            if collect_diagnostics:
+                raw_rms = action_state_tokens.detach().float().square().mean().sqrt()
+                spine_metrics["bottom_spine_raw_token_rms"] = raw_rms
+                spine_metrics["bottom_spine_to_raw_token_rms_ratio"] = (
+                    spine_metrics["bottom_spine_update_rms"]
+                    / raw_rms.clamp_min(torch.finfo(torch.float32).tiny)
+                )
         evidence_tokens = view.tokens
         evidence_value_tokens = view.value_tokens
         evidence_bias = view.key_bias.to(device=evidence_tokens.device)
@@ -2941,7 +3075,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         action_state_factor = TimeDomainMMDiTBlock._source_scale(
             noisy_scale, action_state_tokens
         )
-        action = action + action_state_tokens * action_state_factor
+        if spine_tokens is None:
+            # Preserve the exact Schema30 expression on the disabled path.
+            action = action + action_state_tokens * action_state_factor
+        else:
+            action = action + (action_state_tokens + spine_tokens) * action_state_factor
         policy_delta_metrics: dict[str, Tensor] = {}
         if self.policy_delta_bridge_enabled:
             assert policy_role_delta_bank is not None
@@ -3069,6 +3207,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 float(self.policy_delta_bridge_enabled)
             )
             dynamic_output.update(policy_delta_metrics)
+            dynamic_output.update(spine_metrics)
             return dynamic_output
         block_rows: list[dict[str, Tensor]] = []
         controller_state: Tensor | None = None
@@ -3079,7 +3218,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         controller_rows: list[dict[str, Tensor]] = []
         contraction_rows: list[dict[str, Tensor]] = []
         prefix_velocity_rows: list[Tensor] = [
-            self.velocity_head(self.action_norm(action))
+            self.terminal_controller.predict_candidate_velocity(
+                self.terminal_controller.normalize(action)
+            )
         ]
         dwell_candidate_prediction_rows: list[Tensor] = []
         dwell_candidate_mask_rows: list[Tensor] = []
@@ -3307,15 +3448,22 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             probe_operation_rows.append(probe_operation_count)
             feedback = action - block_input
             block_rows.append(committed_metrics)
-            prefix_velocity_rows.append(self.velocity_head(self.action_norm(action)))
-        action = self.action_norm(action)
-        pred_velocity, event_logits, motion_logits, gripper_metrics = (
-            self._read_output_heads(
-                action,
-                collect_diagnostics=collect_diagnostics,
-                collect_gripper_diagnostics=collect_gripper_diagnostics,
+            prefix_velocity_rows.append(
+                self.terminal_controller.predict_candidate_velocity(
+                    self.terminal_controller.normalize(action)
+                )
             )
+        action = self.terminal_controller.normalize(action)
+        terminal = self.terminal_controller.read_heads(
+            action,
+            collect_diagnostics=collect_diagnostics,
+            collect_gripper_diagnostics=collect_gripper_diagnostics,
         )
+        pred_velocity = terminal.physical_velocity
+        event_logits = terminal.event_logits
+        motion_logits = terminal.motion_logits
+        gripper_command_logits = terminal.command_logits
+        gripper_metrics = dict(terminal.diagnostics)
         if not collect_diagnostics:
             output = {
                 "pred_velocity": pred_velocity,
@@ -3324,6 +3472,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             }
             if event_logits is not None:
                 output["event_logits"] = event_logits
+            if gripper_command_logits is not None:
+                output["gripper_command_logits"] = gripper_command_logits
             return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
@@ -3367,7 +3517,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         }
         if event_logits is not None:
             out["event_logits"] = event_logits
+        if gripper_command_logits is not None:
+            out["gripper_command_logits"] = gripper_command_logits
         out.update(policy_delta_metrics)
+        out.update(spine_metrics)
 
         scalar_metric_names = (
             "action_update_norm",

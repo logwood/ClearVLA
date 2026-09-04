@@ -675,8 +675,8 @@ class _ActivationCapture:
             (
                 encoder.soft_address_compiler.target_dino_key.register_forward_hook(target_hook),
                 organizer.g2_typed_rectifier.register_forward_hook(rectifier_hook),
-                self.model.top.grounder.candidate_norm.register_forward_hook(candidate_hook),
-                self.model.top.dynamics.delta_head.register_forward_hook(delta_hook),
+                self.model.grounding.grounder.candidate_norm.register_forward_hook(candidate_hook),
+                self.model.world.dynamics.delta_head.register_forward_hook(delta_hook),
             )
         )
 
@@ -758,7 +758,7 @@ class _ActivationCapture:
 
         object.__setattr__(compiler, "progressive_fine_candidates", captured_sampler)
 
-        dynamics = self.model.top.dynamics
+        dynamics = self.model.world.dynamics
         original_field = dynamics._field_with_diagnostics
         self._dynamics_had_instance_field = "_field_with_diagnostics" in dynamics.__dict__
         self._dynamics_instance_field = dynamics.__dict__.get("_field_with_diagnostics")
@@ -798,7 +798,7 @@ class _ActivationCapture:
             )
         elif "progressive_fine_candidates" in compiler.__dict__:
             object.__delattr__(compiler, "progressive_fine_candidates")
-        dynamics = self.model.top.dynamics
+        dynamics = self.model.world.dynamics
         if self._dynamics_had_instance_field:
             object.__setattr__(
                 dynamics,
@@ -827,7 +827,7 @@ class _ActivationCapture:
         content_rows = self._einsum_rows[self._CONTENT_EINSUM]
         variance_rows = self._einsum_rows[self._VARIANCE_EINSUM]
         canonical_rows = self._einsum_rows[self._CANONICAL_EINSUM]
-        expected_masked = int(self.model.top.grounder.iterations) + 5
+        expected_masked = int(self.model.grounding.grounder.iterations) + 5
         if len(self._target_key_rows) != 1:
             raise RuntimeError("target-DINO activation call count changed")
         if len(content_rows) != 2 or len(variance_rows) != 2:
@@ -846,7 +846,7 @@ class _ActivationCapture:
                 f"expected {expected_masked}, got {len(self._masked_rows)}"
             )
 
-        iterations = int(self.model.top.grounder.iterations)
+        iterations = int(self.model.grounding.grounder.iterations)
         self._put("target_key", self._target_key_rows[0])
         self._put("g1_coarse_logits", state.coarse_logits)
         self._put("g1_coarse_probability", state.coarse_probability)
@@ -1284,7 +1284,8 @@ def _formal_forward(
             flow_state = sample_flow_matching(
                 batch.action_target.normalized,
                 action_state=batch.online.history.action_state,
-                codec=model.action_codec,
+                codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
+                codec=model.outlet_adapter,
                 distribution=config.bottom.flow_time_distribution,
                 generator=flow_generator,
             )
@@ -1304,16 +1305,17 @@ def _formal_forward(
                         pass0_clean_physical = flow_state.noisy_physical + remaining * (
                             pass0.bottom.physical_velocity.to(dtype=flow_state.noisy_physical.dtype)
                         )
-                        pass0_action = model.action_codec.decode(
+                        pass0_action = model.outlet_adapter.decode(
                             pass0_clean_physical,
                             cache0.history.action_state,
+                            codec_gripper_boundary=cache0.history.codec_gripper_boundary,
                         ).detach()
                         pass0_condition = PhysicalActionCondition.from_horizon_action(
                             pass0_action,
                             cache0.history.action_state.detach(),
                         )
                         del pass0, pass0_clean_physical
-            refined_top, _ = model.top.refine_deployment_world(
+            refined_top, _ = model.world.refine_deployment_world(
                 cache0.top,
                 action_condition=pass0_condition,
                 collect_diagnostics=False,
@@ -1335,7 +1337,7 @@ def _formal_forward(
                 observation=training_state.observation,
                 top_targets=top_targets,
                 predicted_dynamics=formal_cache.top.predicted_dynamics,
-                action_codec=model.action_codec,
+                action_codec=model.outlet_adapter,
                 collect_diagnostics=False,
             )
             if activation_capture is not None:

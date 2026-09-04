@@ -121,6 +121,11 @@ class ObservableHistory:
 
     state: Tensor  # [B,S]
     action_state: Tensor  # [B,A], current state in the action chart
+    # Profile-owned causal boundary used only by the continuous gripper codec.
+    # Pen/CALVIN use current action-state; RDT uses the previous command.  It
+    # stays separate from ``action_state`` so qpos remains observable without
+    # being misrepresented as the command trajectory anchor.
+    codec_gripper_boundary: Tensor  # [B,1], normalized action-command chart
     state_history: Tensor  # [B,Hs,S]
     executed_action_history: Tensor  # [B,Ha,A]
 
@@ -134,6 +139,11 @@ class ObservableHistory:
         _shape(self.state, (batch, dims.state_dim), "current state")
         _shape(self.action_state, (batch, dims.action_dim), "current action-state")
         _shape(
+            self.codec_gripper_boundary,
+            (batch, 1),
+            "codec gripper boundary",
+        )
+        _shape(
             self.state_history,
             (batch, dims.state_history_length, dims.state_dim),
             "state history",
@@ -146,6 +156,7 @@ class ObservableHistory:
         for name in (
             "state",
             "action_state",
+            "codec_gripper_boundary",
             "state_history",
             "executed_action_history",
         ):
@@ -155,6 +166,7 @@ class ObservableHistory:
             for value in (
                 self.state,
                 self.action_state,
+                self.codec_gripper_boundary,
                 self.state_history,
                 self.executed_action_history,
             )

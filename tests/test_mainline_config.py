@@ -5,6 +5,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from clearvla.mainline.config import ExperimentConfig, config_from_mapping, load_config
+from clearvla.mainline.v120_core.bspine import (
+    BSPINE0_BASIS_DIGEST,
+    BSPINE0_IMPLEMENTATION,
+    BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_DISABLED_IMPLEMENTATION,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +45,35 @@ def test_mainline_config_loads_one_flat_active_preset() -> None:
     assert config.objectives.gripper_event_threshold == 0.10
     assert len(config.digest()) == 64
     assert config.digest() != config.digest(include_paths=True)
+
+
+def test_bspine_config_is_explicit_and_baseline_payload_stays_schema30() -> None:
+    baseline = load_config(ROOT / "configs" / "mainline" / "object_intent_dynamics_323.json")
+    enabled = load_config(
+        ROOT / "configs" / "mainline" / "object_intent_dynamics_323_pen_bspine0.json"
+    )
+    assert baseline.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION
+    assert not any(name.startswith("bspine_") for name in baseline.as_dict()["bottom"])
+    assert enabled.bottom.bspine_implementation == BSPINE0_IMPLEMENTATION
+    assert enabled.bottom.bspine_degree == 3
+    assert enabled.bottom.bspine_control_points == 12
+    assert enabled.bottom.bspine_basis_digest == BSPINE0_BASIS_DIGEST
+    assert enabled.bottom.bspine_spec_fingerprint == BSPINE0_SPEC_FINGERPRINT
+    assert enabled.digest() != baseline.digest()
+
+    incomplete = replace(
+        baseline,
+        bottom=replace(
+            baseline.bottom,
+            bspine_implementation=BSPINE0_IMPLEMENTATION,
+        ),
+    )
+    try:
+        incomplete.validate()
+    except ValueError as error:
+        assert "frozen cubic K=12" in str(error)
+    else:
+        raise AssertionError("B-spine must not run without its serialized basis identity")
 
 
 def test_mainline_config_rejects_legacy_or_unknown_switches() -> None:

@@ -40,6 +40,7 @@ def _batch(batch: int = 2) -> TrainingBatch:
         history=ObservableHistory(
             state=torch.zeros(batch, dims.state_dim),
             action_state=torch.zeros(batch, dims.action_dim),
+            codec_gripper_boundary=torch.zeros(batch, 1),
             state_history=torch.zeros(batch, dims.state_history_length, dims.state_dim),
             executed_action_history=torch.zeros(
                 batch, dims.executed_history_length, dims.action_dim

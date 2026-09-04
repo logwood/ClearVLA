@@ -35,7 +35,7 @@ class ArrayNormalizer:
 
     @classmethod
     def fit_identity(cls, arrays: list[np.ndarray]) -> "ArrayNormalizer":
-        """Keep raw physical units while recording statistics for evaluation."""
+        """Keep source-native units while recording evaluation statistics."""
         x = _concat(arrays)
         mean = x.mean(axis=0, keepdims=True).astype(np.float32)
         std = np.maximum(x.std(axis=0, keepdims=True).astype(np.float32), 1e-8)

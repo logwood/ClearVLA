@@ -13,6 +13,7 @@
     "wrist_camera_key": "observations/images/cam_right_wrist",
     "cache_side": 336,
     "dinov2_model": "facebook/dinov2-base",
+    "dinov2_reference_batch_size": 32,
     "split_mode": "ordered-counts",
     "train_episodes": 63,
     "val_episodes": 5,

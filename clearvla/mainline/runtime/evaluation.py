@@ -140,6 +140,12 @@ class ValidationAccumulator:
     gripper_event_threshold: float = 0.10
     arm_motion_threshold: float = 0.02
     gripper_event_tolerance: int = 2
+    # The mode is part of the validation ABI, not a property inferred from a
+    # particular batch.  Keeping it on the accumulator lets matched
+    # counterfactual reports use the same CALVIN command semantics even when
+    # they intentionally do not carry the primary head logits.
+    gripper_output_mode: str = "continuous"
+    arm_flow_mode: str = "legacy_independent"
     square_error: dict[str, Tensor] = field(default_factory=dict)
     element_count: dict[str, int] = field(default_factory=dict)
     samples: int = 0
@@ -155,12 +161,14 @@ class ValidationAccumulator:
         device: torch.device,
         gripper_event_threshold: float = 0.10,
         arm_motion_threshold: float = 0.02,
+        gripper_output_mode: str = "continuous",
+        arm_flow_mode: str = "legacy_independent",
     ) -> "ValidationAccumulator":
-        """Build physical-unit accounting from the exact training chart.
+        """Build source-native accounting from the exact training chart.
 
-        For an affine chart ``normalized = physical * scale + offset``, the
-        physical prediction error is simply ``normalized_error / scale``.
-        The offset cancels, so no decoded prediction tensor needs to be kept.
+        For an affine chart ``normalized = source_native * scale + offset``,
+        the source-native prediction error is ``normalized_error / scale``.
+        Legacy ``*_physical`` metric names remain compatibility aliases only.
         """
 
         scale = torch.as_tensor(
@@ -175,11 +183,19 @@ class ValidationAccumulator:
             device=device,
             dtype=torch.float32,
         ).reshape(1, 1, -1)
+        mode = str(gripper_output_mode)
+        if mode not in {"continuous", "calvin_binary_command"}:
+            raise ValueError(f"unknown validation gripper output mode {mode!r}")
+        arm_mode = str(arm_flow_mode)
+        if arm_mode not in {"legacy_independent", "relative_command_direct"}:
+            raise ValueError(f"unknown validation arm flow mode {arm_mode!r}")
         return cls(
             action_scale=scale,
             action_offset=offset,
             gripper_event_threshold=float(gripper_event_threshold),
             arm_motion_threshold=float(arm_motion_threshold),
+            gripper_output_mode=mode,
+            arm_flow_mode=arm_mode,
         )
 
     def _add_classification(
@@ -220,15 +236,26 @@ class ValidationAccumulator:
         motion_target: Tensor | None = None,
         physical_field: Tensor | None = None,
         gripper_decode_delta_blend: float | None = None,
+        gripper_command_logits: Tensor | None = None,
+        gripper_command: Tensor | None = None,
+        gripper_output_mode: str | None = None,
         row_indices: Tensor | None = None,
     ) -> None:
         target = batch.action_target.normalized.float()
         normalized_current = batch.online.history.action_state.float()
+        normalized_codec_gripper_boundary = (
+            batch.online.history.codec_gripper_boundary.float()
+        )
         raw_target = batch.action_target.raw_units.float()
         raw_current = batch.action_target.current_raw_units.float()
-        raw_gripper_transition_boundary = (
-            batch.action_target.gripper_transition_boundary_raw_units.float()
+        raw_codec_gripper_boundary = (
+            batch.action_target.gripper_transition_boundary_raw_units[..., -1:].float()
         )
+        expected_boundary_shape = (int(prediction.shape[0]), 1)
+        if tuple(normalized_codec_gripper_boundary.shape) != expected_boundary_shape:
+            raise ValueError("normalized codec gripper boundary must be [B,1]")
+        if tuple(raw_codec_gripper_boundary.shape) != expected_boundary_shape:
+            raise ValueError("source-native codec gripper boundary must be [B,1]")
         if row_indices is not None:
             rows = row_indices.detach().to(device="cpu", dtype=torch.long)
             if rows.ndim != 1 or not rows.numel():
@@ -241,10 +268,13 @@ class ValidationAccumulator:
             prediction = prediction.index_select(0, device_rows)
             target = target.index_select(0, device_rows)
             normalized_current = normalized_current.index_select(0, device_rows)
+            normalized_codec_gripper_boundary = (
+                normalized_codec_gripper_boundary.index_select(0, device_rows)
+            )
             raw_target = raw_target.index_select(0, device_rows)
             raw_current = raw_current.index_select(0, device_rows)
-            raw_gripper_transition_boundary = (
-                raw_gripper_transition_boundary.index_select(0, device_rows)
+            raw_codec_gripper_boundary = raw_codec_gripper_boundary.index_select(
+                0, device_rows
             )
             if motion_logits is not None:
                 motion_logits = motion_logits.index_select(0, device_rows)
@@ -252,7 +282,105 @@ class ValidationAccumulator:
                 motion_target = motion_target.index_select(0, device_rows)
             if physical_field is not None:
                 physical_field = physical_field.index_select(0, device_rows)
-        error = prediction.float() - target
+            if gripper_command_logits is not None:
+                gripper_command_logits = gripper_command_logits.index_select(
+                    0, device_rows
+                )
+            if gripper_command is not None:
+                gripper_command = gripper_command.index_select(0, device_rows)
+        output_mode = (
+            self.gripper_output_mode
+            if gripper_output_mode is None
+            else str(gripper_output_mode)
+        )
+        if output_mode not in {"continuous", "calvin_binary_command"}:
+            raise ValueError(f"unknown validation gripper output mode {output_mode!r}")
+        if output_mode == "calvin_binary_command":
+            command_target = (raw_target[..., -1] >= 0.0).to(dtype=torch.long)
+            if gripper_command_logits is not None:
+                expected_command_shape = (
+                    int(prediction.shape[0]),
+                    int(prediction.shape[1]),
+                    2,
+                )
+                if tuple(gripper_command_logits.shape) != expected_command_shape:
+                    raise ValueError(
+                        "validation gripper command logits must be [B,T,2], got "
+                        f"{tuple(gripper_command_logits.shape)}"
+                    )
+                command_prediction = gripper_command_logits.detach().float().argmax(dim=-1)
+            else:
+                # Matched intervention paths intentionally retain only their
+                # decoded action.  Their binary command is still unambiguous,
+                # so infer the class from the strict +/-1 action alphabet.
+                command_prediction = (prediction.detach().float()[..., -1] >= 0.0).to(
+                    dtype=torch.long
+                )
+            if gripper_command is not None:
+                if tuple(gripper_command.shape) != tuple(command_prediction.shape):
+                    raise ValueError("validation gripper command has the wrong shape")
+                command_float = gripper_command.float()
+                if not torch.isfinite(command_float).all() or not (
+                    (command_float == -1.0) | (command_float == 1.0)
+                ).all():
+                    raise ValueError("validation gripper command must contain only {-1,+1}")
+                expected_command = command_prediction.float().mul(2.0).sub(1.0)
+                if not torch.equal(
+                    gripper_command.detach().float().cpu(), expected_command.cpu()
+                ):
+                    raise ValueError("validation command tensor disagrees with logits")
+            command_value = command_prediction.float().mul(2.0).sub(1.0)
+            command_raw_error = command_value - raw_target[..., -1]
+            command_correct = (command_prediction == command_target).float()
+            command_tp = (
+                (command_prediction == 1) & (command_target == 1)
+            ).float().sum()
+            command_fp = (
+                (command_prediction == 1) & (command_target == 0)
+            ).float().sum()
+            command_fn = (
+                (command_prediction == 0) & (command_target == 1)
+            ).float().sum()
+            self._add_scalar("gripper_command_correct", command_correct.sum())
+            self._add_scalar(
+                "gripper_command_rows",
+                prediction.new_tensor(float(command_target.numel())),
+            )
+            self._add_scalar(
+                "gripper_command_predicted_positive",
+                (command_prediction == 1).float().sum(),
+            )
+            self._add_scalar(
+                "gripper_command_target_positive",
+                (command_target == 1).float().sum(),
+            )
+            self._add_scalar("gripper_command_true_positive", command_tp)
+            self._add_scalar("gripper_command_false_positive", command_fp)
+            self._add_scalar("gripper_command_false_negative", command_fn)
+            self._add_scalar(
+                "gripper_command_square_error",
+                command_raw_error.square().sum(),
+            )
+        elif gripper_command_logits is not None or gripper_command is not None:
+            raise ValueError(
+                "continuous validation cannot consume a gripper command-state tensor"
+            )
+        metric_prediction = prediction.float()
+        if output_mode == "calvin_binary_command":
+            # ``SamplingResult.action`` keeps the strict command alphabet in
+            # its final slot for the bridge, whereas the rest of this
+            # accumulator expects normalized action coordinates.  Re-encode
+            # the command for RMSE surfaces, and decode it back to raw units
+            # below for event timing and command-specific accounting.
+            metric_prediction = metric_prediction.clone()
+            if self.action_scale is not None and self.action_offset is not None:
+                metric_prediction[..., -1] = (
+                    command_value * self.action_scale[..., -1]
+                    + self.action_offset[..., -1]
+                )
+            else:
+                metric_prediction[..., -1] = command_value
+        error = metric_prediction - target
         action_bands = _action_band_slices(int(error.shape[1]))
         rows = {
             "normalized_action": error,
@@ -267,6 +395,35 @@ class ValidationAccumulator:
             rows[f"normalized_gripper_band_{band_name}"] = error[
                 :, band_slice, -1:
             ]
+        normalized_boundary_gap = (
+            normalized_codec_gripper_boundary - normalized_current[..., -1:]
+        )
+        source_native_boundary_gap = (
+            raw_codec_gripper_boundary - raw_current[..., -1:]
+        )
+        boundary_rows = error.new_tensor(float(normalized_boundary_gap.numel()))
+        self._add_scalar(
+            "codec_gripper_boundary_qpos_gap_square_normalized",
+            normalized_boundary_gap.square().sum(),
+        )
+        self._add_scalar(
+            "codec_gripper_boundary_qpos_gap_square_source_native",
+            source_native_boundary_gap.square().sum(),
+        )
+        self._add_scalar("codec_gripper_boundary_rows", boundary_rows)
+        action_state_gripper_abs = normalized_current[..., -1].abs()
+        self._add_scalar(
+            "action_state_gripper_abs_gt3",
+            (action_state_gripper_abs > 3.0).float().sum(),
+        )
+        self._add_scalar(
+            "action_state_gripper_abs_gt5",
+            (action_state_gripper_abs > 5.0).float().sum(),
+        )
+        self._add_scalar(
+            "action_state_gripper_rows",
+            error.new_tensor(float(action_state_gripper_abs.numel())),
+        )
         if self.action_scale is not None:
             if self.action_scale.device != error.device:
                 raise ValueError("validation action scale is on the wrong device")
@@ -301,14 +458,15 @@ class ValidationAccumulator:
             gripper_field = physical_field.detach().float()[..., -6:]
             absolute_branch = gripper_field[..., :1]
             cumulative_branch = (
-                normalized_current.detach()[:, None, -1:]
+                normalized_codec_gripper_boundary.detach()[:, None]
                 + torch.cumsum(gripper_field[..., 1:2], dim=1)
             )
             reconstructed = (1.0 - blend) * absolute_branch + blend * cumulative_branch
-            identity_error = (
-                reconstructed - prediction.detach().float()[..., -1:]
-            ).abs().amax()
-            self._add_maximum("gripper_branch_decode_identity_max_abs", identity_error)
+            if output_mode == "continuous":
+                identity_error = (
+                    reconstructed - prediction.detach().float()[..., -1:]
+                ).abs().amax()
+                self._add_maximum("gripper_branch_decode_identity_max_abs", identity_error)
             for band_name, band_slice in action_bands:
                 absolute_error = absolute_branch[:, band_slice] - target[
                     :, band_slice, -1:
@@ -347,20 +505,21 @@ class ValidationAccumulator:
         if self.action_scale is not None:
             if self.action_offset is None:
                 raise ValueError("validation action offset is missing")
-            raw_prediction = (prediction.float() - self.action_offset) / self.action_scale
+            raw_prediction = (metric_prediction - self.action_offset) / self.action_scale
         else:
-            raw_prediction = prediction.float()
+            raw_prediction = metric_prediction
             raw_target = target
             raw_current = normalized_current
-        transition_start = torch.cat(
-            (raw_current[:, :-1], raw_gripper_transition_boundary[:, -1:]),
-            dim=-1,
+            raw_codec_gripper_boundary = normalized_codec_gripper_boundary
+        if output_mode == "calvin_binary_command":
+            raw_prediction = raw_prediction.clone()
+            raw_prediction[..., -1] = command_value
+        first_boundary = torch.cat(
+            (raw_current[..., :-1], raw_codec_gripper_boundary), dim=-1
         )
-        target_boundary = torch.cat(
-            (transition_start[:, None], raw_target[:, :-1]), dim=1
-        )
+        target_boundary = torch.cat((first_boundary[:, None], raw_target[:, :-1]), dim=1)
         pred_boundary = torch.cat(
-            (transition_start[:, None], raw_prediction[:, :-1]), dim=1
+            (first_boundary[:, None], raw_prediction[:, :-1]), dim=1
         )
         target_delta = raw_target - target_boundary
         pred_delta = raw_prediction - pred_boundary
@@ -443,12 +602,23 @@ class ValidationAccumulator:
             predicted=pred_event.float().sum(),
             target=target_event.float().sum(),
         )
-        decoded_motion_target = target_delta[..., :-1].norm(dim=-1) >= float(
-            self.arm_motion_threshold
-        )
-        decoded_motion = pred_delta[..., :-1].norm(dim=-1) >= float(
-            self.arm_motion_threshold
-        )
+        if self.arm_flow_mode == "relative_command_direct":
+            # CALVIN rows are already relative TCP commands.  Their magnitude
+            # is the motion signal; differencing adjacent commands would turn
+            # this audit back into the retired acceleration chart.
+            decoded_motion_target = target[..., :-1].norm(dim=-1) >= float(
+                self.arm_motion_threshold
+            )
+            decoded_motion = metric_prediction[..., :-1].norm(dim=-1) >= float(
+                self.arm_motion_threshold
+            )
+        else:
+            decoded_motion_target = target_delta[..., :-1].norm(dim=-1) >= float(
+                self.arm_motion_threshold
+            )
+            decoded_motion = pred_delta[..., :-1].norm(dim=-1) >= float(
+                self.arm_motion_threshold
+            )
         self._add_classification(
             "decoded_motion",
             true_positive=(decoded_motion_target & decoded_motion).float().sum(),
@@ -535,6 +705,12 @@ class ValidationAccumulator:
             + self.scalar_totals["decoded_gripper_close_timing_count"]
         )
         motion_rows = self.scalar_totals["motion_head_rows"].clamp_min(1.0)
+        boundary_rows = self.scalar_totals["codec_gripper_boundary_rows"].clamp_min(
+            1.0
+        )
+        action_state_gripper_rows = self.scalar_totals[
+            "action_state_gripper_rows"
+        ].clamp_min(1.0)
         tensors = {
             "validation_action_rmse_normalized": rmse["normalized_action"],
             "validation_first_rmse_normalized": rmse["normalized_first"],
@@ -578,7 +754,69 @@ class ValidationAccumulator:
             "validation_band_1_4_rmse_normalized": rmse["normalized_band_1_4"],
             "validation_band_5_12_rmse_normalized": rmse["normalized_band_5_12"],
             "validation_band_13_24_rmse_normalized": rmse["normalized_band_13_24"],
+            "validation_codec_gripper_boundary_qpos_gap_rms_normalized": (
+                self.scalar_totals[
+                    "codec_gripper_boundary_qpos_gap_square_normalized"
+                ]
+                / boundary_rows
+            ).sqrt(),
+            "validation_codec_gripper_boundary_qpos_gap_rms_source_native": (
+                self.scalar_totals[
+                    "codec_gripper_boundary_qpos_gap_square_source_native"
+                ]
+                / boundary_rows
+            ).sqrt(),
+            "validation_action_state_gripper_abs_gt3_rate_normalized": (
+                self.scalar_totals["action_state_gripper_abs_gt3"]
+                / action_state_gripper_rows
+            ),
+            "validation_action_state_gripper_abs_gt5_rate_normalized": (
+                self.scalar_totals["action_state_gripper_abs_gt5"]
+                / action_state_gripper_rows
+            ),
         }
+        if "gripper_command_rows" in self.scalar_totals:
+            command_rows = self.scalar_totals["gripper_command_rows"].clamp_min(1.0)
+            command_correct = self.scalar_totals["gripper_command_correct"]
+            command_predicted_positive = self.scalar_totals[
+                "gripper_command_predicted_positive"
+            ]
+            command_target_positive = self.scalar_totals[
+                "gripper_command_target_positive"
+            ]
+            command_tp = self.scalar_totals["gripper_command_true_positive"]
+            command_fp = self.scalar_totals["gripper_command_false_positive"]
+            command_fn = self.scalar_totals["gripper_command_false_negative"]
+            command_precision = command_tp / (command_tp + command_fp).clamp_min(1.0)
+            command_recall = command_tp / (command_tp + command_fn).clamp_min(1.0)
+            command_f1 = (
+                2.0 * command_precision * command_recall
+                / (command_precision + command_recall).clamp_min(1e-8)
+            )
+            tensors.update(
+                {
+                    "validation_gripper_command_accuracy": command_correct
+                    / command_rows,
+                    "validation_gripper_command_predicted_positive_rate": (
+                        command_predicted_positive / command_rows
+                    ),
+                    "validation_gripper_command_positive_rate": (
+                        command_predicted_positive / command_rows
+                    ),
+                    "validation_gripper_command_target_positive_rate": (
+                        command_target_positive / command_rows
+                    ),
+                    "validation_gripper_command_precision": command_precision,
+                    "validation_gripper_command_recall": command_recall,
+                    "validation_gripper_command_f1": command_f1,
+                    "validation_gripper_command_rows": command_rows,
+                }
+            )
+            if "gripper_command_square_error" in self.scalar_totals:
+                tensors["validation_gripper_command_rmse_physical"] = (
+                    self.scalar_totals["gripper_command_square_error"]
+                    / command_rows
+                ).sqrt()
         for band_name, _ in _action_band_slices(ACTION_BAND_ENDS[-1]):
             tensors[f"validation_gripper_band_{band_name}_rmse_normalized"] = rmse[
                 f"normalized_gripper_band_{band_name}"
@@ -656,6 +894,16 @@ class ValidationAccumulator:
                     f"validation_gripper_post_event_{bin_name}_rmse_physical"
                 ] = (square_error / row_count.clamp_min(1.0)).sqrt()
                 tensors[f"validation_gripper_post_event_rows_{bin_name}"] = row_count
+        # Historical logs called the de-normalized HDF5/source chart
+        # "physical" even when the producer's SI units were unknown.  Emit the
+        # truthful name alongside the old key so dashboards remain readable.
+        tensors.update(
+            {
+                f"{name[:-len('_physical')]}_source_native": value
+                for name, value in tuple(tensors.items())
+                if name.endswith("_physical")
+            }
+        )
         return tensor_scalars(tensors)
 
 
@@ -667,6 +915,8 @@ class MatchedP2InterventionAccumulator:
     action_offset: Tensor
     gripper_event_threshold: float
     arm_motion_threshold: float
+    gripper_output_mode: str = "continuous"
+    arm_flow_mode: str = "legacy_independent"
     primary: dict[str, ValidationAccumulator] = field(default_factory=dict)
     counterfactual: dict[str, ValidationAccumulator] = field(default_factory=dict)
     delta_square_error: dict[str, Tensor] = field(default_factory=dict)
@@ -681,12 +931,16 @@ class MatchedP2InterventionAccumulator:
         device: torch.device,
         gripper_event_threshold: float,
         arm_motion_threshold: float,
+        gripper_output_mode: str = "continuous",
+        arm_flow_mode: str = "legacy_independent",
     ) -> "MatchedP2InterventionAccumulator":
         base = ValidationAccumulator.from_action_normalizer(
             normalizer,
             device=device,
             gripper_event_threshold=gripper_event_threshold,
             arm_motion_threshold=arm_motion_threshold,
+            gripper_output_mode=gripper_output_mode,
+            arm_flow_mode=arm_flow_mode,
         )
         if base.action_scale is None or base.action_offset is None:
             raise RuntimeError("matched P2 accounting requires the physical action chart")
@@ -695,6 +949,8 @@ class MatchedP2InterventionAccumulator:
             action_offset=base.action_offset,
             gripper_event_threshold=float(gripper_event_threshold),
             arm_motion_threshold=float(arm_motion_threshold),
+            gripper_output_mode=str(gripper_output_mode),
+            arm_flow_mode=str(arm_flow_mode),
         )
 
     def _new_validation_accumulator(self) -> ValidationAccumulator:
@@ -703,6 +959,8 @@ class MatchedP2InterventionAccumulator:
             action_offset=self.action_offset,
             gripper_event_threshold=self.gripper_event_threshold,
             arm_motion_threshold=self.arm_motion_threshold,
+            gripper_output_mode=self.gripper_output_mode,
+            arm_flow_mode=self.arm_flow_mode,
         )
 
     def update(
@@ -846,6 +1104,8 @@ class MatchedCoreAttributionAccumulator:
     action_offset: Tensor
     gripper_event_threshold: float
     arm_motion_threshold: float
+    gripper_output_mode: str = "continuous"
+    arm_flow_mode: str = "legacy_independent"
     primary: ValidationAccumulator | None = None
     counterfactual: dict[str, ValidationAccumulator] = field(default_factory=dict)
     delta_square_error: dict[str, Tensor] = field(default_factory=dict)
@@ -867,12 +1127,16 @@ class MatchedCoreAttributionAccumulator:
         device: torch.device,
         gripper_event_threshold: float,
         arm_motion_threshold: float,
+        gripper_output_mode: str = "continuous",
+        arm_flow_mode: str = "legacy_independent",
     ) -> "MatchedCoreAttributionAccumulator":
         base = ValidationAccumulator.from_action_normalizer(
             normalizer,
             device=device,
             gripper_event_threshold=gripper_event_threshold,
             arm_motion_threshold=arm_motion_threshold,
+            gripper_output_mode=gripper_output_mode,
+            arm_flow_mode=arm_flow_mode,
         )
         if base.action_scale is None or base.action_offset is None:
             raise RuntimeError("core attribution requires the physical action chart")
@@ -881,6 +1145,8 @@ class MatchedCoreAttributionAccumulator:
             action_offset=base.action_offset,
             gripper_event_threshold=float(gripper_event_threshold),
             arm_motion_threshold=float(arm_motion_threshold),
+            gripper_output_mode=str(gripper_output_mode),
+            arm_flow_mode=str(arm_flow_mode),
         )
         result.primary = result._new_validation_accumulator()
         return result
@@ -891,6 +1157,8 @@ class MatchedCoreAttributionAccumulator:
             action_offset=self.action_offset,
             gripper_event_threshold=self.gripper_event_threshold,
             arm_motion_threshold=self.arm_motion_threshold,
+            gripper_output_mode=self.gripper_output_mode,
+            arm_flow_mode=self.arm_flow_mode,
         )
 
     def update_primary(self, action: Tensor, batch: TrainingBatch) -> None:
@@ -1104,13 +1372,18 @@ def evaluate_loader(
 ) -> dict[str, float]:
     model_device = next(model.parameters()).device if device is None else device
     accumulator = (
-        ValidationAccumulator()
+        ValidationAccumulator(
+            gripper_output_mode=config.bottom.gripper_output_mode,
+            arm_flow_mode=config.bottom.arm_flow_mode,
+        )
         if action_normalizer is None
         else ValidationAccumulator.from_action_normalizer(
             action_normalizer,
             device=model_device,
             gripper_event_threshold=config.objectives.gripper_event_threshold,
             arm_motion_threshold=config.objectives.arm_motion_threshold,
+            gripper_output_mode=config.bottom.gripper_output_mode,
+            arm_flow_mode=config.bottom.arm_flow_mode,
         )
     )
     for batch_index, raw_batch in enumerate(loader):
@@ -1130,12 +1403,11 @@ def evaluate_loader(
         else:
             raise TypeError("mainline validation loader yielded an unsupported batch type")
         result = sample_action(model, batch.online, config, generator=generator)
-        target_physical = model.action_codec.encode(
-            batch.action_target.normalized,
-            batch.online.history.action_state,
-        )
         motion_target = (
-            model.action_codec.split(target_physical).arm_delta.float().norm(dim=-1)
+            model.outlet_adapter.arm_motion_magnitude(
+                batch.action_target.normalized,
+                batch.online.history.action_state,
+            )
             >= float(config.objectives.arm_motion_threshold)
         )
         accumulator.update(
@@ -1144,7 +1416,10 @@ def evaluate_loader(
             motion_logits=result.motion_logits,
             motion_target=motion_target,
             physical_field=result.physical_field,
-            gripper_decode_delta_blend=model.action_codec.decode_delta_blend,
+            gripper_decode_delta_blend=model.outlet_adapter.decode_delta_blend,
+            gripper_command_logits=result.gripper_command_logits,
+            gripper_command=result.gripper_command,
+            gripper_output_mode=config.bottom.gripper_output_mode,
         )
     return accumulator.means()
 

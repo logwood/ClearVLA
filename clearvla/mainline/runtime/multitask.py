@@ -17,6 +17,20 @@ from ..interfaces import TrainingBatch
 from .evaluation import ValidationAccumulator
 
 TASK_VALIDATION_METRICS = (
+    "validation_action_rmse_normalized",
+    "validation_band_1_4_rmse_normalized",
+    "validation_band_5_12_rmse_normalized",
+    "validation_band_13_24_rmse_normalized",
+    "validation_arm_rmse_normalized",
+    "validation_gripper_rmse_normalized",
+    "validation_action_rmse_source_native",
+    "validation_band_1_4_rmse_source_native",
+    "validation_band_5_12_rmse_source_native",
+    "validation_band_13_24_rmse_source_native",
+    "validation_arm_rmse_source_native",
+    "validation_gripper_rmse_source_native",
+    # Compatibility aliases for pre-fix dashboards. These values are exactly
+    # the source-native metrics above and do not assert SI/physical units.
     "validation_action_rmse_physical",
     "validation_band_1_4_rmse_physical",
     "validation_band_5_12_rmse_physical",
@@ -45,10 +59,25 @@ def _project(metrics: Mapping[str, float], *, samples: int) -> dict[str, float]:
     missing = [name for name in TASK_VALIDATION_METRICS if name not in metrics]
     if missing:
         raise ValueError(f"multitask validation is missing required metrics: {missing}")
-    return {
+    result = {
         "validation_sample_count": float(samples),
         **{name: float(metrics[name]) for name in TASK_VALIDATION_METRICS},
     }
+    # CALVIN command metrics are optional so the existing continuous RDT
+    # multitask ABI does not gain new required fields.
+    for name in (
+        "validation_gripper_command_accuracy",
+        "validation_gripper_command_predicted_positive_rate",
+        "validation_gripper_command_positive_rate",
+        "validation_gripper_command_target_positive_rate",
+        "validation_gripper_command_precision",
+        "validation_gripper_command_recall",
+        "validation_gripper_command_f1",
+        "validation_gripper_command_rows",
+    ):
+        if name in metrics:
+            result[name] = float(metrics[name])
+    return result
 
 
 @dataclass
@@ -65,6 +94,8 @@ class TaskValidationAccumulators:
         device: torch.device,
         gripper_event_threshold: float,
         arm_motion_threshold: float,
+        gripper_output_mode: str = "continuous",
+        arm_flow_mode: str = "legacy_independent",
     ) -> "TaskValidationAccumulators":
         if not task_order or len(set(task_order)) != len(task_order):
             raise ValueError("multitask validation requires an ordered unique task registry")
@@ -76,6 +107,8 @@ class TaskValidationAccumulators:
                     device=device,
                     gripper_event_threshold=gripper_event_threshold,
                     arm_motion_threshold=arm_motion_threshold,
+                    gripper_output_mode=gripper_output_mode,
+                    arm_flow_mode=arm_flow_mode,
                 )
                 for _ in task_order
             ),
@@ -91,6 +124,9 @@ class TaskValidationAccumulators:
         motion_target: Tensor | None = None,
         physical_field: Tensor | None = None,
         gripper_decode_delta_blend: float | None = None,
+        gripper_command_logits: Tensor | None = None,
+        gripper_command: Tensor | None = None,
+        gripper_output_mode: str | None = None,
     ) -> None:
         tasks = task_indices.detach().to(device="cpu", dtype=torch.long)
         if tasks.ndim != 1 or int(tasks.numel()) != int(prediction.shape[0]):
@@ -108,6 +144,9 @@ class TaskValidationAccumulators:
                 motion_target=motion_target,
                 physical_field=physical_field,
                 gripper_decode_delta_blend=gripper_decode_delta_blend,
+                gripper_command_logits=gripper_command_logits,
+                gripper_command=gripper_command,
+                gripper_output_mode=gripper_output_mode,
                 row_indices=rows,
             )
 
@@ -138,7 +177,8 @@ class TaskValidationAccumulators:
         }
         return {
             "schema": "clearvla-multitask-validation-v1",
-            "metric_space": "shared_raw_physical_action_chart",
+            "metric_space": "normalized_and_shared_source_native_action_charts",
+            "physical_metric_semantics": "compatibility_alias_of_source_native",
             "expected_task_count": len(self.task_order),
             "observed_task_count": len(observed),
             "task_coverage": float(len(observed) / len(self.task_order)),

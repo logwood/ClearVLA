@@ -22,6 +22,11 @@ class SamplingResult:
     initial_physical_noise: Tensor
     step_times: Tensor
     metrics: dict[str, Tensor]
+    # CALVIN-only command readout.  Continuous Pen/RDT samples leave these
+    # fields as ``None`` so their result ABI remains unchanged semantically.
+    gripper_command_logits: Tensor | None = None
+    gripper_command: Tensor | None = None
+    continuous_action: Tensor | None = None
 
 
 def _integrate_cache(
@@ -47,14 +52,14 @@ def _integrate_cache(
     }
     dims = config.dimensions
     if initial_physical_noise is None:
-        value = model.action_codec.sample_noise(
+        value = model.outlet_adapter.sample_noise(
             batch,
             device=device,
             dtype=cache.history.action_state.dtype,
             generator=generator,
         )
     else:
-        expected = (batch, dims.action_horizon, model.action_codec.physical_dim)
+        expected = (batch, dims.action_horizon, model.outlet_adapter.physical_dim)
         if tuple(initial_physical_noise.shape) != expected:
             raise ValueError(f"initial physical action noise must be {expected}")
         value = initial_physical_noise.to(device=device)
@@ -99,21 +104,35 @@ def _integrate_cache(
             execution_mode=execution_mode,
             collect_diagnostics=False,
         )
+    outlet_output = model.outlet_adapter.finalize(
+        value,
+        cache.history.action_state,
+        codec_gripper_boundary=cache.history.codec_gripper_boundary,
+        command_logits=endpoint_output.bottom.gripper_command_logits,
+    )
+    outlet_metrics = model.outlet_adapter.sampling_metrics(outlet_output)
+    output_mode_metric = outlet_metrics.pop("sampling_gripper_output_mode_code")
+    result_metrics = {
+        **(static_metrics or {}),
+        **dynamic_metrics,
+        "sampling_gripper_output_mode_code": output_mode_metric,
+        "sampling_update_time_first": times[0].detach().float(),
+        "sampling_update_time_last": times[-1].detach().float(),
+        "sampling_endpoint_head_time": endpoint_time[0].detach().float(),
+        "sampling_velocity_update_calls": times.new_tensor(float(steps)),
+        "sampling_endpoint_head_calls": times.new_ones(()),
+    }
+    result_metrics.update(outlet_metrics)
     return SamplingResult(
-        action=model.action_codec.decode(value, cache.history.action_state).float(),
+        action=outlet_output.deployed_action,
         physical_field=value,
         motion_logits=endpoint_output.bottom.motion_logits.float(),
         initial_physical_noise=noise,
         step_times=times,
-        metrics={
-            **(static_metrics or {}),
-            **dynamic_metrics,
-            "sampling_update_time_first": times[0].detach().float(),
-            "sampling_update_time_last": times[-1].detach().float(),
-            "sampling_endpoint_head_time": endpoint_time[0].detach().float(),
-            "sampling_velocity_update_calls": times.new_tensor(float(steps)),
-            "sampling_endpoint_head_calls": times.new_ones(()),
-        },
+        metrics=result_metrics,
+        gripper_command_logits=outlet_output.command_logits,
+        gripper_command=outlet_output.command,
+        continuous_action=outlet_output.continuous_action,
     )
 
 
@@ -160,7 +179,7 @@ def refine_cached_world(
         dtype=runtime_dtype,
         enabled=autocast_enabled,
     ):
-        refined_top, metrics = model.top.refine_deployment_world(
+        refined_top, metrics = model.world.refine_deployment_world(
             cache.top,
             action_condition=action_condition,
             collect_diagnostics=collect_diagnostics,

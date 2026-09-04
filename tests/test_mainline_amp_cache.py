@@ -66,7 +66,7 @@ def _formal_block_vjp_after_candidate_probe(
         capture_block,
         with_kwargs=True,
     )
-    head_hook = decoder.velocity_head.register_forward_pre_hook(capture_head)
+    head_hook = decoder.terminal_controller.velocity_head.register_forward_pre_hook(capture_head)
     try:
         with torch.autocast(device.type, dtype=torch.bfloat16):
             decoder._probe_native_candidates(
@@ -96,8 +96,8 @@ def _formal_block_vjp_after_candidate_probe(
                 evidence_value_tokens=values,
                 evidence_key_bias=key_bias,
             )
-            formal_velocity = decoder.velocity_head(
-                decoder.action_norm(formal_action)
+            formal_velocity = decoder.terminal_controller.predict_candidate_velocity(
+                decoder.terminal_controller.normalize(formal_action)
             )
         formal_velocity.float().square().mean().backward()
     finally:
@@ -110,7 +110,7 @@ def _formal_block_vjp_after_candidate_probe(
     assert torch.count_nonzero(block_gradient) > 0
     head_gradients = tuple(
         parameter.grad
-        for parameter in decoder.velocity_head.parameters()
+        for parameter in decoder.terminal_controller.velocity_head.parameters()
         if parameter.requires_grad
     )
     assert any(

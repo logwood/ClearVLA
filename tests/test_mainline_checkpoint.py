@@ -15,15 +15,29 @@ from clearvla.mainline.checkpoint import (
     compare_checkpoint_identity,
 )
 from clearvla.mainline.config import ExperimentConfig
-from clearvla.mainline.manifest import manifest_from_mapping
+from clearvla.mainline.manifest import LAYOUT_SCHEMA, manifest_from_mapping
+from clearvla.mainline.model.component_contracts import (
+    ComponentSelection,
+    legacy_state_dict,
+    modular_to_legacy_name,
+)
+from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.checkpoints import (
+    CHECKPOINT_SCHEMA,
     VALIDATION_REPLAY_SOURCE_PATHS,
     load_checkpoint_exact,
     load_checkpoint_for_validation,
     migrate_bottom_only,
     save_checkpoint,
 )
-from clearvla.mainline.training.optimizer import WarmupCosineSchedule
+from clearvla.mainline.training.optimizer import WarmupCosineSchedule, build_optimizer
+from clearvla.mainline.v120_core.bspine import (
+    BSPINE0_BASIS_DIGEST,
+    BSPINE0_CONTROL_POINTS,
+    BSPINE0_DEGREE,
+    BSPINE0_IMPLEMENTATION,
+    BSPINE0_SPEC_FINGERPRINT,
+)
 
 
 def _dataset() -> DatasetIdentity:
@@ -37,6 +51,64 @@ def _dataset() -> DatasetIdentity:
         decoded_cache_identity=zero,
         dino_cache_identity=zero,
     )
+
+
+def _reduced_modular_config() -> ExperimentConfig:
+    base = ExperimentConfig()
+    config = replace(
+        base,
+        dimensions=replace(
+            base.dimensions,
+            action_basis_tokens=4,
+            hidden_size=32,
+            num_heads=4,
+            visual_token_dim=16,
+            goal_token_dim=16,
+            patches_per_camera=64,
+        ),
+        observation=replace(
+            base.observation,
+            feature_dim=16,
+            address_route_dim=8,
+            flow_iterations=2,
+            correlation_radius=1,
+            raw_base_channels=8,
+        ),
+        top=replace(
+            base.top,
+            grounder_iterations=2,
+            teacher_key_dim=8,
+        ),
+        bottom=replace(
+            base.bottom,
+            operator_rank=8,
+            operator_groups=8,
+            controller_tokens=4,
+            controller_depth=2,
+            controller_heads=4,
+        ),
+        optimizer=replace(base.optimizer, warmup_steps=2),
+        runtime=replace(base.runtime, compute_dtype="fp32"),
+    )
+    config.validate()
+    return config
+
+
+def _reduced_bspine_config() -> ExperimentConfig:
+    base = _reduced_modular_config()
+    config = replace(
+        base,
+        bottom=replace(
+            base.bottom,
+            bspine_implementation=BSPINE0_IMPLEMENTATION,
+            bspine_degree=BSPINE0_DEGREE,
+            bspine_control_points=BSPINE0_CONTROL_POINTS,
+            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
+            bspine_spec_fingerprint=BSPINE0_SPEC_FINGERPRINT,
+        ),
+    )
+    config.validate()
+    return config
 
 
 def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
@@ -57,6 +129,9 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert "clearvla/mainline/v120_core/profile.py" in paths
     assert "clearvla/mainline/model/action_contract.py" in paths
     assert "clearvla/mainline/model/observation_contract.py" in paths
+    assert "clearvla/mainline/model/component_contracts.py" in paths
+    assert "clearvla/mainline/model/components.py" in paths
+    assert "clearvla/mainline/runtime/checkpoints.py" in paths
     # These superseded independent rewrites are retained only as source
     # archaeology.  The formal entry point has no dependency on either one.
     assert "clearvla/mainline/model/bottom.py" not in paths
@@ -775,3 +850,268 @@ def test_bottom_migration_rejects_incomplete_typed_state_before_mutation(
         raise AssertionError("an incomplete typed bottom must be rejected")
     for name, value in model.state_dict().items():
         assert torch.equal(value, before[name])
+
+
+def test_modular_checkpoint_round_trip_and_legacy_layout_gate(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal.pt"
+    condition.write_bytes(b"t5-condition")
+    config = _reduced_modular_config()
+    identity = build_checkpoint_identity(
+        config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=ArtifactIdentity.from_file("t5_goal", condition),
+        commit="1" * 40,
+    )
+
+    torch.manual_seed(11)
+    source = ClearVLAMainlinePolicy(config)
+    source_optimizer, _ = build_optimizer(source, config)
+    source_schedule = WarmupCosineSchedule(
+        source_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    current_path = tmp_path / "modular.pt"
+    save_checkpoint(
+        current_path,
+        model=source,
+        optimizer=source_optimizer,
+        schedule=source_schedule,
+        config=config,
+        identity=identity,
+        epoch=0,
+        global_step=0,
+        best_metric=None,
+    )
+    current_payload = torch.load(current_path, map_location="cpu", weights_only=False)
+    assert current_payload["component_selection"] == ComponentSelection.from_config(
+        config
+    ).as_dict()
+    assert current_payload["identity"]["manifest"]["layout_schema"] == LAYOUT_SCHEMA
+    assert all(
+        not str(name).startswith(("top.", "bottom.", "action_codec."))
+        for name in current_payload["model"]
+    )
+
+    torch.manual_seed(13)
+    exact_target = ClearVLAMainlinePolicy(config)
+    exact_optimizer, _ = build_optimizer(exact_target, config)
+    exact_schedule = WarmupCosineSchedule(
+        exact_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    restored = load_checkpoint_exact(
+        current_path,
+        model=exact_target,
+        optimizer=exact_optimizer,
+        schedule=exact_schedule,
+        config=config,
+        identity=identity,
+    )
+    assert restored.epoch == 0 and restored.global_step == 0
+    for name, value in source.state_dict().items():
+        assert torch.equal(exact_target.state_dict()[name], value)
+
+    legacy_manifest = copy.deepcopy(identity.manifest)
+    legacy_manifest["layout_schema"] = 1
+    parsed_legacy_manifest = manifest_from_mapping(
+        legacy_manifest,
+        require_current_schema=False,
+    )
+    legacy_identity = replace(
+        identity,
+        manifest=legacy_manifest,
+        manifest_digest=parsed_legacy_manifest.digest(),
+    )
+    legacy_path = tmp_path / "legacy-layout.pt"
+    torch.save(
+        {
+            "schema": CHECKPOINT_SCHEMA,
+            "identity": legacy_identity.as_dict(),
+            "config": config.as_dict(),
+            "model": legacy_state_dict(source),
+            "epoch": 0,
+            "global_step": 0,
+            "best_metric": None,
+        },
+        legacy_path,
+    )
+    try:
+        load_checkpoint_exact(
+            legacy_path,
+            model=exact_target,
+            optimizer=exact_optimizer,
+            schedule=exact_schedule,
+            config=config,
+            identity=identity,
+        )
+    except ValueError as error:
+        assert "pre-modular model layout" in str(error)
+    else:
+        raise AssertionError("legacy layout must never enter exact resume")
+
+    torch.manual_seed(17)
+    validation_target = ClearVLAMainlinePolicy(config)
+    validation = load_checkpoint_for_validation(
+        legacy_path,
+        model=validation_target,
+        config=config,
+        identity=identity,
+    )
+    assert validation.epoch == 0 and validation.global_step == 0
+    for name, value in source.state_dict().items():
+        assert torch.equal(validation_target.state_dict()[name], value)
+
+    torch.manual_seed(19)
+    migration_target = ClearVLAMainlinePolicy(config)
+    report = migrate_bottom_only(
+        legacy_path,
+        migration_target,
+        identity=identity,
+        config=config,
+    )
+    expected_bottom_names = tuple(
+        sorted(
+            name
+            for name in source.state_dict()
+            if modular_to_legacy_name(name).startswith("bottom.")
+        )
+    )
+    assert report.loaded == expected_bottom_names
+    assert not report.missing
+    assert not report.shape_mismatch
+    assert not report.dtype_mismatch
+    for name in expected_bottom_names:
+        assert torch.equal(migration_target.state_dict()[name], source.state_dict()[name])
+
+
+def test_schema31_bspine_round_trip_and_schema30_exact_resume_rejection(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal.pt"
+    condition.write_bytes(b"t5-condition")
+    language = ArtifactIdentity.from_file("t5_goal", condition)
+    schema30_config = _reduced_modular_config()
+    schema31_config = _reduced_bspine_config()
+    schema30_identity = build_checkpoint_identity(
+        schema30_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="1" * 40,
+    )
+    schema31_identity = build_checkpoint_identity(
+        schema31_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="1" * 40,
+    )
+    assert schema30_identity.manifest["schema"] == 30
+    assert schema31_identity.manifest["schema"] == 31
+    assert schema30_identity.manifest_digest != schema31_identity.manifest_digest
+
+    torch.manual_seed(31)
+    source = ClearVLAMainlinePolicy(schema31_config)
+    source_spine = source.execution_bottom.decoder.spine
+    assert source_spine is not None
+    generator = torch.Generator().manual_seed(32)
+    with torch.no_grad():
+        for parameter in source_spine.parameters():
+            parameter.copy_(
+                torch.randn(
+                    parameter.shape,
+                    generator=generator,
+                    dtype=parameter.dtype,
+                )
+                * 1.0e-2
+            )
+    source_optimizer, _ = build_optimizer(source, schema31_config)
+    source_schedule = WarmupCosineSchedule(
+        source_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    for _ in range(3):
+        source_schedule.step()
+    schema31_path = tmp_path / "schema31-bspine.pt"
+    save_checkpoint(
+        schema31_path,
+        model=source,
+        optimizer=source_optimizer,
+        schedule=source_schedule,
+        config=schema31_config,
+        identity=schema31_identity,
+        epoch=2,
+        global_step=3,
+        best_metric=0.25,
+    )
+
+    torch.manual_seed(33)
+    restored_model = ClearVLAMainlinePolicy(schema31_config)
+    restored_optimizer, _ = build_optimizer(restored_model, schema31_config)
+    restored_schedule = WarmupCosineSchedule(
+        restored_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    restored = load_checkpoint_exact(
+        schema31_path,
+        model=restored_model,
+        optimizer=restored_optimizer,
+        schedule=restored_schedule,
+        config=schema31_config,
+        identity=schema31_identity,
+    )
+    assert restored.epoch == 2 and restored.global_step == 3
+    for name, value in source.state_dict().items():
+        assert torch.equal(restored_model.state_dict()[name], value), name
+
+    torch.manual_seed(34)
+    schema30_model = ClearVLAMainlinePolicy(schema30_config)
+    schema30_optimizer, _ = build_optimizer(schema30_model, schema30_config)
+    schema30_schedule = WarmupCosineSchedule(
+        schema30_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    schema30_path = tmp_path / "schema30.pt"
+    save_checkpoint(
+        schema30_path,
+        model=schema30_model,
+        optimizer=schema30_optimizer,
+        schedule=schema30_schedule,
+        config=schema30_config,
+        identity=schema30_identity,
+        epoch=0,
+        global_step=0,
+        best_metric=None,
+    )
+    before = {
+        name: value.detach().clone()
+        for name, value in restored_model.state_dict().items()
+    }
+    try:
+        load_checkpoint_exact(
+            schema30_path,
+            model=restored_model,
+            optimizer=restored_optimizer,
+            schedule=restored_schedule,
+            config=schema31_config,
+            identity=schema31_identity,
+        )
+    except ValueError as error:
+        assert "component selection differs" in str(error)
+    else:
+        raise AssertionError("Schema30 must not exact-resume into Schema31")
+    for name, value in restored_model.state_dict().items():
+        assert torch.equal(value, before[name]), name

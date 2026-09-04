@@ -12,10 +12,20 @@ import json
 from dataclasses import dataclass
 from typing import Mapping, cast
 
+from .v120_core.bspine import (
+    BSPINE0_IMPLEMENTATION,
+    BSPINE_DISABLED_IMPLEMENTATION,
+)
+
 CAPABILITY_NAME = "object_intent_dynamics_323"
 CAPABILITY_SCHEMA = 30
+BSPINE_CAPABILITY_SCHEMA = 31
+CURRENT_CAPABILITY_SCHEMAS = frozenset({CAPABILITY_SCHEMA, BSPINE_CAPABILITY_SCHEMA})
 LAYOUT_NAME = "clearvla_mainline"
-LAYOUT_SCHEMA = 1
+# Layout 2 is the atomic component-owner hierarchy.  Layout 1 is readable only
+# for explicit validation/migration; it is never an exact-resume target.
+LAYOUT_SCHEMA = 2
+LEGACY_LAYOUT_SCHEMAS = frozenset({1})
 TOPOLOGY = (3, 2, 3)
 INTERVALS = ((4, 8), (8, 16), (16, 32), (32, 48))
 
@@ -25,10 +35,10 @@ class ComponentABI:
     """Stable component identities used for explicit checkpoint migration."""
 
     observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
-    top: str = "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_typed_chronology_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3"
+    top: str = "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3_schema28_core_recovery"
     bottom: str = "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_fp32_capacity_gripper_private_continuous_field_no_event_head"
-    training: str = "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_deployed_cumulative_persistence_gripper_trajectory_v120_decay_local_global_clip_detached_endpoint_self_conditioned_w_single_action_loss_rng_matched_gradient_probes"
-    runtime: str = "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_train_cache0_endpoint_cache1_formal_pass_deploy_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics"
+    training: str = "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_physical_w_ingress_gradient_probes_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary"
+    runtime: str = "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary_source_native_metrics"
 
     def validate(self) -> None:
         for name, value in self.as_dict().items():
@@ -73,10 +83,15 @@ class ArchitectureManifest:
         if self.capability != CAPABILITY_NAME:
             raise ValueError("mainline capability identity is incompatible")
         if int(self.schema) <= 0 or (
-            require_current_schema and int(self.schema) != CAPABILITY_SCHEMA
+            require_current_schema and int(self.schema) not in CURRENT_CAPABILITY_SCHEMAS
         ):
             raise ValueError("mainline capability identity/schema is incompatible")
-        if self.layout != LAYOUT_NAME or int(self.layout_schema) != LAYOUT_SCHEMA:
+        accepted_layout_schemas = (
+            {LAYOUT_SCHEMA}
+            if require_current_schema
+            else {LAYOUT_SCHEMA, *LEGACY_LAYOUT_SCHEMAS}
+        )
+        if self.layout != LAYOUT_NAME or int(self.layout_schema) not in accepted_layout_schemas:
             raise ValueError("mainline code-layout identity is incompatible")
         if tuple(self.topology) != TOPOLOGY:
             raise ValueError("mainline topology must be G3/W2/P3")
@@ -114,6 +129,27 @@ class ArchitectureManifest:
 
 
 ARCHITECTURE_MANIFEST = ArchitectureManifest()
+BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_coarse_detail_v1_cubic_k12_fp32"
+        )
+    ),
+)
+
+
+def architecture_manifest_for_bspine_implementation(
+    implementation: str,
+) -> ArchitectureManifest:
+    """Resolve the behavioral schema without making the baseline Schema31."""
+
+    if str(implementation) == BSPINE_DISABLED_IMPLEMENTATION:
+        return ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE0_IMPLEMENTATION:
+        return BSPINE_ARCHITECTURE_MANIFEST
+    raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 
 def _integer(value: object, *, name: str) -> int:

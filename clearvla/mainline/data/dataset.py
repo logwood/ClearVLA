@@ -123,8 +123,7 @@ class ObservedStateWindowDataset(Dataset):
             "previous_command",
         }:
             raise ValueError(
-                "gripper transition boundary must be current_action_state or "
-                "previous_command"
+                "gripper transition boundary must be current_action_state or previous_command"
             )
         self.gripper_transition_boundary = str(gripper_transition_boundary)
         self.refs: list[ObservedWindowRef] = []
@@ -144,6 +143,13 @@ class ObservedStateWindowDataset(Dataset):
             image_store.validate_episode(episode)
             low = max(0, -int(min_rel))
             high = int(episode.length - 1 - max_rel)
+            # External benchmark converters may retain context around an
+            # annotated segment but only centers whose complete future lies in
+            # that segment are legal supervision rows.  Keep the bounds in
+            # the episode metadata so the cache namespace remains unchanged.
+            if episode.valid_center_start is not None and episode.valid_center_end is not None:
+                low = max(low, int(episode.valid_center_start))
+                high = min(high, int(episode.valid_center_end))
             for center in range(low, high + 1, config.stride):
                 self.refs.append(ObservedWindowRef(episode_idx, center))
         if not self.refs:
@@ -158,10 +164,10 @@ class ObservedStateWindowDataset(Dataset):
     ) -> np.ndarray:
         """Return the producer-owned boundary for gripper command changes.
 
-        Pen declares current qpos and command to share its event boundary.
-        RDT declares continuous command-to-command transitions instead: qpos
-        remains the physical decode boundary, while the previous executed
-        command owns the first transition row of a sampled window.
+        Pen declares current qpos and command to share this boundary. RDT
+        declares continuous command-to-command transitions instead: qpos
+        remains separately observable and anchors the arm chart, while the
+        previous executed command anchors the complete gripper codec path.
         """
 
         action_states_raw = episode.action_states_raw
@@ -224,24 +230,20 @@ class ObservedStateWindowDataset(Dataset):
                 action_start=action_start,
             )
             action_raw = np.asarray(
-                actions_raw[
-                    action_start : action_start + cfg.policy_horizon
-                ],
+                actions_raw[action_start : action_start + cfg.policy_horizon],
                 dtype=np.float32,
             )
             action = self.action_normalizer.encode(action_raw).astype(np.float32)
             state = self.action_normalizer.encode(action_state_raw).astype(np.float32)
-            gripper_boundary = self.action_normalizer.encode(
-                gripper_boundary_raw
-            ).astype(np.float32)
+            gripper_boundary = self.action_normalizer.encode(gripper_boundary_raw).astype(
+                np.float32
+            )
             first_boundary = state.copy()
             first_boundary[grip_indices] = gripper_boundary[grip_indices]
             boundary = np.concatenate((first_boundary[None], action[:-1]), axis=0)
             delta = action - boundary
             motion[index] = float(np.sqrt(np.mean(np.square(delta), dtype=np.float64)))
-            raw_boundary = np.concatenate(
-                (gripper_boundary_raw[None], action_raw[:-1]), axis=0
-            )
+            raw_boundary = np.concatenate((gripper_boundary_raw[None], action_raw[:-1]), axis=0)
             gripper_delta = action_raw[:, grip_indices] - raw_boundary[:, grip_indices]
             event[index] = bool(np.any(np.abs(gripper_delta) >= float(event_threshold)))
         return motion, event
@@ -318,9 +320,7 @@ class ObservedStateWindowDataset(Dataset):
             ),
             "state": torch.from_numpy(self.state_normalizer.encode(state_raw)),
             "state_raw": torch.from_numpy(state_raw.copy()),
-            "action_state": torch.from_numpy(
-                self.action_normalizer.encode(action_state_raw)
-            ),
+            "action_state": torch.from_numpy(self.action_normalizer.encode(action_state_raw)),
             "action_state_raw": torch.from_numpy(action_state_raw.copy()),
             "gripper_transition_boundary": torch.from_numpy(
                 self.action_normalizer.encode(gripper_transition_boundary_raw)

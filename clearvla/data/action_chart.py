@@ -16,6 +16,7 @@ from typing import Sequence
 import numpy as np
 
 from .hdf5_episode import LoadedEpisode
+from .physical_chart import PhysicalChartSpec, resolve_physical_chart_spec
 
 
 @dataclass(frozen=True)
@@ -37,15 +38,34 @@ class ActionStateChartProfile:
         return len(self.action_indices)
 
     @property
+    def physical_chart(self) -> PhysicalChartSpec:
+        """Return unit/range metadata without changing the numeric profile.
+
+        The metadata registry is intentionally separate from ``as_dict`` and
+        ``digest``.  Existing normalizer artifacts therefore retain their
+        numeric profile identity while new run metadata can state physical
+        units explicitly.
+        """
+
+        spec = resolve_physical_chart_spec(self.name)
+        if spec.output_dim != self.output_dim:
+            raise ValueError(
+                f"physical chart {spec.name!r} width {spec.output_dim} "
+                f"does not match profile {self.name!r} width {self.output_dim}"
+            )
+        return spec
+
+    @property
     def gripper_transition_boundary(self) -> str:
-        """Dataset-owned first boundary for continuous gripper commands.
+        """Profile-owned causal boundary for continuous gripper commands.
 
         This is deliberately not part of the numeric projection digest used
         by already-built RDT normalizer/cache artifacts: it changes no stored
-        array. The resolved run metadata records it independently.
+        array. The resolved run metadata records it independently, and the
+        mainline carries it through encode, decode, loss, and evaluation.
         """
 
-        if self.name == "identity_7d_pen":
+        if self.name in {"identity_7d_pen", "calvin_relative_7d_v1"}:
             return "current_action_state"
         if self.name in {
             "rdt_right_arm_action_chart_v1",
@@ -53,9 +73,7 @@ class ActionStateChartProfile:
             "rdt_bimanual_action_chart_v1",
         }:
             return "previous_command"
-        raise ValueError(
-            f"profile {self.name!r} has no declared gripper transition boundary"
-        )
+        raise ValueError(f"profile {self.name!r} has no declared gripper transition boundary")
 
     def validate(self) -> None:
         if not self.name or not self.action_chart or not self.state_chart:
@@ -74,9 +92,7 @@ class ActionStateChartProfile:
             raise ValueError("action projection index is outside the source chart")
         if min(self.state_indices) < 0 or max(self.state_indices) >= self.source_state_dim:
             raise ValueError("state projection index is outside the source chart")
-        if not self.gripper_indices or len(set(self.gripper_indices)) != len(
-            self.gripper_indices
-        ):
+        if not self.gripper_indices or len(set(self.gripper_indices)) != len(self.gripper_indices):
             raise ValueError("profile gripper indices must be non-empty and unique")
         if min(self.gripper_indices) < 0 or max(self.gripper_indices) >= self.output_dim:
             raise ValueError("profile gripper index is outside the output chart")
@@ -118,8 +134,24 @@ class ActionStateChartProfile:
             )
         projected_action = np.ascontiguousarray(actions[:, self.action_indices])
         projected_state = np.ascontiguousarray(states[:, self.state_indices])
+        source_action_state = episode.action_states_raw
+        if source_action_state is None:
+            # Legacy episodes do not carry a separate command-boundary array;
+            # their observed state is already the action-state source.
+            source_action_state = states
+        source_action_state = np.asarray(source_action_state, dtype=np.float32)
+        if tuple(source_action_state.shape) != tuple(episode.actions_raw.shape):
+            raise ValueError(
+                f"{episode.path}: action_state must align with source action, got "
+                f"{source_action_state.shape} != {episode.actions_raw.shape}"
+            )
+        if int(source_action_state.shape[1]) != self.source_action_dim:
+            raise ValueError(
+                f"{episode.path}: profile {self.name} requires action_state width "
+                f"{self.source_action_dim}, got {source_action_state.shape[1]}"
+            )
         action_state = np.ascontiguousarray(
-            projected_state
+            source_action_state[:, self.action_indices]
             * np.asarray(self.state_to_action_scale, dtype=np.float32)[None, :]
         )
         for name, value in (
@@ -142,6 +174,9 @@ class ActionStateChartProfile:
         )
 
 
+# These are source-chart calibration values used only to express an observed
+# qpos boundary in the command chart.  They are not physical units or
+# full-scale limits; those remain separate metadata in ``physical_chart``.
 _RDT_LEFT_QPOS_GRIPPER_SCALE = 4.7908
 _RDT_RIGHT_QPOS_GRIPPER_SCALE = 4.7888
 _RDT_LEFT_ACTION_GRIPPER_SCALE = 11.8997
@@ -183,6 +218,16 @@ ACTION_STATE_CHART_PROFILES: dict[str, ActionStateChartProfile] = {
         gripper_indices=(6,),
         action_chart="pen_native_6_joint_plus_gripper_command",
         state_chart="pen_native_6_joint_plus_gripper_qpos",
+        source_dim=7,
+    ),
+    "calvin_relative_7d_v1": _profile(
+        name="calvin_relative_7d_v1",
+        action_indices=range(7),
+        state_indices=range(7),
+        state_to_action_scale=(1.0,) * 7,
+        gripper_indices=(6,),
+        action_chart="calvin_relative_world_tcp_6d_plus_binary_gripper",
+        state_chart="calvin_robot_obs_tcp_6d_plus_gripper",
         source_dim=7,
     ),
     "rdt_right_arm_action_chart_v1": _profile(

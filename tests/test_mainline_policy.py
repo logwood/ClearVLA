@@ -24,6 +24,7 @@ from clearvla.mainline.interfaces import (
     OnlinePolicyInput,
     TrainingBatch,
 )
+from clearvla.mainline.model.component_contracts import BSPINE0_EXECUTION_BOTTOM
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.model.restored_observation import (
     _v120_flow_field,
@@ -59,6 +60,13 @@ from clearvla.mainline.training.optimizer import (
     WarmupCosineSchedule,
     build_optimizer,
     role_lr_scale,
+)
+from clearvla.mainline.v120_core.bspine import (
+    BSPINE0_BASIS_DIGEST,
+    BSPINE0_CONTROL_POINTS,
+    BSPINE0_DEGREE,
+    BSPINE0_IMPLEMENTATION,
+    BSPINE0_SPEC_FINGERPRINT,
 )
 from clearvla.mainline.v120_core.layer_contracts import LayerContractAdapterHeads
 
@@ -106,9 +114,55 @@ def _config() -> ExperimentConfig:
     return config
 
 
+def _bspine_config() -> ExperimentConfig:
+    base = _config()
+    config = replace(
+        base,
+        bottom=replace(
+            base.bottom,
+            bspine_implementation=BSPINE0_IMPLEMENTATION,
+            bspine_degree=BSPINE0_DEGREE,
+            bspine_control_points=BSPINE0_CONTROL_POINTS,
+            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
+            bspine_spec_fingerprint=BSPINE0_SPEC_FINGERPRINT,
+        ),
+    )
+    config.validate()
+    return config
+
+
+def _calvin_binary_config() -> ExperimentConfig:
+    base = _config()
+    config = replace(
+        base,
+        data=replace(
+            base.data,
+            data_profile="calvin_relative_7d_v1",
+            split_mode="episode-manifest",
+            split_manifest="calvin-test-split.json",
+            train_episodes=0,
+            val_episodes=0,
+            test_episodes=0,
+            sampling_gripper_event_threshold=0.1,
+        ),
+        bottom=replace(
+            base.bottom,
+            arm_flow_mode="relative_command_direct",
+            gripper_output_mode="calvin_binary_command",
+        ),
+        objectives=replace(
+            base.objectives,
+            gripper_command=0.1,
+            gripper_event_threshold=0.1,
+        ),
+    )
+    config.validate()
+    return config
+
+
 def test_restored_observation_keeps_consumed_v120_address_modules_trainable() -> None:
     model = ClearVLAMainlinePolicy(_config())
-    parameters = dict(model.observation.encoder.named_parameters())
+    parameters = dict(model.observation.compiler.encoder.named_parameters())
     for name in (
         "history_type",
         "camera_type",
@@ -138,6 +192,70 @@ def test_restored_observation_keeps_consumed_v120_address_modules_trainable() ->
     assert not parameters[
         "progressive_grounding_address.query_projections.2.weight"
     ].requires_grad
+
+
+def test_calvin_velocity_is_invariant_to_compatibility_gripper_field() -> None:
+    torch.manual_seed(2909)
+    config = _calvin_binary_config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    command_head = model.execution_bottom.decoder.terminal_controller.optional_command_head
+    assert command_head is not None
+    with torch.no_grad():
+        command_head[-1].weight.normal_(mean=0.0, std=0.1)
+        command_head[-1].bias.normal_(mean=0.0, std=0.1)
+
+    batch = _batch(config)
+    with torch.no_grad():
+        cache, _training_state, _metrics = model.encode_online(
+            batch.online,
+            training_mask=False,
+            geometry_supervision=False,
+            collect_diagnostics=False,
+        )
+        first_field = torch.randn(1, 24, model.outlet_adapter.physical_dim)
+        second_field = first_field.clone()
+        arm_channels = 2 * model.outlet_adapter.arm_dim
+        second_field[..., arm_channels:] = torch.randn_like(
+            second_field[..., arm_channels:]
+        )
+        time = torch.full((1,), 0.4)
+        first = model.velocity(
+            cache,
+            noisy_action_field=first_field,
+            time=time,
+            collect_diagnostics=True,
+        )
+        second = model.velocity(
+            cache,
+            noisy_action_field=second_field,
+            time=time,
+            collect_diagnostics=True,
+        )
+
+    torch.testing.assert_close(
+        first.bottom.action_query,
+        second.bottom.action_query,
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        first.bottom.physical_velocity,
+        second.bottom.physical_velocity,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert first.bottom.gripper_command_logits is not None
+    assert second.bottom.gripper_command_logits is not None
+    torch.testing.assert_close(
+        first.bottom.gripper_command_logits,
+        second.bottom.gripper_command_logits,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert first.metrics["bottom_calvin_binary_gripper_condition_max_abs"] == 0.0
+    assert second.metrics["bottom_calvin_binary_gripper_condition_max_abs"] == 0.0
+    assert first.metrics["bottom_calvin_binary_gripper_condition_neutral"] == 1.0
+    assert second.metrics["bottom_calvin_binary_gripper_condition_neutral"] == 1.0
 
 
 def test_v120_exported_flow_is_reindexed_and_scaled_by_chart_side() -> None:
@@ -189,6 +307,7 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
         history=ObservableHistory(
             state=torch.randn(batch, dims.state_dim),
             action_state=torch.randn(batch, dims.action_dim),
+            codec_gripper_boundary=torch.randn(batch, 1),
             state_history=torch.randn(batch, dims.state_history_length, dims.state_dim),
             executed_action_history=torch.randn(
                 batch,
@@ -232,7 +351,7 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
     )
 
 
-def test_detached_self_conditioning_owns_one_formal_loss_and_rng_pass() -> None:
+def test_recovered_training_uses_one_formal_forward_and_loss() -> None:
     torch.manual_seed(2900)
     config = _config()
     model = ClearVLAMainlinePolicy(config).train()
@@ -301,65 +420,27 @@ def test_detached_self_conditioning_owns_one_formal_loss_and_rng_pass() -> None:
             generator=torch.Generator().manual_seed(29003),
         )
 
-    assert velocity.call_count == 2
+    assert velocity.call_count == 1
     assert sample_flow.call_count == 1
     assert compose.call_count == 1
-    assert grad_modes == [False, True]
-    assert autocast_cache_modes == [False, True]
+    assert grad_modes == [True]
+    assert autocast_cache_modes == [True]
     assert velocity_caches[0] is cache
-    assert velocity_caches[1] is not cache
-    assert velocity_caches[1].top is not cache.top
-    assert noisy_inputs[0] is noisy_inputs[1]
-    assert time_inputs[0] is time_inputs[1]
-    assert torch.equal(rng_entries[0], rng_entries[1])
-    assert torch.equal(rng_exits[0], rng_exits[1])
-    assert torch.equal(torch.get_rng_state(), rng_exits[1])
-
-    formal_condition = velocity_caches[1].top.action_condition
-    assert not formal_condition.interval_action.requires_grad
-    assert not formal_condition.interval_delta.requires_grad
-    assert velocity_caches[1].top.predicted_dynamics.semantic_delta.requires_grad
-    assert compose.call_args.kwargs["policy_output"] is velocity_outputs[1]
+    assert len(noisy_inputs) == 1
+    assert len(time_inputs) == 1
+    assert len(rng_entries) == 1
+    assert len(rng_exits) == 1
+    assert torch.equal(torch.get_rng_state(), rng_exits[0])
+    assert cache.top.action_condition.interval_action.requires_grad
+    assert cache.top.action_condition.interval_delta.requires_grad
+    assert cache.top.predicted_dynamics.semantic_delta.requires_grad
+    assert compose.call_args.kwargs["policy_output"] is velocity_outputs[0]
     assert (
         compose.call_args.kwargs["predicted_dynamics"]
-        is velocity_caches[1].top.predicted_dynamics
-    )
-    assert (
-        compose.call_args.kwargs["predicted_dynamics"]
-        is not cache.top.predicted_dynamics
+        is cache.top.predicted_dynamics
     )
     assert ledger.terms["action_flow"].requires_grad
-    with torch.no_grad():
-        pass0_terms = action_terms(
-            config,
-            model.action_codec,
-            velocity_outputs[0],
-            batch.action_target,
-            batch.online.history,
-            compose.call_args.kwargs["flow_state"],
-            collect_diagnostics=False,
-        )
-    torch.testing.assert_close(
-        metrics["training_self_conditioning_pass0_action_flow_audit"],
-        pass0_terms["action_flow"],
-    )
-    torch.testing.assert_close(
-        metrics["training_self_conditioning_pass1_action_flow_minus_pass0"],
-        ledger.terms["action_flow"].detach()
-        - pass0_terms["action_flow"].detach(),
-    )
-    for name in (
-        "training_self_conditioning_pass0_clean_action_rms",
-        "training_self_conditioning_coarse_to_pass0_condition_rms",
-        "training_self_conditioning_pass0_to_pass1_clean_action_delta_rms",
-        "training_self_conditioning_pass1_world_interval_mismatch_rms",
-        "training_self_conditioning_pass1_world_delta_mismatch_rms",
-        "training_self_conditioning_pass0_action_flow_audit",
-        "training_self_conditioning_pass1_action_flow_minus_pass0",
-    ):
-        assert name in metrics
-        assert metrics[name].ndim == 0
-        assert torch.isfinite(metrics[name])
+    assert not any(name.startswith("training_self_conditioning_") for name in metrics)
 
 
 def test_full_mainline_has_complete_gradient_ownership() -> None:
@@ -474,16 +555,16 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     # diagnostics must therefore read .grad in the engine rather than stacking
     # a new persistent hook on every diagnostic batch.
     for parameter_name in (
-        "top.dynamics.transport_head.weight",
-        "top.effect_reader.source_query.0.weight",
-        "top.effect_reader.source_query.1.weight",
-        "top.effect_reader.terminal_query.0.weight",
-        "top.effect_reader.terminal_query.1.weight",
-        "top.effect_reader.semantic_value.weight",
-        "top.effect_reader.transport_value.weight",
-        "top.consequence.semantic_interaction.weight",
-        "top.consequence.geometry_interaction.weight",
-        "bottom.decoder.velocity_head.gripper_gate.weight",
+        "world.dynamics.transport_head.weight",
+        "policy_compiler.effect_reader.source_query.0.weight",
+        "policy_compiler.effect_reader.source_query.1.weight",
+        "policy_compiler.effect_reader.terminal_query.0.weight",
+        "policy_compiler.effect_reader.terminal_query.1.weight",
+        "policy_compiler.effect_reader.semantic_value.weight",
+        "policy_compiler.effect_reader.transport_value.weight",
+        "policy_compiler.consequence.semantic_interaction.weight",
+        "policy_compiler.consequence.geometry_interaction.weight",
+        "execution_bottom.decoder.terminal_controller.velocity_head.gripper_gate.weight",
     ):
         parameter = dict(model.named_parameters())[parameter_name]
         assert parameter._backward_hooks is None or not parameter._backward_hooks
@@ -566,10 +647,10 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     # already supervised during this interval.
     assert missing
     assert all(
-        name.startswith("bottom.decoder.operator_contractions.")
-        or name.startswith("bottom.decoder.execution_controller.operation_")
-        or name == "bottom.decoder.execution_controller.block_queries"
-        or name.startswith("bottom.decoder.execution_controller.capacity_head.")
+            name.startswith("execution_bottom.decoder.operator_contractions.")
+            or name.startswith("execution_bottom.decoder.execution_controller.operation_")
+            or name == "execution_bottom.decoder.execution_controller.block_queries"
+            or name.startswith("execution_bottom.decoder.execution_controller.capacity_head.")
         for name in missing
     ), missing
     dormant = [
@@ -588,18 +669,18 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     engine.train_step(_batch(config), collect_diagnostics=True)
     capacity_gradient = sum(
         parameter.grad.detach().abs().sum()
-        for operator in model.bottom.capacity
+        for operator in model.execution_bottom.capacity
         for parameter in operator.parameters()
         if parameter.requires_grad and parameter.grad is not None
     )
     execution_capacity_gradient = sum(
         parameter.grad.detach().abs().sum()
-        for parameter in model.bottom.execution.capacity_head.parameters()
+        for parameter in model.execution_bottom.execution.capacity_head.parameters()
         if parameter.requires_grad and parameter.grad is not None
     )
     execution_value_gradient = sum(
         parameter.grad.detach().abs().sum()
-        for parameter in model.bottom.execution.value_reader.parameters()
+        for parameter in model.execution_bottom.execution.value_reader.parameters()
         if parameter.requires_grad and parameter.grad is not None
     )
     assert capacity_gradient > 0
@@ -608,6 +689,424 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert len(ownership.trainable_names) == len(
         [parameter for parameter in model.parameters() if parameter.requires_grad]
     )
+
+
+def test_bspine_zero_init_preserves_the_complete_baseline_output_and_rng() -> None:
+    baseline_config = _config()
+    bspine_config = _bspine_config()
+
+    torch.manual_seed(4010)
+    baseline = ClearVLAMainlinePolicy(baseline_config).eval()
+    baseline_rng = torch.get_rng_state().clone()
+    torch.manual_seed(4010)
+    candidate = ClearVLAMainlinePolicy(bspine_config).eval()
+    candidate_rng = torch.get_rng_state().clone()
+    assert torch.equal(candidate_rng, baseline_rng)
+    assert candidate.selection.execution_bottom == BSPINE0_EXECUTION_BOTTOM
+    assert baseline.execution_bottom.decoder.spine is None
+    assert candidate.execution_bottom.decoder.spine is not None
+
+    baseline_parameters = dict(baseline.named_parameters())
+    candidate_parameters = dict(candidate.named_parameters())
+    extra_parameters = set(candidate_parameters).difference(baseline_parameters)
+    assert len(extra_parameters) == 10
+    assert all(
+        name.startswith("execution_bottom.decoder.spine.")
+        for name in extra_parameters
+    )
+    for name, parameter in baseline_parameters.items():
+        torch.testing.assert_close(
+            candidate_parameters[name],
+            parameter,
+            atol=0.0,
+            rtol=0.0,
+        )
+
+    torch.manual_seed(4011)
+    batch = _batch(baseline_config)
+    physical = torch.randn(
+        1,
+        baseline_config.dimensions.action_horizon,
+        baseline.outlet_adapter.physical_dim,
+        generator=torch.Generator().manual_seed(4012),
+    )
+    time = torch.full((1,), 0.45)
+    with torch.no_grad():
+        torch.manual_seed(4013)
+        baseline_cache, _, _ = baseline.encode_online(batch.online)
+        torch.manual_seed(4013)
+        candidate_cache, _, _ = candidate.encode_online(batch.online)
+        baseline_output = baseline.velocity(
+            baseline_cache,
+            noisy_action_field=physical,
+            time=time,
+            collect_diagnostics=False,
+        )
+        candidate_output = candidate.velocity(
+            candidate_cache,
+            noisy_action_field=physical,
+            time=time,
+            collect_diagnostics=False,
+        )
+    for left, right in (
+        (baseline_output.bottom.physical_velocity, candidate_output.bottom.physical_velocity),
+        (baseline_output.bottom.motion_logits, candidate_output.bottom.motion_logits),
+        (baseline_output.bottom.action_query, candidate_output.bottom.action_query),
+    ):
+        torch.testing.assert_close(left, right, atol=0.0, rtol=0.0)
+    assert set(baseline_output.bottom.decoder_tensors) == set(
+        candidate_output.bottom.decoder_tensors
+    )
+    for name, value in baseline_output.bottom.decoder_tensors.items():
+        torch.testing.assert_close(
+            candidate_output.bottom.decoder_tensors[name],
+            value,
+            atol=0.0,
+            rtol=0.0,
+        )
+
+
+def test_bspine_has_one_optimizer_owner_without_moving_baseline_groups() -> None:
+    baseline_config = _config()
+    bspine_config = _bspine_config()
+    torch.manual_seed(4020)
+    baseline = ClearVLAMainlinePolicy(baseline_config)
+    baseline_optimizer, baseline_ownership = build_optimizer(baseline, baseline_config)
+    torch.manual_seed(4020)
+    candidate = ClearVLAMainlinePolicy(bspine_config)
+    optimizer, ownership = build_optimizer(candidate, bspine_config)
+
+    baseline_groups = {
+        str(group["name"]): (
+            float(group["lr"]),
+            float(group["weight_decay"]),
+            tuple(group["parameter_names"]),
+        )
+        for group in baseline_optimizer.param_groups
+    }
+    candidate_groups = {
+        str(group["name"]): (
+            float(group["lr"]),
+            float(group["weight_decay"]),
+            tuple(group["parameter_names"]),
+        )
+        for group in optimizer.param_groups
+    }
+    spine_group = candidate_groups.pop("bottom_spine/decay")
+    assert candidate_groups == baseline_groups
+    assert set(baseline_ownership.role_counts) == set(ownership.role_counts) - {
+        "bottom_spine"
+    }
+    assert ownership.role_counts["bottom_spine"] == 10
+    assert spine_group[0] == bspine_config.optimizer.learning_rate * 0.7
+    assert spine_group[1] == bspine_config.optimizer.weight_decay
+    assert len(spine_group[2]) == 10
+    assert all(name.startswith("bottom.decoder.spine.") for name in spine_group[2])
+    spine_parameter_ids = {
+        id(parameter)
+        for name, parameter in candidate.named_parameters()
+        if name.startswith("execution_bottom.decoder.spine.")
+    }
+    optimizer_ids = [
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+        if id(parameter) in spine_parameter_ids
+    ]
+    assert len(optimizer_ids) == len(spine_parameter_ids) == len(set(optimizer_ids))
+
+
+def test_bspine_full_loss_reaches_raw_coarse_and_detail_once() -> None:
+    torch.manual_seed(4030)
+    config = _bspine_config()
+    model = ClearVLAMainlinePolicy(config)
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    decoder = model.execution_bottom.decoder
+    spine = decoder.spine
+    assert spine is not None
+    assert type(model.outlet_adapter.codec).__name__ == "PhysicalActionFieldCodec"
+    assert type(decoder.noisy_lift).__name__ == "NativeTimePhysicalActionTokenLift"
+    assert not any(type(module).__name__ == "DCTFlowCodec" for module in model.modules())
+
+    raw_input = torch.randn(2, 24, 18)
+    raw_tangent = torch.randn_like(raw_input)
+    raw_output, raw_jvp = torch.autograd.functional.jvp(
+        decoder.noisy_lift,
+        raw_input,
+        raw_tangent,
+        strict=True,
+    )
+    assert bool(torch.isfinite(raw_output).all())
+    assert bool(torch.isfinite(raw_jvp).all())
+    assert float(raw_jvp.abs().sum()) > 0.0
+
+    with mock.patch.object(
+        model.outlet_adapter.codec,
+        "encode",
+        wraps=model.outlet_adapter.codec.encode,
+    ) as codec_encode, mock.patch.object(
+        decoder.noisy_lift,
+        "forward",
+        wraps=decoder.noisy_lift.forward,
+    ) as raw_forward, mock.patch.object(
+        spine,
+        "forward",
+        wraps=spine.forward,
+    ) as spine_forward:
+        result = engine.train_step(_batch(config), collect_diagnostics=True)
+
+    assert codec_encode.call_count == raw_forward.call_count == spine_forward.call_count == 1
+    assert torch.isfinite(result.loss)
+    assert result.metrics["bottom_spine_decomposition_max_abs"] <= 5.0e-7
+    for name in (
+        "gradient_raw_bottom_query_l2",
+        "gradient_raw_bottom_spine_l2",
+        "gradient_raw_bottom_spine_coarse_l2",
+        "gradient_raw_bottom_spine_detail_l2",
+    ):
+        assert name in result.metrics
+        assert torch.isfinite(result.metrics[name])
+        assert result.metrics[name] > 0.0
+
+
+def test_bspine_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
+    torch.manual_seed(4040)
+    base = _bspine_config()
+    config = replace(base, runtime=replace(base.runtime, compute_dtype="bf16"))
+    model = ClearVLAMainlinePolicy(config)
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+    )
+    result = engine.train_step(_batch(config), collect_diagnostics=True)
+    assert torch.isfinite(result.loss)
+    assert torch.isfinite(result.gradient_norm)
+    assert result.gradient_norm > 0.0
+    assert result.metrics["bottom_spine_decomposition_max_abs"] <= 5.0e-7
+    assert result.metrics["gradient_raw_bottom_spine_coarse_l2"] > 0.0
+    assert result.metrics["gradient_raw_bottom_spine_detail_l2"] > 0.0
+
+
+def test_bspine_zero_is_a_matched_learned_output_intervention() -> None:
+    torch.manual_seed(4050)
+    config = _bspine_config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    spine = model.execution_bottom.decoder.spine
+    assert spine is not None
+    generator = torch.Generator().manual_seed(4051)
+    with torch.no_grad():
+        for parameter in spine.parameters():
+            parameter.copy_(
+                torch.randn(
+                    parameter.shape,
+                    generator=generator,
+                    dtype=parameter.dtype,
+                )
+                * 5.0e-2
+            )
+        batch = _batch(config)
+        cache, _, _ = model.encode_online(batch.online)
+        physical = torch.randn(1, 24, 18, generator=generator)
+        time = torch.full((1,), 0.45)
+        primary = model.velocity(
+            cache,
+            noisy_action_field=physical,
+            time=time,
+            collect_diagnostics=True,
+        )
+        zeroed = model.velocity(
+            cache,
+            noisy_action_field=physical,
+            time=time,
+            execution_mode="spine_zero",
+            collect_diagnostics=True,
+        )
+        learned_weights = {
+            name: parameter.detach().clone()
+            for name, parameter in spine.named_parameters()
+        }
+        for parameter in spine.parameters():
+            parameter.zero_()
+        explicit_zero = model.velocity(
+            cache,
+            noisy_action_field=physical,
+            time=time,
+            collect_diagnostics=True,
+        )
+        for name, parameter in spine.named_parameters():
+            parameter.copy_(learned_weights[name])
+
+    assert not torch.equal(
+        primary.bottom.physical_velocity,
+        zeroed.bottom.physical_velocity,
+    )
+    assert primary.metrics["bottom_spine_zero_intervention_active"] == 0.0
+    assert zeroed.metrics["bottom_spine_zero_intervention_active"] == 1.0
+    for left, right in (
+        (zeroed.bottom.physical_velocity, explicit_zero.bottom.physical_velocity),
+        (zeroed.bottom.motion_logits, explicit_zero.bottom.motion_logits),
+        (zeroed.bottom.action_query, explicit_zero.bottom.action_query),
+    ):
+        torch.testing.assert_close(left, right, atol=0.0, rtol=0.0)
+    for name, value in zeroed.bottom.decoder_tensors.items():
+        if name.startswith("bottom_spine_"):
+            continue
+        torch.testing.assert_close(
+            value,
+            explicit_zero.bottom.decoder_tensors[name],
+            atol=0.0,
+            rtol=0.0,
+        )
+
+    model.train()
+    try:
+        model.velocity(
+            cache,
+            noisy_action_field=physical,
+            time=time,
+            execution_mode="spine_zero",
+        )
+    except ValueError as error:
+        assert "evaluation-only" in str(error)
+    else:
+        raise AssertionError("spine_zero must never alter a training forward")
+
+
+def test_bspine_deployment_keeps_exactly_twelve_bottom_calls() -> None:
+    torch.manual_seed(4060)
+    config = _bspine_config()
+    model = ClearVLAMainlinePolicy(config).eval()
+    batch = _batch(config)
+    spine = model.execution_bottom.decoder.spine
+    assert spine is not None
+    with mock.patch.object(model, "velocity", wraps=model.velocity) as velocity, mock.patch.object(
+        spine,
+        "forward",
+        wraps=spine.forward,
+    ) as spine_forward:
+        result = sample_action(
+            model,
+            batch.online,
+            config,
+            collect_diagnostics=False,
+            dtype=torch.float32,
+        )
+    expected_calls = 2 * (config.runtime.inference_steps + 1)
+    assert expected_calls == 12
+    assert velocity.call_count == spine_forward.call_count == expected_calls
+    assert torch.isfinite(result.action).all()
+
+
+def test_bspine_validation_archives_matched_band_and_channel_surfaces() -> None:
+    torch.manual_seed(4070)
+    base = _bspine_config()
+    config = replace(
+        base,
+        runtime=replace(
+            base.runtime,
+            eval_sampling_diagnostic_batches=0,
+            eval_proposal_ablation_batches=0,
+            eval_execution_ablation_batches=1,
+        ),
+    )
+    model = ClearVLAMainlinePolicy(config)
+    spine = model.execution_bottom.decoder.spine
+    assert spine is not None
+    generator = torch.Generator().manual_seed(4071)
+    with torch.no_grad():
+        for parameter in spine.parameters():
+            parameter.copy_(
+                torch.randn(
+                    parameter.shape,
+                    generator=generator,
+                    dtype=parameter.dtype,
+                )
+                * 2.0e-2
+            )
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    batch = _batch(config)
+    action_dim = config.dimensions.action_dim
+    unit = np.ones((1, action_dim), dtype=np.float32)
+    normalizer = ArrayNormalizer(
+        offset=np.zeros_like(unit),
+        scale=unit,
+        mean=np.zeros_like(unit),
+        std=unit,
+        minimum=-unit,
+        maximum=unit,
+        mode="identity",
+    )
+    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None)
+    with mock.patch(
+        "clearvla.mainline.train.to_training_batch",
+        return_value=batch,
+    ):
+        report = _validate(
+            engine=engine,
+            loader=[object()],
+            bundle=bundle,
+            config=config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+    assert report["validation_execution_ablation_coverage"] == 1.0
+    assert report["validation_execution_spine_zero_action_delta_rmse_normalized"] > 0.0
+    for band in ("1_4", "5_12", "13_24"):
+        for owner in ("arm", "gripper"):
+            stem = f"validation_execution_spine_zero_{owner}_band_{band}"
+            for suffix in (
+                "primary_rmse_normalized",
+                "rmse_normalized",
+                "mse_gain_vs_primary_normalized",
+                "action_delta_rmse_normalized",
+                "primary_rmse_physical",
+                "rmse_physical",
+                "mse_gain_vs_primary_physical",
+                "action_delta_rmse_physical",
+            ):
+                name = f"{stem}_{suffix}"
+                assert name in report
+                assert math.isfinite(report[name])
 
 
 def test_nonfinite_gradient_reports_first_owner_before_any_update() -> None:
@@ -844,8 +1343,8 @@ def test_optimizer_restores_v120_role_scales_and_capacity_no_decay() -> None:
 
 def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> None:
     torch.manual_seed(43)
-    decoder = ClearVLAMainlinePolicy(_config()).bottom.decoder
-    head = decoder.velocity_head
+    decoder = ClearVLAMainlinePolicy(_config()).execution_bottom.decoder
+    head = decoder.terminal_controller.velocity_head
     assert head.arm_abs is not None and head.arm_delta is not None
     assert head.grip_value is not None and head.grip_delta is not None
     assert head.grip_extra is not None and head.grip_native is None
@@ -907,18 +1406,18 @@ def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> No
 def test_continuous_gripper_trajectory_reads_only_value_and_delta_channels() -> None:
     torch.manual_seed(44)
     model = ClearVLAMainlinePolicy(_config()).train()
-    decoder = model.bottom.decoder
-    assert decoder.event_head is None
+    decoder = model.execution_bottom.decoder
+    assert decoder.terminal_controller.optional_event_head is None
     assert not hasattr(model, "decoded_gripper_event_head")
     batch = 2
     physical = torch.randn(
         batch,
         model.config.dimensions.action_horizon,
-        model.action_codec.physical_dim,
+        model.outlet_adapter.physical_dim,
         requires_grad=True,
     )
     action_state = torch.randn(batch, model.config.dimensions.action_dim)
-    absolute, cumulative = model.action_codec.gripper_decode_branches(
+    absolute, cumulative = model.outlet_adapter.gripper_decode_branches(
         physical,
         action_state,
     )
@@ -939,21 +1438,22 @@ def test_continuous_gripper_trajectory_reads_only_value_and_delta_channels() -> 
 
 def test_gripper_head_diagnostics_are_separate_from_execution_diagnostics() -> None:
     torch.manual_seed(45)
-    decoder = ClearVLAMainlinePolicy(_config()).bottom.decoder.train()
+    decoder = ClearVLAMainlinePolicy(_config()).execution_bottom.decoder.train()
     action = torch.randn(2, 24, 32)
-    _, event_logits, _, quiet_metrics = decoder._read_output_heads(
+    quiet = decoder.terminal_controller.read_heads(
         action,
         collect_diagnostics=True,
         collect_gripper_diagnostics=False,
     )
-    assert event_logits is None
-    assert quiet_metrics == {}
-    _, event_logits, _, captured_metrics = decoder._read_output_heads(
+    assert quiet.event_logits is None
+    assert quiet.diagnostics == {}
+    captured = decoder.terminal_controller.read_heads(
         action,
         collect_diagnostics=True,
         collect_gripper_diagnostics=True,
     )
-    assert event_logits is None
+    captured_metrics = captured.diagnostics
+    assert captured.event_logits is None
     assert "gripper_private_gate_tensor" in captured_metrics
     assert "gripper_private_state_tensor" in captured_metrics
     assert "gripper_private_state_delta_tensor" in captured_metrics
@@ -964,7 +1464,7 @@ def test_formal_gripper_trajectory_loss_reaches_both_private_deployed_heads() ->
     torch.manual_seed(46)
     config = _config()
     model = ClearVLAMainlinePolicy(config).train()
-    head = model.bottom.decoder.velocity_head
+    head = model.execution_bottom.decoder.terminal_controller.velocity_head
     batch = _batch(config, batch=2)
     action_state = torch.zeros(2, config.dimensions.action_dim)
     history = replace(batch.online.history, action_state=action_state)
@@ -986,13 +1486,13 @@ def test_formal_gripper_trajectory_loss_reaches_both_private_deployed_heads() ->
             batch.action_target.gripper_transition_boundary_raw_units
         ),
     )
-    target_physical = model.action_codec.encode(target_action, action_state)
+    target_physical = model.outlet_adapter.encode(target_action, action_state)
     zero_physical = torch.zeros_like(target_physical)
     tokens = torch.randn(2, 24, 32, requires_grad=True)
     physical, _, _ = head.forward_with_gripper_state(tokens)
     terms = action_terms(
         config,
-        model.action_codec,
+        model.outlet_adapter.codec,
         SimpleNamespace(
             bottom=SimpleNamespace(
                 physical_velocity=physical,
@@ -1054,7 +1554,7 @@ def test_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:
 def test_capacity_stays_fp32_below_one_and_reaches_its_ordered_bank() -> None:
     torch.manual_seed(461)
     model = ClearVLAMainlinePolicy(_config()).train()
-    decoder = model.bottom.decoder
+    decoder = model.execution_bottom.decoder
     controller = decoder.execution_controller
     assert controller is not None
     with torch.no_grad():
@@ -1164,7 +1664,7 @@ def test_formal_eight_row_history_proposal_is_preserved_and_supervised() -> None
     )
     model = ClearVLAMainlinePolicy(config)
     batch = _batch(config)
-    proposal = model.history_proposal(
+    proposal = model.conditioning.history_proposal(
         batch.online.history.executed_action_history
     )
     assert proposal.tokens.shape == (
@@ -1192,7 +1692,7 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
     )
     model = ClearVLAMainlinePolicy(config).train()
     batch = _batch(config)
-    complete_proposal = model.history_proposal(
+    complete_proposal = model.conditioning.history_proposal(
         batch.online.history.executed_action_history
     )
     captured: dict[str, dict[str, object]] = {}
@@ -1204,8 +1704,8 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
         return hook
 
     handles = [
-        model.top.intent.register_forward_pre_hook(capture("intent"), with_kwargs=True),
-        model.factual_reader.register_forward_pre_hook(
+        model.intent.organizer.register_forward_pre_hook(capture("intent"), with_kwargs=True),
+        model.p1.factual_reader.register_forward_pre_hook(
             capture("factual"), with_kwargs=True
         ),
     ]
@@ -1279,7 +1779,7 @@ def test_progressive_grounding_executes_g1_g2_g3_and_rematerializes_n49_once() -
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
-    compiler = model.observation.encoder.soft_address_compiler
+    compiler = model.observation.compiler.encoder.soft_address_compiler
     with mock.patch.object(
         compiler,
         "progressive_fine_candidates",
@@ -1336,8 +1836,8 @@ def test_grounding_canvas_structurally_excludes_forbidden_conditions() -> None:
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
     prepared = model.observation.prepare(batch.online.observation)
-    role = model.bottom.sample_role_table(prepared.pack.value_tokens)
-    canvas, slices = model.bottom.grounding_canvas(
+    role = model.bridge.sample_role_context(prepared.pack.value_tokens)
+    canvas, slices = model.bridge.build_grounding_seed(
         state=batch.online.history.state,
         rollout_init=prepared.pack.future_queries,
         role=role,
@@ -1363,15 +1863,15 @@ def test_v120_p1_query_chunking_preserves_output_and_parameter_gradients() -> No
         captured["args"] = args
         captured["kwargs"] = {**kwargs, "collect_diagnostics": False}
 
-    hook = model.factual_reader.register_forward_pre_hook(capture, with_kwargs=True)
+    hook = model.p1.factual_reader.register_forward_pre_hook(capture, with_kwargs=True)
     try:
         with torch.no_grad():
             model.encode_online(batch.online)
     finally:
         hook.remove()
     assert "args" in captured and "kwargs" in captured
-    chunked = copy.deepcopy(model.factual_reader).eval()
-    unchunked = copy.deepcopy(model.factual_reader).eval()
+    chunked = copy.deepcopy(model.p1.factual_reader).eval()
+    unchunked = copy.deepcopy(model.p1.factual_reader).eval()
     chunked.address_query_batch_budget = 1
     unchunked.address_query_batch_budget = 1_000_000
     # Checkpointing is an independent production memory contract. Disable it
@@ -1423,7 +1923,7 @@ def test_p1_has_no_global_object_value_or_learned_null_shortcut() -> None:
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
     cache, _, _ = model.encode_online(batch.online)
-    parameter_names = {name for name, _ in model.factual_reader.named_parameters()}
+    parameter_names = {name for name, _ in model.p1.factual_reader.named_parameters()}
     assert not any("object_value" in name for name in parameter_names)
     assert not any("learned_null" in name for name in parameter_names)
     assert torch.count_nonzero(cache.factual_dock.protected_detail) > 0
@@ -1435,20 +1935,20 @@ def test_dynamic_p1_completes_cached_detail_at_each_ode_time() -> None:
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
     cache, _, _ = model.encode_online(batch.online)
-    physical = model.action_codec.encode(
+    physical = model.outlet_adapter.encode(
         batch.action_target.normalized,
         batch.online.history.action_state,
     )
-    query = model.bottom.action_query(physical, torch.full((1,), 0.25))
-    first, first_metrics = model.bottom.complete_p1_fact(
+    query = model.bridge.action_query(physical, torch.full((1,), 0.25))
+    first, first_metrics = model.p1.update_dynamic(
         action_query=query,
-        protected_detail=cache.factual_dock.protected_detail,
+        factual=cache.factual_dock,
         time=torch.full((1,), 0.25),
         collect_diagnostics=True,
     )
-    second, _ = model.bottom.complete_p1_fact(
+    second, _ = model.p1.update_dynamic(
         action_query=query,
-        protected_detail=cache.factual_dock.protected_detail,
+        factual=cache.factual_dock,
         time=torch.full((1,), 0.75),
     )
     assert set(first.__dataclass_fields__) == {
@@ -1494,23 +1994,23 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     batch = _batch(config)
     cache, training_state, _ = model.encode_online(batch.online)
     time = torch.full((1,), 0.5)
-    physical = model.action_codec.encode(
+    physical = model.outlet_adapter.encode(
         batch.action_target.normalized,
         batch.online.history.action_state,
     )
-    query, seed_context = model.bottom.action_and_context(
+    query, seed_context = model.bridge.action_and_context(
         physical,
         time,
         cache.history,
         executed_memory=cache.executed_memory,
         action_history_keep=cache.action_history_keep,
     )
-    p1_state, _ = model.bottom.complete_p1_fact(
+    p1_state, _ = model.p1.update_dynamic(
         action_query=query,
-        protected_detail=cache.factual_dock.protected_detail,
+        factual=cache.factual_dock,
         time=time,
     )
-    compiled, _ = model.top.compile_policy(
+    compiled, _ = model.policy_compiler.compile(
         cache.top,
         p1_state=p1_state,
         action_query=query,
@@ -1637,12 +2137,12 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         transition.neutral_coefficients,
     )
     assert restored_metrics["controlled_transition_intervention_active"] == 0
-    assert "p1_fact" not in inspect.signature(model.bottom.forward).parameters
+    assert "p1_fact" not in inspect.signature(model.execution_bottom.step).parameters
     assert "action_query" not in inspect.signature(
-        model.bottom._layer_contracts
+        model.execution_bottom._layer_contracts
     ).parameters
-    assert "p1_fact" not in inspect.signature(model.bottom._layer_contracts).parameters
-    assert "plan" not in inspect.signature(model.bottom._layer_contracts).parameters
+    assert "p1_fact" not in inspect.signature(model.execution_bottom._layer_contracts).parameters
+    assert "plan" not in inspect.signature(model.execution_bottom._layer_contracts).parameters
     contract_inputs: list[tuple[torch.Tensor, dict[str, slice]]] = []
     contract_outputs: list[dict[str, torch.Tensor]] = []
     captured_event: dict[str, torch.Tensor] = {}
@@ -1658,15 +2158,15 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         captured_event["value"] = kwargs["event_evidence"].detach().clone()
 
     contract_hooks = []
-    for head in model.bottom.layer_contract_heads:
+    for head in model.execution_bottom.layer_contract_heads:
         contract_hooks.append(head.register_forward_pre_hook(capture_contract_input))
         contract_hooks.append(head.register_forward_hook(capture_contract_output))
-    evidence_hook = model.bottom.decoder.evidence_adapter.register_forward_pre_hook(
+    evidence_hook = model.execution_bottom.decoder.evidence_adapter.register_forward_pre_hook(
         capture_evidence_input,
         with_kwargs=True,
     )
     try:
-        evidence = model.bottom.compile_evidence_view(
+        evidence = model.execution_bottom.compile_evidence_view(
             plan=compiled.plan,
             intent=cache.top.intent,
             seed=seed_context,
@@ -1677,7 +2177,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         for hook in contract_hooks:
             hook.remove()
     contract_heads: list[LayerContractAdapterHeads] = []
-    for module in model.bottom.layer_contract_heads:
+    for module in model.execution_bottom.layer_contract_heads:
         assert isinstance(module, LayerContractAdapterHeads)
         contract_heads.append(module)
     assert [head.layer_index for head in contract_heads] == [5, 6]
@@ -1784,7 +2284,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
                     rtol=2e-7,
                 )
     trajectory_start, trajectory_stop = evidence.ranges["trajectory"]
-    trajectory_projection = model.bottom.decoder.evidence_adapter.source_proj[
+    trajectory_projection = model.execution_bottom.decoder.evidence_adapter.source_proj[
         "trajectory"
     ]
     assert not trajectory_projection[0].weight.requires_grad
@@ -1794,7 +2294,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         evidence.tokens[:, rollout_start:rollout_stop]
     ) > 0
     assert torch.count_nonzero(evidence.value_tokens[:, rollout_start:rollout_stop]) > 0
-    role_bank = model.bottom._role_bank(compiled.plan)
+    role_bank = model.execution_bottom._role_bank(compiled.plan)
     assert role_bank.source_names == compiled.plan.source_names
     assert role_bank.source_names == ("p3_temporal", "p3_state_change")
     protected_detail = role_bank.protected_detail
@@ -1807,9 +2307,9 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         protected_policy_precision,
         p1_state.policy_query_residual,
     )
-    assert model.bottom.decoder.protected_detail_basis_attnres is not None
-    assert not model.bottom.decoder.protected_detail_basis_attnres.include_null
-    optional_reader = model.bottom.decoder.policy_delta_attnres
+    assert model.execution_bottom.decoder.protected_detail_basis_attnres is not None
+    assert not model.execution_bottom.decoder.protected_detail_basis_attnres.include_null
+    optional_reader = model.execution_bottom.decoder.policy_delta_attnres
     assert optional_reader is not None
     basis = config.dimensions.action_basis_tokens
     assert optional_reader.max_sources == basis
@@ -1828,21 +2328,21 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         protected_detail=torch.zeros_like(protected_detail),
     )
     dynamic_basis_read, _ = (
-        model.bottom.decoder.protected_detail_basis_attnres(
+        model.execution_bottom.decoder.protected_detail_basis_attnres(
             bottom_query,
             protected_policy_precision,
             collect_diagnostics=False,
         )
     )
     optional_update, consequence_update, _ = (
-        model.bottom.decoder._read_policy_delta_bank(
+        model.execution_bottom.decoder._read_policy_delta_bank(
             bottom_query,
             isolated_dynamic_bank,
             collect_diagnostics=False,
         )
     )
     expected_optional = (
-        float(model.bottom.core_config.role_attnres_policy_to_mmdit_scale)
+        float(model.execution_bottom.core_config.role_attnres_policy_to_mmdit_scale)
         * dynamic_basis_read
     )
     torch.testing.assert_close(
@@ -1864,7 +2364,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         protected_policy_precision=torch.zeros_like(protected_policy_precision),
     )
     zero_optional, zero_consequence, _ = (
-        model.bottom.decoder._read_policy_delta_bank(
+        model.execution_bottom.decoder._read_policy_delta_bank(
             bottom_query,
             zero_dynamic_bank,
             collect_diagnostics=False,
@@ -1879,7 +2379,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         protected_policy_precision=torch.zeros_like(protected_policy_precision),
     )
     lane_update, lane_consequence, lane_metrics = (
-        model.bottom.decoder._read_policy_delta_bank(
+        model.execution_bottom.decoder._read_policy_delta_bank(
             bottom_query,
             lane_bank,
             collect_diagnostics=True,
@@ -1896,7 +2396,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         collect_diagnostics=False,
     )
     expected_lane_update = (
-        float(model.bottom.core_config.role_attnres_policy_to_mmdit_scale)
+        float(model.execution_bottom.core_config.role_attnres_policy_to_mmdit_scale)
         * (temporal_read + state_change_read)
     )
     torch.testing.assert_close(lane_update, expected_lane_update)
@@ -1911,7 +2411,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         assert torch.count_nonzero(lane_gradient[:, lane_index]) > 0
     changed_values = lane_bank.values.clone()
     changed_values[:, 0] = 1000.0 * torch.randn_like(changed_values[:, 0])
-    _, _, changed_metrics = model.bottom.decoder._read_policy_delta_bank(
+    _, _, changed_metrics = model.execution_bottom.decoder._read_policy_delta_bank(
         bottom_query,
         replace(lane_bank, values=changed_values),
         collect_diagnostics=True,
@@ -1926,10 +2426,10 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         atol=0.0,
         rtol=0.0,
     )
-    state_tokens, state_history_tokens, executed_tokens = model.bottom._state_memory(
+    state_tokens, state_history_tokens, executed_tokens = model.execution_bottom._state_memory(
         seed_context
     )
-    intent_memory = model.bottom._intent_memory(
+    intent_memory = model.execution_bottom._intent_memory(
         cache.top.intent,
         state_tokens,
         executed_tokens,
@@ -1937,7 +2437,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert set(intent_memory) == {"state", "executed"}
     start, stop = evidence.ranges["transition"]
     assert torch.count_nonzero(evidence.value_tokens[:, start:stop]) > 0
-    alternate_query, alternate_seed = model.bottom.action_and_context(
+    alternate_query, alternate_seed = model.bridge.action_and_context(
         torch.zeros_like(physical),
         time,
         cache.history,
@@ -1953,10 +2453,10 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert not torch.equal(transition.action_coefficients, alternate_transition.action_coefficients)
     assert not torch.equal(transition.value, alternate_transition.value)
 
-    anchors = int(model.bottom.core_config.future_anchors)
+    anchors = int(model.execution_bottom.core_config.future_anchors)
     spatial = (
-        int(model.bottom.core_config.num_cameras)
-        * int(model.bottom.core_config.future_grid_size) ** 2
+        int(model.execution_bottom.core_config.num_cameras)
+        * int(model.execution_bottom.core_config.future_grid_size) ** 2
     )
     marker = torch.arange(
         1,
@@ -1967,27 +2467,27 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         transition,
         value=marker.reshape(1, anchors * spatial, config.dimensions.hidden_size),
     )
-    event_context = model.bottom._transition_event_context(marked_transition)
+    event_context = model.execution_bottom._transition_event_context(marked_transition)
     lower = 0
-    for index, upper in enumerate(model.bottom.core_config.flow_jepa_action_offsets):
+    for index, upper in enumerate(model.execution_bottom.core_config.flow_jepa_action_offsets):
         assert torch.equal(
             event_context[:, lower:upper],
             torch.full_like(event_context[:, lower:upper], float(index + 1)),
         )
         lower = int(upper)
     assert lower == config.dimensions.action_horizon
-    assert len(model.top.grounding_blocks) == 3
-    assert model.top.dynamics.w1 is not model.top.dynamics.w2
-    assert model.history_proposal.OFFSETS == (-24, -16, -12, -8, -6, -4, -2, -1)
-    assert len(model.history_proposal.blocks) == 2
-    assert model.history_proposal.recent_tokens == 4
-    assert model.history_proposal.summary_tokens == 3
-    assert model.bottom.p1_policy_block is not None
+    assert len(model.grounding.blocks) == 3
+    assert model.world.dynamics.w1 is not model.world.dynamics.w2
+    assert model.conditioning.history_proposal.OFFSETS == (-24, -16, -12, -8, -6, -4, -2, -1)
+    assert len(model.conditioning.history_proposal.blocks) == 2
+    assert model.conditioning.history_proposal.recent_tokens == 4
+    assert model.conditioning.history_proposal.summary_tokens == 3
+    assert model.p1.dynamic_policy_block is not None
     assert model.transition.rank == 8
     assert model.transition.action_queries.shape[1] == 8
-    assert len(model.bottom.blocks) == 3
-    assert len(model.bottom.capacity) == 3
-    assert model.bottom.execution is not None
+    assert len(model.execution_bottom.blocks) == 3
+    assert len(model.execution_bottom.capacity) == 3
+    assert model.execution_bottom.execution is not None
 
 
 def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> None:
@@ -1995,7 +2495,7 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
     config = _config()
     model = ClearVLAMainlinePolicy(config)
     batch = _batch(config)
-    calls = [0 for _ in model.bottom.blocks]
+    calls = [0 for _ in model.execution_bottom.blocks]
     factual_calls = 0
     teacher_calls = 0
     grounding_block_calls = [0, 0, 0]
@@ -2024,18 +2524,18 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
         nonlocal transition_calls
         transition_calls += 1
 
-    handles.append(model.factual_reader.register_forward_hook(count_factual))
-    handles.append(model.top.teacher.register_forward_hook(count_teacher))
-    for index, block in enumerate(model.top.grounding_blocks):
+    handles.append(model.p1.factual_reader.register_forward_hook(count_factual))
+    handles.append(model.training_targets.teacher.register_forward_hook(count_teacher))
+    for index, block in enumerate(model.grounding.blocks):
 
         def count_grounding_block(_module, _args, _output, *, index=index):
             grounding_block_calls[index] += 1
 
         handles.append(block.register_forward_hook(count_grounding_block))
-    handles.append(model.history_proposal.register_forward_hook(count_history_proposal))
-    handles.append(model.bottom.p1_policy_block.register_forward_hook(count_p1_host))
+    handles.append(model.conditioning.history_proposal.register_forward_hook(count_history_proposal))
+    handles.append(model.p1.dynamic_policy_block.register_forward_hook(count_p1_host))
     handles.append(model.transition.register_forward_hook(count_transition))
-    for index, block in enumerate(model.bottom.blocks):
+    for index, block in enumerate(model.execution_bottom.blocks):
 
         def count_call(_module, _args, _output, *, index=index):
             calls[index] += 1
@@ -2046,13 +2546,13 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
         "prepare",
         wraps=model.observation.prepare,
     ) as observation_prepare, mock.patch.object(
-        model.observation.encoder.flow,
+        model.observation.compiler.encoder.flow,
         "forward",
-        wraps=model.observation.encoder.flow.forward,
+        wraps=model.observation.compiler.encoder.flow.forward,
     ) as semantic_flow, mock.patch.object(
-        model.observation.encoder.raw_flow,
+        model.observation.compiler.encoder.raw_flow,
         "forward",
-        wraps=model.observation.encoder.raw_flow.forward,
+        wraps=model.observation.compiler.encoder.raw_flow.forward,
     ) as raw_flow:
         result = sample_action(
             model,
@@ -2127,7 +2627,7 @@ def test_clean_endpoint_head_forward_cannot_change_integrated_action() -> None:
     config = _config()
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
-    initial_noise = model.action_codec.sample_noise(
+    initial_noise = model.outlet_adapter.sample_noise(
         batch.online.batch,
         device=batch.online.device,
         dtype=torch.float32,
@@ -2179,7 +2679,7 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
     def capture_p1_g3_rollout(_module, args):
         captured["g3_rollout"] = args[1]
 
-    handle = model.factual_reader.register_forward_pre_hook(
+    handle = model.p1.factual_reader.register_forward_pre_hook(
         capture_p1_g3_rollout
     )
     try:
@@ -2230,7 +2730,7 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
         atol=0.0,
         rtol=0.0,
     )
-    noisy_action = model.action_codec.encode(
+    noisy_action = model.outlet_adapter.encode(
         batch.action_target.normalized,
         batch.online.history.action_state,
     )
@@ -2329,7 +2829,7 @@ def test_cached_deployment_forces_eval_mode_and_is_repeatable() -> None:
     noise = torch.randn(
         batch.action_target.batch,
         config.dimensions.action_horizon,
-        model.action_codec.physical_dim,
+        model.outlet_adapter.physical_dim,
     )
     model.train()
     first = sample_cached_action(
@@ -2367,7 +2867,7 @@ def test_core_attribution_preserves_primary_and_sole_consumer_identities() -> No
     noise = torch.randn(
         batch.action_target.batch,
         config.dimensions.action_horizon,
-        model.action_codec.physical_dim,
+        model.outlet_adapter.physical_dim,
     )
     primary = sample_cached_action(
         model,
@@ -2407,7 +2907,7 @@ def test_core_attribution_preserves_primary_and_sole_consumer_identities() -> No
         collect_diagnostics=True,
         dtype=torch.float32,
     )
-    model.top.consequence.set_eval_intervention("effect_neutral")
+    model.policy_compiler.consequence.set_eval_intervention("effect_neutral")
     try:
         consequence_neutral = sample_cached_action(
             model,
@@ -2418,7 +2918,7 @@ def test_core_attribution_preserves_primary_and_sole_consumer_identities() -> No
             dtype=torch.float32,
         )
     finally:
-        model.top.consequence.clear_eval_intervention()
+        model.policy_compiler.consequence.clear_eval_intervention()
     assert torch.equal(world_neutral.action, consequence_neutral.action)
     assert torch.equal(world_neutral.physical_field, consequence_neutral.physical_field)
     assert torch.equal(world_neutral.motion_logits, consequence_neutral.motion_logits)
@@ -2587,7 +3087,7 @@ def test_core_attribution_full_one_batch_validation_smoke() -> None:
         ]
         > 0.0
     )
-    assert model.top.consequence._eval_intervention == "none"
+    assert model.policy_compiler.consequence._eval_intervention == "none"
     assert model.transition._eval_intervention == "none"
 
 
@@ -2599,7 +3099,7 @@ def test_validation_execution_interventions_match_the_native_v120_modes() -> Non
     batch = _batch(config)
     with torch.no_grad():
         cache, _, _ = model.encode_online(batch.online)
-        physical = model.action_codec.sample_noise(
+        physical = model.outlet_adapter.sample_noise(
             batch.online.batch,
             device=batch.online.device,
             dtype=torch.float32,
@@ -2687,7 +3187,7 @@ def test_proposal_ablation_does_not_alias_p1_or_controlled_transition() -> None:
     initial_noise = torch.randn(
         batch.online.batch,
         config.dimensions.action_horizon,
-        model.action_codec.physical_dim,
+        model.outlet_adapter.physical_dim,
     )
     primary = sample_refined_cached_action(
         model,
@@ -2750,7 +3250,7 @@ def test_native_execution_probabilities_and_dwell_are_bounded() -> None:
     batch = _batch(config)
     cache, _, _ = model.encode_online(batch.online)
     time = torch.full((1,), 0.5)
-    physical = model.action_codec.encode(
+    physical = model.outlet_adapter.encode(
         batch.action_target.normalized,
         batch.online.history.action_state,
     )
@@ -2766,7 +3266,7 @@ def test_native_execution_probabilities_and_dwell_are_bounded() -> None:
     dwell = output.metrics["evidence_mmd_it_dwell_expected"]
     assert torch.allclose(operation + terminal, operation.new_ones(()), atol=1e-6)
     assert 0 <= capacity <= 1
-    assert 0 <= dwell <= model.bottom.decoder.max_dwell
+    assert 0 <= dwell <= model.execution_bottom.decoder.max_dwell
 
 
 def test_scheduler_applies_warmup_before_first_optimizer_update() -> None:

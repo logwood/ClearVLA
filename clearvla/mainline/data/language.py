@@ -13,16 +13,17 @@ from typing import Any, Sequence
 import torch
 from torch import Tensor
 
+from clearvla.data.instructions import instruction_key, normalize_instruction
+
 T5_INSTRUCTION_CACHE_SCHEMA = "clearvla-t5-instruction-cache-v1"
+CALVIN_LANGUAGE_BANK_SCHEMA = "clearvla-language-bank-v1"
 T5_ENCODER_ID = "google/t5-v1_1-xxl"
 T5_SOURCE_MAX_TOKENS = 120
 
 
 def _is_sha256(value: object) -> bool:
     text = str(value).lower()
-    return len(text) == 64 and all(
-        character in "0123456789abcdef" for character in text
-    )
+    return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
 
 
 def _tensor_storage_sha256(value: Tensor) -> str:
@@ -52,35 +53,25 @@ def _rdt_precomputed_metadata(
     duplicate_policy = str(payload.get("embedding_duplicate_policy", ""))
     if duplicate_policy not in {"error", "lexicographic"}:
         raise ValueError("RDT precomputed bank has an invalid duplicate policy")
-    tokenizer_verification = str(
-        payload.get("embedding_tokenizer_verification", "")
-    )
+    tokenizer_verification = str(payload.get("embedding_tokenizer_verification", ""))
     if tokenizer_verification not in {"local_only", "skipped_explicitly"}:
         raise ValueError("RDT precomputed bank has invalid tokenizer verification")
     records = payload.get("embedding_records")
     if not isinstance(records, list) or len(records) != len(instructions):
-        raise ValueError(
-            "RDT precomputed bank must have one provenance record per instruction"
-        )
+        raise ValueError("RDT precomputed bank must have one provenance record per instruction")
     candidate_total = 0
     variant_groups = 0
     policy_tokens = int(raw_tokens.shape[1])
-    for row, (instruction, record_value) in enumerate(
-        zip(instructions, records, strict=True)
-    ):
+    for row, (instruction, record_value) in enumerate(zip(instructions, records, strict=True)):
         if not isinstance(record_value, Mapping):
             raise TypeError("RDT embedding provenance records must be mappings")
         record = dict(record_value)
-        if str(record.get("instruction_sha256", "")) != instruction_sha256(
-            instruction
-        ):
+        if str(record.get("instruction_sha256", "")) != instruction_sha256(instruction):
             raise ValueError("RDT embedding provenance instruction digest is stale")
         selected_path = str(record.get("selected_relative_path", ""))
         selected_file_digest = str(record.get("selected_file_sha256", ""))
         selected_tensor_digest = str(record.get("selected_tensor_sha256", ""))
-        selected_policy_digest = str(
-            record.get("selected_policy_tensor_sha256", "")
-        )
+        selected_policy_digest = str(record.get("selected_policy_tensor_sha256", ""))
         selected_policy_tokens = int(record.get("selected_policy_tokens", 0))
         if (
             not selected_path
@@ -144,12 +135,9 @@ def _rdt_precomputed_metadata(
         if (
             selected_policy_tokens != expected_retained
             or not torch.equal(raw_mask[row].to(device="cpu"), expected_mask)
-            or _tensor_storage_sha256(raw_tokens[row, :expected_retained])
-            != selected_policy_digest
+            or _tensor_storage_sha256(raw_tokens[row, :expected_retained]) != selected_policy_digest
         ):
-            raise ValueError(
-                "RDT embedding selected policy row does not match its provenance"
-            )
+            raise ValueError("RDT embedding selected policy row does not match its provenance")
     if int(payload.get("embedding_candidate_file_count", -1)) != candidate_total:
         raise ValueError("RDT embedding candidate total is inconsistent")
     if int(payload.get("embedding_variant_group_count", -1)) != variant_groups:
@@ -231,8 +219,7 @@ class T5ConditionBank:
         )
         if missing:
             raise KeyError(
-                "T5 instruction cache does not cover episode instructions: "
-                f"{missing[:5]}"
+                f"T5 instruction cache does not cover episode instructions: {missing[:5]}"
             )
         return torch.tensor([index[str(value)] for value in values], dtype=torch.long)
 
@@ -272,9 +259,7 @@ def _load_instruction_bank(
     ):
         raise ValueError("instruction cache inventory digest is inconsistent")
     source_episode_count = int(payload.get("source_episode_count", 0))
-    source_inventory_digest = str(
-        payload.get("source_instruction_inventory_sha256", "")
-    ).lower()
+    source_inventory_digest = str(payload.get("source_instruction_inventory_sha256", "")).lower()
     if source_episode_count <= 0:
         raise ValueError("instruction cache source episode count must be positive")
     if not _is_sha256(source_inventory_digest):
@@ -324,6 +309,89 @@ def _load_instruction_bank(
     return T5ConditionBank(
         tokens=tokens.contiguous(),
         mask=mask.contiguous(),
+        instructions=instructions,
+        metadata=metadata,
+    )
+
+
+def _load_calvin_language_bank(
+    source: Path,
+    payload: Mapping[str, Any],
+    *,
+    max_tokens: int,
+    expected_width: int,
+) -> T5ConditionBank:
+    """Load the content-addressed bank emitted by the benchmark adapters."""
+
+    if str(payload.get("schema", "")) != CALVIN_LANGUAGE_BANK_SCHEMA:
+        raise ValueError("unsupported external language bank schema")
+    if str(payload.get("encoder_model", "")) != T5_ENCODER_ID:
+        raise ValueError(f"external language bank must use {T5_ENCODER_ID}")
+    raw_conditions = payload.get("conditions")
+    if not isinstance(raw_conditions, Mapping) or not raw_conditions:
+        raise ValueError("external language bank must contain a non-empty conditions map")
+
+    rows: list[tuple[str, Tensor, Tensor]] = []
+    for raw_key, raw_value in raw_conditions.items():
+        key = str(raw_key)
+        if not isinstance(raw_value, Mapping):
+            raise TypeError(f"external language condition {key!r} must be a mapping")
+        instruction = normalize_instruction(str(raw_value.get("instruction", "")))
+        if instruction_key(instruction) != key:
+            raise ValueError(f"external language key does not identify {instruction!r}")
+        if "tokens" not in raw_value:
+            raise KeyError(f"external language condition {key!r} has no tokens")
+        raw_tokens = torch.as_tensor(raw_value["tokens"])
+        if raw_tokens.ndim == 2:
+            raw_tokens = raw_tokens.unsqueeze(0)
+        if raw_tokens.ndim != 3 or int(raw_tokens.shape[0]) != 1:
+            raise ValueError(
+                f"external language tokens must be [L,D] or [1,L,D], got {tuple(raw_tokens.shape)}"
+            )
+        tokens = raw_tokens.detach().to(device="cpu", dtype=torch.float32)
+        tokens = tokens[:, : int(max_tokens)]
+        if int(tokens.shape[1]) < 1 or int(tokens.shape[2]) != int(expected_width):
+            raise ValueError("external language token dimensions do not match the model")
+        mask_value = raw_value.get("mask", raw_value.get("attention_mask"))
+        if mask_value is None:
+            mask = torch.ones(tokens.shape[:2], dtype=torch.bool)
+        else:
+            mask = torch.as_tensor(mask_value, dtype=torch.bool, device="cpu")
+            if mask.ndim == 1:
+                mask = mask.unsqueeze(0)
+            mask = mask[:, : tokens.shape[1]]
+        if tuple(mask.shape) != tuple(tokens.shape[:2]) or not bool(mask.any()):
+            raise ValueError(f"external language mask is invalid for {instruction!r}")
+        if not bool(torch.isfinite(tokens).all()):
+            raise ValueError("external language bank contains NaN or infinity")
+        # The bank may store a short, unpadded row.  Materialize one fixed
+        # policy length so the collated condition tensor has a stable ABI.
+        padded_tokens = torch.zeros(1, int(max_tokens), int(expected_width), dtype=torch.float32)
+        padded_mask = torch.zeros(1, int(max_tokens), dtype=torch.bool)
+        length = int(tokens.shape[1])
+        padded_tokens[:, :length].copy_(tokens)
+        padded_mask[:, :length].copy_(mask)
+        padded_tokens.masked_fill_(~padded_mask[..., None], 0.0)
+        rows.append((instruction, padded_tokens, padded_mask))
+
+    rows.sort(key=lambda row: row[0])
+    instructions = tuple(row[0] for row in rows)
+    if len(set(instructions)) != len(instructions):
+        raise ValueError("external language bank contains duplicate instructions")
+    tokens = torch.cat([row[1] for row in rows], dim=0).contiguous()
+    mask = torch.cat([row[2] for row in rows], dim=0).contiguous()
+    metadata = {
+        "source": "precomputed_external_language_bank",
+        "path": str(source.resolve()),
+        "schema": CALVIN_LANGUAGE_BANK_SCHEMA,
+        "encoder_id": T5_ENCODER_ID,
+        "instructions": len(instructions),
+        "effective_tokens": int(max_tokens),
+        "storage_dtype": str(payload.get("storage_dtype", "unknown")),
+    }
+    return T5ConditionBank(
+        tokens=tokens,
+        mask=mask,
         instructions=instructions,
         metadata=metadata,
     )
@@ -430,13 +498,21 @@ def load_t5_condition_bank(
     source = Path(path).expanduser()
     if source.is_file():
         payload = torch.load(source, map_location="cpu", weights_only=False)
-        if isinstance(payload, dict) and payload.get("schema") == T5_INSTRUCTION_CACHE_SCHEMA:
-            return _load_instruction_bank(
-                source,
-                payload,
-                max_tokens=max_tokens,
-                expected_width=expected_width,
-            )
+        if isinstance(payload, dict):
+            if payload.get("schema") == T5_INSTRUCTION_CACHE_SCHEMA:
+                return _load_instruction_bank(
+                    source,
+                    payload,
+                    max_tokens=max_tokens,
+                    expected_width=expected_width,
+                )
+            if payload.get("schema") == CALVIN_LANGUAGE_BANK_SCHEMA:
+                return _load_calvin_language_bank(
+                    source,
+                    payload,
+                    max_tokens=max_tokens,
+                    expected_width=expected_width,
+                )
     tokens, mask, metadata = load_t5_condition(
         source,
         max_tokens=max_tokens,
@@ -455,6 +531,7 @@ __all__ = [
     "T5ConditionBank",
     "T5_ENCODER_ID",
     "T5_INSTRUCTION_CACHE_SCHEMA",
+    "CALVIN_LANGUAGE_BANK_SCHEMA",
     "T5_SOURCE_MAX_TOKENS",
     "instruction_inventory_sha256",
     "instruction_sha256",

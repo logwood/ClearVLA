@@ -7,6 +7,7 @@ strict reader so the active graph does not import an old experiment package.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -19,6 +20,7 @@ from clearvla.data.hdf5_episode import LoadedEpisode
 from clearvla.vision.preprocessing import PreprocessConfig
 
 DINO_TOKEN_CACHE_VERSION = "rdt2-dinov2-dense-token-v1"
+DEFAULT_MMAP_ARRAY_CACHE_CAPACITY = 16
 
 
 def _source_fingerprint(path: Path) -> dict[str, Any]:
@@ -101,6 +103,7 @@ class DinoV2TokenStore:
         preprocessing: PreprocessConfig,
         dinov2_model: str,
         required_episode_indices: Sequence[int] | None = None,
+        max_open_arrays: int = DEFAULT_MMAP_ARRAY_CACHE_CAPACITY,
     ) -> None:
         if not episodes:
             raise ValueError("DINO token store requires at least one episode")
@@ -111,7 +114,14 @@ class DinoV2TokenStore:
             raise ValueError("requested DINO cameras must be non-empty and unique")
         self.preprocessing = preprocessing
         self.dinov2_model = str(dinov2_model)
-        self._arrays: dict[int, np.ndarray] = {}
+        if int(max_open_arrays) <= 0:
+            raise ValueError("max_open_arrays must be positive")
+        self.max_open_arrays = int(max_open_arrays)
+        # Each memmap retains an OS file descriptor.  Workers visit many
+        # episodes over a formal epoch, so an unbounded dict eventually hits
+        # RLIMIT_NOFILE even though returned batches are released.  Advanced
+        # indexing in ``load_batch`` copies rows, making LRU eviction safe.
+        self._arrays: OrderedDict[int, np.ndarray] = OrderedDict()
         required = (
             tuple(range(len(self.episodes)))
             if required_episode_indices is None
@@ -144,7 +154,7 @@ class DinoV2TokenStore:
 
     def __getstate__(self) -> dict[str, object]:
         state = dict(self.__dict__)
-        state["_arrays"] = {}
+        state["_arrays"] = OrderedDict()
         return state
 
     def _validate_episode(self, episode_idx: int, episode: LoadedEpisode) -> DinoTokenEpisodeMeta:
@@ -170,16 +180,21 @@ class DinoV2TokenStore:
         if not token_path.is_file():
             raise FileNotFoundError(f"missing DINO token array: {token_path}")
         array = np.load(token_path, mmap_mode="r")
-        expected = (
-            episode.length,
-            len(meta.cameras),
-            meta.tokens_per_camera,
-            meta.token_dim,
-        )
-        if tuple(array.shape) != expected or array.dtype != np.float16:
-            raise ValueError(
-                f"invalid DINO cache {token_path}: {array.shape}/{array.dtype}, expected {expected}/float16"
+        try:
+            expected = (
+                episode.length,
+                len(meta.cameras),
+                meta.tokens_per_camera,
+                meta.token_dim,
             )
+            if tuple(array.shape) != expected or array.dtype != np.float16:
+                raise ValueError(
+                    f"invalid DINO cache {token_path}: {array.shape}/{array.dtype}, expected {expected}/float16"
+                )
+        finally:
+            # Validation runs over every admitted episode in the parent.  Do
+            # not retain one memmap descriptor per episode before workers fork.
+            del array
         return meta
 
     def _array(self, episode_idx: int) -> np.ndarray:
@@ -190,12 +205,18 @@ class DinoV2TokenStore:
             raise KeyError(
                 f"episode index {index} was not admitted by this loader-only cache scope"
             )
-        if index not in self._arrays:
-            self._arrays[index] = np.load(
-                _tokens_path(self.cache_dir, self.episodes[index].cache_key),
-                mmap_mode="r",
-            )
-        return self._arrays[index]
+        if index in self._arrays:
+            array = self._arrays.pop(index)
+            self._arrays[index] = array
+            return array
+        array = np.load(
+            _tokens_path(self.cache_dir, self.episodes[index].cache_key),
+            mmap_mode="r",
+        )
+        self._arrays[index] = array
+        while len(self._arrays) > self.max_open_arrays:
+            self._arrays.popitem(last=False)
+        return array
 
     def load_batch(self, sample_keys: Tensor | Sequence[Sequence[int]]) -> Tensor:
         keys = torch.as_tensor(sample_keys, dtype=torch.long).cpu().numpy()
@@ -223,4 +244,9 @@ class DinoV2TokenStore:
         return torch.from_numpy(np.ascontiguousarray(result))
 
 
-__all__ = ["DINO_TOKEN_CACHE_VERSION", "DinoTokenEpisodeMeta", "DinoV2TokenStore"]
+__all__ = [
+    "DEFAULT_MMAP_ARRAY_CACHE_CAPACITY",
+    "DINO_TOKEN_CACHE_VERSION",
+    "DinoTokenEpisodeMeta",
+    "DinoV2TokenStore",
+]

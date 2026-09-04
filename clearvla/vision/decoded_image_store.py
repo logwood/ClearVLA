@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from clearvla.vision.image_io import decode_image_value
 from clearvla.vision.preprocessing import PreprocessConfig, apply_preprocess
 
 DECODED_IMAGE_CACHE_VERSION = "decoded-image-v1"
+DEFAULT_MMAP_ARRAY_CACHE_CAPACITY = 16
 
 
 def _source_fingerprint(path: Path) -> dict[str, Any]:
@@ -217,14 +219,20 @@ class DecodedImageStore:
         *,
         camera_names: tuple[str, ...],
         preprocessing: PreprocessConfig,
+        max_open_arrays: int = DEFAULT_MMAP_ARRAY_CACHE_CAPACITY,
     ) -> None:
         if not camera_names:
             raise ValueError("camera_names must be non-empty")
         self.cache_dir = Path(cache_dir)
         self.camera_names = tuple(camera_names)
         self.preprocessing = preprocessing
+        if int(max_open_arrays) <= 0:
+            raise ValueError("max_open_arrays must be positive")
+        self.max_open_arrays = int(max_open_arrays)
         self._meta: dict[str, DecodedImageEpisodeMeta] = {}
-        self._arrays: dict[tuple[str, str], np.ndarray] = {}
+        # Keep the process-local mmap descriptor count bounded when workers
+        # traverse a large multi-episode benchmark.
+        self._arrays: OrderedDict[tuple[str, str], np.ndarray] = OrderedDict()
 
     def validate_episode(self, episode: LoadedEpisode) -> DecodedImageEpisodeMeta:
         meta_path = _meta_path(self.cache_dir, episode.cache_key)
@@ -271,29 +279,38 @@ class DecodedImageStore:
             if not path.exists():
                 raise FileNotFoundError(f"Missing decoded-image mmap: {path}")
             array = np.load(path, mmap_mode="r")
-            expected_shape = (episode.length, *meta.camera_shapes_hwc[camera])
-            if tuple(array.shape) != expected_shape or array.dtype != np.uint8:
-                raise ValueError(
-                    f"Invalid decoded-image mmap {path}: shape={tuple(array.shape)}, dtype={array.dtype}; "
-                    f"expected={expected_shape}, uint8"
-                )
+            try:
+                expected_shape = (episode.length, *meta.camera_shapes_hwc[camera])
+                if tuple(array.shape) != expected_shape or array.dtype != np.uint8:
+                    raise ValueError(
+                        f"Invalid decoded-image mmap {path}: shape={tuple(array.shape)}, dtype={array.dtype}; "
+                        f"expected={expected_shape}, uint8"
+                    )
+            finally:
+                del array
         self._meta[episode.cache_key] = meta
         return meta
 
     def __getstate__(self):
         state = dict(self.__dict__)
-        state["_arrays"] = {}
+        state["_arrays"] = OrderedDict()
         state["_meta"] = {}
         return state
 
     def _array(self, episode: LoadedEpisode, camera: str) -> np.ndarray:
         key = (episode.cache_key, camera)
-        if key not in self._arrays:
-            if episode.cache_key not in self._meta:
-                self.validate_episode(episode)
-            path = _episode_dir(self.cache_dir, episode.cache_key) / _camera_filename(camera)
-            self._arrays[key] = np.load(path, mmap_mode="r")
-        return self._arrays[key]
+        if key in self._arrays:
+            array = self._arrays.pop(key)
+            self._arrays[key] = array
+            return array
+        if episode.cache_key not in self._meta:
+            self.validate_episode(episode)
+        path = _episode_dir(self.cache_dir, episode.cache_key) / _camera_filename(camera)
+        array = np.load(path, mmap_mode="r")
+        self._arrays[key] = array
+        while len(self._arrays) > self.max_open_arrays:
+            self._arrays.popitem(last=False)
+        return array
 
     def load_window(self, episode: LoadedEpisode, indices: np.ndarray) -> dict[str, torch.Tensor]:
         if indices.ndim != 1 or len(indices) == 0:

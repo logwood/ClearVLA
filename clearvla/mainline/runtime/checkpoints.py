@@ -20,6 +20,12 @@ from ..checkpoint import (
     compare_checkpoint_identity,
 )
 from ..config import ExperimentConfig, config_from_mapping
+from ..manifest import LAYOUT_SCHEMA, ArchitectureManifest, manifest_from_mapping
+from ..model.component_contracts import (
+    ComponentSelection,
+    map_legacy_state_dict,
+    modular_to_legacy_name,
+)
 from ..training.optimizer import WarmupCosineSchedule
 
 CHECKPOINT_SCHEMA = "clearvla-mainline-checkpoint-v4"
@@ -31,6 +37,23 @@ VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
         "clearvla/mainline/runtime/evaluation.py",
         "clearvla/mainline/runtime/logging.py",
         "clearvla/mainline/train.py",
+    }
+)
+LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/checkpoint.py",
+        "clearvla/mainline/manifest.py",
+        "clearvla/mainline/model/__init__.py",
+        "clearvla/mainline/model/component_contracts.py",
+        "clearvla/mainline/model/components.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/evaluation.py",
+        "clearvla/mainline/runtime/sampling.py",
+        "clearvla/mainline/train.py",
+        "clearvla/mainline/training/engine.py",
+        "clearvla/mainline/training/optimizer.py",
+        "clearvla/mainline/v120_core/time_domain_mmdit.py",
     }
 )
 
@@ -57,7 +80,74 @@ class MigrationReport:
     loaded: tuple[str, ...]
     missing: tuple[str, ...]
     shape_mismatch: tuple[str, ...]
+    dtype_mismatch: tuple[str, ...]
     rejected: tuple[str, ...]
+
+
+def _identity_manifest(identity: CheckpointIdentity) -> ArchitectureManifest:
+    return manifest_from_mapping(
+        identity.manifest,
+        require_current_schema=False,
+    )
+
+
+def _resolved_component_selection(
+    model: nn.Module,
+    config: ExperimentConfig,
+) -> ComponentSelection:
+    expected = ComponentSelection.from_config(config)
+    live = getattr(model, "selection", None)
+    if live is not None and live != expected:
+        raise ValueError("live model component selection differs from the config")
+    return expected
+
+
+def _checkpoint_component_selection(
+    payload: Mapping[str, object],
+    *,
+    config: ExperimentConfig,
+    manifest: ArchitectureManifest,
+) -> ComponentSelection:
+    raw = payload.get("component_selection")
+    if raw is None and int(manifest.layout_schema) != LAYOUT_SCHEMA:
+        # Pre-modular checkpoints did not serialize this object.  The frozen
+        # config still resolves its only legal baseline selection.
+        return ComponentSelection.from_config(config)
+    if not isinstance(raw, Mapping):
+        raise ValueError("checkpoint has no complete component selection")
+    return ComponentSelection.from_mapping(raw, config=config)
+
+
+def _layout_only_manifest_difference(
+    saved: ArchitectureManifest,
+    current: ArchitectureManifest,
+) -> bool:
+    saved_value = saved.as_dict()
+    saved_value["layout_schema"] = int(current.layout_schema)
+    return saved_value == current.as_dict()
+
+
+def _state_for_current_layout(
+    saved: Mapping[str, object],
+    *,
+    model: nn.Module,
+    saved_layout_schema: int,
+) -> Mapping[str, Tensor]:
+    if int(saved_layout_schema) == LAYOUT_SCHEMA:
+        return cast(Mapping[str, Tensor], saved)
+    try:
+        return map_legacy_state_dict(model, cast(Mapping[str, Tensor], saved))
+    except (KeyError, TypeError, ValueError, RuntimeError) as error:
+        raise ValueError("legacy checkpoint state cannot map to the modular layout") from error
+
+
+def _legacy_bottom_name(name: str) -> str:
+    try:
+        return modular_to_legacy_name(name)
+    except KeyError:
+        # Keep this helper usable by small checkpoint contract fixtures that
+        # model a literal ``bottom`` without constructing the 168M graph.
+        return name
 
 
 def _rng_state() -> dict[str, object]:
@@ -211,6 +301,7 @@ def save_checkpoint(
 
     config.validate()
     identity.validate()
+    component_selection = _resolved_component_selection(model, config)
     if int(epoch) < 0 or int(global_step) < 0:
         raise ValueError("checkpoint epoch/global step must be non-negative")
     if int(schedule.step_index) != int(global_step):
@@ -223,6 +314,7 @@ def save_checkpoint(
         "schema": CHECKPOINT_SCHEMA,
         "identity": identity.as_dict(),
         "config": config.as_dict(),
+        "component_selection": component_selection.as_dict(),
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "schedule": schedule.state_dict(),
@@ -276,6 +368,20 @@ def load_checkpoint_exact(
         raw_identity,
         require_current_manifest=False,
     )
+    saved_manifest = _identity_manifest(saved_identity)
+    if int(saved_manifest.layout_schema) != LAYOUT_SCHEMA:
+        raise ValueError(
+            "exact resume rejects the pre-modular model layout; use read-only "
+            "validation or explicit migration"
+        )
+    saved_selection = _checkpoint_component_selection(
+        payload,
+        config=saved_config,
+        manifest=saved_manifest,
+    )
+    current_selection = _resolved_component_selection(model, config)
+    if saved_selection != current_selection:
+        raise ValueError("exact resume component selection differs")
     report = compare_checkpoint_identity(saved_identity, identity)
     if not report.exact_resume:
         raise ValueError("exact resume rejected: " + "; ".join(report.reasons))
@@ -458,9 +564,26 @@ def load_checkpoint_for_validation(
         raw_identity,
         require_current_manifest=False,
     )
+    saved_manifest = _identity_manifest(saved_identity)
+    current_manifest = _identity_manifest(identity)
+    saved_selection = _checkpoint_component_selection(
+        payload,
+        config=saved_config,
+        manifest=saved_manifest,
+    )
+    current_selection = _resolved_component_selection(model, config)
+    if saved_selection != current_selection:
+        raise ValueError("validation replay component selection differs")
     report = compare_checkpoint_identity(saved_identity, identity)
+    legacy_layout_only = (
+        int(saved_manifest.layout_schema) != LAYOUT_SCHEMA
+        and _layout_only_manifest_difference(saved_manifest, current_manifest)
+    )
+    allowed_identity_reasons = {"source identity differs"}
+    if legacy_layout_only:
+        allowed_identity_reasons.add("manifest identity differs")
     rejected_reasons = tuple(
-        reason for reason in report.reasons if reason != "source identity differs"
+        reason for reason in report.reasons if reason not in allowed_identity_reasons
     )
     if rejected_reasons:
         raise ValueError("validation replay rejected: " + "; ".join(rejected_reasons))
@@ -475,10 +598,15 @@ def load_checkpoint_for_validation(
             if saved_sources.get(path) != current_sources.get(path)
         )
     )
+    allowed_source_paths = VALIDATION_REPLAY_SOURCE_PATHS
+    if legacy_layout_only:
+        allowed_source_paths = allowed_source_paths.union(
+            LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS
+        )
     unexpected_source_files = tuple(
         path
         for path in changed_source_files
-        if path not in VALIDATION_REPLAY_SOURCE_PATHS
+        if path not in allowed_source_paths
     )
     if unexpected_source_files:
         raise ValueError(
@@ -489,11 +617,16 @@ def load_checkpoint_for_validation(
     saved_model = payload.get("model")
     if not isinstance(saved_model, Mapping):
         raise ValueError("validation replay checkpoint has no model state mapping")
+    mapped_model = _state_for_current_layout(
+        saved_model,
+        model=model,
+        saved_layout_schema=int(saved_manifest.layout_schema),
+    )
     current_model = model.state_dict()
-    if set(saved_model) != set(current_model):
+    if set(mapped_model) != set(current_model):
         raise ValueError("validation replay model parameter ownership differs")
     for name, current_value in current_model.items():
-        saved_value = saved_model[name]
+        saved_value = mapped_model[name]
         if not isinstance(saved_value, torch.Tensor):
             raise ValueError(f"model state {name!r} is not a tensor")
         if tuple(saved_value.shape) != tuple(current_value.shape):
@@ -517,7 +650,7 @@ def load_checkpoint_for_validation(
     if restored_best is not None and not math.isfinite(restored_best):
         raise ValueError("validation replay best metric is non-finite")
 
-    model.load_state_dict(saved_model, strict=True)
+    model.load_state_dict(mapped_model, strict=True)
     return ValidationReplayState(
         epoch=restored_epoch,
         global_step=restored_step,
@@ -533,6 +666,7 @@ def migrate_bottom_only(
     model: nn.Module,
     *,
     identity: CheckpointIdentity,
+    config: ExperimentConfig | None = None,
 ) -> MigrationReport:
     """Load a verified, ABI-compatible mainline bottom with a full report."""
 
@@ -543,12 +677,36 @@ def migrate_bottom_only(
             "ABI-compatible complete typed bottom"
         )
     raw_identity = payload.get("identity")
+    raw_config = payload.get("config")
     if not isinstance(raw_identity, Mapping):
         raise ValueError("bottom migration source has no serialized architecture identity")
+    saved_config = config_from_mapping(raw_config) if isinstance(raw_config, Mapping) else None
     saved_identity = checkpoint_identity_from_mapping(
         raw_identity,
         require_current_manifest=False,
     )
+    saved_manifest = _identity_manifest(saved_identity)
+    saved_selection = (
+        _checkpoint_component_selection(
+            payload,
+            config=saved_config,
+            manifest=saved_manifest,
+        )
+        if saved_config is not None
+        else None
+    )
+    live_selection = getattr(model, "selection", None)
+    if config is not None:
+        current_selection = _resolved_component_selection(model, config)
+    elif isinstance(live_selection, ComponentSelection):
+        current_selection = live_selection
+    else:
+        current_selection = None
+    if saved_selection is not None and current_selection is not None and (
+        saved_selection.execution_bottom != current_selection.execution_bottom
+        or saved_selection.terminal_controller != current_selection.terminal_controller
+    ):
+        raise ValueError("bottom migration component selection is incompatible")
     compatibility = compare_checkpoint_identity(saved_identity, identity)
     if "bottom" not in compatibility.reusable_components:
         raise ValueError("bottom migration rejected: " + "; ".join(compatibility.reasons))
@@ -558,32 +716,58 @@ def migrate_bottom_only(
     current = model.state_dict()
     selected: dict[str, torch.Tensor] = {}
     shape_mismatch: list[str] = []
+    dtype_mismatch: list[str] = []
     rejected: list[str] = []
     invalid_bottom: list[str] = []
+    source_by_legacy_name: dict[str, tuple[str, object]] = {}
     for raw_name, value in state.items():
         name = str(raw_name)
-        if not name.startswith("bottom."):
+        legacy_name = _legacy_bottom_name(name)
+        if not legacy_name.startswith("bottom."):
             rejected.append(name)
             continue
-        if name not in current or not isinstance(value, torch.Tensor):
-            invalid_bottom.append(name)
-        elif tuple(value.shape) != tuple(current[name].shape):
-            shape_mismatch.append(name)
+        if legacy_name in source_by_legacy_name:
+            invalid_bottom.append(legacy_name)
         else:
-            selected[name] = value
-    missing = sorted(
-        name for name in current if name.startswith("bottom.") and name not in selected
-    )
+            source_by_legacy_name[legacy_name] = (name, value)
+
+    bottom_destinations = {
+        name: _legacy_bottom_name(name)
+        for name in current
+        if _legacy_bottom_name(name).startswith("bottom.")
+    }
+    missing: list[str] = []
+    for destination_name, legacy_name in bottom_destinations.items():
+        source_row = source_by_legacy_name.get(legacy_name)
+        if source_row is None:
+            missing.append(destination_name)
+            continue
+        source_name, value = source_row
+        target = current[destination_name]
+        if not isinstance(value, torch.Tensor):
+            invalid_bottom.append(source_name)
+        elif tuple(value.shape) != tuple(target.shape):
+            shape_mismatch.append(source_name)
+        elif value.dtype != target.dtype:
+            dtype_mismatch.append(source_name)
+        elif (value.is_floating_point() or value.is_complex()) and not bool(
+            torch.isfinite(value).all()
+        ):
+            invalid_bottom.append(source_name)
+        else:
+            selected[destination_name] = value
     # ABI compatibility is all-or-nothing.  A partial shape-only load would
     # silently create a third bottom that is neither fresh nor the source
     # checkpoint, defeating the explicit migration boundary.  Validate the
     # complete state before touching the live model.
-    if missing or shape_mismatch or invalid_bottom:
+    if missing or shape_mismatch or dtype_mismatch or invalid_bottom:
         details = []
         if missing:
             details.append(f"missing={len(missing)}")
         if shape_mismatch:
             details.append(f"shape_mismatch={len(shape_mismatch)}")
+        if dtype_mismatch:
+            details.append(f"dtype_mismatch={len(dtype_mismatch)}")
         if invalid_bottom:
             details.append(f"invalid_bottom={len(invalid_bottom)}")
         raise ValueError("bottom migration state is incomplete: " + ", ".join(details))
@@ -592,12 +776,14 @@ def migrate_bottom_only(
         loaded=tuple(sorted(selected)),
         missing=tuple(missing),
         shape_mismatch=tuple(sorted(shape_mismatch)),
+        dtype_mismatch=tuple(sorted(dtype_mismatch)),
         rejected=tuple(sorted(rejected)),
     )
 
 
 __all__ = [
     "CHECKPOINT_SCHEMA",
+    "LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS",
     "MigrationReport",
     "RestoredTrainingState",
     "VALIDATION_REPLAY_SOURCE_PATHS",

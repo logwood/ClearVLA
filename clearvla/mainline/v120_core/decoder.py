@@ -182,6 +182,7 @@ class ActionOnlyPhysicalVelocityHead(nn.Module):
             # initialization or the loader RNG derived after model creation.
             torch.set_rng_state(host_rng_state)
         self.arm_manifold = str(config.arm_flow_mode) == "manifold_native"
+        self.arm_direct = str(config.arm_flow_mode) == "relative_command_direct"
         self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
         if self.arm_manifold:
             self.arm_native = nn.Linear(h, ad)
@@ -229,7 +230,7 @@ class ActionOnlyPhysicalVelocityHead(nn.Module):
             arm_field = self.codec.encode_arm_tangent(self.arm_native(base_read))
         else:
             if self.arm_abs is None or self.arm_delta is None:
-                raise RuntimeError("legacy arm velocity heads are not initialized")
+                raise RuntimeError("two-branch arm velocity heads are not initialized")
             arm_field = torch.cat(
                 [self.arm_abs(base_read), self.arm_delta(base_read)],
                 dim=-1,

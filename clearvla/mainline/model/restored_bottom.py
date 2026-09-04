@@ -26,6 +26,11 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import ObservableHistory
+from ..v120_core.bspine import (
+    BSPINE0_IMPLEMENTATION,
+    BSPINE_DISABLED_IMPLEMENTATION,
+    BSpine0,
+)
 from ..v120_core.layer_contracts import LayerContractAdapterHeads
 from ..v120_core.primitives import TimeEmbedding
 from ..v120_core.profile import build_v120_policy_config
@@ -70,6 +75,8 @@ def _build_decoder_config(config: ExperimentConfig):
         target_future_count=dims.future_supports,
         action_basis_tokens=dims.action_basis_tokens,
         gripper_field_dim=bottom.gripper_field_dim,
+        gripper_output_mode=bottom.gripper_output_mode,
+        arm_flow_mode=bottom.arm_flow_mode,
         physical_decode_delta_blend=bottom.physical_decode_delta_blend,
         dropout=bottom.dropout,
         latent_cvae_mmdit_depth=bottom.evidence_depth,
@@ -95,6 +102,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         super().__init__()
         config.validate()
         dims = config.dimensions
+        bottom = config.bottom
         self.hidden = int(dims.hidden_size)
         self.horizon = int(dims.action_horizon)
         self.basis = int(dims.action_basis_tokens)
@@ -165,6 +173,23 @@ class RestoredV120EvidenceBottom(nn.Module):
             self.core_config,
             hidden_event_head=False,
         )
+        if bottom.bspine_implementation == BSPINE0_IMPLEMENTATION:
+            self.decoder.install_spine(
+                BSpine0(
+                    horizon=dims.action_horizon,
+                    hidden_size=dims.hidden_size,
+                    arm_dim=dims.action_dim - 1,
+                    gripper_field_dim=bottom.gripper_field_dim,
+                    degree=bottom.bspine_degree,
+                    control_points=bottom.bspine_control_points,
+                    expected_basis_digest=bottom.bspine_basis_digest,
+                    expected_spec_fingerprint=bottom.bspine_spec_fingerprint,
+                )
+            )
+        elif bottom.bspine_implementation != BSPINE_DISABLED_IMPLEMENTATION:
+            # ``config.validate`` normally owns this error; retain a local
+            # fail-closed guard at the selected construction boundary.
+            raise ValueError("unsupported execution-bottom B-spine implementation")
         # These generic intent aliases are structurally absent from the V120
         # object path (which passes only current state and last execution).
         # Freezing unreachable projections changes no forward value and keeps
@@ -682,6 +707,7 @@ class RestoredV120EvidenceBottom(nn.Module):
             block_updates=block_updates,
             evidence_tokens=transition.value,
             decoder_tensors=tensor_output,
+            gripper_command_logits=raw.get("gripper_command_logits"),
         )
         output.validate(
             action_dim=self.physical_action_dim,

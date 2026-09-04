@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 
 RDT_SPLIT_MANIFEST_SCHEMA = "clearvla-rdt-per-task-split-v2"
 RDT_SPLIT_NAMES = ("train", "val", "test", "external_test")
+EPISODE_SPLIT_MANIFEST_SCHEMA = "clearvla-episode-splits-v1"
 # A sample needs the oldest executed action at -24 and the final state/DINO
 # support at +48 around one centre: 24 + 48 + the centre row itself.
 RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH = 73
@@ -197,9 +198,7 @@ def split_partitioned_episodes_per_task(
 
     grouped: dict[str, list[int]] = defaultdict(list)
     external_test: list[int] = []
-    for index, (partition, task) in enumerate(
-        zip(source_partitions, task_names, strict=True)
-    ):
+    for index, (partition, task) in enumerate(zip(source_partitions, task_names, strict=True)):
         partition = str(partition)
         task = str(task)
         if not task:
@@ -212,9 +211,7 @@ def split_partitioned_episodes_per_task(
     if not grouped:
         raise ValueError(f"training partition {train_partition!r} has no episodes")
     if not external_test:
-        raise ValueError(
-            f"external-test partition {external_test_partition!r} has no episodes"
-        )
+        raise ValueError(f"external-test partition {external_test_partition!r} has no episodes")
 
     result: dict[str, list[int]] = {
         "train": [],
@@ -293,9 +290,7 @@ def load_rdt_split_manifest(
     if payload.get("schema") != RDT_SPLIT_MANIFEST_SCHEMA:
         raise ValueError("unsupported RDT split manifest schema")
     if str(payload.get("pattern", "")) != str(expected_pattern):
-        raise ValueError(
-            "RDT split manifest glob differs from the configured HDF5 inventory"
-        )
+        raise ValueError("RDT split manifest glob differs from the configured HDF5 inventory")
     if int(payload.get("minimum_episode_length", -1)) != minimum_length:
         raise ValueError("RDT split manifest typed-window length contract differs")
     recorded_digest = str(payload.get("manifest_sha256", ""))
@@ -333,9 +328,7 @@ def load_rdt_split_manifest(
     source_names = sorted([*names, *expected_excluded])
     if int(payload.get("source_episode_count", -1)) != len(source_names):
         raise ValueError("RDT split manifest source episode count differs from live data")
-    if str(payload.get("source_episode_inventory_sha256", "")) != _canonical_digest(
-        source_names
-    ):
+    if str(payload.get("source_episode_inventory_sha256", "")) != _canonical_digest(source_names):
         raise ValueError("RDT split manifest source inventory differs from live data")
     if int(payload.get("episode_count", -1)) != len(names):
         raise ValueError("RDT split manifest eligible episode count differs from loaded data")
@@ -381,14 +374,11 @@ def load_rdt_split_manifest(
         seed=seed,
     )
     expected_split_identities = {
-        split: [names[index] for index in expected_indices[split]]
-        for split in RDT_SPLIT_NAMES
+        split: [names[index] for index in expected_indices[split]] for split in RDT_SPLIT_NAMES
     }
     raw_splits = payload.get("splits")
     if not isinstance(raw_splits, dict) or set(raw_splits) != set(RDT_SPLIT_NAMES):
-        raise ValueError(
-            f"RDT split manifest must contain exactly {list(RDT_SPLIT_NAMES)}"
-        )
+        raise ValueError(f"RDT split manifest must contain exactly {list(RDT_SPLIT_NAMES)}")
     for split in RDT_SPLIT_NAMES:
         values = raw_splits[split]
         if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
@@ -398,9 +388,7 @@ def load_rdt_split_manifest(
                 f"RDT split {split!r} differs from its serialized deterministic policy"
             )
 
-    identity_to_index = {
-        name: index for index, name in enumerate(loaded_names)
-    }
+    identity_to_index = {name: index for index, name in enumerate(loaded_names)}
     resolved = {
         split: [identity_to_index[value] for value in expected_split_identities[split]]
         for split in RDT_SPLIT_NAMES
@@ -416,9 +404,7 @@ def load_rdt_split_manifest(
         raise ValueError("RDT split manifest task-count summary is inconsistent")
     empty_splits = [name for name, values in resolved.items() if not values]
     if empty_splits:
-        raise ValueError(
-            f"RDT split manifest requires non-empty formal lanes: {empty_splits}"
-        )
+        raise ValueError(f"RDT split manifest requires non-empty formal lanes: {empty_splits}")
 
     metadata: dict[str, object] = {
         "schema": RDT_SPLIT_MANIFEST_SCHEMA,
@@ -427,9 +413,7 @@ def load_rdt_split_manifest(
         "manifest_sha256": recorded_digest,
         "minimum_episode_length": minimum_length,
         "source_episode_count": len(source_names),
-        "source_episode_inventory_sha256": payload[
-            "source_episode_inventory_sha256"
-        ],
+        "source_episode_inventory_sha256": payload["source_episode_inventory_sha256"],
         "episode_count": len(names),
         "episode_inventory_sha256": payload["episode_inventory_sha256"],
         "excluded_too_short": expected_excluded_rows,
@@ -440,7 +424,87 @@ def load_rdt_split_manifest(
     return resolved, metadata
 
 
+def load_episode_split_manifest(
+    path: str | Path,
+    *,
+    episode_names: Sequence[str],
+) -> tuple[list[int], list[int], list[int], dict[str, object]]:
+    """Resolve a compact exact train/val/test manifest.
+
+    This lane is intentionally separate from the RDT four-way manifest: it is
+    used by external benchmarks such as CALVIN after an explicit task filter.
+    The manifest must cover the complete filtered inventory exactly once.
+    """
+
+    source, payload, _manifest_names = load_episode_split_manifest_inventory(path)
+    raw_splits = payload["splits"]
+
+    names = [str(value) for value in episode_names]
+    if not names or len(set(names)) != len(names):
+        raise ValueError("episode names must be non-empty and unique")
+    name_to_index = {name: index for index, name in enumerate(names)}
+    resolved: dict[str, list[int]] = {}
+    seen: set[str] = set()
+    for split in ("train", "val", "test"):
+        rows = raw_splits[split]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"episode split {split!r} must be a non-empty list")
+        ids: list[int] = []
+        for raw_name in rows:
+            name = str(raw_name)
+            if name in seen:
+                raise ValueError(f"episode {name!r} occurs in more than one split")
+            if name not in name_to_index:
+                raise ValueError(f"split manifest references unknown episode {name!r}")
+            seen.add(name)
+            ids.append(name_to_index[name])
+        resolved[split] = ids
+    missing = sorted(set(name_to_index).difference(seen))
+    if missing:
+        raise ValueError(f"split manifest omits episodes: {missing[:8]}")
+    metadata: dict[str, object] = {
+        "schema": EPISODE_SPLIT_MANIFEST_SCHEMA,
+        "path": str(source.resolve()),
+        "file_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "split_counts": {name: len(resolved[name]) for name in ("train", "val", "test")},
+        "task_filter": str(payload.get("task_filter", "")),
+    }
+    return resolved["train"], resolved["val"], resolved["test"], metadata
+
+
+def load_episode_split_manifest_inventory(
+    path: str | Path,
+) -> tuple[Path, dict[str, object], tuple[str, ...]]:
+    """Return the exact episode inventory before any HDF5 is opened."""
+
+    source = Path(path).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(f"episode split manifest does not exist: {source}")
+    payload_value = json.loads(source.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload_value, dict)
+        or payload_value.get("schema") != EPISODE_SPLIT_MANIFEST_SCHEMA
+    ):
+        raise ValueError(f"{source} is not a {EPISODE_SPLIT_MANIFEST_SCHEMA} manifest")
+    raw_splits = payload_value.get("splits")
+    if not isinstance(raw_splits, dict) or set(raw_splits) != {"train", "val", "test"}:
+        raise ValueError("episode split manifest must contain exactly train/val/test")
+    names: list[str] = []
+    for split in ("train", "val", "test"):
+        rows = raw_splits[split]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"episode split {split!r} must be a non-empty list")
+        if any(not isinstance(value, str) or not value for value in rows):
+            raise TypeError(f"episode split {split!r} must contain non-empty strings")
+        names.extend(rows)
+    if len(names) != len(set(names)):
+        raise ValueError("episode split manifest membership overlaps")
+    return source, payload_value, tuple(names)
+
+
 __all__ = [
+    "EPISODE_SPLIT_MANIFEST_SCHEMA",
+    "load_episode_split_manifest_inventory",
     "RDT_SPLIT_MANIFEST_SCHEMA",
     "RDT_SPLIT_NAMES",
     "RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH",

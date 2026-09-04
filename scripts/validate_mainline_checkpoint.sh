@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Read-only existing-checkpoint validation for the capability-named mainline.
+# Keep this launcher LF-only: it is executed directly on the Linux benchmark host.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -22,7 +22,15 @@
     prototypes and are not part of the active manifest source closure;
 - `clearvla/mainline/model/policy.py`, `top.py`
   - static online cache, training-only target plane and ODE-step-dependent
-    P2/P3/bottom composition;
+  P2/P3/bottom composition;
+- `clearvla/mainline/model/action_codec.py` and
+  `clearvla/mainline/v120_core/codec.py`
+  - outlet-owned 18-D physical-field encoding, source-noise construction,
+    direct/legacy arm branch semantics, profile-owned gripper boundary and
+    decode/projection behavior;
+  - CALVIN `relative_command_direct` must be audited as two direct relative-TCP
+    command branches, while Pen/RDT retain the legacy absolute/adjacent-delta
+    arm chart;
 - `clearvla/mainline/training/losses.py`, `optimizer.py`, `engine.py`
   - exact action/representation ledger, owner groups, backward and clipping;
   - `optimizer.py` resolves the V120 role geometry explicitly: public top at
@@ -32,6 +40,14 @@
 - `clearvla/mainline/runtime/evaluation.py`, `logging.py`, `sampling.py`
   - deploy-style normalized/physical validation, separate decoded/event/motion
     semantics, lossless `metrics.jsonl` and console projections;
+- `clearvla/mainline/v120_core/bspine.py`,
+  `model/restored_bottom.py`, `model/components.py`, `training/optimizer.py`,
+  `train.py`, and `runtime/logging.py`
+  - the opt-in Schema31 fixed cubic `T=24/K=12` coarse/detail view beside the
+    unchanged raw action lift, its sole optimizer owner, evaluation-only
+    `spine_zero` route and matched band/channel validation surface;
+  - the spline reads only the deployed noisy physical field. It adds no loss,
+    top carrier, action codec, output head, ODE step or W rebuild;
 - `clearvla/tools/audit_policy_logs.py`
   - parser for both mainline and historical logs.
 

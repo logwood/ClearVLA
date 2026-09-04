@@ -17,6 +17,7 @@ from clearvla.mainline.data.language import load_t5_condition, load_t5_condition
 from clearvla.mainline.data.loading import (
     GoalTemplate,
     MainlineDataBundle,
+    _configure_worker_tensor_sharing,
     to_training_batch,
 )
 from clearvla.mainline.data.normalizer import ArrayNormalizer
@@ -97,6 +98,10 @@ def test_dataset_batch_is_partitioned_into_online_target_and_teacher_planes() ->
     assert torch.equal(
         typed.action_target.gripper_transition_boundary.cpu(),
         raw["gripper_transition_boundary"],
+    )
+    assert torch.equal(
+        typed.online.history.codec_gripper_boundary.cpu(),
+        raw["gripper_transition_boundary"][:, -1:],
     )
     assert torch.equal(
         typed.action_target.gripper_transition_boundary_raw_units.cpu(),
@@ -224,6 +229,59 @@ def test_train_loader_owns_the_resolved_information_balanced_sampler() -> None:
         validation_loader.batch_sampler,
         InformationBalancedBatchSampler,
     )
+
+
+def test_validation_loader_does_not_keep_prefetch_workers_alive() -> None:
+    """The one-batch startup preflight must not orphan validation workers."""
+
+    dataset = _SamplingDataset()
+    goal = GoalTemplate(
+        tokens=torch.zeros(1, 1, 12),
+        mask=torch.ones(1, 1, dtype=torch.bool),
+        metadata={"source": "test"},
+    )
+    bundle = MainlineDataBundle(
+        episodes=(),
+        splits={"train": (), "val": ()},
+        datasets={"train": dataset, "val": dataset},
+        materialized_episode_indices=(),
+        action_normalizer=cast(ArrayNormalizer, None),
+        state_normalizer=cast(ArrayNormalizer, None),
+        goal=goal,
+        skipped=(),
+        sampling_seed=7,
+        information_uniform_fraction=0.50,
+        information_event_fraction=0.125,
+        information_motion_quantile=0.70,
+        gripper_event_threshold=0.10,
+        gripper_indices=(6,),
+    )
+    train_loader = bundle.loader(
+        "train",
+        batch_size=2,
+        workers=1,
+        device=torch.device("cpu"),
+    )
+    validation_loader = bundle.loader(
+        "val",
+        batch_size=2,
+        workers=1,
+        device=torch.device("cpu"),
+        shuffle=False,
+    )
+    assert train_loader.persistent_workers is True
+    assert validation_loader.persistent_workers is False
+    assert train_loader.prefetch_factor == 1
+    assert validation_loader.prefetch_factor == 1
+
+
+def test_worker_tensor_sharing_fails_closed_on_file_system_strategy() -> None:
+    original = torch.multiprocessing.get_sharing_strategy()
+    try:
+        _configure_worker_tensor_sharing(1)
+        assert torch.multiprocessing.get_sharing_strategy() == "file_system"
+    finally:
+        torch.multiprocessing.set_sharing_strategy(original)
 
 
 def test_cached_dataset_groups_three_causal_dino_rows_with_future_supports() -> None:

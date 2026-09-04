@@ -121,13 +121,13 @@ def test_probe_flow_generator_contract_matches_direct_sampler() -> None:
     state = sample_flow_matching(
         batch.action_target.normalized,
         action_state=batch.online.history.action_state,
-        codec=model.action_codec,
+        codec=model.outlet_adapter.codec,
         distribution=config.bottom.flow_time_distribution,
         generator=generator,
     )
     assert tuple(state.noisy_physical.shape) == (
         1,
         config.dimensions.action_horizon,
-        model.action_codec.physical_dim,
+        model.outlet_adapter.physical_dim,
     )
     assert torch.isfinite(state.noisy_physical).all()

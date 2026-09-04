@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import h5py
 import numpy as np
 
-from .schema import ACTION_ALIASES, CAMERA_ALIASES, STATE_ALIASES, list_hdf5_datasets, resolve_key
+from .instructions import instruction_key, normalize_instruction
+from .schema import (
+    ACTION_ALIASES,
+    ACTION_STATE_ALIASES,
+    CAMERA_ALIASES,
+    STATE_ALIASES,
+    list_hdf5_datasets,
+    resolve_key,
+)
 
 
 @dataclass
@@ -21,6 +30,7 @@ class LoadedEpisode:
     actions_raw: np.ndarray
     instruction: str | None = None
     actions_norm: np.ndarray | None = None
+    action_state_key: str | None = None
     state_key: str | None = None
     states_raw: np.ndarray | None = None
     states_norm: np.ndarray | None = None
@@ -28,6 +38,9 @@ class LoadedEpisode:
     # It equals ``states_raw`` for legacy data and is explicitly converted by
     # an RDT profile when qpos/action gripper source scales differ.
     action_states_raw: np.ndarray | None = None
+    language_key: str | None = None
+    valid_center_start: int | None = None
+    valid_center_end: int | None = None
     source_action_dim: int = 0
     source_state_dim: int = 0
     data_profile: str = "source_native"
@@ -103,14 +116,17 @@ def decode_hdf5_instruction(value: object) -> str:
 
 
 def load_hdf5_instruction(path: Path) -> str | None:
-    """Read the optional scalar instruction without materializing an episode."""
+    """Read an optional scalar instruction from a dataset or root attribute."""
 
     with h5py.File(path, "r") as handle:
         instruction_dataset = handle.get("instruction")
+        if isinstance(instruction_dataset, h5py.Dataset):
+            return decode_hdf5_instruction(instruction_dataset[()])
+        raw_instruction = handle.attrs.get("instruction")
         return (
-            decode_hdf5_instruction(instruction_dataset[()])
-            if isinstance(instruction_dataset, h5py.Dataset)
-            else None
+            None
+            if raw_instruction is None
+            else normalize_instruction(decode_hdf5_instruction(raw_instruction))
         )
 
 
@@ -122,6 +138,7 @@ def load_episode(
     task_id: str = "",
     cameras: tuple[str, ...],
     action_key: str = "action",
+    action_state_key: str | None = None,
     state_key: str | None = None,
     camera_key_overrides: dict[str, str] | None = None,
 ) -> LoadedEpisode:
@@ -131,6 +148,16 @@ def load_episode(
     assert resolved_action is not None
     resolved_state = (
         resolve_key(datasets, state_key, STATE_ALIASES, required=True) if state_key else None
+    )
+    resolved_action_state = (
+        resolve_key(
+            datasets,
+            action_state_key,
+            ACTION_STATE_ALIASES,
+            required=True,
+        )
+        if action_state_key
+        else None
     )
 
     camera_keys: dict[str, str] = {}
@@ -158,6 +185,11 @@ def load_episode(
             if resolved_state is not None
             else actions.copy()
         )
+        action_states = (
+            np.asarray(f[resolved_action_state], dtype=np.float32)
+            if resolved_action_state is not None
+            else states.copy()
+        )
         camera_lengths: dict[str, int] = {}
         for camera, key in camera_keys.items():
             dataset = f.get(key)
@@ -165,11 +197,28 @@ def load_episode(
                 raise TypeError(f"{path}: camera={camera!r} must be an HDF5 sequence")
             camera_lengths[camera] = int(dataset.shape[0])
         instruction_dataset = f.get("instruction")
-        instruction = (
-            decode_hdf5_instruction(instruction_dataset[()])
-            if isinstance(instruction_dataset, h5py.Dataset)
-            else None
-        )
+        if isinstance(instruction_dataset, h5py.Dataset):
+            instruction = decode_hdf5_instruction(instruction_dataset[()])
+        else:
+            raw_instruction = f.attrs.get("instruction")
+            instruction = (
+                None
+                if raw_instruction is None
+                else normalize_instruction(decode_hdf5_instruction(raw_instruction))
+            )
+        raw_language_key = f.attrs.get("language_key")
+        if isinstance(raw_language_key, (bytes, np.bytes_)):
+            raw_language_key = bytes(raw_language_key).decode("utf-8")
+        language_key = None if raw_language_key is None else str(raw_language_key).strip()
+        raw_task = f.attrs.get("task")
+        if isinstance(raw_task, (bytes, np.bytes_)):
+            raw_task = bytes(raw_task).decode("utf-8")
+        if not str(task_id) and raw_task is not None:
+            task_id = str(raw_task).strip()
+        raw_valid_start = f.attrs.get("valid_center_start")
+        raw_valid_end = f.attrs.get("valid_center_end")
+        valid_center_start = None if raw_valid_start is None else int(raw_valid_start)
+        valid_center_end = None if raw_valid_end is None else int(raw_valid_end)
 
     if actions.ndim != 2:
         raise ValueError(f"{path}: action must have shape [T,D], got {actions.shape}")
@@ -189,6 +238,30 @@ def load_episode(
     if not np.isfinite(states).all():
         bad = np.argwhere(~np.isfinite(states))
         raise ValueError(f"{path}: state contains non-finite values at {bad[:20].tolist()}")
+    if action_states.ndim != 2 or action_states.shape != actions.shape:
+        raise ValueError(
+            f"{path}: action_state must have shape [T,D] aligned with action, "
+            f"got {action_states.shape}"
+        )
+    if not np.isfinite(action_states).all():
+        bad = np.argwhere(~np.isfinite(action_states))
+        raise ValueError(f"{path}: action_state contains non-finite values at {bad[:20].tolist()}")
+    if instruction is not None:
+        expected_language_key = instruction_key(instruction)
+        if language_key is None:
+            language_key = expected_language_key
+        elif language_key != expected_language_key:
+            raise ValueError(f"{path}: language_key does not identify its instruction")
+    elif language_key is not None:
+        raise ValueError(f"{path}: language_key exists without an instruction")
+    if (valid_center_start is None) != (valid_center_end is None):
+        raise ValueError(f"{path}: valid center bounds must be both present or both absent")
+    if valid_center_start is not None and valid_center_end is not None:
+        if not 0 <= valid_center_start <= valid_center_end < int(actions.shape[0]):
+            raise ValueError(
+                f"{path}: invalid center bounds "
+                f"[{valid_center_start},{valid_center_end}] for T={actions.shape[0]}"
+            )
     misaligned_cameras = {
         camera: length
         for camera, length in camera_lengths.items()
@@ -209,9 +282,13 @@ def load_episode(
         camera_keys=camera_keys,
         actions_raw=actions,
         instruction=instruction,
+        action_state_key=resolved_action_state,
         state_key=resolved_state,
         states_raw=states,
-        action_states_raw=states,
+        action_states_raw=action_states,
+        language_key=language_key,
+        valid_center_start=valid_center_start,
+        valid_center_end=valid_center_end,
         source_action_dim=int(actions.shape[1]),
         source_state_dim=int(states.shape[1]),
     )
@@ -224,15 +301,34 @@ def load_episodes(
     cameras: tuple[str, ...],
     min_length: int,
     action_key: str = "action",
+    action_state_key: str | None = None,
     state_key: str | None = None,
     camera_key_overrides: dict[str, str] | None = None,
+    episode_names: Sequence[str] | None = None,
 ) -> tuple[list[LoadedEpisode], list[tuple[str, str]]]:
     episodes: list[LoadedEpisode] = []
     skipped: list[tuple[str, str]] = []
     identity_paths: dict[str, Path] = {}
+    candidates = []
+    requested_values = (
+        None if episode_names is None else tuple(str(value) for value in episode_names)
+    )
+    requested = None if requested_values is None else set(requested_values)
+    if requested is not None and (not requested or len(requested) != len(requested_values)):
+        raise ValueError("requested episode identities must be non-empty and unique")
     for path in find_hdf5_files(root, pattern):
+        identity, source_partition, task_id = episode_identity(root, path)
+        if requested is None or identity in requested:
+            candidates.append((path, identity, source_partition, task_id))
+    if requested is not None:
+        observed = {identity for _path, identity, _partition, _task in candidates}
+        missing = sorted(requested.difference(observed))
+        if missing:
+            raise FileNotFoundError(
+                f"requested HDF5 episodes are absent from {root}: {missing[:8]}"
+            )
+    for path, identity, source_partition, task_id in candidates:
         try:
-            identity, source_partition, task_id = episode_identity(root, path)
             ep = load_episode(
                 path,
                 episode_id=identity,
@@ -240,6 +336,7 @@ def load_episodes(
                 task_id=task_id,
                 cameras=cameras,
                 action_key=action_key,
+                action_state_key=action_state_key,
                 state_key=state_key,
                 camera_key_overrides=camera_key_overrides,
             )
@@ -278,9 +375,7 @@ def resolve_too_short_episode_exclusions(
     exclusions: dict[str, int] = {}
     unexpected: list[tuple[str, str]] = []
     for skipped_path, reason in skipped:
-        match = re.fullmatch(
-            r"too_short_T=(\d+), min_length=(\d+)", str(reason)
-        )
+        match = re.fullmatch(r"too_short_T=(\d+), min_length=(\d+)", str(reason))
         if match is None or int(match.group(2)) != minimum_length:
             unexpected.append((str(skipped_path), str(reason)))
             continue

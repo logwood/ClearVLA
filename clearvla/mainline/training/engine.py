@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 import torch
@@ -11,13 +11,11 @@ from torch import Tensor
 
 from ..config import ExperimentConfig
 from ..interfaces import TrainingBatch
-from ..model.action_codec import anchor_horizon_weights
 from ..model.policy import (
     ClearVLAMainlinePolicy,
     OnlinePolicyCache,
     OnlineTrainingState,
 )
-from ..model.types import PhysicalActionCondition
 from ..runtime.logging import tensor_scalars
 from ..runtime.numerics import resolve_compute_dtype
 from .gradient_audit import (
@@ -27,6 +25,7 @@ from .gradient_audit import (
 )
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
+from ..model.component_contracts import legacy_named_parameters, modular_to_legacy_name
 
 _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
     (
@@ -254,7 +253,7 @@ class MainlineTrainingEngine:
         *,
         global_norm: Tensor,
     ) -> NonFiniteGradientReport:
-        for name, parameter in self.model.named_parameters():
+        for name, parameter in legacy_named_parameters(self.model):
             gradient = parameter.grad
             if gradient is None:
                 continue
@@ -303,7 +302,9 @@ class MainlineTrainingEngine:
         before either clipping stage.
         """
 
-        parameters = dict(self.model.named_parameters())
+        parameters = {
+            name: parameter for name, parameter in legacy_named_parameters(self.model)
+        }
         metrics: dict[str, Tensor] = {}
         for parameter_name, metric_name in _R2_PARAMETER_GRADIENT_METRICS:
             try:
@@ -329,11 +330,8 @@ class MainlineTrainingEngine:
     ) -> tuple[Tensor, dict[str, Tensor], float]:
         """V120 finite-check -> decoder-local -> global clip lifecycle."""
 
-        parameters = [
-            parameter
-            for parameter in self.model.parameters()
-            if parameter.grad is not None
-        ]
+        ordered_parameters = legacy_named_parameters(self.model)
+        parameters = [parameter for _, parameter in ordered_parameters if parameter.grad is not None]
         gradients = [parameter.grad for parameter in parameters]
         try:
             total_norm = torch.nn.utils.get_total_norm(
@@ -365,7 +363,7 @@ class MainlineTrainingEngine:
         ):
             named_parameters = [
                 (name, parameter)
-                for name, parameter in self.model.named_parameters()
+                for name, parameter in ordered_parameters
                 if parameter.grad is not None
             ]
             gradient_spike_handler(
@@ -385,7 +383,7 @@ class MainlineTrainingEngine:
             metrics.update(self._r2_parameter_gradient_metrics())
         decoder_parameters = [
             parameter
-            for name, parameter in self.model.named_parameters()
+            for name, parameter in ordered_parameters
             if name.startswith("bottom.decoder.") and parameter.grad is not None
         ]
         decoder_norm: Tensor | None = None
@@ -510,7 +508,7 @@ class MainlineTrainingEngine:
         batch: TrainingBatch,
         encoded: EncodedTrainingBatch,
         *,
-        formal_cache: OnlinePolicyCache,
+        formal_cache: OnlinePolicyCache | None = None,
     ) -> dict[str, Tensor]:
         """Compare real frame position with S/W behaviour without training on it.
 
@@ -523,11 +521,15 @@ class MainlineTrainingEngine:
         if batch.audit.frame_progress is None:
             return {}
         intent = encoded.training_state.top.intent
-        # S remains the single static online/training owner.  W diagnostics
-        # must instead read the cache that owns the formal pass-one action and
-        # future losses; reading OnlineTrainingState here would silently audit
-        # the retired coarse-conditioned W.
-        dynamics = formal_cache.top.predicted_dynamics
+        # The recovery path has one formal training pass, so the online cache
+        # is also the loss-owning W cache.  ``formal_cache`` remains accepted
+        # for compatibility with archived callers, but is not created by the
+        # active recovery engine.
+        dynamics = (
+            encoded.training_state.top.predicted_dynamics
+            if formal_cache is None
+            else formal_cache.top.predicted_dynamics
+        )
         progress = batch.audit.frame_progress.to(
             device=intent.public_interval_carrier.device,
             dtype=torch.float32,
@@ -626,80 +628,14 @@ class MainlineTrainingEngine:
         flow_state = sample_flow_matching(
             batch.action_target.normalized,
             action_state=batch.online.history.action_state,
-            codec=self.model.action_codec,
+            codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
+            codec=self.model.outlet_adapter.codec,
             distribution=self.config.bottom.flow_time_distribution,
             generator=generator,
         )
 
-        # Training and deployment must assign the final action objective to
-        # the same action-conditioned W distribution.  Pass zero is only a
-        # detached endpoint estimator.  Forking the global CPU/current-CUDA
-        # streams lets it use the exact dropout stream that the formal pass
-        # will see, then restores that stream before pass one.  The net global
-        # RNG advance is therefore one dynamic pass, exactly as before.
-        cuda_devices: list[int] = []
-        if self.device.type == "cuda":
-            cuda_devices.append(
-                torch.cuda.current_device()
-                if self.device.index is None
-                else int(self.device.index)
-            )
-        with torch.random.fork_rng(devices=cuda_devices):
-            with torch.no_grad():
-                # CUDA autocast caches lower-precision parameter copies for
-                # the lifetime of the outer training context.  If a module's
-                # first dynamic call happens under no-grad, a cached BF16
-                # copy can lose its parameter edge and then be reused by the
-                # formal pass.  Keep pass0 numerically identical but forbid
-                # this detached estimator from publishing weight copies into
-                # the surrounding pass1 cache.
-                with _autocast(
-                    self.device,
-                    self.dtype,
-                    cache_enabled=False,
-                ):
-                    pass0_output = self.model.velocity(
-                        encoded.cache,
-                        noisy_action_field=flow_state.noisy_physical,
-                        time=flow_state.time,
-                        require_execution_supervision=False,
-                        collect_diagnostics=False,
-                    )
-                    remaining = (1.0 - flow_state.time.to(
-                        dtype=flow_state.noisy_physical.dtype
-                    ))[:, None, None]
-                    pass0_clean_physical = flow_state.noisy_physical + remaining * (
-                        pass0_output.bottom.physical_velocity.to(
-                            dtype=flow_state.noisy_physical.dtype
-                        )
-                    )
-                    pass0_clean_action = self.model.action_codec.decode(
-                        pass0_clean_physical,
-                        encoded.cache.history.action_state,
-                    ).detach()
-                    pass0_condition = PhysicalActionCondition.from_horizon_action(
-                        pass0_clean_action,
-                        encoded.cache.history.action_state.detach(),
-                    )
-                    pass0_action_flow = (
-                        self._detached_v120_action_flow(
-                            pass0_output.bottom.physical_velocity,
-                            flow_state.target_physical_velocity,
-                        )
-                        if collect_diagnostics
-                        else None
-                    )
-                    del pass0_output, pass0_clean_physical
-
-        refined_top, refinement_metrics = self.model.top.refine_deployment_world(
-            encoded.cache.top,
-            action_condition=pass0_condition,
-            collect_diagnostics=collect_diagnostics,
-        )
-        formal_cache = replace(encoded.cache, top=refined_top)
-        formal_cache.validate(self.config)
         output = self.model.velocity(
-            formal_cache,
+            encoded.cache,
             noisy_action_field=flow_state.noisy_physical,
             time=flow_state.time,
             # Execution-value regression is part of the loss on every train
@@ -717,115 +653,14 @@ class MainlineTrainingEngine:
             flow_state=flow_state,
             observation=encoded.training_state.observation,
             top_targets=top_targets,
-            predicted_dynamics=formal_cache.top.predicted_dynamics,
-            action_codec=self.model.action_codec,
+            predicted_dynamics=encoded.cache.top.predicted_dynamics,
+            action_codec=self.model.outlet_adapter.codec,
             collect_diagnostics=collect_diagnostics,
         )
-        self_conditioning_metrics: dict[str, Tensor] = {}
+        metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
         if collect_diagnostics:
-            if pass0_action_flow is None:
-                raise RuntimeError("self-conditioning action-flow audit was not materialized")
-            with torch.no_grad():
-                remaining = (1.0 - flow_state.time.to(
-                    dtype=flow_state.noisy_physical.dtype
-                ))[:, None, None]
-                pass1_clean_physical = flow_state.noisy_physical + remaining * (
-                    output.bottom.physical_velocity.detach().to(
-                        dtype=flow_state.noisy_physical.dtype
-                    )
-                )
-                pass1_clean_action = self.model.action_codec.decode(
-                    pass1_clean_physical,
-                    formal_cache.history.action_state,
-                )
-                pass1_condition = PhysicalActionCondition.from_horizon_action(
-                    pass1_clean_action,
-                    formal_cache.history.action_state,
-                )
-                coarse_fingerprint = encoded.cache.top.action_condition.fingerprint.float()
-                pass0_fingerprint = pass0_condition.fingerprint.float()
-                self_conditioning_metrics = {
-                    "training_self_conditioning_pass0_clean_action_rms": (
-                        pass0_clean_action.float().square().mean().sqrt()
-                    ),
-                    "training_self_conditioning_coarse_to_pass0_condition_rms": (
-                        pass0_fingerprint - coarse_fingerprint
-                    )
-                    .square()
-                    .mean()
-                    .sqrt(),
-                    "training_self_conditioning_pass0_to_pass1_clean_action_delta_rms": (
-                        pass1_clean_action.float() - pass0_clean_action.float()
-                    )
-                    .square()
-                    .mean()
-                    .sqrt(),
-                    "training_self_conditioning_pass1_world_interval_mismatch_rms": (
-                        pass1_condition.interval_action.float()
-                        - pass0_condition.interval_action.float()
-                    )
-                    .square()
-                    .mean()
-                    .sqrt(),
-                    "training_self_conditioning_pass1_world_delta_mismatch_rms": (
-                        pass1_condition.interval_delta.float()
-                        - pass0_condition.interval_delta.float()
-                    )
-                    .square()
-                    .mean()
-                    .sqrt(),
-                    "training_self_conditioning_pass0_action_flow_audit": pass0_action_flow,
-                    "training_self_conditioning_pass1_action_flow_minus_pass0": (
-                        ledger.terms["action_flow"].detach().float()
-                        - pass0_action_flow
-                    ),
-                }
-        metrics = {
-            **encoded.metrics,
-            **teacher_metrics,
-            **refinement_metrics,
-            **output.metrics,
-            **self_conditioning_metrics,
-        }
-        if collect_diagnostics:
-            metrics.update(
-                self._audit_progress_metrics(
-                    batch,
-                    encoded,
-                    formal_cache=formal_cache,
-                )
-            )
+            metrics.update(self._audit_progress_metrics(batch, encoded))
         return ledger, metrics
-
-    def _detached_v120_action_flow(
-        self,
-        prediction: Tensor,
-        target: Tensor,
-    ) -> Tensor:
-        """Reproduce the formal V120 physical flow scalar for pass-zero audit.
-
-        This value is detached, diagnostic-only and deliberately excludes the
-        event-balanced counterfactual.  Keeping the exact arm absolute/delta
-        and gripper-field geometry makes its delta to the formal pass-one
-        ``loss_action_flow`` interpretable without composing a second loss.
-        """
-
-        residual = prediction.detach().float() - target.detach().float()
-        parts = self.model.action_codec.split(residual)
-        arm_error = 0.5 * (
-            parts.arm_absolute.square() + parts.arm_delta.square()
-        )
-        gripper_error = parts.gripper_field.square().mean(dim=-1)
-        physical_error = (
-            arm_error.sum(dim=-1) + gripper_error
-        ) / float(self.model.action_codec.arm_dim + 1)
-        horizon_weight = anchor_horizon_weights(
-            horizon=self.config.dimensions.action_horizon,
-            tail_emphasis=self.config.objectives.horizon_tail_emphasis,
-            first_step_protection=self.config.objectives.horizon_first_step_protection,
-            device=prediction.device,
-        )
-        return (physical_error * horizon_weight[None]).mean()
 
     @torch.no_grad()
     def encode_eval(

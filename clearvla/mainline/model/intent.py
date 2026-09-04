@@ -252,19 +252,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
         for type_index, projection in enumerate(
             (self.object_semantic, self.object_appearance, self.object_geometry)
         ):
-            # K owners contribute complementary evidence.  Averaging by the
-            # configured K count attenuates one real owner merely because the
-            # other slots are algebraically zero.  Sum without selected-mass
-            # renormalization, then let the one shared outer contract bound the
-            # complete policy context below.
-            selected_route = relevance_value[..., type_index, :].sum(dim=2)
-            components.append(projection(selected_route))
+            # K is a fixed identity axis.  A fixed mean preserves zero and
+            # cannot cancel the optionality by renormalizing selected mass.
+            selected_route = relevance_value[..., type_index, :].mean(dim=2)
+            component, _ = smooth_rms_contract(projection(selected_route), 0.35)
+            components.append(component)
         typed_components = torch.stack(components, dim=2)
-        # Semantic, appearance and geometry are complementary latent owners,
-        # not three always-present iid branches.  A fixed sqrt(3) divisor makes
-        # a lone active type weaker for no data-dependent reason.  Their raw
-        # sum receives one zero-preserving shared amplitude boundary.
-        raw_context = typed_components.sum(dim=2)
+        raw_context = typed_components.sum(dim=2) / (3.0**0.5)
         _, context_scale = smooth_rms_contract(raw_context, 0.35)
         typed_components = typed_components * context_scale[:, :, None].to(
             dtype=typed_components.dtype
@@ -343,7 +337,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         typed_common_value, typed_interval_residual_value = (
             _interval_common_residual(typed_relevance_value)
         )
-        typed_policy_context = typed_policy_components.sum(dim=2)
+        typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
         policy_intervals = public_intervals + typed_policy_context
         temporal_base = self.temporal_identity.to(
             device=public_intervals.device, dtype=public_intervals.dtype

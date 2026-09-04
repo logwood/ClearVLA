@@ -248,8 +248,8 @@ def test_policy_role_bank_metadata_matches_its_two_optional_sources() -> None:
     bank.validate(hidden_size=16, horizon=24)
 
 
-def test_camera_reduction_uses_validity_not_support_width() -> None:
-    """A wider geometric read must not gain cross-camera authority."""
+def test_camera_reduction_uses_validity_times_support() -> None:
+    """Camera coordinates and transport use physical validity and support."""
 
     torch.manual_seed(307)
     facts, _ = DenseObjectGrounder(
@@ -278,32 +278,39 @@ def test_camera_reduction_uses_validity_not_support_width() -> None:
         camera_support=support,
     )
 
-    expected_coordinates = coordinates.mean(dim=2)
-    expected_transport = transport.mean(dim=2)
+    weight = validity * support
+    expected_coordinates = (coordinates * weight).sum(dim=2) / weight.sum(dim=2)
+    expected_transport = (transport * weight).sum(dim=2) / weight.sum(dim=2)
     torch.testing.assert_close(facts.coordinates, expected_coordinates)
     torch.testing.assert_close(facts.transport_prior, expected_transport)
 
     belief = facts.world_belief()
     torch.testing.assert_close(belief.transport_prior, expected_transport)
 
-    # Changing only the support width must leave every validity-weighted vote
-    # unchanged, including the compact W belief exported from G.
+    # Support is a producer-owned geometric measure, so changing it changes
+    # the normalized cross-camera vote rather than acting as metadata only.
+    widened_support = torch.tensor(
+        [[[[0.20], [0.02]]]], dtype=torch.float32
+    ).expand(batch, objects, -1, -1)
     widened = replace(
         facts,
-        camera_support=torch.tensor(
-            [[[[0.20], [0.02]]]], dtype=torch.float32
-        ).expand(batch, objects, -1, -1),
+        camera_support=widened_support,
     )
-    torch.testing.assert_close(widened.coordinates, facts.coordinates)
-    torch.testing.assert_close(widened.transport_prior, facts.transport_prior)
+    widened_weight = validity * widened_support
+    widened_coordinates = (coordinates * widened_weight).sum(dim=2) / widened_weight.sum(dim=2)
+    widened_transport = (transport * widened_weight).sum(dim=2) / widened_weight.sum(dim=2)
+    torch.testing.assert_close(widened.coordinates, widened_coordinates)
+    torch.testing.assert_close(widened.transport_prior, widened_transport)
     torch.testing.assert_close(
         widened.world_belief().transport_prior,
-        belief.transport_prior,
+        widened_transport,
     )
+    assert not torch.equal(widened.coordinates, facts.coordinates)
+    assert not torch.equal(widened.transport_prior, facts.transport_prior)
 
 
-def test_w_observable_validity_is_applied_once_at_the_public_field_boundary() -> None:
-    """Partial support must not attenuate a typed value before masking it."""
+def test_w_validity_is_applied_at_typed_ingress_and_camera_boundaries() -> None:
+    """Object and camera validity remain continuous, zero-preserving owners."""
 
     torch.manual_seed(308)
     top = _object_top().eval()
@@ -354,19 +361,43 @@ def test_w_observable_validity_is_applied_once_at_the_public_field_boundary() ->
         action,
         collect_diagnostics=False,
     )
-    # Grounding has already normalized each typed read inside observable
-    # support. Validity is the public availability measure, not a second input
-    # amplitude, so it cannot alter W's pre-mask owner states.
-    torch.testing.assert_close(half_common, full_common, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(half_interval, full_interval, atol=0.0, rtol=0.0)
-    # Validity is a continuous public availability measure, not a private
-    # binary owner gate.  The W owner can remain materialized even when the
-    # eventual field boundary masks it to exact zero.
-    torch.testing.assert_close(zero_common, full_common, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(zero_interval, full_interval, atol=0.0, rtol=0.0)
+    # Physical validity is a typed W ingress measure.  Fractional validity
+    # attenuates the owner continuously; exact-zero validity erases it.
+    assert torch.count_nonzero(full_common) > 0
+    assert torch.count_nonzero(full_interval) > 0
+    assert torch.count_nonzero(half_common - full_common) > 0
+    assert torch.count_nonzero(half_interval - full_interval) > 0
     torch.testing.assert_close(
-        top.dynamics._camera_geometry_carrier(half, full_common[..., 2, :]),
-        top.dynamics._camera_geometry_carrier(full, full_common[..., 2, :]),
+        zero_common,
+        torch.zeros_like(zero_common),
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        zero_interval,
+        torch.zeros_like(zero_interval),
+        atol=0.0,
+        rtol=0.0,
+    )
+
+    full_carrier = top.dynamics._camera_geometry_carrier(
+        full, full_common[..., 2, :]
+    )
+    half_carrier = top.dynamics._camera_geometry_carrier(
+        half, full_common[..., 2, :]
+    )
+    zero_carrier = top.dynamics._camera_geometry_carrier(
+        zero, full_common[..., 2, :]
+    )
+    torch.testing.assert_close(
+        half_carrier,
+        0.5 * full_carrier,
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+    torch.testing.assert_close(
+        zero_carrier,
+        torch.zeros_like(zero_carrier),
         atol=0.0,
         rtol=0.0,
     )
@@ -388,14 +419,8 @@ def test_w_observable_validity_is_applied_once_at_the_public_field_boundary() ->
         half_field.semantic_delta,
         0.5 * full_field.semantic_delta,
     )
-    torch.testing.assert_close(
-        half_field.transport_mean,
-        0.5 * full_field.transport_mean,
-    )
-    torch.testing.assert_close(
-        half_field.transport_covariance,
-        0.5 * full_field.transport_covariance,
-    )
+    assert torch.count_nonzero(half_field.transport_mean) > 0
+    assert torch.count_nonzero(half_field.transport_covariance) > 0
     zero_field = top.dynamics._field(
         facts=zero,
         typed_common=full_common,
@@ -1796,7 +1821,7 @@ def test_w_is_goal_and_s_invariant_when_physical_action_is_fixed() -> None:
     _assert_same_typed_value(first.predicted_dynamics, second.predicted_dynamics)
 
 
-def test_w_common_is_written_once_and_existing_chronology_seeds_typed_intervals() -> None:
+def test_w_common_is_written_once_and_zero_innovation_returns_common() -> None:
     torch.manual_seed(311)
     top = _object_top().eval()
     facts, _ = top.grounder(_local_facts(cameras=2))
@@ -1828,22 +1853,6 @@ def test_w_common_is_written_once_and_existing_chronology_seeds_typed_intervals(
     def record_w1_interval_count(_module, args) -> None:
         w1_interval_counts.append(int(args[0].shape[1]))
 
-    saved_interval_identity = top.dynamics.interval_identity.detach().clone()
-    with torch.no_grad():
-        top.dynamics.interval_identity.zero_()
-    _, no_chronology_working, _ = top.dynamics.forward_w1(
-        facts=facts,
-        action=action,
-        collect_diagnostics=False,
-    )
-    no_chronology_field, _ = top.dynamics.forward_w2(
-        facts=facts,
-        w1_state=no_chronology_working,
-        collect_diagnostics=False,
-    )
-    with torch.no_grad():
-        top.dynamics.interval_identity.copy_(saved_interval_identity)
-
     handle = top.dynamics.w1.register_forward_pre_hook(record_w1_interval_count)
     try:
         _, working, _ = top.dynamics.forward_w1(
@@ -1860,33 +1869,16 @@ def test_w_common_is_written_once_and_existing_chronology_seeds_typed_intervals(
         handle.remove()
 
     assert w1_interval_counts.count(1) == 1
-    assert torch.count_nonzero(no_chronology_working.near_interval_innovation) == 0
-    assert torch.count_nonzero(working.near_interval_innovation) > 0
-    for index in range(1, no_chronology_field.intervals):
+    assert torch.count_nonzero(working.near_interval_innovation) == 0
+    for index in range(1, field.intervals):
         torch.testing.assert_close(
-            no_chronology_field.semantic_delta[:, index],
-            no_chronology_field.semantic_delta[:, 0],
+            field.semantic_delta[:, index],
+            field.semantic_delta[:, 0],
         )
         torch.testing.assert_close(
-            no_chronology_field.transport_mean[:, index],
-            no_chronology_field.transport_mean[:, 0],
+            field.transport_mean[:, index],
+            field.transport_mean[:, 0],
         )
-    assert not torch.equal(field.semantic_delta[:, 1:], field.semantic_delta[:, :-1])
-    assert not torch.equal(field.transport_mean[:, 1:], field.transport_mean[:, :-1])
-
-    top.dynamics.zero_grad(set_to_none=True)
-    teacher = replace(
-        field,
-        semantic_delta=torch.zeros_like(field.semantic_delta),
-    )
-    future = future_dynamics_terms(
-        field,
-        teacher,
-        current_loss_support=facts.camera_validity,
-    )
-    future["future_semantic_innovation"].backward()
-    assert top.dynamics.interval_identity.grad is not None
-    assert torch.count_nonzero(top.dynamics.interval_identity.grad) > 0
 
     zero_facts = replace(
         facts,
@@ -3636,16 +3628,10 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
         action,
         collect_diagnostics=True,
     )
-    _, valid_common, valid_residual, _ = top.dynamics._base(
-        facts,
-        action,
-        collect_diagnostics=False,
-    )
-    # W keeps the typed owner continuous and applies the physical validity
-    # measure once, at the public field boundary.  Invalid support therefore
-    # does not erase the private chart before its named consumer.
-    torch.testing.assert_close(common, valid_common, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(residual, valid_residual, atol=0.0, rtol=0.0)
+    # Invalid object support is a zero-preserving W typed source, so it cannot
+    # leave a private semantic/appearance/geometry owner behind.
+    torch.testing.assert_close(common, torch.zeros_like(common), atol=0.0, rtol=0.0)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=0.0, rtol=0.0)
     fully_invalid = replace(
         invalid_facts,
         camera_validity=torch.zeros_like(invalid_facts.camera_validity),
@@ -3660,8 +3646,8 @@ def test_s_owns_per_type_object_relevance_and_fixed_zero_null_values() -> None:
     assert torch.count_nonzero(invalid_field.transport_covariance) == 0
 
 
-def test_s_lone_object_and_type_are_not_divided_by_inactive_owner_counts() -> None:
-    """K and type are complementary owners, not a fixed-size average."""
+def test_s_lone_object_and_type_keep_fixed_owner_means_and_rms_contract() -> None:
+    """S keeps fixed K/type means and one shared sqrt(3) aggregation."""
 
     torch.manual_seed(370)
     top = _object_top().eval()
@@ -3685,11 +3671,15 @@ def test_s_lone_object_and_type_are_not_divided_by_inactive_owner_counts() -> No
         facts=facts,
     )
 
-    # With zero relevance queries, the fixed-zero comparison is exactly 0.5.
-    # A lone nonzero semantic K owner should therefore be projected at its
-    # actual 0.5 amplitude, followed by the one shared outer RMS contract.
-    selected = relevance_value[..., 0, :].sum(dim=2)
-    expected, _ = smooth_rms_contract(top.intent.object_semantic(selected), 0.35)
+    # K uses a fixed mean, each type owns its own RMS boundary, and the three
+    # type owners are combined through the fixed sqrt(3) contract.
+    selected = relevance_value[..., 0, :].mean(dim=2)
+    semantic_component, _ = smooth_rms_contract(
+        top.intent.object_semantic(selected), 0.35
+    )
+    raw_context = semantic_component / (3.0**0.5)
+    _, context_scale = smooth_rms_contract(raw_context, 0.35)
+    expected = semantic_component * context_scale
     actual = components.sum(dim=2)
     torch.testing.assert_close(actual, expected, atol=2.0e-7, rtol=2.0e-7)
     torch.testing.assert_close(

@@ -137,7 +137,6 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
             "object_grounding_object_content_pair_cosine": 0.34,
             "object_p2_semantic_effect_rms": 0.35,
             "object_p3_protected_policy_precision_rms": 0.41,
-            "training_self_conditioning_pass1_world_interval_mismatch_rms": 0.36,
             "flow_jepa_address_coarse_variance_min": 0.01,
             "object_p2_terminal_has_null": 0.0,
             "gradient_raw_observation_l2": 0.42,
@@ -159,10 +158,7 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
     assert "object_grounding_object_content_pair_cosine=0.34" in joined
     assert "object_p2_semantic_effect_rms=0.35" in joined
     assert "object_p3_protected_policy_precision_rms=0.41" in joined
-    assert (
-        "training_self_conditioning_pass1_world_interval_mismatch_rms=0.36"
-        in joined
-    )
+    assert "training_self_conditioning_pass1_world_interval_mismatch_rms=" not in joined
     assert "flow_jepa_address_coarse_variance_min=0.01" in joined
     assert "object_p2_terminal_has_null=0" in joined
     assert "gradient_raw_observation_l2=0.42" in joined
@@ -299,6 +295,35 @@ def test_decision_console_prioritizes_task_objective_path_and_coverage() -> None
         "validation_core_attribution_controlled_transition_delta_neutral_"
         "band_13_24_mse_gain_vs_primary_physical=-0.004" in validation_details
     )
+
+
+def test_validation_console_puts_truthful_chart_metrics_before_legacy_aliases() -> None:
+    metrics = {
+        "validation_action_rmse_normalized": 0.2,
+        "validation_action_rmse_source_native": 0.8,
+        "validation_action_rmse_physical": 0.8,
+        "validation_codec_gripper_boundary_qpos_gap_rms_normalized": 1.2,
+        "validation_codec_gripper_boundary_qpos_gap_rms_source_native": 2.4,
+        "validation_action_state_gripper_abs_gt3_rate_normalized": 0.1,
+        "validation_action_state_gripper_abs_gt5_rate_normalized": 0.05,
+    }
+    line = JsonlRunLogger.compact_line(
+        "val", epoch=1, batch=None, step=10, metrics=metrics
+    )
+    assert line.index("validation_action_rmse_normalized=") < line.index(
+        "validation_action_rmse_source_native="
+    )
+    assert line.index("validation_action_rmse_source_native=") < line.index(
+        "validation_action_rmse_physical="
+    )
+    details = JsonlRunLogger.diagnostic_lines(
+        "val", epoch=1, batch=None, step=10, metrics=metrics
+    )
+    boundary = next(row for row in details if "[mainline-val-boundary]" in row)
+    assert "validation_codec_gripper_boundary_qpos_gap_rms_normalized=1.2" in boundary
+    assert "validation_codec_gripper_boundary_qpos_gap_rms_source_native=2.4" in boundary
+    assert "validation_action_state_gripper_abs_gt3_rate_normalized=0.1" in boundary
+    assert "validation_action_state_gripper_abs_gt5_rate_normalized=0.05" in boundary
 
 
 def test_gradient_tensor_hooks_observe_backward_without_changing_gradient() -> None:
@@ -598,7 +623,7 @@ def test_exact_resume_metric_stream_accepts_matching_or_new_output(tmp_path) -> 
     )
 
 
-def test_validation_reports_explicit_normalized_and_physical_units() -> None:
+def test_validation_reports_normalized_source_native_and_physical_aliases() -> None:
     config = ExperimentConfig()
     dims = config.dimensions
     batch = 1
@@ -606,6 +631,7 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
     history = ObservableHistory(
         state=torch.zeros(batch, dims.state_dim),
         action_state=torch.zeros(batch, dims.action_dim),
+        codec_gripper_boundary=torch.zeros(batch, 1),
         state_history=torch.zeros(batch, dims.state_history_length, dims.state_dim),
         executed_action_history=torch.zeros(batch, dims.executed_history_length, dims.action_dim),
     )
@@ -688,6 +714,11 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
     )
     assert metrics["validation_action_rmse_normalized"] == 1.0
     assert metrics["validation_action_rmse_physical"] == 0.5
+    assert metrics["validation_action_rmse_source_native"] == 0.5
+    assert (
+        metrics["validation_action_rmse_physical"]
+        == metrics["validation_action_rmse_source_native"]
+    )
     assert metrics["validation_band_1_4_rmse_normalized"] == 1.0
     assert metrics["validation_band_5_12_rmse_normalized"] == 1.0
     assert metrics["validation_band_13_24_rmse_normalized"] == 1.0
@@ -695,6 +726,15 @@ def test_validation_reports_explicit_normalized_and_physical_units() -> None:
     assert metrics["validation_gripper_band_1_4_rmse_normalized"] == 1.0
     assert metrics["validation_gripper_band_5_12_rmse_physical"] == 0.5
     assert metrics["validation_gripper_band_13_24_rmse_physical"] == 0.5
+    assert metrics["validation_gripper_band_13_24_rmse_source_native"] == 0.5
+    assert metrics[
+        "validation_codec_gripper_boundary_qpos_gap_rms_normalized"
+    ] == 0.0
+    assert metrics[
+        "validation_codec_gripper_boundary_qpos_gap_rms_source_native"
+    ] == 0.0
+    assert metrics["validation_action_state_gripper_abs_gt3_rate_normalized"] == 0.0
+    assert metrics["validation_action_state_gripper_abs_gt5_rate_normalized"] == 0.0
     assert "validation_decoded_gripper_event_ratio" in metrics
     assert "validation_motion_head_f1" in metrics
     assert "validation_action_rmse" not in metrics
@@ -820,6 +860,7 @@ def test_validation_reports_gripper_persistence_between_target_events() -> None:
     history = ObservableHistory(
         state=torch.zeros(1, dims.state_dim),
         action_state=torch.zeros(1, dims.action_dim),
+        codec_gripper_boundary=torch.zeros(1, 1),
         state_history=torch.zeros(1, dims.state_history_length, dims.state_dim),
         executed_action_history=torch.zeros(
             1, dims.executed_history_length, dims.action_dim
@@ -918,7 +959,10 @@ def test_validation_first_gripper_transition_uses_the_profile_command_boundary()
             gripper_transition_boundary_raw_units=previous_command_boundary,
         ),
         online=SimpleNamespace(
-            history=SimpleNamespace(action_state=current_qpos_boundary),
+            history=SimpleNamespace(
+                action_state=current_qpos_boundary,
+                codec_gripper_boundary=previous_command_boundary[..., -1:],
+            ),
         ),
     )
     identity = ArrayNormalizer.fit_identity(
@@ -933,6 +977,12 @@ def test_validation_first_gripper_transition_uses_the_profile_command_boundary()
     metrics = accumulator.means()
     assert metrics["validation_decoded_gripper_events_target"] == 0.0
     assert metrics["validation_decoded_gripper_events_predicted"] == 0.0
+    assert metrics[
+        "validation_codec_gripper_boundary_qpos_gap_rms_normalized"
+    ] == 1.0
+    assert metrics[
+        "validation_codec_gripper_boundary_qpos_gap_rms_source_native"
+    ] == 1.0
 
     target_with_transition = target.clone()
     target_with_transition[:, 4:, -1] = 0.0
@@ -969,6 +1019,7 @@ def test_validation_gripper_branches_and_event_context_reconstruct_band_error() 
     history = ObservableHistory(
         state=torch.zeros(1, dims.state_dim),
         action_state=torch.zeros(1, dims.action_dim),
+        codec_gripper_boundary=torch.zeros(1, 1),
         state_history=torch.zeros(1, dims.state_history_length, dims.state_dim),
         executed_action_history=torch.zeros(
             1, dims.executed_history_length, dims.action_dim
@@ -1147,6 +1198,7 @@ def test_validation_keeps_decoded_events_and_motion_head_semantically_separate()
     history = ObservableHistory(
         state=torch.zeros(1, dims.state_dim),
         action_state=torch.zeros(1, dims.action_dim),
+        codec_gripper_boundary=torch.zeros(1, 1),
         state_history=torch.zeros(1, dims.state_history_length, dims.state_dim),
         executed_action_history=torch.zeros(
             1, dims.executed_history_length, dims.action_dim

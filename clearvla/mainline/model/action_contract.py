@@ -419,6 +419,10 @@ class BottomDecoderOutput:
     block_updates: tuple[Tensor, ...]
     evidence_tokens: Tensor
     decoder_tensors: dict[str, Tensor] = field(default_factory=lambda: {})
+    # Optional explicit command-state head.  It is populated only for the
+    # CALVIN binary-gripper profile and remains absent on Pen/RDT continuous
+    # checkpoints, preserving the old output ABI for those paths.
+    gripper_command_logits: Tensor | None = None
 
     def validate(self, *, action_dim: int, horizon: int, basis: int, hidden: int) -> None:
         batch = int(self.physical_velocity.shape[0])
@@ -428,6 +432,11 @@ class BottomDecoderOutput:
             raise ValueError("bottom motion logits have an invalid shape")
         if tuple(self.action_query.shape) != (batch, horizon, basis, hidden):
             raise ValueError("bottom action query lost its basis axis")
+        if self.gripper_command_logits is not None:
+            if tuple(self.gripper_command_logits.shape) != (batch, horizon, 2):
+                raise ValueError(
+                    "bottom gripper command logits must be [B,horizon,2]"
+                )
 
 
 @dataclass(frozen=True)

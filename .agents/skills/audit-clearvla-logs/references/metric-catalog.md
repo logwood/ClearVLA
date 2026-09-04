@@ -837,7 +837,9 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
 
 - The audit utility's text report must project active schema-20 G/S/W/P,
   teacher, transition, bottom and per-owner gradient tails, plus normalized,
-  physical and three-band validation values.  `metric_index` remains the
+  source-native and three-band validation values. Historical `*_physical`
+  validation keys are exact compatibility aliases of `*_source_native`, not a
+  claim that an outlet has verified SI units. `metric_index` remains the
   lossless machine-readable inventory; a sparse text projection must not be
   interpreted as a sparse training log.
 
@@ -846,9 +848,24 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   auditable; the compact console may omit ordinary zeros.  Prefer JSONL for
   observability and always-zero conclusions.
 
-- Compare normalized and physical action RMSE together.  Always include
-  first, first-8, tail, arm, gripper and physical/normalized `1-4 / 5-12 /
-  13-24` bands.  `tail/first` remains diagnostic, not a loss.
+- Compare normalized and source-native action RMSE together. Always include
+  first, first-8, tail, arm, gripper and source-native/normalized `1-4 / 5-12 /
+  13-24` bands. The legacy `physical` projection must match source-native
+  exactly; `tail/first` remains diagnostic, not a loss.
+- For `arm_flow_mode=relative_command_direct`, CALVIN's first and second
+  six-dimensional arm-field branches are two direct views of the same native
+  relative TCP command. `physical_decode_delta_blend=0.25` therefore means
+  `0.75 * branch0 + 0.25 * branch1`; neither branch is an adjacent command
+  difference and neither is cumulatively integrated. In this mode
+  `smooth_delta` is intentionally zero, while `physical_delta_consistency`
+  measures direct-branch agreement. Never compare its raw 18-D flow value or
+  branch semantics with a `legacy_independent` CALVIN checkpoint as though the
+  action chart matched.
+- For RDT-like command/state mismatches, read
+  `validation_codec_gripper_boundary_qpos_gap_rms_normalized` together with
+  its source-native counterpart. The `validation_action_state_gripper_abs_gt3_rate_normalized`
+  and `...gt5...` rows are detached qpos outlier gauges; they diagnose chart
+  pressure and are not clipping thresholds or objective terms.
 - Training exposes `loss_action_flow`, `loss_action_flow_native`, decoded
   action, arm/gripper, event/hold rows and the exact horizon mass.  The
   V120-compatible per-row weighting gives the unequal-length bands different
@@ -940,6 +957,36 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   fingerprint used for cross-run comparison and the full SHA-256 used for
   checkpoint identity.  Do not compare V120's short MD5 directly with the
   SHA-256 and call the data contract different.
+
+### Provisional Schema31 bottom B-spine
+
+- Identify this experiment from manifest schema 31, execution-bottom selection
+  `v120_evidence_mmdit_bspine0_v1`, and the serialized basis/spec identities;
+  a run name containing `bspine` is not sufficient. Schema30 remains the
+  disabled-path baseline.
+- `bottom_spine_coarse_field_rms` and `bottom_spine_detail_field_rms` describe
+  the exact fixed decomposition of the noisy 18-D flow field.
+  `bottom_spine_decomposition_max_abs` is a numerical closure invariant, not a
+  train objective or smoothing score.
+- `bottom_spine_coarse_token_rms`, `bottom_spine_detail_token_rms`, and
+  `bottom_spine_update_rms` measure the learned parallel write.
+  `bottom_spine_to_raw_token_rms_ratio` is descriptive amplitude evidence and
+  has no target value, quota, gate or loss. An exact-zero token/update row is
+  expected before the first optimizer update because both lifts initialize at
+  zero; persistent zero after learning must be read with owner gradients.
+- Read `gradient_raw_bottom_spine_coarse_l2` and
+  `gradient_raw_bottom_spine_detail_l2` separately. A healthy aggregate bottom
+  or raw-action-lift gradient cannot establish that both numerical views learn.
+- `spine_zero` is evaluation-only and uses matched initial physical noise.
+  Interpret it only when `validation_execution_ablation_coverage` is nonzero.
+  Report its action delta and MSE gain for `1-4 / 5-12 / 13-24`, split into arm
+  and gripper. At zero initialization an exact-zero action delta is required;
+  after learning, a zero delta means the branch did not reach deployed action,
+  while a positive MSE gain means removing the branch improved error and is
+  evidence against the candidate.
+- B-spine adds no objective contribution. Never infer optimization dominance
+  from its token magnitude and never repair an unfavorable intervention with a
+  hand-set fusion gain, smoothing loss, clipping or forced coarse/detail mass.
 
 ## Gradients and interventions
 

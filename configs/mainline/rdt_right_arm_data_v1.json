@@ -21,6 +21,7 @@
     "image_open_file_capacity": 8,
     "cache_side": 336,
     "dinov2_model": "facebook/dinov2-base",
+    "dinov2_reference_batch_size": 32,
     "split_mode": "manifest",
     "split_manifest": "/data/senwang/data/rdt_ft_data/split_seed0.json",
     "train_episodes": 0,

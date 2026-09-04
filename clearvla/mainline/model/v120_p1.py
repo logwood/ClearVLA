@@ -22,6 +22,7 @@ from ..v120_core.role_delta_attnres import (
     smooth_rms_contract,
 )
 
+
 @dataclass(frozen=True)
 class SharedFactualGlimpseBank:
     """One basis-free P1 value read exposed to basis-specific P2 consumers.

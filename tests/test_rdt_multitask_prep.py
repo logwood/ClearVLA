@@ -297,7 +297,10 @@ def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None
             gripper_transition_boundary_raw_units=current,
         ),
         online=SimpleNamespace(
-            history=SimpleNamespace(action_state=current),
+            history=SimpleNamespace(
+                action_state=current,
+                codec_gripper_boundary=current[..., -1:],
+            ),
         ),
     )
     prediction = torch.cat(
@@ -320,8 +323,16 @@ def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None
 
     assert report["observed_task_count"] == 2
     assert report["task_coverage"] == pytest.approx(2 / 3)
+    assert report["metric_space"] == "normalized_and_shared_source_native_action_charts"
+    assert report["physical_metric_semantics"] == "compatibility_alias_of_source_native"
     assert report["missing_tasks"] == ["missing"]
     assert set(report["tasks"]) == {"a", "b"}
+    assert report["tasks"]["a"]["validation_action_rmse_normalized"] == pytest.approx(
+        1.0
+    )
+    assert report["tasks"]["a"][
+        "validation_action_rmse_source_native"
+    ] == pytest.approx(1.0)
     assert report["tasks"]["a"]["validation_action_rmse_physical"] == pytest.approx(1.0)
     assert report["tasks"]["b"]["validation_action_rmse_physical"] == pytest.approx(3.0)
     assert report["micro"]["validation_action_rmse_physical"] == pytest.approx(5**0.5)
