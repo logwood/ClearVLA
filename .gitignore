@@ -21,6 +21,8 @@ policy_semantic_map/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+/.tmp/
+/v120_bspline_reintegration/
 .env
 .env.*
 !.env.example
@@ -41,5 +43,4 @@ policy_semantic_map/
 checkpoints/
 outputs/
 wandb/
-/new_logs/**
-!/new_logs/README.md
+/new_logs/

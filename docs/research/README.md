@@ -9,16 +9,16 @@ Use the smallest document that can answer the question.
 2. [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md) — unresolved
    questions that can change the next source unit.
 3. [`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md) —
-   current two-outlet execution order and decision rules.
+   repository consolidation, refactor order and decision rules.
 
 These three files are maintained in place. Do not create a new versioned copy
 for each conversation.
 
 ## Current detailed references
 
-[`auxiliary/`](auxiliary/README.md) contains only the rolling handoff, the
-current RDT adapter contract and two compact historical indexes. Read one only
-when the active contract points to it.
+[`auxiliary/`](auxiliary/README.md) contains the rolling handoff, the current
+RDT adapter contract and two compact historical indexes. Read one only when
+the active contract or the task requires its detail.
 
 ## Historical evidence
 
@@ -26,10 +26,11 @@ when the active contract points to it.
   source units and donor decisions.
 - [`archive/legacy_evidence/`](archive/legacy_evidence/README.md): older
   research notes and reproducibility tools.
-- [`../../history_design/`](../../history_design/README.md): superseded
-  architecture/design plans.
-- [`../../new_logs/README.md`](../../new_logs/README.md): raw run evidence
-  placement and retention rules.
+
+The retired `history_design/` tree and the old local-log index are recoverable
+from Git commit `b8163cb`. Raw run evidence remains local under the ignored
+`new_logs/` directory; only decision statistics, identities and reproducible
+commands belong in tracked documentation.
 
 Historical material cannot override active source or a run's serialized
 context. Checkpoints, tensor caches, raw JSONL, complete probe dumps and

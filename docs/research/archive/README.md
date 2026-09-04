@@ -12,3 +12,8 @@ Current architecture and work order remain in
 [`../00_CURRENT_ARCHITECTURE_CONTRACT.md`](../00_CURRENT_ARCHITECTURE_CONTRACT.md).
 Archive filenames and version labels are historical identities, not active
 configuration.
+
+The larger retired `history_design/` tree and the former local-log index were
+removed from the live documentation tree during the 2026-09-04 compaction.
+Both remain recoverable from Git commit `b8163cb`; raw run artifacts remain
+outside Git.
